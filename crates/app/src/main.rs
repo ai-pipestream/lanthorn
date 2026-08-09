@@ -3412,6 +3412,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                         timed_out: false,
                                         pictures: Vec::new(),
                                         transcript_elems: Vec::new(),
+                                        prose_retired: None,
                                     };
                                     apply_turn(
                                         &mut mapper,
@@ -3690,6 +3691,7 @@ fn reobserve_location(
         timed_out: false,
         pictures: Vec::new(),
         transcript_elems: Vec::new(),
+        prose_retired: None,
     };
     apply_turn(mapper, "", &restore_result, &mut state.death_watch);
     state.set_viewed_layer(None);

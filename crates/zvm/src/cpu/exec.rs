@@ -273,6 +273,18 @@ pub struct Machine {
     /// window) — stamps `PictureEvent::out_chars` so window-0 inline pictures
     /// anchor to their position in the text stream. Monotonic, never reset.
     pub v6_win0_out_chars: u64,
+    /// Where the host's transcript stands at the moment a wrap+scroll window was
+    /// moved or resized with prose already on screen, so that prose was frozen
+    /// where it was painted (SQ-0697,
+    /// [`crate::screen::ZWindow::retire_streamed`]) — a
+    /// [`Machine::v6_win0_out_chars`] stamp, `None` when nothing was retired.
+    ///
+    /// The frozen half is now PAINT, so the host has to stop streaming it: the
+    /// stamp is where its transcript restarts, with everything before it kept as
+    /// scrollback above the boundary. A turn that retires twice keeps the LAST
+    /// stamp — each retirement supersedes the one before it as the live screen's
+    /// beginning. Set-only here; `GameSession::drain_turn` takes it.
+    pub v6_prose_retired: Option<u64>,
     /// A `(window, pixel column)` a v6 `set_cursor` just DECLARED, pending the
     /// next print to that window — see [`Machine::v6_take_declared_indent`]
     /// (SQ-0697). Transient one-shot state between the opcode and the print it
@@ -479,6 +491,7 @@ impl Machine {
             pending_pictures: Vec::new(),
             pending_erase_fills: Vec::new(),
             v6_win0_out_chars: 0,
+            v6_prose_retired: None,
             v6_declared_x: None,
             v6_input_window: 0,
             diagnostics: Vec::new(),
@@ -1888,6 +1901,10 @@ impl Machine {
                                 w.grid.clear();
                                 w.texts.clear();
                                 w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
+                                // …and both prose shadows: the live one and whatever
+                                // was already frozen. The whole screen goes (SQ-0697).
+                                w.streamed.clear();
+                                w.retired.clear();
                                 w.y_cursor = 1;
                                 w.x_cursor = 1;
                                 fills.push(EraseFill {
@@ -1933,6 +1950,10 @@ impl Machine {
                                 w.grid.clear();
                                 w.texts.clear();
                                 w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
+                                // …and both prose shadows: the live one and whatever
+                                // was already frozen. The whole screen goes (SQ-0697).
+                                w.streamed.clear();
+                                w.retired.clear();
                                 fills.push(EraseFill {
                                     window: i as u8,
                                     x: w.x_coord.max(1),
@@ -1965,6 +1986,16 @@ impl Machine {
                             // the pictures (see the -1 arm).
                             w.grid.clear();
                             w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
+                            // …and the shadow of the prose still inside the window,
+                            // which those pixels are (SQ-0697). Prose already FROZEN
+                            // is not cleared here: it sits at coordinates this
+                            // window may no longer cover, and `erase_screen_rect`
+                            // below trims exactly the part the erase does reach —
+                            // the same treatment `texts` gets, and for the same
+                            // reason. Shogun erases window 0 right after moving it
+                            // down to its menu box; clearing outright took the
+                            // frozen title header with it.
+                            w.streamed.clear();
                             w.y_cursor = 1;
                             w.x_cursor = 1;
                             fills.push(EraseFill {
@@ -2792,12 +2823,21 @@ impl Machine {
                 if self.trace_screen {
                     self.screen_trace.push(format!("@move_window(win={win}, y={y}, x={x})"));
                 }
+                let mut retired = false;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
+                        if (w.y_coord, w.x_coord) != (y, x) {
+                            // Freeze whatever the window's NEW box leaves behind.
+                            let (bw, bh) = (w.x_size, w.y_size);
+                            retired = w.retire_streamed(x, y, bw, bh);
+                        }
                         w.y_coord = y;
                         w.x_coord = x;
                     }
+                }
+                if retired {
+                    self.v6_prose_retired = Some(self.v6_win0_out_chars);
                 }
                 StepResult::Continue
             }
@@ -2818,9 +2858,17 @@ impl Machine {
                 // real terminal (a 4K screen at 8 px/cell is ~480×270 cells) yet
                 // caps worst-case storage at ~1M cells. The pixel sizes (props
                 // 2/3) are still stored verbatim; only the cell grid is bounded.
+                let mut retired = false;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
+                        // The box is changing under prose already on screen, and
+                        // that prose does not move with it (SQ-0697). `y` is the
+                        // new height and `x` the new width (ZMSD §15).
+                        if (w.y_size, w.x_size) != (y, x) {
+                            let (bx, by) = (w.x_coord, w.y_coord);
+                            retired = w.retire_streamed(bx, by, x, y);
+                        }
                         w.y_size = y;
                         w.x_size = x;
                         // ZMSD §8.8.3.4: "If the window size is reduced so that
@@ -2837,6 +2885,9 @@ impl Machine {
                         let cols = (x / V6_FONT_WIDTH).clamp(1, GRID_CELL_CAP);
                         w.grid.resize(rows, cols);
                     }
+                }
+                if retired {
+                    self.v6_prose_retired = Some(self.v6_win0_out_chars);
                 }
                 StepResult::Continue
             }
@@ -3444,8 +3495,11 @@ impl Machine {
     /// the line count) moving, not to place pixels.
     ///
     /// No-op below v6.
-    fn v6_advance_prose_cursor(&mut self, s: &str) {
+    fn v6_advance_prose_cursor(&mut self, s: &str, shadow: bool) {
         let fw = V6_FONT_WIDTH;
+        // The style/colours this text is going out in, for the SQ-0697 shadow
+        // below — read before the window borrow.
+        let (style, fg, bg) = (self.screen.text_style, self.screen.current_fg, self.screen.current_bg);
         let Some(v6) = self.screen.v6.as_mut() else {
             return;
         };
@@ -3459,6 +3513,14 @@ impl Machine {
             let right_edge = w.x_size.saturating_sub(w.right_margin);
             if w.x_cursor.saturating_add(fw).saturating_sub(1) > right_edge {
                 w.prose_new_line();
+            }
+            // Shadow where this glyph landed, so the prose can be frozen in place
+            // if the window is later moved or resized (SQ-0697, ZMSD §15 —
+            // "does not change the current display"). Recorded at the cursor,
+            // which is where the game's own `set_cursor` put it; the host stream
+            // carries that column as an indent instead and cannot be read back.
+            if shadow {
+                w.record_streamed(ch, style, fg, bg);
             }
             w.x_cursor = w.x_cursor.saturating_add(fw);
         }
@@ -3814,13 +3876,13 @@ impl Machine {
             // Only the DESTINATION changes here. Everything the game can observe —
             // the window cursor (props 4/5) and the §8.8.3.2.2 newline interrupt below
             // — happens either way, exactly as it would if the text had streamed.
-            let divert = self.screen.v6.as_ref().and_then(|v6| {
+            let diverted = self.screen.v6.as_ref().and_then(|v6| {
                 let cur = v6.current as usize;
                 let w = &v6.windows[cur];
                 (w.prose_window() && !w.copy_to_transcript() && v6.current != self.v6_input_window)
                     .then_some(cur)
             });
-            if let Some(cur) = divert {
+            if let Some(cur) = diverted {
                 if let Some(v6) = self.screen.v6.as_mut() {
                     v6.windows[cur].push_prose(s);
                 }
@@ -3860,7 +3922,7 @@ impl Machine {
             // newline interrupt so a prop-8 routine sees the post-newline
             // cursor, exactly as it would in frotz (whose screen_new_line
             // moves the cursor and only then counts down).
-            self.v6_advance_prose_cursor(s);
+            self.v6_advance_prose_cursor(s, diverted.is_none());
             // v6 newline interrupt (ZMSD §8.8.3.2.2): this stream path is the
             // *scrolling* regime (v6 window 0 / Inform's wrap+scroll win7), the
             // only place Frotz counts new-lines. Tick the current window's prop-9

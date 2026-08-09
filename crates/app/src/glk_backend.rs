@@ -1663,6 +1663,7 @@ mod tests {
             .map(|e| match e {
                 crate::session::TranscriptElem::Text { .. } => "T",
                 crate::session::TranscriptElem::Image(_) => "I",
+                crate::session::TranscriptElem::ScreenClear => "C",
             })
             .collect();
         assert_eq!(kinds.first().copied(), Some("T"));

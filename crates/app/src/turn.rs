@@ -1164,6 +1164,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         }
     }
 
@@ -1184,6 +1185,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         }
     }
 

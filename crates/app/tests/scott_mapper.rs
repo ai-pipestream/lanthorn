@@ -40,6 +40,7 @@ fn scott_walk_drives_the_automapper() {
         timed_out: false,
         pictures: Vec::new(),
         transcript_elems: Vec::new(),
+        prose_retired: None,
     };
     apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
 

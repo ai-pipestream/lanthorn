@@ -264,16 +264,16 @@ fn win0_pic_align(
     }
 }
 
-fn interleave_story_pics(
+fn interleave_story_elems(
     text: &str,
     runs: &[CaptureRun],
-    pics: Vec<(u64, crate::inline_image::InlineImage)>,
+    marks: Vec<(u64, TranscriptElem)>,
     base: u64,
 ) -> Vec<TranscriptElem> {
     let chars: Vec<char> = text.chars().collect();
     let total = chars.len();
     // Clamp into this turn's text, then snap to the owning line's start.
-    let mut inserts: Vec<(usize, crate::inline_image::InlineImage)> = pics
+    let mut inserts: Vec<(usize, TranscriptElem)> = marks
         .into_iter()
         .map(|(abs, img)| {
             let mut off = (abs.saturating_sub(base) as usize).min(total);
@@ -332,7 +332,7 @@ fn interleave_story_pics(
             }
             pos = off;
         }
-        elems.push(TranscriptElem::Image(img));
+        elems.push(img);
     }
     if pos < total {
         let tail: String = chars[pos..].iter().collect();
@@ -350,6 +350,12 @@ fn interleave_story_pics(
 pub enum TranscriptElem {
     Text { text: String, runs: Vec<CaptureRun> },
     Image(crate::inline_image::InlineImage),
+    /// A screen-clear boundary *inside* the turn's output (SQ-0697): a v6
+    /// wrap+scroll window moved out from under the prose printed before this
+    /// point, and the engine froze that prose where it was painted. Everything
+    /// above stays in scrollback; the live screen begins here, at the window's
+    /// new origin. Carries no text, so it never shifts an offset.
+    ScreenClear,
 }
 
 /// Trim trailing `Text` elements of `elems` so the total char-count of their
@@ -364,7 +370,7 @@ pub(crate) fn trim_elems_to_len(elems: &mut [TranscriptElem], keep: usize) {
         .iter()
         .map(|e| match e {
             TranscriptElem::Text { text, .. } => text.chars().count(),
-            TranscriptElem::Image(_) => 0,
+            TranscriptElem::Image(_) | TranscriptElem::ScreenClear => 0,
         })
         .sum();
     if total <= keep {
@@ -468,6 +474,18 @@ pub struct TurnResult {
     /// loop pushes from it. When empty, the loop falls back to `transcript` +
     /// `transcript_runs`.
     pub transcript_elems: Vec<TranscriptElem>,
+    /// Where in `transcript` a v6 wrap+scroll window was moved or resized out
+    /// from under the prose it had already printed, so the engine froze that
+    /// prose where it was painted (SQ-0697) — a char offset, `None` when nothing
+    /// was retired.
+    ///
+    /// Everything BEFORE the offset is now paint on the screen at its old
+    /// coordinates, so the host must not go on streaming it too: it pushes that
+    /// head as scrollback, marks a screen-clear boundary, and starts the live
+    /// screen at the offset. Scrollback is preserved — `mark_screen_clear`, never
+    /// the SQ-0407 truncate, which would eat the session's history along with it.
+    /// Always `None` for non-v6 Z-machine stories, Glulx and Scott.
+    pub prose_retired: Option<usize>,
 }
 
 /// One `erase_window`'s background fill: the screen rect it painted (0-based pixels,
@@ -1266,15 +1284,33 @@ impl GameSession {
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
         let sounds = std::mem::take(&mut self.machine.pending_sounds);
         let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
+        // A v6 wrap+scroll window moved out from under prose it had already
+        // printed, and the engine froze that prose where it was painted (SQ-0697).
+        // The stamp is in the same window-0 output-char space as an inline
+        // picture's anchor, so the boundary rides the SAME interleave: it becomes
+        // a `ScreenClear` element between the frozen text and what the game
+        // printed at the window's new origin. A flat `mark_screen_clear` around
+        // the whole push could not split a turn that contains both halves — and
+        // Shogun's opening is exactly one such turn.
+        let prose_retired_at = std::mem::take(&mut self.machine.v6_prose_retired);
+        let prose_retired = prose_retired_at
+            .map(|at| (at.saturating_sub(win0_base) as usize).min(transcript.chars().count()));
         let pictures = self.drain_pictures();
         self.drain_erase_fills();
         // Window-0 inline pictures interleave into this turn's text as ordered
         // elements; empty for turns without them (the app then uses the flat
         // transcript path unchanged).
-        let transcript_elems = if self.story_pics.is_empty() {
+        let transcript_elems = if self.story_pics.is_empty() && prose_retired_at.is_none() {
             Vec::new()
         } else {
-            interleave_story_pics(&transcript, &transcript_runs, std::mem::take(&mut self.story_pics), win0_base)
+            let mut marks: Vec<(u64, TranscriptElem)> = std::mem::take(&mut self.story_pics)
+                .into_iter()
+                .map(|(at, img)| (at, TranscriptElem::Image(img)))
+                .collect();
+            if let Some(at) = prose_retired_at {
+                marks.push((at, TranscriptElem::ScreenClear));
+            }
+            interleave_story_elems(&transcript, &transcript_runs, marks, win0_base)
         };
 
         TurnResult {
@@ -1293,6 +1329,7 @@ impl GameSession {
             timed_out,
             pictures,
             transcript_elems,
+            prose_retired,
         }
     }
 
@@ -2220,6 +2257,67 @@ impl GameSession {
                         upscale: false,
                     }),
                 }));
+            }
+
+            // RETIRED PROSE (SQ-0697). The prose window publishes as a `Buffer`,
+            // whose node carries no pixel runs — the transcript is its text. But a
+            // window that has been moved or resized leaves the prose it already
+            // printed painted where it was (ZMSD §15), and the engine hands those
+            // runs to `texts` when that happens. Publish them as their own paint
+            // layer so they still render: Shogun's title header stays up top,
+            // centred on the columns the game declared, while the transcript
+            // starts again in the 548x64 box it moved window 0 down to.
+            //
+            // The entry's BOX is the frozen prose's own extent, not the window's:
+            // the window has moved on, and a layer claiming the window's new box
+            // would be read as an overlay strip sitting inside the story and push
+            // the live transcript down out of it (hybrid's `overlay_strip`).
+            if !win.retired.is_empty() {
+                let (mut rx0, mut ry0, mut rx1, mut ry1) = (u16::MAX, u16::MAX, 0u16, 0u16);
+                for t in &win.retired {
+                    let w = (t.text.chars().count() as u16).saturating_mul(V6_FONT_WIDTH);
+                    rx0 = rx0.min(t.x.saturating_sub(1));
+                    ry0 = ry0.min(t.y.saturating_sub(1));
+                    rx1 = rx1.max(t.x.saturating_sub(1).saturating_add(w));
+                    ry1 = ry1.max(t.y.saturating_sub(1).saturating_add(V6_FONT_HEIGHT));
+                }
+                text_entries.push(PositionedWindow {
+                    x: rx0 / V6_FONT_WIDTH,
+                    y: ry0 / V6_FONT_HEIGHT,
+                    w: (rx1 - rx0).div_ceil(V6_FONT_WIDTH),
+                    h: (ry1 - ry0).div_ceil(V6_FONT_HEIGHT),
+                    x_px: rx0,
+                    y_px: ry0,
+                    w_px: rx1 - rx0,
+                    h_px: ry1 - ry0,
+                    left_margin: win.left_margin,
+                    right_margin: win.right_margin,
+                    node: WinNode::Grid(GridWindow {
+                        cols: 0,
+                        rows: 0,
+                        cells: Vec::new(),
+                        active_rows: 0,
+                        cursor: (1, 1),
+                        cursor_active: false,
+                        border: BorderPref::Unspecified,
+                        bg: None,
+                        fg: None,
+                        reverse: false,
+                        fill: None,
+                        px_texts: win
+                            .retired
+                            .iter()
+                            .map(|t| crate::engine::PxText {
+                                y: t.y,
+                                x: t.x,
+                                text: t.text.clone(),
+                                style: t.style,
+                                fg: crate::state::pack_zcolour(t.fg),
+                                bg: crate::state::pack_zcolour(t.bg),
+                            })
+                            .collect(),
+                    }),
+                });
             }
 
             // Window 0 is normally the scrolling transcript Buffer — but with
@@ -3396,7 +3494,11 @@ impl Engine for GameSession {
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
         let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
         let runs = clamp_runs(raw_runs, transcript.chars().count());
-        interleave_story_pics(&transcript, &runs, std::mem::take(&mut self.story_pics), base)
+        let marks = std::mem::take(&mut self.story_pics)
+            .into_iter()
+            .map(|(at, img)| (at, TranscriptElem::Image(img)))
+            .collect();
+        interleave_story_elems(&transcript, &runs, marks, base)
     }
 
     fn set_strip_prompt(&mut self, on: bool) {
@@ -4119,7 +4221,7 @@ mod tests {
     }
 
     #[test]
-    fn interleave_story_pics_splits_at_line_starts_and_keeps_runs_synced() {
+    fn interleave_story_elems_splits_at_line_starts_and_keeps_runs_synced() {
         use crate::inline_image::{ImageAlign, InlineImage};
         let img = InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(8, 8)),
@@ -4133,7 +4235,7 @@ mod tests {
         let runs = vec![(text.chars().count(), 2u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0u8, false)];
         // Drawn at abs offset base+15 — mid-"second line" — must SNAP to that
         // line's start (offset 11), splitting cleanly at the line boundary.
-        let elems = interleave_story_pics(text, &runs, vec![(115, img)], 100);
+        let elems = interleave_story_elems(text, &runs, vec![(115, TranscriptElem::Image(img))], 100);
         assert_eq!(elems.len(), 3, "Text, Image, Text");
         let TranscriptElem::Text { text: t0, runs: r0 } = &elems[0] else { panic!("elem 0 is Text") };
         assert_eq!(t0, "first line", "separator dropped — element boundary is the break");
@@ -4145,7 +4247,7 @@ mod tests {
     }
 
     #[test]
-    fn interleave_story_pics_at_start_needs_no_split() {
+    fn interleave_story_elems_at_start_needs_no_split() {
         use crate::inline_image::{ImageAlign, InlineImage};
         let img = InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(8, 8)),
@@ -4154,7 +4256,7 @@ mod tests {
             margin_px: None,
             source: crate::inline_image::ImageSource::Story,
         };
-        let elems = interleave_story_pics("story text", &[], vec![(0, img)], 0);
+        let elems = interleave_story_elems("story text", &[], vec![(0, TranscriptElem::Image(img))], 0);
         assert_eq!(elems.len(), 2, "Image then Text");
         assert!(matches!(&elems[0], TranscriptElem::Image(_)));
         assert!(matches!(&elems[1], TranscriptElem::Text { text, .. } if text == "story text"));
@@ -4314,6 +4416,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
         apply_turn(&mut m, "look", &first, &mut Default::default());
         assert_eq!(m.graph.current(), Some(1));
@@ -4337,6 +4440,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
         apply_turn(&mut m, "north", &second, &mut Default::default());
         assert!(m.graph.room(2).is_some());
@@ -4389,6 +4493,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
         apply_turn(&mut m, "look", &result, &mut Default::default());
         assert_eq!(m.graph.current(), None);
@@ -4432,6 +4537,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
         let mut m = Mapper::default();
         apply_turn(&mut m, "", &mk(1, "Living Room", "Living Room\n"), &mut Default::default());
@@ -4482,6 +4588,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
 
         let mut m = Mapper::default();
@@ -4539,6 +4646,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
         apply_turn(&mut m, "", &result, &mut Default::default());
         assert_eq!(m.graph.current(), Some(333));
@@ -4566,6 +4674,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
         assert!(r.info.is_none());
     }
@@ -4590,6 +4699,7 @@ mod tests {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         }
     }
 
@@ -6679,7 +6789,7 @@ mod untried_turn_tests {
             quit: false, erase_lower: false, info: None, sounds: Vec::new(),
             glulx_sound_ops: Vec::new(), diagnostics: vec![], fault: None,
             location_method: None, pending_io: None, timed_out: false,
-            pictures: Vec::new(), transcript_elems: Vec::new(),
+            pictures: Vec::new(), transcript_elems: Vec::new(), prose_retired: None,
         }
     }
 

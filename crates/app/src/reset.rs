@@ -199,6 +199,7 @@ pub(crate) fn reset_game(
                     timed_out: false,
                     pictures: Vec::new(),
                     transcript_elems: Vec::new(),
+                    prose_retired: None,
                 };
                 apply_turn(mapper, "", &seed_result, &mut state.death_watch);
                 let rid = snap_number as mapper::graph::RoomId;

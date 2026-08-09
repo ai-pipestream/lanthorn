@@ -87,6 +87,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun's title screen keeps its header where the game painted it.** The nine
+  centred banner lines are printed while window 0 still *is* the whole screen;
+  the game then drops window 0 to a small box at the bottom, beside its
+  START/RESTORE/QUIT menu, and prints "You may choose to:" there. The Z-machine
+  standard says moving a window changes nothing already on screen — so on the
+  original the banner stays up top. babelmap streamed both halves into one
+  transcript, which jammed the prompt under the banner and then scrolled the
+  banner out of a four-row box. Prose now freezes where it was printed the moment
+  its window moves out from under it: the banner becomes paint at the exact rows
+  and columns the game chose, and the transcript starts again at the window's new
+  origin, so the opening reads the way it does on an Amiga. Nothing is deleted —
+  the frozen lines stay in scrollback. Prose a window is merely resized *around*
+  keeps streaming as before, which is what every turn of Arthur does.
 - **A backdrop that fills the screen is no longer mistaken for a drop-cap.**
   Frobozz Magic Videopoker came up with its card table missing — some graphics,
   no outline — and Journey's title illustration never arrived at all. Both games

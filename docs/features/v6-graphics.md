@@ -293,6 +293,30 @@ the column it asked for, and Journey's title screen, which centres itself the
 same way, comes out right for the same reason. A game that never declares a
 column never gains an indent.
 
+## Prose freezes where it was printed when its window moves
+
+The Z-machine standard is blunt about it: moving or resizing a window "does not
+change the current display". Text already printed is pixels, and pixels do not
+follow a box around. Shogun's opening depends on it — the whole nine-line title
+header is printed while window 0 *is* the screen, and then window 0 drops to a
+tiny box at the bottom beside the menu and prints "You may choose to:" there. On
+an Amiga the header simply stays up top; babelmap streamed both halves into one
+transcript, so the prompt came out jammed under the banner and the banner
+promptly scrolled out of a four-row box.
+
+So a scrolling window's prose is now frozen the moment its window moves out from
+under it: the lines become paint, at the exact rows and columns the game printed
+them at, and the transcript starts again at the window's new origin. Everything
+frozen stays in your scrollback — nothing is deleted, it just stops being the
+live screen. Shogun's title now reads the way it does on the original: the header
+centred across the top, "You may choose to:" down beside START/RESTORE/QUIT.
+
+**Only prose the window walks away from freezes.** A window resized *around* the
+text it just printed still covers it, so that text is still the window's own and
+keeps streaming — which is what Arthur does on nearly every turn of play, and
+what makes the difference between a faithful title screen and a transcript that
+quietly stops scrolling.
+
 ## Margin pictures — text that flows past the art
 
 Some v6 scenes put the picture on one side and let the prose flow past it.
