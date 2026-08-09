@@ -267,6 +267,31 @@ that room's row. Selecting a room **bolds every cell elsewhere that arrives at i
 question a row cannot answer about itself. That highlight is style, never a glyph:
 the table's text does not change.
 
+**Clicking a room also shows you the way there.** babelmap searches the map for the
+shortest route it already knows how to walk, from the room you are standing in to
+the one you clicked, and marks **one cell per step: the row of the room you are in,
+in the column you leave by**. Read the marks top to bottom and you have walking
+instructions — and because it is the *leave-by* cell that lights up, each one keeps
+its own glyph, so you can still see whether the step you are about to take comes
+back or does not. It wears its own colour (`map.matrix.cell:path`), deliberately
+unlike the entrance bolding beside it: the two answer opposite questions, and they
+routinely light up in the same row.
+
+The search walks passages only in the direction you walked them, so a one-way
+corridor is never offered backwards — a route babelmap shows you is a route you can
+actually walk. It searches the *whole* map rather than just this layer, because a
+layer is a way of reading rooms, not a wall between them; steps that land on other
+layers simply have no row here to draw on, and where the route walks out of this
+layer the `⇱out` cell it leaves by is the one marked (that cell already footnotes
+where it goes). The view never jumps layers behind your back. If there is no known
+route at all, the room still selects and babelmap says so rather than falling
+silent — a half-route to somewhere nearer would be answering a question you did not
+ask.
+
+`Esc` backs out one step at a time: the first press clears the route and leaves the
+room selected with its entrances still bold, the next unpins the room, the next
+closes the room dock.
+
 **Narrow panes** degrade before they scroll. First the `⇠x` return suffixes drop
 (cells shrink to `→5`, and the return is still readable on the destination's own row
 and in its room card); only when even that will not fit does the table scroll
@@ -330,9 +355,9 @@ touching a line of code:
 
 The matrix view has its own selectors beside the map's colours:
 `map.matrix.header`, `map.matrix.row:here`, `map.matrix.row:selected`,
-`map.matrix.cell:entrance` (the bold cross-highlight), `map.matrix.cell:frontier`
-(the dimmed `·`/`×` cells) and `map.matrix.footnote`; `map.trail` colours the
-maze breadcrumb.
+`map.matrix.cell:entrance` (the bold cross-highlight), `map.matrix.cell:path` (the
+route to the room you clicked), `map.matrix.cell:frontier` (the dimmed `·`/`×`
+cells) and `map.matrix.footnote`; `map.trail` colours the maze breadcrumb.
 
 Individual glyphs can be overridden one at a time in `[map.overrides]`, and
 `diagonal_corners = false` drops the half-diagonal corner stubs (🮠🮡🮢🮣, Unicode 13
