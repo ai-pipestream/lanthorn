@@ -373,34 +373,49 @@ fn raster_ships_the_paced_frame_and_then_the_settled_one() {
 
 // ── Not an Arthur-shaped rule ────────────────────────────────────────────────
 
-/// Pacing is not gated on Arthur, or on a config key: ANY turn that queues more
-/// than one picture draw paces. Shogun's title screen (two draws into window 7
-/// during its first turn) and Zork Zero's boot art both do, and their feel changes
-/// too — which is intended.
+/// Pacing is gated on GEOMETRY, not on the game and not on a config key: a turn
+/// paces only when one of its pictures paints over ground an earlier picture in
+/// the same turn already covered.
+///
+/// That is the difference between a REVEAL and screen ASSEMBLY. Arthur's intro
+/// reveals — Merlin (480x300 at 81,51) lands inside the graveyard plate (584x392
+/// at 29,5), and the second picture is only meaningful as a change to what the
+/// first put there. Zork Zero's boot border, Arthur's gameplay chrome and Shogun's
+/// title are assembly: disjoint pieces building one static frame, where no pixel is
+/// painted twice, nothing is revealed, and a delay only makes the screen slower to
+/// finish.
+///
+/// The first cut of SQ-0708 paced every multi-picture turn. The rule was narrowed
+/// to overlap so that assembly stops paying for it — and measuring the corpus to
+/// pin this test overturned an assumption worth recording: Zork Zero's boot is NOT
+/// tiling. It draws eight different pictures into the same 45x40 rect at (277,1),
+/// which is a frame-by-frame ANIMATION, and the overlap rule catches it for exactly
+/// the right reason.
 #[test]
-fn other_v6_games_pace_their_multi_picture_turns() {
-    // Zork Zero paints its border during BOOT, before the first turn.
+fn assembly_turns_do_not_pace_only_reveals_do() {
+    // Zork Zero's boot draws EIGHT pictures into one 45x40 rect at (277,1) — a
+    // frame-by-frame animation, not tiling. It paces, and that is the rule working:
+    // every frame after the first paints over the one before it.
     if let Some(mut zork0) = boot("zork0-r393-s890714.z6", true) {
         assert!(
             zork0.paced_picture_hold().is_some(),
-            "Zork Zero's boot art is several draws and paces like any other sequence"
+            "Zork Zero's boot cycles eight pictures through one rect — a real animation, so it paces"
         );
-        let settled = zork0.screen();
         play_out(&mut zork0);
-        let (a, b) = (zork0.screen_now(), settled);
-        let (WinNode::Layered(a), WinNode::Layered(b)) = (&a.root, &b.root) else {
-            panic!("v6 builds a Layered root")
-        };
-        assert_eq!(a.len(), b.len(), "Zork Zero settles on the same window list");
+        assert!(
+            zork0.paced_picture_hold().is_none(),
+            "and it settles"
+        );
     }
 
-    // Shogun's opening screen erases window 7 and draws two pictures into it.
+    // Shogun's opening screen erases window 7 and draws two pictures into it —
+    // two draws, but side by side rather than one over the other.
     if let Some(mut shogun) = boot("shogun-r322-s890706.z6", true) {
         play_out(&mut shogun); // whatever boot queued
         let _ = shogun.submit("");
         assert!(
-            shogun.paced_picture_hold().is_some(),
-            "Shogun's title turn draws two pictures and paces them"
+            shogun.paced_picture_hold().is_none(),
+            "Shogun's title draws two pictures that do not overlap — assembly, not a reveal"
         );
     }
 }
