@@ -120,6 +120,13 @@ fn status_interior(buf: &Buffer, area: Rect) -> (String, bool) {
 fn play_and_render_status_bar(s: &mut GameSession, honor: bool, pane_w: u16) -> (String, bool) {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
+    // SQ-0700 made the upper-window frame off by default. It is incidental to the
+    // subject here — but `status_interior` reads the bar out of the box's rules,
+    // and the frame's columns are part of the width the story is declared, so ask
+    // for it and this suite measures exactly what it always did.
+    state.colors.virtual_window_border = app::render::paneframe::BorderStyle::Single;
+    state.colors.upper_window_border_sides =
+        app::render::paneframe::PaneSides::all(app::render::paneframe::BorderStyle::Single);
     state.config.honor_game_colours = honor;
     let area = Rect::new(0, 0, pane_w, 25);
 

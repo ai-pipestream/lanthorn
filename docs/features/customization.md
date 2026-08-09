@@ -42,6 +42,16 @@ still reach in and override any single selector by name.
   set `panel.terminator_left` / `panel.terminator_right` / `panel.tab_divider`
   to a `glyph` to override any of them. The map additionally sets
   its own canvas fill, `map.background`, since it isn't a Glk window.
+  The one *window* frame babelmap can draw itself is the box around a v4+ game's
+  status/upper window, and it answers to `upper_window_border` in `[elements]` —
+  the selector that colours it carries its shape too. It is **off by default**:
+  the status line sits flush against the story, and the whole pane is the screen
+  the game is told it has. Ask for a box with `style = "single"` (or
+  `double`/`thick`/`rounded`), reach for `style_top` / `style_bottom` /
+  `style_left` / `style_right` to rule one edge at a time, and remember that
+  every side you turn on costs the story a row or a column. Don't reach for
+  `[statusbar]`'s `border` for this — that frames babelmap's own status bar, not
+  the game's window.
 - **The 11 standard Glk styles** — Normal, Emphasized, Preformatted, Header,
   Subheader, Alert, Note, BlockQuote, Input, User1, User2 — are first-class,
   addressable selectors under `[glk.buffer]` (text-buffer windows) and

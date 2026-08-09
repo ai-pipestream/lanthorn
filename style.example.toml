@@ -83,7 +83,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # warning_marker = { parent = "alert" }
 # input_text = { parent = "text" }
 # input_prompt = { parent = "text" }
-# upper_window_border = { parent = "line" }
+# upper_window_border = { parent = "line" }   # frame round a game's status/upper window; none by default — style = "single" (or double | thick | rounded, or per-side style_top/bottom/left/right) boxes it
 # room_panel = { parent = "accent", reversed = true }
 # palette_query = { parent = "text" }
 # palette_name = { parent = "text" }
@@ -230,6 +230,8 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 
 # ── Status bar. Omit [statusbar] for the built-in default. ───────────────────
 # Placeholders: {location} {score} {moves} {time} {turns} {title} {filter}
+# NB: this is babelmap's OWN bar, and `border` frames that. The frame round a
+# GAME's status/upper window is the upper_window_border line up in [elements].
 # [statusbar]
 # border = "none"
 
