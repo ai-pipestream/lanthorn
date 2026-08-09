@@ -1305,11 +1305,25 @@ impl GameSession {
         // 3 lands INSIDE picture 2, painting over ground the plate just covered.
         // Overlap is what separates them, and it is geometry rather than a
         // threshold, so it cannot drift.
-        let reveal = self.sequence_repaints_covered_ground(&events);
+        // …decided PER EVENT, not per turn. One boolean for the whole batch made
+        // every picture in it pace as soon as anything overlapped: Zork Zero's boot
+        // queues its banner, both side pillars AND an eight-frame compass animation
+        // together, so the pillars — each a single disjoint image — were held only
+        // because the compass shared their turn.
+        let covers_earlier = self.events_that_repaint_covered_ground(&events);
         for (i, ev) in events.iter().enumerate() {
             self.apply_picture_event(ev);
+            // Hold the screen here only when the NEXT picture to paint is about to
+            // cover ground already painted — that is the moment there is something
+            // to watch. Otherwise the next picture lands beside this one and the
+            // pair may as well arrive together.
+            let pause_here = events[i + 1..]
+                .iter()
+                .enumerate()
+                .find(|(j, _)| holds[i + 1 + j].is_some())
+                .is_some_and(|(j, _)| covers_earlier[i + 1 + j]);
             if let (Some(hold), Some(last)) = (holds[i], last_painted) {
-                if reveal && i < last && self.paced_frames.len() < PACE_MAX_FRAMES {
+                if pause_here && i < last && self.paced_frames.len() < PACE_MAX_FRAMES {
                     self.paced_frames.push_back(PacedFrame {
                         canvas: self.pictures_canvas.clone(),
                         hold,
@@ -1332,32 +1346,39 @@ impl GameSession {
         events
     }
 
-    /// Whether this turn's pictures REVEAL — whether any of them paints over
-    /// ground an earlier one in the same turn already covered (SQ-0708).
+    /// Which of this turn's pictures REPAINT ground an earlier one in the same
+    /// turn already covered (SQ-0708) — the events worth watching land.
     ///
     /// This is the whole scope rule for pacing, and it is deliberately geometric
-    /// rather than a count or a coverage threshold, because the two shapes in the
-    /// corpus are told apart by geometry alone:
+    /// rather than a count, a coverage threshold or a config key: those drift,
+    /// and this cannot.
     ///
-    /// * **Reveal** — Arthur's intro draws the graveyard plate (584×392 at 29,5)
-    ///   and then Merlin (480×300 at 81,51) *inside* it. The second picture is
-    ///   only meaningful as a change to what the first one put there, so watching
-    ///   it land is the point.
-    /// * **Assembly** — Zork Zero's border tiles, Arthur's gameplay chrome,
-    ///   Shogun's title: disjoint pieces building one static frame. Nothing is
-    ///   revealed, no pixel is painted twice, and pacing them only makes the
-    ///   screen slower to finish.
+    /// * **Reveal** — Arthur's intro draws the graveyard plate (584x392 at 29,5)
+    ///   and then Merlin (480x300 at 81,51) *inside* it. Zork Zero's boot cycles
+    ///   eight pictures through one 45x40 rect at (277,1) — a frame-by-frame
+    ///   animation. In both, a picture is only meaningful as a change to what the
+    ///   last one put there, so watching it land is the point.
+    /// * **Assembly** — Shogun's title draws two pictures side by side; Zork
+    ///   Zero's side pillars are one single image each, abutting the banner above
+    ///   them and disjoint from everything. No pixel is painted twice, nothing is
+    ///   revealed, and holding the screen only makes it slower to finish.
+    ///
+    /// Answered PER EVENT rather than once per turn, because a single batch
+    /// routinely contains both: Zork Zero's boot queues its banner, both pillars
+    /// and the compass animation together. A per-turn verdict made the pillars
+    /// pace purely because the compass was in the same queue.
     ///
     /// Rects are compared in the game's own unit space (art dims doubled by
     /// [`V6_ART_SCALE`], the coordinates `draw_picture` itself uses), and only
     /// within a window — two windows' pictures overlapping on screen is a layout,
     /// not a redraw.
-    fn sequence_repaints_covered_ground(&mut self, events: &[PictureEvent]) -> bool {
+    fn events_that_repaint_covered_ground(&mut self, events: &[PictureEvent]) -> Vec<bool> {
+        let mut covers = vec![false; events.len()];
         let mut painted: Vec<(u8, u32, u32, u32, u32)> = Vec::new();
-        for ev in events {
+        for (i, ev) in events.iter().enumerate() {
             // Same exclusions as `picture_hold`: an erase is a fill, a window-0
             // cursor draw is a transcript float, and unresolvable art paints
-            // nothing. None of them can cover ground.
+            // nothing. None of them can cover ground or be covered.
             if ev.erase || ev.number == 0 || (ev.window == 0 && ev.at_cursor) {
                 continue;
             }
@@ -1367,14 +1388,12 @@ impl GameSession {
             let (x0, y0) = (u32::from(ev.x.max(1)) - 1, u32::from(ev.y.max(1)) - 1);
             let (w, h) = (w * V6_ART_SCALE, h * V6_ART_SCALE);
             let (x1, y1) = (x0 + w, y0 + h);
-            if painted.iter().any(|&(win, px0, py0, px1, py1)| {
+            covers[i] = painted.iter().any(|&(win, px0, py0, px1, py1)| {
                 win == ev.window && x0 < px1 && px0 < x1 && y0 < py1 && py0 < y1
-            }) {
-                return true;
-            }
+            });
             painted.push((ev.window, x0, y0, x1, y1));
         }
-        false
+        covers
     }
 
     /// How long the screen rests on a picture event before the next one lands, or

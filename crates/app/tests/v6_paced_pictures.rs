@@ -445,3 +445,58 @@ fn a_save_mid_sequence_persists_the_settled_screen() {
         "nor does the display list that regenerates them"
     );
 }
+
+/// A picture that lands BESIDE what came before must not be held just because
+/// something else in the same turn is animating (SQ-0708, narrowed twice).
+///
+/// Zork Zero's boot queues one batch containing four different things: the banner
+/// (pic 5, unit rect x 0–640 y 0–68), the left pillar (pic 497 at 1,69 — ONE image,
+/// 36×166), the right pillar (pic 498 at 567,69), and an eight-frame compass
+/// animation cycling through a single 45×40 rect at (277,1).
+///
+/// Only the compass repaints covered ground: it overlaps the banner above it and
+/// then itself, frame after frame. The pillars abut the banner without overlapping
+/// it (y 68–400 against y 0–68) and are disjoint from each other. The first cut of
+/// this rule asked "does anything in this turn overlap?" once per BATCH, so the
+/// pillars were held purely for sharing a queue with the compass — reported as the
+/// side bars drawing slowly.
+///
+/// The guard: by the time the screen first holds, both pillars are already painted.
+#[test]
+fn a_picture_beside_the_last_one_is_not_held_by_an_animation_sharing_its_turn() {
+    let Some(session) = boot("zork0-r393-s890714.z6", true) else { return };
+    assert!(
+        session.paced_picture_hold().is_some(),
+        "Zork Zero's boot compass animates, so the turn does pace"
+    );
+
+    // The screen as the player first sees it, before any hold elapses.
+    let first = session.screen_now();
+    let WinNode::Layered(items) = &first.root else { panic!("v6 builds a Layered root") };
+    let frame = items
+        .iter()
+        .find_map(|it| match &it.node {
+            WinNode::Graphics(g) if g.win == 7 => Some((*g.canvas).clone()),
+            _ => None,
+        })
+        .expect("the boot art lives in window 7");
+
+    // Both pillars sit in the lower band, one at each edge. Art DIMS are doubled
+    // into unit space, but the game's coordinates already are unit space: the
+    // screen is 640 wide, so pic 498's x=567 spans 566..640, not 1134. Sample well
+    // inside each pillar rather than on an edge pixel.
+    for (label, x) in [("left", 20u32), ("right", 600u32)] {
+        let painted = (80..390u32)
+            .step_by(20)
+            .filter(|&y| {
+                frame.get_pixel_checked(x, y).is_some_and(|p| p[3] > 0)
+            })
+            .count();
+        assert!(
+            painted > 5,
+            "the {label} pillar is a single image landing beside the banner — it must already be \
+             on screen when the compass starts animating, not held frame by frame (painted {painted} \
+             of 16 sampled rows at x={x})"
+        );
+    }
+}
