@@ -113,6 +113,16 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
             parse_file(Some(crate::styles::per_game_style_path(&state.game_dir)))
         };
         let (_, gs, _) = crate::colors::resolve_base(global.scheme.as_deref(), &user_dir);
+        // SQ-0510: with no scheme configured, `resolve_base` returns an all-Reset
+        // scheme and `Roles::from_scheme` falls back to a hard-coded white-on-BLACK
+        // `chrome` — a black band across every chrome-derived selector on a
+        // terminal that is not black. Seed the scheme from the OSC 10/11 probe
+        // taken at startup so the theme follows the real terminal. This is the ONE
+        // place the theme is built (startup, `/reload-style`, the style watcher and
+        // the per-game overlay all funnel through `reload_style`), so seeding here
+        // reaches all of them. A terminal that did not answer both channels leaves
+        // the scheme untouched and today's behaviour intact.
+        let gs = crate::colors::seed_scheme_from_terminal(gs, &state.term_default_colors);
         // SQ-0309: a discovered garglk.ini's colours ride the theme's garglk layer
         // (between global and per-game) so they survive the migration off the legacy
         // ColorScheme fields (`ov.apply` still seeds the glk override array, which the
@@ -295,6 +305,110 @@ mod tests {
             "per-game box_style wins"
         );
         assert!(!state.symbols.diagonal_corners, "global diagonal_corners stands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-0510: the probed terminal page reaches the theme's chrome roles ───
+
+    /// The user's reported configuration exactly: no `style.toml`, no scheme —
+    /// just an empty user dir and whatever the OSC 10/11 probe answered.
+    fn state_with_probe(
+        tag: &str,
+        probe: crate::term_colors::TermDefaultColors,
+    ) -> (AppState, std::path::PathBuf) {
+        let dir = temp_dir(tag);
+        let _ = std::fs::remove_file(dir.join("style.toml"));
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = None; // no style.toml, no [colors] scheme
+        state.term_default_colors = probe;
+        match reload_style(&mut state) {
+            ReloadOutcome::Reloaded { .. } => {}
+            ReloadOutcome::Failed { msg } => panic!("the default look must load: {msg}"),
+        }
+        (state, dir)
+    }
+
+    fn rgba(r: u8, g: u8, b: u8) -> image::Rgba<u8> {
+        image::Rgba([r, g, b, 255])
+    }
+
+    #[test]
+    fn reload_seeds_the_chrome_roles_from_an_answered_terminal_probe() {
+        // The bug: Anchorhead's status bar painted a BLACK band on a terminal
+        // whose background is not black. The story sets no colours at all — the
+        // black came from `Roles::terminal_default`'s hard-coded chrome, because
+        // the OSC probe's answer was stored in AppState and never handed to the
+        // theme. `reload_style` is the one place the theme is built (startup,
+        // /reload-style, the style watcher and the per-game overlay all funnel
+        // here), so the seeding has to land — and be observable — here.
+        use ratatui::style::Color;
+        let (state, dir) = state_with_probe(
+            "probe-on",
+            crate::term_colors::TermDefaultColors {
+                fg: Some(rgba(0x58, 0x6e, 0x75)),
+                bg: Some(rgba(0xfd, 0xf6, 0xe3)), // Solarized Light: emphatically not black
+            },
+        );
+
+        let uw = state.colors.theme.get("upper_window").style;
+        assert_ne!(uw.bg, Some(Color::Black), "no black band on a non-black terminal");
+        assert_eq!(uw.bg, Some(Color::Rgb(0xfd, 0xf6, 0xe3)), "the upper window follows the terminal page");
+        assert_eq!(uw.fg, Some(Color::Rgb(0x58, 0x6e, 0x75)));
+        assert_eq!(state.colors.theme.get("chrome").style.bg, Some(Color::Rgb(0xfd, 0xf6, 0xe3)));
+        assert_eq!(state.colors.theme.get("status_bar").style.bg, Some(Color::Rgb(0xfd, 0xf6, 0xe3)));
+        // The out-of-box accents are untouched — this is a page fix, not a repaint.
+        assert_eq!(state.colors.theme.get("panel.border").style.fg, Some(Color::Cyan));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_keeps_todays_behaviour_when_the_terminal_answers_nothing_or_half() {
+        // A terminal that never answers (or answers only one channel) must be
+        // byte-for-byte what it is today: the concrete terminal-default roles,
+        // chrome included. A probed ink is never mixed onto a guessed page.
+        use ratatui::style::Color;
+        let cases = [
+            ("probe-off", crate::term_colors::TermDefaultColors::default()),
+            (
+                "probe-fg-only",
+                crate::term_colors::TermDefaultColors { fg: Some(rgba(0x58, 0x6e, 0x75)), bg: None },
+            ),
+            (
+                "probe-bg-only",
+                crate::term_colors::TermDefaultColors { fg: None, bg: Some(rgba(0xfd, 0xf6, 0xe3)) },
+            ),
+        ];
+        for (tag, probe) in cases {
+            let (state, dir) = state_with_probe(tag, probe);
+            let uw = state.colors.theme.get("upper_window").style;
+            assert_eq!(uw.bg, Some(Color::Black), "{tag}: unchanged fallback");
+            assert_eq!(uw.fg, Some(Color::White), "{tag}: unchanged fallback");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_configured_scheme_still_wins_over_the_probe() {
+        // The probe only fills the gap left by "no scheme configured". A user who
+        // picked a scheme gets that scheme's page, whatever the terminal says.
+        use ratatui::style::Color;
+        let dir = temp_dir("probe-scheme");
+        let path = dir.join("style.toml");
+        std::fs::write(&path, "version = 1\nscheme = \"tomorrow-night\"\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(path.to_string_lossy().to_string());
+        state.term_default_colors = crate::term_colors::TermDefaultColors {
+            fg: Some(rgba(0, 0, 0)),
+            bg: Some(rgba(255, 255, 255)),
+        };
+        assert!(matches!(reload_style(&mut state), ReloadOutcome::Reloaded { .. }));
+
+        let bg = state.colors.theme.get("upper_window").style.bg;
+        assert_ne!(bg, Some(Color::Rgb(255, 255, 255)), "the probe must not overwrite a chosen scheme");
+        assert_eq!(bg, Some(Color::Rgb(0x1d, 0x1f, 0x21)), "tomorrow-night's own page");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

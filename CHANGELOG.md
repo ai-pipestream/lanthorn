@@ -57,6 +57,23 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **The status bar stops painting a black band on a light terminal.** With no
+  `style.toml` and no colour scheme configured, babelmap's UI surfaces — the
+  status bar, the v4+ upper window, story info, dialog backgrounds, the Glk grid
+  styles — were drawn white-on-**black**, regardless of what colour the terminal
+  actually is. It was never the game's doing: Anchorhead, the story it was
+  reported on, sets no colours at all. It was ours. "No scheme configured" left
+  the theme's `chrome` role with nothing to derive from, so it fell back to a
+  hard-coded black page — a guess that happens to be right on a black terminal
+  and wrong everywhere else, laying a band across the top of the screen. babelmap
+  already asks the terminal for its real default colours at startup (the OSC
+  10/11 probe that keeps the v6 raster canvas honest); that answer now reaches
+  the theme as well, so the unconfigured look follows your terminal instead of
+  overriding it. Terminals that don't answer the probe keep exactly today's
+  behaviour, a half answer is declined whole rather than mixed into a probed ink
+  on a guessed page, and a scheme you *did* choose is never second-guessed — as
+  is a game that sets its own page colours, which still wins the grid outright.
+
 - **The upper window's frame answers to `style.toml` again.** `upper_window_border`
   could be recoloured but not reshaped: its `style` / `style_top` / … keys were
   read straight past. The one place that applied them was the retired `[colors]`

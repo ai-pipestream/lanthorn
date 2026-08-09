@@ -4436,6 +4436,83 @@ mod tests {
         assert_eq!(content_cell.bg, Some(Color::Rgb(255, 255, 255)), "grid content painted in the game page bg");
     }
 
+    // ── SQ-0510: the probe-seeded chrome vs. the game's own page ─────────────
+
+    /// A `ColorScheme` whose theme was built the way `reload_style` builds it on
+    /// a terminal that answered the OSC 10/11 probe with no scheme configured:
+    /// chrome follows the terminal's real page instead of the hard-coded black.
+    fn probe_seeded_colors() -> crate::colors::ColorScheme {
+        let probe = crate::term_colors::TermDefaultColors {
+            fg: Some(image::Rgba([0x58, 0x6e, 0x75, 255])),
+            bg: Some(image::Rgba([0xfd, 0xf6, 0xe3, 255])),
+        };
+        let gs = crate::colors::seed_scheme_from_terminal(
+            crate::colors::GhosttyScheme::default(),
+            &probe,
+        );
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.theme = crate::theme::resolve::resolve_theme(
+            &gs,
+            &crate::theme::toml_schema::ParsedStyle::default(),
+        );
+        cs
+    }
+
+    #[test]
+    fn a_game_page_still_beats_the_probe_seeded_chrome() {
+        // SQ-0262 must survive SQ-0510: seeding chrome from the terminal fixes the
+        // case where NOBODY set a colour; a game that DOES set its page still owns
+        // the grid. Run both `honor_game_colours` modes — with the gate on the game
+        // wins, with it off the seeded terminal page stands (and neither is black).
+        use ratatui::style::Color;
+        use zvm::screen::ZColour;
+        let model = model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0));
+
+        let mut state = AppState::default();
+        state.colors = probe_seeded_colors();
+        assert_eq!(
+            state.colors.theme.get("upper_window").style.bg,
+            Some(Color::Rgb(0xfd, 0xf6, 0xe3)),
+            "precondition: the seeded chrome is the probed terminal page"
+        );
+
+        // honor = true (the shipped default): the game's white page wins outright.
+        state.config.honor_game_colours = true;
+        let gc = grid_scheme(&state, &model);
+        assert!(matches!(gc, std::borrow::Cow::Owned(_)), "a game page still forces the override clone");
+        assert_eq!(gc.theme.get("upper_window").style.bg, Some(Color::Rgb(255, 255, 255)));
+        assert_eq!(gc.theme.get("upper_window").style.fg, Some(Color::Rgb(0, 0, 0)));
+        assert_eq!(gc.theme.get("upper_window_border").style.bg, Some(Color::Rgb(255, 255, 255)));
+
+        // honor = false: the game is ignored and the seeded terminal page stands —
+        // still not the old hard-coded black.
+        state.config.honor_game_colours = false;
+        let gc = grid_scheme(&state, &model);
+        assert!(matches!(gc, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(gc.theme.get("upper_window").style.bg, Some(Color::Rgb(0xfd, 0xf6, 0xe3)));
+    }
+
+    #[test]
+    fn a_game_that_sets_only_ink_keeps_the_probe_seeded_page() {
+        // The half-set case `grid_scheme` has always handled: the game names an
+        // ink but no page, so the page comes from the theme's chrome. That used to
+        // mean black; with the probe answered it is the terminal's own page.
+        use ratatui::style::Color;
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = probe_seeded_colors();
+        state.config.honor_game_colours = true;
+        let model = model_with_page(ZColour::Default, ZColour::True24(0x00FF_0000));
+
+        let gc = grid_scheme(&state, &model);
+        assert_eq!(gc.theme.get("upper_window").style.fg, Some(Color::Rgb(255, 0, 0)), "the game's ink");
+        assert_eq!(
+            gc.theme.get("upper_window").style.bg,
+            Some(Color::Rgb(0xfd, 0xf6, 0xe3)),
+            "and the terminal's page beneath it"
+        );
+    }
+
     #[test]
     fn grid_scheme_borrows_theme_when_game_set_no_page() {
         use zvm::screen::ZColour;
