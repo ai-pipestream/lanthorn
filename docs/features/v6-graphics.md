@@ -25,6 +25,29 @@ then height, big-endian) with no pixel data at all. babelmap recognizes a
 mechanism these games rely on — it isn't a general Blorb image feature, it's a
 placement protocol these specific titles speak.
 
+## Splitting the screen TILES it
+
+A v6 game reserves room for artwork by splitting the screen, and the standard is
+precise about what that means (§8.8.4.1): the opcode "tiles windows 0 and 1
+together to fill the screen, so that window 1 has the given height and is placed
+at the top left, while window 0 is placed just below it (with its height suitably
+shortened, possibly making it disappear altogether if window 1 occupies the whole
+screen)". The split *places* the story window; it does not merely shrink it.
+
+That matters because most games never move the story window themselves — they
+don't have to. `mysterious01.z6` splits off 260 pixels, draws its illustration up
+there, and starts narrating; if the story window is left in the top-left corner it
+sits inside the picture and the prose prints across the artwork. And Adventure's
+Inform 6 library goes further: it splits, asks the interpreter where the split left
+window 0, and positions its own prose window at the answer. A game reads the
+tiling back, so getting it wrong misplaces everything downstream of it — bar, room
+description, and menus alike.
+
+The spec's own escape hatch is worth naming: a split that takes the entire screen
+leaves the story window with zero height, which is exactly what Zork Zero's
+full-screen title splash relies on. Nothing is carved over the picture, and the
+game re-places the window itself when the splash goes.
+
 ## The authentic screen: 640×400, an 8×16 cell, art doubled
 
 There's a subtlety in "how big is this thing" that decides whether the whole
@@ -184,6 +207,11 @@ session-only switch that never touches your saved config:
     Journey's verb menu stays welded to the last row at any pane height instead
     of floating over the prose. Chrome text *inside* the story box — Shogun's
     boot menu, a hint screen — paints over the transcript where the game put it.
+    All three are painted *after* the windows' erase fills go down, because a
+    window's erase is the ground its own text is written on, not a lid over it:
+    paint the band first and Adventure's status bar disappears under the very
+    window that drew it. The band's height is measured up front (it decides where
+    the transcript starts) and drawn at the end, with the rest of the text.
   - A graphics window sitting wholly **beside** the story is story content, not
     frame, so it keeps its column: Journey's half-screen character portrait
     renders at its native proportion with the prose inset alongside it. Art that

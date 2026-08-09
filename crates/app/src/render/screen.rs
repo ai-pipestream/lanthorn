@@ -1482,7 +1482,15 @@ fn render_node(
                     let story_top = story.y_px / 16;
                     let story_bot =
                         ((story.y_px as u32 + story.h_px as u32).div_ceil(16)).min(u16::MAX as u32) as u16;
-                    let top_used = draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors);
+                    // The band is MEASURED here and PAINTED below, after the
+                    // erase fills (SQ-0712): its rows have to be known to size the
+                    // story area, but a window's erase is the ground its own text
+                    // is painted on, and the fills go down after the transcript.
+                    // Painting the band first put advent's status bar under its own
+                    // window's erase — the bar vanished the moment the split stopped
+                    // leaving window 0 on top of window 1 and the bar became band
+                    // text instead of story-box paint.
+                    let top_used = anchored_band_rows(&runs, story_top, area.height);
                     // The command band below the story (Journey's menu): its own
                     // inked native rows, packed against the pane's bottom edge so
                     // it stays locked there at any pane height instead of floating
@@ -1599,6 +1607,11 @@ fn render_node(
                     draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
                         px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area)
                     });
+                    // Chrome text ABOVE the story, as a classic full-width status
+                    // line anchored to the pane top. Drawn here, with the rest of the
+                    // run stamping and after the erase fills, so a bar sits ON its
+                    // own window's erased ground rather than under it (SQ-0712).
+                    draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors);
                     // Painted-screen overlay (SQ-0478): stamp the paint runs INSIDE
                     // the story box as absolutely-positioned terminal text on TOP of
                     // the transcript. A no-op in normal gameplay (chrome grids carry
@@ -3650,6 +3663,28 @@ fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_px: i32) -> Vec<
 /// row-12 bar (its story buffer starts at row 13, under a 12-row art panel that
 /// frameless mode drops) reads as a top status line instead of floating a quarter
 /// of the way down the pane.
+/// How many pane rows [`draw_anchored_status_band`] will use, without painting
+/// anything (SQ-0712). The band has to be measured before the story area can be
+/// sized and painted after the erase fills, so the two are split: this is the
+/// span from the first inked native row inside the band to the last, clamped to
+/// the pane, which is exactly what the draw returns.
+fn anchored_band_rows(runs: &[&crate::engine::PxText], band_rows: u16, pane_h: u16) -> u16 {
+    let inked = || {
+        runs.iter()
+            .filter(|t| !t.text.trim().is_empty())
+            .map(|t| (t.y.max(1) - 1) / 16)
+            .filter(|&r| r < band_rows)
+    };
+    let Some(first) = inked().min() else { return 0 };
+    // The draw stops at the pane's bottom edge, so a row that would land off-pane
+    // never paints and never counts — the band must stay in-pane either way.
+    inked()
+        .filter(|&r| r - first < pane_h)
+        .max()
+        .map(|last| last - first + 1)
+        .unwrap_or(0)
+}
+
 fn draw_anchored_status_band(
     runs: &[&crate::engine::PxText],
     ncols: u32,
@@ -6451,6 +6486,45 @@ mod tests {
         let (row, _) = band_row(&runs, 40, 80);
         assert!(row.starts_with("West of House"), "location still flush left: {row:?}");
         assert!(row.trim_end().ends_with("Score: 0  Moves: 3"), "score/moves still flush right: {row:?}");
+    }
+
+    /// SQ-0712: the band is measured before the story area is sized and painted
+    /// after the erase fills, so `anchored_band_rows` has to agree with what
+    /// `draw_anchored_status_band` actually uses — a drift between them mis-sizes
+    /// the transcript or strands the bar off-pane.
+    #[test]
+    fn anchored_band_measurement_matches_the_draw() {
+        let cases: Vec<(Vec<crate::engine::PxText>, u16, u16)> = vec![
+            // One bar row at the top of a 4-row band.
+            (vec![run(1, 1, "Loc"), run(281, 1, "Moves: 1")], 4, 6),
+            // Two rows, one apart.
+            (vec![run(1, 1, "Row0"), run(1, 17, "Row1")], 4, 6),
+            // A gap row in the middle still counts toward the span.
+            (vec![run(1, 1, "Row0"), run(1, 49, "Row3")], 4, 6),
+            // Arthur's shape: nothing until native row 12, band 13 deep.
+            (vec![run(33, 193, "Churchyard")], 13, 6),
+            // Blank-only runs paint nothing and measure nothing.
+            (vec![run(129, 1, "   ")], 4, 6),
+            // Nothing at all.
+            (vec![], 4, 6),
+            // The span is clamped to a pane shorter than the band.
+            (vec![run(1, 1, "Row0"), run(1, 81, "Row5")], 8, 3),
+        ];
+        for (runs, band_rows, pane_h) in cases {
+            let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+            let area = Rect::new(0, 0, 80, pane_h);
+            let mut buf = Buffer::empty(area);
+            let colors = crate::colors::ColorScheme::terminal_default();
+            let drawn = draw_anchored_status_band(
+                &refs, 40, band_rows, area, &mut buf, ratatui::style::Style::default(), true, &colors,
+            );
+            assert_eq!(
+                anchored_band_rows(&refs, band_rows, pane_h),
+                drawn,
+                "measured rows must equal drawn rows for {:?} (band {band_rows}, pane {pane_h})",
+                runs.iter().map(|t| (t.y, t.x, &t.text)).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

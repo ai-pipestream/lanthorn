@@ -1743,10 +1743,26 @@ impl Machine {
                     // picture). Without the resize the picture clips to window 1's
                     // 78px banner box and only its top strip shows, and the story
                     // window stays open and paints the transcript over the splash.
-                    // Only the sizes change — window 0's ORIGIN (its inset frame
-                    // position) is left untouched, so the game's own
-                    // window_size(win=0, …) call restores it verbatim once the
-                    // splash is dismissed. (SQ-0497)
+                    // (SQ-0497)
+                    //
+                    // SQ-0712: the split PLACES window 0, it does not merely shorten
+                    // it. ZMSD §8.8.4.1, verbatim: "The split_screen opcode tiles
+                    // windows 0 and 1 together to fill the screen, so that window 1
+                    // has the given height and is placed at the top left, while
+                    // window 0 is placed just below it (with its height suitably
+                    // shortened, possibly making it disappear altogether if window 1
+                    // occupies the whole screen)." Leaving window 0's origin alone
+                    // left it overlapping window 1: mysterious01.z6 splits 260px for
+                    // its artwork, never moves window 0 itself, and had its prose
+                    // rendered on top of the picture. Tiling is also what the games
+                    // themselves read back — advent's Inform 6 v6 library follows
+                    // its @split_window(20) with @get_wind_prop(win=0, prop=0) and
+                    // places its own prose window at the y it answers.
+                    //
+                    // Zork Zero's @split_window(400) is the spec's own "disappear
+                    // altogether": window 0 lands at y=401 with height 0, and the
+                    // game re-places it with its own move_window once the splash is
+                    // dismissed.
                     let screen_w = self.mem.read_word(0x22);
                     let screen_h = self.mem.read_word(0x24);
                     if let Some(v6) = self.screen.v6.as_mut() {
@@ -1757,7 +1773,13 @@ impl Machine {
                             upper.x_size = screen_w;
                         }
                         upper.y_size = rows;
-                        v6.windows[0].y_size = screen_h.saturating_sub(rows);
+                        let lower = &mut v6.windows[0];
+                        lower.x_coord = 1;
+                        lower.y_coord = rows.saturating_add(1);
+                        if screen_w > 0 {
+                            lower.x_size = screen_w;
+                        }
+                        lower.y_size = screen_h.saturating_sub(rows);
                     }
                 } else {
                     // Cap the row count like EXT window_size does (GRID_CELL_CAP):

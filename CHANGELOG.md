@@ -87,6 +87,22 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **A v6 game that splits its screen for artwork no longer prints the story over
+  the picture.** `mysterious01.z6` reserves the top 260 pixels for its illustration
+  and then simply narrates — it never repositions the text window, because the
+  Z-machine standard says splitting the screen *tiles* the two windows: the upper
+  one takes the height it asked for, and the story window "is placed just below
+  it". babelmap only shortened the story window and left it pinned to the top
+  corner, so it sat squarely inside the picture and the prose came out printed
+  across the artwork. The split now places the story window where the standard puts
+  it, and the picture and the prose each get their own half of the screen. Adventure
+  benefits twice over: its library asks the interpreter where the split left the
+  text window and positions its own from the answer, so its status bar, its room
+  description and its `help` menu all now land where the game intended — the subject
+  list used to be buried under a text window that still claimed the whole screen.
+  Zork Zero's full-screen title splash is untouched: a split that takes the entire
+  screen leaves the story window with no height at all, exactly as the standard
+  describes.
 - **Shogun's title header stays centred outside raster mode.** The nine centred
   lines the game paints across its title screen are frozen where it printed them,
   and the full-frame `raster` composite placed them perfectly — but `hybrid` (the
