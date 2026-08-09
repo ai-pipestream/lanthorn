@@ -252,6 +252,19 @@ The story page itself fills with the window's own background colour (when
 the game set one) rather than leaving the terminal's theme backdrop showing
 through.
 
+Every *other* window's page follows the same rule, because ZMSD §8.8.3.2 gives
+each Version 6 window its own pair — not one page shared by the screen. It
+matters most where the art is mostly holes: Zork Zero's compass and room icons
+are line art on a clear ground (95% transparent) and hang below the banner
+artwork, so the pixels behind them are pixels nobody painted. Left transparent,
+the graphics protocol picks the colour, and it picks black. babelmap paints each
+chrome window's own page into its untouched pixels instead, so the ring it
+uploads is self-contained. Only `alpha == 0` pixels are filled — artwork, status
+bands, glyphs and the icons' own ink are untouched, the story box stays clear for
+the terminal transcript, and a window the game gave no colour keeps the host
+page. It is the whole screen's look for Scopa, whose green baize is a window
+background and nothing else.
+
 This colour honoring now spans *every* v6 presentation, not just the pixel
 raster: the frameless classic status band, the painted menu/hint overlays,
 the hybrid story-strip overlay, and the plain cell fallback all resolve a

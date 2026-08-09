@@ -1,0 +1,259 @@
+//! SQ-0704 — a v6 chrome window's UNPAINTED area must resolve to that window's
+//! OWN background, not to a backdrop the graphics protocol picks for us.
+//!
+//! The reported symptom: Zork Zero's room icons render on an opaque BLACK box
+//! where other interpreters (and the DOS original) show the banner window's own
+//! white page. Measured cause — the icons are pictures 9/10/11/13, 45×40 line
+//! art that is ~95 % `alpha == 0`, drawn into window 1, Zork Zero's 640×78
+//! banner. The banner ARTWORK (window 7's frame) only reaches native row 67, so
+//! the bottom of every icon hangs over rows 68..77, where nothing was painted at
+//! all. `build_chrome_canvas` resolves everything against one host
+//! `default_fg`/`default_bg` pair and consults a window's own colours only for
+//! its text runs (SQ-0519), so those pixels left the compositor transparent —
+//! and a transparent chrome pixel becomes whatever the protocol decides
+//! (halfblocks' `to_rgb8()` flattens it to black; the reporter saw the same
+//! black under kitty). ZMSD §8.8.3.2 is explicit that a Version 6 window has its
+//! OWN foreground/background pair, and window 1's is `set_colour(fg=2 black,
+//! bg=9 white)` — white.
+//!
+//! RASTER mode never showed the bug: it ships one image and already flattens its
+//! holes onto the story page (`flatten_onto_page`, SQ-0510), and Zork Zero's
+//! story page is the same white. HYBRID — the default, and what the reporter
+//! runs — must NOT flatten (the ring's clear middle is what lets the terminal
+//! transcript show through), so the icons' clear ground travelled all the way to
+//! the terminal. `v6_layout::fill_window_pages` closes that gap.
+//!
+//! Both `honor_game_colours` modes are pinned: `true` (the shipped default and
+//! primary baseline) gets the window's page; `false` declines the game's colours
+//! and must keep today's behaviour byte for byte.
+//!
+//! The story asset is gitignored, so every case **skips cleanly** when absent.
+
+use std::path::PathBuf;
+
+use app::engine::{Engine, PositionedWindow, WinNode};
+use app::graphics::PictSource;
+use app::session::GameSession;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+
+fn stories_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
+}
+
+/// Boot Zork Zero and play far enough in that the banner carries a live room
+/// name, its move/score readouts and the compass/room icons.
+fn zork0_in_play(honor_game_colours: bool) -> Option<GameSession> {
+    let story_path = stories_dir().join("zork0-r393-s890714.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return None;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session = GameSession::new_with_trace(
+        story_bytes,
+        honor_game_colours,
+        false,
+        None,
+        false,
+        picture_dims,
+        picts.std_window(),
+        None,
+        None,
+    )
+    .expect("Zork0 (v6) should load and boot without a ZError");
+    assert!(!session.quit && session.machine.fault_trace.is_none(), "Zork0 booted cleanly");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    for _ in 0..6 {
+        match session.pending_input() {
+            app::session::InputKind::Line => {
+                let _ = session.submit("look");
+            }
+            app::session::InputKind::Char => {
+                let _ = session.submit_char(b' ');
+            }
+            app::session::InputKind::Event => {
+                let _ = session.submit("");
+            }
+        }
+        let _ = session.take_transcript();
+    }
+    Some(session)
+}
+
+fn render_state(mode: app::config::V6RenderMode, honor_game_colours: bool) -> app::state::AppState {
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = mode;
+    state.config.honor_game_colours = honor_game_colours;
+    state.push_transcript("Banquet Hall");
+    state.push_transcript("The hall is filled to capacity.");
+    state
+}
+
+/// The chrome window carrying an explicit background that is NOT the story box —
+/// Zork Zero's 640×78 banner (window 1).
+fn banner<'a>(chrome: &[&'a PositionedWindow]) -> Option<&'a PositionedWindow> {
+    chrome
+        .iter()
+        .copied()
+        .find(|pw| matches!(&pw.node, WinNode::Grid(g) if g.bg.is_some()) && pw.h_px < 200)
+}
+
+#[test]
+fn zork0_room_icons_rest_on_the_banner_windows_own_white_page() {
+    let Some(session) = zork0_in_play(true) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
+
+    let state = render_state(app::config::V6RenderMode::Hybrid, true);
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
+
+    let win1 = banner(&layout.chrome).expect("Zork0's banner window publishes its own background");
+    assert_eq!((win1.x_px, win1.y_px, win1.w_px, win1.h_px), (0, 0, 640, 78), "Zork Zero's banner window");
+
+    // The composite exactly as the hybrid ring builds it, before the SQ-0704 pass.
+    let before = app::render::v6_layout::build_chrome_canvas(
+        &layout.chrome,
+        native,
+        default_fg,
+        default_bg,
+        &state.colors,
+    );
+
+    // Precondition (the symptom): inside the banner window, below the frame art,
+    // the icons' clear ground is FULLY TRANSPARENT — nothing of ours decided what
+    // colour the player sees there.
+    let holes: Vec<(u32, u32)> = (68..78)
+        .flat_map(|y| (276..321).map(move |x| (x, y)))
+        .filter(|&(x, y)| before.get_pixel(x, y).0[3] == 0)
+        .collect();
+    assert!(
+        holes.len() > 300,
+        "the icons' clear ground under the banner art is unpainted: only {} of 450 pixels are holes",
+        holes.len()
+    );
+
+    // The icons' LIT strokes over that same strip — these must survive untouched.
+    let strokes: Vec<((u32, u32), [u8; 4])> = (68..78)
+        .flat_map(|y| (276..321).map(move |x| (x, y)))
+        .filter(|&(x, y)| before.get_pixel(x, y).0[3] != 0)
+        .map(|(x, y)| ((x, y), before.get_pixel(x, y).0))
+        .collect();
+    assert!(!strokes.is_empty(), "the icons paint real ink into the strip below the banner art");
+
+    let mut after = before.clone();
+    app::render::v6_layout::fill_window_pages(&mut after, &layout.chrome, layout.story, &state.colors);
+
+    // (1) Every hole now reads the BANNER WINDOW's own page: opaque white
+    // (ZMSD §8.3.1's true-colour equivalent of Standard 9), never black.
+    for &(x, y) in &holes {
+        assert_eq!(
+            after.get_pixel(x, y).0,
+            [255, 255, 255, 255],
+            "({x},{y}) behind a room icon must be window 1's white page, not a protocol-chosen backdrop"
+        );
+    }
+
+    // (2) The icons' own ink is byte-identical — the fix decides what UNPAINTED
+    // pixels mean and never repaints art.
+    for &((x, y), px) in &strokes {
+        assert_eq!(after.get_pixel(x, y).0, px, "icon ink at ({x},{y}) is untouched");
+    }
+
+    // (3) The banner ARTWORK above (window 7's frame, opaque to row 67) is
+    // untouched too — no white box is painted over it.
+    for y in 0..68 {
+        for x in 276..321 {
+            assert_eq!(
+                after.get_pixel(x, y).0,
+                before.get_pixel(x, y).0,
+                "frame art at ({x},{y}) is untouched"
+            );
+        }
+    }
+
+    // (4) The story box stays CLEAR. Window 7 carries the same white page across
+    // the whole 640×400 screen; painting it would fill the hybrid transcript
+    // viewport and defeat `story_clear_native`'s clear-interior probe.
+    let story = layout.story.expect("Zork0 has a story window");
+    let (sx, sy) = (story.x_px as u32 + 40, story.y_px as u32 + 40);
+    assert_eq!(after.get_pixel(sx, sy).0[3], 0, "the story box is left transparent for the transcript");
+}
+
+#[test]
+fn zork0_hybrid_ring_ships_no_black_behind_the_room_icons() {
+    let Some(session) = zork0_in_play(true) else { return };
+    let model = session.screen();
+
+    // Halfblocks is the honest oracle for "a transparent chrome pixel becomes
+    // whatever the protocol decides": `ratatui_image`'s halfblocks encoder calls
+    // `to_rgb8()`, so an `alpha == 0` band pixel flattens to pure BLACK — the
+    // same black the reporter saw under kitty. Pre-fix this render put 85 pure
+    // black cells in the chrome rows above the story viewport (the strip under
+    // the banner art, right where the icons hang); the fix leaves none.
+    let state = render_state(app::config::V6RenderMode::Hybrid, true);
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    assert_eq!(state.v6_ring_plan.get(), "frame", "Zork0's enclosed frame takes the hybrid ring path");
+
+    let viewport = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
+    let black = |c: ratatui::style::Color| matches!(c, ratatui::style::Color::Rgb(0, 0, 0));
+    let mut offenders = Vec::new();
+    for y in 0..viewport.y {
+        for x in viewport.x..viewport.right() {
+            let cell = buf.cell((x, y)).expect("cell inside the pane");
+            if black(cell.fg) || black(cell.bg) {
+                offenders.push((x, y));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the banner ring must never ship a black backdrop: {} black cells, first {:?}",
+        offenders.len(),
+        &offenders[..offenders.len().min(8)]
+    );
+}
+
+#[test]
+fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
+    // `honor_game_colours = false`: the game's pair is declined at the engine
+    // boundary (the model publishes no window background) AND at the render
+    // gate, so the SQ-0704 pass is a no-op and the composite is byte-identical
+    // to today's. The host page governs everywhere, as before.
+    let Some(session) = zork0_in_play(false) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
+
+    let state = render_state(app::config::V6RenderMode::Hybrid, false);
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
+
+    assert!(
+        banner(&layout.chrome).is_none(),
+        "with colours declined no chrome window claims a background of its own"
+    );
+
+    let before = app::render::v6_layout::build_chrome_canvas(
+        &layout.chrome,
+        native,
+        default_fg,
+        default_bg,
+        &state.colors,
+    );
+    let mut after = before.clone();
+    app::render::v6_layout::fill_window_pages(&mut after, &layout.chrome, layout.story, &state.colors);
+    assert_eq!(before.as_raw(), after.as_raw(), "declined colours leave the composite byte-identical");
+
+    // And the icons' ground is still the transparency the caller's page resolves.
+    assert_eq!(after.get_pixel(300, 70).0[3], 0, "the clear ground stays the caller's to colour in");
+}
