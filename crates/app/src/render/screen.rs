@@ -980,7 +980,7 @@ fn render_node(
                             .chrome
                             .iter()
                             .filter(|pw| matches!(&pw.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
-                            .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area))
+                            .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area, 0))
                             .collect();
                         let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs);
                         // An ART strip with no actual art behind it draws a rasterized
@@ -1190,7 +1190,7 @@ fn render_node(
                                 cells: (0, 0, 0, 0),
                             });
                             for pw in &layout.chrome {
-                                let r = px_rect_to_cells(pw, &scale, cell_px, area);
+                                let r = px_rect_to_cells(pw, &scale, cell_px, area, 0);
                                 let kind = match &pw.node {
                                     WinNode::Buffer(b) if b.primary => "story",
                                     WinNode::Buffer(_) => "panel",
@@ -1227,14 +1227,14 @@ fn render_node(
                             .chrome
                             .iter()
                             .copied()
-                            .filter(|pw| px_rect_to_cells(pw, &scale, cell_px, area).y >= viewport.y)
+                            .filter(|pw| px_rect_to_cells(pw, &scale, cell_px, area, 0).y >= viewport.y)
                             .collect();
                         draw_erase_fills(
                             &fill_chrome, viewport, buf, base, state.config.honor_game_colours, &state.colors,
-                            &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area),
+                            &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area, 0),
                         );
                         draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
-                            px_rect_to_cells(pw, &scale, cell_px, area)
+                            px_rect_to_cells(pw, &scale, cell_px, area, 0)
                         });
                         // Chrome text runs that fall INSIDE the story box paint
                         // ON TOP of the terminal transcript (v6 paint order —
@@ -1491,6 +1491,39 @@ fn render_node(
                     // leaving window 0 on top of window 1 and the bar became band
                     // text instead of story-box paint.
                     let top_used = anchored_band_rows(&runs, story_top, area.height);
+                    // …and WHERE the transcript starts is the STORY WINDOW'S OWN BOX
+                    // (SQ-0697), not "wherever the band happens to end". A game that
+                    // parked its story window well down the screen left real empty
+                    // screen above it, and that gap is part of the layout it
+                    // declared. Shogun's title turns on it: the game prints nine
+                    // centred lines across native rows 3–11, then moves window 0 to a
+                    // 548x64 box at native row 21 — level with, and left of, the
+                    // START/RESTORE/QUIT menu at (235,337) — and prints "You may
+                    // choose to:" there. Flush-under-the-band put that prompt on the
+                    // line below the banner, nine rows above the menu it belongs
+                    // beside, which is exactly what a player reported.
+                    //
+                    // The gap is measured against the chrome's declared BOX, never
+                    // its ink: a chrome window taller than the text in it (Zork Zero's
+                    // status panel is 78px of which two rows carry runs) has already
+                    // been compressed to its inked rows by the band, and re-counting
+                    // its own slack as empty screen would push the transcript down for
+                    // art frameless has deliberately dropped. Nothing above the story
+                    // at all → nothing to sit below, so the story keeps the pane's top
+                    // edge.
+                    let chrome_bot = layout
+                        .chrome
+                        .iter()
+                        .filter(|pw| pw.y_px.saturating_add(pw.h_px) <= story.y_px)
+                        .map(|pw| ((pw.y_px as u32 + pw.h_px as u32).div_ceil(16)).min(u16::MAX as u32) as u16)
+                        .max()
+                        .unwrap_or(story_top);
+                    let story_row = (top_used + story_top.saturating_sub(chrome_bot))
+                        .min(area.height.saturating_sub(1));
+                    // The same displacement, as a signed row delta, for everything
+                    // else placed at a native row INSIDE the story box: a menu's
+                    // glyphs and the erased ground they sit on travel with it.
+                    let story_shift = story_row as i32 - story_top as i32;
                     // The command band below the story (Journey's menu): its own
                     // inked native rows, packed against the pane's bottom edge so
                     // it stays locked there at any pane height instead of floating
@@ -1508,7 +1541,7 @@ fn render_node(
                     let bottom_used = bottom_span
                         .map(|(_, n)| n)
                         .unwrap_or(0)
-                        .min(area.height.saturating_sub(top_used));
+                        .min(area.height.saturating_sub(story_row));
                     // A chrome GRAPHICS window entirely BESIDE the story (Journey's
                     // half-screen picture column) is story content, not frame art —
                     // frameless drops the surrounding chrome, but dropping this lost
@@ -1551,8 +1584,8 @@ fn render_node(
                             story_right = story_right.min(area.x + col_of(story_r));
                         }
                     }
-                    let mid_y = area.y + top_used;
-                    let mid_h = area.height.saturating_sub(top_used + bottom_used);
+                    let mid_y = area.y + story_row;
+                    let mid_h = area.height.saturating_sub(story_row + bottom_used);
                     for (pw, _) in &sides {
                         let x = area.x + col_of(pw.x_px);
                         let w = col_of(pw.x_px.saturating_add(pw.w_px)).saturating_sub(col_of(pw.x_px));
@@ -1602,10 +1635,11 @@ fn render_node(
                             &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 },
                             (8, 16),
                             area,
+                            story_shift,
                         ),
                     );
                     draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
-                        px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area)
+                        px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area, story_shift)
                     });
                     // Chrome text ABOVE the story, as a classic full-width status
                     // line anchored to the pane top. Drawn here, with the rest of the
@@ -1617,7 +1651,7 @@ fn render_node(
                     // the transcript. A no-op in normal gameplay (chrome grids carry
                     // only the band runs); on a menu screen it draws the items + the
                     // reverse-video selection caret the anchored band drops.
-                    draw_painted_screen(&runs, story_top..story_bot, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
+                    draw_painted_screen(&runs, story_top..story_bot, story_shift, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
                     if let Some((first, n)) = bottom_span {
                         // Pack the command band's native rows against the pane
                         // bottom: native `first` lands on the first band row.
@@ -3288,16 +3322,22 @@ fn flank_divider_extension(
 /// [`run_cell`] maps a run's origin: through the scale, then ROUNDED. Rounding (not
 /// ceil) on the far edge is what keeps a 20px status strip — 1.25 cells — from
 /// claiming a second row and eating the first line of story under it. (SQ-0584)
+///
+/// `row_shift` slides the whole native screen by whole terminal ROWS, for the cell
+/// path's packing (SQ-0697): there the native screen is anchored on the first inked
+/// chrome row rather than on the pane's top edge, and a window's erased ground has
+/// to move with the glyphs painted on it. Zero everywhere else.
 fn px_rect_to_cells(
     pw: &PositionedWindow,
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     pane: Rect,
+    row_shift: i32,
 ) -> Rect {
     let cw = cell_px.0.max(1) as f32;
     let ch = cell_px.1.max(1) as f32;
     let to_col = |px: f32| pane.x as f32 + (scale.off_x as f32 + px * scale.s) / cw;
-    let to_row = |py: f32| pane.y as f32 + (scale.off_y as f32 + py * scale.s) / ch;
+    let to_row = |py: f32| pane.y as f32 + (scale.off_y as f32 + py * scale.s) / ch + row_shift as f32;
     let x0 = to_col(pw.x_px as f32).round().max(pane.x as f32) as u16;
     let y0 = to_row(pw.y_px as f32).round().max(pane.y as f32) as u16;
     let x1 = to_col(pw.x_px.saturating_add(pw.w_px) as f32).round().max(x0 as f32).min(pane.right() as f32) as u16;
@@ -6030,10 +6070,16 @@ mod tests {
         let screen: String = (0..area.height).map(|y| row_text(y) + "\n").collect();
         // The transcript prompt is preserved (dropped by a painted-only path).
         assert!(screen.contains("You may choose to:"), "transcript prompt preserved, screen:\n{screen}");
-        // All three items render as terminal text on their distinct deep rows.
-        assert_eq!(row_text(8).trim(), "START the game", "row 8 is the START item, screen:\n{screen}");
-        assert_eq!(row_text(9).trim(), "RESTORE a saved game", "row 9 is the RESTORE item");
-        assert_eq!(row_text(10).trim(), "QUIT the game", "row 10 is the QUIT item");
+        // All three items render as terminal text on their distinct deep rows,
+        // placed relative to the STORY BOX they are painted inside (SQ-0697): this
+        // model's story window starts at native y=39 — row 2 — with no chrome above
+        // it, so the box takes the pane's top row and its contents come with it. The
+        // items' native rows 8/9/10 therefore land two rows up, at 6/7/8; stamping
+        // them at absolute native rows instead would tear a menu away from the
+        // transcript it is painted over.
+        assert_eq!(row_text(6).trim(), "START the game", "row 6 is the START item, screen:\n{screen}");
+        assert_eq!(row_text(7).trim(), "RESTORE a saved game", "row 7 is the RESTORE item");
+        assert_eq!(row_text(8).trim(), "QUIT the game", "row 8 is the QUIT item");
     }
 
     /// SQ-0515: a chrome grid window carrying `px_texts`, for the flood discriminator.

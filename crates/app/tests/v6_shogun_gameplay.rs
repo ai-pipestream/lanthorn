@@ -269,6 +269,11 @@ fn shogun_boot_menu_items_paint_horizontally_and_splash_clears() {
 /// positioned terminal text (the old anchored-band path dropped every run below
 /// row 4, leaving "nothing after 'You may choose to:'"), and the selected item's
 /// reverse-video run must carry the REVERSED modifier (the visible caret).
+///
+/// They land on pane rows 18–20, not 21–23: the cell path packs the native screen
+/// (SQ-0697), so the frozen title banner's nine inked rows (native 3–11) pack
+/// against the pane top, and the menu — painted inside the story box the game moved
+/// down to native row 21 — travels with that box, three rows up.
 #[test]
 fn shogun_frameless_boot_menu_paints_items_and_caret() {
     use ratatui::style::Modifier;
@@ -302,22 +307,22 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
     let row_text = |y: u16| -> String {
         (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect()
     };
-    // Native rows 21/22/23 (px y=169/177/185 → (y-1)/8) carry the three items.
-    let r21 = row_text(21);
-    let r22 = row_text(22);
-    let r23 = row_text(23);
-    eprintln!("21|{r21}|\n22|{r22}|\n23|{r23}|");
-    assert!(r21.contains("START the game"), "row 21 shows the START item: {r21:?}");
-    assert!(r22.contains("RESTORE a saved game"), "row 22 shows the RESTORE item: {r22:?}");
-    assert!(r23.contains("QUIT the game"), "row 23 shows the QUIT item: {r23:?}");
+    // The three items, on the packed rows the story box carried them to.
+    let r0 = row_text(18);
+    let r1 = row_text(19);
+    let r2 = row_text(20);
+    eprintln!("18|{r0}|\n19|{r1}|\n20|{r2}|");
+    assert!(r0.contains("START the game"), "row 18 shows the START item: {r0:?}");
+    assert!(r1.contains("RESTORE a saved game"), "row 19 shows the RESTORE item: {r1:?}");
+    assert!(r2.contains("QUIT the game"), "row 20 shows the QUIT item: {r2:?}");
     // The selected item (START, style bit 0 = reverse) carries the REVERSED
     // modifier — the visible selection caret.
-    let start_col = r21.find("START").unwrap() as u16;
-    let cell = buf.cell((start_col, 21)).unwrap();
+    let start_col = r0.find("START").unwrap() as u16;
+    let cell = buf.cell((start_col, 18)).unwrap();
     assert!(cell.modifier.contains(Modifier::REVERSED), "START item is reverse-video (the selection caret)");
     // RESTORE (style 0) is NOT reversed.
-    let restore_col = r22.find("RESTORE").unwrap() as u16;
-    assert!(!buf.cell((restore_col, 22)).unwrap().modifier.contains(Modifier::REVERSED), "RESTORE is not reversed");
+    let restore_col = r1.find("RESTORE").unwrap() as u16;
+    assert!(!buf.cell((restore_col, 19)).unwrap().modifier.contains(Modifier::REVERSED), "RESTORE is not reversed");
 }
 
 /// SQ-0484: Shogun's boot menu in HYBRID render mode. The menu keeps window 0
@@ -360,31 +365,32 @@ fn shogun_hybrid_boot_menu_is_coherent_text_with_solid_reverse_bar() {
     let row_text = |y: u16| -> String {
         (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect()
     };
-    // Native rows 21/22/23 carry the three items — as terminal cells, NOT a raster
-    // stamp (the whole menu is one coherent all-text screen).
-    let r21 = row_text(21);
-    let r22 = row_text(22);
-    let r23 = row_text(23);
-    assert!(r21.contains("START the game"), "row 21 shows the START item: {r21:?}");
-    assert!(r22.contains("RESTORE a saved game"), "row 22 shows the RESTORE item: {r22:?}");
-    assert!(r23.contains("QUIT the game"), "row 23 shows the QUIT item: {r23:?}");
+    // The three items — as terminal cells, NOT a raster stamp (the whole menu is one
+    // coherent all-text screen) — on the packed rows the story box carried them to
+    // (native 21–23 → pane 18–20; see the frameless case above).
+    let r0 = row_text(18);
+    let r1 = row_text(19);
+    let r2 = row_text(20);
+    assert!(r0.contains("START the game"), "row 18 shows the START item: {r0:?}");
+    assert!(r1.contains("RESTORE a saved game"), "row 19 shows the RESTORE item: {r1:?}");
+    assert!(r2.contains("QUIT the game"), "row 20 shows the QUIT item: {r2:?}");
 
     // The selected item (START, reverse-video) is a SOLID reverse bar: every cell
     // from the first glyph to the last — INCLUDING the gap cells between "START",
     // "the", and "game" — carries the REVERSED modifier. The old per-run stamp left
     // the gaps unreversed (moth-eaten).
-    let start = r21.find("START").unwrap() as u16;
-    let end = (r21.rfind("game").unwrap() + "game".len()) as u16; // exclusive
+    let start = r0.find("START").unwrap() as u16;
+    let end = (r0.rfind("game").unwrap() + "game".len()) as u16; // exclusive
     for x in start..end {
         assert!(
-            buf.cell((x, 21)).unwrap().modifier.contains(Modifier::REVERSED),
-            "START selection bar cell {x} is reversed (incl. inter-word gaps): {r21:?}"
+            buf.cell((x, 18)).unwrap().modifier.contains(Modifier::REVERSED),
+            "START selection bar cell {x} is reversed (incl. inter-word gaps): {r0:?}"
         );
     }
     // An UNSELECTED item (RESTORE, normal video) is NOT reversed.
-    let restore = r22.find("RESTORE").unwrap() as u16;
+    let restore = r1.find("RESTORE").unwrap() as u16;
     assert!(
-        !buf.cell((restore, 22)).unwrap().modifier.contains(Modifier::REVERSED),
+        !buf.cell((restore, 19)).unwrap().modifier.contains(Modifier::REVERSED),
         "RESTORE (unselected) is not reverse-video"
     );
 }

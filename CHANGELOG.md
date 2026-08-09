@@ -87,6 +87,20 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun's "You may choose to:" now sits beside START/RESTORE/QUIT, not under
+  the title.** The game prints its nine centred banner lines while window 0 is the
+  whole screen, then moves window 0 down to a four-row box level with — and to the
+  left of — its boot menu, and prints the prompt there. babelmap already froze the
+  banner where it was painted and already held the right box; it just started the
+  resumed transcript flush under the banner and let it flow, so the prompt landed
+  nine rows above the menu it belongs beside and scrolled away with everything
+  else. The story window's box now says where its transcript starts on every
+  presentation, cell paths included: the gap a game leaves between its chrome and
+  its story window carries through into your pane, and a menu painted inside that
+  box — items and the ground erased under them — travels with it. Measured against
+  the chrome's declared rectangle rather than the text in it, so a status panel
+  taller than its own two lines (Zork Zero's) still keeps the transcript exactly
+  where it was; Arthur, Journey and Adventure render byte-for-byte as before.
 - **Selecting a card in scopa no longer smears the OK button across the table.**
   Choosing a card relabels the confirm button from "Choose" to "OK", and the label's
   white field came with it — running out of the button's rounded outline and off the

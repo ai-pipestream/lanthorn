@@ -379,6 +379,27 @@ keeps streaming — which is what Arthur does on nearly every turn of play, and
 what makes the difference between a faithful title screen and a transcript that
 quietly stops scrolling.
 
+**And the transcript restarts in the box the game moved the window to.** Freezing
+the old half was only half the job: the live half has to land somewhere, and
+somewhere is the story window's own box. In the pixel composite that was always
+true — the transcript is drawn inside the window's rectangle. The cell
+presentations (`frameless`, and `hybrid` on a menu screen) build the pane by
+relation instead: the chrome above the story packs against your pane's top edge,
+the chrome below packs against its bottom, and the transcript fills between. That
+packing used to start the transcript flush under the band, which is right for
+every game that puts its story window directly under its status bar — and wrong
+for Shogun, whose window 0 sits nine rows further down, level with the menu. The
+prompt came out on the line below the banner instead of beside START/RESTORE/QUIT.
+
+Now the story window's box says where its transcript starts: the gap the game left
+between its chrome and its story window carries through into the pane, and anything
+painted *inside* that box — a menu's items, and the ground erased under them —
+travels with it. The gap is measured against the chrome's declared rectangle rather
+than the text in it, so a status panel taller than its own two lines (Zork Zero's
+is 78 pixels of which two rows carry text) does not push the transcript down for
+art `frameless` has deliberately dropped. Nothing above the story window at all
+means nothing to sit below, and the transcript keeps the top of your pane.
+
 **Frozen prose keeps the columns it was given.** `raster` composites the frozen
 layer as pixels, so it lands exactly where the game put it. `hybrid` and
 `frameless` have no pixels to composite there: text sitting above the story window
