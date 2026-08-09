@@ -225,6 +225,151 @@ fn shogun_frozen_header_reaches_the_composite() {
     }
 }
 
+/// SQ-0717 — reported by a player as "some of shogun intro text is no longer
+/// centered", minutes after the freeze landed. The centring survives in EVERY
+/// render path, which is the assertion that would have caught it at merge time:
+/// the previous guard checked only the raster composite, and raster is the one path
+/// that was never wrong.
+///
+/// Measured, Shogun's title, before the fix — lines losing their centring:
+///   raster     0 of 9   (the composite paints the frozen layer as pixels)
+///   hybrid     6 of 9   ← the shipped default, and what the player saw
+///   frameless  6 of 9   (identical to hybrid)
+///
+/// Both cell paths route text above the story through the frameless status band,
+/// which sorts each run into a LEFT/CENTER/RIGHT anchor group by where it STARTS —
+/// the right question for a status field, the wrong one for a paragraph. Shogun's
+/// nine lines are centred by the game's own cursor arithmetic, so the five longest
+/// begin left of the left-third boundary (208px of a 640px screen) and the shortest
+/// ends past the right two-thirds: five flushed to the left margin, one to the
+/// right. A run with equal margins on the game's screen was centred on purpose and
+/// stays centred in the pane.
+///
+/// Falsified by reverting the `centred` exemption in `draw_anchored_status_band`:
+/// "hybrid honor=true 80x25: \"Copyright (c) 1988 by Infocom\" keeps the centring
+/// the game gave it (at col 0, want ~25)".
+#[test]
+fn shogun_frozen_header_stays_centred_in_every_render_path() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let Some(mut session) = boot("shogun-r322-s890706.z6") else { return };
+    match session.pending_input() {
+        InputKind::Char => session.submit_char(13),
+        _ => session.submit(""),
+    };
+    let model = session.screen();
+
+    // Every line of the header, exactly as the game centred it.
+    let lines = [
+        "SHOGUN",
+        "A Story of Japan",
+        "Copyright (c) 1988 by Infocom",
+        "All rights reserved.",
+        "SHOGUN is a trademark of James Clavell",
+        "Original Literary Work Copyright 1975 by James Clavell",
+        "Licensed by Noble House Trading Limited, London.",
+        "Release 322 / Pix 322 / Serial number 890706",
+        "IBM Interpreter version 6.65",
+    ];
+
+    for (tag, mode) in [
+        ("hybrid", app::config::V6RenderMode::Hybrid),
+        ("frameless", app::config::V6RenderMode::Frameless),
+    ] {
+        for honor in [true, false] {
+            for (w, h) in [(80u16, 25u16), (120, 40)] {
+                let mut state = app::state::AppState::default();
+                state.colors = app::colors::ColorScheme::terminal_default();
+                state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+                state.config.v6_render = mode;
+                state.config.honor_game_colours = honor;
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+                let row_text = |y: u16| -> String {
+                    (0..w).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+                };
+                let rows: Vec<String> = (0..h).map(row_text).collect();
+                let ctx = format!("{tag} honor={honor} {w}x{h}");
+
+                for line in lines {
+                    let at = rows
+                        .iter()
+                        .find_map(|r| r.find(line))
+                        .unwrap_or_else(|| panic!("{ctx}: the frozen header line {line:?} reaches the pane:\n{}", rows.join("\n")));
+                    let want = (w as usize - line.chars().count()) / 2;
+                    assert!(
+                        (at as i32 - want as i32).abs() <= 1,
+                        "{ctx}: {line:?} keeps the centring the game gave it (at col {at}, want ~{want}):\n{}",
+                        rows.join("\n")
+                    );
+                }
+
+                // The block still reads as one paragraph: consecutive rows, in order.
+                let first = rows.iter().position(|r| r.contains("SHOGUN")).expect("header rows located above");
+                for (i, line) in lines.iter().enumerate() {
+                    assert!(
+                        rows[first + i].contains(line),
+                        "{ctx}: the header keeps the game's own row order at row {}: {:?}",
+                        first + i,
+                        rows[first + i]
+                    );
+                }
+            }
+        }
+    }
+
+    // …and the RASTER composite, the third path. It paints the frozen layer as
+    // pixels at the game's own coordinates and was never wrong, but it is pinned
+    // here so the invariant is "centred in every path" rather than "centred in the
+    // two we happened to fix". Measured as the INK extent of each 16px text row,
+    // inside the middle band where the frame art never reaches.
+    let layout = app::render::v6_layout::classify_windows(match &model.root {
+        WinNode::Layered(items) => items,
+        _ => panic!("v6 builds a Layered root"),
+    });
+    let native = match &model.root {
+        WinNode::Layered(items) => app::render::v6_layout::native_extent(items),
+        _ => unreachable!(),
+    };
+    for honor in [true, false] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.honor_game_colours = honor;
+        if let Some(p) = Engine::paint_surface(&session) {
+            *state.v6_paint.borrow_mut() = Some(p);
+        }
+        let (canvas, _metrics) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+        // The header occupies native text rows 3..12 (y = 49, 65, … 177).
+        for row in 3..12u32 {
+            let (mut lo, mut hi) = (u32::MAX, 0u32);
+            for y in row * 16..(row * 16 + 16).min(canvas.height()) {
+                for x in 80..560u32.min(canvas.width()) {
+                    let ink = canvas
+                        .get_pixel_checked(x, y)
+                        .is_some_and(|p| p[3] == 255 && (p[0] as u16 + p[1] as u16 + p[2] as u16) > 200);
+                    if ink {
+                        lo = lo.min(x);
+                        hi = hi.max(x);
+                    }
+                }
+            }
+            assert_ne!(lo, u32::MAX, "raster honor={honor}: header row {row} is painted");
+            let right = native.0 as u32 - (hi + 1);
+            // Equal margins to within one 8px cell — the glyph's ink stops short of
+            // its advance, so the right margin runs a few pixels wide.
+            assert!(
+                lo.abs_diff(right) <= 8,
+                "raster honor={honor}: header row {row} stays centred (ink {lo}..{hi}, \
+                 left margin {lo}px, right margin {right}px of {}px)",
+                native.0
+            );
+        }
+    }
+}
+
 /// The corpus guard, and the reason the freeze is scoped to what the window's new
 /// box LEAVES rather than to the box merely changing.
 ///

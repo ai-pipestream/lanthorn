@@ -87,6 +87,18 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun's title header stays centred outside raster mode.** The nine centred
+  lines the game paints across its title screen are frozen where it printed them,
+  and the full-frame `raster` composite placed them perfectly — but `hybrid` (the
+  default) and `frameless` route text above the story through the status-bar
+  renderer, which sorts a line into a left, centre or right field by where it
+  *starts*. That is the right question for a status bar and the wrong one for a
+  paragraph: five of the nine lines began far enough left to be flushed against the
+  left margin and the shortest ended far enough right to be flushed against the
+  right one, so a carefully centred block came out ragged on both edges. A line
+  with equal margins on the game's own screen was centred on purpose, so it is now
+  centred in your pane too, at any terminal width. Status bars are untouched — a
+  field that begins at the screen edge is still anchored there.
 - **Turning game colours off no longer deletes half of a v6 game's board.** With
   `honor_game_colours` off, scopa's felt table disappeared and left a black
   card table with two green stripes across it — the only survivors being the bands

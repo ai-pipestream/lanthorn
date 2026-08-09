@@ -340,6 +340,19 @@ keeps streaming — which is what Arthur does on nearly every turn of play, and
 what makes the difference between a faithful title screen and a transcript that
 quietly stops scrolling.
 
+**Frozen prose keeps the columns it was given.** `raster` composites the frozen
+layer as pixels, so it lands exactly where the game put it. `hybrid` and
+`frameless` have no pixels to composite there: text sitting above the story window
+is drawn by the anchored status-band renderer, which stretches a game's 40- or
+80-column bar across whatever width your terminal is by sorting each run into a
+left, centre or right field. It decides by where the run *starts*, which is how a
+location name finds the left margin and a score finds the right one — and which
+would tear a centred paragraph apart, since a longer line starts further left. So
+a run whose margins are equal on the game's own screen is taken as deliberately
+centred and is centred again in your pane, however far left it begins. A field
+that starts at the screen's edge is not centred text and stays anchored where it
+was.
+
 ## Margin pictures — text that flows past the art
 
 Some v6 scenes put the picture on one side and let the prose flow past it.

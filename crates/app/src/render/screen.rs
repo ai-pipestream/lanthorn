@@ -3695,17 +3695,35 @@ fn draw_anchored_status_band(
         // group join would likewise have doubled.
         let row_runs = merge_row_fragments(&row_runs, 8);
         // Classify each run into an anchor group by its native position. A run
-        // spanning most of the row (a full-width bar) counts LEFT; otherwise a
-        // start in the left third is LEFT, an end past the right two-thirds is
-        // RIGHT, and everything between is CENTER. Within a group, run order is
-        // preserved and the native gaps collapse to a two-space join.
+        // the game CENTRED on its own screen is CENTER wherever it starts (see
+        // below); otherwise a run spanning most of the row (a full-width bar)
+        // counts LEFT, a start in the left third is LEFT, an end past the right
+        // two-thirds is RIGHT, and everything between is CENTER. Within a group,
+        // run order is preserved and the native gaps collapse to a two-space join.
         let (mut left, mut center, mut right): (Vec<&str>, Vec<&str>, Vec<&str>) =
             (Vec::new(), Vec::new(), Vec::new());
         for t in &row_runs {
             let start = ((t.x.max(1) - 1) / 8) as u32;
             let len = t.text.chars().count() as u32;
             let end = start + len;
-            if len * 3 >= ncols * 2 || start < left_bound {
+            // SQ-0717: the thirds rule reads a run's START, which is the right
+            // question for a status FIELD (a location name begins at the left
+            // margin, a score ends at the right one) and the wrong one for a line
+            // the game centred by cursor arithmetic. Shogun's frozen title header
+            // is nine such lines (SQ-0697) — the longer ones begin left of the
+            // left-third boundary and the shortest ends past the right two-thirds,
+            // so five of nine were flushed to col 0 and one flushed right, wrecking
+            // the block the game had carefully centred. A run with equal margins on
+            // its own screen — within the one cell that 8px column quantization can
+            // cost — was centred deliberately, so it is CENTER, and the pane centres
+            // it again at whatever width the terminal happens to be. Both margins
+            // must be non-zero: a rule or bar drawn from the screen edge is not
+            // centred text, and stays the LEFT-anchored bar it was.
+            let centred =
+                start > 0 && end < ncols && start.abs_diff(ncols - end) <= 1;
+            if centred {
+                center.push(&t.text);
+            } else if len * 3 >= ncols * 2 || start < left_bound {
                 left.push(&t.text);
             } else if end > right_bound {
                 right.push(&t.text);
@@ -6391,6 +6409,48 @@ mod tests {
         // Only the last 5 cols hold RIGHT's tail (28 - 22 - 1 = 5 chars survive).
         let tail: String = row.chars().skip(23).collect();
         assert_eq!(tail, ": 100", "RIGHT truncated from its left edge to the fitting tail");
+    }
+
+    /// SQ-0717: a line the game centred on its own screen stays centred, however
+    /// far left it begins. Shogun's frozen title header (SQ-0697) is the case —
+    /// nine cursor-centred lines that the thirds rule sorted by their START, so the
+    /// long ones began left of the left-third boundary and flushed to col 0 while
+    /// the shortest ended past the right two-thirds and flushed right.
+    #[test]
+    fn anchored_band_keeps_a_line_the_game_centred() {
+        // Shogun's own columns, on its 640px (80-cell) screen.
+        let lines: [(u16, &str); 3] = [
+            (297, "SHOGUN"),                                             // col 37, well inside
+            (105, "Original Literary Work Copyright 1975 by James Clavell"), // col 13 → was LEFT
+            (209, "IBM Interpreter version 6.65"),                       // ends col 54 → was RIGHT
+        ];
+        for w in [80u16, 120] {
+            for (x, text) in lines {
+                let (row, _) = band_row(&[run(x, 1, text)], 80, w);
+                let at = row.find(text).unwrap_or_else(|| panic!("{text:?} painted at {w} cols: {row:?}"));
+                let want = (w as usize - text.chars().count()) / 2;
+                assert!(
+                    (at as i32 - want as i32).abs() <= 1,
+                    "{text:?} stays centred at {w} cols (at {at}, want ~{want}): {row:?}"
+                );
+            }
+        }
+    }
+
+    /// …and the centring exemption does not loosen a real bar. A field that begins
+    /// at the screen's left edge is LEFT even when its right margin happens to
+    /// match, and edge-anchored status fields keep their thirds classification.
+    #[test]
+    fn anchored_band_centring_exemption_spares_edge_anchored_fields() {
+        // A rule drawn from col 0: margins 0 and 4 — not centred, still LEFT.
+        let bar = "=".repeat(36);
+        let (row, _) = band_row(&[run(1, 1, &bar)], 40, 80);
+        assert!(row.starts_with(&bar), "an edge-anchored rule is not 'centred': {row:?}");
+        // Location left, score/moves right — the classic bar, unmoved.
+        let runs = vec![run(9, 1, "West of House"), run(241, 1, "Score: 0"), run(297, 1, "Moves: 3")];
+        let (row, _) = band_row(&runs, 40, 80);
+        assert!(row.starts_with("West of House"), "location still flush left: {row:?}");
+        assert!(row.trim_end().ends_with("Score: 0  Moves: 3"), "score/moves still flush right: {row:?}");
     }
 
     #[test]
