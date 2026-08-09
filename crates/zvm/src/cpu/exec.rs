@@ -100,6 +100,30 @@ pub struct PictureEvent {
     pub at_cursor: bool,
 }
 
+/// One filled rectangle painted by an `erase_window`, in native v6 pixels
+/// (SQ-0706). See [`Machine::pending_erase_fills`].
+///
+/// The rect is the window's own box at the moment of the erase, in absolute
+/// screen coordinates — NOT relative to anything the host must reconstruct,
+/// because the window has usually been moved and resized specifically to place
+/// this rectangle and will move again before the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EraseFill {
+    /// The window that was erased (0–7).
+    pub window: u8,
+    /// Left edge in native pixels, 1-based as the game supplies it (ZMSD §15).
+    pub x: u16,
+    /// Top edge in native pixels, 1-based.
+    pub y: u16,
+    /// Width in native pixels.
+    pub w: u16,
+    /// Height in native pixels.
+    pub h: u16,
+    /// The window's background at erase time — the colour the rect is filled
+    /// with. `Default` means the window named none and the host resolves it.
+    pub bg: crate::screen::ZColour,
+}
+
 /// Result of executing one instruction.
 #[derive(Debug, PartialEq)]
 pub enum StepResult {
@@ -215,6 +239,36 @@ pub struct Machine {
     /// 1b) decodes the Blorb `Pict` resource and renders it — mirrors
     /// `pending_sounds`.
     pub pending_pictures: Vec<PictureEvent>,
+    /// Filled rectangles an `erase_window` painted, since the host last drained
+    /// them (SQ-0706).
+    ///
+    /// ZMSD §8.7.3.3: erasing a window fills it with its background colour. On a
+    /// v6 screen that is a PAINT operation on the display, not bookkeeping on a
+    /// window — and some games use it as their only drawing primitive. scopa
+    /// draws every playing card this way, hundreds of fills per card:
+    ///
+    /// ```text
+    /// [ fastsimplebox x y w h c;
+    ///     @window_size 3 h w;
+    ///     @move_window 3 y x;
+    ///     @set_colour 2 c 3;
+    ///     @erase_window 3;
+    /// ];
+    /// ```
+    ///
+    /// The canvas-clear sentinel already on `pending_pictures` cannot express
+    /// this: it says only "window N was cleared", so a host that moves and erases
+    /// one window 500 times is left with a single empty canvas at the last
+    /// position — which is exactly what babelmap rendered (no cards at all).
+    ///
+    /// A separate queue rather than another `PictureEvent` field: an erase-fill
+    /// is not a picture, it carries a rect and a colour instead of a resource
+    /// number, and every fill is ordered against every other fill here — which is
+    /// what a game drawing WITH fills depends on. When picture compositing later
+    /// moves onto the same host surface the two queues should be unified under
+    /// one paint sequence; today they are independent because pictures and fills
+    /// are drawn by different games for different purposes.
+    pub pending_erase_fills: Vec<EraseFill>,
     /// Running count of chars printed to v6 window 0 (the main scrolling
     /// window) — stamps `PictureEvent::out_chars` so window-0 inline pictures
     /// anchor to their position in the text stream. Monotonic, never reset.
@@ -423,6 +477,7 @@ impl Machine {
             pending_sounds: Vec::new(),
             picture_dims: Vec::new(),
             pending_pictures: Vec::new(),
+            pending_erase_fills: Vec::new(),
             v6_win0_out_chars: 0,
             v6_declared_x: None,
             v6_input_window: 0,
@@ -1806,6 +1861,11 @@ impl Machine {
                     // order host-side (the title splash must actually vanish).
                     let out_chars = self.v6_win0_out_chars;
                     let mut clear_canvas: Vec<u8> = Vec::new();
+                    // The rects this erase PAINTS, in absolute native pixels
+                    // (SQ-0706). ZMSD §8.7.3.3: an erase fills the window with its
+                    // background, and on a v6 screen that is a drawing operation —
+                    // scopa builds every card out of these and nothing else.
+                    let mut fills: Vec<EraseFill> = Vec::new();
                     match win {
                         -1 => {
                             // ZMSD §8.8.5.3.1: "Erasing window number -1 erases
@@ -1830,6 +1890,14 @@ impl Machine {
                                 w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
                                 w.y_cursor = 1;
                                 w.x_cursor = 1;
+                                fills.push(EraseFill {
+                                    window: i as u8,
+                                    x: w.x_coord.max(1),
+                                    y: w.y_coord.max(1),
+                                    w: w.x_size,
+                                    h: w.y_size,
+                                    bg: w.bg,
+                                });
                                 clear_canvas.push(i as u8);
                             }
                             // "unsplits windows 0 and 1": window 1 collapses to
@@ -1865,6 +1933,14 @@ impl Machine {
                                 w.grid.clear();
                                 w.texts.clear();
                                 w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
+                                fills.push(EraseFill {
+                                    window: i as u8,
+                                    x: w.x_coord.max(1),
+                                    y: w.y_coord.max(1),
+                                    w: w.x_size,
+                                    h: w.y_size,
+                                    bg: w.bg,
+                                });
                                 clear_canvas.push(i as u8);
                             }
                         }
@@ -1891,10 +1967,19 @@ impl Machine {
                             w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
                             w.y_cursor = 1;
                             w.x_cursor = 1;
+                            fills.push(EraseFill {
+                                window: n as u8,
+                                x: left as u16,
+                                y: top as u16,
+                                w: wd.max(0) as u16,
+                                h: h.max(0) as u16,
+                                bg: w.bg,
+                            });
                             clear_canvas.push(n as u8);
                         }
                         _ => {}
                     }
+                    self.pending_erase_fills.extend(fills);
                     for window in clear_canvas {
                         self.pending_pictures.push(PictureEvent {
                             number: 0,
@@ -8281,6 +8366,78 @@ pub(crate) mod tests {
         assert_eq!(m.screen.upper.cell(1, 1).ch, 'H');
         m.exec_var(0x0A, &[2], None, None); // re-split
         assert_eq!(m.screen.upper.cell(1, 1).ch, ' ', "v3 clears the upper window after a split");
+    }
+
+    /// SQ-0706: a v6 `erase_window` PAINTS its window's box with the window's
+    /// background, and that rect is published for the host to composite.
+    ///
+    /// This is not bookkeeping. Some games draw with nothing else: scopa builds
+    /// every playing card out of hundreds of these, moving and resizing one
+    /// window per filled run —
+    ///
+    /// ```text
+    /// [ fastsimplebox x y w h c;
+    ///     @window_size 3 h w; @move_window 3 y x; @set_colour 2 c 3; @erase_window 3; ];
+    /// ```
+    ///
+    /// The canvas-clear sentinel on `pending_pictures` cannot express it: it says
+    /// only "window N was cleared", so a host replaying it keeps ONE empty canvas
+    /// at the last position and draws no cards at all — the reported symptom.
+    #[test]
+    fn v6_erase_window_publishes_the_rect_it_painted_and_its_colour() {
+        let mut m = build_test_machine(&[]);
+        let mut windows: [crate::screen::ZWindow; 8] = Default::default();
+        // Window 3 placed exactly as `fastsimplebox` places it: a small box at an
+        // absolute position, carrying the fill colour as its background.
+        windows[3] = crate::screen::ZWindow {
+            x_coord: 61,
+            y_coord: 97,
+            x_size: 12,
+            y_size: 8,
+            bg: crate::screen::ZColour::True(0x7fff),
+            ..Default::default()
+        };
+        m.screen.v6 = Some(crate::screen::V6Windows { windows, current: 3 });
+
+        m.exec_var(0x0D, &[3], None, None); // erase_window(3)
+
+        assert_eq!(
+            m.pending_erase_fills,
+            vec![EraseFill { window: 3, x: 61, y: 97, w: 12, h: 8, bg: crate::screen::ZColour::True(0x7fff) }],
+            "the erase publishes the box it filled, in absolute native pixels, with its colour"
+        );
+
+        // A SECOND fill at a new position accumulates rather than replacing —
+        // this is the whole point: a card is many fills from one moved window.
+        if let Some(v6) = m.screen.v6.as_mut() {
+            v6.windows[3].x_coord = 73;
+            v6.windows[3].bg = crate::screen::ZColour::True(0x001f);
+        }
+        m.exec_var(0x0D, &[3], None, None);
+        assert_eq!(m.pending_erase_fills.len(), 2, "fills queue, they do not overwrite each other");
+        assert_eq!(m.pending_erase_fills[1].x, 73, "the second fill records the window's NEW position");
+        assert_eq!(m.pending_erase_fills[1].bg, crate::screen::ZColour::True(0x001f), "and its new colour");
+    }
+
+    /// `erase_window(-1)` clears every window, so every window's box is painted —
+    /// a host that only handled the single-window case would leave the screen
+    /// stale after a full clear.
+    #[test]
+    fn v6_erase_all_windows_publishes_a_fill_for_each() {
+        let mut m = build_test_machine(&[]);
+        let mut windows: [crate::screen::ZWindow; 8] = Default::default();
+        windows[0] = crate::screen::ZWindow { x_coord: 1, y_coord: 1, x_size: 640, y_size: 400, ..Default::default() };
+        windows[3] = crate::screen::ZWindow { x_coord: 61, y_coord: 97, x_size: 12, y_size: 8, ..Default::default() };
+        m.screen.v6 = Some(crate::screen::V6Windows { windows, current: 0 });
+
+        m.exec_var(0x0D, &[0xFFFF], None, None); // erase_window(-1)
+
+        let win0 = m.pending_erase_fills.iter().find(|f| f.window == 0).expect("window 0 was erased");
+        assert_eq!((win0.x, win0.y, win0.w, win0.h), (1, 1, 640, 400), "the full-screen window's box");
+        assert!(
+            m.pending_erase_fills.iter().any(|f| f.window == 3),
+            "every window the erase covered publishes its own box"
+        );
     }
 
     #[test]
