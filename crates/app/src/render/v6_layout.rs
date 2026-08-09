@@ -309,6 +309,82 @@ pub fn story_pair_packed(story: Option<&PositionedWindow>) -> (u32, u32) {
     }
 }
 
+/// Whether two positioned windows' native pixel boxes intersect at all.
+fn boxes_overlap(a: &PositionedWindow, b: &PositionedWindow) -> bool {
+    let (ax0, ay0) = (a.x_px as u32, a.y_px as u32);
+    let (bx0, by0) = (b.x_px as u32, b.y_px as u32);
+    let (ax1, ay1) = (ax0 + a.w_px as u32, ay0 + a.h_px as u32);
+    let (bx1, by1) = (bx0 + b.w_px as u32, by0 + b.h_px as u32);
+    ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1
+}
+
+/// SQ-0704: resolve each chrome window's still-UNPAINTED area to that window's
+/// OWN background colour.
+///
+/// ZMSD §8.8.3.2 gives every Version 6 window its own foreground/background pair
+/// (property 11). [`build_chrome_canvas`] resolves everything against a SINGLE
+/// host `default_fg`/`default_bg`, and consults a window's own pair only for its
+/// text runs (`fill_explicit_bg_rows`, SQ-0519) — it never paints a window's own
+/// page, and the graphics pass blits alpha untouched. So a window whose art is
+/// mostly transparent reached the terminal as transparency, and whatever the
+/// protocol composited it over became the backdrop. Zork Zero's room/compass
+/// icons (pictures 9/10/11/13, 45×40, ~95 % alpha-0 line art drawn into its
+/// 640×78 banner window) hang below the banner artwork, and there the clear
+/// ground rendered as an opaque BLACK box where the DOS original shows the
+/// window's white page.
+///
+/// Only pixels no layer has touched (`alpha == 0`) are painted, so frame art,
+/// status bands, glyphs and the icons' own lit strokes are left byte-for-byte
+/// alone — the faithful alpha compositing is preserved, and a window the game
+/// gave no colour is skipped entirely and keeps today's behaviour (its holes
+/// still fall through to the caller's page).
+///
+/// A window that overlaps the STORY box is skipped too: Zork Zero's window 7
+/// carries the same white page across the whole 640×400 screen, and both the
+/// hybrid transcript viewport and [`story_clear_native`]'s clear-interior probe
+/// need that region to stay transparent. The story window's page is painted by
+/// the story paths (`fill_pane_page` in hybrid, the story-rect fill plus
+/// [`flatten_onto_page`] in raster), which already honour its own colour.
+///
+/// Callers gate this on `honor_game_colours`: with the game's colours declined
+/// the host page governs everywhere, exactly as before.
+pub fn fill_window_pages(
+    canvas: &mut RgbaImage,
+    chrome: &[&PositionedWindow],
+    story: Option<&PositionedWindow>,
+    colors: &ColorScheme,
+) {
+    for it in chrome {
+        let bg = match &it.node {
+            WinNode::Grid(g) => g.bg,
+            WinNode::Buffer(b) => b.bg,
+            _ => None,
+        };
+        // Only a colour the game actually NAMED counts (`packed_explicit`):
+        // "current"/"default" are inheritance, not a page choice.
+        let Some(bg) = bg.filter(|&p| packed_explicit(p)) else { continue };
+        // A size sentinel (negative read as i16) is not a real box (SQ-0481).
+        if it.w_px == 0 || it.h_px == 0 || (it.w_px as i16) < 0 || (it.h_px as i16) < 0 {
+            continue;
+        }
+        if story.is_some_and(|s| boxes_overlap(it, s)) {
+            continue;
+        }
+        // `bg` is explicit here, so the fallback can never be reached.
+        let page = packed_to_rgba(bg, Rgba([0, 0, 0, 255]), colors);
+        let (x0, y0) = (it.x_px as u32, it.y_px as u32);
+        let x1 = (x0 + it.w_px as u32).min(canvas.width());
+        let y1 = (y0 + it.h_px as u32).min(canvas.height());
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if canvas.get_pixel(x, y)[3] == 0 {
+                    canvas.put_pixel(x, y, page);
+                }
+            }
+        }
+    }
+}
+
 /// Whether any pixel in the `w × h` box at `(px, py)` of `canvas` is opaque
 /// (alpha ≥ 128). Used to tell a reverse-video run sitting ON frame art from one
 /// over a clear background, so the art is preserved but a bare selection bar still
@@ -1614,6 +1690,76 @@ mod tests {
         let c = build_chrome_canvas(&[&art, &letter], (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
         // px 12 is the second cell (no ink, no run) — the banner art shows through.
         assert_eq!(*c.get_pixel(12, 8), art_color, "explicit-fg-only run leaves the banner art (no bg flood)");
+    }
+
+    // ── per-window page fill (SQ-0704, ZMSD §8.8.3.2) ───────────────────────
+
+    /// A chrome grid window at `(0,0)` covering `w × h` native pixels, carrying
+    /// `bg` as its own Normal-style background.
+    fn page_grid(w: u16, h: u16, bg: Option<u32>) -> PositionedWindow {
+        PositionedWindow {
+            x: 0, y: 0, w: (w / 8).max(1), h: (h / 16).max(1), x_px: 0, y_px: 0, w_px: w, h_px: h,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                fill: None,
+                cols: (w / 8).max(1), rows: (h / 16).max(1), cells: vec![], active_rows: 1,
+                cursor: (0, 0), cursor_active: false, border: BorderPref::Unspecified,
+                bg, fg: None, reverse: false, px_texts: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn window_page_fills_only_the_holes_and_leaves_art_alone() {
+        // A window whose art covers the top half only: the untouched bottom half
+        // becomes the window's own page, the art stays byte-for-byte.
+        let art_color = Rgba([180, 140, 90, 255]);
+        let art = graphics_window(0, 0, 16, 8, image::RgbaImage::from_pixel(16, 8, art_color));
+        let win = page_grid(16, 16, Some(BLUE));
+        let chrome = [&art, &win];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        assert_eq!(c.get_pixel(4, 12)[3], 0, "precondition: the window's lower half is unpainted");
+        fill_window_pages(&mut c, &chrome, None, &colors());
+        assert_eq!(*c.get_pixel(4, 12), Rgba([0, 0, 255, 255]), "an unpainted pixel takes the window's own page");
+        assert_eq!(*c.get_pixel(4, 4), art_color, "artwork is never repainted");
+    }
+
+    #[test]
+    fn window_with_no_page_of_its_own_keeps_todays_transparency() {
+        let win = page_grid(16, 16, None);
+        let chrome = [&win];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let before = c.as_raw().clone();
+        fill_window_pages(&mut c, &chrome, None, &colors());
+        assert_eq!(*c.as_raw(), before, "a window the game gave no colour is left exactly as before");
+    }
+
+    #[test]
+    fn a_window_overlapping_the_story_box_is_skipped() {
+        // Zork Zero's window 7 carries the same page across the WHOLE screen;
+        // filling it would flood the hybrid transcript viewport and defeat
+        // `story_clear_native`'s clear-interior probe.
+        let full = page_grid(16, 16, Some(BLUE));
+        let story = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 4, y_px: 4, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        let chrome = [&full];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        fill_window_pages(&mut c, &chrome, Some(&story), &colors());
+        assert_eq!(c.get_pixel(8, 8)[3], 0, "the story box stays clear for the transcript");
+        assert_eq!(c.get_pixel(0, 0)[3], 0, "and the covering window is skipped whole, not clipped");
+    }
+
+    #[test]
+    fn an_inherited_colour_is_not_a_page_choice() {
+        // Standard 0/1 ("current"/"default", ZMSD §8.3.1) are inheritance, not a
+        // colour the game named — `packed_explicit` rejects them.
+        let win = page_grid(16, 16, Some(1u32 << 24)); // Standard(0)
+        let chrome = [&win];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        fill_window_pages(&mut c, &chrome, None, &colors());
+        assert_eq!(c.get_pixel(4, 4)[3], 0, "an inherited colour leaves the window's page to the host");
     }
 
     // ── story region background fill (Lane C) ───────────────────────────────

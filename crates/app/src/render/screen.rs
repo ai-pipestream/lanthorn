@@ -667,6 +667,15 @@ fn render_node(
                             }
                         }
                         let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                        // SQ-0704: a chrome window that named its own page paints it
+                        // into its unpainted pixels here (ZMSD §8.8.3.2), so the ring
+                        // bands ship self-contained instead of leaving the icons'
+                        // clear ground for the terminal to colour in (Zork Zero's
+                        // room icons came out on an opaque black box). Same live
+                        // `honor_game_colours` gate as the pane flood above.
+                        if state.config.honor_game_colours {
+                            v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
+                        }
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
                         let pane_dev = (
@@ -2018,6 +2027,12 @@ pub fn build_v6_raster_canvas(
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+    // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
+    // pixels before the story is stamped — the story box itself is skipped (see
+    // `fill_window_pages`), so `story_clear_native` below still finds it clear.
+    if honor {
+        v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
+    }
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
     // one full 8x16 text cell. A full-screen picture (Zork Zero's rebus) grows

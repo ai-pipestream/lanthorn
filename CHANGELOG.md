@@ -57,6 +57,21 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Zork Zero's room icons stop sitting on a black box.** The little compass and
+  room icons in Zork Zero's banner are line art on a *clear* ground — 95% of
+  each 45×40 picture is fully transparent — and the bottom of every one of them
+  hangs below the banner artwork, where the game had painted nothing at all.
+  Nothing of ours decided what the player saw there, so the graphics protocol
+  decided instead, and its answer was black. The Z-Machine Standard is clear
+  that it was ours to decide (§8.8.3.2: every Version 6 window has its OWN
+  foreground/background pair) and Zork Zero's banner window says white, like the
+  DOS original. babelmap now paints each chrome window's own page into the
+  pixels no layer touched, so the ring it ships is self-contained instead of
+  leaving holes for the terminal to colour in. Only untouched pixels are filled:
+  artwork, status bands, glyphs and the icons' own ink are left byte for byte
+  alone, the story area stays clear for the transcript, and a window the game
+  gave no colour keeps exactly today's look. `/set-game-colours off` opts out as
+  usual. The same rule gives Scopa its green baize back.
 - **The status bar stops painting a black band on a light terminal.** With no
   `style.toml` and no colour scheme configured, babelmap's UI surfaces — the
   status bar, the v4+ upper window, story info, dialog backgrounds, the Glk grid
