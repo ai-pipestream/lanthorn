@@ -48,13 +48,21 @@ pub const STANDARD_COLOUR_RGB15: [(u8, u16); 8] = [
     (9, 0x7FFF),
 ];
 
-/// The §8.3.1 true-colour equivalent of Standard colour `n` as 8-bit RGB, or
-/// `None` outside 2..=9.
+/// The true-colour equivalent of Standard colour `n` as 8-bit RGB, or `None`
+/// outside 2..=9.
+///
+/// Resolved through `zvm::screen::standard_true_colour`, so the active
+/// interpreter palette applies (SQ-0719): under the default
+/// `Palette::Standard` this is exactly [`STANDARD_COLOUR_RGB15`] above; under
+/// `Palette::Amiga` these become the colours Infocom's own Amiga interpreter
+/// loaded. Routing through the VM's table rather than reading the local one
+/// keeps a single answer for "what colour is Standard(6)" across the terminal
+/// cell palette, the v6 pixel path and the game's own window properties 17/18.
 pub fn standard_colour_rgb(n: u8) -> Option<(u8, u8, u8)> {
-    STANDARD_COLOUR_RGB15
-        .iter()
-        .find(|(c, _)| *c == n)
-        .map(|(_, v)| zvm::screen::rgb15_to_888(*v))
+    if !STANDARD_COLOUR_RGB15.iter().any(|(c, _)| *c == n) {
+        return None;
+    }
+    zvm::screen::standard_true_colour(n).map(zvm::screen::rgb15_to_888)
 }
 
 /// The §8.3.1 true-colour equivalent of Standard colour `n` as a concrete

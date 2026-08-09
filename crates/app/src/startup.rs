@@ -218,6 +218,18 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // Raw executable bytes (for the IFID / map-dir key), independent of engine.
     let story_bytes = loaded.bytes().to_vec();
 
+    // SQ-0719: which machine are we presenting ourselves as? Resolved from the
+    // launch (an explicit interpreter number, else the medium the story came out
+    // of, else IBM PC — today's behaviour, named) and settled HERE, before the
+    // colour scheme resolves below: the profile's palette is what
+    // `ColorScheme::terminal_default`'s Standard 2..=9 seed reads, so selecting
+    // it after that point would leave the terminal cells on one machine's
+    // colours and the v6 pixel path on another's. Re-asserted on every story so
+    // a picker→play loop cannot carry one story's machine into the next.
+    cfg.interpreter_profile =
+        app::interpreter::InterpreterProfile::resolve(&story_path, cfg.interpreter_number);
+    zvm::screen::set_palette(cfg.interpreter_profile.palette());
+
     // Booting a large story to its first prompt can take several seconds, and this
     // happens before the alternate screen is entered — so the normal terminal would
     // otherwise sit frozen. Spin a tiny indicator on a side thread; it only starts
@@ -350,12 +362,19 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // and passed into the constructor so it is in force BEFORE the game boots.
     // `honor_game_colours = false` means the interpreter declares itself
     // colourless to the story, so the VM's §8.3.2 seed is left alone.
+    // SQ-0719: unless the interpreter profile has defaults of its OWN. A machine
+    // that claims to be an Amiga should be telling the game the Amiga's default
+    // page and ink, not the user's terminal's. `honor_game_colours = false` still
+    // wins over both — that declares the interpreter colourless (§8.3.2) and
+    // leaves the VM's own black-on-white seed alone.
     let host_default_colours = if cfg.honor_game_colours {
-        app::colors::host_default_colour_pair(
-            cs.theme.get("transcript").style,
-            term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
-            term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
-        )
+        cfg.interpreter_profile.default_colours().or_else(|| {
+            app::colors::host_default_colour_pair(
+                cs.theme.get("transcript").style,
+                term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+            )
+        })
     } else {
         None
     };
@@ -391,11 +410,22 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // the reference-authentic 640×400 unit screen (SQ-0479) — before boot
             // so windows + hardcoded art align. `None` (no Reso / non-v6) falls
             // back to 320×200 art → 640×400 screen inside.
-            let v6_screen_px = picts.std_window();
+            // SQ-0719/SQ-0736: a native Amiga `Pic.data` archive has no `Reso`
+            // chunk to read — the format has no such concept — so the machine
+            // answers instead of the container, and the existing scale rule
+            // fires unchanged rather than being special-cased for `.adf`. IBM PC
+            // supplies nothing here, so a Blorb (or a Blorb-less scopa) decides
+            // exactly as before.
+            let v6_screen_px = picts.std_window().or_else(|| cfg.interpreter_profile.std_window());
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
-            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims, v6_screen_px, host_default_colours, host_screen) {
+            // SQ-0719: the configured number still wins; absent one, the profile
+            // names its machine, and IBM PC names nothing so zvm's own default
+            // rule (Frotz's: 6 for v6, 1 otherwise) stays in force untouched.
+            let interpreter_number =
+                cfg.interpreter_number.or_else(|| cfg.interpreter_profile.interpreter_number());
+            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, host_default_colours, host_screen) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;

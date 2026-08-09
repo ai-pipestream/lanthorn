@@ -16,6 +16,20 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **A story off an Amiga floppy is played on an Amiga.** Header byte `0x1E` was
+  always settable, but setting it alone produced a machine that never existed: a
+  game told it was running on an Amiga, then told its artwork was IBM PC-sized and
+  its default colours were your terminal's. The answers now travel together as a
+  named **interpreter profile**. *IBM PC* is the default and is exactly what
+  babelmap has always done, named rather than changed. *Amiga* is the sibling, and
+  it selects itself — boot a game out of an `.adf` release floppy and you get
+  interpreter number 4, the Amiga's 320×200 standard window, its own default page
+  and ink, and the palette Infocom's Amiga interpreter actually loaded. Setting
+  `interpreter_number` yourself still wins, and now brings the whole machine with
+  it rather than one byte. `honor_game_colours` remains the escape hatch: a
+  faithful 1989 colour scheme that reads poorly in a modern terminal is one toggle
+  away from your own theme.
+
 - **Play straight off the original Amiga floppy.** Hand babelmap an `.adf` disk
   image — `babelmap "Zork Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem
   (OFS and FFS both), finds the game inside, and boots it. No unpacking step, no
@@ -103,6 +117,18 @@ identifies which beta it is without reading its git hash.
   name refuses with a message and moves nothing.
 
 ### Fixed
+
+- **Artwork off a disk image is drawn at full size.** *Zork Zero* booted straight
+  from its Amiga floppy painted its pictures at half scale on a full-scale screen,
+  so anything the game positioned from a picture's dimensions landed in the wrong
+  place. Two correct rules had collided: a Blorb with no `Reso` chunk really is
+  declaring its images non-scalable (which is why scopa and mysterious01 rightly
+  stay at 1:1), but a native Amiga picture archive has no such chunk because the
+  format has no such concept — absence of evidence was being read as evidence of
+  absence. The machine now answers where the container cannot: an Amiga's Version
+  6 standard window is 320×200, which is precisely what every Infocom Blorb's
+  `Reso` chunk declares, so a game off the floppy and the same game off a Blorb
+  now scale identically.
 
 - **HOLD lands under the card you are holding.** Frobozz Magic VideoPoker positions
   everything it says: `HOLD` under each held card, the running totals in the panel

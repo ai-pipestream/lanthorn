@@ -884,6 +884,17 @@ pub struct Config {
     /// on it persists like any other setting. Never persisted itself.
     #[serde(skip)]
     pub interpreter_number_cli: Option<u8>,
+    /// The machine babelmap presents itself to this story as (SQ-0719).
+    ///
+    /// Not a config key — it is INFERRED per story at boot by
+    /// [`crate::interpreter::InterpreterProfile::resolve`] (an explicit
+    /// `interpreter_number` names it outright, else the medium the story came
+    /// out of decides, else IBM PC) and parked here because it rides with the
+    /// story for the rest of the session: the restart path rebuilds the engine
+    /// from it, and the per-tick default-colour poller has to know whether the
+    /// profile pins those colours or the terminal supplies them. Never persisted.
+    #[serde(skip)]
+    pub interpreter_profile: crate::interpreter::InterpreterProfile,
     /// When true (default), play audio for `sound_effect` (bleeps + Blorb samples).
     #[serde(default = "default_enable_sound")]
     pub enable_sound: bool,
@@ -971,6 +982,7 @@ impl Default for Config {
             config_error: None,
             interpreter_number: None,
             interpreter_number_cli: None,
+            interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             enable_sound: default_enable_sound(),
             volume: default_volume(),
             acceleration: default_acceleration(),
@@ -1925,6 +1937,7 @@ use_defaults = false
             config_error: None,
             interpreter_number: None,
             interpreter_number_cli: None,
+            interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             enable_sound: true,
             volume: 100,
             search: SearchConfig::default(),
