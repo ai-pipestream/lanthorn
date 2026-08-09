@@ -675,6 +675,15 @@ fn render_node(
                         // `honor_game_colours` gate as the pane flood above.
                         if state.config.honor_game_colours {
                             v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
+                            // …and the story window's own page under the pixels the
+                            // ring bands ship (SQ-0704, hybrid half). Raster flattens
+                            // its whole canvas opaque before shipping; hybrid ships
+                            // only these bands, and they overlap the story box — the
+                            // sliver under a top banner, and the flanks. A pixel left
+                            // transparent there is the TERMINAL's to resolve, which is
+                            // why the icons kept coming out on the terminal background
+                            // after the chrome half of this fix landed.
+                            v6::fill_story_page_clear(&mut canvas, layout.story, &state.colors);
                         }
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);

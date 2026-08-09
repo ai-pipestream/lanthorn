@@ -385,6 +385,43 @@ pub fn fill_window_pages(
     }
 }
 
+/// Fill the STORY window's still-unpainted pixels with its own declared page
+/// (SQ-0704, hybrid half).
+///
+/// [`fill_window_pages`] deliberately skips any window overlapping the story box,
+/// because in RASTER mode the story page is painted separately by
+/// `build_v6_raster_canvas` and the whole canvas is flattened opaque before it
+/// ships. HYBRID has no such flatten: it draws the story as terminal text and
+/// ships only the ring bands as images — and those bands overlap the story box,
+/// both in the one-row sliver under a top banner and along the flanks. Every pixel
+/// left transparent there is resolved by the TERMINAL, not by us, so Zork Zero's
+/// room icons came out sitting on the terminal background instead of the white page
+/// the game declared for the window they live in.
+///
+/// Only pixels no layer has touched are filled, and only when the story window
+/// named a page explicitly — a game that set none keeps today's behaviour.
+pub fn fill_story_page_clear(
+    canvas: &mut RgbaImage,
+    story: Option<&PositionedWindow>,
+    colors: &ColorScheme,
+) {
+    let Some(it) = story else { return };
+    let Some(page) = story_bg_rgba(Some(it), colors) else { return };
+    if it.w_px == 0 || it.h_px == 0 || (it.w_px as i16) < 0 || (it.h_px as i16) < 0 {
+        return;
+    }
+    let (x0, y0) = (it.x_px as u32, it.y_px as u32);
+    let x1 = (x0 + it.w_px as u32).min(canvas.width());
+    let y1 = (y0 + it.h_px as u32).min(canvas.height());
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if canvas.get_pixel(x, y)[3] == 0 {
+                canvas.put_pixel(x, y, page);
+            }
+        }
+    }
+}
+
 /// Whether any pixel in the `w × h` box at `(px, py)` of `canvas` is opaque
 /// (alpha ≥ 128). Used to tell a reverse-video run sitting ON frame art from one
 /// over a clear background, so the art is preserved but a bare selection bar still

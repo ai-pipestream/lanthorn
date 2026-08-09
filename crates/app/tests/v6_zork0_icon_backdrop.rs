@@ -274,7 +274,11 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
 /// Probed after the fill rather than before it (the distinction that makes the
 /// question answerable at all): **0 of 450** pixels in the icon strip are still
 /// clear. Nothing is left for a protocol to colour in, so no `Graphics`-side
-/// change is called for — and if the symptom recurs it is not here.
+/// change is called for.
+///
+/// The symptom DID recur, and this case correctly said it was not here: it was in
+/// the hybrid ring, which never paints the story box at all — see
+/// `zork0_hybrid_ring_ships_the_story_page_under_the_banner` below.
 #[test]
 fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
     let Some(session) = zork0_in_play(true) else { return };
@@ -324,4 +328,64 @@ fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
         "after the fill nothing in the icon strip may be left unpainted: {} of 450 still clear",
         clear.len()
     );
+}
+
+/// SQ-0704, HYBRID half — the ring's bands must ship the story window's page, not
+/// leave it for the terminal.
+///
+/// Reported after both earlier passes: "in v6-render mode the background is
+/// correct white; in hybrid the background hasn't been fixed." That split is the
+/// whole diagnosis. RASTER flattens its finished canvas onto the page before
+/// shipping, so every pixel it sends is opaque. HYBRID draws the story as terminal
+/// text and ships only the ring bands as images — and those bands OVERLAP the
+/// story box: the sliver between the banner's bottom edge (native y=78) and the
+/// first viewport row, plus the flanks. `fill_window_pages` deliberately skips any
+/// window overlapping the story box, so nothing ever painted that sliver, and a
+/// band pixel left transparent is resolved by the TERMINAL — which is exactly what
+/// "the icons sit on the terminal background" looks like.
+///
+/// The oracle is POSITIVE — the sliver must carry the game's own white — because
+/// the sibling case above only forbids BLACK, and that is precisely why this
+/// survived it: pre-fix at 120x40 and larger those cells are neither white nor
+/// black but `Reset`, a cell with no background at all. Sizes are swept because
+/// the sliver is a cell-quantization artifact: it does not exist at every pane
+/// size (at 80x24 and 90x30 the banner art consumes it), and a single-size test
+/// would have been a coin flip.
+///
+/// Falsified by dropping `fill_story_page_clear`: white goes to 0 of 71 at
+/// 100x34 (71 pure BLACK, the halfblocks flattening of transparent), and 0 of 85,
+/// 0 of 101, 0 of 115 at the larger sizes (`Reset` — the reported symptom).
+#[test]
+fn zork0_hybrid_ring_ships_the_story_page_under_the_banner() {
+    let Some(session) = zork0_in_play(true) else { return };
+    let model = session.screen();
+    let state = render_state(app::config::V6RenderMode::Hybrid, true);
+
+    let mut checked = 0;
+    for (w, h) in [(100u16, 34u16), (120, 40), (140, 45), (160, 50)] {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        let vp = state.transcript_geom.get().expect("hybrid publishes a transcript viewport").area;
+        assert!(vp.y > 0, "the banner ring reserves rows above the story viewport at {w}x{h}");
+
+        // The band row directly above the viewport is the sliver in question.
+        let row = vp.y - 1;
+        let width = vp.width as usize;
+        let page = (vp.x..vp.right())
+            .filter(|&x| {
+                matches!(
+                    buf.cell((x, row)).expect("cell inside the pane").style().bg,
+                    Some(ratatui::style::Color::Rgb(255, 255, 255))
+                )
+            })
+            .count();
+        assert!(
+            page * 100 >= width * 95,
+            "at {w}x{h} the ring row under the banner must carry the story window's own white page, \
+             not the terminal's: {page} of {width} cells"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 4, "every swept pane size was actually asserted");
 }
