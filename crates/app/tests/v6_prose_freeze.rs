@@ -370,6 +370,175 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
     }
 }
 
+/// SQ-0697, second half — the freeze was right and the RESUME was unplaced.
+/// Reported by a player, clean boot, no overlay: "'You may choose to:' appears the
+/// line below the last centred line of intro text."
+///
+/// The freeze leaves the nine banner lines painted across native rows 3–11; the
+/// game then moves window 0 to a 548x64 box at (47,337) — four rows, level with and
+/// to the LEFT of its START/RESTORE/QUIT menu at (235,337) — and prints the prompt
+/// there. `/dump-windows` confirmed we hold the right box. The cell path simply
+/// started the transcript flush under the band and let it flow, so the prompt came
+/// out nine rows above the menu it belongs beside.
+///
+/// The story window's box is authoritative for where its transcript renders: the
+/// transcript begins at the box's own declared offset below the chrome above it,
+/// and everything painted INSIDE the box — the menu's glyphs and the erased ground
+/// under them — moves with it.
+///
+/// Falsified by reverting `story_row` to `top_used`: "hybrid honor=true 80x25:
+/// 'You may choose to:' renders beside the menu, not above it (prompt row 9, menu
+/// row 21)".
+#[test]
+fn shogun_resumed_prompt_lands_beside_the_menu() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let Some(mut session) = boot("shogun-r322-s890706.z6") else { return };
+    let result = match session.pending_input() {
+        InputKind::Char => session.submit_char(13),
+        _ => session.submit(""),
+    };
+    let model = session.screen();
+
+    for (tag, mode) in [
+        ("hybrid", app::config::V6RenderMode::Hybrid),
+        ("frameless", app::config::V6RenderMode::Frameless),
+    ] {
+        for honor in [true, false] {
+            for (w, h) in [(80u16, 25u16), (100, 40)] {
+                let mut state = app::state::AppState::default();
+                state.colors = app::colors::ColorScheme::terminal_default();
+                state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+                state.config.v6_render = mode;
+                state.config.honor_game_colours = honor;
+                app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+                let rows: Vec<String> = (0..h)
+                    .map(|y| {
+                        (0..w).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+                    })
+                    .collect();
+                let ctx = format!("{tag} honor={honor} {w}x{h}");
+
+                let prompt = rows
+                    .iter()
+                    .position(|r| r.contains("You may choose to:"))
+                    .unwrap_or_else(|| panic!("{ctx}: the prompt reaches the pane:\n{}", rows.join("\n")));
+                let menu = rows
+                    .iter()
+                    .position(|r| r.contains("START the game"))
+                    .unwrap_or_else(|| panic!("{ctx}: the menu reaches the pane:\n{}", rows.join("\n")));
+                assert_eq!(
+                    prompt, menu,
+                    "{ctx}: \"You may choose to:\" renders beside the menu, not above it \
+                     (prompt row {prompt}, menu row {menu}):\n{}",
+                    rows.join("\n")
+                );
+                // …and to its LEFT, which is the layout the game declared: window 0
+                // at x=47, window 2 at x=235.
+                let prompt_col = rows[prompt].find("You may choose to:").expect("located above");
+                let menu_col = rows[menu].find("START the game").expect("located above");
+                assert!(
+                    prompt_col < menu_col,
+                    "{ctx}: the prompt sits left of the menu (prompt col {prompt_col}, menu col {menu_col}):\n{}",
+                    rows.join("\n")
+                );
+                // The frozen banner still owns the top of the pane, unchanged, with
+                // the game's own gap between it and the box it moved down to.
+                assert!(
+                    rows[0].contains("SHOGUN"),
+                    "{ctx}: the frozen banner still starts at the pane top: {:?}",
+                    rows[0]
+                );
+                // Row 18, at every pane size, because the cell path packs the native
+                // screen and not the pane: the banner's nine inked native rows (3–11)
+                // pack to pane rows 0–8, then the nine rows of empty screen the game
+                // left between its banner and its story box (native 12–20) carry
+                // through, putting the box's first row at 9 + 9 = 18. Pinning the row
+                // itself is what separates "the prompt is beside the menu" from "the
+                // prompt and the menu drifted up together".
+                assert_eq!(
+                    prompt, 18,
+                    "{ctx}: the story box lands its own declared distance below the \
+                     banner — nine packed banner rows, then the game's nine-row gap:\n{}",
+                    rows.join("\n")
+                );
+            }
+        }
+    }
+}
+
+/// The corpus guard for the placement rule: every other v6 game puts its story
+/// window flush under its chrome, so honouring the box must move NOTHING.
+///
+/// Measured native geometry — the story window's declared top, and the chrome box
+/// above it, in 16px text rows:
+///
+/// ```text
+///   advent   status window 640x20  at row 0 → box bottom row 2; story at row 1
+///   Arthur   status window 584x16  at row 12 → box bottom row 13; story at row 13
+///   Zork0    status panel 640x78   at row 0 → box bottom row 5; story at row 4
+///   Journey  nothing above the story at all;                    story at row 0
+/// ```
+///
+/// Zork Zero is the case that forced the gap to be measured against the chrome's
+/// declared BOX rather than its ink: only two of that 78px panel's five rows carry
+/// runs, the band has already compressed it to those two, and re-counting its own
+/// slack as empty screen pushed the whole transcript down two rows for art frameless
+/// had deliberately dropped.
+#[test]
+fn a_story_window_flush_under_its_chrome_keeps_the_pane_top() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    // (story file, driver command, the pane row its transcript starts on)
+    for (name, cmd, want_row) in [
+        ("advent.z6", "look", 1u16),
+        ("arthur-r74-s890714.z6", "look", 1),
+        ("zork0-r393-s890714.z6", "look", 2),
+        ("journey-r83-s890706.z6", "", 0),
+    ] {
+        let Some(mut session) = boot(name) else { continue };
+        for turn in 0..8 {
+            let r = match session.pending_input() {
+                InputKind::Char => session.submit_char(13),
+                InputKind::Line => session.submit(if turn % 2 == 0 { cmd } else { "" }),
+                InputKind::Event => session.submit(""),
+            };
+            if r.transcript.to_lowercase().contains("y or n") {
+                let _ = session.submit_char(b'n');
+            }
+        }
+        let model = session.screen();
+        for honor in [true, false] {
+            let mut state = app::state::AppState::default();
+            state.colors = app::colors::ColorScheme::terminal_default();
+            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            // FRAMELESS forces the cell path for a game that would otherwise take
+            // the hybrid pixel ring — that path is where the placement rule lives.
+            state.config.v6_render = app::config::V6RenderMode::Frameless;
+            state.config.honor_game_colours = honor;
+            let area = Rect::new(0, 0, 80, 25);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+            let map = state.v6_cell_map.borrow();
+            let story = map
+                .iter()
+                .find(|r| r.label.starts_with("path:cell"))
+                .unwrap_or_else(|| panic!("{name} honor={honor}: frameless takes the cell path: {map:?}"));
+            assert_eq!(
+                story.cells.1, want_row,
+                "{name} honor={honor}: its story window sits flush under its chrome, so the \
+                 transcript keeps the row it has always started on (got {}, want {want_row})",
+                story.cells.1
+            );
+        }
+    }
+}
+
 /// The corpus guard, and the reason the freeze is scoped to what the window's new
 /// box LEAVES rather than to the box merely changing.
 ///
