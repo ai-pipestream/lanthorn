@@ -21,7 +21,7 @@ cargo test -p app --test v6_arthur_status -- <name>  # one test within it
 cargo test -p zvm -p gvm -p scott -p app 2>&1 | grep -cE "^error(\[|:)| [1-9][0-9]* failed"
 ```
 
-This must **print 0**. Note: grep exits 1 when it finds zero matches — that exit code IS the pass, so never chain this with `&&` or treat a nonzero exit as failure. Also cross-check completeness: the number of `test result:` lines must equal the number of test binaries launched (compare `grep -c "^     Running\|^   Doc-tests"` against `grep -c "^test result:"`) — a binary that dies mid-run otherwise disappears silently.
+This must **print 0**. Note: grep exits 1 when it finds zero matches — that exit code IS the pass, so never chain this with `&&` or treat a nonzero exit as failure. Also cross-check completeness: the number of `test result:` lines must equal the number of test binaries launched (compare `grep -c "^     Running\|^   Doc-tests"` against `grep -c "^test result:"`) — a binary that dies mid-run otherwise disappears silently. That check catches a binary that *died*, not one that was never *enumerated*: a newly-created `crates/app/tests/*.rs` can be missing from the first run after you add it, and the counts still match because cargo never launched it. When you add a test file, also confirm its name appears in the `Running` lines (or just re-run the gate).
 
 **Clippy gate**: `cargo clippy --workspace --all-targets -- -D warnings` must be clean.
 
