@@ -16,6 +16,19 @@
 //! story-less, neither painting a ground) is exactly what the text takeover is for
 //! and keeps it. `v6_zork0_hints.rs` pins that side.
 //!
+//! SQ-0709 is the same seam seen from the other end, and this file is its guard.
+//! It was filed against the arm ABOVE: hybrid's pane flood reads
+//! `story_bg_rgba`, which only looks at a `WinNode::Buffer`, so scopa — whose page
+//! is declared by a full-screen GRID — flooded nothing and its green table came
+//! out as the terminal background while raster drew it correctly. Routing a
+//! painted story-less screen to the composite closed that: hybrid no longer runs
+//! the flood at all for scopa, and `hybrid_draws_the_table_instead_of_two_button_labels`
+//! pins both halves — that the table reaches the pane, and that hybrid and raster
+//! agree byte for byte. Re-measured across the corpus afterwards, no other v6
+//! title declares its page from a grid while its story Buffer declares none
+//! (Zork Zero and fmvpoker declare both; Arthur, Shogun, Journey and advent
+//! declare neither), so the original mechanism has no remaining reproducer.
+//!
 //! The story is gitignored (CLAUDE.md), so these skip cleanly when it is absent.
 
 use std::path::PathBuf;
