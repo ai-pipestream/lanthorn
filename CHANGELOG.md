@@ -57,6 +57,17 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **The upper window's frame answers to `style.toml` again.** `upper_window_border`
+  could be recoloured but not reshaped: its `style` / `style_top` / … keys were
+  read straight past. The one place that applied them was the retired `[colors]`
+  table, and the `style.toml` babelmap seeds has no `[colors]` section — the
+  selector lives in `[elements]`, where its border keys parsed into the theme and
+  stopped there. So `upper_window_border = { style = "none" }` sat in the file
+  doing nothing, on Anchorhead and every other v4+ story. The frame's shape now
+  travels from the file to the renderer, which both draws it and reserves its
+  rows and columns, and the seeded template finally documents the spelling
+  instead of showing only the colour form.
+
 - **Quote boxes are readable again.** The Inform `box` statement — the framed
   reverse-video epigraphs a great many games open with — splits the upper window
   tall, prints into it, then shrinks it back to the status line *before* waiting
@@ -86,6 +97,11 @@ identifies which beta it is without reading its git hash.
 
 ### Changed
 
+- **A game's status/upper window is no longer boxed by default.** The single-line
+  frame babelmap drew round it is off out of the box: the status line sits flush
+  against the story, and the two rows and two columns the frame was costing go
+  back to the game's own screen. Put it back — in any style, or one edge at a
+  time — with `upper_window_border = { style = "single" }` in `[elements]`.
 - The matrix view's tried-but-pathless cell is `×` rather than `_` — a mark
   centered in the cell instead of one hugging the baseline, where it read as
   an empty cell with an underline artifact. `·` (untried) is unchanged.

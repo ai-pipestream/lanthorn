@@ -45,8 +45,12 @@ playing.
   up column-for-column with the prose beside it instead of floating in a fixed
   80-column box. Pin a fixed screen with `virtual_screen_cols`/`virtual_screen_rows`
   if you want a game's original layout back; when the pane is smaller than a pinned
-  screen, the viewport auto-follows the cursor. The virtual window is
-  themeable (`upper_window`, `upper_window_border`, `virtual_window_border`).
+  screen, the viewport auto-follows the cursor. The virtual window is themeable
+  from `[elements]`: `upper_window` inks its cells, and `upper_window_border`
+  both colours and shapes the frame around them. That frame is off by default —
+  the bar sits flush against the story and the game keeps every row and column
+  of the pane — so set `style = "single"` (or `double`/`thick`/`rounded`) if you
+  want it boxed.
   During a `read_char` prompt keystrokes go to the game; only the hotkey prefix
   (default `Ctrl+P`) stays reserved.
 - **Timed / interrupt input** — v4+ `read` and `read_char` honor their `time`+

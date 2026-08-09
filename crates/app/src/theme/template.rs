@@ -195,6 +195,15 @@ fn enum_hint(row: &RegRow) -> &'static str {
         "badge_save" => "   # story-list badge: the story has a save",
         "badge_hint" => "   # story-list badge: hints are installed",
         "badge_hint_available" => "   # story-list badge: hints exist but aren't downloaded",
+        // SQ-0700: this one draws a FRAME as well as colouring it, but its default
+        // delta carries no border (the frame's default lives on `ColorScheme`), so
+        // the generic border hint below never fired and the `style` key that turns
+        // the frame off was documented nowhere.
+        "upper_window_border" => {
+            "   # frame round a game's status/upper window; none by default — \
+             style = \"single\" (or double | thick | rounded, or per-side \
+             style_top/bottom/left/right) boxes it"
+        }
         _ if row.default_delta.border.is_some() => "   # style: none | single | double | thick | rounded",
         _ => "",
     }
@@ -300,6 +309,8 @@ const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour who
 
 # ── Status bar. Omit [statusbar] for the built-in default. ───────────────────
 # Placeholders: {location} {score} {moves} {time} {turns} {title} {filter}
+# NB: this is babelmap's OWN bar, and `border` frames that. The frame round a
+# GAME's status/upper window is the upper_window_border line up in [elements].
 # [statusbar]
 # border = "none"
 

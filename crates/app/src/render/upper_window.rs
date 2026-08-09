@@ -685,7 +685,10 @@ mod tests {
     fn border_adds_overhead() {
         let upper = make_upper_hi();
         let mut colors = make_colors();
+        // The frame is off by default (SQ-0700), so a test about the frame's cost
+        // has to ask for one — and it is the SIDES the renderer measures.
         colors.virtual_window_border = BorderStyle::Single;
+        colors.upper_window_border_sides = PaneSides::all(BorderStyle::Single);
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
 

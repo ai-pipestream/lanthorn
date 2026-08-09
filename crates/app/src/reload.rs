@@ -121,6 +121,13 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         state.colors.theme = resolve_theme_layered(&gs, &global, &garglk_decls, &per_game);
     }
 
+    // SQ-0700: the upper-window frame's STYLE still lives on `ColorScheme` (the
+    // renderer frames and reserves from it), but the file it is written in is the
+    // new schema, where the selector sits in `[elements]` and lands in the theme
+    // just rebuilt above. Lower it back so `upper_window_border = { style = "none" }`
+    // reaches the frame instead of dying in the theme.
+    crate::style::lower_upper_window_border(&mut state.colors);
+
     // SQ-0663: append the freshly-rebuilt theme's own diagnostics (a `parent`
     // re-root naming an unknown selector, or a cycle) after style::resolve's.
     // Every consumer of `ReloadOutcome::Reloaded` already loops over `warnings`

@@ -77,6 +77,13 @@ fn boot(honor: bool, host_screen: (u16, u16)) -> Option<GameSession> {
 fn state_for(honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
+    // SQ-0700 made the upper-window frame off by default. It is incidental to the
+    // subject here — but `status_interior` reads the bar out of the box's rules,
+    // and the frame's columns are part of the width the story is declared, so ask
+    // for it and this suite measures exactly what it always did.
+    state.colors.virtual_window_border = app::render::paneframe::BorderStyle::Single;
+    state.colors.upper_window_border_sides =
+        app::render::paneframe::PaneSides::all(app::render::paneframe::BorderStyle::Single);
     state.config.honor_game_colours = honor;
     state
 }
