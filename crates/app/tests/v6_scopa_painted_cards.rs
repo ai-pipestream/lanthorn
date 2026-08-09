@@ -93,11 +93,14 @@ fn scopa_paints_a_ground_the_renderer_can_composite() {
 
 /// …and those pixels survive into what the player actually sees.
 ///
-/// scopa reaches the RASTER composite in both v6 render modes: it publishes no
-/// Buffer window at all (its screen is three Grids), so hybrid's `if let Some(story)`
-/// finds nothing to draw as terminal text and falls through. That is asserted below
-/// rather than assumed, and it is why this drives the raster composite directly
-/// instead of looping over a render mode that would not change the path taken.
+/// scopa publishes no Buffer window at all — its screen is three Grids — so
+/// hybrid's `if let Some(story)` ring arm is skipped. This file used to claim the
+/// frame then "falls through" to the raster composite. It did not: the next arm
+/// down is the painted-screen text takeover (SQ-0477), which drew scopa's two
+/// button labels and discarded the table. SQ-0711 sends a screen with a painted
+/// ground to the composite instead, so both render modes now really do reach it —
+/// asserted end to end in `v6_scopa_hybrid_no_story.rs`, which is why this test
+/// can drive the composite directly.
 ///
 /// Both colour modes ARE pinned: painted pixels are the game's own drawing, not a
 /// palette preference, so declining game colours must not erase its cards.
@@ -128,8 +131,8 @@ fn the_painted_cards_reach_the_composite_in_both_modes() {
 
     assert!(
         layout.story.is_none(),
-        "scopa publishes no Buffer window, so hybrid has no story text to draw and falls through \
-         to the raster composite — which is why this test drives that composite for both modes"
+        "scopa publishes no Buffer window, so hybrid's ring arm is skipped — which arm it lands \
+         on instead is SQ-0711's business (v6_scopa_hybrid_no_story.rs); both end at this composite"
     );
 
     for honor in [true, false] {

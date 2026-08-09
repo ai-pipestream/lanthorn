@@ -1929,6 +1929,53 @@ impl GameSession {
         (if w == 0 { 320 } else { w }, if h == 0 { 200 } else { h })
     }
 
+    /// The ON-SCREEN part of a v6 window's box, in native pixels (SQ-0710) —
+    /// `(w, h)` clipped so `pos + size` never reaches past the screen.
+    ///
+    /// ZMSD §8.4.3 puts the v6 screen's size in header words $22 (width) and $24
+    /// (height), in units — pixels for v6 — and `zvm::screen` seeds both at boot.
+    /// Every window the game opens lives inside that box; a `window_size` past it
+    /// describes nothing a player can see.
+    ///
+    /// Games use `window_size` as a MEASURING instrument, not only as layout.
+    /// scopa's own Inform source sizes window 5 to 1000×1000 so a string it is
+    /// about to measure cannot wrap:
+    ///
+    /// ```text
+    /// textwidth [ txt ws tw;  @window_size 5 1000 1000;  ws = WinSet(5); ...
+    /// ```
+    ///
+    /// Taken literally, that one window ballooned the composite's extent to
+    /// 1579×1370 once a hand was dealt, scaling the whole picture down inside the
+    /// pane (the report's "the screen zooms out") with black bands wherever the
+    /// oversized page painted outside the real screen.
+    ///
+    /// The clip is deliberately on the PUBLISHED box, never on the VM's stored
+    /// size. `get_wind_prop` has to keep reporting what the game wrote (ZMSD
+    /// §8.8.3.2) — Shogun centres its title from window 0's prop 3, Arthur reads
+    /// props 2/3 — and scopa's own measurement is only correct while the window it
+    /// measures in really is 1000px wide, so clamping in zvm would break the very
+    /// idiom that motivates this. zvm stores the size verbatim; the renderer draws
+    /// the part of it that exists. That is also how `native_extent` already treats
+    /// Shogun's unresolved size sentinel (SQ-0481) — and a size with the high bit
+    /// set IS that sentinel (a small negative leaked as a large `u16`), so it is
+    /// passed through untouched rather than handed a plausible-looking clip.
+    fn v6_clip_box(&self, x_px: u16, y_px: u16, x_size: u16, y_size: u16) -> (u16, u16) {
+        // An unseeded header word is not a 1×1 screen: clip to nothing rather than
+        // to a guess, so a story that never got one keeps today's box.
+        let unset = |v: u16| if v == 0 { u16::MAX } else { v };
+        let clip = |size: u16, pos: u16, screen: u16| -> u16 {
+            if (size as i16) < 0 {
+                return size; // unresolved sentinel — not a size to clip (SQ-0481)
+            }
+            size.min(screen.saturating_sub(pos))
+        };
+        (
+            clip(x_size, x_px, unset(self.machine.mem.read_word(0x22))),
+            clip(y_size, y_px, unset(self.machine.mem.read_word(0x24))),
+        )
+    }
+
     /// Build the v6 z-ordered layered [`ScreenModel`] from `screen.v6`'s 8-window
     /// table plus `pictures_canvas` (Plan 1b Task 2). Called from `Engine::screen`
     /// when the story has v6 window state; the v1–5 `screen_model_from_machine`
@@ -1987,7 +2034,18 @@ impl GameSession {
             if w.x_size == 0 && w.y_size == 0 && w.texts.is_empty() && w.prose.is_empty() {
                 continue;
             }
-            let native = (w.x_coord.saturating_sub(1), w.y_coord.saturating_sub(1), w.x_size, w.y_size);
+            // The model publishes the ON-SCREEN part of the box (SQ-0710), so the
+            // rect this matches nodes and cells by has to be clipped the same way
+            // — or a window the game oversized reads as "not published" here while
+            // it is on screen. The game's own size stays on the `win` line below,
+            // which is where a reader looking for what the game asked for goes.
+            let (cw, chh) = self.v6_clip_box(
+                w.x_coord.saturating_sub(1),
+                w.y_coord.saturating_sub(1),
+                w.x_size,
+                w.y_size,
+            );
+            let native = (w.x_coord.saturating_sub(1), w.y_coord.saturating_sub(1), cw, chh);
             let mut flags = Vec::new();
             if w.wrapping() { flags.push("wrap"); }
             if w.scrolling() { flags.push("scroll"); }
@@ -2008,10 +2066,18 @@ impl GameSession {
                 if marks.is_empty() { String::new() } else { format!("  <- {}", marks.join("+")) },
             ));
             out.push(format!(
-                "          game: attrs={:04b}, {} paint run(s), {} prose line(s)",
+                "          game: attrs={:04b}, {} paint run(s), {} prose line(s){}",
                 w.attributes,
                 w.texts.len(),
-                w.prose.len()
+                w.prose.len(),
+                // SQ-0710: say so when the game sized a window past the screen —
+                // otherwise the `win` line above reads 1000x1000 and every rect
+                // under it reads 61x30, with nothing to explain the difference.
+                if (cw, chh) == (w.x_size, w.y_size) {
+                    String::new()
+                } else {
+                    format!(" — off-screen, clipped to {cw}x{chh}")
+                },
             ));
             // What the model made of this window, matched by its native rect.
             let node = items.iter().find(|pw| (pw.x_px, pw.y_px, pw.w_px, pw.h_px) == native);
@@ -2136,6 +2202,9 @@ impl GameSession {
             let x = x_px / V6_FONT_WIDTH;
             let y = y_px / V6_FONT_HEIGHT;
             let (cols, rows) = (win.grid.cols, win.grid.rows);
+            // …and the box the renderer gets is the part of it that is ON SCREEN
+            // (SQ-0710) — see `v6_clip_box`.
+            let (w_px, h_px) = self.v6_clip_box(x_px, y_px, win.x_size, win.y_size);
 
             if let Some(canvas) = visible.get(&(i as u8)) {
                 graphics_entries.push((canvas.z_seq, PositionedWindow {
@@ -2145,8 +2214,8 @@ impl GameSession {
                     h: rows,
                     x_px,
                     y_px,
-                    w_px: win.x_size,
-                    h_px: win.y_size,
+                    w_px,
+                    h_px,
                     left_margin: win.left_margin,
                     right_margin: win.right_margin,
                     node: WinNode::Graphics(GraphicsWindow {
@@ -2254,8 +2323,8 @@ impl GameSession {
                 h: rows,
                 x_px,
                 y_px,
-                w_px: win.x_size,
-                h_px: win.y_size,
+                w_px,
+                h_px,
                 left_margin: win.left_margin,
                 right_margin: win.right_margin,
                 node,

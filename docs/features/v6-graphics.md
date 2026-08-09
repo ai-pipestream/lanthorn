@@ -48,6 +48,20 @@ rendered by doubling the 8×8 glyph masters vertically to fill the 8×16 cell.
 Screen size and picture size double *together*, so the frame-vs-content picture
 classification (which is pure ratios) lands exactly where it did before.
 
+And that screen is a **hard edge**. A v6 game may size a window far past it,
+because `window_size` doubles as a measuring instrument: scopa opens a scratch
+window 1000×1000 so a string it is about to print cannot wrap, reads the width
+back, and moves on. Taken literally that one window is bigger than the screen,
+and since the composite spans every window the game has open, the whole picture
+would shrink to fit it — the table crammed into a corner with black bands where
+the oversized window's page fell off the world. babelmap draws the part of a
+window that exists: each box is clipped to the screen the header declares
+(§8.4.3's width and height words) before anything is composited. The clip is
+purely what gets *drawn* — the interpreter still reports the size the game wrote
+when the game asks for it back, which is the whole point of the trick scopa is
+pulling. `/dump-windows` shows both: the size the game set, and what of it is on
+screen.
+
 ## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
@@ -84,6 +98,15 @@ session-only switch that never touches your saved config:
   into an ordinary text strip — a solid bar with the transcript starting beneath it,
   rather than glyphs stamped over scrolling prose. Such a bar need not be
   reverse-video to fill the row; a window that shape *is* the status bar.
+  Not every v6 game *has* a story window to ring, though. scopa's card table
+  streams no prose at all — its screen is three grid windows and a table drawn out
+  of filled rectangles, with two button labels on top — and a ring around nothing
+  is nothing. A screen with no story window is presented whole instead: as crisp
+  positioned terminal text when it really is only text (a hint menu, a boot menu),
+  and as the **full-picture composite** when the game has painted pixels onto it,
+  because those pixels *are* the screen and the composite draws the labels over
+  them anyway. So hybrid shows scopa's table exactly as raster does, and Zork
+  Zero's InvisiClues stays the readable full-pane text screen it has always been.
 - **More than one scrolling text window.** A v6 game may run several flowing-prose
   windows at once — advent.z6's `style` opens one across the top of the screen and
   keeps playing in another below it. Both are wrap+scroll, so both stream through

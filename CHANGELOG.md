@@ -87,6 +87,30 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **A v6 game with no story window now draws in hybrid mode too.** scopa's card
+  table never streams prose — its whole screen is painted rectangles with a couple
+  of buttons on top — and hybrid mode, which builds a picture frame *around* a
+  terminal transcript, had no transcript to build around. It fell back to the path
+  meant for hint menus, which presents a screen as plain positioned text: the two
+  button labels arrived, seven characters in an otherwise empty pane, and the cards
+  did not. Now a screen the game has painted goes to the full-picture composite
+  whichever render mode you are in, so hybrid shows the table exactly as raster
+  does. Genuinely text-only screens — Zork Zero's InvisiClues, Shogun's boot menu —
+  are untouched and still come up as crisp terminal text.
+- **A v6 game that measures text no longer shrinks its own screen.** Deal a hand
+  in scopa and the whole table zoomed out — the cards crammed into a corner with
+  big black rectangles beside them. The card game was not drawing any of that: to
+  find out how wide a string is, it opens a scratch window 1000×1000 so the string
+  cannot wrap, prints into it, and reads the width back. babelmap sized the
+  composite to cover every window the game had open, so that one measuring window
+  — two and a half times wider than the screen — decided how big the picture was,
+  and everything real shrank to fit inside it. Now a window is drawn only where it
+  exists: each box is clipped to the screen the story itself declared before
+  anything is composited. What the *game* sees is untouched — it still reads back
+  the size it asked for, which is the entire point of the trick it is pulling — so
+  the measurement stays correct while the picture goes back to filling the pane.
+  `/dump-windows` now says both, the size the game set and how much of it is on
+  screen.
 - **Arthur's opening illustrations are no longer scribbled over.** The sword in
   the churchyard, and Merlin rising out of it, came up with the previous screen's
   narration rasterized straight across the artwork — a wall of text over the
