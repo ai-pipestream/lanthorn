@@ -145,14 +145,16 @@ fn hybrid_draws_the_table_instead_of_two_button_labels() {
                      goes to the composite, not to the text takeover"
                 );
 
-                // The table reaches the pane. How MUCH of it is a colour-mode
-                // question and deliberately so: the felt is window 1's page, which
-                // is painted only when the game's colours are honoured (SQ-0704),
-                // while the bands the game fills with `erase_window` are drawing and
-                // arrive either way (SQ-0706).
+                // The table reaches the pane, in either colour mode. It used to be
+                // a colour-mode question — the felt is window 1's page, painted only
+                // when the game's colours were honoured (SQ-0704), while the bands
+                // the game fills with `erase_window` are drawing and arrived either
+                // way (SQ-0706) — which left a black table with green stripes on it.
+                // SQ-0716 made a window the game DREW INTO keep its page regardless;
+                // `v6_scopa_declined_colours.rs` pins that side in detail.
                 let cells = (w as usize) * (h as usize);
                 let green = buf.content().iter().filter(|c| is_baize(c.bg)).count();
-                let floor = if honor { cells / 2 } else { cells / 20 };
+                let floor = cells / 2;
                 assert!(
                     green > floor,
                     "{mode:?} honor={honor} pane={w}x{h}: the table reaches the pane — {green} of \

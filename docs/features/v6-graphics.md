@@ -374,6 +374,23 @@ the terminal transcript, and a window the game gave no colour keeps the host
 page. It is the whole screen's look for Scopa, whose green baize is a window
 background and nothing else.
 
+**A window the game has drawn into keeps its page even when you decline game
+colours.** That exception exists because Scopa's baize is not a preference at all:
+read from the screen ops, it sizes window 1 to the whole 640×400 screen, names an
+explicit true-colour green and issues `erase_window` — the same fill opcode that
+draws its cards. A fill spanning the entire screen is treated as a screen clear
+rather than as paint (otherwise every game that merely erases would gain a
+backdrop it never asked for), so the window's background is the only surviving
+record of that drawing. Gating that record on `honor_game_colours` while leaving
+the smaller fills ungated split one picture in half: turn game colours off and you
+got a *black* table carrying the green bands and the cards the game had drawn onto
+it. The discriminator is the painted ground — a window with the game's own pixels
+inside it is a canvas and keeps its page either way; a window with none is
+presentation, and your theme still owns it. The story window is never in scope:
+its page and ink are the surface prose is read on, and those are exactly what the
+setting is for. Nothing else in the v6 corpus paints a ground at all, so Zork
+Zero, Arthur, Shogun, Journey and Adventure are untouched.
+
 This colour honoring now spans *every* v6 presentation, not just the pixel
 raster: the frameless classic status band, the painted menu/hint overlays,
 the hybrid story-strip overlay, and the plain cell fallback all resolve a

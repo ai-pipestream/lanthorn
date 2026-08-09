@@ -694,6 +694,18 @@ fn render_node(
                             // why the icons kept coming out on the terminal background
                             // after the chrome half of this fix landed.
                             v6::fill_story_page_clear(&mut canvas, layout.story, &state.colors);
+                        } else {
+                            // SQ-0716: colours declined, but a window the game has
+                            // PAINTED INTO still gets its page — that page is the
+                            // ground its own drawing sits on, not a palette
+                            // preference. See `fill_painted_window_pages`.
+                            v6::fill_painted_window_pages(
+                                &mut canvas,
+                                &layout.chrome,
+                                layout.story,
+                                &state.colors,
+                                state.v6_paint.borrow().as_deref(),
+                            );
                         }
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
@@ -2069,6 +2081,20 @@ pub fn build_v6_raster_canvas(
     v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
     if honor {
         v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
+    } else {
+        // SQ-0716: colours declined, but a window the game has PAINTED INTO still
+        // gets its page — scopa's felt table is a full-screen `erase_window` in
+        // explicit green that `drain_erase_fills` drops as a screen clear, so
+        // window 1's background is the only surviving record of that drawing.
+        // Gating it left a black table under the game's own green stripes and
+        // cards. See `fill_painted_window_pages`.
+        v6::fill_painted_window_pages(
+            &mut canvas,
+            &layout.chrome,
+            layout.story,
+            &state.colors,
+            state.v6_paint.borrow().as_deref(),
+        );
     }
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least

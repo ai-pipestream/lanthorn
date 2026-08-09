@@ -87,6 +87,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Turning game colours off no longer deletes half of a v6 game's board.** With
+  `honor_game_colours` off, scopa's felt table disappeared and left a black
+  card table with two green stripes across it — the only survivors being the bands
+  the game had drawn on top of the felt. The table was never a colour preference:
+  scopa sizes a window to the whole screen, names an explicit green and erases it,
+  which is the same drawing operation that paints its cards, and only reaches the
+  renderer as a window background because a full-screen erase is treated as a
+  screen clear rather than as paint. So the felt is back whichever way the setting
+  is thrown: a window the game has *drawn into* keeps the ground it drew on, while
+  a window it merely coloured still defers to your theme, and the story window —
+  the surface you actually read prose on — is governed by the setting exactly as
+  before. Zork Zero, Arthur, Shogun, Journey and Adventure paint no ground at all
+  and are untouched.
 - **A v6 game with no story window now draws in hybrid mode too.** scopa's card
   table never streams prose — its whole screen is painted rectangles with a couple
   of buttons on top — and hybrid mode, which builds a picture frame *around* a

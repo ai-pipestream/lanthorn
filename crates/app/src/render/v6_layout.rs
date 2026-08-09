@@ -377,12 +377,71 @@ fn boxes_overlap(a: &PositionedWindow, b: &PositionedWindow) -> bool {
 /// [`flatten_onto_page`] in raster), which already honour its own colour.
 ///
 /// Callers gate this on `honor_game_colours`: with the game's colours declined
-/// the host page governs everywhere, exactly as before.
+/// the host page governs everywhere, exactly as before — except for the windows
+/// [`fill_painted_window_pages`] carves back out, which are the game's own canvas
+/// rather than its colour preference.
 pub fn fill_window_pages(
     canvas: &mut RgbaImage,
     chrome: &[&PositionedWindow],
     story: Option<&PositionedWindow>,
     colors: &ColorScheme,
+) {
+    fill_pages_where(canvas, chrome, story, colors, |_| true);
+}
+
+/// SQ-0716: the half of [`fill_window_pages`] that survives `honor_game_colours
+/// = off` — a window the game has DRAWN INTO keeps its declared page.
+///
+/// scopa's felt table is why. Measured from the screen ops rather than the model,
+/// it boots `@set_true_colour(fg=true(0x0000), bg=true(0x0200), window=1)` — an
+/// explicit green — sizes window 1 to the full 640×400 screen and issues
+/// `@erase_window`. That is a FILL, the same drawing operation SQ-0706 declared
+/// ungatable when it made the cards survive a declined palette; the cards and the
+/// table come out of the identical opcode. It reaches us as a window page only
+/// because `drain_erase_fills` classifies a fill spanning the whole screen as a
+/// screen clear and drops it, leaving window 1's background as the sole surviving
+/// record of the paint. Gating that record on the colour flag therefore deleted
+/// half of one drawing: declining game colours left a BLACK table carrying the
+/// green stripes and cards the game had drawn onto it — worse than either
+/// honouring the game or ignoring it.
+///
+/// The discriminator is the painted ground, exactly as in SQ-0711: a window with
+/// the game's own pixels inside it is a canvas, and its page is the ground those
+/// pixels were drawn on. A window with none is presentation, and the host page
+/// governs it as before. Zork Zero, Arthur, Shogun, Journey and advent paint no
+/// ground at all, so none of them can reach this path.
+///
+/// The STORY window is deliberately NOT included (and `fill_pages_where` skips
+/// anything overlapping it anyway): its page and ink are the surface prose is read
+/// on, they have to be honoured or declined as a PAIR (SQ-0532 wave-5), and that
+/// pair is precisely what `honor_game_colours` exists to govern.
+pub fn fill_painted_window_pages(
+    canvas: &mut RgbaImage,
+    chrome: &[&PositionedWindow],
+    story: Option<&PositionedWindow>,
+    colors: &ColorScheme,
+    paint: Option<&RgbaImage>,
+) {
+    let Some(paint) = paint else { return };
+    fill_pages_where(canvas, chrome, story, colors, |it| window_has_paint(it, paint));
+}
+
+/// Whether the game's painted ground has any pixel inside `it`'s native box.
+fn window_has_paint(it: &PositionedWindow, paint: &RgbaImage) -> bool {
+    let (x0, y0) = (it.x_px as u32, it.y_px as u32);
+    let x1 = (x0 + it.w_px as u32).min(paint.width());
+    let y1 = (y0 + it.h_px as u32).min(paint.height());
+    (y0..y1).any(|y| (x0..x1).any(|x| paint.get_pixel(x, y)[3] > 0))
+}
+
+/// The shared body of [`fill_window_pages`] and [`fill_painted_window_pages`]:
+/// paint each `keep`-approved chrome window's own page into its untouched pixels.
+fn fill_pages_where(
+    canvas: &mut RgbaImage,
+    chrome: &[&PositionedWindow],
+    story: Option<&PositionedWindow>,
+    colors: &ColorScheme,
+    keep: impl Fn(&PositionedWindow) -> bool,
 ) {
     for it in chrome {
         let bg = match &it.node {
@@ -398,6 +457,9 @@ pub fn fill_window_pages(
             continue;
         }
         if story.is_some_and(|s| boxes_overlap(it, s)) {
+            continue;
+        }
+        if !keep(it) {
             continue;
         }
         // `bg` is explicit here, so the fallback can never be reached.
@@ -2036,6 +2098,66 @@ mod tests {
         let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
         fill_window_pages(&mut c, &chrome, None, &colors());
         assert_eq!(c.get_pixel(4, 4)[3], 0, "an inherited colour leaves the window's page to the host");
+    }
+
+    // ── declined colours: a PAINTED window keeps its page (SQ-0716) ─────────
+
+    /// A painted ground with one opaque pixel at `(px, py)` of a `w × h` surface.
+    fn ground(w: u32, h: u32, px: u32, py: u32) -> image::RgbaImage {
+        let mut g = image::RgbaImage::new(w, h);
+        g.put_pixel(px, py, Rgba([255, 0, 0, 255]));
+        g
+    }
+
+    #[test]
+    fn a_painted_window_keeps_its_page_with_colours_declined() {
+        // scopa's shape: the game drew inside this window, so its declared page is
+        // the ground of that drawing rather than a palette preference.
+        let win = page_grid(16, 16, Some(BLUE));
+        let chrome = [&win];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        fill_painted_window_pages(&mut c, &chrome, None, &colors(), Some(&ground(16, 16, 4, 4)));
+        assert_eq!(*c.get_pixel(10, 10), Rgba([0, 0, 255, 255]), "the painted window's page arrives anyway");
+    }
+
+    #[test]
+    fn an_unpainted_window_still_declines_its_page() {
+        // The flag keeps its meaning for every window the game only coloured:
+        // Zork Zero, Arthur, Shogun, Journey and advent paint no ground at all.
+        let win = page_grid(16, 16, Some(BLUE));
+        let chrome = [&win];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let before = c.as_raw().clone();
+        // A ground that exists but lies entirely outside this window's box.
+        let mut g = image::RgbaImage::new(64, 64);
+        g.put_pixel(40, 40, Rgba([255, 0, 0, 255]));
+        fill_painted_window_pages(&mut c, &chrome, None, &colors(), Some(&g));
+        assert_eq!(*c.as_raw(), before, "a window the game never drew into keeps the host page");
+    }
+
+    #[test]
+    fn no_painted_ground_at_all_changes_nothing() {
+        let win = page_grid(16, 16, Some(BLUE));
+        let chrome = [&win];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let before = c.as_raw().clone();
+        fill_painted_window_pages(&mut c, &chrome, None, &colors(), None);
+        assert_eq!(*c.as_raw(), before, "no ground, no exception");
+    }
+
+    #[test]
+    fn a_painted_window_over_the_story_box_is_still_skipped() {
+        // The story window's page and ink are the reading surface: they are the
+        // pair `honor_game_colours` governs, painted ground or not.
+        let full = page_grid(16, 16, Some(BLUE));
+        let story = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 4, y_px: 4, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        let chrome = [&full];
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        fill_painted_window_pages(&mut c, &chrome, Some(&story), &colors(), Some(&ground(16, 16, 4, 4)));
+        assert_eq!(c.get_pixel(0, 0)[3], 0, "the story-overlapping window is skipped whole, exactly as when colours are honoured");
     }
 
     // ── story region background fill (Lane C) ───────────────────────────────
