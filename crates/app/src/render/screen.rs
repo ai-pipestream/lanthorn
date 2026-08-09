@@ -185,6 +185,10 @@ pub fn render_story_pane(
     area: Rect,
     buf: &mut Buffer,
 ) -> StoryPaneMetrics {
+    // Per-frame: the v6 Layered arm republishes this if the game named a page
+    // (SQ-0704). Cleared first so a non-v6 frame — or a v6 game that declares
+    // nothing — can never inherit the last frame's page.
+    state.v6_story_page.set(None);
     // Paint the story-pane background with the game's current background
     // (theme-safe: only the story pane, never the map/chrome; only a concrete,
     // honoured background — Default keeps the theme).
@@ -664,6 +668,9 @@ fn render_node(
                         if state.config.honor_game_colours {
                             if let Some(p) = v6::story_bg_rgba(Some(story), &state.colors) {
                                 fill_pane_page(area, p, buf);
+                                // Publish it for inline story pictures: their alpha is
+                                // ours to resolve, against THIS page (SQ-0704).
+                                state.v6_story_page.set(Some((p[0], p[1], p[2])));
                             }
                         }
                         let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);

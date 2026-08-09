@@ -12,7 +12,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::widgets::Widget;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
@@ -35,7 +35,7 @@ pub(crate) fn try_blit_band_row(
 ) -> bool {
     if let Some(band) = &wr.band {
         if let Some(picker) = state.game_picker.as_ref() {
-            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, state.colors.theme.get("inline_image").style, buf);
+            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, page_for(state.v6_story_page.get(), state.colors.theme.get("inline_image").style), buf);
         }
         return true;
     }
@@ -55,7 +55,7 @@ pub(crate) fn blit_float_row(
     buf: &mut Buffer,
 ) {
     if let Some(picker) = state.game_picker.as_ref() {
-        blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, state.colors.theme.get("inline_image").style, buf);
+        blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, page_for(state.v6_story_page.get(), state.colors.theme.get("inline_image").style), buf);
     }
 }
 
@@ -71,7 +71,7 @@ pub(crate) fn blit_band(
     area_x: u16,
     area_width: u16,
     row_y: u16,
-    letterbox: Style,
+    page: Option<image::Rgba<u8>>,
     buf: &mut Buffer,
 ) {
     let dest = Rect::new(
@@ -80,12 +80,101 @@ pub(crate) fn blit_band(
         band.cols.min(area_width.saturating_sub(band.x_off)),
         1,
     );
-    render.borrow_mut().render_row(picker, band, dest, letterbox, buf);
+    render.borrow_mut().render_row(picker, band, dest, page, buf);
 }
 
 /// Cache key for one band row's built protocol: the image's pixel-buffer
-/// identity plus the band geometry that determines the resized strip.
-type BandCacheKey = (usize, u16, u16, u16);
+/// identity, the band geometry that determines the resized strip, and the page
+/// the strip was flattened onto (see [`flatten_onto`]) so a theme or game-colour
+/// change re-encodes instead of serving a strip baked over the old page.
+type BandCacheKey = (usize, u16, u16, u16, u32);
+
+/// Resize `src` to sit inside a `box_w × box_h` pixel box WITHOUT distorting it,
+/// centred, with the leftover margin left transparent (SQ-0704).
+///
+/// The band's cell footprint is computed by rounding the image UP to whole cells
+/// on each axis independently (`InlineImage::fitted_cells`), and the two axes
+/// round by different amounts — so the box is very rarely the image's own shape.
+/// Resizing straight onto it (`resize_exact`) stretched the picture to match: a
+/// 40×40 icon in an 8×16 cell becomes 5 cols × 3 rows = 40×48 px, i.e. 20% too
+/// tall. Zork Zero's square room icons came out visibly tall that way.
+///
+/// The margin stays transparent here and is resolved by [`flatten_onto`] against
+/// the story's page, so the padding matches the paper the icon sits on.
+pub(crate) fn fit_preserving_aspect(
+    src: &image::RgbaImage,
+    box_w: u32,
+    box_h: u32,
+) -> image::RgbaImage {
+    let (sw, sh) = (src.width().max(1), src.height().max(1));
+    // The largest whole-pixel size with the source's aspect that still fits.
+    let dw = (box_w).min((sw as u64 * box_h as u64 / sh as u64).max(1) as u32).max(1);
+    let dh = (box_h).min((sh as u64 * dw as u64 / sw as u64).max(1) as u32).max(1);
+    let resized = image::imageops::resize(src, dw, dh, image::imageops::FilterType::Triangle);
+    if dw == box_w && dh == box_h {
+        return resized;
+    }
+    let mut out = image::RgbaImage::new(box_w, box_h);
+    image::imageops::replace(&mut out, &resized, ((box_w - dw) / 2) as i64, ((box_h - dh) / 2) as i64);
+    out
+}
+
+/// Composite every pixel of `strip` over an opaque `page`, in place (SQ-0704).
+///
+/// An inline story picture is handed to the image protocol WITH ITS ALPHA. Kitty
+/// keeps that alpha and composites the image against the terminal's own
+/// background — not against the cell colours underneath, which the protocol never
+/// consults. So Zork Zero's room icons (transparent PNGs drawn as transcript
+/// floats, exactly like its drop-caps) came out sitting on the terminal
+/// background instead of the white page the story window declared, no matter what
+/// colour the cells behind them carried.
+///
+/// Flattening here is the same move `flatten_onto_page` makes for the raster
+/// composite, applied to the one surface that still shipped alpha: whoever
+/// composites must not be left to pick the colour for us. It also resolves the
+/// margin [`fit_preserving_aspect`] leaves, so the padding around a picture whose
+/// shape differs from its cell box is the story's page, not a hole.
+pub(crate) fn flatten_onto(strip: &mut image::RgbaImage, page: image::Rgba<u8>) {
+    for px in strip.pixels_mut() {
+        let a = px[3] as u32;
+        if a == 255 {
+            continue;
+        }
+        // Straight `over`: src·α + dst·(1−α), with the destination fully opaque.
+        for c in 0..3 {
+            px[c] = ((px[c] as u32 * a + page[c] as u32 * (255 - a)) / 255) as u8;
+        }
+        px[3] = 255;
+    }
+}
+
+/// The opaque page an inline image should be flattened onto.
+///
+/// It must be the STORY's page, not a theme colour — so `AppState::v6_story_page`
+/// (published by the render's Layered arm from the window the game declared) wins
+/// outright when set. The theme's `inline_image` style is only the fallback for a
+/// frame that declared none: flattening onto it by default would paint the icons
+/// with the very terminal-following colour the game overrode, since `transcript`
+/// and `upper_window` follow the terminal's own background as of SQ-0510.
+///
+/// Deliberately NOT read back out of the destination cell. The band's cells hold
+/// whatever the previous frame drew there — including the picture itself — so
+/// sampling them feeds the image its own colours and mints a fresh cache entry
+/// every frame.
+///
+/// `None` when neither names a background we can resolve (`Reset` is the
+/// terminal's own colour and `Indexed` has no canonical RGB here): there is then
+/// no page we could claim is right, so the alpha ships as before rather than
+/// being flattened onto a guess.
+pub(crate) fn page_for(story_page: Option<(u8, u8, u8)>, letterbox: Style) -> Option<image::Rgba<u8>> {
+    if let Some((r, g, b)) = story_page {
+        return Some(image::Rgba([r, g, b, 255]));
+    }
+    match letterbox.bg {
+        None | Some(Color::Reset) | Some(Color::Indexed(_)) => None,
+        Some(c) => Some(crate::render::v6_layout::color_to_rgba(c, image::Rgba([0, 0, 0, 255]))),
+    }
+}
 
 #[derive(Default)]
 pub struct InlineImageRender {
@@ -113,11 +202,15 @@ impl std::fmt::Debug for InlineImageRender {
 
 impl InlineImageRender {
     /// Blit the strip for `band.row` (of `band.rows`) into the 1-row `dest`.
-    pub(crate) fn render_row(&mut self, picker: &Picker, band: &ImageBand, dest: Rect, letterbox: Style, buf: &mut Buffer) {
+    pub(crate) fn render_row(&mut self, picker: &Picker, band: &ImageBand, dest: Rect, page: Option<image::Rgba<u8>>, buf: &mut Buffer) {
         if dest.width == 0 || dest.height == 0 {
             return;
         }
         // Letterbox the destination first (padding when the image is narrower).
+        let letterbox = match page {
+            Some(p) => Style::default().bg(Color::Rgb(p[0], p[1], p[2])),
+            None => Style::default(),
+        };
         for y in dest.top()..dest.bottom() {
             for x in dest.left()..dest.right() {
                 if let Some(c) = buf.cell_mut((x, y)) {
@@ -126,7 +219,13 @@ impl InlineImageRender {
             }
         }
         let src_ptr = std::sync::Arc::as_ptr(&band.image.pixels) as usize;
-        let key: BandCacheKey = (src_ptr, band.cols, band.rows, band.row);
+        // The page joins the key: the same strip over a different page is a
+        // different image, and serving the cached one would keep the old ground
+        // after a theme switch or `/set-game-colours`.
+        let page_key = page.map_or(0, |p| {
+            u32::from_be_bytes([1, p[0], p[1], p[2]])
+        });
+        let key: BandCacheKey = (src_ptr, band.cols, band.rows, band.row, page_key);
         if !self.cache.contains_key(&key) {
             // Fit the whole image to the band's cell box in pixels, then crop
             // the strip for this row. Cell pixel size comes from the picker font.
@@ -147,11 +246,28 @@ impl InlineImageRender {
             // the SQ-0513 fix — the crop is cheap; the resize is not.
             let strip = {
                 let (_pin, full) = self.fitted.entry((src_ptr, band.cols, band.rows)).or_insert_with(|| {
-                    let fitted = image::DynamicImage::ImageRgba8((*band.image.pixels).clone())
-                        .resize_exact(box_w, box_h, image::imageops::FilterType::Triangle);
+                    // Fit, do not stretch: the cell box is rounded up per axis and
+                    // is almost never the picture's own shape (SQ-0704).
+                    let fitted = image::DynamicImage::ImageRgba8(fit_preserving_aspect(
+                        &band.image.pixels,
+                        box_w,
+                        box_h,
+                    ));
                     (band.image.pixels.clone(), fitted)
                 });
                 full.crop_imm(0, strip_y, box_w, strip_h)
+            };
+            // Flatten the strip onto its page BEFORE the protocol is built, so the
+            // encoder never sees an alpha channel it would hand to the terminal to
+            // resolve (SQ-0704). Done on the crop rather than the cached `fitted`
+            // full image, which is shared across pages.
+            let strip = match page {
+                Some(p) => {
+                    let mut rgba = strip.to_rgba8();
+                    flatten_onto(&mut rgba, p);
+                    image::DynamicImage::ImageRgba8(rgba)
+                }
+                None => strip,
             };
             if let Ok(proto) = picker.new_protocol(strip, Size::new(band.cols, 1), Resize::Fit(None)) {
                 self.cache.insert(key, (band.image.pixels.clone(), proto));
@@ -193,8 +309,127 @@ mod tests {
         let picker = Picker::halfblocks();
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
         let mut r = InlineImageRender::default();
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, &mut buf);
         // No panic == pass; the halfblock protocol writes into (0,0)..(2,1).
+    }
+
+    /// SQ-0704: an inline picture's transparent pixels must be resolved by US,
+    /// against the page the row already shows, never handed to the terminal.
+    ///
+    /// Zork Zero's room icons are transcript floats like its drop-caps, and their
+    /// PNGs carry alpha. The protocol keeps that alpha — kitty composites the
+    /// image against the TERMINAL's background and never consults the cell colours
+    /// underneath — so the icons sat on the terminal background instead of the
+    /// white page their story window declared.
+    ///
+    /// Halfblocks is the honest oracle: its encoder calls `to_rgb8()`, so an
+    /// unflattened transparent pixel becomes pure BLACK. Falsified by dropping the
+    /// flatten — every asserted cell comes back `Rgb(0, 0, 0)`.
+    #[test]
+    fn a_transparent_inline_picture_is_flattened_onto_the_rows_own_page() {
+        // Fully transparent: every pixel is the terminal's to resolve, pre-fix.
+        let px = image::RgbaImage::new(16, 16);
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+        };
+        let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
+        let picker = Picker::halfblocks();
+        let white = Some(image::Rgba([255, 255, 255, 255]));
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let mut r = InlineImageRender::default();
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), white, &mut buf);
+        for x in 0..2 {
+            let cell = buf.cell((x, 0)).expect("the band wrote this cell");
+            assert_eq!(
+                cell.style().fg,
+                Some(ratatui::style::Color::Rgb(255, 255, 255)),
+                "cell {x} must carry the page the picture was flattened onto, not the terminal's"
+            );
+        }
+
+        // A different page is a different image: the cache must not serve the
+        // strip baked over the old one after a theme or game-colour change.
+        let black = Some(image::Rgba([0, 0, 0, 255]));
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), black, &mut buf);
+        assert_eq!(r.cache.len(), 2, "the page is part of the cache key");
+    }
+
+    /// A style with no resolvable background leaves the alpha alone — there is no
+    /// colour we could claim is right, so we do not invent one.
+    #[test]
+    fn an_unresolvable_page_leaves_the_picture_unflattened() {
+        let none = ratatui::style::Style::default();
+        assert_eq!(page_for(None, none), None, "no page published and no theme background");
+        assert_eq!(page_for(None, none.bg(Color::Reset)), None, "Reset is the terminal's own colour");
+        assert_eq!(page_for(None, none.bg(Color::Indexed(9))), None, "an indexed colour has no canonical RGB here");
+        assert_eq!(
+            page_for(None, none.bg(Color::White)),
+            Some(image::Rgba([255, 255, 255, 255])),
+            "a named ANSI theme colour does resolve as the fallback"
+        );
+        // The GAME's page wins over the theme: the theme's inline_image colour
+        // follows the terminal since SQ-0510, which is exactly what must not win
+        // when the story window declared a page of its own.
+        let themed = none.bg(Color::Rgb(26, 26, 26));
+        assert_eq!(
+            page_for(Some((255, 255, 255)), themed),
+            Some(image::Rgba([255, 255, 255, 255])),
+            "the story window's declared page beats the theme"
+        );
+        assert_eq!(
+            page_for(None, themed),
+            Some(image::Rgba([26, 26, 26, 255])),
+            "with no declared page the theme is the fallback"
+        );
+    }
+
+    /// SQ-0704: a square picture must stay square in a cell box that is not.
+    ///
+    /// `fitted_cells` rounds the image up to whole cells on each axis
+    /// independently, so the box rarely matches the picture's shape: a 40x40 icon
+    /// with an 8x16 cell lands in a 5x3 cell box = 40x48 px. Stretching to fill
+    /// that made Zork Zero's room icons 20% too tall.
+    ///
+    /// Falsified by restoring `resize_exact`: the drawn height becomes 48, not 40.
+    #[test]
+    fn a_square_picture_keeps_its_shape_in_a_taller_cell_box() {
+        let mut src = image::RgbaImage::new(40, 40);
+        for p in src.pixels_mut() {
+            *p = image::Rgba([10, 20, 30, 255]);
+        }
+        let out = fit_preserving_aspect(&src, 40, 48);
+        assert_eq!((out.width(), out.height()), (40, 48), "the fitted image fills the whole box");
+
+        // The opaque content inside it is still square, and centred.
+        let opaque_rows: Vec<u32> = (0..out.height())
+            .filter(|&y| (0..out.width()).any(|x| out.get_pixel(x, y)[3] == 255))
+            .collect();
+        let opaque_cols: Vec<u32> = (0..out.width())
+            .filter(|&x| (0..out.height()).any(|y| out.get_pixel(x, y)[3] == 255))
+            .collect();
+        assert_eq!(opaque_rows.len(), 40, "the picture keeps its own height, not the box's");
+        assert_eq!(opaque_cols.len(), 40, "and its own width");
+        assert_eq!(opaque_rows[0], 4, "the leftover margin is split evenly above and below");
+
+        // A box that already matches needs no padding at all.
+        let exact = fit_preserving_aspect(&src, 40, 40);
+        assert!(exact.pixels().all(|p| p[3] == 255), "an exact box is filled edge to edge");
+    }
+
+    #[test]
+    fn flatten_onto_composites_partial_alpha_over_the_page() {
+        let mut img = image::RgbaImage::new(3, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255])); // opaque — untouched
+        img.put_pixel(1, 0, image::Rgba([255, 0, 0, 0])); // clear — becomes the page
+        img.put_pixel(2, 0, image::Rgba([0, 0, 0, 128])); // half — blends
+        flatten_onto(&mut img, image::Rgba([255, 255, 255, 255]));
+        assert_eq!(img.get_pixel(0, 0), &image::Rgba([255, 0, 0, 255]), "opaque pixels are left alone");
+        assert_eq!(img.get_pixel(1, 0), &image::Rgba([255, 255, 255, 255]), "clear pixels take the page");
+        assert_eq!(img.get_pixel(2, 0), &image::Rgba([127, 127, 127, 255]), "half alpha blends toward the page");
+        assert!(img.pixels().all(|p| p[3] == 255), "nothing is left for a compositor to resolve");
     }
 
     #[test]
@@ -210,15 +445,15 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
         let mut r = InlineImageRender::default();
         assert_eq!(r.cache.len(), 0);
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, &mut buf);
         assert_eq!(r.cache.len(), 1);
         // A second render of the same band/row reuses the cached protocol
         // rather than inserting a new entry.
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, &mut buf);
         assert_eq!(r.cache.len(), 1);
         // A different row of the same band gets its own cache entry.
         let band_row1 = crate::render::transcript::ImageBand { row: 1, ..band };
-        r.render_row(&picker, &band_row1, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band_row1, Rect::new(0, 0, 2, 1), None, &mut buf);
         assert_eq!(r.cache.len(), 2);
     }
 
@@ -241,7 +476,7 @@ mod tests {
         let mut r = InlineImageRender::default();
         for row in 0..rows {
             let band = crate::render::transcript::ImageBand { image: img.clone(), cols, rows, row, x_off: 0 };
-            r.render_row(&picker, &band, Rect::new(0, row, cols, 1), ratatui::style::Style::default(), &mut buf);
+            r.render_row(&picker, &band, Rect::new(0, row, cols, 1), None, &mut buf);
         }
         assert_eq!(r.fitted.len(), 1, "the whole image is fit-resized once per band, shared by every row");
         assert_eq!(r.cache.len(), rows as usize, "each row still gets its own cheap cropped protocol");
@@ -273,7 +508,7 @@ mod tests {
         let arc_a = std::sync::Arc::new(image::RgbaImage::new(16, 16));
         let ptr_a = std::sync::Arc::as_ptr(&arc_a) as usize;
         let band_a = band_for(arc_a.clone());
-        r.render_row(&picker, &band_a, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band_a, Rect::new(0, 0, 2, 1), None, &mut buf);
         assert_eq!(r.cache.len(), 1);
         // Drop every strong reference to A that this test holds; only the cache
         // still pins it. Its address stays reserved and un-reusable.
@@ -285,7 +520,7 @@ mod tests {
         // The pin guarantees B cannot land on A's still-reserved address.
         assert_ne!(ptr_b, ptr_a, "cached Arc must keep A's address reserved");
         let band_b = band_for(arc_b);
-        r.render_row(&picker, &band_b, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band_b, Rect::new(0, 0, 2, 1), None, &mut buf);
         // B is a fresh, distinct entry — it never reuses A's cached protocol.
         assert_eq!(r.cache.len(), 2);
     }
@@ -300,8 +535,8 @@ mod tests {
         let arc2 = std::sync::Arc::new(image::RgbaImage::new(16, 16));
         let ptr1 = std::sync::Arc::as_ptr(&arc1) as usize;
         let ptr2 = std::sync::Arc::as_ptr(&arc2) as usize;
-        r.render_row(&picker, &band_for(arc1.clone()), Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
-        r.render_row(&picker, &band_for(arc2.clone()), Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band_for(arc1.clone()), Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band_for(arc2.clone()), Rect::new(0, 0, 2, 1), None, &mut buf);
         assert_eq!(r.cache.len(), 2);
 
         // Only band 1 is still live: band 2's entry is evicted, band 1's kept.

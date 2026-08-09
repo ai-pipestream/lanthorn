@@ -2162,6 +2162,21 @@ pub struct AppState {
     /// arm so inline story pictures scale to match the chrome frame (see
     /// `render_transcript`). 0.0 (the Default) and 1.0 both mean "no scaling".
     pub v6_image_scale: std::cell::Cell<f32>,
+    /// The page the v6 story window declared for the CURRENT frame, published by
+    /// the render's Layered arm alongside the pane flood that paints it (SQ-0704).
+    ///
+    /// Inline story pictures (Zork Zero's drop-caps and room icons) carry alpha,
+    /// and the image protocol hands that alpha to the terminal to resolve — kitty
+    /// composites against the terminal's own background and never consults the
+    /// cells underneath. So a transparent icon must be flattened onto this page
+    /// before it is encoded, or it sits on the terminal's colour instead of the
+    /// game's. `None` when the game named no page, or outside a v6 frame; the
+    /// theme's `inline_image` style is then the fallback.
+    ///
+    /// Published rather than read back out of the buffer: the band's own cells
+    /// hold what the PREVIOUS frame drew there, so sampling them would feed the
+    /// picture its own colours.
+    pub v6_story_page: std::cell::Cell<Option<(u8, u8, u8)>>,
     /// Where the last v6 frame actually PUT each window, in terminal cells, for
     /// `/dump-windows`. The engine can report the game's pixel rects but has no idea
     /// what the renderer did with them, and a v6 layout defect is nearly always in
@@ -2544,6 +2559,7 @@ impl Default for AppState {
             selection_edge: 0,
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
+            v6_story_page: std::cell::Cell::new(None),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
             v6_path_log: std::cell::RefCell::new(Vec::new()),
             v6_save_log: std::cell::RefCell::new(Vec::new()),
