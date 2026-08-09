@@ -98,6 +98,15 @@ session-only switch that never touches your saved config:
   into an ordinary text strip — a solid bar with the transcript starting beneath it,
   rather than glyphs stamped over scrolling prose. Such a bar need not be
   reverse-video to fill the row; a window that shape *is* the status bar.
+  Not every v6 game *has* a story window to ring, though. scopa's card table
+  streams no prose at all — its screen is three grid windows and a table drawn out
+  of filled rectangles, with two button labels on top — and a ring around nothing
+  is nothing. A screen with no story window is presented whole instead: as crisp
+  positioned terminal text when it really is only text (a hint menu, a boot menu),
+  and as the **full-picture composite** when the game has painted pixels onto it,
+  because those pixels *are* the screen and the composite draws the labels over
+  them anyway. So hybrid shows scopa's table exactly as raster does, and Zork
+  Zero's InvisiClues stays the readable full-pane text screen it has always been.
 - **More than one scrolling text window.** A v6 game may run several flowing-prose
   windows at once — advent.z6's `style` opens one across the top of the screen and
   keeps playing in another below it. Both are wrap+scroll, so both stream through

@@ -1287,7 +1287,20 @@ fn render_node(
                         })
                         .flatten()
                         .collect();
-                    if runs.iter().any(|t| !t.text.trim().is_empty()) {
+                    // SQ-0711: this path draws the RUNS and nothing else — every
+                    // pixel on the screen is discarded. That is right for a screen
+                    // that is only text (Zork Zero's InvisiClues, Shogun's boot
+                    // menu: both no-story, both with no painted ground). It is
+                    // wrong when the game's picture IS the screen. scopa publishes
+                    // no Buffer window at all — its screen is three Grids — and
+                    // draws its card table entirely with `erase_window` fills, so
+                    // hybrid landed here and rendered SEVEN cells ("abort" and
+                    // "OK") out of a 100×34 pane while raster drew the table.
+                    // A painted ground means there are pixels that only the raster
+                    // composite can show, and it draws the runs over them anyway,
+                    // so fall through to it.
+                    let painted_ground = state.v6_paint.borrow().is_some();
+                    if !painted_ground && runs.iter().any(|t| !t.text.trim().is_empty()) {
                         {
                             // Stamp this path like every other exit (SQ-0637): the
                             // painted menu drops the ring, so the next ring frame is a

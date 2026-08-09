@@ -87,6 +87,16 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **A v6 game with no story window now draws in hybrid mode too.** scopa's card
+  table never streams prose — its whole screen is painted rectangles with a couple
+  of buttons on top — and hybrid mode, which builds a picture frame *around* a
+  terminal transcript, had no transcript to build around. It fell back to the path
+  meant for hint menus, which presents a screen as plain positioned text: the two
+  button labels arrived, seven characters in an otherwise empty pane, and the cards
+  did not. Now a screen the game has painted goes to the full-picture composite
+  whichever render mode you are in, so hybrid shows the table exactly as raster
+  does. Genuinely text-only screens — Zork Zero's InvisiClues, Shogun's boot menu —
+  are untouched and still come up as crisp terminal text.
 - **A v6 game that measures text no longer shrinks its own screen.** Deal a hand
   in scopa and the whole table zoomed out — the cards crammed into a corner with
   big black rectangles beside them. The card game was not drawing any of that: to
