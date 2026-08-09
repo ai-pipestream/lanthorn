@@ -124,6 +124,32 @@ identifies which beta it is without reading its git hash.
   the measurement stays correct while the picture goes back to filling the pane.
   `/dump-windows` now says both, the size the game set and how much of it is on
   screen.
+- **Shogun's title screen keeps its header where the game painted it.** The nine
+  centred banner lines are printed while window 0 still *is* the whole screen;
+  the game then drops window 0 to a small box at the bottom, beside its
+  START/RESTORE/QUIT menu, and prints "You may choose to:" there. The Z-machine
+  standard says moving a window changes nothing already on screen — so on the
+  original the banner stays up top. babelmap streamed both halves into one
+  transcript, which jammed the prompt under the banner and then scrolled the
+  banner out of a four-row box. Prose now freezes where it was printed the moment
+  its window moves out from under it: the banner becomes paint at the exact rows
+  and columns the game chose, and the transcript starts again at the window's new
+  origin, so the opening reads the way it does on an Amiga. Nothing is deleted —
+  the frozen lines stay in scrollback. Prose a window is merely resized *around*
+  keeps streaming as before, which is what every turn of Arthur does.
+- **A backdrop that fills the screen is no longer mistaken for a drop-cap.**
+  Frobozz Magic Videopoker came up with its card table missing — some graphics,
+  no outline — and Journey's title illustration never arrived at all. Both games
+  clear the screen and then paint a full 640×400 picture at its top-left corner,
+  and clearing the screen is also what puts the text cursor there, so the picture
+  looked exactly like one of Zork Zero's illuminated drop-caps: drawn on the
+  current text line, meant to have prose flowing beside it. It got floated into
+  the transcript and the screen never received it. babelmap now asks the question
+  a float actually turns on — *is there room left beside it?* — and a picture
+  spanning the window from edge to edge answers no. The table, the JOURNEY splash
+  and the Mysterious Adventures' title cards all land on the screen now, with the
+  story text over them. Zork Zero's drop-caps and room icons and Shogun's opening
+  ship are untouched: the widest of those still leaves nearly half its window free.
 - **Arthur's opening illustrations are no longer scribbled over.** The sword in
   the churchyard, and Merlin rising out of it, came up with the previous screen's
   narration rasterized straight across the artwork — a wall of text over the

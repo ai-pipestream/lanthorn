@@ -305,6 +305,40 @@ pub struct ZWindow {
     /// The window the game reads input through streams to the host transcript as
     /// before and leaves this empty.
     pub prose: Vec<String>,
+    /// Where on the screen the prose this window has streamed to the host
+    /// transcript is currently sitting (SQ-0697), as runs in the same
+    /// screen-absolute space as [`ZWindow::texts`].
+    ///
+    /// ZMSD §15 is explicit that `move_window`/`window_size` "do not change the
+    /// current display": text already printed stays as pixels where it was
+    /// drawn. A scrolling window is no exception — Shogun prints its whole title
+    /// header while window 0 is the full 640x400 screen, then moves window 0 down
+    /// to a 548x64 box beside its menu and prints "You may choose to:" there. On a
+    /// real interpreter the header stays painted up top; we stream both halves
+    /// into one transcript, so they end up adjacent.
+    ///
+    /// So the stream is shadowed here as it goes out, and
+    /// [`ZWindow::retire_streamed`] hands it over to `texts` — real paint — the
+    /// moment the window's box changes. This is the ONLY use: nothing renders
+    /// from this buffer directly, and while the window stays put the host
+    /// transcript remains the single source of the prose.
+    ///
+    /// Bounded by the window itself: [`ZWindow::prose_new_line`] scrolls the runs
+    /// up with the text and drops whatever leaves the top, so a window that never
+    /// moves holds at most a screenful. `erase_window` empties it, exactly as it
+    /// empties `texts` and `prose` — the pixels are gone, so their record is too.
+    pub streamed: Vec<V6Text>,
+    /// Prose this window streamed that has since been FROZEN in place (SQ-0697):
+    /// the window was moved or resized, and ZMSD §15 keeps what was already
+    /// printed exactly where it was drawn.
+    ///
+    /// Kept apart from [`ZWindow::texts`] rather than folded into it, even though
+    /// both are paint in the same absolute space: `texts` is the window's live
+    /// painted layer and several renderers reason about it as such (its rows are
+    /// the window's own status/menu bars), while this is a layer the window has
+    /// LEFT BEHIND, at coordinates it no longer covers. An erase trims and clears
+    /// the two together — the pixels are shared, so their fates are.
+    pub retired: Vec<V6Text>,
 }
 
 /// One pixel-positioned text run in a v6 grid window: `(y, x)` are the 1-based
@@ -442,7 +476,90 @@ impl ZWindow {
         let fh = V6_FONT_HEIGHT as u32;
         if self.y_cursor as u32 + 2 * fh - 1 <= self.y_size as u32 {
             self.y_cursor += V6_FONT_HEIGHT;
+        } else {
+            // The window scrolled under a stationary cursor, so everything
+            // already on screen moved up one line and the top line left the
+            // window (SQ-0697). Move the shadow with it — a record that claimed
+            // the old rows would freeze the prose in places it no longer is.
+            let top = self.y_coord;
+            for t in self.streamed.iter_mut() {
+                t.y = t.y.saturating_sub(V6_FONT_HEIGHT);
+            }
+            self.streamed.retain(|t| t.y >= top);
         }
+    }
+
+    /// Shadow one streamed glyph at the window cursor's current screen position
+    /// (SQ-0697) — see [`ZWindow::streamed`]. Extends the run in progress when the
+    /// glyph continues it in the same style at the next cell; starts a new one
+    /// otherwise (a new line, a `set_cursor` jump, a style or colour change).
+    pub fn record_streamed(&mut self, ch: char, style: u8, fg: ZColour, bg: ZColour) {
+        // Window coords and cursors are both 1-based, so the absolute position is
+        // origin + cursor - 1 (ZMSD §8.8.1/§8.8.3.2).
+        let x = self.x_coord.saturating_add(self.x_cursor).saturating_sub(1);
+        let y = self.y_coord.saturating_add(self.y_cursor).saturating_sub(1);
+        if let Some(last) = self.streamed.last_mut() {
+            let end = last.x as u32 + last.px_w();
+            if last.y == y
+                && end == x as u32
+                && last.style == style
+                && last.fg == fg
+                && last.bg == bg
+            {
+                last.text.push(ch);
+                return;
+            }
+        }
+        // Insurance only: the scroll in `prose_new_line` already bounds this to a
+        // screenful for any window that stays put, and a window that never
+        // scrolls is one whose prose fits. A story that defeats both still can't
+        // grow the buffer without bound.
+        if self.streamed.len() >= STREAMED_MAX_RUNS {
+            self.streamed.drain(..self.streamed.len() - STREAMED_MAX_RUNS / 2);
+        }
+        self.streamed.push(V6Text { y, x, text: ch.to_string(), style, fg, bg });
+    }
+
+    /// Hand the shadowed prose over to real paint (SQ-0697): the window's box is
+    /// about to become `(x, y, w, h)`, and what it already printed does not move
+    /// with it (ZMSD §15, "does not change the current display").
+    ///
+    /// Only the prose the NEW box no longer covers is frozen. That distinction is
+    /// the whole safety of this feature. Arthur resizes and moves window 0 around
+    /// its narration on almost every turn — the box changes, but it still covers
+    /// the text, which is therefore still the window's own live content and still
+    /// belongs to the streaming transcript. Shogun's title header is the other
+    /// case: window 0 drops from the full 640x400 screen to a 548x64 box at the
+    /// bottom, leaving nine lines of header stranded at rows the window no longer
+    /// reaches. Freezing on the box CHANGING rather than on the box LEAVING froze
+    /// Arthur's prose seven turns running and stacked its stale prompts up as paint.
+    ///
+    /// Returns `true` when anything was frozen, which is the host's cue to restart
+    /// its transcript at the window's new origin.
+    pub fn retire_streamed(&mut self, x: u16, y: u16, w: u16, h: u16) -> bool {
+        if self.streamed.is_empty() {
+            return false;
+        }
+        let (left, top) = (x.max(1) as i32, y.max(1) as i32);
+        let (right, bottom) = (left + w as i32, top + h as i32);
+        let mut kept = Vec::with_capacity(self.streamed.len());
+        let mut froze = false;
+        for run in std::mem::take(&mut self.streamed) {
+            let rx = run.x.max(1) as i32;
+            let ry = run.y.max(1) as i32;
+            let covered = rx >= left
+                && ry >= top
+                && rx + run.px_w() as i32 <= right
+                && ry + V6_FONT_HEIGHT as i32 <= bottom;
+            if covered {
+                kept.push(run);
+            } else {
+                self.retired.push(run);
+                froze = true;
+            }
+        }
+        self.streamed = kept;
+        froze
     }
 
     /// Read property `n` (0–15, ZMSD 1.1 §8.8.3.2). Out-of-range → 0.
@@ -644,17 +761,22 @@ impl V6Windows {
             return;
         }
         for win in self.windows.iter_mut() {
-            if win.texts.iter().any(|t| {
-                let ty = t.y as i32;
-                let tx = t.x as i32;
-                ty + (V6_FONT_HEIGHT as i32) > top
-                    && ty < top + h
-                    && tx + (t.px_w() as i32) > left
-                    && tx < left + w
-            }) {
-                let old = std::mem::take(&mut win.texts);
-                win.texts =
-                    old.into_iter().flat_map(|t| trim_run_against_rect(t, top, left, h, w)).collect();
+            // Both painted layers: what the window is showing now, and the prose
+            // it left frozen behind when it moved (SQ-0697). The erase covers
+            // pixels, and does not care which layer put them there.
+            for layer in [&mut win.texts, &mut win.retired] {
+                if layer.iter().any(|t| {
+                    let ty = t.y as i32;
+                    let tx = t.x as i32;
+                    ty + (V6_FONT_HEIGHT as i32) > top
+                        && ty < top + h
+                        && tx + (t.px_w() as i32) > left
+                        && tx < left + w
+                }) {
+                    let old = std::mem::take(layer);
+                    *layer =
+                        old.into_iter().flat_map(|t| trim_run_against_rect(t, top, left, h, w)).collect();
+                }
             }
         }
     }
@@ -1207,6 +1329,13 @@ pub const GRID_CELL_CAP: u16 = 1024;
 /// earlier lines off. Twice the tallest screen leaves room for that overshoot while
 /// keeping a runaway printer from growing the buffer without bound.
 pub const PROSE_MAX_LINES: usize = 50;
+
+/// Cap on [`ZWindow::streamed`] (SQ-0697). The scroll in
+/// [`ZWindow::prose_new_line`] already bounds the shadow to a screenful for any
+/// window that stays put; this is the backstop for one that never scrolls. A run
+/// per glyph on the tallest v6 screen (25 rows of 80 cells) is 2000, so four
+/// times that is far past anything real while still bounded.
+pub const STREAMED_MAX_RUNS: usize = 8000;
 
 /// Write the screen-dimension header fields for the loaded story's version.
 ///

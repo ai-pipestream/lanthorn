@@ -41,6 +41,7 @@ fn turn(num: u16, name: &str) -> TurnResult {
         timed_out: false,
         pictures: Vec::new(),
         transcript_elems: Vec::new(),
+        prose_retired: None,
     }
 }
 

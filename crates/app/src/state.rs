@@ -800,6 +800,10 @@ pub fn apply_transcript_elems(state: &mut AppState, elems: &[crate::session::Tra
                 state.push_transcript_runs(text, TranscriptKind::Story, runs);
             }
             TranscriptElem::Image(img) => state.push_transcript_image(img.clone()),
+            // The window moved out from under the prose above, which the engine
+            // froze in place (SQ-0697). Everything so far stays in scrollback;
+            // the live screen restarts here, at the window's new origin.
+            TranscriptElem::ScreenClear => state.mark_screen_clear(),
         }
     }
 }
@@ -5975,6 +5979,7 @@ mod tests {
             fault: None,
             pictures: Vec::new(),
             transcript_elems: vec![],
+            prose_retired: None,
         }
     }
 

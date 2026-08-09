@@ -6285,6 +6285,7 @@ mod tests {
                 timed_out: false,
                 pictures: Vec::new(),
                 transcript_elems: Vec::new(),
+                prose_retired: None,
             };
             apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
             state.select_room(Some(snap_number as mapper::graph::RoomId));
@@ -6332,6 +6333,7 @@ mod tests {
                 timed_out: false,
                 pictures: Vec::new(),
                 transcript_elems: Vec::new(),
+                prose_retired: None,
             };
             apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
             state.select_room(Some(snap_number as mapper::graph::RoomId));

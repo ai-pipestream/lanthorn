@@ -667,6 +667,7 @@ impl GlulxSession {
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: elems,
+            prose_retired: None,
         }
     }
 

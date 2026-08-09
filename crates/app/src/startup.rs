@@ -694,7 +694,8 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             .iter()
             .filter_map(|e| match e {
                 app::session::TranscriptElem::Text { text, .. } => Some(text.as_str()),
-                app::session::TranscriptElem::Image(_) => None,
+                app::session::TranscriptElem::Image(_)
+                | app::session::TranscriptElem::ScreenClear => None,
             })
             .collect()
     };
@@ -774,6 +775,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             timed_out: false,
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
+            prose_retired: None,
         };
         apply_turn(&mut mapper, "", &seed_result, &mut state.death_watch);
         crate::turn::flush_screen_trace(&state.config.user_dir, &mut *session, state.config.trace.screen);
