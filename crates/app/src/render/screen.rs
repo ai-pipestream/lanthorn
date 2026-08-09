@@ -2118,6 +2118,9 @@ pub fn build_v6_raster_canvas(
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+    // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
+    // canvas does not draw. The story page below spares them like any chrome text.
+    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors);
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
     // `fill_window_pages`), so `story_clear_native` below still finds it clear.
@@ -2329,6 +2332,12 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
             }
             WinNode::Buffer(b) => {
                 (b.bg, b.fg, b.primary).hash(&mut h);
+                // A SECONDARY prose window's lines are drawn into the composite
+                // (SQ-0729), so a change to them must rebuild it — without this the
+                // cached canvas outlives the text it was built from.
+                if !b.primary {
+                    b.lines.hash(&mut h);
+                }
             }
             _ => {}
         }
@@ -3013,12 +3022,27 @@ enum BottomPlan {
 /// rasterizes the story text over it in one canvas, and already renders this screen
 /// correctly. Detection is deliberately narrow — the story window must cover the
 /// whole screen (within one native text row per edge) AND opaque graphics must sit
-/// behind it across that whole area. An ordinary gameplay screen keeps window 0
-/// inset inside its frame, so it can never qualify.
+/// behind it, either FILLING it or FRAMING it (below). An ordinary gameplay screen
+/// keeps window 0 inset inside its frame, so it can never qualify.
 ///
 /// The opacity test samples a coarse grid rather than every pixel: it runs on every
 /// hybrid frame, and a fully painted picture versus a frame-only (or empty) canvas
 /// is not a close call.
+///
+/// SQ-0729: filling the screen was too strong a test. fmvpoker paints a 640×400
+/// poker table into full-screen window 0 and prints its whole title inside it, and
+/// that table is a FRAME — 17% of its pixels opaque, the middle a hole — so the
+/// grid below misses it at every point that matters and hybrid kept its (empty)
+/// ring. The game drew not one picture on screen. What actually decides this is
+/// the story window covering the screen: that alone leaves `chrome_bands` with
+/// nothing to carve, so NO art behind it can be uploaded whatever its shape. So a
+/// second arm asks whether the art ENCLOSES the screen instead — painted pixels
+/// within a native text row of all four edges, which is "the painted bounding box
+/// spans the screen" without scanning the interior. Measured across the v6 corpus,
+/// this moves fmvpoker alone: Zork Zero and Shogun keep window 0 inset, advent and
+/// scopa paint nothing behind it, Arthur's intro plate and Journey's title already
+/// fill the screen, and mysterious01's plate (a 512×192 band across the lower half)
+/// reaches neither the top edge nor the right one.
 fn picture_takeover(
     story: &crate::engine::PositionedWindow,
     chrome: &[&crate::engine::PositionedWindow],
@@ -3055,14 +3079,30 @@ fn picture_takeover(
             && y - wy < img.height()
             && img.get_pixel(x - wx, y - wy)[3] >= 128
     };
-    (0..N).all(|iy| {
+    let painted = |x: u32, y: u32| {
+        chrome.iter().any(|pw| painted_at(x, y, pw)) || story_gfx.is_some_and(|pw| painted_at(x, y, pw))
+    };
+    let fills_screen = (0..N).all(|iy| {
         let y = native.1 as u32 * (2 * iy + 1) / (2 * N);
         (0..N).all(|ix| {
             let x = native.0 as u32 * (2 * ix + 1) / (2 * N);
-            chrome.iter().any(|pw| painted_at(x, y, pw))
-                || story_gfx.is_some_and(|pw| painted_at(x, y, pw))
+            painted(x, y)
         })
-    })
+    });
+    if fills_screen {
+        return true;
+    }
+    // Or the art FRAMES the screen (SQ-0729): painted pixels within one native text
+    // row of every edge. Probed edge strip by edge strip, so a hollow frame answers
+    // on its border instead of failing on its hole.
+    let (w, h) = (native.0 as u32, native.1 as u32);
+    let any_painted = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+        ys.step_by(2).any(|y| xs.clone().step_by(2).any(|x| painted(x, y)))
+    };
+    any_painted(0..w, 0..slop)
+        && any_painted(0..w, h.saturating_sub(slop)..h)
+        && any_painted(0..slop, 0..h)
+        && any_painted(w.saturating_sub(slop)..w, 0..h)
 }
 
 /// Classify what sits below the story window natively, to pick the [`BottomPlan`]
@@ -3738,7 +3778,6 @@ fn draw_chrome_text_strip(
         }
     }
 }
-
 
 /// SQ-0509: merge horizontally-contiguous same-style fragments of ONE native text
 /// row (`row_runs` sorted by `x`) into single runs. A game that positions status
