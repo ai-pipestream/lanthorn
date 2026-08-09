@@ -1465,7 +1465,7 @@ impl GameSession {
             // Same exclusions as `picture_hold`: an erase is a fill, a window-0
             // cursor draw is a transcript float, and unresolvable art paints
             // nothing. None of them can cover ground or be covered.
-            if ev.erase || ev.number == 0 || (ev.window == 0 && ev.at_cursor) {
+            if ev.erase || ev.number == 0 || self.is_win0_inline_float(ev) {
                 continue;
             }
             let Some((w, h)) = self.pict_source.as_mut().and_then(|p| p.dims(ev.number as u32)) else {
@@ -1496,13 +1496,70 @@ impl GameSession {
     /// what the original hardware did, and why a full plate reads as visibly slower
     /// than a small icon.
     fn picture_hold(&mut self, ev: &PictureEvent) -> Option<std::time::Duration> {
-        if ev.erase || ev.number == 0 || (ev.window == 0 && ev.at_cursor) {
+        if ev.erase || ev.number == 0 || self.is_win0_inline_float(ev) {
             return None;
         }
         let (w, h) = self.pict_source.as_mut()?.dims(ev.number as u32)?;
         let area = (w as u64 * V6_ART_SCALE as u64) * (h as u64 * V6_ART_SCALE as u64);
         let ms = (area / PACE_PX_PER_MS).clamp(PACE_MIN_MS, PACE_MAX_MS);
         Some(std::time::Duration::from_millis(ms))
+    }
+
+    /// Whether a picture event is an INLINE TRANSCRIPT FLOAT — art the game meant
+    /// to flow with window 0's prose — rather than art it placed on the window.
+    ///
+    /// Two things have to hold. The engine's [`PictureEvent::at_cursor`] says the
+    /// picture landed on window 0's current text line (SQ-0695), which is what
+    /// separates Zork Zero's drop-caps and Shogun's opening ship from Arthur's
+    /// centred plates. That alone is not enough: `erase_window` puts the cursor
+    /// back at (1,1), so a game that erases the screen and then paints a backdrop
+    /// at (1,1) — fmvpoker's 640×400 poker table, Journey's opening illustration,
+    /// mysterious01's title art — draws "at the cursor" by pure coincidence
+    /// (SQ-0714). Reading those as floats left `pictures_canvas` empty, so the
+    /// model published no `Graphics` leaf for window 0 at all and the art only
+    /// ever appeared as a transcript image in the text flow.
+    ///
+    /// So the second test asks what a float actually IS: **a float flows beside
+    /// text.** A picture that spans window 0's full width leaves no column for
+    /// text to flow in, and cannot be one — it is placed art, and belongs on the
+    /// window canvas with the prose composited over it.
+    ///
+    /// Measured across the v6 corpus (unit pixels; picture dims doubled by
+    /// [`V6_ART_SCALE`] to match the window box, which is already unit space):
+    ///
+    /// | game        | picture      | draw x | picture w | window w | verdict |
+    /// |-------------|--------------|--------|-----------|----------|---------|
+    /// | Zork Zero   | 2 (drop-cap) | 1      | 84        | 468      | float   |
+    /// | Zork Zero   | 216 (icon)   | 1      | 42        | 468      | float   |
+    /// | Shogun      | 7 (ship)     | 229    | 320       | 548      | float   |
+    /// | Journey     | 160          | 1      | 640       | 640      | canvas  |
+    /// | fmvpoker    | 99           | 1      | 640       | 640      | canvas  |
+    /// | mysterious01| 33           | 1      | 1024      | 640      | canvas  |
+    ///
+    /// The gap is not a tuned threshold — the widest float covers 58% of its
+    /// window, the narrowest canvas covers 100%.
+    ///
+    /// Art that will not resolve keeps the old answer: neither path paints
+    /// anything for it, and guessing a canvas would only create an empty one.
+    fn is_win0_inline_float(&mut self, ev: &PictureEvent) -> bool {
+        if ev.window != 0 || !ev.at_cursor {
+            return false;
+        }
+        let win_w = self
+            .machine
+            .screen
+            .v6
+            .as_ref()
+            .and_then(|v6| v6.windows.first())
+            .map_or(0, |w| u32::from(w.x_size));
+        let Some((pic_w, _)) = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32))
+        else {
+            return true;
+        };
+        // Spans the window: starts at (or left of) its left edge and reaches the
+        // right one. Window coords are 1-based (ZMSD §8.8.1).
+        let spans_window = ev.x <= 1 && pic_w * V6_ART_SCALE >= win_w.max(1);
+        !spans_window
     }
 
     // ── The paced picture sequence, as the app loop drives it (SQ-0708) ───────
@@ -1769,6 +1826,9 @@ impl GameSession {
             }
             return;
         }
+        // Decided before the window borrow below, since it consults `pict_source`
+        // for the picture's own width (see `is_win0_inline_float`).
+        let inline_float = self.is_win0_inline_float(ev);
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
         let Some(w) = v6.windows.get(ev.window as usize) else { return };
         // Snapshot window 0's margin/size state (pixels) so the win0-picture
@@ -1799,7 +1859,11 @@ impl GameSession {
         // plates as separate full-width bands instead of compositing them, and
         // left `pictures_canvas` empty for the whole intro — so the model
         // published no `Graphics` leaf and the art never rasterized at all.
-        if ev.window == 0 && ev.at_cursor {
+        //
+        // A picture that SPANS window 0's full width is not inline either, even
+        // when it lands on the cursor's own line: nothing can flow beside it. See
+        // `is_win0_inline_float` for the corpus measurements (SQ-0714).
+        if inline_float {
             if ev.erase {
                 return; // no canvas to erase; a win0 erase_picture is a no-op here
             }

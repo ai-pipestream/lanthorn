@@ -199,9 +199,21 @@ The tell is where the game put the picture: **on the current text line, or
 somewhere it chose for itself.** A drop-cap is drawn at window 0's text cursor —
 it belongs to the paragraph beside it and has to travel with it. Ask for a
 picture at a row the cursor is nowhere near and you mean something else
-entirely: you have placed it. (Only the vertical axis decides. An inline float's
-horizontal position is a margin choice — Shogun parks its ship at the right edge
-and still means "beside this paragraph".)
+entirely: you have placed it. (An inline float's horizontal position is a margin
+choice — Shogun parks its ship at the right edge and still means "beside this
+paragraph".)
+
+There is a second question, because clearing the screen also puts the cursor
+back at its top-left corner: **is there any room left beside the picture?** A
+float, by definition, has prose flowing next to it. A picture that spans window
+0 from edge to edge leaves no column for that prose, so it cannot be one — it is
+a backdrop, and it goes on the window's own canvas with the story text drawn
+over it. Frobozz Magic Videopoker paints its whole card table that way, Journey
+its title illustration, the Mysterious Adventures their title cards; every one of
+them draws at (1,1) immediately after erasing the screen and would otherwise be
+mistaken for the world's largest drop-cap. The margin between the two readings is
+not a fine one: the widest genuine float in the Infocom v6 catalogue — Shogun's
+ship — covers 58% of its window, and every backdrop covers all of it.
 
 ## Full-page plates — art the game placed itself
 

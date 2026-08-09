@@ -87,6 +87,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **A backdrop that fills the screen is no longer mistaken for a drop-cap.**
+  Frobozz Magic Videopoker came up with its card table missing — some graphics,
+  no outline — and Journey's title illustration never arrived at all. Both games
+  clear the screen and then paint a full 640×400 picture at its top-left corner,
+  and clearing the screen is also what puts the text cursor there, so the picture
+  looked exactly like one of Zork Zero's illuminated drop-caps: drawn on the
+  current text line, meant to have prose flowing beside it. It got floated into
+  the transcript and the screen never received it. babelmap now asks the question
+  a float actually turns on — *is there room left beside it?* — and a picture
+  spanning the window from edge to edge answers no. The table, the JOURNEY splash
+  and the Mysterious Adventures' title cards all land on the screen now, with the
+  story text over them. Zork Zero's drop-caps and room icons and Shogun's opening
+  ship are untouched: the widest of those still leaves nearly half its window free.
 - **Arthur's opening illustrations are no longer scribbled over.** The sword in
   the churchyard, and Merlin rising out of it, came up with the previous screen's
   narration rasterized straight across the artwork — a wall of text over the
