@@ -29,6 +29,12 @@ pub fn next_draw_seq() -> u64 {
     DRAW_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Cloning is cheap: the pixels ride an `Arc` and every mutator goes through
+/// `Arc::make_mut`, so a clone is a refcount bump that only copies if one of the
+/// two is painted afterwards. That is what makes the v6 picture pacer's
+/// intermediate frames (SQ-0708) affordable — it snapshots the whole canvas map
+/// at each step of a turn's picture sequence.
+#[derive(Clone)]
 pub struct Canvas {
     pub img: Arc<RgbaImage>,
     bg: Rgba<u8>,
