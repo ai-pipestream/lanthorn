@@ -48,6 +48,20 @@ rendered by doubling the 8×8 glyph masters vertically to fill the 8×16 cell.
 Screen size and picture size double *together*, so the frame-vs-content picture
 classification (which is pure ratios) lands exactly where it did before.
 
+And that screen is a **hard edge**. A v6 game may size a window far past it,
+because `window_size` doubles as a measuring instrument: scopa opens a scratch
+window 1000×1000 so a string it is about to print cannot wrap, reads the width
+back, and moves on. Taken literally that one window is bigger than the screen,
+and since the composite spans every window the game has open, the whole picture
+would shrink to fit it — the table crammed into a corner with black bands where
+the oversized window's page fell off the world. babelmap draws the part of a
+window that exists: each box is clipped to the screen the header declares
+(§8.4.3's width and height words) before anything is composited. The clip is
+purely what gets *drawn* — the interpreter still reports the size the game wrote
+when the game asks for it back, which is the whole point of the trick scopa is
+pulling. `/dump-windows` shows both: the size the game set, and what of it is on
+screen.
+
 ## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
