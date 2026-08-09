@@ -71,6 +71,38 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun's title screen is centred again — because Shogun centres it.** The
+  header that opens Shogun (`SHOGUN`, `A Story of Japan`, the copyright block)
+  arrived jammed against the left margin. Shogun does the centring itself, in
+  pixels: for every line it reads its own window's width, works out the centred
+  column, and moves the cursor there — then prints the text with no leading
+  spaces at all. The centring was never in the text, so streaming the text and
+  dropping the cursor column lost it entirely. babelmap now carries a declared
+  column into the transcript as an indent; at the v6 cell width of 8 pixels the
+  two measurements are the same one, and every line lands exactly where the game
+  worked out it should. Journey's title screen, centred the same way, comes
+  right with it. Games that declare nothing are untouched: Arthur only ever
+  moves the cursor to switch it on and off, and Zork Zero only ever asks for
+  column 1.
+
+- **Arthur's intro illustrations actually appear — where Arthur put them.** The
+  three plates that open Arthur (the sword in the stone, the churchyard, Merlin)
+  never rendered at all. Arthur lays those screens out itself: it clears every
+  window, asks window 0 how big it is, centres the 584×392 plate by hand at
+  x=29, y=5, and narrates over it. babelmap treated *every* window-0 picture as
+  an inline drop-cap — the Zork Zero idiom, where the art is drawn on the text
+  cursor and has to scroll with the paragraph beside it — so Arthur's backdrops
+  were pushed into the transcript as floats, no window canvas was ever made, and
+  the art never rasterized. The two plates of the Merlin screen would also have
+  stacked as separate bands instead of compositing, losing the effect of Merlin
+  appearing *on* the graveyard. The engine now records whether a picture was
+  placed on the window's current text line or at a position the game chose, and
+  a placed one gets a real canvas at the pixel origin the game named, with later
+  draws compositing into it. The margin Arthur deliberately left around each
+  plate stays the page — the art is not stretched to fill it. Drop-caps, room
+  icons and Shogun's margin-parked ship are untouched: all three are drawn on
+  the cursor, and still float with the prose.
+
 - **Zork Zero's room icons stop sitting on a black box.** The little compass and
   room icons in Zork Zero's banner are line art on a *clear* ground — 95% of
   each 45×40 picture is fully transparent — and the bottom of every one of them

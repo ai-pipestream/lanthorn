@@ -195,6 +195,50 @@ at the left margin of the story text and wraps the surrounding lines beside
 them, so they scroll naturally with the transcript instead of sitting in a
 fixed frame.
 
+The tell is where the game put the picture: **on the current text line, or
+somewhere it chose for itself.** A drop-cap is drawn at window 0's text cursor —
+it belongs to the paragraph beside it and has to travel with it. Ask for a
+picture at a row the cursor is nowhere near and you mean something else
+entirely: you have placed it. (Only the vertical axis decides. An inline float's
+horizontal position is a margin choice — Shogun parks its ship at the right edge
+and still means "beside this paragraph".)
+
+## Full-page plates — art the game placed itself
+
+Arthur opens on three illustrated screens, and it lays each one out by hand.
+It clears every window, asks window 0 how big it is, does the centring
+arithmetic itself — a 584×392 plate in a 640×400 window lands at x=29, y=5 —
+draws the plate there, and only then narrates over it. The Merlin screen redraws
+the graveyard at that same origin and composites Merlin *inside* it, so the
+wizard appears on the graveyard in a single frame rather than beneath it in a
+second one.
+
+babelmap honours that arithmetic. A window-0 picture the game placed rather than
+inlined gets a real window canvas, at the pixel origin the game named, and later
+draws composite into the same canvas exactly as they would on an Amiga. The
+centring margin the game deliberately left around the plate stays the story
+window's own page — we don't stretch art to fill space the author left empty.
+Because such a screen has no frame ring at all, `hybrid` hands the frame to the
+full-canvas compositor (the same path Zork Zero's map takes), which draws the
+plate and rasterizes the narration onto it in one image.
+
+## Prose the game positions itself
+
+A v6 window that wraps and scrolls streams its text, and babelmap renders that
+stream as real terminal text — selectable, scrollable, reflowing to your pane.
+But a game can still position that prose horizontally, and some do. Shogun's
+title screen is the case: for every header line it reads its own window's width,
+computes the centred column, moves the cursor there, and prints the line with no
+leading spaces whatsoever. The centring lives entirely in the cursor move.
+
+babelmap carries that declaration into the text stream as an indent. The v6 cell
+is 8 pixels wide, so the pixel column and the character column are the same
+measurement — column 297 is character 37, which is exactly where a six-letter
+title centres on an eighty-column screen. Every line of Shogun's header lands on
+the column it asked for, and Journey's title screen, which centres itself the
+same way, comes out right for the same reason. A game that never declares a
+column never gains an indent.
+
 ## Margin pictures — text that flows past the art
 
 Some v6 scenes put the picture on one side and let the prose flow past it.

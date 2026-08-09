@@ -1486,13 +1486,28 @@ impl GameSession {
         // picture) — captured here at drain time.
         let (win0_left_margin, win0_right_margin, win0_x_size) =
             (w.left_margin, w.right_margin, w.x_size);
-        // Window 0 is the main scrolling text window: its pictures are INLINE
-        // story content (Zork Zero's drop-caps and room icons, drawn at the
-        // text cursor with a margin set for the text to flow beside them).
-        // They anchor to the transcript at their output-char position rather
-        // than painting a window canvas — the raster/hybrid renderers float
-        // them beside the text they belong to, and they scroll with it.
-        if ev.window == 0 {
+        // Window 0 is the main scrolling text window, and a picture drawn ON ITS
+        // CURRENT TEXT LINE is INLINE story content (Zork Zero's drop-caps and
+        // room icons, drawn at the text cursor with a margin set for the text to
+        // flow beside them; Shogun's opening ship, `y = 0` with a right margin).
+        // Those anchor to the transcript at their output-char position rather
+        // than painting a window canvas — the raster/hybrid renderers float them
+        // beside the text they belong to, and they scroll with it.
+        //
+        // A picture the game placed SOMEWHERE ELSE in window 0 is not inline at
+        // all: it is absolutely placed, and falls through to the ordinary window
+        // canvas below like any other window's art (SQ-0695). Arthur's intro is
+        // the case — for each illustrated screen it erases every window, reads
+        // window 0's own size (`get_wind_prop` props 2/3 → 400×640), centres the
+        // 584×392 plate itself (x = (640−584)/2+1 = 29, y = (400−392)/2+1 = 5) and
+        // draws it there while the text cursor is still at (1,1), then narrates
+        // OVER it; the Merlin screen redraws the same plate and composites
+        // picture 3 inside it at (81,51). Floating those as transcript images
+        // discarded the placement the game had just computed, stacked the two
+        // plates as separate full-width bands instead of compositing them, and
+        // left `pictures_canvas` empty for the whole intro — so the model
+        // published no `Graphics` leaf and the art never rasterized at all.
+        if ev.window == 0 && ev.at_cursor {
             if ev.erase {
                 return; // no canvas to erase; a win0 erase_picture is a no-op here
             }
@@ -5151,7 +5166,7 @@ mod tests {
         let mut windows: [ZWindow; 8] = Default::default();
         windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
         machine.screen.v6 = Some(V6Windows { windows, current: 7 });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false });
 
         // Construct the session directly (bypassing the constructor's boot
         // loop, which this synthetic story can't usefully run) with a Pict
@@ -5177,7 +5192,7 @@ mod tests {
         assert!(sess.pictures_canvas.is_empty(), "no canvas before the turn is drained");
         let result = sess.drain_turn(false, None, false);
 
-        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None }],
+        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false }],
             "the drained event is carried on TurnResult (mirrors pending_sounds)");
         assert!(sess.machine.pending_pictures.is_empty(), "the VM queue is drained after the turn");
 
@@ -5230,7 +5245,7 @@ mod tests {
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
-        let draw = PictureEvent { number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None };
+        let draw = PictureEvent { number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false };
         sess.apply_picture_event(&draw);
         assert_eq!(sess.story_pics.len(), 1, "content splash anchors one inline band");
         assert_eq!(sess.story_pics[0].1.source, crate::inline_image::ImageSource::ContentSplash);
@@ -5239,7 +5254,7 @@ mod tests {
         assert_eq!(sess.story_pics.len(), 1, "a repeat draw of the same pic is deduped");
 
         // Canvas clear (erase_window rides the queue as number 0) resets dedupe.
-        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None });
+        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: false });
         sess.apply_picture_event(&draw);
         assert_eq!(sess.story_pics.len(), 2, "after a canvas clear a fresh draw anchors again");
     }
@@ -5280,7 +5295,7 @@ mod tests {
 
         // The pre-restart session draws at the window's top-left corner…
         sess.apply_picture_event(&PictureEvent {
-            number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None,
+            number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
         });
         assert_eq!(sess.display_ops.get(&7).map_or(0, Vec::len), 1, "the draw is recorded for replay");
         // …and something took window 7 out of replay (an op-cap overflow in a long
@@ -5298,7 +5313,7 @@ mod tests {
         // The rebooted game draws the SAME picture somewhere else, then a base
         // picture establishes a new palette and every window replays.
         sess.apply_picture_event(&PictureEvent {
-            number: 1, window: 7, x: 33, y: 1, erase: false, out_chars: 0, margin_after: None,
+            number: 1, window: 7, x: 33, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
         });
         sess.replay_under_current_palette();
 
@@ -5342,7 +5357,7 @@ mod tests {
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
-        sess.apply_picture_event(&PictureEvent { number: 3, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None });
+        sess.apply_picture_event(&PictureEvent { number: 3, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false });
         assert!(sess.story_pics.is_empty(), "frame art stays canvas-only");
         assert!(sess.pictures_canvas.contains_key(&7), "but it IS drawn into the window canvas");
     }
@@ -5358,8 +5373,8 @@ mod tests {
         machine.screen.v6 = Some(V6Windows { windows, current: 7 });
         // Draw, then erase the same picture — the erase must clear back to
         // transparent over the picture's own footprint (2x2, ZMSD §15).
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true, out_chars: 0, margin_after: None });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true, out_chars: 0, margin_after: None, at_cursor: false });
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
@@ -5569,7 +5584,7 @@ mod tests {
         // The erase path allocates the canvas even without a resolved image.
         // (number != 0: a real erase_picture — number 0 is the erase_window
         // canvas-clear sentinel, which removes the canvas instead.)
-        sess.apply_picture_event(&PictureEvent { number: 5, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None });
+        sess.apply_picture_event(&PictureEvent { number: 5, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None, at_cursor: false });
         let c = sess.pictures_canvas.get(&7).expect("erase allocated a canvas");
         assert!(c.img.width() <= 4096 && c.img.height() <= 4096,
             "canvas clamped, got {}x{}", c.img.width(), c.img.height());
