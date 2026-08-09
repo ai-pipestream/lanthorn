@@ -1,6 +1,8 @@
 //! Zero-dependency parser for the IFF "Blorb" interactive-fiction resource
 //! container. Exposes the embedded executable and a generic resource accessor.
 
+pub mod infocom_pics;
+
 /// Errors that can arise while parsing a Blorb container.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BlorbError {
