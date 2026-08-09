@@ -57,6 +57,20 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun's title screen is centred again — because Shogun centres it.** The
+  header that opens Shogun (`SHOGUN`, `A Story of Japan`, the copyright block)
+  arrived jammed against the left margin. Shogun does the centring itself, in
+  pixels: for every line it reads its own window's width, works out the centred
+  column, and moves the cursor there — then prints the text with no leading
+  spaces at all. The centring was never in the text, so streaming the text and
+  dropping the cursor column lost it entirely. babelmap now carries a declared
+  column into the transcript as an indent; at the v6 cell width of 8 pixels the
+  two measurements are the same one, and every line lands exactly where the game
+  worked out it should. Journey's title screen, centred the same way, comes
+  right with it. Games that declare nothing are untouched: Arthur only ever
+  moves the cursor to switch it on and off, and Zork Zero only ever asks for
+  column 1.
+
 - **Arthur's intro illustrations actually appear — where Arthur put them.** The
   three plates that open Arthur (the sword in the stone, the churchyard, Merlin)
   never rendered at all. Arthur lays those screens out itself: it clears every

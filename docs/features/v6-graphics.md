@@ -222,6 +222,23 @@ Because such a screen has no frame ring at all, `hybrid` hands the frame to the
 full-canvas compositor (the same path Zork Zero's map takes), which draws the
 plate and rasterizes the narration onto it in one image.
 
+## Prose the game positions itself
+
+A v6 window that wraps and scrolls streams its text, and babelmap renders that
+stream as real terminal text — selectable, scrollable, reflowing to your pane.
+But a game can still position that prose horizontally, and some do. Shogun's
+title screen is the case: for every header line it reads its own window's width,
+computes the centred column, moves the cursor there, and prints the line with no
+leading spaces whatsoever. The centring lives entirely in the cursor move.
+
+babelmap carries that declaration into the text stream as an indent. The v6 cell
+is 8 pixels wide, so the pixel column and the character column are the same
+measurement — column 297 is character 37, which is exactly where a six-letter
+title centres on an eighty-column screen. Every line of Shogun's header lands on
+the column it asked for, and Journey's title screen, which centres itself the
+same way, comes out right for the same reason. A game that never declares a
+column never gains an indent.
+
 ## Margin pictures — text that flows past the art
 
 Some v6 scenes put the picture on one side and let the prose flow past it.

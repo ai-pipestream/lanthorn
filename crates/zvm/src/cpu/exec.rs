@@ -219,6 +219,13 @@ pub struct Machine {
     /// window) — stamps `PictureEvent::out_chars` so window-0 inline pictures
     /// anchor to their position in the text stream. Monotonic, never reset.
     pub v6_win0_out_chars: u64,
+    /// A `(window, pixel column)` a v6 `set_cursor` just DECLARED, pending the
+    /// next print to that window — see [`Machine::v6_take_declared_indent`]
+    /// (SQ-0697). Transient one-shot state between the opcode and the print it
+    /// positions; nothing outside that pair reads it, and it is re-armed by the
+    /// story's own `set_cursor` on any path that matters, so it carries no
+    /// snapshot weight.
+    pub v6_declared_x: Option<(u8, u16)>,
     /// The v6 window the game last asked for INPUT through, when that window was a
     /// flowing-prose one (SQ-0585). It is the game's main text window by definition
     /// — the one the player types into — so its output is what the host mirrors as
@@ -417,6 +424,7 @@ impl Machine {
             picture_dims: Vec::new(),
             pending_pictures: Vec::new(),
             v6_win0_out_chars: 0,
+            v6_declared_x: None,
             v6_input_window: 0,
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
@@ -1976,6 +1984,13 @@ impl Machine {
                             // clamp to 1 for any zero/negative operand.
                             w.y_cursor = if (row as i16) < 1 { 1 } else { row };
                             w.x_cursor = if (col as i16) < 1 { 1 } else { col };
+                            // Remember that this column was DECLARED, so prose
+                            // streaming out of a wrap+scroll window can carry it
+                            // as an indent instead of dropping it — see
+                            // `v6_take_declared_indent` (SQ-0697). Armed only
+                            // here, so the cursor advancing over printed text can
+                            // never be mistaken for a fresh declaration.
+                            self.v6_declared_x = Some((win, w.x_cursor));
                         }
                     }
                 } else {
@@ -3292,6 +3307,45 @@ impl Machine {
         self.newline_interrupt_active = false;
     }
 
+    /// Consume a pending v6 `set_cursor` COLUMN as a leading indent, in characters,
+    /// for prose about to stream to the transcript (SQ-0697).
+    ///
+    /// A v6 window that wraps and scrolls streams its text; ZMSD §15's `set_cursor`
+    /// stores a pixel column on it and nothing downstream ever reads that column
+    /// back, so a game that positions its prose horizontally had the position
+    /// silently dropped. Shogun's title screen is the case: it centres **every**
+    /// header line itself, in pixels, from its own geometry —
+    ///
+    /// ```text
+    /// @get_wind_prop(win=0, prop=3) -> 640     ; the window's width
+    /// @set_cursor(row=49, col=297, window=0)   ; centred x for "SHOGUN"
+    /// ```
+    ///
+    /// — and prints the six letters of `SHOGUN` one at a time with no leading
+    /// spaces at all. The centring is not in the text; it is in the column. At the
+    /// v6 cell width of 8 px the two spaces are the same space: column 297 is
+    /// character 37, and `(80 - 6) / 2` is 37. Every line of the header lands on
+    /// its ideal column that way — 257→32, 205→25, 241→30, 169→21, 105→13 — so
+    /// carrying the declaration into the stream as an indent reproduces the layout
+    /// the game asked for, in the one coordinate space a scrolling transcript has.
+    ///
+    /// The declaration is ONE-SHOT and is armed only by `set_cursor` itself, never
+    /// by the cursor advancing over printed text: Shogun prints character by
+    /// character, and re-deriving an indent from `x_cursor` on every call would
+    /// re-indent each letter. It is dropped rather than deferred when the first
+    /// print after it is a bare newline (the game moved on), and an indent is only
+    /// produced for a column genuinely right of the window's left margin.
+    fn v6_take_declared_indent(&mut self, s: &str) -> usize {
+        let Some((win, col)) = self.v6_declared_x.take() else { return 0 };
+        let Some(v6) = self.screen.v6.as_ref() else { return 0 };
+        if win != v6.current || s.starts_with('\n') {
+            return 0;
+        }
+        let w = &v6.windows[(win as usize).min(7)];
+        // 1-based pixel column, relative to the window's own left margin.
+        usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / V6_FONT_WIDTH)
+    }
+
     /// Advance the current v6 window's cursor as `s` streams out through the
     /// scrolling prose path (ZMSD §8.8.3.2.7: the cursor a game reads back
     /// must be accurate for the text already printed — with nothing held in a
@@ -3686,23 +3740,30 @@ impl Machine {
                     v6.windows[cur].push_prose(s);
                 }
             } else {
+                // A column this window's own `set_cursor` DECLARED for the text
+                // about to stream, carried into the character stream as an indent
+                // (SQ-0697). See `v6_take_declared_indent`.
+                let indent = self.v6_take_declared_indent(s);
                 // v6: this is window 0's (the main scrolling window's) output.
                 // Count its chars so window-0 inline pictures can anchor to their
-                // exact position in the text stream (PictureEvent::out_chars).
+                // exact position in the text stream (PictureEvent::out_chars) —
+                // the indent is real streamed text, so it counts like any other.
                 if self.screen.v6.is_some() {
-                    self.v6_win0_out_chars += s.chars().count() as u64;
+                    self.v6_win0_out_chars += (s.chars().count() + indent) as u64;
                 }
                 let attrs = crate::io::TextAttrs {
                     style: self.screen.text_style,
                     fg: self.screen.current_fg,
                     bg: self.screen.current_bg,
                 };
-                if font3 {
-                    let translated: String = s.chars().map(|ch| {
+                if font3 || indent != 0 {
+                    let mut text = String::with_capacity(indent + s.len());
+                    text.extend(std::iter::repeat_n(' ', indent));
+                    text.extend(s.chars().map(|ch| {
                         let code = ch as u32;
-                        if (32..=126).contains(&code) { font3_translate(ch) } else { ch }
-                    }).collect();
-                    self.out.print_attr(&translated, attrs);
+                        if font3 && (32..=126).contains(&code) { font3_translate(ch) } else { ch }
+                    }));
+                    self.out.print_attr(&text, attrs);
                 } else {
                     self.out.print_attr(s, attrs);
                 }
