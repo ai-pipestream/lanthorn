@@ -87,6 +87,20 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **THE BAT's title page stops putting rooms on the map.** The game opens on an act
+  list — *Prologue • ACT I • Interlude • …* — and then a prologue headed *Excerpted
+  from the New Gothenburg Post:*, and the automap had drawn both as rooms before the
+  player had typed a single command. Neither is a place; they only look like one,
+  because Inform bolds a room heading and a title with the same style. babelmap now
+  reads the shape of the page rather than the words on it. A room heading is joined
+  to the description printed directly beneath it, and the turn that prints one ends
+  by handing you the command prompt; a banner stands alone above a blank line on a
+  page that ends by asking you to press any key. Both halves have to agree, and each
+  is load-bearing: Adventure in `superbrief` prints a room as a bold line, a blank
+  line and a list of what's lying about, which the first half alone would discard,
+  while a room you really did walk into can perfectly well be followed by a cutscene
+  that ends on a keypress. Kerkerkruip's screen-reader question, whose *Enable* was
+  bold and at the start of its line, stops being a room too.
 - **advent.z6's help bar stops losing letters, and wide terminals stop clipping the
   line.** Opening `help` in Adventure showed a navigation bar reading
   `N   n xt subj ct` and `RETURN = r ad subjec` — the `=`, three lowercase `e`s and

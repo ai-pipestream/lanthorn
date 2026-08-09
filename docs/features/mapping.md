@@ -71,7 +71,14 @@ still there long after the turn that discovered it.
   you enter a room (`via room heading`). Games like FooFoo and Superluminal
   Vagrant Twin map cleanly this way; rooms are matched by name since the Glulx
   world model isn't introspectable, and pre-game menus or character-setup screens
-  correctly produce no room.
+  correctly produce no room. Front matter is bolded the same way a room is, so
+  babelmap reads the *shape of the page* rather than the words on it: Inform
+  joins a room heading to the description underneath it and then hands you the
+  command prompt, while a title, an act list or a content warning stands alone
+  above a blank line on a page that ends by asking for a keypress. That is why
+  THE BAT's act list and its prologue's newspaper strapline don't become rooms,
+  and why Adventure in `superbrief` — where a room is a bold line, a blank line
+  and a list of what's lying about — still does.
 - **Scott Adams** adventures feed their locations straight through the same
   engine-agnostic pipeline — nothing special to configure.
 

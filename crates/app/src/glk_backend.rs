@@ -209,6 +209,17 @@ pub struct AppGlk {
     /// Whether `heading_acc` is an active heading run (a `Subheader` run that
     /// began at line start and has not yet been terminated).
     in_heading: bool,
+    /// A finished heading line still awaiting the verdict of what follows it —
+    /// see [`HeadingTail`]. Promoted to `last_heading` once it is confirmed.
+    heading_pending: Option<String>,
+    /// Where the output stream sits relative to `heading_pending`.
+    heading_tail: HeadingTail,
+    /// Output seen since the blank line that detached `heading_pending` from the
+    /// rest of the turn, capped at [`HEADING_TAIL_CAP`] chars.
+    heading_tail_text: String,
+    /// Set once `heading_tail_text` hit the cap: whatever follows the blank line
+    /// is far too long to be a bare read prompt, so it is prose.
+    heading_tail_prose: bool,
     /// Graphics-window pixel canvases, keyed by window id.
     graphics: std::collections::BTreeMap<u32, crate::graphics::Canvas>,
     /// The `(width, height)` of one text-grid cell in pixels, for pixel↔cell
@@ -237,6 +248,28 @@ impl Default for AppGlk {
     fn default() -> Self {
         AppGlk::new(80, 24)
     }
+}
+
+/// How much output after the blank line following a heading candidate is kept.
+/// Only enough to recognise a bare read prompt; anything longer is prose.
+const HEADING_TAIL_CAP: usize = 32;
+
+/// Where the primary window's output stream sits relative to the heading
+/// candidate held in `AppGlk::heading_pending` — the states of the "is this
+/// heading joined to a room description, or set off as a banner?" test.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HeadingTail {
+    /// No candidate is awaiting a verdict.
+    Idle,
+    /// Still on the candidate's own line (a heading run can end before the line
+    /// does — Inform prints "Kitchen" in `Subheader` and the "(on the chair)"
+    /// parenthetical after it in roman).
+    Line,
+    /// The candidate's line just ended; the very next character decides.
+    LineEnd,
+    /// A blank line followed the candidate, so it stands apart from whatever
+    /// comes next. `heading_tail_text` collects that "whatever".
+    Detached,
 }
 
 /// One styled text chunk drained by `take_transcript`: `(char_count, style-bits,
@@ -273,6 +306,10 @@ impl AppGlk {
             last_heading: None,
             at_line_start: true,
             in_heading: false,
+            heading_pending: None,
+            heading_tail: HeadingTail::Idle,
+            heading_tail_text: String::new(),
+            heading_tail_prose: false,
             graphics: BTreeMap::new(),
             char_px,
             picts,
@@ -517,6 +554,13 @@ impl AppGlk {
     /// at the next newline or when the style leaves `Subheader`; the LAST heading
     /// in a turn wins, so a banner title printed earlier on its own line is
     /// overwritten by the real room heading.
+    ///
+    /// A finished heading line is only a *candidate*: an Inform 7 room heading is
+    /// joined to the room description that follows it, whereas a title, act
+    /// header or content warning is set off by a blank line. See
+    /// [`Self::advance_heading_tail`] — that is the test THE BAT needs, whose
+    /// title page and prologue each print two own-line `Subheader` banners before
+    /// play begins (SQ-0732).
     fn capture_heading(&mut self, style: GlkStyle, s: &str) {
         let is_sub = style == GlkStyle::Subheader;
         for ch in s.chars() {
@@ -525,6 +569,7 @@ impl AppGlk {
                     self.finalize_heading();
                     self.in_heading = false;
                 }
+                self.advance_heading_tail('\n');
                 self.at_line_start = true;
                 continue;
             }
@@ -534,33 +579,113 @@ impl AppGlk {
                 }
                 if self.in_heading {
                     self.heading_acc.push(ch);
+                } else {
+                    // A `Subheader` run that began mid-line is an inline link.
+                    self.advance_heading_tail(ch);
                 }
-                // A `Subheader` run that began mid-line is an inline link → ignore.
-            } else if self.in_heading {
-                // Non-`Subheader` text on the heading's line ends the heading run.
-                self.finalize_heading();
-                self.in_heading = false;
+            } else {
+                if self.in_heading {
+                    // Non-`Subheader` text on the heading's line ends the heading
+                    // run — but not the heading's LINE (Inform prints the
+                    // "(on the chair)" parenthetical in roman after the name).
+                    self.finalize_heading();
+                    self.in_heading = false;
+                }
+                self.advance_heading_tail(ch);
             }
             self.at_line_start = false;
         }
     }
 
+    /// Feed one non-heading character to the "what follows the candidate?" test.
+    ///
+    /// The Inform 7 room-description layout puts the heading and the description
+    /// in one paragraph — the description starts on the very next line. A banner,
+    /// act header, title or content warning is its own paragraph, separated from
+    /// the next by a blank line. So text on the line directly below a candidate
+    /// confirms it outright; a blank line only makes it *detachable*, and
+    /// [`Self::take_room_heading`] decides from there.
+    fn advance_heading_tail(&mut self, ch: char) {
+        match self.heading_tail {
+            HeadingTail::Idle => {}
+            HeadingTail::Line => {
+                if ch == '\n' {
+                    self.heading_tail = HeadingTail::LineEnd;
+                }
+            }
+            HeadingTail::LineEnd => {
+                if ch == '\n' {
+                    self.heading_tail = HeadingTail::Detached;
+                } else {
+                    self.confirm_heading();
+                }
+            }
+            HeadingTail::Detached => {
+                if self.heading_tail_text.chars().count() < HEADING_TAIL_CAP {
+                    self.heading_tail_text.push(ch);
+                } else {
+                    self.heading_tail_prose = true;
+                }
+            }
+        }
+    }
+
+    /// Accept the pending candidate as this turn's room heading.
+    fn confirm_heading(&mut self) {
+        if let Some(name) = self.heading_pending.take() {
+            self.last_heading = Some(name);
+        }
+        self.heading_tail = HeadingTail::Idle;
+        self.heading_tail_text.clear();
+        self.heading_tail_prose = false;
+    }
+
     /// Promote the accumulated `Subheader` text (if any, trimmed non-empty) to
-    /// the last-heading slot and clear the accumulator.
+    /// the pending-candidate slot, to be confirmed or rejected by what follows.
     fn finalize_heading(&mut self) {
         let line = self.heading_acc.trim().to_string();
         self.heading_acc.clear();
         if !line.is_empty() {
-            self.last_heading = Some(line);
+            self.heading_pending = Some(line);
+            self.heading_tail = HeadingTail::Line;
+            self.heading_tail_text.clear();
+            self.heading_tail_prose = false;
         }
     }
 
     /// Return and clear the last `Subheader` room heading captured since the
     /// previous call. Drained once per turn, alongside `take_transcript`.
-    pub fn take_room_heading(&mut self) -> Option<String> {
+    ///
+    /// `awaiting_command` says whether the turn ended with the game asking for a
+    /// typed command (Glk line input) rather than a keypress. It is the second
+    /// half of the banner test: a heading that a blank line has already detached
+    /// from the prose below it is a room only if the player is being handed the
+    /// command prompt. A game that instead says "press any key to continue" was
+    /// showing a page — THE BAT's title, its act list and its prologue's
+    /// newspaper strapline are all own-line `Subheader` lines on such pages, and
+    /// each used to mint a room before play began (SQ-0732).
+    ///
+    /// The two halves are deliberately an AND. Either alone loses real rooms:
+    /// Adventure in `superbrief` prints "Inside Building", a blank line and then
+    /// only its object list, while a room heading can perfectly well be followed
+    /// by a cutscene that ends on a keypress.
+    pub fn take_room_heading(&mut self, awaiting_command: bool) -> Option<String> {
         if self.in_heading {
             self.finalize_heading(); // flush a heading with no trailing separator yet
             self.in_heading = false;
+        }
+        // The read prompt the game printed on its way to asking for input is not
+        // prose: in `superbrief` a room is the heading, a blank line and ">".
+        let detached = self.heading_tail == HeadingTail::Detached
+            && (self.heading_tail_prose
+                || !crate::session::strip_read_prompt(&self.heading_tail_text).trim().is_empty());
+        if detached && !awaiting_command {
+            self.heading_pending = None;
+            self.heading_tail = HeadingTail::Idle;
+            self.heading_tail_text.clear();
+            self.heading_tail_prose = false;
+        } else {
+            self.confirm_heading();
         }
         self.last_heading.take()
     }
@@ -883,6 +1008,10 @@ impl GlkBackend for AppGlk {
             self.at_line_start = true;
             self.in_heading = false;
             self.heading_acc.clear();
+            // The wiped window carries away the blank line that would have judged
+            // a pending candidate, so settle it now: a heading already printed
+            // stands, exactly as it did before the candidate slot existed.
+            self.confirm_heading();
             // Signal the app to pin the upcoming reprint to a fresh screen
             // instead of appending a fresh copy (menu redraws). (SQ-0403)
             self.primary_cleared = true;
@@ -1885,9 +2014,9 @@ mod heading_tests {
         let mut b = primary_backend();
         put(&mut b, GlkStyle::Subheader, "Studio Apartment\n");
         put(&mut b, GlkStyle::Normal, "You climb out of bed.\n");
-        assert_eq!(b.take_room_heading().as_deref(), Some("Studio Apartment"));
+        assert_eq!(b.take_room_heading(true).as_deref(), Some("Studio Apartment"));
         // Drained: a second call with no new heading is None.
-        assert_eq!(b.take_room_heading(), None);
+        assert_eq!(b.take_room_heading(true), None);
     }
 
     #[test]
@@ -1897,7 +2026,7 @@ mod heading_tests {
         put(&mut b, GlkStyle::Normal, " by lynnea glasser\n");
         put(&mut b, GlkStyle::Subheader, "Inside the Cellarium");
         put(&mut b, GlkStyle::Normal, "A white structure.\n");
-        assert_eq!(b.take_room_heading().as_deref(), Some("Inside the Cellarium"));
+        assert_eq!(b.take_room_heading(true).as_deref(), Some("Inside the Cellarium"));
     }
 
     #[test]
@@ -1906,14 +2035,14 @@ mod heading_tests {
         put(&mut b, GlkStyle::Header, "Superluminal Vagrant Twin\n");
         put(&mut b, GlkStyle::Emphasized, "Knock.");
         put(&mut b, GlkStyle::Normal, "Prose.\n");
-        assert_eq!(b.take_room_heading(), None);
+        assert_eq!(b.take_room_heading(true), None);
     }
 
     #[test]
     fn menu_only_normal_text_has_no_heading() {
         let mut b = primary_backend();
         put(&mut b, GlkStyle::Normal, "1) Yes\n2) No\n");
-        assert_eq!(b.take_room_heading(), None);
+        assert_eq!(b.take_room_heading(true), None);
     }
 
     #[test]
@@ -1924,7 +2053,7 @@ mod heading_tests {
             put(&mut b, GlkStyle::Subheader, &ch.to_string());
         }
         put(&mut b, GlkStyle::Normal, "\nThe battle.\n");
-        assert_eq!(b.take_room_heading().as_deref(), Some("War Chest"));
+        assert_eq!(b.take_room_heading(true).as_deref(), Some("War Chest"));
     }
 
     #[test]
@@ -1940,7 +2069,7 @@ mod heading_tests {
         put(&mut b, GlkStyle::Normal, "\nA grey world. You going to ");
         put(&mut b, GlkStyle::Subheader, "land"); // inline link, mid-line
         put(&mut b, GlkStyle::Normal, " soon?\n\n");
-        assert_eq!(b.take_room_heading().as_deref(), Some("Orbiting Boony"));
+        assert_eq!(b.take_room_heading(true).as_deref(), Some("Orbiting Boony"));
     }
 
     #[test]
@@ -1953,6 +2082,72 @@ mod heading_tests {
         b.window_clear(1);
         put(&mut b, GlkStyle::Subheader, "Grand Hall"); // top of cleared window
         put(&mut b, GlkStyle::Normal, "\nA vast chamber.\n");
-        assert_eq!(b.take_room_heading().as_deref(), Some("Grand Hall"));
+        assert_eq!(b.take_room_heading(true).as_deref(), Some("Grand Hall"));
+    }
+
+    #[test]
+    fn a_banner_on_a_press_any_key_page_is_not_a_room() {
+        // THE BAT's title page: an act list on its own line, a blank line, and then the
+        // "press any key" note. Nothing about the words says it is not a room — the blank
+        // line and the keypress prompt do. (SQ-0732)
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Prologue • ACT I • Interlude • Epilogue");
+        put(&mut b, GlkStyle::Normal, " \n\n[Please press any key to continue.]\n");
+        assert_eq!(b.take_room_heading(false), None);
+    }
+
+    #[test]
+    fn a_heading_joined_to_its_description_is_a_room_even_before_a_keypress() {
+        // Half the discriminator on its own would be wrong: a room the player really did
+        // walk into can be followed by a cutscene that ends on a keypress.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Master's Bedroom\n");
+        put(&mut b, GlkStyle::Normal, "To the west, you could enter the upstairs corridor.\n");
+        put(&mut b, GlkStyle::Normal, "\n[Please press any key to continue.]\n");
+        assert_eq!(b.take_room_heading(false).as_deref(), Some("Master's Bedroom"));
+    }
+
+    #[test]
+    fn a_detached_heading_is_a_room_at_the_command_prompt() {
+        // Adventure in `superbrief`: heading, blank line, object list, command prompt. The
+        // other half of the discriminator on its own would throw this room away.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Inside Building\n");
+        put(&mut b, GlkStyle::Normal, "\nThere are some keys on the ground here.\n\n>");
+        assert_eq!(b.take_room_heading(true).as_deref(), Some("Inside Building"));
+    }
+
+    #[test]
+    fn a_superbrief_room_is_a_heading_a_blank_line_and_the_prompt() {
+        // An empty superbrief room prints nothing but its name. The read prompt the game
+        // leaves behind is not prose, so the heading still stands even on a keypress page.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "At End Of Road\n");
+        put(&mut b, GlkStyle::Normal, "\n>");
+        assert_eq!(b.take_room_heading(false).as_deref(), Some("At End Of Road"));
+    }
+
+    #[test]
+    fn an_earlier_room_survives_a_banner_printed_after_it() {
+        // A turn that walks into a room and then ends on an act-break page keeps the room:
+        // the banner is rejected on its own, not by clearing what came before it.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Master's Bedroom\n");
+        put(&mut b, GlkStyle::Normal, "To the west, the upstairs corridor.\n\n");
+        put(&mut b, GlkStyle::Subheader, "– Interlude –\n");
+        put(&mut b, GlkStyle::Normal, "\nThe guests are arriving.\n");
+        assert_eq!(b.take_room_heading(false).as_deref(), Some("Master's Bedroom"));
+    }
+
+    #[test]
+    fn a_styled_word_opening_a_sentence_is_not_a_room() {
+        // Kerkerkruip renders the "Enable" of "Enable the screen reader mode?" as a
+        // Subheader hyperlink — at line start, so the line-start rule alone accepted it.
+        // The paragraph break below it and the keypress prompt reject it.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Enable");
+        put(&mut b, GlkStyle::Normal, " the screen reader mode? Please enter: Yes or No\n");
+        put(&mut b, GlkStyle::Normal, "\nThis option can be changed later from the menu.\n");
+        assert_eq!(b.take_room_heading(false), None);
     }
 }
