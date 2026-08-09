@@ -2467,6 +2467,17 @@ pub struct AppState {
     /// Z-machine timed-input clock).
     pub glulx_timer_next_fire: Option<std::time::Instant>,
 
+    /// When a v6 turn's picture sequence is being paced out (SQ-0708), the
+    /// wall-clock instant the frame now on screen gives way to the next. `None`
+    /// whenever nothing is playing.
+    ///
+    /// This is the CLOCK only — the frames themselves live on the session, beside
+    /// the canvases they are snapshots of. Pacing is presentation, so it rides the
+    /// loop's existing deadline-driven wakeups exactly like the game clocks do:
+    /// the story interpreter is never blocked, nothing sleeps, and input stays
+    /// responsive right through the sequence.
+    pub picture_pace_next: Option<std::time::Instant>,
+
     /// The in-game graphics Picker (None when images are disabled or unbuilt).
     pub game_picker: Option<ratatui_image::picker::Picker>,
     /// The terminal's own default fg/bg, probed once at startup (SQ-0510). Seeds
@@ -2622,6 +2633,7 @@ impl Default for AppState {
             event_wait: false,
             input_deadline: None,
             glulx_timer_next_fire: None,
+            picture_pace_next: None,
             game_picker: None,
             term_default_colors: crate::term_colors::TermDefaultColors::default(),
             graphics_render: std::cell::RefCell::new(Default::default()),

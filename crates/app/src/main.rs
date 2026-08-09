@@ -600,7 +600,10 @@ fn draw_frame(
         let full = f.area();
         let buf = f.buffer_mut();
         // The engine-neutral screen model for this frame (status + window tree).
-        let screen_model = engine.screen();
+        // `screen_now`, not `screen`: a v6 turn's picture sequence is played out
+        // over successive frames, so what the player is looking at right now may
+        // be one step short of the settled composite (SQ-0708).
+        let screen_model = engine.screen_now();
         // During replay the map shows the reconstructed snapshot for the selected turn.
         let replay_graph: Option<mapper::graph::MapGraph> = state.overlays.replay.as_ref().map(|r| {
             let snap = state
@@ -1598,6 +1601,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         needs_redraw |= loop_tick::poll_tidy_jobs(&mut state, &mut mapper, &last_panes);
         needs_redraw |= state.poll_render_job();
         needs_redraw |= state.poll_v6_encode_job();
+        // Play out a v6 turn's picture sequence one frame at a time (SQ-0708).
+        // Runs before the draw, so an advanced frame paints on this very pass.
+        needs_redraw |= loop_tick::poll_picture_pacing(&mut state, &mut *session);
         needs_redraw |= loop_tick::refresh_engine_input(&mut state, &mut *session);
         // The command band's object columns are LIVE: refilled from the engine
         // every tick, so a take/drop moves an object between *here* and
@@ -1685,7 +1691,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // the Glulx Glk-timer deadline, or the soonest pending Sound2 volume-ramp
         // completion (any may be `None`/empty).
         let next_volume_deadline = state.glulx_volume_notify.values().map(|(t, _)| *t).min();
-        let next_deadline = [state.input_deadline, state.glulx_timer_next_fire, next_volume_deadline]
+        let next_deadline = [
+            state.input_deadline,
+            state.glulx_timer_next_fire,
+            next_volume_deadline,
+            // …and the v6 picture pacer, so the loop wakes to land the next frame
+            // of a turn's picture sequence on time (SQ-0708).
+            state.picture_pace_next,
+        ]
             .into_iter()
             .flatten()
             .min();
@@ -1821,6 +1834,17 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // Biasing to over-draw here is deliberate: a swallowed key costs one extra
         // frame; a missed redraw is a visible bug. (SQ-0305)
         needs_redraw = true;
+
+        // The player outranks paced output (SQ-0708): a keypress collapses an
+        // in-flight v6 picture sequence to its settled composite at once, and a
+        // resize settles it rather than replaying frames measured against the old
+        // pane. The event is NOT consumed — pacing is decoration over a turn that
+        // already finished, so it goes on to whatever else wanted it.
+        if matches!(&event, Event::Key(k) if k.kind == KeyEventKind::Press)
+            || matches!(&event, Event::Resize(_, _))
+        {
+            loop_tick::settle_picture_pacing(&mut state, &mut *session);
+        }
 
         // If more input is already queued behind this event, defer the next
         // redraw so the whole burst collapses into a single frame. Cleared at

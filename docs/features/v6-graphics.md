@@ -231,6 +231,39 @@ babelmap draws no story text on that frame — the same rule a window-filling
 picture like Zork Zero's rebus already followed. A plate that *does* leave a real
 column — a margin illustration, a corner logo — still gets prose beside it.
 
+## Pictures land one after another, the way they were drawn
+
+A v6 turn can draw more than one picture, and the order matters to how the screen
+reads. Arthur's graveyard→Merlin screen is the case: **one** turn erases every
+window, paints the 584×392 graveyard plate, and fourteen instructions later paints
+Merlin into the middle of it. Compositing both before anything reaches the terminal
+hands you the finished picture instantly — correct, and completely flat. On the
+machines these games were written for you watched the graveyard fill the screen and
+*then* watched Merlin arrive on top of it, because each `draw_picture` blitted as
+its opcode ran.
+
+babelmap plays that back. The turn still runs straight through — the interpreter
+never blocks, never yields mid-picture, and the composite it ends on is exactly the
+one it built before — but the renderer walks the screens the turn passed through on
+the way there, one per frame. The wait between them is proportional to the area
+each picture painted, so a full-page plate rests for a beat you can see and a small
+compass tile barely pauses at all; that is roughly what the original hardware
+imposed, for the same reason.
+
+It is not an Arthur rule and there is nothing to switch on. Any v6 turn that draws
+more than one picture paces, so Zork Zero's border assembles itself at startup,
+Shogun's title screen arrives in two beats, and Journey's scene art lands after the
+frame it sits in. And you are never made to wait: **any keypress collapses the rest
+of the sequence instantly**, landing on precisely the pixels waiting it out would
+have given you. The key still does whatever you pressed it for — pacing is
+decoration over a turn that already finished, so it never swallows a keystroke.
+
+There is no Z-machine construct for any of this. Nothing in those turns busy-waits
+or sleeps, and the `read_char` timers on Arthur's illustrated screens are an
+auto-advance for a player who has wandered off, not an animation clock. This is a
+presentation choice, made deliberately, because the games were written for
+machines that painted at a visible speed.
+
 ## Prose the game positions itself
 
 A v6 window that wraps and scrolls streams its text, and babelmap renders that

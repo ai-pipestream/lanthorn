@@ -649,8 +649,23 @@ pub trait Engine {
     fn has_quit(&self) -> bool;
 
     // ── screen ──
-    /// The current screen as a neutral window tree + status.
+    /// The current screen as a neutral window tree + status — the SETTLED state,
+    /// i.e. everything the game has drawn so far.
     fn screen(&self) -> ScreenModel;
+
+    /// The screen as the player is seeing it THIS INSTANT, which is the settled
+    /// [`screen`](Engine::screen) for every engine but one.
+    ///
+    /// The exception is a v6 Z-machine turn that queued several `draw_picture`s
+    /// (SQ-0708): the renderer plays those out over successive frames instead of
+    /// handing the player the finished composite at once, so mid-sequence this
+    /// answers with the frame that is up rather than the one the turn ended on.
+    /// The sequence always ends on `screen()`'s composite, byte for byte — which
+    /// is why everything that wants the game's state (saves, the display list,
+    /// `/dump-windows`) keeps asking `screen()` and is unaffected by pacing.
+    fn screen_now(&self) -> ScreenModel {
+        self.screen()
+    }
 
     /// A diagnostic dump of the live window layout, one line per entry, for the
     /// `/dump-windows` command. The default gives a one-line Z-machine summary

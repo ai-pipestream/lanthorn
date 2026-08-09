@@ -16,6 +16,22 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **v6 pictures land one after another, the way the game drew them.** A single v6
+  turn can draw several pictures — Arthur's intro paints the graveyard plate and
+  then paints Merlin into the middle of it, fourteen instructions later, without
+  pausing in between. Compositing both before anything rendered handed you the
+  finished screen instantly; now the renderer walks the screens the turn passed
+  through, one per frame, so you watch the graveyard fill the screen and then watch
+  Merlin arrive on it. The pause between pictures is proportional to the area each
+  one painted, so a full-page plate rests for a beat you can see and a small tile
+  barely pauses — roughly what the machines these games were written for imposed.
+  The interpreter is not slowed or blocked for any of it: the turn runs straight
+  through as before and the composite it settles on is byte-for-byte the one it
+  always built. Every v6 game, with nothing to switch on — Zork Zero's border
+  assembles itself at startup, Shogun's title arrives in two beats — and **any
+  keypress collapses the rest of a sequence at once**, landing on exactly the pixels
+  waiting it out would have given you, while still doing whatever you pressed it
+  for.
 - **Click a room in the matrix and it shows you the way there.** babelmap finds
   the shortest route it already knows how to walk, from the room you are standing
   in to the one you clicked, and marks one cell per step — the row of the room you

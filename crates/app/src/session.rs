@@ -490,6 +490,33 @@ pub struct WindowFill {
     pub out_chars: u64,
 }
 
+/// One step of a turn's v6 picture sequence: the screen as it stood after that
+/// step, and how long it is held before the next one lands (SQ-0708).
+///
+/// Cloning the canvas map is a refcount bump per window ([`crate::graphics::Canvas`]
+/// keeps its pixels in an `Arc` and paints through `Arc::make_mut`), so a frame
+/// costs a real copy only for the windows the sequence goes on to repaint.
+struct PacedFrame {
+    canvas: std::collections::HashMap<u8, crate::graphics::Canvas>,
+    hold: std::time::Duration,
+}
+
+/// Notional fill rate for a v6 picture blit, in unit-space pixels per
+/// millisecond — the constant that turns "how big is this picture" into "how
+/// long did it take to paint" (SQ-0708). Arthur's 584×392 plate lands at ~286 ms,
+/// a 64×64 tile at the floor below.
+const PACE_PX_PER_MS: u64 = 800;
+/// Floor on a paced frame's hold: below this a step is a flicker, not a beat.
+const PACE_MIN_MS: u64 = 40;
+/// Ceiling on a paced frame's hold, so even a full-screen plate cannot make the
+/// game feel stalled.
+const PACE_MAX_MS: u64 = 350;
+/// Intermediate frames one turn may pace through. A turn that repaints a whole
+/// chrome ring queues a dozen small draws; past this many the rest collapse into
+/// the settled composite rather than turning one command into a slideshow. Also
+/// bounds the snapshots a single turn can hold.
+const PACE_MAX_FRAMES: usize = 8;
+
 /// A running Z-machine game session.
 pub struct GameSession {
     pub machine: Machine,
@@ -531,6 +558,24 @@ pub struct GameSession {
     /// `drain_turn` from `Machine::pending_pictures`; read by the Task 4
     /// screen adapter to build the layered composite.
     pub pictures_canvas: std::collections::HashMap<u8, crate::graphics::Canvas>,
+    /// The screens this turn's picture sequence passed through on its way to
+    /// `pictures_canvas`, oldest first — empty whenever nothing is playing (SQ-0708).
+    ///
+    /// A v6 turn can queue several `draw_picture`s: Arthur's intro paints the
+    /// graveyard plate and then Merlin fourteen instructions later, in ONE turn.
+    /// Compositing them all before anything renders shows the player the finished
+    /// screen instantly; real hardware blitted each picture as its opcode executed,
+    /// so you watched the graveyard paint and then Merlin paint onto it. There is no
+    /// Z-machine construct expressing that — no busy-wait, no intervening read — so
+    /// this is a presentation choice, not a standard being implemented.
+    ///
+    /// It is replayed AFTER the fact. The turn still runs straight through and
+    /// `pictures_canvas` is settled before the `TurnResult` is published, so the story
+    /// interpreter never blocks and never yields mid-turn; these are snapshots the
+    /// renderer shows on the way there, and the last thing it shows is the settled
+    /// composite itself, byte for byte. Dropping them (a keypress, a resize, a save)
+    /// therefore cannot lose anything — it only arrives sooner.
+    paced_frames: std::collections::VecDeque<PacedFrame>,
     /// The last `erase_window` on each v6 window: what it filled and when (SQ-0584).
     ///
     /// ZMSD §8.8.5.3 — erasing a window fills its rect with that window's background
@@ -719,6 +764,7 @@ impl GameSession {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -941,6 +987,9 @@ impl GameSession {
     /// z-order (later-drawn windows on top) is reproduced.
     pub fn load_pictures_png(&mut self, blobs: &[(u8, Vec<u8>)]) {
         self.pictures_canvas.clear();
+        // A restore swaps the whole screen out; any sequence still playing belongs
+        // to the session that was just discarded (SQ-0708).
+        self.paced_frames.clear();
         for (win, png) in blobs {
             let Ok(img) = image::load_from_memory(png) else { continue };
             let rgba = img.to_rgba8();
@@ -1234,18 +1283,102 @@ impl GameSession {
     /// which never push a `PictureEvent`.
     fn drain_pictures(&mut self) -> Vec<PictureEvent> {
         let events = std::mem::take(&mut self.machine.pending_pictures);
+        // A new turn supersedes whatever sequence was still playing: those frames
+        // describe a screen the game has already moved on from.
+        self.paced_frames.clear();
         let palette_before = self.palette_gen();
-        for ev in &events {
+        // Which of these events PAINT, and for how long (SQ-0708). Everything else
+        // — the `erase_window` canvas clears a v6 screen swap opens with, a
+        // window-0 inline float that anchors to the transcript instead of a canvas
+        // — carries no hold and rides with the next painted frame, exactly as an
+        // erase-then-draw pair did on the hardware.
+        let holds: Vec<Option<std::time::Duration>> =
+            events.iter().map(|ev| self.picture_hold(ev)).collect();
+        // The final painted event needs no frame of its own: what it leaves behind
+        // IS the settled composite, which is what the renderer falls back to.
+        let last_painted = holds.iter().rposition(Option::is_some);
+        for (i, ev) in events.iter().enumerate() {
             self.apply_picture_event(ev);
+            if let (Some(hold), Some(last)) = (holds[i], last_painted) {
+                if i < last && self.paced_frames.len() < PACE_MAX_FRAMES {
+                    self.paced_frames.push_back(PacedFrame {
+                        canvas: self.pictures_canvas.clone(),
+                        hold,
+                    });
+                }
+            }
         }
         // A base draw in this batch established a different Current Palette, so
         // every adaptive picture already on screen is now showing the old one and
         // has to be replotted (Blorb §11.3, SQ-0567). Checked once per batch: with
         // several palette changes in one turn only the final palette is visible.
+        // The paced frames were snapshotted BEFORE this replay, so they keep the
+        // palette that was live when they were painted — which is what the hardware
+        // showed. A v6 framebuffer holds palette INDICES: loading a new palette
+        // recolours everything already on the screen at the instant the picture
+        // carrying it lands, not a moment before.
         if self.palette_gen() != palette_before {
             self.replay_under_current_palette();
         }
         events
+    }
+
+    /// How long the screen rests on a picture event before the next one lands, or
+    /// `None` for an event that paints no canvas and so cannot be watched (SQ-0708).
+    ///
+    /// Only a `draw_picture` into a window canvas paints: an erase is a fill, and a
+    /// window-0 draw at the text cursor is a transcript float that never touches
+    /// `pictures_canvas` at all. A picture whose art will not resolve paints nothing
+    /// either — pacing a frame the renderer cannot tell apart from the last one is
+    /// just a stall.
+    ///
+    /// The hold is proportional to the area painted, in the unit space the canvas
+    /// uses (art-native dims doubled by [`V6_ART_SCALE`]) — which is effectively
+    /// what the original hardware did, and why a full plate reads as visibly slower
+    /// than a small icon.
+    fn picture_hold(&mut self, ev: &PictureEvent) -> Option<std::time::Duration> {
+        if ev.erase || ev.number == 0 || (ev.window == 0 && ev.at_cursor) {
+            return None;
+        }
+        let (w, h) = self.pict_source.as_mut()?.dims(ev.number as u32)?;
+        let area = (w as u64 * V6_ART_SCALE as u64) * (h as u64 * V6_ART_SCALE as u64);
+        let ms = (area / PACE_PX_PER_MS).clamp(PACE_MIN_MS, PACE_MAX_MS);
+        Some(std::time::Duration::from_millis(ms))
+    }
+
+    // ── The paced picture sequence, as the app loop drives it (SQ-0708) ───────
+
+    /// How long the picture frame now on screen is held before the next one lands
+    /// — `None` when nothing is playing and the screen already shows the settled
+    /// composite.
+    pub fn paced_picture_hold(&self) -> Option<std::time::Duration> {
+        self.paced_frames.front().map(|f| f.hold)
+    }
+
+    /// Advance the sequence one step. `true` when the screen changed, so the caller
+    /// knows to redraw; `false` when there was nothing playing.
+    pub fn advance_paced_pictures(&mut self) -> bool {
+        self.paced_frames.pop_front().is_some()
+    }
+
+    /// Collapse the sequence to its settled composite at once — the player pressed
+    /// a key, the pane resized, the game is being saved. `true` when frames were
+    /// dropped (the screen jumps to the final state).
+    ///
+    /// Nothing is lost: the settled composite is already built, and these frames
+    /// were only ever the way there.
+    pub fn settle_paced_pictures(&mut self) -> bool {
+        let had = !self.paced_frames.is_empty();
+        self.paced_frames.clear();
+        had
+    }
+
+    /// The window canvases the screen is showing RIGHT NOW: the in-flight paced
+    /// frame while a picture sequence plays, else the settled composite. Every
+    /// other reader — save, archive, palette replay, `/dump-windows` — wants
+    /// `pictures_canvas` itself, which is always the finished screen.
+    fn visible_canvas(&self) -> &std::collections::HashMap<u8, crate::graphics::Canvas> {
+        self.paced_frames.front().map_or(&self.pictures_canvas, |f| &f.canvas)
     }
 
     /// The Current Palette's generation, or 0 with no Pict source.
@@ -1762,7 +1895,13 @@ impl GameSession {
         out
     }
 
-    fn v6_screen_model(&self) -> ScreenModel {
+    /// Build the v6 model over a given set of window canvases: `pictures_canvas`
+    /// for the settled screen ([`Engine::screen`]), or an in-flight frame of the
+    /// turn's picture sequence for what is on screen right now
+    /// ([`Engine::screen_now`], SQ-0708). Everything else about the model — window
+    /// geometry, text, z-order — is read from the live `screen.v6` table either way,
+    /// so the two differ only in which pixels the `Graphics` leaves carry.
+    fn v6_screen_model(&self, visible: &std::collections::HashMap<u8, crate::graphics::Canvas>) -> ScreenModel {
         use zvm::screen::{V6_FONT_HEIGHT, V6_FONT_WIDTH};
         let screen = &self.machine.screen;
         let v6 = screen.v6.as_ref().expect("caller checked screen.v6.is_some()");
@@ -1797,7 +1936,7 @@ impl GameSession {
             // Window 0 with nothing of its own, while the prose streams elsewhere:
             // it is a boot-time placeholder covering the screen (see below), and
             // admitting it would hand `classify_windows` a second, wrong story rect.
-            if i == 0 && prose_idx != 0 && win.texts.is_empty() && !self.pictures_canvas.contains_key(&0) {
+            if i == 0 && prose_idx != 0 && win.texts.is_empty() && !visible.contains_key(&0) {
                 continue;
             }
             // A zero-pixel-size window is normally inactive and skipped — UNLESS
@@ -1825,7 +1964,7 @@ impl GameSession {
             if i == 0
                 && win.texts.is_empty()
                 && self.machine.v6_win0_out_chars == 0
-                && !self.pictures_canvas.contains_key(&0)
+                && !visible.contains_key(&0)
                 && (win.x_coord, win.y_coord) == (1, 1)
                 && (win.x_size, win.y_size) == (self.machine.mem.read_word(0x22), self.machine.mem.read_word(0x24))
             {
@@ -1839,7 +1978,7 @@ impl GameSession {
             let y = y_px / V6_FONT_HEIGHT;
             let (cols, rows) = (win.grid.cols, win.grid.rows);
 
-            if let Some(canvas) = self.pictures_canvas.get(&(i as u8)) {
+            if let Some(canvas) = visible.get(&(i as u8)) {
                 graphics_entries.push((canvas.z_seq, PositionedWindow {
                     x,
                     y,
@@ -3055,7 +3194,20 @@ impl Engine for GameSession {
 
     fn screen(&self) -> ScreenModel {
         if self.machine.screen.v6.is_some() {
-            self.v6_screen_model()
+            self.v6_screen_model(&self.pictures_canvas)
+        } else {
+            screen_model_from_machine(&self.machine)
+        }
+    }
+
+    /// The settled screen, EXCEPT while a v6 turn's picture sequence is still
+    /// playing out — then it is the frame that is up (SQ-0708). Identical to
+    /// [`screen`](Engine::screen) for every non-v6 story and for every v6 frame
+    /// once the sequence has settled, which is every frame the player is not
+    /// actively watching a picture land on.
+    fn screen_now(&self) -> ScreenModel {
+        if self.machine.screen.v6.is_some() {
+            self.v6_screen_model(self.visible_canvas())
         } else {
             screen_model_from_machine(&self.machine)
         }
@@ -5179,6 +5331,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -5235,6 +5388,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -5283,6 +5437,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -5347,6 +5502,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -5384,6 +5540,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -5434,6 +5591,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -5526,6 +5684,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
@@ -5573,6 +5732,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
