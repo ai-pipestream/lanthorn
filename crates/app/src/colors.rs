@@ -122,6 +122,46 @@ pub fn host_default_colour_pair(
     Some((nearest_standard_colour(bg), nearest_standard_colour(fg)))
 }
 
+/// Seed an unconfigured base scheme's `foreground`/`background` from the
+/// terminal's OSC 10/11-probed defaults (SQ-0510).
+///
+/// With no `scheme` configured, [`resolve_base`] hands back a
+/// [`GhosttyScheme::default()`] whose fg/bg/palette are all [`Color::Reset`], and
+/// [`Roles::from_scheme`](crate::theme::resolve::Roles::from_scheme) early-returns
+/// on exactly that to the concrete
+/// [`Roles::terminal_default`](crate::theme::resolve::Roles::terminal_default)
+/// palette — whose `chrome` role is a hard-coded white-on-BLACK. That guess is
+/// only right on a black-background terminal; anywhere else the chrome-derived
+/// selectors (`status_bar`, `upper_window`, `story_info`, `dialog.background`,
+/// the `glk.grid.*` family) paint a black band across a terminal that is not
+/// black. The probe already knows the real answer — this is what hands it to the
+/// theme.
+///
+/// Applies ONLY when the scheme is the unconfigured all-`Reset` one: a real
+/// configured scheme (built-in name or file) is the user's explicit choice and
+/// is never second-guessed. The palette is left untouched, so `from_scheme`'s
+/// per-slot fallback still supplies the cyan/yellow/grey accents.
+///
+/// A PARTIAL probe answer (fg without bg, or bg without fg) is skipped whole
+/// rather than mixed, matching the house rule [`host_default_colour_pair`]
+/// documents: page and ink always come from the same design, never a probed ink
+/// on a guessed page. A terminal that answers neither leaves the scheme
+/// untouched and keeps the `terminal_default()` behaviour byte-for-byte.
+pub fn seed_scheme_from_terminal(
+    mut gs: GhosttyScheme,
+    term: &crate::term_colors::TermDefaultColors,
+) -> GhosttyScheme {
+    if gs.foreground != Color::Reset || gs.background != Color::Reset {
+        return gs; // a configured scheme speaks for itself
+    }
+    let (Some(fg), Some(bg)) = (term.fg, term.bg) else {
+        return gs; // no answer, or a half answer — skip the layer whole
+    };
+    gs.foreground = Color::Rgb(fg.0[0], fg.0[1], fg.0[2]);
+    gs.background = Color::Rgb(bg.0[0], bg.0[1], bg.0[2]);
+    gs
+}
+
 /// A compiled user transcript-styling rule: a regex matched whole-line against
 /// Story text, plus the `Style` patched over the base `transcript` style on a
 /// match. `PartialEq` compares the source `pattern` and `style` only — the
@@ -1227,4 +1267,55 @@ unknown-key = ignored
         assert_eq!(host_default_colour_pair(named, None, None), None);
     }
 
+    // ── SQ-0510: seeding an unconfigured scheme from the OSC 10/11 probe ──────
+
+    fn probe(fg: Option<(u8, u8, u8)>, bg: Option<(u8, u8, u8)>) -> crate::term_colors::TermDefaultColors {
+        crate::term_colors::TermDefaultColors {
+            fg: fg.map(|(r, g, b)| image::Rgba([r, g, b, 255])),
+            bg: bg.map(|(r, g, b)| image::Rgba([r, g, b, 255])),
+        }
+    }
+
+    #[test]
+    fn seed_fills_an_unconfigured_scheme_from_a_complete_probe() {
+        // The reported case: no scheme configured, a terminal that answers both
+        // queries. fg/bg take the probed RGB so `Roles::from_scheme` stops
+        // early-returning to its white-on-BLACK fallback.
+        let seeded = seed_scheme_from_terminal(
+            GhosttyScheme::default(),
+            &probe(Some((0xc5, 0xc8, 0xc6)), Some((0xfd, 0xf6, 0xe3))),
+        );
+        assert_eq!(seeded.foreground, Color::Rgb(0xc5, 0xc8, 0xc6));
+        assert_eq!(seeded.background, Color::Rgb(0xfd, 0xf6, 0xe3));
+        // The palette is deliberately untouched: `from_scheme`'s per-slot
+        // fallback still supplies the cyan/yellow/grey accents (SQ-0642).
+        assert_eq!(seeded.palette, [Color::Reset; 16], "accents keep their per-slot fallback");
+    }
+
+    #[test]
+    fn seed_is_inert_without_a_complete_probe() {
+        // A terminal that answers nothing, or only one channel, must leave the
+        // scheme exactly as `resolve_base` handed it over — a half-resolved layer
+        // is skipped whole rather than mixed (the `host_default_colour_pair` rule),
+        // so nobody ever gets a probed ink on a guessed page.
+        let base = GhosttyScheme::default();
+        for p in [
+            probe(None, None),
+            probe(Some((0xc5, 0xc8, 0xc6)), None),
+            probe(None, Some((0xfd, 0xf6, 0xe3))),
+        ] {
+            let seeded = seed_scheme_from_terminal(base.clone(), &p);
+            assert_eq!(seeded, base, "an incomplete probe answer changes nothing: {p:?}");
+        }
+    }
+
+    #[test]
+    fn seed_never_second_guesses_a_configured_scheme() {
+        // A real scheme (built-in name or file) is the user's explicit choice; the
+        // probe must not overwrite either channel of it.
+        let gs = GhosttyScheme::parse("background = 1d1f21\nforeground = c5c8c6\n").unwrap();
+        let seeded =
+            seed_scheme_from_terminal(gs.clone(), &probe(Some((255, 255, 255)), Some((255, 255, 255))));
+        assert_eq!(seeded, gs, "a configured scheme speaks for itself");
+    }
 }

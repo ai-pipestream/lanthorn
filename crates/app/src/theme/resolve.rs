@@ -1114,6 +1114,59 @@ mod tests {
         assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
     }
 
+    // ── SQ-0510: a probe-seeded scheme takes `from_scheme`'s real branch ──────
+
+    #[test]
+    fn a_probe_seeded_scheme_puts_the_terminal_page_under_the_chrome_roles() {
+        // The reported bug: with no scheme configured the base is all-Reset, the
+        // guard above early-returns, and `chrome` is a hard-coded white-on-BLACK —
+        // so `upper_window` painted a black band across a terminal that is not
+        // black. Once `colors::seed_scheme_from_terminal` has filled fg/bg in from
+        // the OSC 10/11 probe, the real branch runs and chrome follows the terminal.
+        let probe = crate::term_colors::TermDefaultColors {
+            fg: Some(image::Rgba([0x58, 0x6e, 0x75, 255])),
+            bg: Some(image::Rgba([0xfd, 0xf6, 0xe3, 255])), // Solarized Light page
+        };
+        let gs = crate::colors::seed_scheme_from_terminal(GhosttyScheme::default(), &probe);
+        let roles = Roles::from_scheme(&gs);
+
+        assert_ne!(roles.chrome.bg, Some(Color::Black), "the black guess is gone");
+        assert_eq!(roles.chrome.bg, Some(Color::Rgb(0xfd, 0xf6, 0xe3)));
+        assert_eq!(roles.chrome.fg, Some(Color::Rgb(0x58, 0x6e, 0x75)));
+        // The accents still come from the per-slot fallback — an all-Reset palette
+        // must not drag the UI monochrome (SQ-0642's rule still holds here).
+        assert_eq!(roles.line.fg, Some(Color::Cyan));
+        assert_eq!(roles.accent.fg, Some(Color::Cyan));
+        assert_eq!(roles.muted.fg, Some(Color::DarkGray));
+        assert_eq!(roles.alert.fg, Some(Color::Yellow));
+        // `text` keeps NO background, so the transcript still shows the terminal
+        // page through — chrome now matches it instead of contradicting it.
+        assert_eq!(roles.text.bg, None);
+
+        // …and every chrome-derived selector inherits the probed page.
+        let theme = resolve_theme(&gs, &ParsedStyle::default());
+        for sel in ["upper_window", "status_bar", "story_info", "dialog.background", "glk.grid.normal"] {
+            assert_eq!(
+                theme.get(sel).style.bg,
+                Some(Color::Rgb(0xfd, 0xf6, 0xe3)),
+                "{sel} must follow the terminal page, not a hard-coded black"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unanswered_probe_leaves_the_terminal_default_roles_alone() {
+        // The other half: a terminal that answers neither query keeps today's
+        // behaviour byte-for-byte — the seeding is a no-op and `from_scheme` still
+        // early-returns to the concrete terminal-default palette.
+        let gs = crate::colors::seed_scheme_from_terminal(
+            GhosttyScheme::default(),
+            &crate::term_colors::TermDefaultColors::default(),
+        );
+        assert_eq!(Roles::from_scheme(&gs), Roles::terminal_default());
+        assert_eq!(Roles::from_scheme(&gs).chrome.bg, Some(Color::Black));
+    }
+
     #[test]
     fn resolve_theme_reproduces_terminal_defaults() {
         let scheme = terminal_default_scheme();

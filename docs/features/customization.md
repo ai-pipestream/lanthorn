@@ -122,8 +122,14 @@ switches that make babelmap feel like yours without opening the whole registry.
 - **Color schemes** — recolor rooms, connectors, and chrome from a
   [Ghostty](https://ghostty.org) theme file or a built-in (mono / high-contrast /
   tomorrow-night), with per-role and per-selector overrides. Defaults to your
-  terminal colors. `print-colors` prints the active, resolved scheme to the
-  transcript (`print-colors color` also renders each entry in its own color).
+  terminal colors — genuinely so: with no scheme set, babelmap asks the terminal
+  for its own default foreground and background (OSC 10/11, at startup) and hands
+  the answer to the `chrome` role, so the status bar, upper window and dialog
+  surfaces sit on your terminal's page rather than a black one. A terminal that
+  declines to answer, or answers only half, falls back to the built-in dark
+  palette rather than mixing a real ink into a guessed page. `print-colors` prints
+  the active, resolved scheme to the transcript (`print-colors color` also renders
+  each entry in its own color).
 - **Configurable status bar** — the `[statusbar]` section builds the status line
   from templated segments assigned to a left / center / right cluster. Each
   segment can set its own style directly, or ride a role via `parent = "accent"`.
