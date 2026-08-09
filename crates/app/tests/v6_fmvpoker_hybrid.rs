@@ -38,6 +38,19 @@
 //! streaming path already carried as an indent. `fmvpoker_menu_labels_keep_their
 //! _columns` pins the result against the game's own `set_cursor` operands.
 //!
+//! **…and then could not be clicked** (SQ-0738). With the labels finally in the
+//! right columns the player still could not press one. Input was never the
+//! problem — the VM received every click — but the same conversion FLOORED the
+//! declared row, `(80-1)/16 = 4`, and a diverted window's lines are stacked 16 px
+//! apart from its origin, so the five labels were drawn on native rows 300..315
+//! while the game's own hit test accepts 316..333 for them. Zero overlap: the
+//! drawn label was dead and the blank row beneath it worked. The row rounds to the
+//! nearest line now, which is what `row=80` means, and `MENU_LINE` moved 4 → 5
+//! with it. `fmvpoker_menu_labels_are_clickable_where_drawn_*` is the guard, and
+//! it is behavioural: it finds each label's own pixels on the composite, clicks
+//! the terminal cell showing them through the app's own click map, and requires
+//! the game to act.
+//!
 //! **The frame vanished for the duration of a bet** (SQ-0739). Choosing "CHANGE
 //! CURRENT BET" makes the 594x156 bottom panel the window the game reads through, so
 //! the panel becomes the primary `Buffer` and window 0 — still holding the poker
@@ -379,12 +392,20 @@ const MENU_LABELS: &[(usize, &str)] = &[
 const MENU_ROW: &str =
     "PLAY CURRENT BET      CHANGE CURRENT BET      SAVE      RESTORE      QUIT";
 /// …and the LINE it lands on. Those same `set_cursor` calls declare `row=80` — a
-/// 1-based pixel row down a 156px window in a 16px cell, i.e. text line
-/// `(80-1)/16 = 4`. The row is honoured for the same reason the column is (SQ-0729,
-/// second pass): fmvpoker prints its running totals into WINDOW 0 at absolute
-/// y = 247 and 265, which fall in this window's first two lines, so a panel that
-/// stacked its own prose from its top edge collided with the game's own layout.
-const MENU_LINE: usize = 4;
+/// 1-based pixel row down a 156px window in a 16px cell, i.e. 80 px down, which is
+/// text line **5** counted from zero. The row is honoured for the same reason the
+/// column is (SQ-0729, second pass): fmvpoker prints its running totals into
+/// WINDOW 0 at absolute y = 247 and 265, which fall in this window's first two
+/// lines, so a panel that stacked its own prose from its top edge collided with
+/// the game's own layout.
+///
+/// This constant was 4 until SQ-0738, and moving it is the fix, not a re-baseline:
+/// `(80-1)/16` FLOORS to 4, which drew the labels 15 px above the row the game
+/// declared and clear of the y band 316..333 its own mouse handler accepts for
+/// them, so clicking a label did nothing. The declared row is quantized to the
+/// nearest line now (`v6_take_declared_indent`), and 80 px is one pixel under
+/// line 5's exact start.
+const MENU_LINE: usize = 5;
 
 /// SQ-0729: a v6 prose window is still a pixel surface, and fmvpoker places every
 /// menu label on one row with its own `set_cursor`. `ZWindow::push_prose` kept no
@@ -443,6 +464,175 @@ fn fmvpoker_menu_labels_keep_their_columns_honoring_game_colours() {
 #[test]
 fn fmvpoker_menu_labels_keep_their_columns_theme_only() {
     fmvpoker_menu_labels_keep_their_columns(false);
+}
+
+/// SQ-0738, the behavioural half: a click on a menu label WHERE IT IS DRAWN must
+/// make the game act.
+///
+/// The user reported the menu as dead — PLAY, CHANGE CURRENT BET, SAVE, RESTORE
+/// and QUIT all ignored the mouse. Nothing was wrong with input: the VM received
+/// every click (`@read_mouse -> y=314 x=199 buttons=0x0001`), and the click map is
+/// an exact inverse of the letterbox in both render modes. The game simply
+/// decided the clicks hit nothing, because we were drawing the labels 15 px above
+/// the row it placed them on — `v6_take_declared_indent` floored
+/// `set_cursor(row=80)` to text line 4, and a diverted prose window's lines are
+/// stacked 16 px apart from its origin, so the labels landed on native rows
+/// 300..315 while the game's own hit test accepts y 316..333. Clicking the label
+/// did nothing; clicking the blank row beneath it worked.
+///
+/// So this drives the real geometry rather than a model field: build the composite
+/// the renderer builds, find the native rows the label's glyphs actually INK, pick
+/// the terminal cell that shows most of them, and require that cell's click — the
+/// same `V6ClickMap::map_click` the app's mouse handler uses — to reach the game
+/// and change the screen. A label the player can see and cannot press is the bug;
+/// the assertion is that the two coincide.
+fn menu_lines(session: &GameSession) -> Option<Vec<String>> {
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { return None };
+    items.iter().find_map(|it| match &it.node {
+        WinNode::Buffer(b) if !b.primary && !b.lines.is_empty() => Some(b.lines.clone()),
+        _ => None,
+    })
+}
+
+fn fmvpoker_menu_labels_are_clickable_where_drawn(honor: bool, mode: app::config::V6RenderMode) {
+    for &(col, label) in MENU_LABELS {
+        // A fresh game per label: each of the five takes the game somewhere else.
+        let Some((mut session, mut state)) = fmvpoker_title(honor) else { return };
+        state.config.v6_render = mode;
+        let model = session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let menu = layout
+            .chrome
+            .iter()
+            .find(|it| matches!(&it.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
+            .expect("fmvpoker publishes its menu as a secondary prose window (SQ-0585)");
+        let WinNode::Buffer(mb) = &menu.node else { unreachable!() };
+        assert_eq!(
+            mb.lines.get(MENU_LINE).map(String::as_str),
+            Some(MENU_ROW),
+            "premise (honor={honor} {mode:?}): the five labels reach the model on the line and at \
+             the columns the game's own set_cursor named"
+        );
+
+        // WHERE IT IS DRAWN: the pixels this label and nothing else puts on the
+        // composite — the frame the renderer builds, differenced against the same
+        // frame with the label blanked out of the model. Read back from pixels
+        // rather than recomputed from the model, and immune to the artwork behind
+        // the panel (which is why a plain ink scan will not do: the poker table
+        // shows through).
+        let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+        let mut blanked = session.screen();
+        {
+            let WinNode::Layered(items) = &mut blanked.root else { panic!("v6 Layered root") };
+            let b = items
+                .iter_mut()
+                .find_map(|it| match &mut it.node {
+                    WinNode::Buffer(b) if !b.primary && !b.lines.is_empty() => Some(b),
+                    _ => None,
+                })
+                .expect("the menu window");
+            let line: String = b.lines[MENU_LINE]
+                .chars()
+                .enumerate()
+                .map(|(i, ch)| if (col..col + label.chars().count()).contains(&i) { ' ' } else { ch })
+                .collect();
+            b.lines[MENU_LINE] = line;
+        }
+        let WinNode::Layered(bitems) = &blanked.root else { panic!("v6 Layered root") };
+        let blayout = app::render::v6_layout::classify_windows(bitems);
+        let (bimg, _) = app::render::screen::build_v6_raster_canvas(&blayout, native, &state);
+        let (mut x0, mut x1, mut top, mut bot) = (u32::MAX, 0u32, u32::MAX, 0u32);
+        for y in 0..img.height().min(bimg.height()) {
+            for x in 0..img.width().min(bimg.width()) {
+                if img.get_pixel(x, y) != bimg.get_pixel(x, y) {
+                    (x0, x1) = (x0.min(x), x1.max(x + 1));
+                    (top, bot) = (top.min(y), bot.max(y));
+                }
+            }
+        }
+        assert!(
+            x0 < x1 && top <= bot,
+            "honor={honor} {mode:?}: {label:?} puts nothing on the composite at all"
+        );
+
+        // The terminal cell the player sees it on: the one whose device rect covers
+        // most of that ink. This is the FORWARD letterbox — native pixel n is drawn
+        // at device `img_origin + n * img_size/native` — so it is independent of the
+        // inverse `map_click` performs below.
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        let map = state
+            .graphics_render
+            .borrow()
+            .last_v6_map
+            .expect("a v6 frame records a click map for the mouse handler");
+        let best = |lo: u32, hi: u32, origin: f32, size: f32, native: u16, cell: u16, pane: u16, n: u16| {
+            let dev = |v: u32| origin + v as f32 * size / native as f32;
+            (0..n)
+                .max_by_key(|&c| {
+                    let (c0, c1) = ((c as f32 * cell as f32), ((c + 1) as f32 * cell as f32));
+                    let (l, h) = (dev(lo).max(c0), dev(hi + 1).min(c1));
+                    ((h - l).max(0.0) * 256.0) as i64
+                })
+                .unwrap_or(0)
+                + pane
+        };
+        let cy = best(top, bot, map.img_y, map.img_h, map.native_h, map.cell_h, map.pane_y, area.height);
+        let cx = best(x0, x1 - 1, map.img_x, map.img_w, map.native_w, map.cell_w, map.pane_x, area.width);
+
+        let (gx, gy) = map.map_click(cx, cy).unwrap_or_else(|| {
+            panic!("honor={honor} {mode:?}: the cell showing {label:?} ({cx},{cy}) is off the image")
+        });
+        // Premise: that cell really does look at the label. A click that leaves the
+        // drawn glyphs cannot be expected to press them.
+        assert!(
+            (top..=bot).contains(&(gy.max(1) as u32 - 1)) && (x0..x1).contains(&(gx.max(1) as u32 - 1)),
+            "honor={honor} {mode:?}: the cell showing {label:?} ({cx},{cy}) maps to game pixel \
+             ({gx},{gy}), outside the label's own drawn ink x {x0}..{x1} y {top}..={bot}"
+        );
+
+        // DID THE GAME ACT? Its own answer, measured: a click it rejects makes it
+        // reprint the identical menu and wait again, while a click it accepts on any
+        // of the five erases that panel first — so the menu window's own lines are
+        // the game's verdict. (A whole-model comparison is NOT: the story canvas
+        // carries a version counter that every repaint bumps, hit or miss.)
+        let before = menu_lines(&session);
+        app::engine::Engine::set_mouse(&mut session, gy, gx);
+        let r = session.submit_char(254);
+        assert!(r.fault.is_none(), "honor={honor} {mode:?}: {label:?} click faulted: {:?}", r.fault);
+        app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+        assert!(
+            r.quit || menu_lines(&session) != before,
+            "honor={honor} {mode:?}: clicking {label:?} where it is DRAWN — terminal cell \
+             ({cx},{cy}), game pixel ({gx},{gy}), inside its own ink y {top}..={bot} — left the \
+             game exactly as it was. The label is painted somewhere the game does not accept a \
+             click for it (SQ-0738)."
+        );
+    }
+}
+
+#[test]
+fn fmvpoker_menu_labels_are_clickable_where_drawn_hybrid_honoring_game_colours() {
+    fmvpoker_menu_labels_are_clickable_where_drawn(true, app::config::V6RenderMode::Hybrid);
+}
+
+#[test]
+fn fmvpoker_menu_labels_are_clickable_where_drawn_hybrid_theme_only() {
+    fmvpoker_menu_labels_are_clickable_where_drawn(false, app::config::V6RenderMode::Hybrid);
+}
+
+#[test]
+fn fmvpoker_menu_labels_are_clickable_where_drawn_raster_honoring_game_colours() {
+    fmvpoker_menu_labels_are_clickable_where_drawn(true, app::config::V6RenderMode::Raster);
+}
+
+#[test]
+fn fmvpoker_menu_labels_are_clickable_where_drawn_raster_theme_only() {
+    fmvpoker_menu_labels_are_clickable_where_drawn(false, app::config::V6RenderMode::Raster);
 }
 
 /// The composite carries a secondary prose window's lines. Asserted as ink on the

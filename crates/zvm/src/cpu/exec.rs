@@ -3553,6 +3553,20 @@ impl Machine {
     /// window. A streaming transcript has no way to express it — it is one line
     /// after another — so the streaming caller drops it, but a window that keeps
     /// its own line buffer can pad out to it exactly as it pads out to the column.
+    ///
+    /// The row is quantized to the NEAREST line, not the line it falls inside
+    /// (SQ-0738). A line buffer's only vertical unit is the line, and its host
+    /// draws line *n* at the window's top plus *n* × 16 px — so the question this
+    /// answers is "which line did the game mean?", and the answer that minimizes
+    /// the placement error is the nearest one. Flooring it lost up to a whole
+    /// text row, and did: fmvpoker declares `set_cursor(row=80, window=2)` for
+    /// the menu bar and the CONTINUE button in its 156px bottom panel — 80 px
+    /// down, which is line 5 counted from zero, the game doing its own arithmetic
+    /// in 0-based pixels and handing it over as a 1-based operand. `(80-1)/16` is
+    /// 4, so the five labels were drawn 15 px above where the game put them,
+    /// clear of the y band 316..333 its own mouse handler accepts for them, and
+    /// clicking a label did nothing while the blank row below it worked. Nearest
+    /// gives line 5, which lands the row inside that band exactly.
     fn v6_take_declared_indent(&mut self, s: &str) -> (usize, usize) {
         let Some((win, col, row)) = self.v6_declared_x.take() else { return (0, 0) };
         let Some(v6) = self.screen.v6.as_ref() else { return (0, 0) };
@@ -3563,7 +3577,9 @@ impl Machine {
         // 1-based pixel column, relative to the window's own left margin.
         (
             usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / V6_FONT_WIDTH),
-            usize::from(row.saturating_sub(1) / V6_FONT_HEIGHT),
+            usize::from(
+                row.saturating_sub(1).saturating_add(V6_FONT_HEIGHT / 2) / V6_FONT_HEIGHT,
+            ),
         )
     }
 
