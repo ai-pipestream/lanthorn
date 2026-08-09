@@ -378,6 +378,19 @@ still reaches the screen, and now so does the prose beside it: window 0's page i
 painted *under* the labels other windows put inside its box, in the order the game
 drew them — page first, then the menu, then the prose.
 
+**And the transcript's own glyphs yield to those labels as well.** Sparing the
+page was only half of it: the story text was still rasterized straight over the
+labels the page had carefully filled under. fmvpoker is the case. Its story window
+is the whole screen, so once five dealt cards fill the frame's interior the largest
+clear rectangle left for the transcript drops onto the very box the game gave its
+bottom panel — and the panel is where the hand is announced, *You draw (a) an
+Eight, (b) a Three, (c) an Ace…*, the only place the cards are named. The boot
+banner was written across it. The rule that settles it is a difference in kind: a
+transcript is babelmap's re-reading of everything the story window has ever said,
+while a label another window is holding is on the screen *right now*. Where they
+land on the same cell, the live label wins, and everything the transcript owns
+outside those cells still prints.
+
 The same distinction settles how a reverse-video run is drawn. Highlighting a run
 means painting a solid block and cutting the glyph out of it — except over frame
 art, where a block would erase the picture, so babelmap draws dark ink directly on
@@ -452,8 +465,41 @@ The line is padded out **to** the column, not indented **by** it: a run has to
 land where the game named it, not that far past wherever the previous run
 happened to end, or five labels at fixed columns drift into a ragged row. A
 column already behind the line's end cannot be reached by appending and is
-ignored; a line buffer only moves right. The declared *row* is not honoured
-either — these are logical lines, stacked in the order they were printed.
+ignored; a line buffer only moves right. The declared *row* is honoured the same
+way, with blank lines — the buffer is padded out to it, and a row already behind
+its end is ignored.
+
+## A window the game drew a frame around is a canvas, not a page
+
+The story window is a transcript in every Infocom v6 title: text streams into it,
+babelmap keeps the scrollback, and you can page back through it. Frobozz Magic
+VideoPoker is not built that way. It draws a poker table across the whole screen,
+grows its story window to the whole screen behind it, and then *positions*
+everything it has to say — `HOLD` under each card you are holding, the running
+totals in the panel at the bottom. Read as a transcript, all of it arrived as
+narration: `HOLD` scrolled past in the story text instead of appearing under a
+card, and the running totals stacked up as prose.
+
+The tempting rule — "a run the game moved the cursor before is paint" — does not
+work, and it was measured rather than argued. Arthur positions every room headline
+in the story window, one character at a time, with only the first character
+carrying the cursor move; Shogun and Journey centre each line of their title
+headers the same way; the Mysterious Adventures re-home the cursor before every
+prompt. All of them mean *resume the story here*, with the identical signal
+fmvpoker uses to mean *paint this under that card*. Under that rule Arthur's
+`CHURCH` came out as a painted `C` and a streamed `HURCH`.
+
+So babelmap asks what kind of **surface** the window is, not what a run means.
+Arthur's story window is a transcript that happens to have plates drawn on it;
+fmvpoker's is a picture frame that happens to have text positioned in it. The
+discriminator is that the window's own art **encloses** it — painted pixels within
+a text row of all four edges — while *not* filling it: a solid full-page plate is
+something a game narrates over, and a frame with a hole in the middle is something
+a game positions text inside. A window like that renders as what is sitting on it,
+at the coordinates the game named, and carries no transcript at all — which is
+exactly how a real interpreter shows it, and it is the same idea as a window
+keeping the ground it painted, applied to the text on that ground. Measured across
+every v6 title babelmap is tested against, one game answers to it.
 
 ## Prose freezes where it was printed when its window moves
 

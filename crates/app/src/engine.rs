@@ -246,6 +246,17 @@ pub struct BufferWindow {
     /// `room_panel` colour instead of the transcript colour, so the top and bottom
     /// of a split read as distinct regions. A game-set `bg` still wins.
     pub panel: bool,
+    /// Where the prose this window has streamed is currently SITTING on the v6
+    /// screen (SQ-0729), as absolute pixel runs — zvm's `ZWindow::streamed`.
+    ///
+    /// Live screen state, not history: the game's `erase_window` empties it and a
+    /// scroll drops what leaves the top, so it is what a real interpreter would
+    /// have on the glass right now. The host transcript remains the source of this
+    /// window's prose for every ordinary game and this stays unread; it exists for
+    /// the one shape where the transcript is the wrong reading of the window — a
+    /// story window whose own art ENCLOSES it, which is a canvas the game paints
+    /// into rather than a page it narrates on. Empty for non-v6 engines.
+    pub px_runs: Vec<crate::engine::PxText>,
 }
 
 /// How a [`WinNode::Pair`] divides its space.

@@ -2592,6 +2592,22 @@ impl GameSession {
                     primary: true,
                     bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
                     fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
+                    // Where this window's streamed prose is SITTING (SQ-0729) — see
+                    // `BufferWindow::px_runs`. The transcript is still what renders
+                    // it; this is the same text read as pixels, for the one window
+                    // shape that is a canvas rather than a page.
+                    px_runs: win
+                        .streamed
+                        .iter()
+                        .map(|t| crate::engine::PxText {
+                            y: t.y,
+                            x: t.x,
+                            text: t.text.clone(),
+                            style: t.style,
+                            fg: crate::state::pack_zcolour(t.fg),
+                            bg: crate::state::pack_zcolour(t.bg),
+                        })
+                        .collect(),
                     ..Default::default()
                 })
             } else if !win.prose.is_empty() {
@@ -2610,6 +2626,7 @@ impl GameSession {
                     bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
                     fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
                     panel: false,
+                    px_runs: Vec::new(),
                 })
             } else {
                 WinNode::Grid(GridWindow {

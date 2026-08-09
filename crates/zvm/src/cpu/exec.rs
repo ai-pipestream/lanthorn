@@ -309,13 +309,14 @@ pub struct Machine {
     /// stamp — each retirement supersedes the one before it as the live screen's
     /// beginning. Set-only here; `GameSession::drain_turn` takes it.
     pub v6_prose_retired: Option<u64>,
-    /// A `(window, pixel column)` a v6 `set_cursor` just DECLARED, pending the
-    /// next print to that window — see [`Machine::v6_take_declared_indent`]
-    /// (SQ-0697). Transient one-shot state between the opcode and the print it
+    /// A `(window, pixel column, pixel row)` a v6 `set_cursor` just DECLARED,
+    /// pending the next print to that window — see
+    /// [`Machine::v6_take_declared_indent`] (SQ-0697; the row joined it in
+    /// SQ-0729). Transient one-shot state between the opcode and the print it
     /// positions; nothing outside that pair reads it, and it is re-armed by the
     /// story's own `set_cursor` on any path that matters, so it carries no
     /// snapshot weight.
-    pub v6_declared_x: Option<(u8, u16)>,
+    pub v6_declared_x: Option<(u8, u16, u16)>,
     /// The v6 window the game last asked for INPUT through, when that window was a
     /// flowing-prose one (SQ-0585). It is the game's main text window by definition
     /// — the one the player types into — so its output is what the host mirrors as
@@ -2172,7 +2173,7 @@ impl Machine {
                             // `v6_take_declared_indent` (SQ-0697). Armed only
                             // here, so the cursor advancing over printed text can
                             // never be mistaken for a fresh declaration.
-                            self.v6_declared_x = Some((win, w.x_cursor));
+                            self.v6_declared_x = Some((win, w.x_cursor, w.y_cursor));
                         }
                     }
                 } else {
@@ -3547,15 +3548,22 @@ impl Machine {
     /// re-indent each letter. It is dropped rather than deferred when the first
     /// print after it is a bare newline (the game moved on), and an indent is only
     /// produced for a column genuinely right of the window's left margin.
-    fn v6_take_declared_indent(&mut self, s: &str) -> usize {
-        let Some((win, col)) = self.v6_declared_x.take() else { return 0 };
-        let Some(v6) = self.screen.v6.as_ref() else { return 0 };
+    /// The ROW comes back with it (SQ-0729), as a 0-based text line down the
+    /// window. A streaming transcript has no way to express it — it is one line
+    /// after another — so the streaming caller drops it, but a window that keeps
+    /// its own line buffer can pad out to it exactly as it pads out to the column.
+    fn v6_take_declared_indent(&mut self, s: &str) -> (usize, usize) {
+        let Some((win, col, row)) = self.v6_declared_x.take() else { return (0, 0) };
+        let Some(v6) = self.screen.v6.as_ref() else { return (0, 0) };
         if win != v6.current || s.starts_with('\n') {
-            return 0;
+            return (0, 0);
         }
         let w = &v6.windows[(win as usize).min(7)];
         // 1-based pixel column, relative to the window's own left margin.
-        usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / V6_FONT_WIDTH)
+        (
+            usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / V6_FONT_WIDTH),
+            usize::from(row.saturating_sub(1) / V6_FONT_HEIGHT),
+        )
     }
 
     /// Advance the current v6 window's cursor as `s` streams out through the
@@ -3965,15 +3973,17 @@ impl Machine {
                 // its line buffer, so it pads the line out to the column instead.
                 // Taken on BOTH branches, so a declaration can never outlive the
                 // print that answered it.
-                let col = self.v6_take_declared_indent(s);
+                let (col, row) = self.v6_take_declared_indent(s);
                 if let Some(v6) = self.screen.v6.as_mut() {
-                    v6.windows[cur].push_prose(s, (col > 0).then_some(col));
+                    v6.windows[cur].push_prose(s, (col > 0).then_some(col), (row > 0).then_some(row));
                 }
             } else {
                 // A column this window's own `set_cursor` DECLARED for the text
                 // about to stream, carried into the character stream as an indent
                 // (SQ-0697). See `v6_take_declared_indent`.
-                let indent = self.v6_take_declared_indent(s);
+                // The declared ROW is dropped here: a scrolling transcript has
+                // one line after another and nowhere to put it.
+                let (indent, _) = self.v6_take_declared_indent(s);
                 // v6: this is window 0's (the main scrolling window's) output.
                 // Count its chars so window-0 inline pictures can anchor to their
                 // exact position in the text stream (PictureEvent::out_chars) —

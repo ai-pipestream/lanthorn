@@ -2200,6 +2200,17 @@ pub fn build_v6_raster_canvas(
         // BEFORE this blit, so the text box is still measured against the frame
         // art alone. (SQ-0695)
         v6::blit_story_gfx(&mut canvas, layout.story_gfx);
+        // A story window whose own art ENCLOSES it is a CANVAS, not a page
+        // (SQ-0729): what it shows is the runs sitting on it, at the coordinates
+        // the game's own `set_cursor` named, and a scrolling re-render of
+        // everything it ever printed is the wrong reading of the window. So its
+        // live runs are painted and there is no transcript on this frame — no
+        // prose box, and no scroll metrics, exactly as when a plate owns the
+        // screen. See `story_window_is_a_canvas`: fmvpoker alone.
+        if story_window_is_a_canvas(layout, native) {
+            v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors);
+            return finish_v6_raster_canvas(canvas, page, raster_metrics);
+        }
         // Whether any prose belongs on THIS frame, and where (SQ-0707). An
         // absolutely-placed plate is drawn INSTEAD of prose, not under it: the
         // game erases, draws, and waits, so the narration is its own picture-less
@@ -2218,7 +2229,16 @@ pub fn build_v6_raster_canvas(
         let cols = (tw / 8).max(1) as u16;
         let rows = (th / 16).max(1) as u16;
         let (main, rm) = build_main_text(state, cols, rows);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink);
+        // …sparing the cells another window's own text already holds (SQ-0729).
+        // The page fill above spares them; the GLYPHS did not, so the transcript
+        // was drawn straight through them. fmvpoker's dealt hand is the report:
+        // its five cards fill the frame's interior, window 0's clear rectangle
+        // drops onto the box the game gave its bottom prose window, and the boot
+        // banner landed on top of "You draw (a) an Eight, (b) a Three, …" — the
+        // line the player needs in order to see their draw. The transcript is the
+        // host's re-render of window 0's whole history; the label is on the screen
+        // now, so the label wins.
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &v6::chrome_text_rects(&layout.chrome));
         // [more] pager indicator (SQ-0455): when a single turn's output
         // overflowed the story box the shared pager (SQ-0404) parks the
         // scroll and shows a `[more]` prompt. The raster path can't reserve
@@ -3055,26 +3075,19 @@ fn picture_takeover(
     story_gfx: Option<&crate::engine::PositionedWindow>,
     native: (u16, u16),
 ) -> bool {
-    // One native text row of slack per edge, so a game that leaves a hairline
-    // border still counts as full-screen.
-    let slop = 16u32;
-    let covers_screen = (story.x_px as u32) <= slop
-        && (story.y_px as u32) <= slop
-        && story.x_px as u32 + story.w_px as u32 + slop >= native.0 as u32
-        && story.y_px as u32 + story.h_px as u32 + slop >= native.1 as u32;
-    if !covers_screen {
-        return false;
-    }
-    // Sample an 8×8 grid across the screen; every point must be painted by some
-    // graphics window — chrome, or the STORY window's own plate. Arthur's intro
-    // is the latter: it erases every window, then centres a 584×392 illustration
-    // inside full-screen window 0 and narrates over it (SQ-0695). There is no
-    // chrome ring at all on those screens, so scanning chrome alone found nothing
-    // painted and hybrid opened a pane-wide transcript viewport over art it then
-    // never uploaded — the same "sudden drop into frameless mode" the Zork Zero
-    // map showed. Counting `story_gfx` sends the frame to the raster composite,
-    // which draws the plate and rasterizes the narration onto it in one canvas.
-    const N: u32 = 8;
+    story_covers_screen(story, native)
+        && (art_fills_screen(chrome, story_gfx, native) || art_encloses_screen(chrome, story_gfx, native))
+}
+
+/// One native text row of slack per edge, so a game that leaves a hairline border
+/// still counts as covering the screen.
+const SCREEN_SLOP: u32 = 16;
+
+/// Is a pixel painted by any of these graphics windows?
+fn art_painted_probe<'a>(
+    chrome: &'a [&'a crate::engine::PositionedWindow],
+    story_gfx: Option<&'a crate::engine::PositionedWindow>,
+) -> impl Fn(u32, u32) -> bool + 'a {
     let painted_at = |x: u32, y: u32, pw: &crate::engine::PositionedWindow| {
         let crate::engine::WinNode::Graphics(gw) = &pw.node else { return false };
         let (wx, wy) = (pw.x_px as u32, pw.y_px as u32);
@@ -3085,30 +3098,109 @@ fn picture_takeover(
             && y - wy < img.height()
             && img.get_pixel(x - wx, y - wy)[3] >= 128
     };
-    let painted = |x: u32, y: u32| {
+    move |x: u32, y: u32| {
         chrome.iter().any(|pw| painted_at(x, y, pw)) || story_gfx.is_some_and(|pw| painted_at(x, y, pw))
-    };
-    let fills_screen = (0..N).all(|iy| {
+    }
+}
+
+/// Does the artwork FILL the screen — a solid plate the game narrates over?
+///
+/// Sampled on a coarse 8×8 grid rather than every pixel: this runs on every hybrid
+/// frame, and a fully painted picture versus a frame-only (or empty) canvas is not
+/// a close call. The STORY window's own plate counts, not just chrome: Arthur's
+/// intro erases every window, centres a 584×392 illustration inside full-screen
+/// window 0 and narrates over it (SQ-0695), and there is no chrome ring at all on
+/// those screens — scanning chrome alone found nothing painted and hybrid opened a
+/// pane-wide transcript viewport over art it then never uploaded.
+fn art_fills_screen(
+    chrome: &[&crate::engine::PositionedWindow],
+    story_gfx: Option<&crate::engine::PositionedWindow>,
+    native: (u16, u16),
+) -> bool {
+    const N: u32 = 8;
+    let painted = art_painted_probe(chrome, story_gfx);
+    (0..N).all(|iy| {
         let y = native.1 as u32 * (2 * iy + 1) / (2 * N);
         (0..N).all(|ix| {
             let x = native.0 as u32 * (2 * ix + 1) / (2 * N);
             painted(x, y)
         })
-    });
-    if fills_screen {
-        return true;
-    }
-    // Or the art FRAMES the screen (SQ-0729): painted pixels within one native text
-    // row of every edge. Probed edge strip by edge strip, so a hollow frame answers
-    // on its border instead of failing on its hole.
+    })
+}
+
+/// Does this story window cover the whole screen (within [`SCREEN_SLOP`] per edge)?
+/// Such a window leaves hybrid's `chrome_bands` with nothing to carve.
+fn story_covers_screen(story: &crate::engine::PositionedWindow, native: (u16, u16)) -> bool {
+    (story.x_px as u32) <= SCREEN_SLOP
+        && (story.y_px as u32) <= SCREEN_SLOP
+        && story.x_px as u32 + story.w_px as u32 + SCREEN_SLOP >= native.0 as u32
+        && story.y_px as u32 + story.h_px as u32 + SCREEN_SLOP >= native.1 as u32
+}
+
+/// Does the artwork ENCLOSE the screen (SQ-0729) — painted pixels within one native
+/// text row of every edge? Probed edge strip by edge strip, so a hollow FRAME
+/// answers on its border instead of failing on its hole, which is what makes this
+/// different from "the art fills the screen".
+///
+/// Corpus-measured when it was written, and the measurement is what makes it safe
+/// to reuse: it fires for exactly one title, fmvpoker. Zork Zero and Shogun keep
+/// window 0 inset inside their frames, advent and scopa paint nothing behind it,
+/// Arthur's intro plate and Journey's title are solid and answer the FILL test
+/// instead, and mysterious01's plate is a 512×192 band across the lower half that
+/// reaches neither the top edge nor the right one.
+fn art_encloses_screen(
+    chrome: &[&crate::engine::PositionedWindow],
+    story_gfx: Option<&crate::engine::PositionedWindow>,
+    native: (u16, u16),
+) -> bool {
+    let painted = art_painted_probe(chrome, story_gfx);
     let (w, h) = (native.0 as u32, native.1 as u32);
     let any_painted = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
         ys.step_by(2).any(|y| xs.clone().step_by(2).any(|x| painted(x, y)))
     };
-    any_painted(0..w, 0..slop)
-        && any_painted(0..w, h.saturating_sub(slop)..h)
-        && any_painted(0..slop, 0..h)
-        && any_painted(w.saturating_sub(slop)..w, 0..h)
+    any_painted(0..w, 0..SCREEN_SLOP)
+        && any_painted(0..w, h.saturating_sub(SCREEN_SLOP)..h)
+        && any_painted(0..SCREEN_SLOP, 0..h)
+        && any_painted(w.saturating_sub(SCREEN_SLOP)..w, 0..h)
+}
+
+/// SQ-0729: is this story window a CANVAS rather than a page — a window the game
+/// has drawn a frame AROUND and then positions text INSIDE, rather than a
+/// transcript it narrates on?
+///
+/// The discriminator is deliberately not "what does this RUN mean". A `set_cursor`
+/// before a run is genuinely ambiguous: Arthur positions every room headline in
+/// window 0 (one character at a time, only the first carrying the declaration),
+/// Shogun and Journey centre each header line the same way, and mysterious01
+/// re-homes before its prompt — all of them meaning "resume the transcript here",
+/// while fmvpoker's HOLD means "paint this under that card". Nothing in the signal
+/// separates them, which is what a measured attempt at that rule established.
+///
+/// So the question asked here is what kind of SURFACE the window is. Arthur's
+/// window 0 is a transcript that happens to have plates drawn on it; fmvpoker's is
+/// a picture frame that happens to have text positioned in it — its own art
+/// encloses it on all four sides and it covers the whole screen. That is the same
+/// test [`picture_takeover`]'s enclosure arm asks, reused rather than restated so
+/// the two cannot drift apart, and it fires for fmvpoker alone.
+///
+/// It also extends a rule this codebase already made: SQ-0711/SQ-0716 ruled that a
+/// window the game has drawn into is a canvas and keeps the ground it drew on.
+/// This says the same of the text on that ground.
+///
+/// ENCLOSING and not FILLING is the whole discriminator, and both halves are
+/// load-bearing. A solid full-screen plate reaches all four edges too, so Journey's
+/// title read as a canvas until the fill test excluded it — and a plate is a
+/// picture a game NARRATES OVER (Arthur's illustrated screens, Journey's title),
+/// while a frame with a hole in the middle is a picture a game POSITIONS TEXT
+/// INSIDE. [`picture_takeover`] takes either, because for its purposes — hybrid has
+/// no ring to draw — the two are the same.
+pub fn story_window_is_a_canvas(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    native: (u16, u16),
+) -> bool {
+    layout.story.is_some_and(|s| story_covers_screen(s, native))
+        && !art_fills_screen(&layout.chrome, layout.story_gfx, native)
+        && art_encloses_screen(&layout.chrome, layout.story_gfx, native)
 }
 
 /// Classify what sits below the story window natively, to pick the [`BottomPlan`]
@@ -4104,7 +4196,7 @@ mod tests {
         let cols = (sw / 8).max(1) as u16;
         let rows = (sh / 16).max(1) as u16;
         let (main, _) = build_main_text(&state, cols, rows);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[]);
         let pre_flatten = canvas.clone();
         v6::flatten_onto_page(&mut canvas, page);
 
@@ -4887,6 +4979,7 @@ mod tests {
             bg: None,
             fg: None,
             panel: false,
+            px_runs: Vec::new(),
         }
     }
 
@@ -4910,7 +5003,7 @@ mod tests {
             WinNode::Graphics(crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false })
         }
         fn buf(bg: u32, primary: bool) -> WinNode {
-            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false })
+            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false, px_runs: Vec::new() })
         }
         fn grid(bg: u32) -> WinNode {
             let mut g = GridWindow::default();
@@ -5477,6 +5570,7 @@ mod tests {
             bg: None,
             fg: None,
             panel: false,
+            px_runs: Vec::new(),
         };
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
@@ -7002,7 +7096,7 @@ mod tests {
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;
                     let (main, _) = build_main_text(&state, cols, rows);
-                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg);
+                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[]);
                 }
                 canvas
             };

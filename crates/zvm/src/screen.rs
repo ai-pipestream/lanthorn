@@ -408,9 +408,26 @@ impl ZWindow {
     /// run happened to end. A column already behind the line's end cannot be
     /// reached by appending, so it is ignored — a line buffer can only move right,
     /// and only the streaming shadow ([`ZWindow::record_streamed`]) can express a
-    /// true backwards jump. The declared ROW is likewise not honoured here: these
-    /// are logical lines, stacked in print order.
-    pub fn push_prose(&mut self, s: &str, at_col: Option<usize>) {
+    /// true backwards jump.
+    ///
+    /// `at_row` is that same `set_cursor`'s ROW, in text lines from the window's
+    /// top, and is honoured the same way: the buffer is PADDED OUT TO it with blank
+    /// lines, and a row already behind the buffer's end is ignored. fmvpoker needs
+    /// both halves, and needed the row half the moment its story window became a
+    /// canvas: it prints its menu bar and its CONTINUE button at `set_cursor(row=80,
+    /// …)`, five text lines down its 156px bottom panel, and prints its running
+    /// totals into WINDOW 0 at absolute y = 247 and 265 — which land in that panel's
+    /// first two lines. Stacking the panel's own prose from its top edge put the two
+    /// on the same rows, so the game's own layout collided with itself.
+    pub fn push_prose(&mut self, s: &str, at_col: Option<usize>, at_row: Option<usize>) {
+        // `row` is a 0-based line index, so the buffer needs `row + 1` lines for
+        // the run to land ON it. A buffer already that long has moved past the
+        // declaration and keeps its own last line.
+        if let Some(row) = at_row {
+            while self.prose.len() <= row {
+                self.prose.push(String::new());
+            }
+        }
         for (i, part) in s.split('\n').enumerate() {
             if i > 0 || self.prose.is_empty() {
                 self.prose.push(String::new());
@@ -785,10 +802,15 @@ impl V6Windows {
             return;
         }
         for win in self.windows.iter_mut() {
-            // Both painted layers: what the window is showing now, and the prose
-            // it left frozen behind when it moved (SQ-0697). The erase covers
-            // pixels, and does not care which layer put them there.
-            for layer in [&mut win.texts, &mut win.retired] {
+            // Every layer that records where glyphs are SITTING: what the window
+            // is showing now, the prose it left frozen behind when it moved
+            // (SQ-0697), and the prose it is still streaming (SQ-0729 — the
+            // shadow of the live stream, which is the same pixels seen from the
+            // other side). The erase covers pixels, and does not care which layer
+            // put them there: fmvpoker erases its bottom window and reprints the
+            // running total there, and a shadow that kept the old figure would
+            // have "990" standing on the tail of "1000".
+            for layer in [&mut win.texts, &mut win.retired, &mut win.streamed] {
                 if layer.iter().any(|t| {
                     let ty = t.y as i32;
                     let tx = t.x as i32;

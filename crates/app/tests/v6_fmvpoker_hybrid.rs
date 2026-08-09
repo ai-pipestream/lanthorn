@@ -211,6 +211,13 @@ const MENU_LABELS: &[(usize, &str)] = &[
 ];
 const MENU_ROW: &str =
     "PLAY CURRENT BET      CHANGE CURRENT BET      SAVE      RESTORE      QUIT";
+/// …and the LINE it lands on. Those same `set_cursor` calls declare `row=80` — a
+/// 1-based pixel row down a 156px window in a 16px cell, i.e. text line
+/// `(80-1)/16 = 4`. The row is honoured for the same reason the column is (SQ-0729,
+/// second pass): fmvpoker prints its running totals into WINDOW 0 at absolute
+/// y = 247 and 265, which fall in this window's first two lines, so a panel that
+/// stacked its own prose from its top edge collided with the game's own layout.
+const MENU_LINE: usize = 4;
 
 /// SQ-0729: a v6 prose window is still a pixel surface, and fmvpoker places every
 /// menu label on one row with its own `set_cursor`. `ZWindow::push_prose` kept no
@@ -218,7 +225,8 @@ const MENU_ROW: &str =
 /// `PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT` — inside the VM, before any
 /// render code could see the columns. It now pads the line out TO the declared
 /// column (not BY it: the run has to land where the game named, not that far past
-/// wherever the previous run ended).
+/// wherever the previous run ended), and pads the BUFFER out to the declared line
+/// the same way.
 fn fmvpoker_menu_labels_keep_their_columns(honor: bool) {
     let Some((session, _state)) = fmvpoker_title(honor) else { return };
     let model = session.screen();
@@ -232,18 +240,21 @@ fn fmvpoker_menu_labels_keep_their_columns(honor: bool) {
     let WinNode::Buffer(b) = &menu.node else { unreachable!() };
 
     assert_eq!(
-        b.lines[0], MENU_ROW,
-        "honor={honor}: fmvpoker's five menu labels must reach the model at the columns its own \
-         set_cursor named, not run together (SQ-0729)"
+        b.lines.get(MENU_LINE).map(String::as_str),
+        Some(MENU_ROW),
+        "honor={honor}: fmvpoker's five menu labels must reach the model at the columns AND the \
+         line its own set_cursor named, not run together and not stacked from the window's top \
+         edge (SQ-0729). Lines: {:?}",
+        b.lines
     );
-    let row: Vec<char> = b.lines[0].chars().collect();
+    let row: Vec<char> = b.lines[MENU_LINE].chars().collect();
     for &(col, label) in MENU_LABELS {
         let got: String = row.iter().skip(col).take(label.chars().count()).collect();
         assert_eq!(
             got, label,
             "honor={honor}: {label:?} must start at column {col} — the column the game's \
              set_cursor declared for it. Row: {:?}",
-            b.lines[0]
+            b.lines[MENU_LINE]
         );
     }
     // The window is 594px / 74 characters wide, so nothing is being bought with
@@ -283,20 +294,21 @@ fn fmvpoker_composite_shows_its_menu_window(honor: bool) {
         .find(|it| matches!(&it.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
         .expect("fmvpoker publishes its menu as a secondary prose window (SQ-0585)");
     let WinNode::Buffer(b) = &menu.node else { unreachable!() };
-    assert!(
-        b.lines.iter().any(|l| l.contains("Select an option")),
-        "premise (honor={honor}): the hint line is in that window: {:?}",
-        b.lines
-    );
-    // …and its labels arrive at the columns the game printed them at (SQ-0729).
+    let hint = b
+        .lines
+        .iter()
+        .position(|l| l.contains("Select an option"))
+        .unwrap_or_else(|| panic!("premise (honor={honor}): the hint line is in that window: {:?}", b.lines));
+    // …and its labels arrive at the columns and line the game printed them at.
     assert_eq!(
-        b.lines[0], MENU_ROW,
-        "premise (honor={honor}): the menu labels keep their declared columns"
+        b.lines.get(MENU_LINE).map(String::as_str),
+        Some(MENU_ROW),
+        "premise (honor={honor}): the menu labels keep their declared columns and line"
     );
 
     let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
-    // The hint line's row in native pixels: the window's third line.
-    let (hx, hy) = (menu.x_px as u32 + menu.left_margin as u32, menu.y_px as u32 + 2 * 16);
+    // The hint line's row in native pixels, one 16px text line per buffer line.
+    let (hx, hy) = (menu.x_px as u32 + menu.left_margin as u32, menu.y_px as u32 + hint as u32 * 16);
     let mut seen = std::collections::HashSet::new();
     for y in hy..(hy + 16).min(img.height()) {
         for x in hx..(hx + 63 * 8).min(img.width()) {
@@ -406,4 +418,367 @@ fn fmvpoker_erased_banner_keeps_the_colour_the_game_named_honoring_game_colours(
 #[test]
 fn fmvpoker_erased_banner_keeps_the_colour_the_game_named_theme_only() {
     fmvpoker_erased_banner_keeps_the_colour_the_game_named(false);
+}
+
+/// Play a hand: past the boot screen, `p` to deal, then a key per card until the
+/// game announces the draw. Stops on the frame where its bottom prose window is
+/// carrying "You draw (a) …" — the line the player reads to decide what to hold.
+fn fmvpoker_dealt_hand(honor: bool) -> Option<(GameSession, app::state::AppState)> {
+    let (mut session, mut state) = fmvpoker_title(honor)?;
+    for step in 0..24 {
+        let r = session.submit_char(if step == 0 { b'p' } else { b' ' });
+        assert!(r.fault.is_none(), "fmvpoker faulted dealing: {:?}", r.fault);
+        app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+        *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+        let has_draw = {
+            let model = session.screen();
+            let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+            app::render::v6_layout::classify_windows(items).chrome.iter().any(|it| {
+                matches!(&it.node, WinNode::Buffer(b) if b.lines.iter().any(|l| l.starts_with("You draw")))
+            })
+        };
+        if has_draw {
+            return Some((session, state));
+        }
+    }
+    panic!("fmvpoker never announced a draw within 24 keypresses");
+}
+
+/// SQ-0729: the story transcript wrote its boot banner straight through
+/// "You draw (a) …", the line the player needs in order to see their draw.
+///
+/// Nothing about the model is wrong. The announcement is window 2's prose and
+/// window 2 is already the bottom window, exactly where it belongs. What moves is
+/// window 0: it is the whole 640x400 screen here, and once the five dealt cards
+/// fill the frame's interior its largest CLEAR rectangle drops onto the very box
+/// the game gave window 2. `fill_story_page_under_chrome_text` spared those pixels
+/// from the page FILL (SQ-0728) but nothing spared them from the GLYPHS, so
+/// `draw_story_text` rasterized "FROBOZZ MAGIC VIDEOPOKER / by Zach Matley / …"
+/// over the announcement.
+///
+/// The rule the fix states: a story transcript is the HOST's re-render of
+/// everything window 0 ever printed, while a label another window is holding is on
+/// the screen *now* — so where they collide the live label wins.
+///
+/// Asserted by difference, which is what makes it falsifiable: the rows window 2's
+/// own lines occupy must be byte-identical to the same frame rendered with an
+/// EMPTY host transcript, since with no transcript there is nothing to overdraw
+/// with. The rows below must NOT be identical — the money lines still belong to
+/// the transcript and must still reach the screen — so the test cannot pass by
+/// suppressing the story text wholesale.
+fn fmvpoker_the_draw_announcement_survives_the_transcript(honor: bool) {
+    let Some((session, mut state)) = fmvpoker_dealt_hand(honor) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+
+    // Premise: the announcement is in the bottom prose window, not the transcript…
+    let panel = layout
+        .chrome
+        .iter()
+        .find(|it| matches!(&it.node, WinNode::Buffer(b) if b.lines.iter().any(|l| l.starts_with("You draw"))))
+        .expect("fmvpoker announces the draw in its bottom prose window");
+    let WinNode::Buffer(b) = &panel.node else { unreachable!() };
+    let lines = b.lines.len().min((panel.h_px / 16) as usize);
+    // …and the host transcript has boot prose of its own to collide with.
+    assert!(
+        state.transcript.iter().any(|l| l.contains("FROBOZZ MAGIC VIDEOPOKER")),
+        "premise (honor={honor}): the transcript carries the boot banner"
+    );
+
+    let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    // The same frame with nothing for `draw_story_text` to draw: every other layer
+    // is unchanged, so any difference in these rows IS the transcript overdrawing.
+    state.transcript.clear();
+    state.transcript_styles.clear();
+    state.transcript_runs.clear();
+    state.transcript_para.clear();
+    state.transcript_images.clear();
+    let (bare, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+    let (x0, x1) = (panel.x_px as u32, (panel.x_px as u32 + panel.w_px as u32).min(img.width()));
+    let row_band = |row: usize| -> (u32, u32) {
+        let y = panel.y_px as u32 + row as u32 * 16;
+        (y, (y + 16).min(img.height()))
+    };
+    for row in 0..lines {
+        let (y0, y1) = row_band(row);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                assert_eq!(
+                    img.get_pixel(x, y),
+                    bare.get_pixel(x, y),
+                    "honor={honor}: at ({x},{y}) the story transcript is drawn over row {row} of \
+                     fmvpoker's own bottom window — {:?}. Once the cards fill the frame, window 0's \
+                     clear rectangle lands on window 2's box, and the transcript painted the boot \
+                     banner through \"You draw (a) …\" (SQ-0729).",
+                    b.lines[row]
+                );
+            }
+        }
+    }
+    // …and sparing those rows must not silence what window 0 prints in the rest of
+    // that box: "Current Bet: / 10 / Total Winnings: / 990" belong there too. (They
+    // reach the screen as PAINT rather than as transcript — see
+    // `fmvpoker_paints_the_runs_it_positions` — so this looks for ink, not for a
+    // difference against the bare render.)
+    let money = panel.y_px as u32 + 12;
+    let mut seen = std::collections::HashSet::new();
+    for y in money..(money + 16).min(img.height()) {
+        for x in x0..x1 {
+            seen.insert(img.get_pixel(x, y).0);
+        }
+    }
+    assert!(
+        seen.len() >= 2,
+        "honor={honor}: the row carrying \"Current Bet:\" and \"Total Winnings:\" is one flat \
+         colour ({} seen) — sparing the rows the game's own bottom window holds must not take \
+         window 0's own prose off the screen with them",
+        seen.len()
+    );
+}
+
+#[test]
+fn fmvpoker_the_draw_announcement_survives_the_transcript_honoring_game_colours() {
+    fmvpoker_the_draw_announcement_survives_the_transcript(true);
+}
+
+#[test]
+fn fmvpoker_the_draw_announcement_survives_the_transcript_theme_only() {
+    fmvpoker_the_draw_announcement_survives_the_transcript(false);
+}
+
+/// SQ-0729, rule (d): **a story window whose own art ENCLOSES it is a canvas.**
+///
+/// fmvpoker positions essentially everything it shows. It prints "HOLD" under each
+/// card it is holding at `set_cursor(row=203, col=70/183/296/409/522, window=0)`
+/// and its running totals at (76,247), (76,265), (420,247) and (420,265) — and
+/// every one of those landed in the story SCROLL instead, because window 0 is the
+/// host transcript. The player's own reading of it was the right one: there is not
+/// supposed to be a scroll window in this game at all.
+///
+/// What makes it decidable is refusing to ask what a RUN means. A `set_cursor`
+/// before a run is genuinely ambiguous — Arthur positions every room headline in
+/// window 0 one character at a time, Shogun and Journey centre each header line,
+/// mysterious01 re-homes before its prompt, and all of them mean "resume the
+/// transcript here" with the identical signal fmvpoker uses for "paint this under
+/// that card". Measuring that rule broke Arthur's room names ("CHURCH" came out as
+/// "C" painted and "HURCH" streamed). So the question asked instead is what kind of
+/// SURFACE the window is: Arthur's window 0 is a transcript that happens to have
+/// plates drawn on it, and fmvpoker's is a picture frame that happens to have text
+/// positioned in it. Its own art encloses it on all four sides and it covers the
+/// whole screen.
+///
+/// The window then renders as what is SITTING on it — zvm's streamed shadow, which
+/// an `erase_window` empties exactly as it empties any painted layer — at the
+/// coordinates the game named, and the frame carries no transcript at all.
+///
+/// Asserted the way that makes it unambiguous: the composite must be BYTE-IDENTICAL
+/// with and without a host transcript. A page depends on its transcript; a canvas
+/// does not.
+fn fmvpoker_paints_the_runs_it_positions(honor: bool) {
+    let Some((mut session, mut state)) = fmvpoker_dealt_hand(honor) else { return };
+    // …then hold card (a), which is when the game paints its HOLD label.
+    let r = session.submit_char(b'a');
+    assert!(r.fault.is_none(), "fmvpoker faulted holding a card: {:?}", r.fault);
+    app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+    *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+
+    // Premise: this frame's story window is a canvas…
+    assert!(
+        app::render::screen::story_window_is_a_canvas(&layout, native),
+        "premise (honor={honor}): fmvpoker's window 0 covers the screen and its own table art \
+         encloses it"
+    );
+    // …and the runs the game positioned are on it, at the coordinates it named.
+    let story = layout.story.expect("fmvpoker publishes a story window");
+    let WinNode::Buffer(b) = &story.node else { panic!("window 0 is the primary prose Buffer") };
+    let at = |x: u16, y: u16| b.px_runs.iter().find(|t| (t.x, t.y) == (x, y)).map(|t| t.text.clone());
+    assert_eq!(
+        at(70, 203).as_deref(),
+        Some("HOLD"),
+        "premise (honor={honor}): the HOLD label the game printed at set_cursor(row=203, col=70) \
+         is recorded where it was printed. Runs: {:?}",
+        b.px_runs.iter().map(|t| (t.x, t.y, t.text.clone())).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        at(76, 247).as_deref(),
+        Some("Current Bet:"),
+        "premise (honor={honor}): so is the running total, at set_cursor(row=247, col=76)"
+    );
+    // And they are a SCREEN, not a log: no two of them claim the same pixels. The
+    // running total is reprinted every hand into a window the game erases first —
+    // 1000 becomes 990 — and a shadow that kept the erased figure would leave "990"
+    // standing on the tail of "1000", reading "9900". An erase covers pixels, so it
+    // trims this layer exactly as it trims any other painted one.
+    let rect = |t: &app::engine::PxText| {
+        let (x, y) = (t.x.max(1) as u32 - 1, t.y.max(1) as u32 - 1);
+        (x, y, x + t.text.chars().count() as u32 * 8, y + 16)
+    };
+    for (i, a) in b.px_runs.iter().enumerate() {
+        for c in &b.px_runs[i + 1..] {
+            let (ax0, ay0, ax1, ay1) = rect(a);
+            let (cx0, cy0, cx1, cy1) = rect(c);
+            assert!(
+                ax0 >= cx1 || cx0 >= ax1 || ay0 >= cy1 || cy0 >= ay1,
+                "honor={honor}: {:?} at ({},{}) and {:?} at ({},{}) are both recorded on the same \
+                 pixels — the older one was erased off the screen and its record has to go with \
+                 it (SQ-0729)",
+                a.text,
+                a.x,
+                a.y,
+                c.text,
+                c.x,
+                c.y
+            );
+        }
+    }
+    // Premise: the host transcript is not empty, so "identical without it" means
+    // something.
+    assert!(
+        state.transcript.iter().any(|l| l.contains("FROBOZZ MAGIC VIDEOPOKER")),
+        "premise (honor={honor}): the transcript carries the boot banner"
+    );
+
+    let (img, metrics) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    // The HOLD label is really on the screen: its cells are not one flat colour.
+    let mut seen = std::collections::HashSet::new();
+    for y in 202..218u32 {
+        for x in 69..(69 + 4 * 8) {
+            seen.insert(img.get_pixel(x, y).0);
+        }
+    }
+    assert!(
+        seen.len() >= 2,
+        "honor={honor}: the cells under card (a) at (70,203) are one flat colour ({} seen) — the \
+         HOLD label the game positioned there is not being painted (SQ-0729)",
+        seen.len()
+    );
+    assert!(
+        metrics.is_none(),
+        "honor={honor}: a canvas has no scroll — reporting scroll metrics for it puts a pager on \
+         a frame with no transcript to page through"
+    );
+
+    state.transcript.clear();
+    state.transcript_styles.clear();
+    state.transcript_runs.clear();
+    state.transcript_para.clear();
+    state.transcript_images.clear();
+    let (bare, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    let differing = img.pixels().zip(bare.pixels()).filter(|(a, b)| a != b).count();
+    assert_eq!(
+        differing, 0,
+        "honor={honor}: {differing} pixels of this frame come from the host transcript. A story \
+         window the game has drawn a frame AROUND is a canvas, and what it shows is the runs \
+         sitting on it — not a re-render of everything window 0 has ever printed (SQ-0729)"
+    );
+
+    // …and the game's two layers do not collide. Painting window 0's runs at the
+    // coordinates it named only reads as a fix if the OTHER window's prose is at
+    // the coordinates IT named too: fmvpoker prints its bottom panel's lines at
+    // `set_cursor(row=80, …)`, five text lines down that panel, while these runs
+    // land in its first two lines. Stacking the panel's prose from its top edge
+    // instead put "Current Bet: / 10 / Total Winnings: / 990" straight through
+    // "You draw (a) an Eight, …" — the same symptom, arrived at from the other side.
+    let panel = layout
+        .chrome
+        .iter()
+        .find(|it| matches!(&it.node, WinNode::Buffer(b) if b.lines.iter().any(|l| l.starts_with("You draw"))))
+        .expect("fmvpoker announces the draw in its bottom prose window");
+    let WinNode::Buffer(pb) = &panel.node else { unreachable!() };
+    for (row, line) in pb.lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (ly0, ly1) = (panel.y_px as u32 + row as u32 * 16, panel.y_px as u32 + row as u32 * 16 + 16);
+        let (lx0, lx1) = (
+            panel.x_px as u32 + panel.left_margin as u32,
+            panel.x_px as u32 + panel.w_px as u32,
+        );
+        for t in &b.px_runs {
+            if t.text.trim().is_empty() {
+                continue;
+            }
+            let (ry0, ry1) = (t.y.max(1) as u32 - 1, t.y.max(1) as u32 - 1 + 16);
+            let (rx0, rx1) = (t.x.max(1) as u32 - 1, t.x.max(1) as u32 - 1 + t.text.chars().count() as u32 * 8);
+            assert!(
+                ry0 >= ly1 || ly0 >= ry1 || rx0 >= lx1 || lx0 >= rx1,
+                "honor={honor}: window 0's {:?} at ({},{}) lands on row {row} of the bottom \
+                 panel, {line:?}. Both are the game's own text and it placed neither of them \
+                 there by accident (SQ-0729).",
+                t.text,
+                t.x,
+                t.y
+            );
+        }
+    }
+}
+
+#[test]
+fn fmvpoker_paints_the_runs_it_positions_honoring_game_colours() {
+    fmvpoker_paints_the_runs_it_positions(true);
+}
+
+#[test]
+fn fmvpoker_paints_the_runs_it_positions_theme_only() {
+    fmvpoker_paints_the_runs_it_positions(false);
+}
+
+/// The corpus guard on rule (d), and the reason it was worth trying at all: the
+/// enclosure test was measured when it was written and fires for ONE title.
+///
+/// Zork Zero and Shogun keep window 0 inset inside their frames; advent and scopa
+/// paint nothing behind it; Arthur's intro plate and Journey's title are solid and
+/// answer the FILL arm rather than the enclosure one; mysterious01's plate is a
+/// band across the lower half that reaches neither the top edge nor the right one.
+/// Every one of them keeps its transcript, which is the whole point — window 0 is
+/// the story window of every v6 game.
+#[test]
+fn fmvpoker_is_the_only_canvas_story_window() {
+    let expected: &[(&str, [bool; 4])] = &[
+        ("zork0-r393-s890714.z6", [false; 4]),
+        ("arthur-r74-s890714.z6", [false; 4]),
+        ("shogun-r322-s890706.z6", [false; 4]),
+        ("journey-r83-s890706.z6", [false; 4]),
+        ("advent.z6", [false; 4]),
+        ("scopa.z6", [false; 4]),
+        ("mysterious01.z6", [false; 4]),
+        // …and fmvpoker, which boots with no art at all and is an ordinary page for
+        // that one frame, then draws its table and is a canvas from there.
+        ("fmvpoker.z6", [false, true, true, true]),
+    ];
+    for &(game, want) in expected {
+        let Some((mut session, mut state)) = boot(game, true) else { continue };
+        let mut got = [false; 4];
+        for (step, slot) in got.iter_mut().enumerate() {
+            {
+                let model = session.screen();
+                let WinNode::Layered(items) = &model.root else { panic!("{game}: v6 Layered root") };
+                let native = app::render::v6_layout::native_extent(items);
+                let layout = app::render::v6_layout::classify_windows(items);
+                *slot = app::render::screen::story_window_is_a_canvas(&layout, native);
+            }
+            if step == 3 {
+                break;
+            }
+            let r = match session.pending_input() {
+                InputKind::Char => session.submit_char(13),
+                _ => session.submit(""),
+            };
+            assert!(r.fault.is_none(), "{game} faulted at step {step}: {:?}", r.fault);
+            app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+            *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+        }
+        assert_eq!(
+            got, want,
+            "{game}: which frames read as a CANVAS changed. Rule (d) turns off a v6 title's whole \
+             transcript, so a game that starts qualifying loses its narration (SQ-0729)."
+        );
+    }
 }

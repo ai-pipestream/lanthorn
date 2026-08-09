@@ -962,7 +962,7 @@ fn shogun_prose_emphasis_reaches_the_raster_faces() {
     // a +1 double-strike of it.
     let draw = |m: &v6::MainText| {
         let mut c = image::RgbaImage::new(cols as u32 * 8, 40 * 16);
-        v6::draw_story_text(&mut c, m, 0, 0, cols, 40, image::Rgba([255, 255, 255, 255]));
+        v6::draw_story_text(&mut c, m, 0, 0, cols, 40, image::Rgba([255, 255, 255, 255]), &[]);
         c
     };
     let styled = draw(&main);
