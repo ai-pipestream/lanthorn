@@ -169,18 +169,24 @@ pub(crate) fn clamp_runs(runs: Vec<CaptureRun>, char_len: usize) -> Vec<CaptureR
 /// ratios (below) stay valid because both numerator and denominator double.
 pub(crate) const V6_ART_SCALE: u32 = 2;
 
-/// Scale a native-resolution v6 picture into UNIT space (×[`V6_ART_SCALE`],
+/// Scale a native-resolution v6 picture into UNIT space (×`scale`,
 /// nearest-neighbour — the DOS-authentic crisp pixel double). Every picture that
 /// crosses from PictSource's art-native pixels into the 640×400 unit screen goes
 /// through here exactly once, so window canvases, inline floats and the
 /// `is_content_art` classification all see one consistent unit-space size.
-fn v6_scaled_art(img: &image::DynamicImage) -> image::DynamicImage {
+///
+/// `scale` is the session's [`GameSession::art_scale`]: [`V6_ART_SCALE`] for art
+/// with a Blorb standard window to be scaled against, 1 for non-scalable art.
+fn v6_scaled_art(img: &image::DynamicImage, scale: u32) -> image::DynamicImage {
     use image::GenericImageView;
+    if scale == 1 {
+        return img.clone();
+    }
     let (w, h) = img.dimensions();
     image::DynamicImage::ImageRgba8(image::imageops::resize(
         img,
-        w * V6_ART_SCALE,
-        h * V6_ART_SCALE,
+        w * scale,
+        h * scale,
         image::imageops::FilterType::Nearest,
     ))
 }
@@ -508,6 +514,17 @@ pub struct WindowFill {
     pub out_chars: u64,
 }
 
+/// Where a window's picture canvas was painted, so a later `move_window` can be
+/// told from a redraw in place (SQ-0715). See [`GameSession::canvas_anchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CanvasAnchor {
+    /// The window's 1-based screen origin `(x, y)` when the content was drawn.
+    origin: (u16, u16),
+    /// Union of the draw footprints in canvas coords, `(x, y, w, h)` — the only
+    /// part worth carrying off a canvas that may be 1000×1000 of transparency.
+    rect: (u32, u32, u32, u32),
+}
+
 /// One step of a turn's v6 picture sequence: the screen as it stood after that
 /// step, and how long it is held before the next one lands (SQ-0708).
 ///
@@ -576,6 +593,35 @@ pub struct GameSession {
     /// `drain_turn` from `Machine::pending_pictures`; read by the Task 4
     /// screen adapter to build the layered composite.
     pub pictures_canvas: std::collections::HashMap<u8, crate::graphics::Canvas>,
+    /// Where each window's canvas content was PAINTED — the window's screen
+    /// origin at draw time, plus the footprint the draws actually covered
+    /// (SQ-0715). Only windows that have received a real `draw_picture` appear.
+    ///
+    /// ZMSD §8: "subsequent movements of the window do not move what was
+    /// printed". A window canvas is drawn at the window's *current* origin, so it
+    /// only tells the truth while the window stays put. scopa uses window 3 as a
+    /// scratch pad — it moves it, sizes it to 1000×1000, draws one card picture
+    /// at (1,1) and immediately moves it somewhere else for the next — so the
+    /// canvas is stranded the instant the next `move_window` lands. When the
+    /// origin no longer matches, the pixels are taken off the canvas and painted
+    /// onto the screen's [`paint`](GameSession::paint) ground where they were
+    /// drawn, which is exactly where they stayed on the hardware.
+    canvas_anchor: std::collections::HashMap<u8, CanvasAnchor>,
+    /// The factor this story's Blorb pictures are scaled by on their way to the
+    /// screen — [`V6_ART_SCALE`] for art authored against a standard window, 1 for
+    /// art that declares none (SQ-0715).
+    ///
+    /// Blorb §11 (Resolution chunk): "This chunk is optional; if it is not
+    /// present, then all of the images in this file are non-scalable", and
+    /// "non-scalable images are always displayed at their actual size. (One image
+    /// pixel per screen pixel.)" Every Infocom v6 blorb carries a `Reso` declaring
+    /// a 320×200 standard window, which we present at 640×400 — so their art
+    /// doubles, exactly as Frotz's Amiga/DOS profile does. scopa.blb carries no
+    /// `Reso` at all: its cards are drawn for the 640×400 screen already (its own
+    /// hardwired vector deck is the same 52×84), and doubling them made the
+    /// Neapolitan and Sicilian decks twice the size the game had laid out for,
+    /// overlapping each other and hanging off the bottom of the screen.
+    art_scale: u32,
     /// The v6 screen's PAINTED ground: filled rectangles an `erase_window` left
     /// behind, accumulated in native pixels (SQ-0706).
     ///
@@ -745,10 +791,21 @@ impl GameSession {
         // Frotz's Amiga/DOS interpreter returns `scaler * size` for every pic.
         // PictSource keeps the raw art-native dims; only the game-facing table
         // is scaled here (one crossing into unit space).
+        //
+        // …but ONLY for art that declares a standard window to be scaled against
+        // (SQ-0715). Blorb §11: a resource file with no `Reso` chunk has no
+        // scalable images at all, and non-scalable images are shown at their
+        // actual size, one image pixel per screen pixel. `v6_screen_px` IS that
+        // chunk's standard window, so its absence is the spec's own signal.
+        let art_scale = if machine.mem.version() == 6 && v6_screen_px.is_some() {
+            V6_ART_SCALE
+        } else {
+            1
+        };
         let picture_dims = if machine.mem.version() == 6 {
             picture_dims
                 .into_iter()
-                .map(|(n, w, h)| (n, w * V6_ART_SCALE as u16, h * V6_ART_SCALE as u16))
+                .map(|(n, w, h)| (n, w * art_scale as u16, h * art_scale as u16))
                 .collect()
         } else {
             picture_dims
@@ -802,6 +859,8 @@ impl GameSession {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -838,7 +897,6 @@ impl GameSession {
     /// turn's `drain_turn` happens to pick them up (Plan 1b Task 5 gap).
     pub fn flush_boot_pictures(&mut self) {
         self.drain_pictures();
-        self.drain_erase_fills();
     }
 
     /// Encode each rasterized v6 window canvas (`pictures_canvas`) to PNG bytes,
@@ -979,7 +1037,7 @@ impl GameSession {
                     else {
                         continue;
                     };
-                    let img = v6_scaled_art(&img);
+                    let img = v6_scaled_art(&img, self.art_scale);
                     canvas.draw_image_clipped(&img, dx, dy, (w, h));
                 }
             }
@@ -1296,7 +1354,6 @@ impl GameSession {
         let prose_retired = prose_retired_at
             .map(|at| (at.saturating_sub(win0_base) as usize).min(transcript.chars().count()));
         let pictures = self.drain_pictures();
-        self.drain_erase_fills();
         // Window-0 inline pictures interleave into this turn's text as ordered
         // elements; empty for turns without them (the app then uses the flat
         // transcript path unchanged).
@@ -1333,58 +1390,44 @@ impl GameSession {
         }
     }
 
-    /// Drain `Machine::pending_pictures`, applying each event to
-    /// `pictures_canvas` as it's drained (resolving/rasterizing via
-    /// `pict_source`), and return the drained events for `TurnResult` — mirrors
-    /// `pending_sounds`, except the rasterization happens here rather than in
-    /// the app layer (Task 2 decision: canvas store + Pict source both live on
-    /// `GameSession` so the Task 4 screen adapter can read `pictures_canvas`
-    /// without reaching into `AppState`). A no-op drain for non-v6 stories,
-    /// which never push a `PictureEvent`.
-    /// Paint this turn's `erase_window` fills onto the screen's painted ground
-    /// (SQ-0706). See [`GameSession::paint`].
+    /// Paint one `erase_window` fill onto the screen's painted ground (SQ-0706).
+    /// See [`GameSession::paint`].
     ///
     /// Coordinates arrive 1-based in the game's own native pixels, absolute rather
     /// than window-relative — the window that drew them has usually been moved and
     /// resized for this one rectangle and will move again before the next.
-    fn drain_erase_fills(&mut self) {
-        let fills = std::mem::take(&mut self.machine.pending_erase_fills);
-        if fills.is_empty() {
+    fn apply_erase_fill(&mut self, f: &zvm::cpu::exec::EraseFill) {
+        // A colour the game named outright, or nothing to paint: an erase that
+        // inherits its colour is asking the host to resolve the ground, which
+        // is what the ordinary window background already does.
+        let Some(rgba) = crate::render::v6_layout::explicit_pixel_rgba(
+            crate::state::pack_zcolour(f.bg),
+        ) else {
             return;
+        };
+        if f.w == 0 || f.h == 0 {
+            return; // a window that was never given a box covers no pixels
         }
         let (sw, sh) = self.v6_native_extent();
-        for f in fills {
-            // A colour the game named outright, or nothing to paint: an erase that
-            // inherits its colour is asking the host to resolve the ground, which
-            // is what the ordinary window background already does.
-            let Some(rgba) = crate::render::v6_layout::explicit_pixel_rgba(
-                crate::state::pack_zcolour(f.bg),
-            ) else {
-                continue;
-            };
-            if f.w == 0 || f.h == 0 {
-                continue; // a window that was never given a box covers no pixels
-            }
-            // A fill spanning the WHOLE screen is a screen clear, not drawing: the
-            // page/backdrop machinery already resolves the ground (SQ-0704), and
-            // treating it as paint would blanket every game that merely erases —
-            // Arthur's intro erases all eight windows, Zork Zero's boot erases the
-            // screen. So it drops the painted ground instead, which is also what
-            // keeps this surface bounded when a card table repaints for a new hand.
-            if u32::from(f.w) >= sw && u32::from(f.h) >= sh {
-                self.paint = None;
-                continue;
-            }
-            let canvas = self
-                .paint
-                .get_or_insert_with(|| std::sync::Arc::new(image::RgbaImage::new(sw, sh)));
-            let img = std::sync::Arc::make_mut(canvas);
-            let (x0, y0) = (u32::from(f.x.max(1)) - 1, u32::from(f.y.max(1)) - 1);
-            let (x1, y1) = ((x0 + u32::from(f.w)).min(img.width()), (y0 + u32::from(f.h)).min(img.height()));
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    img.put_pixel(x, y, rgba);
-                }
+        // A fill spanning the WHOLE screen is a screen clear, not drawing: the
+        // page/backdrop machinery already resolves the ground (SQ-0704), and
+        // treating it as paint would blanket every game that merely erases —
+        // Arthur's intro erases all eight windows, Zork Zero's boot erases the
+        // screen. So it drops the painted ground instead, which is also what
+        // keeps this surface bounded when a card table repaints for a new hand.
+        if u32::from(f.w) >= sw && u32::from(f.h) >= sh {
+            self.paint = None;
+            return;
+        }
+        let canvas = self
+            .paint
+            .get_or_insert_with(|| std::sync::Arc::new(image::RgbaImage::new(sw, sh)));
+        let img = std::sync::Arc::make_mut(canvas);
+        let (x0, y0) = (u32::from(f.x.max(1)) - 1, u32::from(f.y.max(1)) - 1);
+        let (x1, y1) = ((x0 + u32::from(f.w)).min(img.width()), (y0 + u32::from(f.h)).min(img.height()));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                img.put_pixel(x, y, rgba);
             }
         }
     }
@@ -1404,8 +1447,24 @@ impl GameSession {
             .unwrap_or((640, 400))
     }
 
+    /// Drain `Machine::pending_pictures` and `Machine::pending_erase_fills`,
+    /// applying both to the screen IN THE ORDER THE GAME ISSUED THEM, and return
+    /// the drained picture events for `TurnResult` — mirrors `pending_sounds`,
+    /// except the rasterization happens here rather than in the app layer (Task 2
+    /// decision: canvas store + Pict source both live on `GameSession` so the Task
+    /// 4 screen adapter can read `pictures_canvas` without reaching into
+    /// `AppState`). A no-op drain for non-v6 stories, which never push either.
+    ///
+    /// The two queues are one timeline (`EraseFill::pics_before`, SQ-0715). Fills
+    /// and pictures paint the same screen, so draining one and then the other
+    /// replays the turn out of order: scopa's boot fills the green table, draws
+    /// its Neapolitan and Sicilian card pictures and then fills the menu buttons,
+    /// and running all the fills last let the opening full-screen clear erase both
+    /// cards it had already painted.
     fn drain_pictures(&mut self) -> Vec<PictureEvent> {
         let events = std::mem::take(&mut self.machine.pending_pictures);
+        let fills = std::mem::take(&mut self.machine.pending_erase_fills);
+        let mut next_fill = 0usize;
         // A new turn supersedes whatever sequence was still playing: those frames
         // describe a screen the game has already moved on from.
         self.paced_frames.clear();
@@ -1435,6 +1494,12 @@ impl GameSession {
         // because the compass shared their turn.
         let covers_earlier = self.events_that_repaint_covered_ground(&events);
         for (i, ev) in events.iter().enumerate() {
+            // Every fill the game issued before this picture goes down first.
+            while next_fill < fills.len() && fills[next_fill].pics_before as usize <= i {
+                let f = fills[next_fill];
+                self.apply_erase_fill(&f);
+                next_fill += 1;
+            }
             self.apply_picture_event(ev);
             // Hold the screen here only when the NEXT picture to paint is about to
             // cover ground already painted — that is the moment there is something
@@ -1453,6 +1518,22 @@ impl GameSession {
                     });
                 }
             }
+        }
+        // …and everything the game filled after its last picture (or, on a turn
+        // with no pictures at all, the whole queue).
+        for f in &fills[next_fill..] {
+            let f = *f;
+            self.apply_erase_fill(&f);
+        }
+        // The last picture of the turn may still be sitting on a canvas whose
+        // window has since moved (scopa moves window 3 again for the next fill
+        // that is not an erase, and on a turn that ends with a draw there is no
+        // later event at all). Settle it now, so what the renderer composites is
+        // the screen the game left behind (SQ-0715).
+        let stranded: Vec<u8> = self.canvas_anchor.keys().copied().collect();
+        for win in stranded {
+            let Some(now) = self.window_origin(win) else { continue };
+            self.retire_stranded_canvas(win, now);
         }
         // A base draw in this batch established a different Current Palette, so
         // every adaptive picture already on screen is now showing the old one and
@@ -1509,7 +1590,7 @@ impl GameSession {
                 continue;
             };
             let (x0, y0) = (u32::from(ev.x.max(1)) - 1, u32::from(ev.y.max(1)) - 1);
-            let (w, h) = (w * V6_ART_SCALE, h * V6_ART_SCALE);
+            let (w, h) = (w * self.art_scale, h * self.art_scale);
             let (x1, y1) = (x0 + w, y0 + h);
             covers[i] = painted.iter().any(|&(win, px0, py0, px1, py1)| {
                 win == ev.window && x0 < px1 && px0 < x1 && y0 < py1 && py0 < y1
@@ -1537,7 +1618,7 @@ impl GameSession {
             return None;
         }
         let (w, h) = self.pict_source.as_mut()?.dims(ev.number as u32)?;
-        let area = (w as u64 * V6_ART_SCALE as u64) * (h as u64 * V6_ART_SCALE as u64);
+        let area = (w as u64 * self.art_scale as u64) * (h as u64 * self.art_scale as u64);
         let ms = (area / PACE_PX_PER_MS).clamp(PACE_MIN_MS, PACE_MAX_MS);
         Some(std::time::Duration::from_millis(ms))
     }
@@ -1595,7 +1676,7 @@ impl GameSession {
         };
         // Spans the window: starts at (or left of) its left edge and reaches the
         // right one. Window coords are 1-based (ZMSD §8.8.1).
-        let spans_window = ev.x <= 1 && pic_w * V6_ART_SCALE >= win_w.max(1);
+        let spans_window = ev.x <= 1 && pic_w * self.art_scale >= win_w.max(1);
         !spans_window
     }
 
@@ -1637,6 +1718,95 @@ impl GameSession {
     /// The Current Palette's generation, or 0 with no Pict source.
     fn palette_gen(&self) -> u64 {
         self.pict_source.as_ref().map_or(0, |s| s.palette_gen())
+    }
+
+    /// A window's 1-based screen origin `(x, y)`, as the game set it — floored at
+    /// 1 exactly as [`PictureEvent::win_box`] does, so the two are comparable.
+    fn window_origin(&self, win: u8) -> Option<(u16, u16)> {
+        let v6 = self.machine.screen.v6.as_ref()?;
+        let w = v6.windows.get(win as usize)?;
+        Some((w.x_coord.max(1), w.y_coord.max(1)))
+    }
+
+    /// Freeze a window's canvas onto the screen if the window has MOVED since the
+    /// pixels were drawn (SQ-0715). `now` is the window's origin as of the event
+    /// being applied.
+    ///
+    /// ZMSD §8: plotting is clipped to the current window, but what shows through
+    /// "is plotted onto the screen", and "subsequent movements of the window do
+    /// not move what was printed". Our per-window canvas is drawn at the window's
+    /// *current* origin, which is a faithful model only while the window stays
+    /// where it was — so the moment the origin changes, the old pixels have to be
+    /// handed to the screen's [painted ground](GameSession::paint) at the
+    /// coordinates they were painted at, and taken off the canvas.
+    ///
+    /// scopa.z6 is the game that cannot survive without this. Its `drawpic`
+    /// borrows window 3 as a scratch pad for every single picture —
+    ///
+    /// ```text
+    /// @move_window 3 y x;  @window_size 3 1000 1000;
+    /// ws = WinSet(3);  @draw_picture pic 1 1;  WinSet(ws);
+    /// ```
+    ///
+    /// — so the Neapolitan and Sicilian card decks were drawn into a window that
+    /// was somewhere else before the frame ever rendered, and then erased outright
+    /// by the next `fastsimplebox` fill. Only the vector deck, which is built from
+    /// `erase_window` fills and already paints the ground, reached the player.
+    ///
+    /// A window that has NOT moved is left entirely alone: its canvas is still a
+    /// faithful model, and a redraw or an erase in place must keep working as it
+    /// always has (Shogun's title splash has to vanish when the game erases the
+    /// window it is sitting in).
+    fn retire_stranded_canvas(&mut self, win: u8, now: (u16, u16)) {
+        let Some(anchor) = self.canvas_anchor.get(&win).copied() else { return };
+        if now == anchor.origin {
+            return; // a redraw in place — the canvas is still telling the truth
+        }
+        self.canvas_anchor.remove(&win);
+        let Some(canvas) = self.pictures_canvas.remove(&win) else { return };
+        // Nothing else can reproduce these pixels once they leave the canvas, so
+        // the window's replay list goes with them.
+        self.display_ops.remove(&win);
+        self.unreplayable.remove(&win);
+        self.last_content_pic.remove(&win);
+        let (sw, sh) = self.v6_native_extent();
+        let (ox, oy) = (
+            u32::from(anchor.origin.0.max(1)) - 1,
+            u32::from(anchor.origin.1.max(1)) - 1,
+        );
+        let src = canvas.img;
+        let ground = self
+            .paint
+            .get_or_insert_with(|| std::sync::Arc::new(image::RgbaImage::new(sw, sh)));
+        let dst = std::sync::Arc::make_mut(ground);
+        let (rx, ry, rw, rh) = anchor.rect;
+        for y in ry..(ry + rh).min(src.height()) {
+            for x in rx..(rx + rw).min(src.width()) {
+                let px = *src.get_pixel(x, y);
+                if px[3] == 0 {
+                    continue; // never drawn — the ground underneath still shows
+                }
+                let (dx, dy) = (ox + x, oy + y);
+                if dx < dst.width() && dy < dst.height() {
+                    dst.put_pixel(dx, dy, px);
+                }
+            }
+        }
+    }
+
+    /// Record that `win`'s canvas now holds pixels drawn while the window sat at
+    /// `origin`, covering `(dx, dy, w, h)` in canvas coords (SQ-0715).
+    fn anchor_canvas_draw(&mut self, win: u8, origin: (u16, u16), dx: i32, dy: i32, w: u32, h: u32) {
+        let (x, y) = (dx.max(0) as u32, dy.max(0) as u32);
+        let entry = self.canvas_anchor.entry(win).or_insert(CanvasAnchor {
+            origin,
+            rect: (x, y, w, h),
+        });
+        let (ax, ay, aw, ah) = entry.rect;
+        let (x0, y0) = (ax.min(x), ay.min(y));
+        let (x1, y1) = ((ax + aw).max(x + w), (ay + ah).max(y + h));
+        entry.origin = origin;
+        entry.rect = (x0, y0, x1 - x0, y1 - y0);
     }
 
     /// The screen rect a v6 window occupies — `(x, y, w, h)` in the same 0-based
@@ -1791,7 +1961,7 @@ impl GameSession {
                         else {
                             continue;
                         };
-                        let img = v6_scaled_art(&img);
+                        let img = v6_scaled_art(&img, self.art_scale);
                         if let Some(c) = self.pictures_canvas.get_mut(&win) {
                             c.draw_image_clipped(&img, dx, dy, (cw, ch));
                         }
@@ -1814,12 +1984,18 @@ impl GameSession {
     /// window state, the window index is out of range, or (draw only) the
     /// picture fails to resolve.
     fn apply_picture_event(&mut self, ev: &PictureEvent) {
+        // The window may have MOVED since its canvas was painted, in which case
+        // those pixels belong to the screen where they were drawn and not to
+        // wherever the window has gone (ZMSD §8, SQ-0715). Freeze them onto the
+        // painted ground before this event touches the canvas.
+        self.retire_stranded_canvas(ev.window, (ev.win_box.0, ev.win_box.1));
         // number 0 + erase = a v6 `erase_window`'s canvas-clear, riding the
         // ordered picture queue (so "erase, then draw the borders" replays in
         // order). Drop the whole canvas: Shogun's title splash must actually
         // vanish when the game erases window 7 before drawing the menu frame.
         if ev.erase && ev.number == 0 {
             self.pictures_canvas.remove(&ev.window);
+            self.canvas_anchor.remove(&ev.window); // nothing left to strand
             // The window's canvas was cleared, so a later redraw of a content
             // splash into it is genuinely new — forget the dedupe key. (SQ-0461)
             self.last_content_pic.remove(&ev.window);
@@ -1916,7 +2092,7 @@ impl GameSession {
                 // Scale into unit space (SQ-0479) so the float renders at its
                 // authentic 2× size beside the 8×16 text and its reserved rows
                 // (height/16) stay consistent with the 16px grid.
-                let img = v6_scaled_art(&img);
+                let img = v6_scaled_art(&img, self.art_scale);
                 let (iw, ih) = (img.width(), img.height());
                 let (screen_w, screen_h) = self.v6_screen_px();
                 let align = win0_pic_align(
@@ -1947,9 +2123,13 @@ impl GameSession {
         // exceeds any real v6 screen (~640 px) yet bounds worst-case storage to
         // ~64 MB — mirroring the grid-cell cap on the engine side (Phase 1a).
         const CANVAS_PX_CAP: u32 = 4096;
+        // The window's box AT THE MOMENT OF THE CALL, not now: a scratch window is
+        // resized for one drawing operation and moved on (SQ-0715). scopa sizes
+        // window 3 to 1000×1000 for each card and had shrunk it to an 80×1 sliver
+        // by the time this ran, clipping every picture out of existence.
         let (pw, ph) = (
-            (w.x_size.max(1) as u32).min(CANVAS_PX_CAP),
-            (w.y_size.max(1) as u32).min(CANVAS_PX_CAP),
+            (ev.win_box.2.max(1) as u32).min(CANVAS_PX_CAP),
+            (ev.win_box.3.max(1) as u32).min(CANVAS_PX_CAP),
         );
         // 1-based window-relative → 0-based canvas coords.
         let dx = (ev.x.max(1) as i32) - 1;
@@ -1971,7 +2151,7 @@ impl GameSession {
                 .pict_source
                 .as_mut()
                 .and_then(|s| s.dims(ev.number as u32))
-                .map(|(w, h)| (w * V6_ART_SCALE, h * V6_ART_SCALE));
+                .map(|(w, h)| (w * self.art_scale, h * self.art_scale));
             let (ew, eh) = dims.unwrap_or((pw, ph));
             // Clip the erase to the window box.
             let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
@@ -1984,9 +2164,22 @@ impl GameSession {
             // Blit the art at 2× into the unit-space window canvas (SQ-0479): the
             // game placed it at unit coords (dx,dy) expecting the Amiga/DOS
             // doubled picture, so the scaled pixels fill the box the game reserved.
-            let img = v6_scaled_art(&img);
+            let img = v6_scaled_art(&img, self.art_scale);
             canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
             canvas.z_seq = crate::graphics::next_draw_seq();
+            // Remember where on the SCREEN these pixels landed, so a later
+            // `move_window` freezes them there instead of dragging them along
+            // (SQ-0715).
+            let drawn_w = img.width().min(pw.saturating_sub(dx.max(0) as u32));
+            let drawn_h = img.height().min(ph.saturating_sub(dy.max(0) as u32));
+            self.anchor_canvas_draw(
+                ev.window,
+                (ev.win_box.0, ev.win_box.1),
+                dx,
+                dy,
+                drawn_w,
+                drawn_h,
+            );
             // Every picture goes in the display list, base or adaptive: under a new
             // palette they ALL recolour, and their order is what a replay has to
             // reproduce. (SQ-0567)
@@ -4949,11 +5142,22 @@ mod tests {
         // be visible on the constructed session even for a story that quits
         // immediately in its main routine. For v6 the dims are scaled into unit
         // space by V6_ART_SCALE (SQ-0479): `picture_data` reports the doubled
-        // sizes the game lays out on the 640×400 screen with.
+        // sizes the game lays out on the 640×400 screen with — but only when the
+        // Blorb declares a standard window for them to be scaled AGAINST.
         let dims = vec![(5u16, 100u16, 60u16), (9u16, 20u16, 30u16)];
-        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None, None, None)
+
+        // A Blorb `Reso` standard window (every Infocom v6 title): the screen is
+        // that window doubled, so the art doubles with it.
+        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), Some((320, 200)), None, None)
             .expect("v6 session");
         assert_eq!(session.machine.picture_dims, vec![(5, 200, 120), (9, 40, 60)]);
+
+        // No `Reso` at all (scopa.blb): Blorb §11 makes every image in the file
+        // non-scalable — "always displayed at their actual size. (One image pixel
+        // per screen pixel.)" — so the game is told the truth (SQ-0715).
+        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None, None, None)
+            .expect("v6 session");
+        assert_eq!(session.machine.picture_dims, dims);
     }
 
     /// SQ-0532/A-F1. ZMSD §8.4: the interpreter "may change the exact dimensions
@@ -5724,7 +5928,7 @@ mod tests {
         let mut windows: [ZWindow; 8] = Default::default();
         windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
         machine.screen.v6 = Some(V6Windows { windows, current: 7 });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) });
 
         // Construct the session directly (bypassing the constructor's boot
         // loop, which this synthetic story can't usefully run) with a Pict
@@ -5737,6 +5941,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -5752,7 +5958,7 @@ mod tests {
         assert!(sess.pictures_canvas.is_empty(), "no canvas before the turn is drained");
         let result = sess.drain_turn(false, None, false);
 
-        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false }],
+        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) }],
             "the drained event is carried on TurnResult (mirrors pending_sounds)");
         assert!(sess.machine.pending_pictures.is_empty(), "the VM queue is drained after the turn");
 
@@ -5795,6 +6001,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -5807,7 +6015,7 @@ mod tests {
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
-        let draw = PictureEvent { number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false };
+        let draw = PictureEvent { number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) };
         sess.apply_picture_event(&draw);
         assert_eq!(sess.story_pics.len(), 1, "content splash anchors one inline band");
         assert_eq!(sess.story_pics[0].1.source, crate::inline_image::ImageSource::ContentSplash);
@@ -5816,7 +6024,7 @@ mod tests {
         assert_eq!(sess.story_pics.len(), 1, "a repeat draw of the same pic is deduped");
 
         // Canvas clear (erase_window rides the queue as number 0) resets dedupe.
-        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: false });
+        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) });
         sess.apply_picture_event(&draw);
         assert_eq!(sess.story_pics.len(), 2, "after a canvas clear a fresh draw anchors again");
     }
@@ -5845,6 +6053,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -5860,6 +6070,7 @@ mod tests {
         // The pre-restart session draws at the window's top-left corner…
         sess.apply_picture_event(&PictureEvent {
             number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
+            win_box: (1, 1, 64, 48),
         });
         assert_eq!(sess.display_ops.get(&7).map_or(0, Vec::len), 1, "the draw is recorded for replay");
         // …and something took window 7 out of replay (an op-cap overflow in a long
@@ -5878,6 +6089,7 @@ mod tests {
         // picture establishes a new palette and every window replays.
         sess.apply_picture_event(&PictureEvent {
             number: 1, window: 7, x: 33, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
+            win_box: (1, 1, 64, 48),
         });
         sess.replay_under_current_palette();
 
@@ -5911,6 +6123,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -5923,7 +6137,7 @@ mod tests {
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
-        sess.apply_picture_event(&PictureEvent { number: 3, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false });
+        sess.apply_picture_event(&PictureEvent { number: 3, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) });
         assert!(sess.story_pics.is_empty(), "frame art stays canvas-only");
         assert!(sess.pictures_canvas.contains_key(&7), "but it IS drawn into the window canvas");
     }
@@ -5939,8 +6153,8 @@ mod tests {
         machine.screen.v6 = Some(V6Windows { windows, current: 7 });
         // Draw, then erase the same picture — the erase must clear back to
         // transparent over the picture's own footprint (2x2, ZMSD §15).
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true, out_chars: 0, margin_after: None, at_cursor: false });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) });
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
@@ -5950,6 +6164,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6002,6 +6218,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6096,6 +6314,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6145,6 +6365,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6158,7 +6380,7 @@ mod tests {
         // The erase path allocates the canvas even without a resolved image.
         // (number != 0: a real erase_picture — number 0 is the erase_window
         // canvas-clear sentinel, which removes the canvas instead.)
-        sess.apply_picture_event(&PictureEvent { number: 5, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None, at_cursor: false });
+        sess.apply_picture_event(&PictureEvent { number: 5, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 0xFFFF, 0xFFFF) });
         let c = sess.pictures_canvas.get(&7).expect("erase allocated a canvas");
         assert!(c.img.width() <= 4096 && c.img.height() <= 4096,
             "canvas clamped, got {}x{}", c.img.width(), c.img.height());

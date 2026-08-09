@@ -71,6 +71,17 @@ rendered by doubling the 8×8 glyph masters vertically to fill the 8×16 cell.
 Screen size and picture size double *together*, so the frame-vs-content picture
 classification (which is pure ratios) lands exactly where it did before.
 
+The doubling follows the **`Reso` chunk**, though, not the version number. Blorb
+§11 is explicit that a resource file without one has no scalable images at all —
+"non-scalable images are always displayed at their actual size. (One image pixel
+per screen pixel.)" Every Infocom v6 blorb declares a 320×200 standard window, so
+they all double. scopa.blb declares nothing: its card art is drawn for the 640×400
+screen already, the same 52×84 as the vector deck hardwired into its own z-code.
+Doubling *that* told the game its cards were 104×168, and it dutifully laid out a
+menu whose sample cards overlapped each other and hung off the bottom of the
+screen. So the screen is still 640×400 either way, and the art scales only when the
+story says what it should scale against.
+
 And that screen is a **hard edge**. A v6 game may size a window far past it,
 because `window_size` doubles as a measuring instrument: scopa opens a scratch
 window 1000×1000 so a string it is about to print cannot wrap, reads the width
@@ -380,6 +391,30 @@ a run whose margins are equal on the game's own screen is taken as deliberately
 centred and is centred again in your pane, however far left it begins. A field
 that starts at the screen's edge is not centred text and stays anchored where it
 was.
+
+## …and so do pictures
+
+Same rule, one layer over. babelmap keeps each v6 window's art on a canvas of its
+own and paints that canvas wherever the window currently is, which tells the truth
+right up until the game moves the window. scopa never stops moving it. Every
+picture it draws goes through a scratch window it borrows for exactly one
+operation — move it to the corner the card belongs in, size it to 1000×1000 so
+nothing can clip, draw at (1,1), and immediately move it again for the next card
+or the next fill. Its Neapolitan and Sicilian decks were being drawn into a window
+that had already left, clipped to whatever sliver it had been shrunk to and then
+erased outright by the following fill, so the only deck that ever reached the
+opening menu was the vector one the z-code draws with fills instead of pictures.
+
+Two things fix it, and both are the standard read literally. The engine now
+records the window's **box at the moment of the call** on the picture event
+itself, the same way it already records the rect an `erase_window` painted — a
+scratch window's geometry is only meaningful at the instant it is used. And when a
+window with art on it moves, that art is frozen onto the screen's painted ground
+at the coordinates it was drawn at, exactly as prose is. Picture draws and erase
+fills also drain as one ordered timeline now rather than one queue after the
+other: scopa's boot fills its green table, draws two card pictures and *then* fills
+the menu buttons over the top, and replaying the fills last let the opening
+full-screen clear wipe cards that had already been painted.
 
 ## Margin pictures — text that flows past the art
 

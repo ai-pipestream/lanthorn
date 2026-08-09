@@ -98,6 +98,19 @@ pub struct PictureEvent {
     /// its ship at `x = 229` to reserve the right column) and says nothing about
     /// whether the picture belongs to the text or to the window.
     pub at_cursor: bool,
+    /// The target window's box AT THE MOMENT OF THE CALL — `(x, y, w, h)` in
+    /// native pixels, the 1-based origin and size the game had just given it
+    /// (SQ-0715).
+    ///
+    /// Recorded here for the same reason [`EraseFill`] records its rect: a v6
+    /// window is a clipping region the game moves and resizes for one drawing
+    /// operation at a time, and by the time the host drains the queue it has
+    /// usually been moved several times more. scopa's `drawpic` borrows window 3
+    /// for every picture — `move_window`, `window_size 1000 1000`,
+    /// `draw_picture 1 1`, and straight on to the next — so a host reading the
+    /// window's *current* box clipped each card to whatever 80×1 sliver the
+    /// window had ended up as, and placed it wherever the window had wandered to.
+    pub win_box: (u16, u16, u16, u16),
 }
 
 /// One filled rectangle painted by an `erase_window`, in native v6 pixels
@@ -122,6 +135,17 @@ pub struct EraseFill {
     /// The window's background at erase time — the colour the rect is filled
     /// with. `Default` means the window named none and the host resolves it.
     pub bg: crate::screen::ZColour,
+    /// How many [`PictureEvent`]s were already queued when this fill was pushed —
+    /// the one thing that puts the two queues back on a single timeline (SQ-0715).
+    ///
+    /// Fills and pictures both paint the same screen, and a v6 game interleaves
+    /// them freely: scopa's boot fills its green table, draws its Neapolitan and
+    /// Sicilian card pictures, then fills the menu buttons over the top. Draining
+    /// one queue and then the other replays that turn in the wrong order — the
+    /// screen-clearing fill at the start of boot lands *after* the pictures and
+    /// erases them. The host walks both queues together, applying every fill whose
+    /// `pics_before` has been reached before the next picture.
+    pub pics_before: u32,
 }
 
 /// Result of executing one instruction.
@@ -1895,7 +1919,14 @@ impl Machine {
                     // as draws, so "erase, then draw the borders" replays in
                     // order host-side (the title splash must actually vanish).
                     let out_chars = self.v6_win0_out_chars;
-                    let mut clear_canvas: Vec<u8> = Vec::new();
+                    // Where this erase sits on the picture queue's timeline, so the
+                    // host can replay fills and pictures in the order the game
+                    // issued them (SQ-0715). Read before any event is pushed below.
+                    let pics_before = self.pending_pictures.len() as u32;
+                    // Each cleared window with its box AT ERASE TIME — the host
+                    // needs the geometry the erase actually had, not whatever the
+                    // window has been moved to by the time the queue drains (SQ-0715).
+                    let mut clear_canvas: Vec<(u8, (u16, u16, u16, u16))> = Vec::new();
                     // The rects this erase PAINTS, in absolute native pixels
                     // (SQ-0706). ZMSD §8.7.3.3: an erase fills the window with its
                     // background, and on a v6 screen that is a drawing operation —
@@ -1936,8 +1967,12 @@ impl Machine {
                                     w: w.x_size,
                                     h: w.y_size,
                                     bg: w.bg,
+                                    pics_before,
                                 });
-                                clear_canvas.push(i as u8);
+                                clear_canvas.push((
+                                    i as u8,
+                                    (w.x_coord.max(1), w.y_coord.max(1), w.x_size, w.y_size),
+                                ));
                             }
                             // "unsplits windows 0 and 1": window 1 collapses to
                             // zero height, window 0 takes the whole screen
@@ -1983,8 +2018,12 @@ impl Machine {
                                     w: w.x_size,
                                     h: w.y_size,
                                     bg: w.bg,
+                                    pics_before,
                                 });
-                                clear_canvas.push(i as u8);
+                                clear_canvas.push((
+                                    i as u8,
+                                    (w.x_coord.max(1), w.y_coord.max(1), w.x_size, w.y_size),
+                                ));
                             }
                         }
                         n if (0..8).contains(&n) => {
@@ -2027,16 +2066,21 @@ impl Machine {
                                 w: wd.max(0) as u16,
                                 h: h.max(0) as u16,
                                 bg: w.bg,
+                                pics_before,
                             });
-                            clear_canvas.push(n as u8);
+                            clear_canvas.push((
+                                n as u8,
+                                (left as u16, top as u16, wd.max(0) as u16, h.max(0) as u16),
+                            ));
                         }
                         _ => {}
                     }
                     self.pending_erase_fills.extend(fills);
-                    for window in clear_canvas {
+                    for (window, win_box) in clear_canvas {
                         self.pending_pictures.push(PictureEvent {
                             number: 0,
                             window,
+                            win_box,
                             x: 1,
                             y: 1,
                             erase: true,
@@ -2976,6 +3020,11 @@ impl Machine {
                         .get(window as usize)
                         .map(|w| (w.y_cursor.max(1), w.x_cursor.max(1)))
                         .unwrap_or((1, 1));
+                    let win_box = v6
+                        .windows
+                        .get(window as usize)
+                        .map(|w| (w.x_coord.max(1), w.y_coord.max(1), w.x_size, w.y_size))
+                        .unwrap_or((1, 1, 0, 0));
                     let y = match ops.get(1).copied().unwrap_or(0) { 0 => cy, v => v };
                     let x = match ops.get(2).copied().unwrap_or(0) { 0 => cx, v => v };
                     if self.trace_screen {
@@ -2985,7 +3034,7 @@ impl Machine {
                     }
                     let out_chars = self.v6_win0_out_chars;
                     self.pending_pictures.push(PictureEvent {
-                        number, window, x, y, erase: false, out_chars, margin_after: None,
+                        number, window, x, y, erase: false, out_chars, margin_after: None, win_box,
                         // Placed on the window's current text line — see
                         // `PictureEvent::at_cursor` (SQ-0695).
                         at_cursor: y == cy,
@@ -3010,6 +3059,11 @@ impl Machine {
                         .get(window as usize)
                         .map(|w| (w.y_cursor.max(1), w.x_cursor.max(1)))
                         .unwrap_or((1, 1));
+                    let win_box = v6
+                        .windows
+                        .get(window as usize)
+                        .map(|w| (w.x_coord.max(1), w.y_coord.max(1), w.x_size, w.y_size))
+                        .unwrap_or((1, 1, 0, 0));
                     let y = match ops.get(1).copied().unwrap_or(0) { 0 => cy, v => v };
                     let x = match ops.get(2).copied().unwrap_or(0) { 0 => cx, v => v };
                     if self.trace_screen {
@@ -3019,7 +3073,7 @@ impl Machine {
                     }
                     let out_chars = self.v6_win0_out_chars;
                     self.pending_pictures.push(PictureEvent {
-                        number, window, x, y, erase: true, out_chars, margin_after: None,
+                        number, window, x, y, erase: true, out_chars, margin_after: None, win_box,
                         at_cursor: y == cy,
                     });
                 }
@@ -4664,7 +4718,7 @@ pub(crate) mod tests {
         m.state.frames.clear();                          // simulate stack unwound mid-run
         m.state.eval_stack.push(0xDEAD);
         m.undo_stack.push(UndoSnapshot { blob: Vec::new(), store: None });
-        m.pending_pictures.push(PictureEvent { number: 1, window: 0, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: true });
+        m.pending_pictures.push(PictureEvent { number: 1, window: 0, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: true, win_box: (1, 1, 0, 0) });
 
         m.restart();
 
@@ -8487,7 +8541,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             m.pending_erase_fills,
-            vec![EraseFill { window: 3, x: 61, y: 97, w: 12, h: 8, bg: crate::screen::ZColour::True(0x7fff) }],
+            vec![EraseFill { window: 3, x: 61, y: 97, w: 12, h: 8, bg: crate::screen::ZColour::True(0x7fff), pics_before: 0 }],
             "the erase publishes the box it filled, in absolute native pixels, with its colour"
         );
 
@@ -10122,7 +10176,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 m.pending_pictures.last(),
-                Some(&PictureEvent { number: 0, window: 2, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: true }),
+                Some(&PictureEvent { number: 0, window: 2, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: true, win_box: (159, 169, 1, 24) }),
                 "erase_window rides the picture queue as a number-0 erase"
             );
         }
@@ -10403,7 +10457,7 @@ pub(crate) mod tests {
         let r = m.exec_ext(0x05, &[5, 1, 1], None, None); // draw_picture(5, y=1, x=1)
         assert!(matches!(r, StepResult::Continue));
         assert_eq!(m.pending_pictures, vec![
-            PictureEvent { number: 5, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: true }
+            PictureEvent { number: 5, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: true, win_box: (1, 1, 0, 0) }
         ]);
     }
 
@@ -10414,7 +10468,7 @@ pub(crate) mod tests {
         let r = m.exec_ext(0x07, &[5, 2, 4], None, None); // erase_picture(5, y=2, x=4)
         assert!(matches!(r, StepResult::Continue));
         assert_eq!(m.pending_pictures, vec![
-            PictureEvent { number: 5, window: 3, x: 4, y: 2, erase: true, out_chars: 0, margin_after: None, at_cursor: false }
+            PictureEvent { number: 5, window: 3, x: 4, y: 2, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 0, 0) }
         ]);
     }
 
