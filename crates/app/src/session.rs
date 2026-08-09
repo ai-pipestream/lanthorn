@@ -3102,7 +3102,10 @@ impl Engine for GameSession {
                 truncated = true;
                 break;
             }
-            out.push(format!("  row {r:>2}: {trimmed:?}"));
+            // 1-based, matching the `cursor:` line above and the Z-machine's own
+            // row coordinates (`set_cursor` is 1-based, ZMSD §8.7.2.3) — a dump
+            // that mixed the two bases would be read wrong at a glance.
+            out.push(format!("  row {:>2}: {trimmed:?}", r + 1));
             printed += 1;
         }
         if truncated {

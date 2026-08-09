@@ -246,6 +246,48 @@ impl Engine for ScottSession {
         ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) }
     }
 
+    /// `/dump-windows` for the Scott engine (SQ-0699 follow-up).
+    ///
+    /// Without this the trait default ran, and it is written for the Z-machine:
+    /// it looked for a GRID window, found none (Scott's layout is
+    /// buffer-over-buffer), and printed `Grid 0x0 over Buffer (Z-machine simple
+    /// path)` — a size that is always zero and an engine name that is always
+    /// wrong. Report what a Scott screen actually has: the optional room picture
+    /// band with its canvas diagnostics, the room panel and its live lines, and
+    /// the transcript below.
+    ///
+    /// The graphics line mirrors the Glulx dump's `canvas=WxH vN opaque=N`
+    /// (`glk_backend::window_dump_lines`) so the two read alike; `opaque=0` on a
+    /// present canvas is the tell for "the game never painted this room".
+    fn window_dump(&self) -> Vec<String> {
+        let block = self.vm.room_block();
+        let panel = room_panel(&block);
+        let mut out = vec!["Scott Adams layout — picture over room panel over transcript".to_string()];
+        match &self.current_canvas {
+            Some(canvas) => {
+                let opaque = canvas.pixels().filter(|p| p.0[3] != 0).count();
+                out.push(format!(
+                    "  picture: {} row(s) reserved  ·  canvas={}x{} v{} opaque={}",
+                    PICTURE_ROWS,
+                    canvas.width(),
+                    canvas.height(),
+                    self.pic_version,
+                    opaque
+                ));
+            }
+            None => out.push("  picture: none (text-only game, or this room has no art)".to_string()),
+        }
+        out.push(format!("  room panel: {} line(s)", panel.lines.len()));
+        for (i, line) in panel.lines.iter().enumerate() {
+            let trimmed = line.trim_end();
+            if !trimmed.is_empty() {
+                out.push(format!("  line {:>2}: {trimmed:?}", i + 1));
+            }
+        }
+        out.push("  transcript: primary buffer (host-managed scrollback)".to_string());
+        out
+    }
+
     fn save_state(&self) -> EngineSave {
         EngineSave::new(SCOTT_ENGINE, SCOTT_SAVE_FORMAT, self.vm.snapshot())
     }
