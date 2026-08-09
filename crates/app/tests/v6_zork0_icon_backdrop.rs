@@ -257,3 +257,71 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
     // And the icons' ground is still the transparency the caller's page resolves.
     assert_eq!(after.get_pixel(300, 70).0[3], 0, "the clear ground stays the caller's to colour in");
 }
+
+/// SQ-0704 follow-up — the mechanism that resolves the icons' clear ground,
+/// pinned directly.
+///
+/// Reported after SQ-0704 shipped: the icons no longer render black, but were
+/// said to show the *terminal* background rather than the banner window's white
+/// page. The theory offered for it — that the icons hang off the window's
+/// `Graphics` entry, which carries no colour pair, so `fill_window_pages` skips
+/// them — is not the operative mechanism. `classify_windows` lists Zork Zero's
+/// banner TWICE: once as `Graphics` (the canvas the icons live in) and once as
+/// `Grid` at the IDENTICAL `(0,0) 640x78` rect, and it is the Grid entry that
+/// carries the explicit `Standard(9)` white. Both are chrome, so
+/// `fill_window_pages` iterates both and the Grid arm resolves the whole rect.
+///
+/// Probed after the fill rather than before it (the distinction that makes the
+/// question answerable at all): **0 of 450** pixels in the icon strip are still
+/// clear. Nothing is left for a protocol to colour in, so no `Graphics`-side
+/// change is called for — and if the symptom recurs it is not here.
+#[test]
+fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
+    let Some(session) = zork0_in_play(true) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
+    let state = render_state(app::config::V6RenderMode::Hybrid, true);
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
+
+    // The banner really is listed twice — a Graphics entry with no colour of its
+    // own, and a Grid entry at the identical rect that carries the white page.
+    let at_banner_rect =
+        |pw: &&PositionedWindow| (pw.x_px, pw.y_px, pw.w_px, pw.h_px) == (0, 0, 640, 78);
+    assert!(
+        layout.chrome.iter().any(|pw| at_banner_rect(pw) && matches!(&pw.node, WinNode::Graphics(_))),
+        "the icons' canvas is a Graphics entry at the banner rect"
+    );
+    assert!(
+        layout
+            .chrome
+            .iter()
+            .any(|pw| at_banner_rect(pw) && matches!(&pw.node, WinNode::Grid(g) if g.bg.is_some())),
+        "a Grid entry at the SAME rect carries the banner's own background — that is what \
+         `fill_window_pages` resolves the icons' clear ground with"
+    );
+
+    let mut canvas = app::render::v6_layout::build_chrome_canvas(
+        &layout.chrome,
+        native,
+        default_fg,
+        default_bg,
+        &state.colors,
+    );
+    app::render::v6_layout::fill_window_pages(
+        &mut canvas,
+        &layout.chrome,
+        layout.story,
+        &state.colors,
+    );
+    let clear: Vec<(u32, u32)> = (68..78)
+        .flat_map(|y| (276..321).map(move |x| (x, y)))
+        .filter(|&(x, y)| canvas.get_pixel(x, y).0[3] == 0)
+        .collect();
+    assert!(
+        clear.is_empty(),
+        "after the fill nothing in the icon strip may be left unpainted: {} of 450 still clear",
+        clear.len()
+    );
+}
