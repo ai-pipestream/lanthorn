@@ -397,8 +397,11 @@ impl GlulxSession {
         // the boot path had its own copy. `room_for` still falls back to the name
         // hash when nothing is locked, which is every game that never learns.
         let ram = session.scan_ram();
-        session.last_room =
-            session.appglk().take_room_heading().map(|n| session.room_for(&n, &ram));
+        let awaiting_command = session.pending == InputKind::Line;
+        session.last_room = session
+            .appglk()
+            .take_room_heading(awaiting_command)
+            .map(|n| session.room_for(&n, &ram));
         Ok(session)
     }
 
@@ -624,7 +627,10 @@ impl GlulxSession {
         // room. `movement` is what we can say for sure about the room changing —
         // and a repeated heading says NOTHING, because it is either a `look` or a
         // move into a different room with the same name (the maze).
-        let heading = self.appglk().take_room_heading();
+        // A heading is only a room when the turn hands the player the command
+        // prompt; one printed on a "press any key" page is a banner (SQ-0732).
+        let awaiting_command = self.pending == InputKind::Line;
+        let heading = self.appglk().take_room_heading(awaiting_command);
         let movement = match (&heading, self.last_room.as_ref().map(|r| &r.name)) {
             (None, _) => crate::glulx_roomlock::Movement::Unchanged,
             (Some(h), Some(prev)) if h == prev => crate::glulx_roomlock::Movement::Ambiguous,
