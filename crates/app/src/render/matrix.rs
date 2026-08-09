@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use mapper::direction::short_label;
+use mapper::direction::{short_label, Direction};
 use mapper::graph::{MapGraph, RoomId};
 use mapper::layer::LayerId;
 use mapper::matrix::{self, Matrix, MatrixCell, MATRIX_DIRS};
@@ -249,6 +249,7 @@ pub fn render_matrix(
     let here_style = state.colors.theme.get("map.matrix.row:here").style;
     let selected_style = state.colors.theme.get("map.matrix.row:selected").style;
     let entrance_style = state.colors.theme.get("map.matrix.cell:entrance").style;
+    let path_style = state.colors.theme.get("map.matrix.cell:path").style;
     let frontier_style = state.colors.theme.get("map.matrix.cell:frontier").style;
     let footnote_style = state.colors.theme.get("map.matrix.footnote").style;
     let trail_style = state.colors.theme.get("map.trail").style;
@@ -281,6 +282,15 @@ pub fn render_matrix(
     // Bolding the cells that ARRIVE at the selected room answers "how do I get back here" — the
     // one question the table cannot answer by reading across a row.
     let entrances = selected.map(|id| matrix::entrances(graph, id)).unwrap_or_default();
+    // The route to the selected room (SQ-0693), as the cells it is walked THROUGH: row = the room
+    // you are standing in, column = the direction you leave by. One cell per step, so the highlight
+    // reads down the table as walking instructions and never overwrites the glyph that says what
+    // kind of passage each step is.
+    //
+    // Steps whose room has no row here — the search deliberately crosses layers — simply do not
+    // draw. The step that LEAVES this layer does have a row, so its `⇱out` cell lights up and marks
+    // the departure; that cell already footnotes where it goes.
+    let path: Vec<(RoomId, Direction)> = state.room_path.iter().map(|s| (s.room, s.dir)).collect();
     // The walked trail is maze furniture: on an ordinary layer a breadcrumb is noise, because the
     // drawn map already shows you where you came from.
     let maze = graph.layer_is_maze(layer);
@@ -331,8 +341,12 @@ pub fn render_matrix(
             let w = text.chars().count() as u16;
             let x = area.x + LABEL_W + ml.cell_w * col_slot as u16 + ml.cell_w - w;
             // An entrance to the selected room is bolded wherever it appears — style, not a
-            // glyph, so the cell keeps saying exactly one thing.
-            let style = if entrances.contains(&(row.room, MATRIX_DIRS[i])) {
+            // glyph, so the cell keeps saying exactly one thing. A step of the route wins over
+            // that: the LAST step is necessarily an entrance too, and the answer the player just
+            // asked for beats the standing cross-reference.
+            let style = if path.contains(&(row.room, MATRIX_DIRS[i])) {
+                path_style
+            } else if entrances.contains(&(row.room, MATRIX_DIRS[i])) {
                 entrance_style
             } else if cell.is_frontier() {
                 frontier_style

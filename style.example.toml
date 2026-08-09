@@ -152,6 +152,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # "matrix.row:here" = { parent = "accent", reversed = true }
 # "matrix.row:selected" = { parent = "accent" }
 # "matrix.cell:entrance" = { parent = "text", bold = true }
+# "matrix.cell:path" = { parent = "accent", bold = true, underline = true }
 # "matrix.cell:frontier" = { parent = "muted" }
 # "matrix.footnote" = { parent = "muted" }
 # "edge:oneway" = { parent = "map.connector" }

@@ -1947,6 +1947,15 @@ pub struct AppState {
     /// Map scroll offset in grid cells: (x, y).
     pub scroll: (i32, i32),
     pub selected_room: Option<RoomId>,
+    /// The route the matrix view is highlighting: the shortest KNOWN walk from the room the player
+    /// is standing in to the room they clicked (SQ-0693). Empty = no route on screen.
+    ///
+    /// Held rather than recomputed each frame because it is an ANSWER, not a view of the graph: it
+    /// is minted by one deliberate click, and it survives the player walking on, so they can read
+    /// the next direction off the table with the route still in front of them. It is also what the
+    /// first rung of the Esc ladder clears — a derived highlight would have nothing to clear.
+    /// Session state; nothing about it belongs in a save.
+    pub room_path: Vec<mapper::path::Step>,
     /// Matrix-view scroll offset: `(first direction column, first room row)` (SQ-0666).
     ///
     /// Separate from `scroll`, which is the drawn map's viewport in grid cells. They measure
@@ -2480,6 +2489,7 @@ impl Default for AppState {
             zoom_level: 7, // default = Boxes (level 7)
             scroll: (0, 0),
             selected_room: None,
+            room_path: Vec::new(),
             matrix_scroll: (0, 0),
             tangle_suggested: std::collections::BTreeSet::new(),
             map_trail: std::collections::VecDeque::new(),

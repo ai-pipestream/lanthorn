@@ -4,6 +4,7 @@ pub mod layer;
 pub mod layout;
 pub mod mapper;
 pub mod matrix;
+pub mod path;
 pub mod persist;
 pub mod render;
 pub mod route;

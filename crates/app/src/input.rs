@@ -375,6 +375,9 @@ pub enum Action {
     /// Unpin the room dock — clear the selection so it follows the player again.
     /// The dock itself stays up.
     UnpinRoomDock,
+    /// Clear the highlighted route without dropping the selection (SQ-0693) —
+    /// Esc's FIRST rung whenever a route is on screen.
+    ClearRoomPath,
     /// Close the room dock (Esc's second rung; the toggle command's off state).
     CloseRoomDock,
     /// Open the room dock in the Info view, or close it if already open.
@@ -526,21 +529,28 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return hotkey_dialog_key_to_action(state, key);
     }
 
-    // 6.5. Room dock Esc ladder (SQ-0692): unpin first, close on the next press.
+    // 6.5. Room dock Esc ladder (SQ-0692, extended by SQ-0693): drop the route
+    // first, then unpin, then close on the next press.
     // Comes after steps 2-6 (prompt/anim/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
     //
-    // Two rungs because the dock has two states worth leaving: pinned to a room
-    // you clicked, and simply up. Esc walks out of them in the order you entered
-    // them, so one habit ("Esc backs out") covers both, and neither needs a
-    // second key.
+    // Three rungs because there are three states worth leaving: a highlighted
+    // route to the room you clicked, the pin on that room, and the dock simply
+    // being up. Esc walks out of them in the order you entered them, so one habit
+    // ("Esc backs out") covers all of them, and none needs a second key. Clearing
+    // the route WITHOUT dropping the selection is the point of the extra rung:
+    // the room stays selected and its entrances stay bold, so "stop shouting the
+    // way there" and "stop looking at this room" are two separate thoughts.
     //
     // Enter is deliberately NOT a close key. The dock is not a modal — typing
     // reaches the story prompt with it open (a letter resolves to `InputChar`),
     // so stealing Enter would let you compose a command and never submit it.
-    if state.room_dock.open && key.modifiers == KeyModifiers::NONE
+    if (state.room_dock.open || !state.room_path.is_empty())
+        && key.modifiers == KeyModifiers::NONE
         && matches!(key.code, KeyCode::Esc) {
-            return KeyResolve::Action(if state.room_dock_pinned() {
+            return KeyResolve::Action(if !state.room_path.is_empty() {
+                Action::ClearRoomPath
+            } else if state.room_dock_pinned() {
                 Action::UnpinRoomDock
             } else {
                 Action::CloseRoomDock
@@ -1873,6 +1883,10 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                     // the very table the player is stepping through; a CLICK still opens it,
                     // because a click is a deliberate "tell me about this one".
                     state.select_room(Some(id));
+                    // Any route on screen belonged to the room we just stepped off (SQ-0693).
+                    // Recomputing it per arrow instead would fire "no known route from here" for
+                    // every unreachable row the selection merely passed over.
+                    state.room_path.clear();
                     if let Some((w, h)) = state.map_pane_size.get() {
                         let area = ratatui::layout::Rect::new(0, 0, w, h);
                         state.matrix_scroll.1 = crate::render::matrix::scroll_to_show(
@@ -2493,10 +2507,35 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             // every letter a map command (so typing reached nothing) and dimmed the
             // story pane on top of that. The selected-room highlight does not need
             // focus — `render/map.rs` reads only `selected_room`.
+
+            // SQ-0693: in the MATRIX view a click also asks "and how do I walk
+            // there from here?". Only there — the drawn map has no leave-by cell
+            // to mark, so computing a route for it would buy a toast and nothing
+            // else. A route to the room you are already standing in is empty and
+            // says nothing, which is the correct amount to say.
+            state.room_path.clear();
+            if state.map_shows_matrix(&mapper.graph) {
+                if let Some(here) = mapper.graph.current() {
+                    match mapper::path::route(&mapper.graph, here, id) {
+                        Some(steps) => state.room_path = steps,
+                        // Falling silent here reads as a broken click: the room
+                        // selects, its entrances bold, and nothing says why no
+                        // route appeared. A partial route to somewhere nearer
+                        // would be worse — it answers a question nobody asked.
+                        None => state.set_status("no known route from here"),
+                    }
+                }
+            }
         }
 
         Action::UnpinRoomDock => {
             state.selected_room = None;
+            // The route described THAT selection, so it goes with it.
+            state.room_path.clear();
+        }
+
+        Action::ClearRoomPath => {
+            state.room_path.clear();
         }
 
         Action::CloseRoomDock => {

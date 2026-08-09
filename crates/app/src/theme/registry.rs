@@ -275,6 +275,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.matrix.row:here", Section::Map, Kind::Style, Some("accent"), mods(false, false, false, true)),
     row("map.matrix.row:selected", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.matrix.cell:entrance", Section::Map, Kind::Style, Some("text"), mods(true, false, false, false)),
+    // The route from where you are standing to the room you clicked (SQ-0693): one cell per step,
+    // the direction you LEAVE BY. Underlined rather than bold, because it must not be confused
+    // with the entrance bolding beside it — that answers "how do I get BACK here", this answers
+    // "how do I get THERE", and the two frequently light up in the same row.
+    row("map.matrix.cell:path", Section::Map, Kind::Style, Some("accent"), mods(true, false, true, false)),
     row("map.matrix.cell:frontier", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     row("map.matrix.footnote", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // ── Honest asymmetric edges in the DRAWN view (SQ-0666). Both default to the current
@@ -515,6 +520,7 @@ mod tests {
         "map.matrix.row:here",
         "map.matrix.row:selected",
         "map.matrix.cell:entrance",
+        "map.matrix.cell:path",
         "map.matrix.cell:frontier",
         "map.matrix.footnote",
         "map.edge:oneway",

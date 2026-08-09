@@ -16,6 +16,20 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **Click a room in the matrix and it shows you the way there.** babelmap finds
+  the shortest route it already knows how to walk, from the room you are standing
+  in to the one you clicked, and marks one cell per step — the row of the room you
+  are in, in the column you leave by — so the marks read top to bottom as walking
+  instructions. Each cell keeps its own glyph, so you can still see whether the
+  step you are about to take comes back or does not. Passages are only ever walked
+  in the direction you walked them, so a one-way corridor is never offered
+  backwards: a route babelmap shows you is a route you can actually walk. The
+  search covers the whole map rather than just the layer on screen — steps on
+  other layers have no row here, and where the route walks out of this layer the
+  `⇱out` cell it leaves by is the one marked — and the view never jumps layers
+  behind your back. With no known route the room still selects and babelmap says
+  so. `Esc` clears the route and keeps the room selected; a second `Esc` unpins
+  it, a third closes the dock. Styleable as `map.matrix.cell:path`.
 - **The room dock — one panel that describes where you are.** The floating Room
   Info popup (left-click) and the diagnostics Inspector (right-click,
   `/toggle-inspector`) are retired: both are now BODIES of a single dock that
