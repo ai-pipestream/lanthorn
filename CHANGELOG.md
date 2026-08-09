@@ -87,6 +87,37 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Text that vanished from `raster` mode in four v6 games.** Three separate field
+  reports, one mistaken assumption: the pixel composite kept using "is this pixel
+  opaque?" to mean "is there artwork here?", and rasterized glyphs are opaque too.
+  - **Shogun's title showed no prose at all.** Its menu is printed *inside* window
+    0's four-row box, and measuring the box against those glyphs shrank it to a
+    single row — too little for one line and the caret together. The room a story
+    window has is now measured against the artwork alone, so the prompt and the
+    menu share the rows the way they do on an Amiga; window 0's page is painted
+    *under* the labels other windows put in its box rather than over them. **Journey**
+    had the same box shrink to zero height — the screen-wide fill that closes the
+    bare cells of a reverse-video bar was running across its text panel — so its
+    narration was missing from `raster` too, and is back.
+  - **advent's help screen lost its whole navigation bar.** "About Adventure",
+    "N = next subject", "RETURN = read subject" render fine as cells and were
+    simply absent from the picture. The game paints the bar as one run per label
+    plus reversed spacer spaces, and a spacer lands inside "About Adventure" — so
+    the header saw the spacer's own highlight block, decided it was sitting on
+    frame art (where a block would erase the picture), dropped its block and drew
+    itself in the page colour on the page. The over-art test now reads the art
+    layer, frozen before a single glyph is stamped.
+  - **fmvpoker showed no text whatsoever** — a correct blue frame around a blank
+    white interior. Its poker table is a 640×400 picture that is mostly *hole*, and
+    a full-window picture in the story window is normally a plate the game draws
+    instead of prose (Arthur's illustrated screens). Measured by its bounding box
+    the frame owned the screen; measured by the pixels it actually paints, the
+    largest clear rectangle it leaves is exactly where the game prints. Arthur's
+    plates are dense enough to still own theirs.
+  - And a cleared screen now starts at the *top* of the story window in `raster`
+    as it always has on the cell paths, so Shogun's four-row box shows the line the
+    game printed into it instead of redrawing the tail of the banner it had just
+    frozen up top.
 - **Shogun's "You may choose to:" now sits beside START/RESTORE/QUIT, not under
   the title.** The game prints its nine centred banner lines while window 0 is the
   whole screen, then moves window 0 down to a four-row box level with — and to the

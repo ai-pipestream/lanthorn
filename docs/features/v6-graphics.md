@@ -305,6 +305,50 @@ babelmap draws no story text on that frame — the same rule a window-filling
 picture like Zork Zero's rebus already followed. A plate that *does* leave a real
 column — a margin illustration, a corner logo — still gets prose beside it.
 
+**"No room" means no room among the pixels the plate actually painted**, not
+inside the rectangle it happens to span. fmvpoker draws a 640×400 poker table into
+window 0 and then prints its title *inside* it — because the table is a frame with
+a hollow middle, barely a sixth of it opaque. Measured by its bounding box it looked
+like a plate that owned the screen and every line of the game's text disappeared;
+measured by its ink, the largest clear rectangle it leaves is exactly the hole the
+author meant to print in. Arthur's plates are dense enough to leave only their own
+centring margin, so they still own their screens.
+
+## What crowds the story window is *art*, not text
+
+The story window has to be seated inside whatever the game drew around it: Zork
+Zero rings it with a carved frame, Arthur hangs a graphics panel above it, Journey
+puts an illustration down its left side. babelmap finds the room by shrinking the
+window's rectangle, edge by edge, until no edge touches anything opaque — and for
+a long time "opaque" meant *any* pixel already on the canvas, which includes the
+rasterized glyphs of the game's own menus.
+
+That is the wrong question, because a v6 game routinely prints *over* window 0.
+Shogun's title puts "You may choose to:" at the left of a four-row window 0 and
+its START/RESTORE/QUIT menu into a second window sitting inside the same four
+rows; on an Amiga both are simply on the screen. Measured against the menu's
+glyphs, window 0's 548×64 box shrank to 548×16 — one row, which leaves no room for
+a line of prose *and* the input caret, so the title showed no text at all. Journey
+fared worse: the screen-wide fill that closes the bare cells of a reverse-video bar
+ran straight across its 392×304 text panel, and the panel measured 392×**0**.
+
+So the shrink is measured against the artwork alone. Everything the game printed
+still reaches the screen, and now so does the prose beside it: window 0's page is
+painted *under* the labels other windows put inside its box, in the order the game
+drew them — page first, then the menu, then the prose.
+
+The same distinction settles how a reverse-video run is drawn. Highlighting a run
+means painting a solid block and cutting the glyph out of it — except over frame
+art, where a block would erase the picture, so babelmap draws dark ink directly on
+the art instead (that is how Zork Zero's ribbon labels sit on their banner). The
+"is there art here?" test also used to read the live canvas, where an earlier run's
+own highlight block looks exactly like artwork. advent's help screen is drawn as
+one run per label plus reversed spacer spaces, and one of those spacers lands in
+the middle of "About Adventure" — so the header concluded it was sitting on a
+picture, dropped its block, and drew itself in the page colour on the page. The
+whole navigation bar was invisible in `raster` while reading perfectly as cells.
+Both tests now consult the art layer, frozen before a single glyph is stamped.
+
 ## Pictures land one after another, the way they were drawn
 
 A v6 turn can draw more than one picture, and the order matters to how the screen
@@ -399,6 +443,14 @@ than the text in it, so a status panel taller than its own two lines (Zork Zero'
 is 78 pixels of which two rows carry text) does not push the transcript down for
 art `frameless` has deliberately dropped. Nothing above the story window at all
 means nothing to sit below, and the transcript keeps the top of your pane.
+
+**A cleared screen starts at the top of its box, in every mode.** When a game
+clears the screen, babelmap pins what it prints next to the *top* of the story
+window and leaves the rest blank, rather than sticking to the bottom and dragging
+pre-clear history back into view — your scrollback is all still there, one scroll
+up. The cell paths have always done this; `raster` now does too, which is what
+keeps Shogun's four-row box showing the one line the game printed into it instead
+of redrawing the tail of the banner it had just frozen up top.
 
 **Frozen prose keeps the columns it was given.** `raster` composites the frozen
 layer as pixels, so it lands exactly where the game put it. `hybrid` and

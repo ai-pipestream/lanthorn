@@ -2125,24 +2125,42 @@ pub fn build_v6_raster_canvas(
     // the art and glyphs already on the canvas and BEFORE the window pages claim
     // what is left, because a fill is the oldest thing on the screen: the game
     // filled its rectangle, then printed the label on top of it.
-    v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
-    if honor {
-        v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
-    } else {
-        // SQ-0716: colours declined, but a window the game has PAINTED INTO still
-        // gets its page — scopa's felt table is a full-screen `erase_window` in
-        // explicit green that `drain_erase_fills` drops as a screen clear, so
-        // window 1's background is the only surviving record of that drawing.
-        // Gating it left a black table under the game's own green stripes and
-        // cards. See `fill_painted_window_pages`.
-        v6::fill_painted_window_pages(
-            &mut canvas,
-            &layout.chrome,
-            layout.story,
-            &state.colors,
-            state.v6_paint.borrow().as_deref(),
-        );
-    }
+    let grounds = |c: &mut image::RgbaImage| {
+        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref());
+        if honor {
+            v6::fill_window_pages(c, &layout.chrome, layout.story, &state.colors);
+        } else {
+            // SQ-0716: colours declined, but a window the game has PAINTED INTO still
+            // gets its page — scopa's felt table is a full-screen `erase_window` in
+            // explicit green that `drain_erase_fills` drops as a screen clear, so
+            // window 1's background is the only surviving record of that drawing.
+            // Gating it left a black table under the game's own green stripes and
+            // cards. See `fill_painted_window_pages`.
+            v6::fill_painted_window_pages(
+                c,
+                &layout.chrome,
+                layout.story,
+                &state.colors,
+                state.v6_paint.borrow().as_deref(),
+            );
+        }
+    };
+    grounds(&mut canvas);
+    // What the story box is measured against (SQ-0728): the same layers, MINUS the
+    // chrome text. `story_clear_native` shrinks the story window edge by edge until
+    // no edge touches an opaque pixel, and its purpose is to seat the prose inside
+    // bordering frame ART — Zork Zero's ring, Arthur's plate, Journey's picture
+    // panel. Rasterized glyphs are opaque too, so a chrome window the game paints
+    // INSIDE window 0 was eating the story box instead of coexisting with it, which
+    // is not what a real interpreter does: Shogun's title prints "You may choose
+    // to:" at x=47 while its menu window prints "START the game" at x=235, on the
+    // same rows. Measured against the full canvas Shogun's declared 548x64 box came
+    // back as 548x16 — one row, which `build_main_text` then reports as ZERO visible
+    // rows — and Journey's 392x304 text panel came back 392x0. Against the art it is
+    // the box each game declared. Same lesson as `build_graphics_canvas` on the
+    // hybrid side (SQ-0500): "opaque" is not "artwork".
+    let mut obstruction = v6::build_graphics_canvas(&layout.chrome, native);
+    grounds(&mut obstruction);
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
     // one full 8x16 text cell. A full-screen picture (Zork Zero's rebus) grows
@@ -2154,7 +2172,7 @@ pub fn build_v6_raster_canvas(
     // screen: ship the art alone and report no scroll metrics, exactly like the
     // no-story-window case.
     let story_clear =
-        v6::story_clear_native(layout.story, &canvas).filter(|&(_, _, w, h)| w >= 8 && h >= 16);
+        v6::story_clear_native(layout.story, &obstruction).filter(|&(_, _, w, h)| w >= 8 && h >= 16);
     if let Some((sx, sy, sw, sh)) = story_clear {
         // Paint the story page opaque (SQ-0510, reopened). Leaving it
         // transparent let whoever composites the image pick the colour
@@ -2162,7 +2180,10 @@ pub fn build_v6_raster_canvas(
         // bordering frame art, and `flatten_onto_page` below covers the
         // degenerate case where that inset leaves nothing; inline-image
         // floats redraw on top in `draw_story_text`. So no artwork is covered.
-        v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
+        // The chrome TEXT the game printed inside the box is spared (SQ-0728):
+        // window 0's page is under it, not over it — Shogun's title prints its
+        // menu into window 0's box and both belong on the screen.
+        v6::fill_story_page_under_chrome_text(&mut canvas, (sx, sy, sw, sh), page, &layout.chrome);
         // …then the story window's OWN absolutely-placed artwork, before any
         // prose: Arthur's intro centres a 584×392 plate in window 0, so the plate
         // is the page's backdrop, not part of the frame ring — and the page fill
@@ -2394,7 +2415,12 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
         styles[row] = bits;
     }
     let mut floats: Vec<AbsFloat> = Vec::new();
+    // Wrapped row each source line starts on, so the screen-clear anchor can be
+    // mapped into the wrap — the raster twin of `wrap_lines_kinded_indexed`'s
+    // `starts` (SQ-0640).
+    let mut line_starts: Vec<usize> = Vec::with_capacity(state.transcript.len() + 1);
     for (i, line) in state.transcript.iter().enumerate() {
+        line_starts.push(wrapped.len());
         if let Some(Some(img)) = state.transcript_images.get(i) {
             // ContentSplash entries exist only for frameless mode; the raster
             // path draws the graphics window canvas itself, so skip them here to
@@ -2522,8 +2548,26 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     // the [more] pager (SQ-0404) drive the raster and terminal paths identically:
     // when the user scrolls back the visible slice shifts up in lockstep. (SQ-0455)
     let scroll = (state.effective_transcript_scroll() as usize).min(max_scroll);
-    let end = total.saturating_sub(scroll);
-    let start = end.saturating_sub(budget);
+    let mut end = total.saturating_sub(scroll);
+    let mut start = end.saturating_sub(budget);
+    // Top-anchor the post-clear screen, exactly as the cell path does
+    // (`window_wrapped_rows`, SQ-0305/0640): at the bottom of the scrollback, a
+    // game screen-clear pins its output to the TOP of the box with blanks below,
+    // instead of bottom-sticking and dragging pre-clear history back into view.
+    // Shogun's title needs it (SQ-0728): the SQ-0697 freeze retires nine banner
+    // lines as paint and marks the clear, and window 0's new box is four rows —
+    // bottom-sticking redrew the tail of the banner it had just frozen up top,
+    // across the menu, instead of the one line the game printed into the new box.
+    // Only while the post-clear content still fits; once it overflows, the box
+    // scrolls normally.
+    let anchor_row = (scroll == 0)
+        .then(|| state.clear_anchor.and_then(|a| line_starts.get(a).copied()))
+        .flatten()
+        .map(|a| a.min(total));
+    if let Some(a) = anchor_row.filter(|&a| total - a <= budget) {
+        start = a;
+        end = total;
+    }
     let visible_len = end - start;
     let lines = wrapped[start..end].to_vec();
     // Emphasis travels with the visible slice (padded first: `wrapped_styles`
