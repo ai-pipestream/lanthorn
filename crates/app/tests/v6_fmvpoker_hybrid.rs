@@ -96,6 +96,9 @@ fn fmvpoker_title(honor: bool) -> Option<(GameSession, app::state::AppState)> {
     };
     assert!(r.fault.is_none(), "fmvpoker faulted: {:?}", r.fault);
     app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+    // The game's own painted ground, as the app publishes it every frame
+    // (`main.rs`): fmvpoker's `erase_window` fills live here and nowhere else.
+    *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
     Some((session, state))
 }
 
@@ -317,4 +320,90 @@ fn fmvpoker_composite_shows_its_menu_window_honoring_game_colours() {
 #[test]
 fn fmvpoker_composite_shows_its_menu_window_theme_only() {
     fmvpoker_composite_shows_its_menu_window(false);
+}
+
+/// The "Double Fanucci" banner, and what actually happens to it (SQ-0729).
+///
+/// The frame art is Zork Zero's — fmvpoker ships that picture file renamed to
+/// FMVPOKER.EG1 — so its top-centre tab natively reads "Double Fanucci", a title
+/// belonging to a different game. The reading under investigation was that fmvpoker
+/// overprints it with a title of its own and we fail to draw that text. It does not:
+/// traced from the game itself, the boot frame parks WINDOW 1 at (173,7) 289x34,
+/// exactly over the banner, `erase_window`s it to the blue it declared for that
+/// window, and never prints a single character into it for the rest of the session.
+/// The banner is not overwritten, it is ERASED — which is how a game hides a title
+/// that is not its own, and there is no fmvpoker title to draw.
+///
+/// What WAS wrong is the colour of the hole. The erase reached the host correctly as
+/// a painted-ground fill (SQ-0706), but `fill_story_page_under_chrome_text` then
+/// flooded window 0's whole box on top of it — window 0 is the entire 640x400 screen
+/// here — so the tab rendered as a white gash across the top of an otherwise
+/// complete blue frame. That is the "the top-centre tab is cut off at y=0" this quest
+/// carried for three passes as a clipping question; the art is not clipped at all.
+/// The page is now the OLDEST thing in the box, sparing the game's own fills exactly
+/// as it already spares chrome text.
+fn fmvpoker_erased_banner_keeps_the_colour_the_game_named(honor: bool) {
+    let Some((session, state)) = fmvpoker_title(honor) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+
+    // Premise: window 1 is parked over the banner and the game printed NOTHING into
+    // it. If a later fmvpoker really does put its own title there, this is the
+    // assertion that notices — and the theory this test refutes becomes true.
+    let tab = layout
+        .chrome
+        .iter()
+        .find(|it| (it.x_px, it.y_px, it.w_px, it.h_px) == (172, 6, 289, 34))
+        .expect("premise: fmvpoker parks window 1 at native (173,7) 289x34, over the banner");
+    let WinNode::Grid(g) = &tab.node else { panic!("window 1 is published as a Grid") };
+    assert!(
+        g.px_texts.is_empty() && g.cells.iter().all(|c| c.ch == '\0' || c.ch == ' '),
+        "premise (honor={honor}): fmvpoker prints nothing into the window it parks over the \
+         \"Double Fanucci\" banner — it erases the title rather than overwriting it"
+    );
+
+    // Premise: the erase cut the banner out of the ARTWORK — the plate is a hole
+    // there — and reached us as painted ground in the colour window 1 declared. So
+    // what shows at those pixels comes from under the art, and is the game's fill or
+    // nothing.
+    let plate = layout.story_gfx.expect("fmvpoker draws its table into window 0 (SQ-0714)");
+    let WinNode::Graphics(gfx) = &plate.node else { panic!("story_gfx is a Graphics leaf") };
+    let paint = Engine::paint_surface(&session).expect("premise: the erase_window fill is recorded");
+    let ground = *paint.get_pixel(300, 20);
+    assert_ne!(ground[3], 0, "premise (honor={honor}): the banner's pixels were filled by the game");
+
+    let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    for (x, y) in [(300u32, 20u32), (180, 10), (450, 36)] {
+        assert_eq!(
+            gfx.canvas.get_pixel(x, y).0[3],
+            0,
+            "premise (honor={honor}): at ({x},{y}) the erase cut the \"Double Fanucci\" banner out \
+             of the plate, so nothing of the artwork remains to be clipped"
+        );
+        assert_eq!(
+            *paint.get_pixel(x, y),
+            ground,
+            "premise (honor={honor}): ({x},{y}) is inside the rectangle the game filled"
+        );
+        assert_eq!(
+            *img.get_pixel(x, y),
+            ground,
+            "honor={honor}: at ({x},{y}) the banner must keep the colour fmvpoker's own \
+             erase_window painted there, not window 0's page. The story page is the oldest thing \
+             in its box; a fill the game issued afterwards is newer, and flooding over it renders \
+             the frame's top-centre tab as a white gash (SQ-0729)."
+        );
+    }
+}
+
+#[test]
+fn fmvpoker_erased_banner_keeps_the_colour_the_game_named_honoring_game_colours() {
+    fmvpoker_erased_banner_keeps_the_colour_the_game_named(true);
+}
+
+#[test]
+fn fmvpoker_erased_banner_keeps_the_colour_the_game_named_theme_only() {
+    fmvpoker_erased_banner_keeps_the_colour_the_game_named(false);
 }
