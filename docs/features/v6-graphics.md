@@ -604,6 +604,20 @@ its page and ink are the surface prose is read on, and those are exactly what th
 setting is for. Nothing else in the v6 corpus paints a ground at all, so Zork
 Zero, Arthur, Shogun, Journey and Adventure are untouched.
 
+**The story page fills UNDER the game's own fills.** Window 0's page is the oldest
+thing in its box — the game filled the window, then everything else was drawn on
+top — so the page yields both to the labels other windows print inside that box
+and to any rectangle the game itself painted with `erase_window`. fmvpoker is why
+the second half matters. It draws its poker table with Zork Zero's picture file
+(the original release ships that file renamed to `FMVPOKER.EG1`), so the frame's
+top-centre tab natively reads *Double Fanucci* — and the game hides that title the
+way a v6 game does, by parking a window over the banner and erasing it to the
+colour it declared for that window. It never prints a title of its own there; the
+banner is erased, not overwritten. With window 0 covering the entire 640×400
+screen, a page fill that ignored the erase repainted the tab in window 0's white
+and the frame appeared to have its top cut off — an artefact of the fill order, not
+of the artwork, which is neither clipped nor mis-placed.
+
 This colour honoring now spans *every* v6 presentation, not just the pixel
 raster: the frameless classic status band, the painted menu/hint overlays,
 the hybrid story-strip overlay, and the plain cell fallback all resolve a

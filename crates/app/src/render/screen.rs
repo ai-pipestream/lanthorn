@@ -2186,7 +2186,13 @@ pub fn build_v6_raster_canvas(
         // The chrome TEXT the game printed inside the box is spared (SQ-0728):
         // window 0's page is under it, not over it — Shogun's title prints its
         // menu into window 0's box and both belong on the screen.
-        v6::fill_story_page_under_chrome_text(&mut canvas, (sx, sy, sw, sh), page, &layout.chrome);
+        v6::fill_story_page_under_chrome_text(
+            &mut canvas,
+            (sx, sy, sw, sh),
+            page,
+            &layout.chrome,
+            state.v6_paint.borrow().as_deref(),
+        );
         // …then the story window's OWN absolutely-placed artwork, before any
         // prose: Arthur's intro centres a 584×392 plate in window 0, so the plate
         // is the page's backdrop, not part of the frame ring — and the page fill

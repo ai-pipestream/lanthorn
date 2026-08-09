@@ -87,6 +87,20 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **fmvpoker's frame stops having a hole punched in the top of it.** Frobozz Magic
+  VideoPoker draws its poker table with Zork Zero's artwork — the original ships that
+  picture file renamed — so the frame's top-centre tab natively reads *Double
+  Fanucci*, a title belonging to a different game. fmvpoker hides it the way a v6
+  game does: it parks a window exactly over the banner and erases it to the blue it
+  declared for that window. babelmap recorded the erase correctly and then flooded
+  window 0's page straight over the top of it, and window 0 here is the entire
+  screen — so the tab came out as a white gash across an otherwise complete blue
+  frame, which is what three passes at this had recorded as artwork being clipped at
+  the top edge. Nothing was ever clipped. The story page is now the oldest thing in
+  its box: it fills under the game's own `erase_window` fills, exactly as it already
+  filled under the labels a game prints inside window 0. Every other v6 title is
+  byte-identical.
+
 - **THE BAT's title page stops putting rooms on the map.** The game opens on an act
   list — *Prologue • ACT I • Interlude • …* — and then a prologue headed *Excerpted
   from the New Gothenburg Post:*, and the automap had drawn both as rooms before the

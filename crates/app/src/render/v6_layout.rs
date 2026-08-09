@@ -567,22 +567,36 @@ fn chrome_text_rects(chrome: &[&PositionedWindow]) -> Vec<(u32, u32, u32, u32)> 
 /// inside window 0's 548x64 box and prints "START the game" there while window 0
 /// prints "You may choose to:" beside it; both are on the screen at once on a real
 /// interpreter. A flat fill of the box erased the menu.
+///
+/// `paint` is the game's own PAINTED GROUND — the rectangles its `erase_window`
+/// calls filled (SQ-0706) — and is spared for exactly the same reason as the chrome
+/// text: those pixels are NEWER than window 0's page, not older. fmvpoker is the
+/// report (SQ-0729). It parks window 1 over the "Double Fanucci" banner its frame
+/// art carries — the art is Zork Zero's, shipped renamed as FMVPOKER.EG1 — and
+/// erases it to the blue it declared for that window, which is how the game hides a
+/// title that is not its own. The erase reached us correctly, but the story page
+/// then flooded window 0's whole box on top of it, so the banner rendered as a white
+/// gash across the top of the frame rather than a plain blue tab.
 pub fn fill_story_page_under_chrome_text(
     canvas: &mut RgbaImage,
     (bx, by, bw, bh): (u32, u32, u32, u32),
     page: Rgba<u8>,
     chrome: &[&PositionedWindow],
+    paint: Option<&RgbaImage>,
 ) {
     let text: Vec<(u32, u32, u32, u32)> = chrome_text_rects(chrome)
         .into_iter()
         .filter(|&(x0, y0, x1, y1)| x0 < bx + bw && bx < x1 && y0 < by + bh && by < y1)
         .collect();
+    let painted = |x: u32, y: u32| -> bool {
+        paint.is_some_and(|p| x < p.width() && y < p.height() && p.get_pixel(x, y)[3] != 0)
+    };
     let (cw, ch) = (canvas.width(), canvas.height());
     for y in by..(by + bh).min(ch) {
         let row: Vec<(u32, u32)> =
             text.iter().filter(|&&(_, y0, _, y1)| y >= y0 && y < y1).map(|&(x0, _, x1, _)| (x0, x1)).collect();
         for x in bx..(bx + bw).min(cw) {
-            if row.iter().any(|&(x0, x1)| x >= x0 && x < x1) {
+            if row.iter().any(|&(x0, x1)| x >= x0 && x < x1) || painted(x, y) {
                 continue;
             }
             canvas.put_pixel(x, y, page);
