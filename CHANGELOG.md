@@ -118,6 +118,18 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **The poker menu can be clicked where it is printed.** *Play Current Bet*,
+  *Change Current Bet*, *Save*, *Restore* and *Quit* all ignored the mouse in
+  Frobozz Magic VideoPoker — and so did the *Continue* button between hands. The
+  clicks were arriving: the game read the coordinates every time and decided they
+  had hit nothing, because the labels were being drawn one text row above the
+  place the game had put them. A second text window keeps its own lines and they
+  are drawn sixteen pixels apart from its top edge, so a cursor move part-way down
+  a line had to be resolved to one; it was resolved to the line it fell inside
+  rather than the nearest one, and the fifteen-pixel remainder went with it. The
+  five labels landed just above the strip the game accepts a click on for them, so
+  pressing a label did nothing while pressing the empty row beneath it worked.
+  Declared rows now round to the nearest line, which is where fmvpoker meant them.
 - **Artwork off a disk image is drawn at full size.** *Zork Zero* booted straight
   from its Amiga floppy painted its pictures at half scale on a full-scale screen,
   so anything the game positioned from a picture's dimensions landed in the wrong

@@ -478,6 +478,17 @@ ignored; a line buffer only moves right. The declared *row* is honoured the same
 way, with blank lines — the buffer is padded out to it, and a row already behind
 its end is ignored.
 
+The row is taken to the **nearest** text line, not the line it happens to fall
+inside. A line buffer's only vertical unit is the line, and it is drawn at the
+window's top plus sixteen pixels per line, so the question is which line the game
+meant — and rounding down can lose a whole row of it. fmvpoker places its menu bar
+and its *Continue* button at pixel row 80 of a bottom panel, which is five
+sixteen-pixel lines down if you count from zero, the way the game did; taking the
+line it falls *inside* gave four, drew the five labels fifteen pixels high, and
+put them clear of the band the game's own mouse handler accepts for them. The
+labels were visible and dead: clicking one did nothing, while clicking the blank
+row beneath it played the hand.
+
 ## A window the game drew a frame around is a canvas, not a page
 
 The story window is a transcript in every Infocom v6 title: text streams into it,
