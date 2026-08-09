@@ -168,6 +168,15 @@ session-only switch that never touches your saved config:
   frame with a hollow middle that the game prints its whole title inside, only 17%
   of its pixels painted. Asking whether the art filled the screen missed it at
   every point that mattered, and the game drew not one picture in hybrid mode.
+  A third way to have no ring: the story window's **own** picture is left out of the
+  band canvas on purpose (it belongs inside the story viewport, blitted there as a
+  float), which is right only while the picture is inside the window it belongs to.
+  fmvpoker breaks that without redrawing anything — choosing *Change Current Bet*
+  hands the read to its bottom panel, so the panel becomes the story window and the
+  window still holding the poker table stops being one. The table then belonged to
+  neither half and was drawn by nobody, and the frame vanished for as long as the
+  player took to type a bet. A picture painting outside its own story window goes to
+  the composite too. No other v6 title's picture ever leaves its story window.
   Not every v6 game *has* a story window to ring, though. scopa's card table
   streams no prose at all — its screen is three grid windows and a table drawn out
   of filled rectangles, with two button labels on top — and a ring around nothing

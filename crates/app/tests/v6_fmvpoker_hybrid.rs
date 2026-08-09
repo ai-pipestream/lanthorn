@@ -38,6 +38,19 @@
 //! streaming path already carried as an indent. `fmvpoker_menu_labels_keep_their
 //! _columns` pins the result against the game's own `set_cursor` operands.
 //!
+//! **The frame vanished for the duration of a bet** (SQ-0739). Choosing "CHANGE
+//! CURRENT BET" makes the 594x156 bottom panel the window the game reads through, so
+//! the panel becomes the primary `Buffer` and window 0 — still holding the poker
+//! table drawn into it — stops being the story window. Nothing was redrawn: the
+//! table did not move, the story window did. But `classify_windows` keeps window 0's
+//! plate out of the chrome canvas on the grounds that it belongs to the story, and
+//! that reasoning holds only while the plate is inside the window it belongs to.
+//! With the story viewport reduced to one bottom panel, the escaping art was in
+//! neither half — no band carried it and no viewport showed it — so hybrid built a
+//! ring canvas of ZERO opaque pixels and the player's frame disappeared while they
+//! typed. `fmvpoker_bet_entry_keeps_its_frame` is the guard, and
+//! `no_corpus_plate_escapes_its_story_window` is the corpus half.
+//!
 //! `stories/fmvpoker.blb` is a byte-identical copy of `stories/Zork0.blb`: the
 //! original release ships Zork Zero's picture file renamed to FMVPOKER.EG1, so the
 //! table is a Zork Zero picture drawn deliberately. Both `honor_game_colours` modes
@@ -190,6 +203,160 @@ fn fmvpoker_is_the_only_title_this_moves() {
              `picture_takeover` is meant to move fmvpoker alone — a title that stops taking the \
              ring renders as a pixel image instead of crisp terminal cells."
         );
+    }
+}
+
+/// SQ-0739: the frame must not disappear while the player types a bet.
+///
+/// Choosing "CHANGE CURRENT BET" hands the read to the bottom panel, and that alone
+/// re-labels the screen: the panel becomes the primary `Buffer` and window 0 — with
+/// the 640x400 poker table still drawn into it — becomes an ordinary window. The
+/// game redrew nothing; the story window moved out from under its own art.
+///
+/// What that does to hybrid is the defect. The ring's bands are cropped from the
+/// CHROME canvas, and `classify_windows` deliberately leaves the story window's own
+/// plate out of it (`story_gfx` is blitted inside the story viewport instead). Once
+/// the plate is no longer inside the window it is the plate OF, it is in neither
+/// place: the premises below measure exactly that — a ring canvas with not one
+/// opaque pixel, and art painting outside a story viewport that could never show it.
+///
+/// So the frame must keep taking the composite, and the assertion is the player's
+/// own test: the screen above the bottom panel is byte-identical to the screen they
+/// were looking at when they chose the option.
+fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
+    let Some((mut session, mut state)) = fmvpoker_title(honor) else { return };
+    // The frame as the player last saw it, at the menu.
+    let menu_shot = {
+        let model = session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        app::render::screen::build_v6_raster_canvas(&layout, native, &state).0
+    };
+    assert_eq!(render_path(&session, &state), "raster", "premise (honor={honor}): the menu screen is a composite");
+
+    // "c" — CHANGE CURRENT BET.
+    let r = session.submit_char(b'c');
+    assert!(r.fault.is_none(), "fmvpoker faulted choosing CHANGE CURRENT BET: {:?}", r.fault);
+    app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+    *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+
+    // Premise: the story window is now the bottom panel the game reads through…
+    let story = layout.story.expect("the bet prompt's window is the primary Buffer");
+    assert_eq!(
+        (story.x_px, story.y_px, story.w_px, story.h_px),
+        (22, 235, 594, 156),
+        "premise (honor={honor}): choosing CHANGE CURRENT BET makes fmvpoker's bottom panel the \
+         window it reads input through, so the story window moves there"
+    );
+    // …while the table is exactly where it always was, on window 0.
+    let plate = layout.story_gfx.expect("window 0 still holds the poker table");
+    assert_eq!(
+        (plate.x_px, plate.y_px, plate.w_px, plate.h_px),
+        (0, 0, 640, 400),
+        "premise (honor={honor}): the game redrew nothing — the plate has not moved"
+    );
+    assert!(
+        app::render::screen::story_plate_escapes_story_window(story, Some(plate)),
+        "premise (honor={honor}): the plate now paints outside the story window's box, so the \
+         story viewport cannot show it"
+    );
+    // …and the ring cannot show it either: its canvas is empty.
+    let ring_canvas = app::render::v6_layout::build_chrome_canvas(
+        &layout.chrome,
+        native,
+        image::Rgba([255, 255, 255, 255]),
+        image::Rgba([0, 0, 0, 255]),
+        &state.colors,
+    );
+    assert_eq!(
+        ring_canvas.pixels().filter(|p| p.0[3] != 0).count(),
+        0,
+        "premise (honor={honor}): the chrome canvas the ring's bands are cropped from carries \
+         nothing at all on this frame"
+    );
+
+    assert_eq!(
+        render_path(&session, &state),
+        "raster",
+        "honor={honor}: hybrid must not take the ring on a frame whose ring canvas is empty — the \
+         art is on the story window's plate, outside the story viewport, so no band would carry it \
+         and the poker frame vanished for as long as the player took to type a bet (SQ-0739)"
+    );
+
+    // And what ships is the same frame they were looking at.
+    let bet_shot = app::render::screen::build_v6_raster_canvas(&layout, native, &state).0;
+    for y in 0..story.y_px as u32 {
+        for x in 0..native.0 as u32 {
+            assert_eq!(
+                menu_shot.get_pixel(x, y),
+                bet_shot.get_pixel(x, y),
+                "honor={honor}: at ({x},{y}) — above the bet panel — the screen changed when the \
+                 player chose CHANGE CURRENT BET. The game drew nothing there; only which window \
+                 it reads through moved (SQ-0739)."
+            );
+        }
+    }
+}
+
+#[test]
+fn fmvpoker_bet_entry_keeps_its_frame_honoring_game_colours() {
+    fmvpoker_bet_entry_keeps_its_frame(true);
+}
+
+#[test]
+fn fmvpoker_bet_entry_keeps_its_frame_theme_only() {
+    fmvpoker_bet_entry_keeps_its_frame(false);
+}
+
+/// The corpus half of SQ-0739: a story window's plate escaping it is the exception,
+/// not the rule, so the new arm of `picture_takeover` must fire for nobody else.
+///
+/// Every corpus frame that publishes a plate at all publishes it at EXACTLY the story
+/// window's box — Arthur's intro, Journey's title, mysterious01 and fmvpoker's own
+/// steady state — which is the containment the predicate short-circuits on. The rest
+/// have no window-0 graphics to escape with.
+#[test]
+fn no_corpus_plate_escapes_its_story_window() {
+    for game in [
+        "zork0-r393-s890714.z6",
+        "arthur-r74-s890714.z6",
+        "shogun-r322-s890706.z6",
+        "journey-r83-s890706.z6",
+        "advent.z6",
+        "scopa.z6",
+        "mysterious01.z6",
+        "fmvpoker.z6",
+    ] {
+        let Some((mut session, mut state)) = boot(game, true) else { continue };
+        for step in 0..8 {
+            {
+                let model = session.screen();
+                let WinNode::Layered(items) = &model.root else { panic!("{game}: v6 Layered root") };
+                let layout = app::render::v6_layout::classify_windows(items);
+                if let Some(story) = layout.story {
+                    assert!(
+                        !app::render::screen::story_plate_escapes_story_window(story, layout.story_gfx),
+                        "{game} frame {step}: its story window's plate paints outside the story \
+                         window's box, so this title now falls through to the raster composite \
+                         instead of the hybrid ring — a pixel image where it used to have crisp \
+                         terminal cells (SQ-0739)"
+                    );
+                }
+            }
+            let r = match session.pending_input() {
+                InputKind::Char => session.submit_char(13),
+                _ => session.submit(""),
+            };
+            assert!(r.fault.is_none(), "{game} faulted at step {step}: {:?}", r.fault);
+            app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+            *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+        }
     }
 }
 
