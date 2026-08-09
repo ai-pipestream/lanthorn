@@ -519,7 +519,23 @@ fn has_ancestor(machine: &Machine, start: u16, ancestor: u16) -> bool {
 /// theirs. The set may be generous: both consumers validate a candidate against
 /// the room before trusting it (`detect_location`, `find_player_object`), so a
 /// name that is not the avatar simply fails to validate and is skipped.
-const PLAYER_NAMES: [&str; 8] = ["yourself", "you", "me", "myself", "self", "cretin", "adventurer", "player"];
+///
+/// `(self object)` is the Inform 6 library's own `selfobj` — the avatar of every
+/// Inform 6 game that never calls `ChangePlayer` — and the entry that was
+/// missing (SQ-0701). The name is the literal short name compiled into the story
+/// (games that print "yourself" do it from a `short_name` routine, which is code,
+/// not the string we read), and it turns up as object #20 in every Inform 6 title
+/// checked: anchor.z8, photopia.z5, LostPig.z8, nameless.z8.
+///
+/// Anchorhead is why it matters. Its only *matching* candidate was a conversation
+/// TOPIC named "yourself" parked in `(con_topics)` alongside "Michael" and
+/// "lighthouse", while the real avatar — `(self object)`, correctly parented to
+/// the room — was invisible here. The topic never validates, so detection fell
+/// through to `player_room_beside`, which walked one step up from the topic and
+/// reported the topic BAG as the room: the same object `(con_topics)` for every
+/// room in the game, so the automap saw one room and never a single connection.
+const PLAYER_NAMES: [&str; 9] =
+    ["yourself", "you", "me", "myself", "self", "cretin", "adventurer", "player", "(self object)"];
 
 /// All objects whose short name plausibly denotes the player avatar, in ascending
 /// object order. `detect_location` validates each against the status-line room.
