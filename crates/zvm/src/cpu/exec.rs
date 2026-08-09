@@ -523,6 +523,49 @@ impl Machine {
         w
     }
 
+    /// Print the rows a `split_window` shrink is about to discard into the story
+    /// stream — the Inform box quote (SQ-0696).
+    ///
+    /// See [`UpperWindow::rows_lost_to_shrink`](crate::screen::UpperWindow::rows_lost_to_shrink)
+    /// for why those rows are a quote and what a terminal interpreter shows.
+    /// Each cell keeps its own style and colours, so the box arrives reversed
+    /// exactly as it was painted, and the run is emitted unbuffered so the box's
+    /// column alignment survives (word-wrap would reflow it).
+    ///
+    /// Nothing is printed when the shrink discards no painted rows, so the
+    /// per-turn status-line re-split costs one bounds check.
+    fn flush_box_quote(&mut self, new_rows: u16) {
+        let quote = self.screen.upper.rows_lost_to_shrink(new_rows);
+        if quote.is_empty() {
+            return;
+        }
+        let buffering = self.screen.buffer_mode;
+        self.out.set_buffer_mode(false);
+        self.out.print("\n");
+        for row in &quote {
+            // Coalesce equal-attribute neighbours so a reversed box is one run
+            // per row, not one per character.
+            let mut run = String::new();
+            let mut attrs: Option<crate::io::TextAttrs> = None;
+            for cell in row {
+                let a = crate::io::TextAttrs { style: cell.style, fg: cell.fg, bg: cell.bg };
+                if attrs != Some(a) {
+                    if let Some(prev) = attrs {
+                        self.out.print_attr(&run, prev);
+                    }
+                    run.clear();
+                    attrs = Some(a);
+                }
+                run.push(cell.ch);
+            }
+            if let Some(a) = attrs {
+                self.out.print_attr(&run, a);
+            }
+            self.out.print("\n");
+        }
+        self.out.set_buffer_mode(buffering);
+    }
+
     /// Keep `screen.current_fg`/`current_bg` mirroring the CURRENT v6 window's
     /// colour pair.
     ///
@@ -1658,6 +1701,15 @@ impl Machine {
                         let bg = self.screen.current_bg;
                         self.screen.upper.clear_to(bg);
                     } else {
+                        // SQ-0696: a shrink that discards PAINTED rows is the
+                        // Inform box quote — see `rows_lost_to_shrink`. Print
+                        // them into the story stream before they are truncated,
+                        // which is what a terminal interpreter leaves on screen
+                        // (the rows it does not repaint) and what our scrollback
+                        // lower window makes readable. Anchorhead's second
+                        // startup screen is exactly this and showed as a blank
+                        // screen waiting for a keypress.
+                        self.flush_box_quote(rows);
                         self.screen.upper.resize_preserving(rows, cols.max(1));
                     }
                     self.screen.cursor_row = 1;

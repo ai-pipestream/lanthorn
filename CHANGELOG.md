@@ -57,6 +57,17 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Quote boxes are readable again.** The Inform `box` statement — the framed
+  reverse-video epigraphs a great many games open with — splits the upper window
+  tall, prints into it, then shrinks it back to the status line *before* waiting
+  for a keypress. Truncating those rows at the shrink meant the quote was gone
+  before it could be read, so Anchorhead's two startup quotes (the Lovecraft
+  epigraph beside the title, and `* THE FIRST DAY *`) showed as blank screens
+  waiting for a key. The discarded rows are now printed into the story, with
+  their reverse video intact — the same reading Infocom's own V4 interpreter
+  gave them, where the quote sat on the story window and scrolled away with
+  play. Fixed in the VM, so all three of `babelmap`, `zvm-cli` and any other
+  front-end get it. The per-turn status-line re-split is untouched.
 - **The drawn map's one arrow rule: every arrow on a room border is that room's
   own exit.** A one-way passage used to stamp an inbound arrow on its destination
   (worst at a diagonal, where the side-derived `▶` landed on a box corner and read

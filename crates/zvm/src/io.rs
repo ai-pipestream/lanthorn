@@ -11,7 +11,7 @@ use std::any::Any;
 use crate::screen::ZColour;
 
 /// Text attributes for one styled run (logical colour, pre-reverse-swap).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TextAttrs {
     pub style: u8,
     pub fg: ZColour,
