@@ -16,6 +16,23 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **Play straight off the original Amiga floppy.** Hand babelmap an `.adf` disk
+  image — `babelmap "Zork Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem
+  (OFS and FFS both), finds the game inside, and boots it. No unpacking step, no
+  loose files, nothing to rename. Disk images are listed in the story picker
+  alongside everything else. Because AmigaOS has no filename extensions and
+  Infocom's `Story.data` convention is a convention rather than a promise, the
+  story is identified by its **contents** — a Z-machine header whose version,
+  memory map, serial and declared length all agree with the bytes present — so the
+  two saved games left on the Zork Zero disk, which begin plausibly enough, are
+  correctly passed over. A disk with no game on it (the plain AmigaDOS boot floppy
+  that ships as Disk 0) says so rather than feeding a system library to the VM.
+  The artwork comes with it: a native `Pic.data` archive on the same image is that
+  story's art, no configuration involved, because a shared floppy is as strong a
+  guarantee of pairing as a Blorb is. And the original media is the better source
+  where the two disagree — five *Zork Zero* pictures are cropped in the
+  circulating Blorb, including the full 320×200 pillared and bamboo frames that
+  survive there only as a top band, and the floppy has all five whole.
 - **v6 pictures land one after another, the way the game drew them.** A single v6
   turn can draw several pictures — Arthur's intro paints the graveyard plate and
   then paints Merlin into the middle of it, fourteen instructions later, without

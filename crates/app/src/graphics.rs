@@ -179,9 +179,17 @@ impl Canvas {
 /// overlays rely on their OWN tRNS for the transparent index, so tRNS is left
 /// intact. (Since the decoder reads palette RGB verbatim, copying PLTE alone
 /// reproduces exactly the colours the base picture renders with.)
+///
+/// A story mounted out of an Amiga `.adf` disk image has no Blorb at all: its
+/// art is the native `Pic.data` archive that shipped on the same floppy, held
+/// here as `native` (SQ-0719 / SQ-0734 tier 2). That format has no `APal`
+/// concept and no `Data` resources, so every palette path below simply stays
+/// on its no-adaptive fast lane; only picture lookup and dimensions branch.
 #[derive(Debug)]
 pub struct PictSource {
     blorb: Option<blorb::Blorb>,
+    /// Native Infocom picture archive, used when there is no Blorb.
+    native: Option<blorb::infocom_pics::InfocomPics>,
     cache: HashMap<u32, Option<Arc<DynamicImage>>>,
     /// Pict numbers declared adaptive by the Blorb `APal` chunk (§11.3). Empty
     /// for the overwhelmingly common no-`APal` case, where `image` takes the
@@ -209,12 +217,38 @@ impl PictSource {
             .unwrap_or_default();
         PictSource {
             blorb,
+            native: None,
             cache: HashMap::new(),
             adaptive,
             current_plte: None,
             palette_gen: 0,
             adaptive_cache: HashMap::new(),
         }
+    }
+
+    /// A source backed by a native Infocom picture archive (Amiga `Pic.data`)
+    /// rather than a Blorb — the artwork that shipped on the same disk image as
+    /// the story (SQ-0719).
+    pub fn from_native(pics: blorb::infocom_pics::InfocomPics) -> PictSource {
+        PictSource { native: Some(pics), ..PictSource::new(None) }
+    }
+
+    /// Resolve the picture source for `story_path` (SQ-0734's tiers 1 and 2).
+    ///
+    /// An Amiga `.adf` disk image supplies its own art: the story and the
+    /// picture archive came off the same floppy, so the pairing is guaranteed
+    /// by the medium and needs no configuration. Everything else — including an
+    /// `.adf` that carries no readable archive — resolves the story's resource
+    /// Blorb exactly as before.
+    pub fn resolve(story_path: &std::path::Path) -> PictSource {
+        if let Ok(raw) = std::fs::read(story_path) {
+            if blorb::adf::Adf::looks_like_adf(&raw) {
+                if let Some(pics) = blorb::adf::Adf::mount(raw).ok().and_then(|a| a.pictures()) {
+                    return PictSource::from_native(pics.1);
+                }
+            }
+        }
+        PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b))
     }
 
     /// Generation counter of the Current Palette — bumped whenever a non-adaptive
@@ -271,17 +305,25 @@ impl PictSource {
     /// resolution the pictures were authored for. A v6 story advertises this
     /// as its screen size so its hardcoded pixel art lines up (SQ-0186).
     /// `None` when there's no Blorb or no `Reso` chunk.
+    ///
+    /// A native archive has no equivalent field — Infocom's Amiga interpreter
+    /// knew its own 320×200 lores screen — so it answers `None` and lands on
+    /// exactly that fallback downstream, which is also what the Blorb `Reso`
+    /// chunks of these games say.
     pub fn std_window(&self) -> Option<(u16, u16)> {
         self.blorb.as_ref().and_then(|b| b.std_window())
     }
 
     fn get(&mut self, resnum: u32) -> Option<&Arc<DynamicImage>> {
         if !self.cache.contains_key(&resnum) {
-            let decoded = self.blorb.as_ref()
-                .and_then(|b| b.resource(b"Pict", resnum))
-                .and_then(|(_ty, bytes)| crate::cover::decode(bytes))
-                .map(Arc::new);
-            self.cache.insert(resnum, decoded);
+            let decoded = match (&self.blorb, &self.native) {
+                (Some(b), _) => b
+                    .resource(b"Pict", resnum)
+                    .and_then(|(_ty, bytes)| crate::cover::decode(bytes)),
+                (None, Some(pics)) => native_image(pics, resnum),
+                (None, None) => None,
+            };
+            self.cache.insert(resnum, decoded.map(Arc::new));
         }
         self.cache.get(&resnum).and_then(|o| o.as_ref())
     }
@@ -378,6 +420,15 @@ impl PictSource {
     /// Shogun, Arthur) query these via `picture_data` as invisible *placement*
     /// pictures whose (height, width) encode screen (y, x) layout coordinates.
     pub fn dims(&mut self, resnum: u32) -> Option<(u32, u32)> {
+        if self.blorb.is_none() {
+            // A native directory record carries the size whether or not the
+            // entry has pixels, so a placeholder answers here just as a Blorb
+            // `Rect` does — which is what those placeholders became on
+            // conversion.
+            let pics = self.native.as_ref()?;
+            let e = pics.entry(u16::try_from(resnum).ok()?)?;
+            return Some((u32::from(e.width), u32::from(e.height)));
+        }
         let (ty, bytes) = self.blorb.as_ref()?.resource(b"Pict", resnum)?;
         if ty == b"Rect" {
             let b: &[u8] = bytes;
@@ -397,17 +448,32 @@ impl PictSource {
 
     /// `(number, width, height)` for every `Pict` resource in the Blorb, header-
     /// sniffed via [`PictSource::dims`]. Feeds the v6 `Machine::set_picture_dims`
-    /// injection at session construction (Plan 1a). Empty when there is no Blorb.
+    /// injection at session construction (Plan 1a). Empty when there is neither
+    /// a Blorb nor a native archive.
     pub fn all_pict_dims(&mut self) -> Vec<(u16, u16, u16)> {
-        let numbers: Vec<u32> = match &self.blorb {
-            Some(b) => b.resources().iter().filter(|r| &r.usage == b"Pict").map(|r| r.number).collect(),
-            None => Vec::new(),
+        let numbers: Vec<u32> = match (&self.blorb, &self.native) {
+            (Some(b), _) => b.resources().iter().filter(|r| &r.usage == b"Pict").map(|r| r.number).collect(),
+            (None, Some(pics)) => pics.entries().iter().map(|e| u32::from(e.id)).collect(),
+            (None, None) => Vec::new(),
         };
         numbers
             .into_iter()
             .filter_map(|n| self.dims(n).map(|(w, h)| (n as u16, w as u16, h as u16)))
             .collect()
     }
+}
+
+/// Decode one picture out of a native Infocom archive into the same
+/// `DynamicImage` the Blorb path yields (SQ-0719).
+///
+/// `Picture::rgba` already expands the palette indices and gives the
+/// transparent index alpha 0, which is exactly what `Canvas`'s alpha-honoring
+/// overlay wants. `None` covers every "no image here" case alike: an unknown
+/// id, a size-only placeholder, or a compression variant we do not decode.
+fn native_image(pics: &blorb::infocom_pics::InfocomPics, resnum: u32) -> Option<DynamicImage> {
+    let pic = pics.decode(u16::try_from(resnum).ok()?).ok()?;
+    let buf = image::RgbaImage::from_raw(u32::from(pic.width), u32::from(pic.height), pic.rgba())?;
+    Some(DynamicImage::ImageRgba8(buf))
 }
 
 /// PNG 8-byte signature.
