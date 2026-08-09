@@ -104,6 +104,21 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **The poker frame stays up while you type your bet.** Choosing *Change Current
+  Bet* in Frobozz Magic VideoPoker made the table, the border and the whole screen
+  vanish, leaving a bare page to type into until the bet was entered. The game had
+  drawn nothing new: picking that option simply hands the read to the panel at the
+  bottom of the screen, which makes that panel the story window and leaves the
+  window holding the artwork behind. Hybrid mode carries everything outside the
+  story window as pixel bands and everything inside it as terminal text, and a
+  picture belonging to the story window is deliberately left to the second half —
+  which works right up to the moment the story window moves out from under its own
+  picture. With the story down to one bottom panel, the table belonged to neither
+  half and was drawn by nobody. Such a frame now goes to the full-screen composite,
+  where the picture is drawn as one image, so the screen above the bet panel is
+  pixel-for-pixel the screen you were looking at when you chose the option. No
+  other v6 title's picture ever leaves its story window, so nothing else moves.
+
 - **HOLD lands under the card you are holding.** Frobozz Magic VideoPoker positions
   everything it says: `HOLD` under each held card, the running totals in the panel
   below the table. babelmap read its story window as a transcript, so all of it

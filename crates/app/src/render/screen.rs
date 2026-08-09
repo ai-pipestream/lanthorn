@@ -3069,14 +3069,68 @@ enum BottomPlan {
 /// scopa paint nothing behind it, Arthur's intro plate and Journey's title already
 /// fill the screen, and mysterious01's plate (a 512×192 band across the lower half)
 /// reaches neither the top edge nor the right one.
+///
+/// SQ-0739: a third way to have no ring to draw. The ring's bands are cropped from
+/// the CHROME canvas, and the story window's own plate is deliberately not in it —
+/// it belongs to the story and is blitted inside the story viewport instead. That
+/// holds only while the plate is inside the window it belongs to. When it is not,
+/// the escaping art is in neither place: no band carries it and no viewport shows
+/// it. See [`story_plate_escapes_story_window`].
 fn picture_takeover(
     story: &crate::engine::PositionedWindow,
     chrome: &[&crate::engine::PositionedWindow],
     story_gfx: Option<&crate::engine::PositionedWindow>,
     native: (u16, u16),
 ) -> bool {
-    story_covers_screen(story, native)
-        && (art_fills_screen(chrome, story_gfx, native) || art_encloses_screen(chrome, story_gfx, native))
+    (story_covers_screen(story, native)
+        && (art_fills_screen(chrome, story_gfx, native) || art_encloses_screen(chrome, story_gfx, native)))
+        || story_plate_escapes_story_window(story, story_gfx)
+}
+
+/// SQ-0739: does the STORY window's own plate paint outside the story window's box?
+///
+/// Hybrid splits the screen in two: the chrome ring carries every pixel outside the
+/// story viewport, and the story viewport is terminal cells with the story window's
+/// own plate blitted into it as a float. `classify_windows` sets that plate aside as
+/// `story_gfx` precisely so the ring does NOT carry it — which is right exactly as
+/// long as the plate lives inside the window it is the plate OF.
+///
+/// fmvpoker breaks that assumption without redrawing anything. Choosing "Change
+/// Current Bet" makes its 594x156 bottom panel the window the game reads input
+/// through, so the panel becomes the primary Buffer and window 0 — still holding
+/// the 640x400 poker table drawn into it — stops being the story window. The table
+/// did not move; the story window did. The plate then paints across the whole
+/// screen while the story viewport is one panel at the bottom, so the frame belongs
+/// to neither half: `build_chrome_canvas` never sees it (it is not chrome) and the
+/// viewport is far too small to show it. The ring came up with a canvas of ZERO
+/// opaque pixels and the player's frame vanished for the duration of the bet — the
+/// same "sudden drop into frameless mode" this function was written for.
+///
+/// Cheap first: a plate the story window's box CONTAINS cannot escape it, which is
+/// every corpus frame that has a plate at all (Arthur's intro, Journey's title,
+/// mysterious01 and fmvpoker's own steady state all publish the plate at exactly the
+/// story window's box). Only when the boxes disagree is the alpha sampled, and then
+/// on a coarse grid — a plate that reaches outside reaches by whole bands, never by
+/// a stray pixel.
+pub fn story_plate_escapes_story_window(
+    story: &crate::engine::PositionedWindow,
+    story_gfx: Option<&crate::engine::PositionedWindow>,
+) -> bool {
+    let Some(pw) = story_gfx else { return false };
+    let crate::engine::WinNode::Graphics(gw) = &pw.node else { return false };
+    let (px0, py0) = (pw.x_px as u32, pw.y_px as u32);
+    let (px1, py1) = (px0 + gw.canvas.width(), py0 + gw.canvas.height());
+    let (sx0, sy0) = (story.x_px as u32, story.y_px as u32);
+    let (sx1, sy1) = (sx0 + story.w_px as u32, sy0 + story.h_px as u32);
+    if px0 >= sx0 && py0 >= sy0 && px1 <= sx1 && py1 <= sy1 {
+        return false;
+    }
+    const STEP: usize = 4;
+    (py0..py1).step_by(STEP).any(|y| {
+        (px0..px1).step_by(STEP).any(|x| {
+            (x < sx0 || x >= sx1 || y < sy0 || y >= sy1) && gw.canvas.get_pixel(x - px0, y - py0)[3] >= 128
+        })
+    })
 }
 
 /// One native text row of slack per edge, so a game that leaves a hairline border
