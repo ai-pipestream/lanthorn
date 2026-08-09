@@ -118,6 +118,15 @@ identifies which beta it is without reading its git hash.
   `raster` mode entirely, on a screen where the terminal-cell paths showed both.
   They are drawn now, in the game's own ink where you are honouring game colours
   and the theme's where you are not, and the story page no longer paints over them.
+- **A v6 menu bar keeps its columns instead of running into one word.**
+  fmvpoker's bottom bar read `PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT`
+  — five options with nowhere to break. The game places each label at its own
+  pixel column and prints them onto one row, and a second text window kept its
+  text as plain lines with no note of where each run began, so every label simply
+  followed the last. It now keeps the column the game named for a run and pads the
+  line out to it, exactly as the main text window already did, and the bar reads
+  `PLAY CURRENT BET  CHANGE CURRENT BET  SAVE  RESTORE  QUIT` again. Anything the
+  game centres in such a window — fmvpoker's `CONTINUE` button — lands centred too.
 - **The Mysterious Adventures now draw a map instead of nothing at all.** All
   eleven of Brian Howarth's games — Scott Adams adventures rebuilt as v6 Z-code —
   played from start to finish with a completely empty automap, even though every

@@ -394,12 +394,36 @@ impl ZWindow {
     /// [`PROSE_MAX_LINES`]. Wrapping is the host's job — it knows the font and the
     /// pane — so lines are stored logically, exactly as the host transcript keeps
     /// them.
-    pub fn push_prose(&mut self, s: &str) {
+    ///
+    /// `at_col` is a COLUMN this window's own `set_cursor` declared for `s`
+    /// (SQ-0729), in characters from the window's left margin — `None` when the
+    /// text simply flowed on from the last print. A v6 prose window is still a
+    /// pixel surface, and a game may place runs across it: fmvpoker prints its five
+    /// menu labels into one at x = 1, 178, 372, 454 and 557, and dropping those
+    /// columns butted the runs against each other as
+    /// `PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT`.
+    ///
+    /// The line is PADDED OUT TO the column, not indented BY it: the run has to
+    /// land at the column the game named, not that far past wherever the previous
+    /// run happened to end. A column already behind the line's end cannot be
+    /// reached by appending, so it is ignored — a line buffer can only move right,
+    /// and only the streaming shadow ([`ZWindow::record_streamed`]) can express a
+    /// true backwards jump. The declared ROW is likewise not honoured here: these
+    /// are logical lines, stacked in print order.
+    pub fn push_prose(&mut self, s: &str, at_col: Option<usize>) {
         for (i, part) in s.split('\n').enumerate() {
             if i > 0 || self.prose.is_empty() {
                 self.prose.push(String::new());
             }
             if let Some(last) = self.prose.last_mut() {
+                // Only the first fragment sits at the declared column; everything
+                // after a '\n' starts a line of its own at the left margin.
+                if i == 0 {
+                    if let Some(col) = at_col {
+                        let have = last.chars().count();
+                        last.extend(std::iter::repeat_n(' ', col.saturating_sub(have)));
+                    }
+                }
                 last.push_str(part);
             }
         }

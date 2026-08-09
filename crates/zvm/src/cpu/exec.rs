@@ -3959,8 +3959,15 @@ impl Machine {
                     .then_some(cur)
             });
             if let Some(cur) = diverted {
+                // The column this window's own `set_cursor` DECLARED for this run
+                // (SQ-0729). The streaming branch below carries such a column into
+                // the character stream as a leading indent; a diverted window owns
+                // its line buffer, so it pads the line out to the column instead.
+                // Taken on BOTH branches, so a declaration can never outlive the
+                // print that answered it.
+                let col = self.v6_take_declared_indent(s);
                 if let Some(v6) = self.screen.v6.as_mut() {
-                    v6.windows[cur].push_prose(s);
+                    v6.windows[cur].push_prose(s, (col > 0).then_some(col));
                 }
             } else {
                 // A column this window's own `set_cursor` DECLARED for the text
@@ -7209,6 +7216,86 @@ pub(crate) mod tests {
         assert_eq!(w.interrupt_countdown, 2, "the new-line still counted down (ZMSD 8.8.3.2.2)");
         assert!(w.y_cursor > 1, "the window cursor still advanced (props 4/5), got {}", w.y_cursor);
         assert_eq!(m.global(0), 0, "no routine fires above zero");
+    }
+
+    /// Set up a v6 secondary prose window (wrap + scroll, attribute 2 CLEAR) as
+    /// window 3, with the player typing elsewhere — the SQ-0585 divert.
+    fn diverted_prose_machine() -> Machine {
+        let mut m =
+            Machine::new(Memory::new(crate::header::tests_support::sample_story(6)).unwrap());
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.current = 3;
+            let w = &mut v6.windows[3];
+            w.attributes = 0b1011; // wrap + scroll + buffered, NOT copy-to-transcript
+            w.y_size = 200;
+            w.x_size = 640;
+            w.y_cursor = 1;
+            w.x_cursor = 1;
+        }
+        m.v6_input_window = 7;
+        m
+    }
+
+    // Test (SQ-0729): a v6 prose window is still a PIXEL surface, and a game may
+    // place separate runs across one row of it — fmvpoker prints five menu labels
+    // that way, at 1-based pixel columns 1, 178, 372, 454 and 557. `push_prose`
+    // kept no cursor x, so those runs butted together into
+    // "PLAY CURRENT BETCHANGE CURRENT BET…" inside the VM, before any renderer
+    // could see the columns. The declared column is now padded out to.
+    #[test]
+    fn a_declared_column_places_diverted_prose_on_its_row() {
+        let mut m = diverted_prose_machine();
+        // 8px fixed cell: pixel column C is character column (C-1)/8.
+        m.exec_var(0x0F, &[1, 1, 3], None, None);
+        m.print_text("PLAY");
+        m.exec_var(0x0F, &[1, 178, 3], None, None);
+        m.print_text("SAVE");
+
+        let w = &m.screen.v6.as_ref().unwrap().windows[3];
+        assert_eq!(
+            w.prose,
+            vec![format!("PLAY{}SAVE", " ".repeat(18))],
+            "both runs belong to one line, each starting at the column its own set_cursor \
+             declared (0 and (178-1)/8 = 22)",
+        );
+    }
+
+    // Test (SQ-0729): the column is padded out TO, never indented BY. Indenting by
+    // it would put every run that far past wherever the previous one happened to
+    // end, which is how five labels at fixed columns drift into a ragged row.
+    #[test]
+    fn a_declared_column_is_padded_to_not_indented_by() {
+        let mut m = diverted_prose_machine();
+        m.print_text("0123456789");
+        m.exec_var(0x0F, &[1, 41, 3], None, None); // character column 5
+        m.print_text("X");
+
+        let w = &m.screen.v6.as_ref().unwrap().windows[3];
+        assert_eq!(
+            w.prose,
+            vec!["0123456789X".to_string()],
+            "column 5 is already behind the line's end: a line buffer can only move right, so \
+             the run appends rather than being pushed five columns further out",
+        );
+    }
+
+    // Test (SQ-0729): a declaration is consumed by the print that answers it, on the
+    // diverted path exactly as on the streaming one — so the NEXT run, printed with
+    // no set_cursor of its own, starts where the text left off.
+    #[test]
+    fn a_declared_column_does_not_outlive_its_print() {
+        let mut m = diverted_prose_machine();
+        m.exec_var(0x0F, &[1, 81, 3], None, None); // character column 10
+        m.print_text("A");
+        m.print_text("B");
+
+        let w = &m.screen.v6.as_ref().unwrap().windows[3];
+        assert_eq!(
+            w.prose,
+            vec![format!("{}AB", " ".repeat(10))],
+            "the second print flows on from the first; only set_cursor declares a column",
+        );
     }
 
     // Test (SQ-0585): the same window WITH attribute 2 set streams to the transcript
