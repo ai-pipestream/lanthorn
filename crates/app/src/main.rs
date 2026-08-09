@@ -604,6 +604,10 @@ fn draw_frame(
         // over successive frames, so what the player is looking at right now may
         // be one step short of the settled composite (SQ-0708).
         let screen_model = engine.screen_now();
+        // The painted ground rides beside the window tree, not inside it: it is a
+        // pixel surface the v6 paths composite as a backdrop (SQ-0706). Republished
+        // every frame so a game that stops painting cannot leave a stale one up.
+        *state.v6_paint.borrow_mut() = engine.paint_surface();
         // During replay the map shows the reconstructed snapshot for the selected turn.
         let replay_graph: Option<mapper::graph::MapGraph> = state.overlays.replay.as_ref().map(|r| {
             let snap = state

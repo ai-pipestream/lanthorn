@@ -703,6 +703,17 @@ pub trait Engine {
     /// event path). (Lane M)
     fn set_mouse(&mut self, _y_px: u16, _x_px: u16) {}
 
+    /// The v6 screen's PAINTED ground — filled rectangles left by `erase_window`,
+    /// in native pixels (SQ-0706). `None` for every engine and every game that
+    /// never paints one, which is all of them but scopa-shaped v6 titles.
+    ///
+    /// Deliberately outside [`Engine::screen`]: it is a pixel surface, not a
+    /// window tree, and the renderer composites it as a BACKDROP beneath the
+    /// chrome and the story text rather than as another window.
+    fn paint_surface(&self) -> Option<std::sync::Arc<image::RgbaImage>> {
+        None
+    }
+
     /// Report the host's REAL screen size, in character cells, to the story.
     ///
     /// ZMSD §8.4: the interpreter "may change the exact dimensions whenever it

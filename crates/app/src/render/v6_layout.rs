@@ -36,6 +36,36 @@ fn standard_pixel_rgb(n: u8) -> Option<Rgba<u8>> {
     Some(Rgba([r, g, b, 255]))
 }
 
+/// The pixel colour a packed z-colour names OUTRIGHT, or `None` when it names
+/// none (SQ-0706).
+///
+/// Every case here resolves without a [`ColorScheme`]: true-colour is arithmetic,
+/// and Standard 2..=9 have fixed RGB in ZMSD §8.3.1 (see [`standard_pixel_rgb`]),
+/// which is what the pixel path already uses so that white is real white rather
+/// than VGA grey. `Default`, and the "current"/"default" sentinels 0 and 1, name
+/// no colour: they mean "inherit", which is the host's business, not a painted
+/// rectangle's.
+///
+/// This is what lets `GameSession` rasterize `erase_window` fills into a bounded
+/// surface as they arrive, instead of hoarding an unbounded list of rects to
+/// resolve later against a theme it cannot see.
+pub(crate) fn explicit_pixel_rgba(packed: u32) -> Option<Rgba<u8>> {
+    match packed >> 24 {
+        3 => {
+            let v = packed & 0x00FF_FFFF;
+            Some(Rgba([(v >> 16) as u8, (v >> 8) as u8, v as u8, 255]))
+        }
+        2 => {
+            let v = (packed & 0xFFFF) as u16;
+            let (r, g, b) = ((v & 0x1F) as u8, ((v >> 5) & 0x1F) as u8, ((v >> 10) & 0x1F) as u8);
+            // 5 bits per channel → 8, replicating the high bits (0x1F → 0xFF).
+            Some(Rgba([(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 255]))
+        }
+        1 => standard_pixel_rgb((packed & 0xFF) as u8),
+        _ => None,
+    }
+}
+
 pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorScheme) -> Rgba<u8> {
     if packed == 0 {
         return fallback;
@@ -502,6 +532,26 @@ fn blit_chrome_graphics(canvas: &mut RgbaImage, chrome: &[&PositionedWindow]) {
         if let WinNode::Graphics(gwn) = &it.node {
             let src = &gwn.canvas;
             blit_clipped(canvas, src, it.x_px as u32, it.y_px as u32, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
+        }
+    }
+}
+
+/// Composite the v6 PAINTED GROUND onto `canvas` — the filled rectangles an
+/// `erase_window` left behind (SQ-0706), at their absolute native positions.
+///
+/// Drawn after the window pages and before the story text, so a game that paints
+/// with fills (scopa's cards) sits on its own table and under its own prose. Only
+/// opaque pixels transfer: the surface is empty everywhere the game never painted,
+/// and those pixels belong to whatever the ordinary window machinery resolved.
+pub fn blit_paint_ground(canvas: &mut RgbaImage, paint: Option<&RgbaImage>) {
+    let Some(src) = paint else { return };
+    let (w, h) = (src.width().min(canvas.width()), src.height().min(canvas.height()));
+    for y in 0..h {
+        for x in 0..w {
+            let p = *src.get_pixel(x, y);
+            if p[3] > 0 {
+                canvas.put_pixel(x, y, p);
+            }
         }
     }
 }

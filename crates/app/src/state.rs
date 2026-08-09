@@ -2177,6 +2177,11 @@ pub struct AppState {
     /// hold what the PREVIOUS frame drew there, so sampling them would feed the
     /// picture its own colours.
     pub v6_story_page: std::cell::Cell<Option<(u8, u8, u8)>>,
+    /// The v6 painted ground for the CURRENT frame, republished by `draw_frame`
+    /// from [`crate::engine::Engine::paint_surface`] (SQ-0706). `None` whenever the
+    /// game has painted none, which is every game that does not draw with
+    /// `erase_window`.
+    pub v6_paint: std::cell::RefCell<Option<std::sync::Arc<image::RgbaImage>>>,
     /// Where the last v6 frame actually PUT each window, in terminal cells, for
     /// `/dump-windows`. The engine can report the game's pixel rects but has no idea
     /// what the renderer did with them, and a v6 layout defect is nearly always in
@@ -2571,6 +2576,7 @@ impl Default for AppState {
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
             v6_story_page: std::cell::Cell::new(None),
+            v6_paint: std::cell::RefCell::new(None),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
             v6_path_log: std::cell::RefCell::new(Vec::new()),
             v6_save_log: std::cell::RefCell::new(Vec::new()),

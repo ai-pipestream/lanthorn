@@ -558,6 +558,26 @@ pub struct GameSession {
     /// `drain_turn` from `Machine::pending_pictures`; read by the Task 4
     /// screen adapter to build the layered composite.
     pub pictures_canvas: std::collections::HashMap<u8, crate::graphics::Canvas>,
+    /// The v6 screen's PAINTED ground: filled rectangles an `erase_window` left
+    /// behind, accumulated in native pixels (SQ-0706).
+    ///
+    /// ZMSD §8.7.3.3 makes erasing a window a fill with its background, and on a
+    /// v6 screen that is a drawing operation. scopa.z6 draws every playing card
+    /// with nothing else — `fastsimplebox` resizes one window, moves it, colours
+    /// it and erases it, hundreds of times per card — so a host that treats each
+    /// erase as "drop this window's canvas" renders no cards at all.
+    ///
+    /// A surface rather than a list of rects because the list is unbounded: a card
+    /// table repaints continuously, and the pixels are what matter, not the
+    /// history. Only a fill naming a colour OUTRIGHT paints (see
+    /// [`crate::render::v6_layout::explicit_pixel_rgba`]) — "current"/"default"
+    /// mean inherit, which is the host's business, and skipping them keeps games
+    /// that merely clear their windows (Arthur's intro erases all eight) from
+    /// gaining a backdrop they never asked for.
+    ///
+    /// `None` until a game actually paints one, so nothing changes for the games
+    /// that never do.
+    paint: Option<std::sync::Arc<image::RgbaImage>>,
     /// The screens this turn's picture sequence passed through on its way to
     /// `pictures_canvas`, oldest first — empty whenever nothing is playing (SQ-0708).
     ///
@@ -764,6 +784,7 @@ impl GameSession {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -799,6 +820,7 @@ impl GameSession {
     /// turn's `drain_turn` happens to pick them up (Plan 1b Task 5 gap).
     pub fn flush_boot_pictures(&mut self) {
         self.drain_pictures();
+        self.drain_erase_fills();
     }
 
     /// Encode each rasterized v6 window canvas (`pictures_canvas`) to PNG bytes,
@@ -1245,6 +1267,7 @@ impl GameSession {
         let sounds = std::mem::take(&mut self.machine.pending_sounds);
         let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
         let pictures = self.drain_pictures();
+        self.drain_erase_fills();
         // Window-0 inline pictures interleave into this turn's text as ordered
         // elements; empty for turns without them (the app then uses the flat
         // transcript path unchanged).
@@ -1281,6 +1304,69 @@ impl GameSession {
     /// `GameSession` so the Task 4 screen adapter can read `pictures_canvas`
     /// without reaching into `AppState`). A no-op drain for non-v6 stories,
     /// which never push a `PictureEvent`.
+    /// Paint this turn's `erase_window` fills onto the screen's painted ground
+    /// (SQ-0706). See [`GameSession::paint`].
+    ///
+    /// Coordinates arrive 1-based in the game's own native pixels, absolute rather
+    /// than window-relative — the window that drew them has usually been moved and
+    /// resized for this one rectangle and will move again before the next.
+    fn drain_erase_fills(&mut self) {
+        let fills = std::mem::take(&mut self.machine.pending_erase_fills);
+        if fills.is_empty() {
+            return;
+        }
+        let (sw, sh) = self.v6_native_extent();
+        for f in fills {
+            // A colour the game named outright, or nothing to paint: an erase that
+            // inherits its colour is asking the host to resolve the ground, which
+            // is what the ordinary window background already does.
+            let Some(rgba) = crate::render::v6_layout::explicit_pixel_rgba(
+                crate::state::pack_zcolour(f.bg),
+            ) else {
+                continue;
+            };
+            if f.w == 0 || f.h == 0 {
+                continue; // a window that was never given a box covers no pixels
+            }
+            // A fill spanning the WHOLE screen is a screen clear, not drawing: the
+            // page/backdrop machinery already resolves the ground (SQ-0704), and
+            // treating it as paint would blanket every game that merely erases —
+            // Arthur's intro erases all eight windows, Zork Zero's boot erases the
+            // screen. So it drops the painted ground instead, which is also what
+            // keeps this surface bounded when a card table repaints for a new hand.
+            if u32::from(f.w) >= sw && u32::from(f.h) >= sh {
+                self.paint = None;
+                continue;
+            }
+            let canvas = self
+                .paint
+                .get_or_insert_with(|| std::sync::Arc::new(image::RgbaImage::new(sw, sh)));
+            let img = std::sync::Arc::make_mut(canvas);
+            let (x0, y0) = (u32::from(f.x.max(1)) - 1, u32::from(f.y.max(1)) - 1);
+            let (x1, y1) = ((x0 + u32::from(f.w)).min(img.width()), (y0 + u32::from(f.h)).min(img.height()));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    img.put_pixel(x, y, rgba);
+                }
+            }
+        }
+    }
+
+    /// The v6 screen's size in native pixels — window 0's box, which the standard
+    /// makes the whole screen, falling back to the 640x400 the era assumed.
+    fn v6_native_extent(&self) -> (u32, u32) {
+        self.machine
+            .screen
+            .v6
+            .as_ref()
+            .map(|v6| {
+                let w = &v6.windows[0];
+                (u32::from(w.x_size).max(1), u32::from(w.y_size).max(1))
+            })
+            .filter(|&(w, h)| w > 1 && h > 1)
+            .unwrap_or((640, 400))
+    }
+
     fn drain_pictures(&mut self) -> Vec<PictureEvent> {
         let events = std::mem::take(&mut self.machine.pending_pictures);
         // A new turn supersedes whatever sequence was still playing: those frames
@@ -3192,6 +3278,10 @@ impl Engine for GameSession {
         self.last_confirmed_pc.set(None); // reopen the confirmation gate each turn
         let byte = GameSession::key_input_to_zscii(key)?;
         Some(self.submit_char(byte))
+    }
+
+    fn paint_surface(&self) -> Option<std::sync::Arc<image::RgbaImage>> {
+        self.paint.clone()
     }
 
     fn set_mouse(&mut self, y_px: u16, x_px: u16) {
@@ -5404,6 +5494,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -5461,6 +5552,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -5510,6 +5602,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -5575,6 +5668,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -5613,6 +5707,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -5664,6 +5759,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -5757,6 +5853,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
@@ -5805,6 +5902,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
