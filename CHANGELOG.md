@@ -87,6 +87,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **advent.z6's help bar stops losing letters, and wide terminals stop clipping the
+  line.** Opening `help` in Adventure showed a navigation bar reading
+  `N   n xt subj ct` and `RETURN = r ad subjec` — the `=`, three lowercase `e`s and
+  the tail of "subject", gone. It looked like a font problem and was arithmetic. A
+  line of v6 status text is *positioned* by the game's own pixel coordinates but
+  *drawn* one terminal column per character, and those two only advance at the same
+  rate when the pane happens to be one column per 8-pixel game cell. Widen the
+  terminal past that and they drift: at 120 columns a game cell is a column and a
+  half, so the blank cells the game paints across the bar — harmless where they
+  are, sitting over the label's own spaces — landed on its neighbouring *letters*
+  instead and wiped them, and the blank just past the end of a label reached back
+  inside it and took the last character with it. Blank runs now paint only the
+  cells no text claimed, so the bar reads whole at every terminal width.
 - **The Mysterious Adventures now draw a map instead of nothing at all.** All
   eleven of Brian Howarth's games — Scott Adams adventures rebuilt as v6 Z-code —
   played from start to finish with a completely empty automap, even though every

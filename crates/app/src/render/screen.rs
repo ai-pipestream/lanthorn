@@ -3682,6 +3682,37 @@ fn draw_chrome_text_strip(
                 buf.set_stringn(c, *row as u16, " ", 1, fill);
             }
         }
+        // SQ-0727: the cells this row's GLYPH runs occupy, so a blank run cannot
+        // erase one. A run is POSITIONED by its scale-mapped native pixel, but its
+        // characters then advance ONE TERMINAL COLUMN each — two different rates
+        // wherever the pane is not exactly one column per native 8px text cell (at
+        // 120 columns of a 640px screen it is one and a half). So a blank run the
+        // game painted over another run's OWN whitespace no longer lands on that
+        // whitespace once mapped: it lands on a neighbouring glyph.
+        //
+        // advent.z6's help screen is the report. It paints each bar row as one
+        // label run plus the reversed blank cells of the bar around and between the
+        // labels, and at 120 columns the blanks at native x=17/33/73 mapped onto
+        // "N = next subject"'s columns 3/6/14 — its `=` and both lowercase `e`s —
+        // while the blank at x=113, one native cell past the label's last character,
+        // mapped INSIDE its cell span and clipped the tail off "RETURN = read
+        // subjec[t]". Interior drops and a clipped tail, one mechanism. At 80
+        // columns the two rates coincide and the row was always correct, which is
+        // why this reads as a font bug and is a scale bug.
+        //
+        // A blank run carries no glyphs: the strip and row floods above already put
+        // its background down, and in NATIVE pixels it only ever covers whitespace
+        // the glyph run drew itself. So it may still paint the cells no glyph run
+        // claimed (the bar's own gaps), and must skip the rest.
+        let claimed: Vec<(i32, i32)> = row_runs
+            .iter()
+            .filter(|t| !t.text.trim().is_empty())
+            .map(|t| {
+                let (c, _) = run_cell(t, scale, cell_px, pane);
+                (c, c + t.text.chars().count() as i32)
+            })
+            .collect();
+        let is_claimed = |c: i32| claimed.iter().any(|&(lo, hi)| c >= lo && c < hi);
         for t in row_runs {
             let (col, _) = run_cell(t, scale, cell_px, pane);
             if col < rect.x as i32 || col >= rect.right() as i32 {
@@ -3689,14 +3720,25 @@ fn draw_chrome_text_strip(
             }
             let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
             let max_w = rect.right() as usize - col as usize;
-            if max_w > 0 {
-                // Untrusted game text (SQ-0639).
-                let text = crate::render::blank_control_chars(&t.text);
+            if max_w == 0 {
+                continue;
+            }
+            // Untrusted game text (SQ-0639).
+            let text = crate::render::blank_control_chars(&t.text);
+            if t.text.trim().is_empty() {
+                for (i, ch) in text.chars().take(max_w).enumerate() {
+                    let c = col + i as i32;
+                    if !is_claimed(c) {
+                        buf.set_stringn(c as u16, *row as u16, ch.encode_utf8(&mut [0u8; 4]), 1, style);
+                    }
+                }
+            } else {
                 buf.set_stringn(col as u16, *row as u16, text.as_ref(), max_w, style);
             }
         }
     }
 }
+
 
 /// SQ-0509: merge horizontally-contiguous same-style fragments of ONE native text
 /// row (`row_runs` sorted by `x`) into single runs. A game that positions status
