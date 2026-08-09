@@ -245,7 +245,13 @@ fn advent_style_command_moves_the_story_window() {
     };
 
     let before = story_box(&session);
-    assert_eq!(before, (0, 380), "prose fills the screen before the split");
+    assert_eq!(
+        before,
+        (20, 380),
+        "prose starts below the status bar: advent's @split_window(20) TILES windows 0 and 1 \
+         (ZMSD §8.8.4.1 — window 0 \"is placed just below it\"), the library reads window 0's \
+         y back with @get_wind_prop and moves its own window 7 there (SQ-0712)"
+    );
 
     let r = session.submit("style");
     assert!(!r.quit && r.fault.is_none(), "\"style\" faulted/quit: {:?}", r.fault);
@@ -273,6 +279,17 @@ fn advent_style_command_moves_the_story_window() {
 /// be simply transparent: the menu's text floated over the room description with
 /// nothing behind it. The panel must read solid, and the story must come back
 /// untouched when the menu closes (advent erases and reprints on the way out).
+///
+/// SQ-0712 narrowed the leak scan from the whole pane to the PANEL'S OWN ROWS,
+/// which is what "hides the story behind it" ever meant. Before the split placed
+/// window 0, the prose window covered the entire screen and the menu was an
+/// overlay on top of it, so any story text anywhere was leakage. Now `help` tiles
+/// the screen the way the game asks — the menu owns the top 160px and advent's
+/// library moves its own prose window to 161 — so the transcript below the panel
+/// is the game's layout, not a hole in it. Rendered to PNG, the change is the other
+/// way round from a regression: before, the story window's full-screen box buried
+/// the subject list entirely and the raster composite showed nothing but story
+/// lines; now the list is legible with the transcript beneath it.
 fn advent_help_panel_is_opaque(honor: bool) {
     let Some(mut session) = advent_in_play(honor) else {
         eprintln!("SKIP: gitignored story missing");
@@ -310,11 +327,26 @@ fn advent_help_panel_is_opaque(honor: bool) {
     let menu_y = (0..area.height)
         .find(|&y| row_of(&buf, y).contains("Instructions for playing"))
         .unwrap_or_else(|| panic!("the help menu renders (honor={honor})"));
-    // …and NOT one line of the story shows through anywhere on the panel.
-    let leaks: Vec<u16> = (0..area.height).filter(|&y| row_of(&buf, y).contains("story line")).collect();
+    // …and NOT one line of the story shows through it. The panel is the erased
+    // window's own rect, taken from the model rather than guessed: the cell path is
+    // 1:1 with native 8x16 cells, so 160px of window is the pane's top 10 rows.
+    let panel_rows = {
+        use app::engine::WinNode;
+        let model = session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let panel = items
+            .iter()
+            .filter(|pw| matches!(&pw.node, WinNode::Grid(g) if g.fill.is_some()))
+            .find(|pw| pw.y_px == 0 && pw.h_px >= 16)
+            .expect("the help menu's erased window is published");
+        panel.h_px / 16
+    };
+    assert!(menu_y < panel_rows, "the menu items are inside the panel (honor={honor})");
+    let leaks: Vec<u16> = (0..panel_rows).filter(|&y| row_of(&buf, y).contains("story line")).collect();
     assert!(
         leaks.is_empty(),
-        "the erased menu panel hides the story behind it (honor={honor}); story visible on rows {leaks:?}\n{}",
+        "the erased menu panel hides the story behind it (honor={honor}); story visible on panel \
+         rows {leaks:?} of 0..{panel_rows}\n{}",
         leaks.iter().map(|&y| row_of(&buf, y)).collect::<Vec<_>>().join("\n"),
     );
     // The panel is a filled field, not bare backdrop between the items: the blank row

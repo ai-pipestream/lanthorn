@@ -1482,7 +1482,15 @@ fn render_node(
                     let story_top = story.y_px / 16;
                     let story_bot =
                         ((story.y_px as u32 + story.h_px as u32).div_ceil(16)).min(u16::MAX as u32) as u16;
-                    let top_used = draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors);
+                    // The band is MEASURED here and PAINTED below, after the
+                    // erase fills (SQ-0712): its rows have to be known to size the
+                    // story area, but a window's erase is the ground its own text
+                    // is painted on, and the fills go down after the transcript.
+                    // Painting the band first put advent's status bar under its own
+                    // window's erase — the bar vanished the moment the split stopped
+                    // leaving window 0 on top of window 1 and the bar became band
+                    // text instead of story-box paint.
+                    let top_used = anchored_band_rows(&runs, story_top, area.height);
                     // The command band below the story (Journey's menu): its own
                     // inked native rows, packed against the pane's bottom edge so
                     // it stays locked there at any pane height instead of floating
@@ -1599,6 +1607,11 @@ fn render_node(
                     draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
                         px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area)
                     });
+                    // Chrome text ABOVE the story, as a classic full-width status
+                    // line anchored to the pane top. Drawn here, with the rest of the
+                    // run stamping and after the erase fills, so a bar sits ON its
+                    // own window's erased ground rather than under it (SQ-0712).
+                    draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors);
                     // Painted-screen overlay (SQ-0478): stamp the paint runs INSIDE
                     // the story box as absolutely-positioned terminal text on TOP of
                     // the transcript. A no-op in normal gameplay (chrome grids carry
@@ -3650,6 +3663,28 @@ fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_px: i32) -> Vec<
 /// row-12 bar (its story buffer starts at row 13, under a 12-row art panel that
 /// frameless mode drops) reads as a top status line instead of floating a quarter
 /// of the way down the pane.
+/// How many pane rows [`draw_anchored_status_band`] will use, without painting
+/// anything (SQ-0712). The band has to be measured before the story area can be
+/// sized and painted after the erase fills, so the two are split: this is the
+/// span from the first inked native row inside the band to the last, clamped to
+/// the pane, which is exactly what the draw returns.
+fn anchored_band_rows(runs: &[&crate::engine::PxText], band_rows: u16, pane_h: u16) -> u16 {
+    let inked = || {
+        runs.iter()
+            .filter(|t| !t.text.trim().is_empty())
+            .map(|t| (t.y.max(1) - 1) / 16)
+            .filter(|&r| r < band_rows)
+    };
+    let Some(first) = inked().min() else { return 0 };
+    // The draw stops at the pane's bottom edge, so a row that would land off-pane
+    // never paints and never counts — the band must stay in-pane either way.
+    inked()
+        .filter(|&r| r - first < pane_h)
+        .max()
+        .map(|last| last - first + 1)
+        .unwrap_or(0)
+}
+
 fn draw_anchored_status_band(
     runs: &[&crate::engine::PxText],
     ncols: u32,
@@ -3695,17 +3730,35 @@ fn draw_anchored_status_band(
         // group join would likewise have doubled.
         let row_runs = merge_row_fragments(&row_runs, 8);
         // Classify each run into an anchor group by its native position. A run
-        // spanning most of the row (a full-width bar) counts LEFT; otherwise a
-        // start in the left third is LEFT, an end past the right two-thirds is
-        // RIGHT, and everything between is CENTER. Within a group, run order is
-        // preserved and the native gaps collapse to a two-space join.
+        // the game CENTRED on its own screen is CENTER wherever it starts (see
+        // below); otherwise a run spanning most of the row (a full-width bar)
+        // counts LEFT, a start in the left third is LEFT, an end past the right
+        // two-thirds is RIGHT, and everything between is CENTER. Within a group,
+        // run order is preserved and the native gaps collapse to a two-space join.
         let (mut left, mut center, mut right): (Vec<&str>, Vec<&str>, Vec<&str>) =
             (Vec::new(), Vec::new(), Vec::new());
         for t in &row_runs {
             let start = ((t.x.max(1) - 1) / 8) as u32;
             let len = t.text.chars().count() as u32;
             let end = start + len;
-            if len * 3 >= ncols * 2 || start < left_bound {
+            // SQ-0717: the thirds rule reads a run's START, which is the right
+            // question for a status FIELD (a location name begins at the left
+            // margin, a score ends at the right one) and the wrong one for a line
+            // the game centred by cursor arithmetic. Shogun's frozen title header
+            // is nine such lines (SQ-0697) — the longer ones begin left of the
+            // left-third boundary and the shortest ends past the right two-thirds,
+            // so five of nine were flushed to col 0 and one flushed right, wrecking
+            // the block the game had carefully centred. A run with equal margins on
+            // its own screen — within the one cell that 8px column quantization can
+            // cost — was centred deliberately, so it is CENTER, and the pane centres
+            // it again at whatever width the terminal happens to be. Both margins
+            // must be non-zero: a rule or bar drawn from the screen edge is not
+            // centred text, and stays the LEFT-anchored bar it was.
+            let centred =
+                start > 0 && end < ncols && start.abs_diff(ncols - end) <= 1;
+            if centred {
+                center.push(&t.text);
+            } else if len * 3 >= ncols * 2 || start < left_bound {
                 left.push(&t.text);
             } else if end > right_bound {
                 right.push(&t.text);
@@ -6391,6 +6444,87 @@ mod tests {
         // Only the last 5 cols hold RIGHT's tail (28 - 22 - 1 = 5 chars survive).
         let tail: String = row.chars().skip(23).collect();
         assert_eq!(tail, ": 100", "RIGHT truncated from its left edge to the fitting tail");
+    }
+
+    /// SQ-0717: a line the game centred on its own screen stays centred, however
+    /// far left it begins. Shogun's frozen title header (SQ-0697) is the case —
+    /// nine cursor-centred lines that the thirds rule sorted by their START, so the
+    /// long ones began left of the left-third boundary and flushed to col 0 while
+    /// the shortest ended past the right two-thirds and flushed right.
+    #[test]
+    fn anchored_band_keeps_a_line_the_game_centred() {
+        // Shogun's own columns, on its 640px (80-cell) screen.
+        let lines: [(u16, &str); 3] = [
+            (297, "SHOGUN"),                                             // col 37, well inside
+            (105, "Original Literary Work Copyright 1975 by James Clavell"), // col 13 → was LEFT
+            (209, "IBM Interpreter version 6.65"),                       // ends col 54 → was RIGHT
+        ];
+        for w in [80u16, 120] {
+            for (x, text) in lines {
+                let (row, _) = band_row(&[run(x, 1, text)], 80, w);
+                let at = row.find(text).unwrap_or_else(|| panic!("{text:?} painted at {w} cols: {row:?}"));
+                let want = (w as usize - text.chars().count()) / 2;
+                assert!(
+                    (at as i32 - want as i32).abs() <= 1,
+                    "{text:?} stays centred at {w} cols (at {at}, want ~{want}): {row:?}"
+                );
+            }
+        }
+    }
+
+    /// …and the centring exemption does not loosen a real bar. A field that begins
+    /// at the screen's left edge is LEFT even when its right margin happens to
+    /// match, and edge-anchored status fields keep their thirds classification.
+    #[test]
+    fn anchored_band_centring_exemption_spares_edge_anchored_fields() {
+        // A rule drawn from col 0: margins 0 and 4 — not centred, still LEFT.
+        let bar = "=".repeat(36);
+        let (row, _) = band_row(&[run(1, 1, &bar)], 40, 80);
+        assert!(row.starts_with(&bar), "an edge-anchored rule is not 'centred': {row:?}");
+        // Location left, score/moves right — the classic bar, unmoved.
+        let runs = vec![run(9, 1, "West of House"), run(241, 1, "Score: 0"), run(297, 1, "Moves: 3")];
+        let (row, _) = band_row(&runs, 40, 80);
+        assert!(row.starts_with("West of House"), "location still flush left: {row:?}");
+        assert!(row.trim_end().ends_with("Score: 0  Moves: 3"), "score/moves still flush right: {row:?}");
+    }
+
+    /// SQ-0712: the band is measured before the story area is sized and painted
+    /// after the erase fills, so `anchored_band_rows` has to agree with what
+    /// `draw_anchored_status_band` actually uses — a drift between them mis-sizes
+    /// the transcript or strands the bar off-pane.
+    #[test]
+    fn anchored_band_measurement_matches_the_draw() {
+        let cases: Vec<(Vec<crate::engine::PxText>, u16, u16)> = vec![
+            // One bar row at the top of a 4-row band.
+            (vec![run(1, 1, "Loc"), run(281, 1, "Moves: 1")], 4, 6),
+            // Two rows, one apart.
+            (vec![run(1, 1, "Row0"), run(1, 17, "Row1")], 4, 6),
+            // A gap row in the middle still counts toward the span.
+            (vec![run(1, 1, "Row0"), run(1, 49, "Row3")], 4, 6),
+            // Arthur's shape: nothing until native row 12, band 13 deep.
+            (vec![run(33, 193, "Churchyard")], 13, 6),
+            // Blank-only runs paint nothing and measure nothing.
+            (vec![run(129, 1, "   ")], 4, 6),
+            // Nothing at all.
+            (vec![], 4, 6),
+            // The span is clamped to a pane shorter than the band.
+            (vec![run(1, 1, "Row0"), run(1, 81, "Row5")], 8, 3),
+        ];
+        for (runs, band_rows, pane_h) in cases {
+            let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+            let area = Rect::new(0, 0, 80, pane_h);
+            let mut buf = Buffer::empty(area);
+            let colors = crate::colors::ColorScheme::terminal_default();
+            let drawn = draw_anchored_status_band(
+                &refs, 40, band_rows, area, &mut buf, ratatui::style::Style::default(), true, &colors,
+            );
+            assert_eq!(
+                anchored_band_rows(&refs, band_rows, pane_h),
+                drawn,
+                "measured rows must equal drawn rows for {:?} (band {band_rows}, pane {pane_h})",
+                runs.iter().map(|t| (t.y, t.x, &t.text)).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
