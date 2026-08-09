@@ -27,13 +27,16 @@
 //! (painting fmvpoker's declared black regardless put black glyphs on the host's
 //! black page), and `fill_story_page_under_chrome_text` spares them.
 //!
-//! NOT fixed here, and NOT a render bug — pinned below so it is noticed if it
-//! changes: those menu labels arrive from the model ALREADY concatenated, as
-//! `lines[0] == "PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT"`. The game
-//! prints them at separate columns, but a v6 window in flowing-prose mode streams
-//! through `ZWindow::push_prose`, which keeps no cursor x; that window's `texts`
-//! and `streamed` are both empty. The positions are lost inside zvm before any
-//! render code sees them.
+//! **The menu labels kept their columns** (SQ-0729, second pass). They used to
+//! arrive from the model already concatenated, as
+//! `lines[0] == "PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT"`: the game
+//! prints them at five separate columns, but a v6 window in flowing-prose mode
+//! streams through `ZWindow::push_prose`, which kept no cursor x, and that window's
+//! `texts` and `streamed` are both empty — so the positions were lost inside zvm
+//! before any render code saw them. `push_prose` now takes the column its own
+//! `set_cursor` declared and pads the line out to it, the same declaration the
+//! streaming path already carried as an indent. `fmvpoker_menu_labels_keep_their
+//! _columns` pins the result against the game's own `set_cursor` operands.
 //!
 //! `stories/fmvpoker.blb` is a byte-identical copy of `stories/Zork0.blb`: the
 //! original release ships Zork Zero's picture file renamed to FMVPOKER.EG1, so the
@@ -187,6 +190,80 @@ fn fmvpoker_is_the_only_title_this_moves() {
     }
 }
 
+/// fmvpoker's bottom menu row, as the game lays it out.
+///
+/// Derived, not guessed: on the frame under test the story runs
+/// `@set_window(win2)` and then `@set_cursor(row=80, col=C, window=2)` for
+/// C = 0, 178, 372, 454, 557 — five 1-based pixel columns in an 8px fixed-cell
+/// font, i.e. character columns 0, 22, 46, 56 and 69 (`(C-1)/8`, clamped at the
+/// left margin). The labels are 16, 18, 4, 7 and 4 characters, so every one of
+/// them ENDS short of the next column: the gaps are the game's, and a renderer
+/// that concatenates the runs is losing information the story supplied.
+const MENU_LABELS: &[(usize, &str)] = &[
+    (0, "PLAY CURRENT BET"),
+    (22, "CHANGE CURRENT BET"),
+    (46, "SAVE"),
+    (56, "RESTORE"),
+    (69, "QUIT"),
+];
+const MENU_ROW: &str =
+    "PLAY CURRENT BET      CHANGE CURRENT BET      SAVE      RESTORE      QUIT";
+
+/// SQ-0729: a v6 prose window is still a pixel surface, and fmvpoker places every
+/// menu label on one row with its own `set_cursor`. `ZWindow::push_prose` kept no
+/// cursor x, so the five runs butted together into
+/// `PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT` — inside the VM, before any
+/// render code could see the columns. It now pads the line out TO the declared
+/// column (not BY it: the run has to land where the game named, not that far past
+/// wherever the previous run ended).
+fn fmvpoker_menu_labels_keep_their_columns(honor: bool) {
+    let Some((session, _state)) = fmvpoker_title(honor) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let layout = app::render::v6_layout::classify_windows(items);
+    let menu = layout
+        .chrome
+        .iter()
+        .find(|it| matches!(&it.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
+        .expect("fmvpoker publishes its menu as a secondary prose window (SQ-0585)");
+    let WinNode::Buffer(b) = &menu.node else { unreachable!() };
+
+    assert_eq!(
+        b.lines[0], MENU_ROW,
+        "honor={honor}: fmvpoker's five menu labels must reach the model at the columns its own \
+         set_cursor named, not run together (SQ-0729)"
+    );
+    let row: Vec<char> = b.lines[0].chars().collect();
+    for &(col, label) in MENU_LABELS {
+        let got: String = row.iter().skip(col).take(label.chars().count()).collect();
+        assert_eq!(
+            got, label,
+            "honor={honor}: {label:?} must start at column {col} — the column the game's \
+             set_cursor declared for it. Row: {:?}",
+            b.lines[0]
+        );
+    }
+    // The window is 594px / 74 characters wide, so nothing is being bought with
+    // padding the game did not ask for.
+    assert!(
+        row.len() <= (menu.w_px / 8) as usize,
+        "honor={honor}: the menu row ({} chars) must still fit the window the game declared ({} \
+         columns)",
+        row.len(),
+        menu.w_px / 8
+    );
+}
+
+#[test]
+fn fmvpoker_menu_labels_keep_their_columns_honoring_game_colours() {
+    fmvpoker_menu_labels_keep_their_columns(true);
+}
+
+#[test]
+fn fmvpoker_menu_labels_keep_their_columns_theme_only() {
+    fmvpoker_menu_labels_keep_their_columns(false);
+}
+
 /// The composite carries a secondary prose window's lines. Asserted as ink on the
 /// hint line's row: a row that reached the screen shows more than one colour.
 fn fmvpoker_composite_shows_its_menu_window(honor: bool) {
@@ -208,13 +285,10 @@ fn fmvpoker_composite_shows_its_menu_window(honor: bool) {
         "premise (honor={honor}): the hint line is in that window: {:?}",
         b.lines
     );
-    // …and its labels arrive ALREADY concatenated. Model-side, inside zvm: a
-    // flowing-prose window keeps no cursor x, so the columns the game printed them
-    // at are gone before the renderer runs. Not fixed here; pinned so a later fix
-    // in the VM is noticed rather than silently changing what this file guards.
+    // …and its labels arrive at the columns the game printed them at (SQ-0729).
     assert_eq!(
-        b.lines[0], "PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT",
-        "premise (honor={honor}): the menu labels are flattened before any render code sees them"
+        b.lines[0], MENU_ROW,
+        "premise (honor={honor}): the menu labels keep their declared columns"
     );
 
     let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);

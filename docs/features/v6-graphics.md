@@ -412,6 +412,21 @@ the column it asked for, and Journey's title screen, which centres itself the
 same way, comes out right for the same reason. A game that never declares a
 column never gains an indent.
 
+**A second text window keeps its columns too.** A v6 game may run more than one
+wrapping, scrolling window, and the one that is not the transcript keeps its own
+lines rather than joining the stream. Those lines used to be recorded as plain
+text with no note of where each run began, so a game that placed several runs
+across one row got them back butted together: fmvpoker prints its five menu
+options at pixel columns 1, 178, 372, 454 and 557 and read back as
+`PLAY CURRENT BETCHANGE CURRENT BETSAVERESTOREQUIT`. Such a window now honours a
+declared column the same way the stream does — with one difference that matters.
+The line is padded out **to** the column, not indented **by** it: a run has to
+land where the game named it, not that far past wherever the previous run
+happened to end, or five labels at fixed columns drift into a ragged row. A
+column already behind the line's end cannot be reached by appending and is
+ignored; a line buffer only moves right. The declared *row* is not honoured
+either — these are logical lines, stacked in the order they were printed.
+
 ## Prose freezes where it was printed when its window moves
 
 The Z-machine standard is blunt about it: moving or resizing a window "does not
