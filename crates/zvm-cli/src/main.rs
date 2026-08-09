@@ -116,6 +116,9 @@ fn poll_sound_finish(sound: Option<&mut CliSound>, machine: &mut Machine, view: 
 /// starting column position. Returns `(wrapped_text, new_col)`. Explicit `\n`
 /// in `text` always resets the column to 0. When `cols` is `u16::MAX`,
 /// wrapping is disabled (used when `buffer_mode` is off).
+///
+/// `text` must be the game's own CHARACTERS — see [`format_output`], which owns
+/// the ordering rule that keeps it that way.
 fn wrap_line(text: &str, cols: u16, current_col: u16) -> (String, u16) {
     let mut out = String::with_capacity(text.len());
     let mut col = current_col;
@@ -138,6 +141,34 @@ fn wrap_line(text: &str, cols: u16, current_col: u16) -> (String, u16) {
         }
     }
     (out, col)
+}
+
+/// Compose the bytes for one game write: wrap first, decorate second.
+///
+/// The ORDER is the whole point (SQ-0702). `style_wrap` decorates text with SGR
+/// escapes, and an escape occupies no column on screen — ZMSD §8.8.3.1.2.2 puts
+/// the soft wrap "after the last word which could fit on a line", and a `\x1b[1m`
+/// is not part of any word. Styling first and wrapping the result charged the
+/// game nine columns for every bold space: Anchorhead's title splash prints its
+/// centring indent one styled space at a time, so `A N C H O R H E A D` broke
+/// mid-title eight spaces in, at what the sink thought was column 80. Wrapping
+/// the game's own characters and applying the style to the result keeps the
+/// column arithmetic in the game's units.
+///
+/// Returns `(bytes_to_emit, new_col)`; `attrs` is `None` for an unstyled write.
+fn format_output(
+    text: &str,
+    attrs: Option<zvm::io::TextAttrs>,
+    cols: u16,
+    current_col: u16,
+    is_tty: bool,
+) -> (String, u16) {
+    let (wrapped, new_col) = wrap_line(text, cols, current_col);
+    let out = match attrs {
+        Some(a) => crate::screen::style_wrap(&wrapped, a, is_tty),
+        None => wrapped,
+    };
+    (out, new_col)
 }
 
 // ── StdoutOutput ──────────────────────────────────────────────────────────────
@@ -232,14 +263,20 @@ impl StdoutOutput {
         }
     }
 
-    /// Emit `s` with optional token-based word wrapping (gated by `buffer_mode`).
-    /// Calls `check_paging` after each newline (soft or hard).
+    /// Emit unstyled `s` with optional token-based word wrapping.
     fn write_counted(&mut self, s: &str) {
+        self.write_formatted(s, None);
+    }
+
+    /// Emit `s` with optional token-based word wrapping (gated by `buffer_mode`)
+    /// and, when `attrs` is set, the game's style applied to the wrapped result.
+    /// Calls `check_paging` after each newline (soft or hard).
+    fn write_formatted(&mut self, s: &str, attrs: Option<zvm::io::TextAttrs>) {
         // When buffer_mode is off, pass u16::MAX as cols: saturating_add in
         // wrap_line will never trigger the wrap condition.
         let cols = if self.buffer_mode { self.cols } else { u16::MAX };
-        let (wrapped, new_col) = wrap_line(s, cols, self.current_col);
-        for ch in wrapped.chars() {
+        let (bytes, new_col) = format_output(s, attrs, cols, self.current_col, self.is_tty);
+        for ch in bytes.chars() {
             self.emit_char(ch);
             if ch == '\n' && self.pager.line() {
                 let _ = io::stdout().flush();
@@ -274,8 +311,7 @@ impl Output for StdoutOutput {
                 ..attrs
             }
         };
-        let out = crate::screen::style_wrap(s, effective, self.is_tty);
-        self.write_counted(&out);
+        self.write_formatted(s, Some(effective));
     }
 
     fn set_buffer_mode(&mut self, on: bool) {
@@ -428,11 +464,11 @@ fn build_machine(
     // 80×24 default; without this override the game centres and wraps against
     // 80 columns regardless of the actual pane width (e.g. a title page stays
     // centred for 80 in a 50-column terminal). Kept in sync on resize.
-    zvm::screen::write_screen_dims(
-        &mut machine.mem,
-        term_rows.min(255) as u8,
-        term_cols.min(255) as u8,
-    );
+    //
+    // `Machine::set_screen_dims`, not the bare `write_screen_dims` it wraps: the
+    // header bytes are only half the report, and the other half (refitting a
+    // live upper window to the new width) is what the app has always used.
+    machine.set_screen_dims(term_rows.min(255) as u8, term_cols.min(255) as u8);
     Ok(machine)
 }
 
@@ -961,12 +997,12 @@ fn apply_resize(
         o.pager.set_page_height(*page_height);
     }
     // Keep the game's view of the screen size current so it re-centres and
-    // re-wraps against the new pane width on its next redraw.
-    zvm::screen::write_screen_dims(
-        &mut machine.mem,
-        new_rows.min(255) as u8,
-        new_cols.min(255) as u8,
-    );
+    // re-wraps against the new pane width on its next redraw. `set_screen_dims`
+    // also refits a LIVE upper window to the new width (SQ-0679): a game that
+    // splits once at boot and never re-splits — Sherlock, Trinity — otherwise
+    // keeps its boot-time grid width while the header tracks the resized
+    // terminal, so its status band stops short of (or overflows) the new edge.
+    machine.set_screen_dims(new_rows.min(255) as u8, new_cols.min(255) as u8);
 }
 
 /// Poll the current terminal size and apply it if it changed. Only runs when
@@ -1419,7 +1455,7 @@ mod v6_tests {
     /// A story file with just enough header to load: `version` in byte 0 and a
     /// plausible layout. Not runnable — `build_machine` only has to get as far
     /// as reading the version.
-    fn story_of_version(v: u8) -> Vec<u8> {
+    pub(crate) fn story_of_version(v: u8) -> Vec<u8> {
         let mut buf = vec![0u8; 0x0800];
         buf[0x00] = v;
         buf[0x04] = 0x04; // high_mem_base = 0x0400
@@ -1836,6 +1872,243 @@ mod wrap_tests {
         // "hello " is 6 chars (≤10), then "world" (5) pushes 6+5=11 > 10 → wrap
         assert!(out.contains('\n'), "expected soft newline: {out:?}");
         assert_eq!(col, 5); // "world" = 5 chars after the wrap
+    }
+}
+
+/// SQ-0702 — game-centred text has to land where the game centred it.
+///
+/// Reported against Anchorhead's title splash: `A N C H O R H E A D` came out
+/// visibly off-centre in `zvm-cli` while the very next line looked right, and
+/// babelmap showed both correctly. The splash prints its centring indent one
+/// BOLD space at a time, and the sink styled each write before measuring it —
+/// so `\x1b[1m \x1b[0m` was charged nine columns instead of one, the sink
+/// believed it had passed the right margin after eight spaces, and it inserted
+/// a soft wrap in the middle of the title.
+///
+/// ZMSD §8.8.3.1.2.2 is the rule that was broken: "If 'buffered printing' is on,
+/// then text is wrapped after the last word which could fit on a line." An SGR
+/// escape is not part of any word and takes up no column.
+///
+/// (The *other* line, `[Press 'R' to restore…]`, was never wrong: it is plain
+/// text, and its indent is byte-for-byte what babelmap emits at the same width —
+/// Anchorhead simply centres it inside a margin of its own. It is asserted here
+/// as the control that says so.)
+#[cfg(test)]
+mod centring_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use zvm::io::TextAttrs;
+
+    const BOLD: TextAttrs = TextAttrs { style: 2, fg: zvm::screen::ZColour::Default, bg: zvm::screen::ZColour::Default };
+
+    // ── the root cause, at the unit ─────────────────────────────────────────
+
+    #[test]
+    fn a_styled_space_costs_one_column_not_nine() {
+        let (out, col) = format_output(" ", Some(BOLD), 80, 0, true);
+        assert_eq!(out, "\x1b[1m \x1b[0m", "the bytes are unchanged — only the accounting was wrong");
+        assert_eq!(col, 1, "an SGR escape occupies no column (ZMSD §8.8.3.1.2.2)");
+    }
+
+    /// The reported shape: a centring indent printed one styled space at a time
+    /// must reach its column with no soft wrap in it. At 80 columns the old
+    /// order broke after the eighth space (8 × 9 = 72, and the ninth reset put
+    /// it past 80).
+    #[test]
+    fn a_styled_centring_indent_does_not_wrap_early() {
+        let mut col = 0u16;
+        let mut out = String::new();
+        for _ in 0..29 {
+            let (bytes, new_col) = format_output(" ", Some(BOLD), 80, col, true);
+            out.push_str(&bytes);
+            col = new_col;
+        }
+        assert_eq!(col, 29, "29 styled spaces are 29 columns");
+        assert!(!out.contains('\n'), "no soft wrap belongs inside an indent that fits: {out:?}");
+    }
+
+    // ── the whole title splash, driven from the real story ──────────────────
+
+    /// Every write the game made, as the sink saw it: `(text, attrs, buffered)`.
+    type Writes = Vec<(String, Option<TextAttrs>, bool)>;
+
+    /// Records the game's stream exactly where `StdoutOutput` sits, so the test
+    /// can replay it through the real formatter instead of a copy of it.
+    #[derive(Default)]
+    struct Recorder {
+        buffer_mode: bool,
+        writes: Writes,
+    }
+
+    impl Output for Recorder {
+        fn print(&mut self, s: &str) {
+            self.writes.push((s.to_string(), None, self.buffer_mode));
+        }
+        fn print_styled(&mut self, s: &str, style: u8) {
+            self.print_attr(s, TextAttrs { style, ..Default::default() });
+        }
+        fn print_attr(&mut self, s: &str, attrs: TextAttrs) {
+            self.writes.push((s.to_string(), Some(attrs), self.buffer_mode));
+        }
+        fn set_buffer_mode(&mut self, on: bool) {
+            self.buffer_mode = on;
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    /// Boot `anchor.z8` to its first keypress at `cols` columns, exactly as
+    /// `build_machine` sets a game up, and return what it printed. `None` when
+    /// the gitignored story is absent (CI).
+    fn boot_anchor(cols: u16) -> Option<Writes> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/anchor.z8");
+        let Ok(bytes) = fs::read(&path) else {
+            eprintln!("SKIP: gitignored story missing at {}", path.display());
+            return None;
+        };
+        let mem = Memory::new(bytes).expect("anchor.z8 loads");
+        let mut m = Machine::with_output(mem, Box::new(Recorder::default()));
+        m.init_caps();
+        m.set_screen_dims(24, cols.min(255) as u8);
+        for _ in 0..20_000_000 {
+            if !matches!(m.step(), StepResult::Continue) {
+                break;
+            }
+        }
+        let rec = m.out.as_any().downcast_ref::<Recorder>().expect("recorder");
+        assert!(!rec.writes.is_empty(), "the title splash must have printed something");
+        Some(rec.writes.clone())
+    }
+
+    /// Replay `writes` through the sink's own formatter at `cols`.
+    fn render(writes: &Writes, cols: u16) -> String {
+        let mut out = String::new();
+        let mut col = 0u16;
+        for (text, attrs, buffered) in writes {
+            let width = if *buffered { cols } else { u16::MAX };
+            let (bytes, new_col) = format_output(text, *attrs, width, col, true);
+            out.push_str(&bytes);
+            col = new_col;
+        }
+        out
+    }
+
+    /// Drop SGR sequences — what the player's terminal is left showing.
+    fn visible(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            if chars.next() != Some('[') {
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// The indent of the one line containing `needle`, or a panic naming what
+    /// went wrong (a split title has no such line at all — the reported bug).
+    fn indent_of(text: &str, needle: &str, what: &str) -> usize {
+        let line = text
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{what}: no single line holds {needle:?}; rendered:\n{text}"));
+        line.len() - line.trim_start_matches(' ').len()
+    }
+
+    #[test]
+    fn anchorheads_title_splash_lands_where_the_game_centred_it() {
+        for cols in [60u16, 80, 100] {
+            let Some(writes) = boot_anchor(cols) else { return };
+
+            // What the GAME laid out, before any host wrapping: the reference.
+            let raw: String = writes.iter().map(|(t, _, _)| t.as_str()).collect();
+            // What zvm-cli actually puts on the terminal.
+            let shown = visible(&render(&writes, cols));
+
+            const TITLE: &str = "A N C H O R H E A D";
+            const PROMPT: &str = "[Press 'R' to restore";
+
+            let title = indent_of(&shown, TITLE, &format!("{cols} cols, title"));
+            assert_eq!(
+                title,
+                indent_of(&raw, TITLE, "the game's own stream"),
+                "{cols} cols: rendering must not spend or invent columns the game did not"
+            );
+            let ideal = (cols as usize - TITLE.chars().count()) / 2;
+            assert!(
+                title.abs_diff(ideal) <= 1,
+                "{cols} cols: the title sits at column {title}, centre is {ideal}"
+            );
+
+            // Control: plain text, and already correct before the fix. Its
+            // indent is byte-identical to babelmap's at the same width, so the
+            // game — not the host — is what puts it left of dead centre.
+            let prompt = indent_of(&shown, PROMPT, &format!("{cols} cols, prompt"));
+            assert_eq!(
+                prompt,
+                indent_of(&raw, PROMPT, "the game's own stream"),
+                "{cols} cols: the plain line was never the bug and must stay put"
+            );
+            assert_eq!(prompt, (cols as usize - 50) / 2, "{cols} cols: Anchorhead's own margin");
+        }
+    }
+
+    // ── declared width == rendered width ────────────────────────────────────
+
+    /// The other half of "centred correctly": the width the story is told
+    /// (ZMSD §8.4, bytes $20/$21; §8.4.3, words $22/$24) has to be the width the
+    /// sink wraps at. A story centring against one number while the host wraps
+    /// at another drifts at every width.
+    #[test]
+    fn the_width_declared_to_the_story_is_the_width_the_sink_renders_at() {
+        for cols in [40u16, 60, 80, 100, 132] {
+            let m = build_machine(v6_tests::story_of_version(5), true, false, 24, 24, cols, true, None, false)
+                .expect("a v5 story builds");
+            assert_eq!(m.mem.read_byte(0x21) as u16, cols, "$21 = screen width in characters (§8.4)");
+            assert_eq!(m.mem.read_word(0x22), cols, "$22 = screen width in units (§8.4.3)");
+            let sink = m.out.as_any().downcast_ref::<StdoutOutput>().expect("the stdout sink");
+            assert_eq!(sink.cols, cols, "the sink wraps at exactly what the story was told");
+        }
+    }
+
+    /// …and a resize keeps all three in step — the header, the sink, and the
+    /// upper window the game already split.
+    ///
+    /// That last one is why this goes through `Machine::set_screen_dims` rather
+    /// than the bare `zvm::screen::write_screen_dims` it wraps. Writing only the
+    /// header leaves a game that splits ONCE at boot and never re-splits —
+    /// Sherlock, Trinity — centring its status band against the new width inside
+    /// a grid still the old one (SQ-0679, which the app has had all along).
+    #[test]
+    fn a_resize_retells_the_story_and_retunes_the_sink_together() {
+        let mut m = build_machine(v6_tests::story_of_version(5), true, false, 24, 24, 80, true, None, false)
+            .expect("a v5 story builds");
+        // A live one-row upper window, as a boot-time `split_window 1` leaves.
+        m.screen.upper.resize(1, 80);
+        m.screen.upper_window_rows = 1;
+        let mut view = screen::ScreenView::new(true, false, false, 24, 80);
+        let (mut rows, mut cols, mut page) = (24u16, 80u16, 20u16);
+        for (r, c) in [(30u16, 132u16), (20, 50)] {
+            apply_resize(r, c, &mut rows, &mut cols, &mut page, &mut m, &mut view);
+            assert_eq!(m.mem.read_byte(0x21) as u16, c, "the story is told the new width");
+            assert_eq!(m.mem.read_byte(0x20) as u16, r, "…and the new height");
+            let sink = m.out.as_any().downcast_ref::<StdoutOutput>().expect("the stdout sink");
+            assert_eq!(sink.cols, c, "the sink follows it");
+            assert_eq!(m.screen.upper.cols, c, "and so does the grid the game is drawing into");
+        }
     }
 }
 
