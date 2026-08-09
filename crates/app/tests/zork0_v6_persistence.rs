@@ -76,7 +76,7 @@ fn composite(session: &GameSession) -> image::RgbaImage {
     };
     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
         let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 8).max(1) as u16);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg, &[]);
     }
     canvas
 }

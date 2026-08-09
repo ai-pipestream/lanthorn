@@ -87,6 +87,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **The line telling you what you drew stops being written over.** Deal a hand in
+  Frobozz Magic VideoPoker and the game announces it in the panel under the table —
+  *You draw (a) an Eight, (b) a Three, (c) an Ace…* — which is the only place the
+  cards are named, and babelmap was rasterizing the story scroll's opening banner
+  straight across it. The panel was never in the wrong place; the story window is
+  the whole screen in this game, and once five cards fill the frame's interior the
+  largest clear rectangle left for the transcript drops onto the very box the panel
+  occupies. The page already filled *under* labels another window is holding, so
+  now the glyphs do too: a transcript is babelmap's re-reading of everything the
+  story window has ever said, while a label another window is holding is on the
+  screen right now, and where the two collide the label wins. The money lines the
+  transcript owns still print below it.
+
 - **fmvpoker's frame stops having a hole punched in the top of it.** Frobozz Magic
   VideoPoker draws its poker table with Zork Zero's artwork — the original ships that
   picture file renamed — so the frame's top-centre tab natively reads *Double

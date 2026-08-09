@@ -350,6 +350,19 @@ still reaches the screen, and now so does the prose beside it: window 0's page i
 painted *under* the labels other windows put inside its box, in the order the game
 drew them — page first, then the menu, then the prose.
 
+**And the transcript's own glyphs yield to those labels as well.** Sparing the
+page was only half of it: the story text was still rasterized straight over the
+labels the page had carefully filled under. fmvpoker is the case. Its story window
+is the whole screen, so once five dealt cards fill the frame's interior the largest
+clear rectangle left for the transcript drops onto the very box the game gave its
+bottom panel — and the panel is where the hand is announced, *You draw (a) an
+Eight, (b) a Three, (c) an Ace…*, the only place the cards are named. The boot
+banner was written across it. The rule that settles it is a difference in kind: a
+transcript is babelmap's re-reading of everything the story window has ever said,
+while a label another window is holding is on the screen *right now*. Where they
+land on the same cell, the live label wins, and everything the transcript owns
+outside those cells still prints.
+
 The same distinction settles how a reverse-video run is drawn. Highlighting a run
 means painting a solid block and cutting the glyph out of it — except over frame
 art, where a block would erase the picture, so babelmap draws dark ink directly on

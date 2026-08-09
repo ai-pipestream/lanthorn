@@ -2218,7 +2218,16 @@ pub fn build_v6_raster_canvas(
         let cols = (tw / 8).max(1) as u16;
         let rows = (th / 16).max(1) as u16;
         let (main, rm) = build_main_text(state, cols, rows);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink);
+        // …sparing the cells another window's own text already holds (SQ-0729).
+        // The page fill above spares them; the GLYPHS did not, so the transcript
+        // was drawn straight through them. fmvpoker's dealt hand is the report:
+        // its five cards fill the frame's interior, window 0's clear rectangle
+        // drops onto the box the game gave its bottom prose window, and the boot
+        // banner landed on top of "You draw (a) an Eight, (b) a Three, …" — the
+        // line the player needs in order to see their draw. The transcript is the
+        // host's re-render of window 0's whole history; the label is on the screen
+        // now, so the label wins.
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &v6::chrome_text_rects(&layout.chrome));
         // [more] pager indicator (SQ-0455): when a single turn's output
         // overflowed the story box the shared pager (SQ-0404) parks the
         // scroll and shows a `[more]` prompt. The raster path can't reserve
@@ -4104,7 +4113,7 @@ mod tests {
         let cols = (sw / 8).max(1) as u16;
         let rows = (sh / 16).max(1) as u16;
         let (main, _) = build_main_text(&state, cols, rows);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[]);
         let pre_flatten = canvas.clone();
         v6::flatten_onto_page(&mut canvas, page);
 
@@ -7002,7 +7011,7 @@ mod tests {
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;
                     let (main, _) = build_main_text(&state, cols, rows);
-                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg);
+                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[]);
                 }
                 canvas
             };

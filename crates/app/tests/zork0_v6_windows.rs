@@ -266,7 +266,7 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let chrome_only = canvas.clone(); // snapshot BEFORE story text, to know which pixels are chrome
     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
         let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 16).max(1) as u16);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg, &[]);
     }
     // non-empty
     assert!(canvas.pixels().any(|p| p[3] > 0), "composited canvas has content");

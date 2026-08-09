@@ -407,3 +407,125 @@ fn fmvpoker_erased_banner_keeps_the_colour_the_game_named_honoring_game_colours(
 fn fmvpoker_erased_banner_keeps_the_colour_the_game_named_theme_only() {
     fmvpoker_erased_banner_keeps_the_colour_the_game_named(false);
 }
+
+/// Play a hand: past the boot screen, `p` to deal, then a key per card until the
+/// game announces the draw. Stops on the frame where its bottom prose window is
+/// carrying "You draw (a) …" — the line the player reads to decide what to hold.
+fn fmvpoker_dealt_hand(honor: bool) -> Option<(GameSession, app::state::AppState)> {
+    let (mut session, mut state) = fmvpoker_title(honor)?;
+    for step in 0..24 {
+        let r = session.submit_char(if step == 0 { b'p' } else { b' ' });
+        assert!(r.fault.is_none(), "fmvpoker faulted dealing: {:?}", r.fault);
+        app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+        *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+        let has_draw = {
+            let model = session.screen();
+            let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+            app::render::v6_layout::classify_windows(items).chrome.iter().any(|it| {
+                matches!(&it.node, WinNode::Buffer(b) if b.lines.iter().any(|l| l.starts_with("You draw")))
+            })
+        };
+        if has_draw {
+            return Some((session, state));
+        }
+    }
+    panic!("fmvpoker never announced a draw within 24 keypresses");
+}
+
+/// SQ-0729: the story transcript wrote its boot banner straight through
+/// "You draw (a) …", the line the player needs in order to see their draw.
+///
+/// Nothing about the model is wrong. The announcement is window 2's prose and
+/// window 2 is already the bottom window, exactly where it belongs. What moves is
+/// window 0: it is the whole 640x400 screen here, and once the five dealt cards
+/// fill the frame's interior its largest CLEAR rectangle drops onto the very box
+/// the game gave window 2. `fill_story_page_under_chrome_text` spared those pixels
+/// from the page FILL (SQ-0728) but nothing spared them from the GLYPHS, so
+/// `draw_story_text` rasterized "FROBOZZ MAGIC VIDEOPOKER / by Zach Matley / …"
+/// over the announcement.
+///
+/// The rule the fix states: a story transcript is the HOST's re-render of
+/// everything window 0 ever printed, while a label another window is holding is on
+/// the screen *now* — so where they collide the live label wins.
+///
+/// Asserted by difference, which is what makes it falsifiable: the rows window 2's
+/// own lines occupy must be byte-identical to the same frame rendered with an
+/// EMPTY host transcript, since with no transcript there is nothing to overdraw
+/// with. The rows below must NOT be identical — the money lines still belong to
+/// the transcript and must still reach the screen — so the test cannot pass by
+/// suppressing the story text wholesale.
+fn fmvpoker_the_draw_announcement_survives_the_transcript(honor: bool) {
+    let Some((session, mut state)) = fmvpoker_dealt_hand(honor) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+
+    // Premise: the announcement is in the bottom prose window, not the transcript…
+    let panel = layout
+        .chrome
+        .iter()
+        .find(|it| matches!(&it.node, WinNode::Buffer(b) if b.lines.iter().any(|l| l.starts_with("You draw"))))
+        .expect("fmvpoker announces the draw in its bottom prose window");
+    let WinNode::Buffer(b) = &panel.node else { unreachable!() };
+    let lines = b.lines.len().min((panel.h_px / 16) as usize);
+    // …and the host transcript has boot prose of its own to collide with.
+    assert!(
+        state.transcript.iter().any(|l| l.contains("FROBOZZ MAGIC VIDEOPOKER")),
+        "premise (honor={honor}): the transcript carries the boot banner"
+    );
+
+    let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    // The same frame with nothing for `draw_story_text` to draw: every other layer
+    // is unchanged, so any difference in these rows IS the transcript overdrawing.
+    state.transcript.clear();
+    state.transcript_styles.clear();
+    state.transcript_runs.clear();
+    state.transcript_para.clear();
+    state.transcript_images.clear();
+    let (bare, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+    let (x0, x1) = (panel.x_px as u32, (panel.x_px as u32 + panel.w_px as u32).min(img.width()));
+    let row_band = |row: usize| -> (u32, u32) {
+        let y = panel.y_px as u32 + row as u32 * 16;
+        (y, (y + 16).min(img.height()))
+    };
+    for row in 0..lines {
+        let (y0, y1) = row_band(row);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                assert_eq!(
+                    img.get_pixel(x, y),
+                    bare.get_pixel(x, y),
+                    "honor={honor}: at ({x},{y}) the story transcript is drawn over row {row} of \
+                     fmvpoker's own bottom window — {:?}. Once the cards fill the frame, window 0's \
+                     clear rectangle lands on window 2's box, and the transcript painted the boot \
+                     banner through \"You draw (a) …\" (SQ-0729).",
+                    b.lines[row]
+                );
+            }
+        }
+    }
+    // …and the transcript still reaches the screen elsewhere in that box: the
+    // money lines the game prints into window 0 are transcript prose and belong
+    // below the announcement.
+    let below = panel.y_px as u32 + lines as u32 * 16;
+    let differs = (below..(panel.y_px as u32 + panel.h_px as u32).min(img.height()))
+        .any(|y| (x0..x1).any(|x| img.get_pixel(x, y) != bare.get_pixel(x, y)));
+    assert!(
+        differs,
+        "honor={honor}: sparing the game's own rows must not silence the transcript — \
+         \"Current Bet: / 10 / Total Winnings: / 1000\" are window 0 prose and still belong on \
+         the rows below the announcement"
+    );
+}
+
+#[test]
+fn fmvpoker_the_draw_announcement_survives_the_transcript_honoring_game_colours() {
+    fmvpoker_the_draw_announcement_survives_the_transcript(true);
+}
+
+#[test]
+fn fmvpoker_the_draw_announcement_survives_the_transcript_theme_only() {
+    fmvpoker_the_draw_announcement_survives_the_transcript(false);
+}
