@@ -514,6 +514,77 @@ pub fn fill_story_page_clear(
     }
 }
 
+/// The native pixel rects the game's own chrome TEXT occupies — one per painted
+/// `px_texts` run, one per non-blank cell of a plain character grid (SQ-0728).
+///
+/// It is deliberately the runs the GAME printed, not every opaque pixel the text
+/// pass left: `fill_reverse_row_gaps` also paints, and its screen-wide fill is a
+/// host device for closing the bare cells inside a bar (SQ-0504), not something
+/// the game drew. Journey draws a one-cell reversed divider on each of nineteen
+/// rows, which qualifies every one of them as a "pure reverse row" and floods the
+/// gap either side — right across window 0's text panel. That flood must yield to
+/// the story page; the labels a game deliberately printed inside window 0's box
+/// must not.
+fn chrome_text_rects(chrome: &[&PositionedWindow]) -> Vec<(u32, u32, u32, u32)> {
+    let mut rects = Vec::new();
+    for it in chrome {
+        let WinNode::Grid(g) = &it.node else { continue };
+        if !g.px_texts.is_empty() {
+            for t in &g.px_texts {
+                let x = t.x.max(1) as u32 - 1;
+                let y = t.y.max(1) as u32 - 1;
+                rects.push((x, y, x + t.text.chars().count().max(1) as u32 * FONT_W, y + FONT_H));
+            }
+            continue;
+        }
+        let (ox, oy) = (it.x_px as u32, it.y_px as u32);
+        for row in 0..g.rows {
+            for col in 0..g.cols {
+                let cell = g.cell(row + 1, col + 1);
+                if cell.ch == '\0' || (cell.ch == ' ' && cell.bg == 0) {
+                    continue;
+                }
+                let (x, y) = (ox + col as u32 * FONT_W, oy + row as u32 * FONT_H);
+                rects.push((x, y, x + FONT_W, y + FONT_H));
+            }
+        }
+    }
+    rects
+}
+
+/// Paint the story window's clear interior with its `page`, sparing every pixel a
+/// chrome text run claimed (SQ-0728).
+///
+/// The page has to be opaque — raster ships one image, and a transparent pixel is
+/// resolved by whoever composites it rather than by us (SQ-0510) — but it is also
+/// the OLDEST thing in the box: the game filled window 0, then other windows
+/// printed on top of it. Shogun's title is the measured case. Its menu window sits
+/// inside window 0's 548x64 box and prints "START the game" there while window 0
+/// prints "You may choose to:" beside it; both are on the screen at once on a real
+/// interpreter. A flat fill of the box erased the menu.
+pub fn fill_story_page_under_chrome_text(
+    canvas: &mut RgbaImage,
+    (bx, by, bw, bh): (u32, u32, u32, u32),
+    page: Rgba<u8>,
+    chrome: &[&PositionedWindow],
+) {
+    let text: Vec<(u32, u32, u32, u32)> = chrome_text_rects(chrome)
+        .into_iter()
+        .filter(|&(x0, y0, x1, y1)| x0 < bx + bw && bx < x1 && y0 < by + bh && by < y1)
+        .collect();
+    let (cw, ch) = (canvas.width(), canvas.height());
+    for y in by..(by + bh).min(ch) {
+        let row: Vec<(u32, u32)> =
+            text.iter().filter(|&&(_, y0, _, y1)| y >= y0 && y < y1).map(|&(x0, _, x1, _)| (x0, x1)).collect();
+        for x in bx..(bx + bw).min(cw) {
+            if row.iter().any(|&(x0, x1)| x >= x0 && x < x1) {
+                continue;
+            }
+            canvas.put_pixel(x, y, page);
+        }
+    }
+}
+
 /// Whether any pixel in the `w × h` box at `(px, py)` of `canvas` is opaque
 /// (alpha ≥ 128). Used to tell a reverse-video run sitting ON frame art from one
 /// over a clear background, so the art is preserved but a bare selection bar still
@@ -648,22 +719,63 @@ pub fn blit_story_gfx(canvas: &mut RgbaImage, story_gfx: Option<&PositionedWindo
 /// re-wraps the whole transcript a character per line.
 const MIN_PROSE_COLS: u32 = 8;
 
-/// The painted bounding box of a `story_gfx` entry, in native game pixels —
-/// `None` when there is no plate or it painted nothing.
-fn story_gfx_bbox(story_gfx: Option<&PositionedWindow>) -> Option<(u32, u32, u32, u32)> {
-    let it = story_gfx?;
-    let WinNode::Graphics(gwn) = &it.node else { return None };
-    let (ox, oy) = (it.x_px as u32, it.y_px as u32);
-    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-    for (x, y, px) in gwn.canvas.enumerate_pixels() {
-        if px.0[3] != 0 {
-            x0 = x0.min(x);
-            y0 = y0.min(y);
-            x1 = x1.max(x + 1);
-            y1 = y1.max(y + 1);
+/// The largest axis-aligned rectangle inside `clear` (native game pixels) that the
+/// `story_gfx` plate painted no pixel of. `None` when the plate leaves nothing.
+/// With no plate, or an unpainted one, the whole of `clear` is free.
+///
+/// Standard largest-rectangle-under-a-histogram sweep over the plate's alpha mask:
+/// row by row, each column carries the run of consecutive free pixels above it, and
+/// the monotone stack reads off every maximal rectangle ending at that row.
+fn plate_free_box(
+    clear: (u32, u32, u32, u32),
+    story_gfx: Option<&PositionedWindow>,
+) -> Option<(u32, u32, u32, u32)> {
+    let (cx, cy, cw, chh) = clear;
+    if cw == 0 || chh == 0 {
+        return None;
+    }
+    let mut blocked = vec![false; (cw * chh) as usize];
+    if let Some(it) = story_gfx {
+        if let WinNode::Graphics(gwn) = &it.node {
+            let (ox, oy) = (it.x_px as u32, it.y_px as u32);
+            for (x, y, px) in gwn.canvas.enumerate_pixels() {
+                if px.0[3] == 0 {
+                    continue;
+                }
+                let (sx, sy) = (ox + x, oy + y);
+                if sx < cx || sy < cy || sx >= cx + cw || sy >= cy + chh {
+                    continue;
+                }
+                blocked[((sy - cy) * cw + (sx - cx)) as usize] = true;
+            }
         }
     }
-    (x0 != u32::MAX).then(|| (ox + x0, oy + y0, x1 - x0, y1 - y0))
+    let mut heights = vec![0u32; cw as usize];
+    let mut best: Option<(u32, u32, u32, u32)> = None;
+    let mut stack: Vec<(u32, u32)> = Vec::new(); // (start column, height)
+    for r in 0..chh {
+        for c in 0..cw {
+            heights[c as usize] = if blocked[(r * cw + c) as usize] { 0 } else { heights[c as usize] + 1 };
+        }
+        stack.clear();
+        for c in 0..=cw {
+            let h = if c == cw { 0 } else { heights[c as usize] };
+            let mut start = c;
+            while let Some(&(s, sh)) = stack.last() {
+                if sh <= h {
+                    break;
+                }
+                stack.pop();
+                let area = (c - s) as u64 * sh as u64;
+                if best.is_none_or(|(_, _, bw, bh)| (bw as u64) * (bh as u64) < area) {
+                    best = Some((cx + s, cy + r + 1 - sh, c - s, sh));
+                }
+                start = s;
+            }
+            stack.push((start, h));
+        }
+    }
+    best.filter(|&(_, _, w, h)| w > 0 && h > 0)
 }
 
 /// Where the story window's prose goes once its absolutely-placed plate has the
@@ -683,32 +795,22 @@ fn story_gfx_bbox(story_gfx: Option<&PositionedWindow>) -> Option<(u32, u32, u32
 /// — applied to a plate that blocks the MIDDLE rather than one that outgrew the
 /// window. `story_clear_native` cannot see this: it insets from the EDGES, and a
 /// centred plate touches none of them. So the free area is measured directly, as
-/// the largest of the four margin strips the plate leaves inside `clear`; a strip
-/// too narrow to wrap into ([`MIN_PROSE_COLS`]) or too short for one line means
-/// there is no prose box. A plate that leaves a genuine column — a corner logo,
-/// a margin illustration — still gets prose beside it.
+/// the largest rectangle of `clear` the plate painted no pixel of
+/// ([`plate_free_box`]); one too narrow to wrap into ([`MIN_PROSE_COLS`]) or too
+/// short for one line means there is no prose box. A plate that leaves a genuine
+/// column — a corner logo, a margin illustration — still gets prose beside it.
+///
+/// The free area is measured against what the plate PAINTED, never its bounding
+/// box (SQ-0729). fmvpoker draws its poker table as a 640x400 frame with a hollow
+/// middle: the ring's bounding box is the whole screen, so the bbox rule read the
+/// game's own backdrop as a plate that owns the screen and the title dropped every
+/// line of text it prints inside that frame. Only 17% of the picture is opaque, and
+/// the hole in it is exactly where the game puts its prose.
 pub fn story_prose_box(
     clear: (u32, u32, u32, u32),
     story_gfx: Option<&PositionedWindow>,
 ) -> Option<(u32, u32, u32, u32)> {
-    let (cx, cy, cw, ch) = clear;
-    let Some((px, py, pw, ph)) = story_gfx_bbox(story_gfx) else { return Some(clear) };
-    // No overlap at all: the plate sits outside the text box, which stands whole.
-    if px >= cx + cw || px + pw <= cx || py >= cy + ch || py + ph <= cy {
-        return Some(clear);
-    }
-    // The four strips of `clear` outside the plate. Each is a full-width or
-    // full-height band, so each is a valid axis-aligned rect on its own.
-    let strips = [
-        (cx, cy, cw, py.saturating_sub(cy)),                                    // above
-        (cx, py + ph, cw, (cy + ch).saturating_sub(py + ph)),                   // below
-        (cx, cy, px.saturating_sub(cx), ch),                                    // left
-        (px + pw, cy, (cx + cw).saturating_sub(px + pw), ch),                   // right
-    ];
-    strips
-        .into_iter()
-        .filter(|&(_, _, w, h)| w >= MIN_PROSE_COLS * FONT_W && h >= FONT_H)
-        .max_by_key(|&(_, _, w, h)| w as u64 * h as u64)
+    plate_free_box(clear, story_gfx).filter(|&(_, _, w, h)| w >= MIN_PROSE_COLS * FONT_W && h >= FONT_H)
 }
 
 /// Build a native-resolution canvas containing ONLY the chrome frame graphics —
@@ -736,6 +838,7 @@ pub fn build_graphics_canvas(chrome: &[&PositionedWindow], native: (u16, u16)) -
 /// rule so `region_has_opaque` gates each filled cell.
 fn fill_reverse_row_gaps(
     canvas: &mut RgbaImage,
+    art: &RgbaImage,
     texts: &[PxText],
     default_fg: Rgba<u8>,
     colors: &ColorScheme,
@@ -771,8 +874,8 @@ fn fill_reverse_row_gaps(
         // The bare stretches: from x=0 to the first run, between the runs, and from
         // the last run to the screen edge. Filled at EXACT pixel extent (not cell-
         // quantized): a run's start is `x - 1`, rarely 8-aligned, so a quantized
-        // fill cell would bleed a pixel into the next run and make its own over-art
-        // test (SQ-0487) see the fill as artwork — dropping that run's block.
+        // fill cell would bleed a pixel into the next run — harmless to the over-art
+        // test (SQ-0487), which reads the ART layer, but still the game's geometry.
         let mut gaps: Vec<(u32, u32)> = Vec::new();
         let mut cursor = 0u32;
         for &(s, e) in &spans {
@@ -787,7 +890,7 @@ fn fill_reverse_row_gaps(
         for (gs, ge) in gaps {
             let block = match explicit_block {
                 Some(b) => Some(b),
-                None if region_has_opaque(canvas, gs, py, ge - gs, FONT_H) => None,
+                None if region_has_opaque(art, gs, py, ge - gs, FONT_H) => None,
                 None => Some(default_fg),
             };
             if let Some(b) = block {
@@ -914,6 +1017,22 @@ pub fn build_chrome_canvas(
 
     // Pass 1 — Graphics entries.
     blit_chrome_graphics(&mut canvas, chrome);
+    // The ART layer, frozen (SQ-0727). Every "is this run sitting on artwork?"
+    // question below (SQ-0487's per-run block rule, SQ-0499's gap fill) is asked
+    // of THIS canvas, never of the live one: rasterized text is itself opaque, so
+    // a live probe answers "yes, artwork" for a run whose span another run's own
+    // highlight block already claimed — the lesson `build_graphics_canvas` records
+    // for the hybrid side (SQ-0500).
+    //
+    // advent.z6's help screen is the case that needed it. Its navigation bar is a
+    // pure reverse-video row painted as one run per label plus reversed spacer
+    // spaces, and the spacer at x=289 lands INSIDE "About Adventure" (248..368).
+    // The spacer draws first, so by the time the label's turn came the probe saw
+    // the spacer's own white block, concluded the label sat on frame art, and drew
+    // it as dark ink with no block — black ink that `flatten_onto_page` then
+    // resolved onto a black page. The whole navigation bar was invisible in the
+    // raster composite while rendering correctly as cells.
+    let art = canvas.clone();
 
     // Pass 2 — Grid (status) entries, in list order. A v6 grid with
     // pixel-positioned runs draws those at their EXACT game pixel positions
@@ -931,12 +1050,10 @@ pub fn build_chrome_canvas(
                 // opaque block — the original renders dark ink directly ON the
                 // art. A block is painted only when the game chose colours.
                 let explicit = packed_explicit;
-                // Fill pure-reverse-row gaps FIRST, while the canvas still holds
-                // only frame graphics (pass 1) — so the over-art test sees real
-                // artwork, not a neighbouring run's own glyph block bleeding one
-                // pixel into an odd-aligned gap cell (SQ-0499). The glyph loop then
-                // paints the run cells on top.
-                fill_reverse_row_gaps(&mut canvas, &g.px_texts, default_fg, colors);
+                // Fill pure-reverse-row gaps FIRST, so the glyph loop paints the run
+                // cells on top of them (SQ-0499). Both this fill and the glyph loop
+                // put their over-art question to `art`, never to `canvas`.
+                fill_reverse_row_gaps(&mut canvas, &art, &g.px_texts, default_fg, colors);
                 // SQ-0519: then flood the full WINDOW width of each explicit-bg,
                 // non-reverse row with its own background, so an explicitly-coloured
                 // status band (Shogun's black-on-white location/score bar) reads as
@@ -964,11 +1081,11 @@ pub fn build_chrome_canvas(
                             // visible, so paint the swapped block: a solid default_fg
                             // bar with default_bg ink, INCLUDING the blank gap runs the
                             // game paints between the item's words (a reversed space
-                            // then fills its cell — no more moth-eaten bar). Pass 1
-                            // already blitted every graphics window, so the canvas
-                            // shows the real art (or transparency) under this run.
+                            // then fills its cell — no more moth-eaten bar). `art` is
+                            // pass 1 frozen, so this sees the real artwork (or
+                            // transparency) and never another run's own block.
                             let span_w = t.text.chars().count().max(1) as u32 * FONT_W;
-                            if region_has_opaque(&canvas, px0, py, span_w, FONT_H) {
+                            if region_has_opaque(&art, px0, py, span_w, FONT_H) {
                                 (default_bg, None)
                             } else {
                                 (default_bg, Some(default_fg))
