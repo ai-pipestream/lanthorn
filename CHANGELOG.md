@@ -87,6 +87,22 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **The Mysterious Adventures now draw a map instead of nothing at all.** All
+  eleven of Brian Howarth's games — Scott Adams adventures rebuilt as v6 Z-code —
+  played from start to finish with a completely empty automap, even though every
+  turn repaints "I'm in a dense SPOOKY Forest / Obvious exits: NORTH SOUTH" in
+  plain sight. They defeat every way babelmap knows to find a room, all at once:
+  the player is never put into the object tree at all, every room object carries
+  the same compiled name (`ScottRoom`), and the line you read lives in a property
+  where no name match will ever find it. babelmap now takes the room from the
+  variable these games keep it in — but only after confirming that the room it
+  points at is carrying, in its own properties, the very words on screen that
+  turn. The screen and the object tree have to agree before either is believed,
+  which is what makes the answer an exact room rather than a name: these games
+  reuse a description across whole mazes, and ten rooms that all read "I'm in a
+  Tunnel" now map as ten rooms. Nothing changes for any game that already found
+  its rooms — the new check runs only where babelmap previously found none — and
+  the automapper's own probing can no longer fault the story it is reading.
 - **Shogun's "You may choose to:" now sits beside START/RESTORE/QUIT, not under
   the title.** The game prints its nine centred banner lines while window 0 is the
   whole screen, then moves window 0 down to a four-row box level with — and to the

@@ -52,6 +52,20 @@ still there long after the turn that discovered it.
   date field is never promoted to a room on a name match alone, and Journey — whose
   story window owns the top of the screen and whose menus sit below it — correctly
   reports no room at all (its menu window is the whole screen, not a strip).
+- **v6 ports that keep the room somewhere else again.** Brian Howarth's eleven
+  *Mysterious Adventures* are Scott Adams games rebuilt as v6 Z-code, and they
+  duck every check above at once: nobody is ever put in the object tree (the
+  player object's parent stays empty for the whole game), and every room object
+  answers to the same compiled name, `ScottRoom`, with the line you actually read
+  — "I'm in a dense SPOOKY Forest" — tucked away in a property. What the games do
+  keep is a variable holding the room you're standing in, and babelmap takes it —
+  but only after checking that the room it names is carrying, in its own
+  properties, the very words on the screen this turn. Object tree and screen have
+  to agree, every turn, and no variable is trusted just for being a variable. The
+  payoff is an exact room, which matters here more than anywhere: these games
+  reuse a description across whole mazes — ten rooms in *Feasibility Experiment*
+  all read "I'm in a Tunnel" — and a room known only by its name would fold every
+  one of them into a single dot.
 - **Glulx (Inform 7)** games often keep the room out of the status bar entirely,
   so babelmap reads the **Inform room heading** — the bold title line printed as
   you enter a room (`via room heading`). Games like FooFoo and Superluminal

@@ -163,6 +163,26 @@ impl Memory {
         self.mem_fault.take()
     }
 
+    /// Run `f` without letting anything it reads latch a memory fault, and
+    /// without disturbing a fault already latched.
+    ///
+    /// The fault latch exists to report *the story* stepping outside its own
+    /// memory, and the app turns it into a VM fault that ends the session. Host
+    /// code that SPECULATES — the automapper following a property word that may
+    /// or may not be a packed string address (`object_text_property`) — is not
+    /// the story, and a guess that lands out of bounds is an answer ("not a
+    /// string"), not a crash. Without this the automapper's own probing killed
+    /// mysterious01 one turn later, with a fault trace pointing at whatever the
+    /// story happened to be executing (SQ-0724).
+    ///
+    /// Only for reads. A speculative WRITE has no legitimate caller.
+    pub fn without_fault_latch<T>(&self, f: impl FnOnce() -> T) -> T {
+        let saved = self.mem_fault.get();
+        let out = f();
+        self.mem_fault.set(saved);
+        out
+    }
+
     /// Unpack a packed routine address (ZMSD §1.2.3).
     pub fn unpack_routine(&self, packed: u16) -> u32 {
         let p = packed as u32;
@@ -257,6 +277,33 @@ mod tests {
         assert_eq!(m.read_byte(0x40), 0xBE);
         assert_eq!(m.read_byte(0x41), 0xEF);
         assert_eq!(m.read_word(0x40), 0xBEEF);
+    }
+
+    /// SQ-0724. A speculative read inside `without_fault_latch` must answer with
+    /// its zero and leave no trace: the automapper probes property words that may
+    /// not be addresses at all, and a wrong guess is not the story faulting. A
+    /// fault latched BEFORE the guarded block is the story's, and must survive.
+    #[test]
+    fn without_fault_latch_hides_speculative_reads_but_keeps_a_real_one() {
+        let m = Memory::new(sample_story(3)).unwrap();
+        let past_end = m.len() as u32 + 16;
+
+        // Baseline: an out-of-bounds read normally latches.
+        assert_eq!(m.read_word(past_end), 0);
+        assert!(m.take_mem_fault().is_some(), "an unguarded OOB read must latch");
+
+        // Guarded: same read, nothing latched.
+        m.without_fault_latch(|| m.read_word(past_end));
+        assert_eq!(m.take_mem_fault(), None, "a guarded OOB read must not latch");
+
+        // A real fault outstanding when the guard runs is not swallowed.
+        let _ = m.read_word(past_end);
+        m.without_fault_latch(|| m.read_word(past_end + 32));
+        assert_eq!(
+            m.take_mem_fault(),
+            Some((false, 2, past_end)),
+            "the story's own fault must survive a guarded block, unchanged"
+        );
     }
 
     #[test]
