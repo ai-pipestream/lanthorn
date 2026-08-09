@@ -87,6 +87,17 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Selecting a card in scopa no longer smears the OK button across the table.**
+  Choosing a card relabels the confirm button from "Choose" to "OK", and the label's
+  white field came with it — running out of the button's rounded outline and off the
+  right edge of the screen. scopa prints every button label into one scratch window
+  it shoves around for each draw, and by the time the screen is composed that
+  window's box is a leftover 1000×1000 measurement clamped to the screen, so it
+  describes nothing. A text row that names its own background is padded out to its
+  window's edges so a status band printed in pieces (Shogun's location and score
+  bar) still reads as one solid bar — but only now when the row's text actually
+  reaches those edges. A two-letter label with forty-five pixels of nothing beside
+  it is a label, not a bar, and stays the size the game drew it.
 - **A v6 game that splits its screen for artwork no longer prints the story over
   the picture.** `mysterious01.z6` reserves the top 260 pixels for its illustration
   and then simply narrates — it never repositions the text window, because the
