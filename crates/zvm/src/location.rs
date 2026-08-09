@@ -409,7 +409,10 @@ pub fn v6_status_room_candidates(machine: &Machine) -> Vec<String> {
 ///    the ONLY thing that recovers Shogun's "Bridge" (whose avatar is not
 ///    parented to the room). Centered runs are never StatusName'd — a centered
 ///    run is a banner far more often than a room.
-/// 3. NameOnly is DROPPED for v6: with no backing object a v6 candidate is far
+/// 3. `global_room_by_shown_text` — the room's NAME is a property and the
+///    pointer to the current room is a GLOBAL. See that function; it is the only
+///    thing that maps the Mysterious Adventures ports (SQ-0724).
+/// 4. NameOnly is DROPPED for v6: with no backing object a v6 candidate is far
 ///    more likely a title/character-sheet/banner than a room, and there is no
 ///    grid-shaped left-justified discipline to lean on. Returning None on a
 ///    title/menu screen is the correct answer, so an object-less candidate yields
@@ -433,8 +436,133 @@ fn detect_location_v6(machine: &Machine) -> Option<Location> {
             return Some(Location::StatusName(shown));
         }
     }
-    // 3. No object-backed candidate: do NOT invent a NameOnly room for v6.
+    // 3. The room object exists but is not named by its short name, and no avatar
+    //    is parented into it. Corroborate a global against the shown text.
+    if let Some(room) = global_room_by_shown_text(machine, &cands) {
+        return Some(Location::StatusName(room));
+    }
+    // 4. No object-backed candidate: do NOT invent a NameOnly room for v6.
     None
+}
+
+/// Shortest candidate this rung will corroborate a global against, normalized.
+/// Every real room description clears it by a wide margin ("I'm in a Cave"), and
+/// it keeps a stray one- or two-glyph run — the paint model can emit those — from
+/// prefix-matching an arbitrary object's text and blessing an arbitrary global.
+const V6_GLOBAL_ROOM_MIN_LEN: usize = 6;
+
+/// The room object a GLOBAL points at, confirmed by the text the game is
+/// painting right now — the last v6 rung, and the one the Mysterious Adventures
+/// ports need (SQ-0724).
+///
+/// Brian Howarth's *Mysterious Adventures* ship as Inform 6 re-implementations of
+/// the Scott Adams engine, and they defeat every rung above for two independent
+/// reasons at once. Their avatar (`player`, object #5) has parent 0 — it is never
+/// put into the tree at all, so PlayerParent has nothing to walk. And every room
+/// object carries the *same* compiled short name, `ScottRoom`, with the text the
+/// player reads ("I'm in a dense SPOOKY Forest") held in a PROPERTY instead — so
+/// `resolve_room_object`, which matches short names, can never name one either.
+///
+/// What the games do have is a global holding the current room's object number,
+/// and that is the signal worth taking: it is exact. The alternative — matching
+/// the shown text against every object's properties — collapses mazes, because
+/// these games reuse a description across many rooms (mysterious07 has ten rooms
+/// that all read "I'm in a Tunnel", mysterious05 eight "ventilation ducts"). The
+/// global distinguishes them; a name never can.
+///
+/// A global is not trusted for being a global. It is trusted only when the object
+/// it names carries, in one of its own properties, the very text the status band
+/// is painting this turn — so the object tree and the screen corroborate each
+/// other, every turn, and no global INDEX is hard-coded. The returned snapshot
+/// takes its name from that property, because the object's short name is the
+/// useless `ScottRoom`.
+fn global_room_by_shown_text(machine: &Machine, cands: &[V6Candidate]) -> Option<ObjectSnapshot> {
+    let mem = &machine.mem;
+    let max_obj = max_object_number(mem);
+    if max_obj == 0 {
+        return None;
+    }
+    // The 240 globals (ZMSD §6.2), deduplicated and filtered to plausible object
+    // numbers: these games mirror the room pointer into several globals, and the
+    // duplicates all name the same object. Slots past the end of memory are
+    // skipped rather than read — a short or hand-built story must not be turned
+    // into a memory fault by our own scan.
+    let base = mem.global_vars() as u32;
+    let mut objs: Vec<u16> = (0..240u32)
+        .map(|i| base + i * 2)
+        .take_while(|&at| at as usize + 1 < mem.len())
+        .map(|at| mem.read_word(at))
+        .filter(|&v| v != 0 && v <= max_obj)
+        .collect();
+    objs.sort_unstable();
+    objs.dedup();
+
+    for cand in cands {
+        if normalize_name(&cand.name).len() < V6_GLOBAL_ROOM_MIN_LEN {
+            continue;
+        }
+        for &obj in &objs {
+            if let Some(text) = object_text_property(machine, obj, &cand.name) {
+                return Some(ObjectSnapshot { name: text, ..object_snapshot(mem, obj) });
+            }
+        }
+    }
+    None
+}
+
+/// The text of `obj`'s first property that reads as a string the status band is
+/// showing as `name`, or None.
+///
+/// A word-sized property holding a PACKED string address is how Inform stores a
+/// printable name it does not put in the short name. Every such property is
+/// unpacked and decoded, and the decoded text is accepted only if `name` matches
+/// it by the ordinary [`status_name_matches`] rule — with the *property* as the
+/// full text and the shown `name` as its leading part, because the band's text is
+/// what gets clipped: `clean_room_text` cuts it at the first comma, and a long
+/// description can be cut again by the window's width.
+///
+/// Most of this is guessing, and the guesses are kept harmless two ways. A word
+/// that is not really a string address is rejected up front unless it reaches a
+/// terminated Z-string of plausible length ([`is_zstring`]), and the decode
+/// itself runs under [`Memory::without_fault_latch`] — an abbreviation inside a
+/// mis-guessed string can still point anywhere, and a speculative read landing
+/// out of bounds must answer "not a string", never fault the story.
+fn object_text_property(machine: &Machine, obj: u16, name: &str) -> Option<String> {
+    use crate::objects::{get_next_prop, get_prop_addr, get_prop_len};
+    let mem = &machine.mem;
+    let mut prop = get_next_prop(mem, obj, 0);
+    while prop != 0 {
+        let addr = get_prop_addr(mem, obj, prop);
+        if get_prop_len(mem, addr) == 2 {
+            let packed = mem.read_word(addr as u32);
+            let str_addr = mem.unpack_string(packed);
+            if packed != 0 && is_zstring(mem, str_addr) {
+                let text =
+                    mem.without_fault_latch(|| crate::text::decode::decode_string(mem, str_addr).0);
+                if status_name_matches(&text, name) {
+                    return Some(text);
+                }
+            }
+        }
+        prop = get_next_prop(mem, obj, prop);
+    }
+    None
+}
+
+/// Longest Z-string the room-text probe will consider, in words (3 Z-chars each).
+/// A room description is a line of a status band; 48 words is 144 Z-chars, well
+/// past any of them and short enough that a wrong guess costs nothing.
+const ZSTRING_PROBE_MAX_WORDS: u32 = 48;
+
+/// Whether the bytes at `addr` are a Z-string: terminated within
+/// [`ZSTRING_PROBE_MAX_WORDS`] without running off the end of the story file.
+/// Reads only words that lie wholly inside memory, so it can never latch a fault
+/// of its own.
+fn is_zstring(mem: &crate::memory::Memory, addr: u32) -> bool {
+    (0..ZSTRING_PROBE_MAX_WORDS)
+        .map(|i| addr + i * 2)
+        .take_while(|&at| at as usize + 1 < mem.len())
+        .any(|at| mem.read_word(at) & 0x8000 != 0)
 }
 
 /// True if `short` names the room shown as `candidate`: equality, or `short` is
@@ -1412,6 +1540,117 @@ mod tests {
         let mut m = machine_in_forest(3);
         m.screen.v6 = Some(v6_band(&[(1, 121, " "), (9, 121, " ")]));
         assert_eq!(detect_location(&m), None, "no room text → no location (title/menu is None)");
+    }
+
+    // ── v6 rung 3: room text in a PROPERTY, room pointer in a GLOBAL (SQ-0724) ──
+    // The Mysterious Adventures shape: no avatar in the tree, every room object
+    // sharing one useless short name, and the text the player reads held in a
+    // property. Built synthetically here; driven against all eleven real titles
+    // by `crates/app/tests/mysterious_room_detection.rs`.
+
+    /// Encode a lowercase/space string as a Z-string (alphabet A0 only), padded
+    /// to a whole number of words with the standard z-char 5 and terminated.
+    fn zstring_bytes(text: &str) -> Vec<u8> {
+        let mut z: Vec<u8> =
+            text.chars().map(|c| if c == ' ' { 0 } else { c as u8 - b'a' + 6 }).collect();
+        while !z.len().is_multiple_of(3) {
+            z.push(5);
+        }
+        let words = z.len() / 3;
+        let mut out = Vec::new();
+        for i in 0..words {
+            let mut w = ((z[i * 3] as u16) << 10) | ((z[i * 3 + 1] as u16) << 5) | z[i * 3 + 2] as u16;
+            if i == words - 1 {
+                w |= 0x8000;
+            }
+            out.extend_from_slice(&w.to_be_bytes());
+        }
+        out
+    }
+
+    /// A machine shaped like a Mysterious Adventures port: the avatar is
+    /// parentless, object #6's short name ("it") is nothing like the room, its
+    /// real text sits in property 10, and global `g` points at it.
+    ///
+    /// `room_obj` is what the global is set to — pointing it somewhere else is how
+    /// the negative test shows the text has to corroborate the global.
+    fn machine_scott_shaped(g: u32, room_obj: u16, text: &str) -> Machine {
+        const ROOM_TEXT_ADDR: usize = 0x600; // packed (v5, ×4) = 0x180
+        const DECOY_ADDR: usize = 0x610; //     packed (v5, ×4) = 0x184
+        let mut buf = build_v5_forests();
+        put_word(&mut buf, v5_entry(4) + 6, 0); // avatar parentless: no PlayerParent
+        buf.resize(0x800, 0);
+        let enc = zstring_bytes(text);
+        buf[ROOM_TEXT_ADDR..ROOM_TEXT_ADDR + enc.len()].copy_from_slice(&enc);
+
+        // A DECOY: a property word that IS a well-formed, terminated Z-string, but
+        // whose first z-char is an abbreviation (1) whose table entry points far
+        // past the end of the story. Decoding it walks out of bounds — the exact
+        // shape `without_fault_latch` exists for, and unreachable by any bounds
+        // check on the property word itself.
+        put_word(&mut buf, DECOY_ADDR, 0x8000 | (1 << 10) | (5 << 5) | 5);
+        put_word(&mut buf, 0x40 + 2 * 5, 0x7000); // abbrev #5 → byte address 0xE000
+
+        // Append property 10 (one-byte header, bit 6 = 2 data bytes) over an
+        // object's end-of-properties sentinel, holding a PACKED string address.
+        let add_text_prop = |buf: &mut Vec<u8>, ptbl: usize, packed: u16| {
+            let after_name = ptbl + 1 + buf[ptbl] as usize * 2;
+            buf[after_name] = 0x40 | 10;
+            put_word(buf, after_name + 1, packed);
+            buf[after_name + 3] = 0x00;
+        };
+        add_text_prop(&mut buf, 0x280, (ROOM_TEXT_ADDR / 4) as u16); // #6 "it": the room
+        add_text_prop(&mut buf, 0x1F2, (DECOY_ADDR / 4) as u16); //    #5 "forest": the decoy
+
+        // global_vars = 0x300. The decoy object is named by a global too, and is
+        // probed FIRST (objects are tried in ascending order).
+        put_word(&mut buf, 0x300 + g as usize * 2, room_obj);
+        put_word(&mut buf, 0x300 + (g as usize + 1) * 2, 5);
+        let mut m = make_machine(buf);
+        m.screen.v6 = Some(v6_band(&[(11, 71, text), (11, 489, "Score: 0")]));
+        m
+    }
+
+    #[test]
+    fn v6_detect_room_from_a_global_confirmed_by_a_property_string() {
+        let m = machine_scott_shaped(3, 6, "deep caverns");
+        // Guard: the room is NOT findable by any rung above — its short name is
+        // "it" and no avatar reaches it.
+        assert_eq!(normalize_name(&short_name(&m.mem, 6)), "it");
+        assert_eq!(resolve_room_object(&m, "deep caverns"), None);
+
+        let loc = detect_location(&m).expect("the global-plus-property room must be detected");
+        assert_eq!(loc.method(), LocationMethod::StatusName);
+        let obj = loc.object().expect("object-backed");
+        assert_eq!(obj.number, 6, "the exact object the global names");
+        assert_eq!(obj.name, "deep caverns", "named from the property, not the short name \"it\"");
+    }
+
+    #[test]
+    fn v6_global_room_needs_the_shown_text_to_corroborate_it() {
+        // Same story, but the global points at object #1 ("forest"), which carries
+        // no such text. A global is never trusted for being a global.
+        let m = machine_scott_shaped(3, 1, "deep caverns");
+        assert_eq!(detect_location(&m), None, "an uncorroborated global must not become a room");
+    }
+
+    #[test]
+    fn v6_global_room_ignores_a_too_short_candidate() {
+        // A stray one- or two-glyph run must never prefix-match its way into
+        // blessing a global (V6_GLOBAL_ROOM_MIN_LEN).
+        let mut m = machine_scott_shaped(3, 6, "deep caverns");
+        m.screen.v6 = Some(v6_band(&[(11, 71, "de"), (11, 489, "Score: 0")]));
+        assert_eq!(detect_location(&m), None, "a two-glyph run must not resolve a room");
+    }
+
+    #[test]
+    fn v6_global_room_probe_never_latches_a_memory_fault() {
+        // The probe decodes property words that are not string addresses at all.
+        // Whatever it reads, the story must be left un-faulted (SQ-0724).
+        let m = machine_scott_shaped(3, 6, "deep caverns");
+        let _ = m.mem.take_mem_fault();
+        assert!(detect_location(&m).is_some());
+        assert_eq!(m.mem.take_mem_fault(), None, "speculative probing must not fault the story");
     }
 
     // ── TDD Step 1: write the failing tests ───────────────────────────────────
