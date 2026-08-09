@@ -843,38 +843,38 @@ fn fill_explicit_bg_rows(
     }
     for (py, runs) in rows {
         if let Some(bg) = row_flood_bg(&runs, default_bg, colors) {
-            // Only as wide as the row's own runs — never the whole window.
-            //
             // The point of this flood is to close the GAPS BETWEEN runs, so a bar
-            // the game painted as several runs reads as one solid block. Painting
-            // the full window width also paints where the game printed nothing,
-            // and a window is not always a bar: scopa positions its "abort"/"OK"
-            // labels with a scratch window it moves around, so flooding that
-            // window's box smeared each button's colour out to the screen edge,
-            // past the rounded outline the game had drawn (SQ-0706 follow-up).
-            //
-            // Shogun's status bar — the case this flood exists for (SQ-0519) — is
-            // unaffected in practice: its runs span 49..592 inside a 46..594
-            // window, so the bar loses three pixels at one end and two at the
-            // other, and still reads as one solid block.
+            // the game painted as several runs reads as one solid block. The runs'
+            // own hull is therefore the floor; whether it also reaches the window's
+            // edges is the question below.
             let lo = runs.iter().map(|t| u32::from(t.x.max(1)) - 1).min().unwrap_or(ox);
             let hi = runs
                 .iter()
                 .map(|t| (u32::from(t.x.max(1)) - 1) + t.text.chars().count().max(1) as u32 * FONT_W)
                 .max()
                 .unwrap_or(ox + win_w);
-            // A window whose own runs sit INSIDE its box is describing a bar, and
-            // the bar is the window: flood it edge to edge. Shogun's status band is
-            // this — runs at 49..592 in a 46..594 window.
+            // A window is the bar only when its runs REACH BOTH OF ITS EDGES —
+            // within one character cell, the padding a game leaves at the ends of a
+            // band it filled. Shogun's status band is that: runs 49..592 in a 46..594
+            // window, three pixels of slack at one end and two at the other, so the
+            // flood rounds it out edge to edge and the gaps between "Erasmus :",
+            // "SHOGUN" and "Score:" close.
             //
-            // A window whose runs fall OUTSIDE its box is not a bar at all. scopa
-            // positions its "abort"/"OK" labels with a scratch window it moves for
-            // every draw, so its runs land at 568..608 while the box reads 579..640;
-            // flooding that box smeared each button's colour past the rounded
-            // outline the game had drawn. There, flood only what the runs occupy.
-            let contained = lo >= ox && hi <= ox + win_w;
-            let (fx, fw) = if contained { (ox, win_w) } else { (lo, hi.saturating_sub(lo)) };
-            fill_cell(canvas, fx, py, fw, FONT_H, bg);
+            // Anything else is a label parked in a scratch window whose box describes
+            // nothing, and flooding that box smears the label's background across the
+            // screen. scopa positions its "abort"/"OK" button labels with one window 5
+            // it moves and resizes for every draw — and whose size its `measure`
+            // routine leaves at a 1000×1000 sentinel, clamped to the screen. Its
+            // "abort" run lands at 567..607 while the box reads 579..640, outside on
+            // the left (SQ-0706); selecting a card redraws the same button's label as
+            // "OK" at 579..595, which starts exactly ON that left edge and stops 45 px
+            // short of the right one — inside the box, but 45 px is not padding. That
+            // flooded a white tab from the button's rounded outline out to the screen
+            // edge, which is what the player saw as the OK label spreading rightwards
+            // (SQ-0721). There, flood only what the runs occupy.
+            let spans_window = lo <= ox + FONT_W && hi + FONT_W >= ox + win_w;
+            let (fx, fe) = if spans_window { (lo.min(ox), hi.max(ox + win_w)) } else { (lo, hi) };
+            fill_cell(canvas, fx, py, fe.saturating_sub(fx), FONT_H, bg);
         }
     }
 }
