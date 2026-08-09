@@ -523,47 +523,28 @@ impl Machine {
         w
     }
 
-    /// Print the rows a `split_window` shrink is about to discard into the story
-    /// stream — the Inform box quote (SQ-0696).
+    /// Retire a quote box left standing above the split (SQ-0696).
     ///
-    /// See [`UpperWindow::rows_lost_to_shrink`](crate::screen::UpperWindow::rows_lost_to_shrink)
-    /// for why those rows are a quote and what a terminal interpreter shows.
-    /// Each cell keeps its own style and colours, so the box arrives reversed
-    /// exactly as it was painted, and the run is emitted unbuffered so the box's
-    /// column alignment survives (word-wrap would reflow it).
+    /// `split_window` shrinks the split but keeps whatever was PAINTED, so an
+    /// Inform box quote stays on screen while the game waits for the keypress it
+    /// asks for immediately afterwards. It must not stay forever: on a real
+    /// screen the quote "would then scroll away as part of the story window's
+    /// natural scrolling, over the next few command inputs" (Plotkin, *Quote
+    /// Boxes in Z-Machine Games*). The player acting is that boundary — a game
+    /// that box-quotes and simply plays on, never erasing, would otherwise strand
+    /// the box at the top of the pane for the rest of the session.
     ///
-    /// Nothing is printed when the shrink discards no painted rows, so the
-    /// per-turn status-line re-split costs one bounds check.
-    fn flush_box_quote(&mut self, new_rows: u16) {
-        let quote = self.screen.upper.rows_lost_to_shrink(new_rows);
-        if quote.is_empty() {
-            return;
+    /// A timeout is not the player acting, so it retires nothing (the same
+    /// distinction `v6_reload_line_counts` draws).
+    fn retire_stranded_upper_rows(&mut self) {
+        if self.screen.v6.is_some() {
+            return; // v6 text is paint; erases and repaints govern it (§8.8.5.3)
         }
-        let buffering = self.screen.buffer_mode;
-        self.out.set_buffer_mode(false);
-        self.out.print("\n");
-        for row in &quote {
-            // Coalesce equal-attribute neighbours so a reversed box is one run
-            // per row, not one per character.
-            let mut run = String::new();
-            let mut attrs: Option<crate::io::TextAttrs> = None;
-            for cell in row {
-                let a = crate::io::TextAttrs { style: cell.style, fg: cell.fg, bg: cell.bg };
-                if attrs != Some(a) {
-                    if let Some(prev) = attrs {
-                        self.out.print_attr(&run, prev);
-                    }
-                    run.clear();
-                    attrs = Some(a);
-                }
-                run.push(cell.ch);
-            }
-            if let Some(a) = attrs {
-                self.out.print_attr(&run, a);
-            }
-            self.out.print("\n");
+        let split = self.screen.upper_window_rows;
+        if self.screen.upper.rows > split {
+            let cols = self.screen.upper.cols.max(1);
+            self.screen.upper.resize_preserving(split, cols);
         }
-        self.out.set_buffer_mode(buffering);
     }
 
     /// Keep `screen.current_fg`/`current_bg` mirroring the CURRENT v6 window's
@@ -1701,16 +1682,38 @@ impl Machine {
                         let bg = self.screen.current_bg;
                         self.screen.upper.clear_to(bg);
                     } else {
-                        // SQ-0696: a shrink that discards PAINTED rows is the
-                        // Inform box quote — see `rows_lost_to_shrink`. Print
-                        // them into the story stream before they are truncated,
-                        // which is what a terminal interpreter leaves on screen
-                        // (the rows it does not repaint) and what our scrollback
-                        // lower window makes readable. Anchorhead's second
-                        // startup screen is exactly this and showed as a blank
-                        // screen waiting for a keypress.
-                        self.flush_box_quote(rows);
-                        self.screen.upper.resize_preserving(rows, cols.max(1));
+                        // SQ-0696: shrink the SPLIT, keep what was PAINTED.
+                        //
+                        // The Inform `box` statement splits the upper window
+                        // tall, prints reverse-video text into it, then shrinks
+                        // it back to the status line — and only THEN waits for a
+                        // keypress. Truncating the grid here destroyed the quote
+                        // before it could be read: Anchorhead's two startup
+                        // quotes each rendered as a blank screen awaiting a key.
+                        //
+                        // ZMSD does not cover the case (§8.6.1.1.2 specifies only
+                        // Version 3's clear-on-split), and the note its remarks
+                        // cite names this exact failure: "In a naive Glk
+                        // implementation -- or _any_ simple implementation using
+                        // text windows -- this trick fails. The interpreter will
+                        // display the quote text for a tiny fraction of a second,
+                        // or (if the display system has built-in buffering) not
+                        // at all." (Plotkin, *Quote Boxes in Z-Machine Games*.)
+                        // A terminal interpreter shows it because shrinking the
+                        // window repaints nothing — the rows keep displaying what
+                        // was put there.
+                        //
+                        // So the allocation only ever grows here. `upper.rows`
+                        // already exceeds `upper_window_rows` whenever a game
+                        // paints below its own split (LostPig's HELP menu), and
+                        // every host already renders the full grown height, so
+                        // the quote lands exactly where the game placed it —
+                        // including in `--screen-reader`, where a region taller
+                        // than one row is read as content rather than quietened
+                        // chrome. `erase_window` reallocates and is what clears
+                        // it, which is the same moment a real screen loses it.
+                        let painted = self.screen.upper.rows.max(rows);
+                        self.screen.upper.resize_preserving(painted, cols.max(1));
                     }
                     self.screen.cursor_row = 1;
                     self.screen.cursor_col = 1;
@@ -3776,6 +3779,7 @@ impl Machine {
         // this on ZC_TIME_OUT — our timeout path is terminator 0).
         if terminator != 0 {
             self.v6_reload_line_counts();
+            self.retire_stranded_upper_rows();
         }
 
         let version = self.mem.version();
@@ -3850,6 +3854,7 @@ impl Machine {
         // ZSCII 0 (our timed-read timeout) does not (frotz console_read_key).
         if ch != 0 {
             self.v6_reload_line_counts();
+            self.retire_stranded_upper_rows();
         }
         self.do_store(pending.store_var, ch as u16);
     }
@@ -8146,9 +8151,29 @@ pub(crate) mod tests {
         assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "v5 re-split keeps the old contents");
         assert_eq!(m.screen.upper.rows, 3, "and still resizes");
         assert_eq!(m.screen.upper.cell(3, 1).ch, ' ', "the new row is blank");
+        // SQ-0696: a shrink no longer truncates on the spot. The Inform box
+        // quote paints a tall upper window and shrinks it back BEFORE asking for
+        // the keypress that is meant to display it, so what was painted has to
+        // outlive the shrink — otherwise the quote is destroyed unread.
         m.exec_var(0x0A, &[1], None, None); // shrink
-        assert_eq!(m.screen.upper.rows, 1, "shrinking truncates");
+        assert_eq!(m.screen.upper_window_rows, 1, "the SPLIT shrinks immediately");
+        assert_eq!(m.screen.upper.rows, 3, "…but the painted rows stay on screen");
         assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "the surviving row survives");
+
+        // They are retired when the player next acts — the box "would then
+        // scroll away as part of the story window's natural scrolling, over the
+        // next few command inputs".
+        m.pending_input = Some(PendingInput {
+            store_var: Some(0),
+            text_buf: 0,
+            parse_buf: 0,
+            interrupt_time: 0,
+            interrupt_routine: 0,
+            instr_pc: 0,
+        });
+        m.supply_char(b' ');
+        assert_eq!(m.screen.upper.rows, 1, "a real keypress retires the stranded rows");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "the status row itself is untouched");
     }
 
     #[test]

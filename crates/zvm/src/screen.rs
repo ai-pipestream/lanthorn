@@ -123,59 +123,6 @@ pub struct UpperWindow {
     pub cells: Vec<Cell>,
 }
 impl UpperWindow {
-    /// The rows a shrink to `new_rows` is about to discard, as styled runs
-    /// ready to print into the story stream — the Inform **box quote**
-    /// (SQ-0696).
-    ///
-    /// `box` splits the upper window tall, prints reverse-video text into it,
-    /// then shrinks it back — and only *then* waits for a keypress. A terminal
-    /// interpreter shows the quote because shrinking the window does not repaint
-    /// what those rows were displaying: Infocom's V4 interpreter left the
-    /// reverse-video text "overlaid on the top of the story window ... [it] would
-    /// then scroll away as part of the story window's natural scrolling"
-    /// (Plotkin, *Quote Boxes in Z-Machine Games*, the note ZMSD §8's remarks
-    /// cite — the standard itself does not specify the case). A window model
-    /// that simply drops the truncated rows is the failure Plotkin names: the
-    /// quote shows "for a tiny fraction of a second, or ... not at all".
-    ///
-    /// Returning the rows lets the caller print them, which is that same reading
-    /// in a host whose lower window is a real scrollback transcript.
-    ///
-    /// Empty unless rows are actually being removed AND something was painted in
-    /// them, so the ordinary re-split every turn (games repaint a status line at
-    /// the same height) and a collapse of blank rows both yield nothing. A row
-    /// counts as painted when any cell is a non-space OR carries a style —
-    /// reverse-video spaces are the box's own padding, not blank filler. Trailing
-    /// default-styled blanks are trimmed; interior cells are kept verbatim so the
-    /// box keeps its shape.
-    pub fn rows_lost_to_shrink(&self, new_rows: u16) -> Vec<Vec<Cell>> {
-        if new_rows >= self.rows || self.cols == 0 {
-            return Vec::new();
-        }
-        let painted = |c: &Cell| c.ch != ' ' || c.style != 0;
-        let mut out = Vec::new();
-        for r in new_rows..self.rows {
-            let start = r as usize * self.cols as usize;
-            let end = (start + self.cols as usize).min(self.cells.len());
-            if start >= self.cells.len() {
-                break;
-            }
-            let row = &self.cells[start..end];
-            let last = row.iter().rposition(painted);
-            out.push(match last {
-                Some(i) => row[..=i].to_vec(),
-                None => Vec::new(),
-            });
-        }
-        // A trailing run of wholly blank rows is the padding below the box, not
-        // part of it; leading blanks stay so the box keeps its offset from the
-        // status line above.
-        while out.last().is_some_and(|r| r.is_empty()) {
-            out.pop();
-        }
-        out
-    }
-
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.rows = rows;
         self.cols = cols;
@@ -1358,55 +1305,6 @@ mod tests {
     use crate::header::tests_support::sample_story;
     use crate::memory::Memory;
     use crate::text::encode::encode_word;
-
-    /// SQ-0696: the rows a shrink discards are the Inform box quote, and only a
-    /// shrink that discards PAINTED rows is one.
-    #[test]
-    fn rows_lost_to_shrink_returns_the_box_and_nothing_else() {
-        let mut u = UpperWindow::default();
-        u.resize(12, 20);
-        let put = |u: &mut UpperWindow, row: u16, col: u16, text: &str, style: u8| {
-            for (i, ch) in text.chars().enumerate() {
-                let idx = (row - 1) as usize * u.cols as usize + (col - 1) as usize + i;
-                u.cells[idx] = Cell { ch, style, fg: ZColour::Default, bg: ZColour::Default };
-            }
-        };
-        // A box quote's shape: reverse-video padding around reverse-video text,
-        // sitting a few rows down, with blank default rows above and below.
-        put(&mut u, 4, 3, "      ", 1);
-        put(&mut u, 5, 3, "  Quote  ", 1);
-        put(&mut u, 6, 3, "      ", 1);
-
-        // The per-turn status re-split at the SAME height discards nothing.
-        assert!(u.rows_lost_to_shrink(12).is_empty(), "an unchanged height is not a shrink");
-        // Nor does a GROW.
-        assert!(u.rows_lost_to_shrink(20).is_empty(), "a grow discards nothing");
-        // A shrink that keeps the box discards only blank rows below it.
-        assert!(u.rows_lost_to_shrink(6).is_empty(), "blank rows below the box are not a quote");
-
-        // The real shrink back to the status line yields the box.
-        let quote = u.rows_lost_to_shrink(1);
-        assert_eq!(quote.len(), 5, "rows 2..=6: the blank offset rows plus the box, trailing blanks trimmed");
-        assert!(quote[0].is_empty() && quote[1].is_empty(), "leading blank rows keep the box's offset");
-        let text: String = quote[3].iter().map(|c| c.ch).collect();
-        assert_eq!(
-            text, "    Quote  ",
-            "default-styled blanks LEFT of the box are kept (its offset) and its own reversed \
-             right padding is kept too — only unpainted trailing cells are trimmed"
-        );
-        assert!(quote[3].iter().skip(2).all(|c| c.style == 1), "the box keeps its reverse video");
-        // Reverse-video SPACES are the box's own padding, not blank filler.
-        assert_eq!(quote[2].len(), 8, "a row of reversed spaces survives as painted");
-
-        // An upper window carrying only an unstyled status line is not a quote.
-        let mut plain = UpperWindow::default();
-        plain.resize(3, 20);
-        put(&mut plain, 2, 1, "Score: 10", 0);
-        assert_eq!(plain.rows_lost_to_shrink(1).len(), 1, "painted status rows do count as lost");
-        let mut blank = UpperWindow::default();
-        blank.resize(3, 20);
-        assert!(blank.rows_lost_to_shrink(1).is_empty(), "collapsing blank rows yields nothing");
-    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
