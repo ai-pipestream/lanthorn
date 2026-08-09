@@ -3056,12 +3056,59 @@ impl Engine for GameSession {
         if self.machine.screen.v6.is_some() {
             return self.v6_window_dump(&[]);
         }
-        let model = self.screen();
-        let (gc, gr) = model.grid().map(|g| (g.cols, g.active_rows)).unwrap_or((0, 0));
-        vec![format!(
-            "Window layout: Grid {gc}x{gr} over Buffer (Z-machine v{})",
-            self.machine.mem.version()
-        )]
+        let screen = &self.machine.screen;
+        let mut out = vec![format!("Z-machine v{} layout — Grid over Buffer", self.machine.mem.version())];
+        // The split height and the painted grid height are now deliberately
+        // separate numbers (SQ-0696): a `split_window` shrink keeps whatever rows
+        // were painted (Inform box quotes survive it), and a game may paint below
+        // its own split (LostPig's HELP menu). Surfacing them apart is the whole
+        // point of this dump — collapsed together they hide exactly the
+        // divergence a screen bug needs.
+        out.push(format!(
+            "  split: {} row(s) requested  ·  grid: {} row(s) painted{}",
+            screen.upper_window_rows,
+            screen.upper.rows,
+            if screen.upper.rows != screen.upper_window_rows { "  <- diverge" } else { "" }
+        ));
+        out.push(format!("  grid cols: {}", screen.upper.cols));
+        out.push(format!(
+            "  cursor: row {}, col {}  ·  window: {}",
+            screen.cursor_row,
+            screen.cursor_col,
+            if screen.current_window == 1 { "upper" } else { "lower" }
+        ));
+        out.push(format!("  buffer_mode: {}", screen.buffer_mode));
+        out.push(format!("  colours: fg {:?}, bg {:?}", screen.current_fg, screen.current_bg));
+
+        // The grid's non-blank rows, as a reader would see them — trailing
+        // blanks trimmed, capped so a runaway grid can't flood the dump.
+        const MAX_PRINTED_ROWS: usize = 20;
+        let cols = screen.upper.cols as usize;
+        let rows = screen.upper.rows as usize;
+        let mut printed = 0usize;
+        let mut truncated = false;
+        for r in 0..rows {
+            let start = r * cols;
+            if start >= screen.upper.cells.len() {
+                break;
+            }
+            let end = (start + cols).min(screen.upper.cells.len());
+            let text: String = screen.upper.cells[start..end].iter().map(|c| c.ch).collect();
+            let trimmed = text.trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if printed >= MAX_PRINTED_ROWS {
+                truncated = true;
+                break;
+            }
+            out.push(format!("  row {r:>2}: {trimmed:?}"));
+            printed += 1;
+        }
+        if truncated {
+            out.push(format!("  … additional non-blank row(s) not shown (cap {MAX_PRINTED_ROWS})"));
+        }
+        out
     }
 
     fn save_state(&self) -> EngineSave {
