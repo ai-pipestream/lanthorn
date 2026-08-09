@@ -208,10 +208,9 @@ and still means "beside this paragraph".)
 Arthur opens on three illustrated screens, and it lays each one out by hand.
 It clears every window, asks window 0 how big it is, does the centring
 arithmetic itself — a 584×392 plate in a 640×400 window lands at x=29, y=5 —
-draws the plate there, and only then narrates over it. The Merlin screen redraws
-the graveyard at that same origin and composites Merlin *inside* it, so the
-wizard appears on the graveyard in a single frame rather than beneath it in a
-second one.
+and draws the plate there. The Merlin screen redraws the graveyard at that same
+origin and composites Merlin *inside* it, so the wizard appears on the graveyard
+in a single frame rather than beneath it in a second one.
 
 babelmap honours that arithmetic. A window-0 picture the game placed rather than
 inlined gets a real window canvas, at the pixel origin the game named, and later
@@ -219,8 +218,18 @@ draws composite into the same canvas exactly as they would on an Amiga. The
 centring margin the game deliberately left around the plate stays the story
 window's own page — we don't stretch art to fill space the author left empty.
 Because such a screen has no frame ring at all, `hybrid` hands the frame to the
-full-canvas compositor (the same path Zork Zero's map takes), which draws the
-plate and rasterizes the narration onto it in one image.
+full-canvas compositor (the same path Zork Zero's map takes), which ships the
+plate as one image.
+
+**A plate is drawn *instead of* prose, not underneath it.** Arthur's illustrated
+screens carry no text at all: the game erases the screen, draws the plate, hides
+the cursor and waits for a key — the whole graveyard→Merlin turn is thirty-one
+instructions and prints not one character. Its narration is a *separate*,
+picture-less screen, erased before the next plate goes up. So when a placed plate
+leaves no column wide enough to wrap prose into, the picture owns the screen and
+babelmap draws no story text on that frame — the same rule a window-filling
+picture like Zork Zero's rebus already followed. A plate that *does* leave a real
+column — a margin illustration, a corner logo — still gets prose beside it.
 
 ## Prose the game positions itself
 

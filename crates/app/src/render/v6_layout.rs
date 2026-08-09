@@ -512,15 +512,85 @@ fn blit_chrome_graphics(canvas: &mut RgbaImage, chrome: &[&PositionedWindow]) {
 /// `classify_windows` has always set this entry aside — a `WinNode::Graphics` whose
 /// `win` is 0 is story content, not chrome — but nothing ever drew it, so it was
 /// classified and dropped. Arthur's intro is what needs it: each illustrated screen
-/// centres a 584×392 plate in window 0 and narrates over it, so the plate is a
-/// BACKDROP for the story text rather than part of the frame ring.
+/// centres a 584×392 plate in window 0, so the plate is a BACKDROP occupying the
+/// story window rather than part of the frame ring.
 ///
 /// Callers blit it after the story page fill and before the story text, which is
-/// the painter's order the game itself used: page, then plate, then prose.
+/// the painter's order the game itself used: page, then plate, then prose — see
+/// [`story_prose_box`] for whether any prose belongs on this frame at all.
 pub fn blit_story_gfx(canvas: &mut RgbaImage, story_gfx: Option<&PositionedWindow>) {
     let Some(it) = story_gfx else { return };
     let WinNode::Graphics(gwn) = &it.node else { return };
     blit_clipped(canvas, &gwn.canvas, it.x_px as u32, it.y_px as u32, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
+}
+
+/// A prose column narrower than this (cells) is not a text box — it is a sliver.
+/// Mirrors the identical floor `build_main_text` applies before wrapping prose
+/// beside an inline float, and the SQ-0578 lesson that a one-column story box
+/// re-wraps the whole transcript a character per line.
+const MIN_PROSE_COLS: u32 = 8;
+
+/// The painted bounding box of a `story_gfx` entry, in native game pixels —
+/// `None` when there is no plate or it painted nothing.
+fn story_gfx_bbox(story_gfx: Option<&PositionedWindow>) -> Option<(u32, u32, u32, u32)> {
+    let it = story_gfx?;
+    let WinNode::Graphics(gwn) = &it.node else { return None };
+    let (ox, oy) = (it.x_px as u32, it.y_px as u32);
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for (x, y, px) in gwn.canvas.enumerate_pixels() {
+        if px.0[3] != 0 {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
+        }
+    }
+    (x0 != u32::MAX).then(|| (ox + x0, oy + y0, x1 - x0, y1 - y0))
+}
+
+/// Where the story window's prose goes once its absolutely-placed plate has the
+/// floor — `None` when the plate owns the screen and no prose belongs on the
+/// frame at all (SQ-0707).
+///
+/// An absolutely-placed window-0 picture is a BACKDROP the game draws INSTEAD of
+/// prose, not underneath it. Arthur's intro is the measured case: each screen
+/// `@erase_window(-1)`s, draws its plate, hides the cursor with `@set_cursor(-1)`
+/// and waits on a `read_char` — the narration is a separate, picture-less screen
+/// that the game erases before printing. The whole graveyard→Merlin turn is 31
+/// instructions and prints not one character. So rasterizing the app's scrollback
+/// onto the plate (which is what SQ-0695 shipped, on the mistaken premise that the
+/// game "narrates over it") painted the previous screen's prose across the art.
+///
+/// The rule is the SQ-0578 one — "no room for text → the picture owns the screen"
+/// — applied to a plate that blocks the MIDDLE rather than one that outgrew the
+/// window. `story_clear_native` cannot see this: it insets from the EDGES, and a
+/// centred plate touches none of them. So the free area is measured directly, as
+/// the largest of the four margin strips the plate leaves inside `clear`; a strip
+/// too narrow to wrap into ([`MIN_PROSE_COLS`]) or too short for one line means
+/// there is no prose box. A plate that leaves a genuine column — a corner logo,
+/// a margin illustration — still gets prose beside it.
+pub fn story_prose_box(
+    clear: (u32, u32, u32, u32),
+    story_gfx: Option<&PositionedWindow>,
+) -> Option<(u32, u32, u32, u32)> {
+    let (cx, cy, cw, ch) = clear;
+    let Some((px, py, pw, ph)) = story_gfx_bbox(story_gfx) else { return Some(clear) };
+    // No overlap at all: the plate sits outside the text box, which stands whole.
+    if px >= cx + cw || px + pw <= cx || py >= cy + ch || py + ph <= cy {
+        return Some(clear);
+    }
+    // The four strips of `clear` outside the plate. Each is a full-width or
+    // full-height band, so each is a valid axis-aligned rect on its own.
+    let strips = [
+        (cx, cy, cw, py.saturating_sub(cy)),                                    // above
+        (cx, py + ph, cw, (cy + ch).saturating_sub(py + ph)),                   // below
+        (cx, cy, px.saturating_sub(cx), ch),                                    // left
+        (px + pw, cy, (cx + cw).saturating_sub(px + pw), ch),                   // right
+    ];
+    strips
+        .into_iter()
+        .filter(|&(_, _, w, h)| w >= MIN_PROSE_COLS * FONT_W && h >= FONT_H)
+        .max_by_key(|&(_, _, w, h)| w as u64 * h as u64)
 }
 
 /// Build a native-resolution canvas containing ONLY the chrome frame graphics —
@@ -1099,6 +1169,71 @@ mod tests {
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary, ..Default::default() }),
         }
+    }
+
+    /// A window-0 plate `w`×`h` painted opaque at native `(x, y)`.
+    fn plate_at(x: u16, y: u16, w: u32, h: u32) -> PositionedWindow {
+        let canvas = Arc::new(image::RgbaImage::from_pixel(w, h, image::Rgba([1, 2, 3, 255])));
+        PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w as u16, h_px: h as u16,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(GraphicsWindow { win: 0, canvas, version: 0, upscale: false }),
+        }
+    }
+
+    // ── story_prose_box (SQ-0707) ────────────────────────────────────────────
+
+    #[test]
+    fn story_prose_box_without_a_plate_is_the_whole_clear_interior() {
+        assert_eq!(story_prose_box((0, 0, 640, 400), None), Some((0, 0, 640, 400)));
+    }
+
+    /// Arthur's real geometry: a 584×392 plate centred in window 0's 640×400 box
+    /// leaves 28px side margins (3 cells — below the 8-column floor) and 4px
+    /// top/bottom (under one 16px line). Nothing survives, so the plate owns the
+    /// screen and no prose is drawn. This is the SQ-0707 symptom in one line.
+    #[test]
+    fn story_prose_box_yields_the_screen_to_a_centred_full_bleed_plate() {
+        let plate = plate_at(28, 4, 584, 392);
+        assert_eq!(
+            story_prose_box((0, 0, 640, 400), Some(&plate)),
+            None,
+            "a plate leaving only a 3-cell side margin is not a prose box — the picture owns \
+             the screen exactly as a window-filling one does (SQ-0578)"
+        );
+    }
+
+    /// Graceful degradation: a plate that leaves a genuine column still gets
+    /// prose beside it, in the widest strip it left. A 240px-wide plate down the
+    /// left of a 640px box leaves 400px (50 cells) on the right.
+    #[test]
+    fn story_prose_box_keeps_the_column_a_margin_illustration_leaves() {
+        let plate = plate_at(0, 0, 240, 400);
+        assert_eq!(
+            story_prose_box((0, 0, 640, 400), Some(&plate)),
+            Some((240, 0, 400, 400)),
+            "prose wraps in the column beside a margin illustration"
+        );
+    }
+
+    /// A plate wholly outside the story's clear interior changes nothing.
+    #[test]
+    fn story_prose_box_ignores_a_plate_that_misses_the_text_box() {
+        let plate = plate_at(0, 0, 100, 100);
+        assert_eq!(story_prose_box((200, 200, 400, 200), Some(&plate)), Some((200, 200, 400, 200)));
+    }
+
+    /// Only PAINTED pixels count: a plate whose canvas is fully transparent (a
+    /// window-0 graphics leaf that has drawn nothing yet) never takes the screen.
+    #[test]
+    fn story_prose_box_ignores_an_unpainted_plate() {
+        let canvas = Arc::new(image::RgbaImage::new(584, 392));
+        let plate = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 28, y_px: 4, w_px: 584, h_px: 392,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(GraphicsWindow { win: 0, canvas, version: 0, upscale: false }),
+        };
+        assert_eq!(story_prose_box((0, 0, 640, 400), Some(&plate)), Some((0, 0, 640, 400)));
     }
 
     #[test]
