@@ -87,6 +87,23 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **All three of scopa's card decks now show up, at the size they were drawn.**
+  The opening menu invites you to click a card type to begin, and only ever offered
+  one: the Milanese deck hardwired into the z-code. The Neapolitan and Sicilian
+  decks live in the game's Blorb, and scopa draws every one of those pictures
+  through a scratch window it borrows for a single instruction — move it, size it
+  to 1000×1000, draw at the corner, move it straight on for the next card. By the
+  time the renderer looked, that window had gone somewhere else and shrunk to an
+  80×1 sliver, so both photographic decks were clipped out of existence and then
+  erased by the next fill. Pictures now record the window box they were drawn into
+  and freeze onto the screen where they landed when the window moves on — the same
+  rule that already keeps a moved window's prose where it was printed. They are
+  also drawn at their real size: scopa's Blorb declares no standard window, which
+  the Blorb spec defines as "display at actual size, one image pixel per screen
+  pixel", so doubling them (right for every Infocom v6 title, all of which do
+  declare one) had told the game its cards were twice as big as they are and
+  produced a menu row that overlapped itself and hung off the bottom of the screen.
+  Pick a deck and the whole hand — table, hand, backs and all — now deals in it.
 - **Turning game colours off no longer deletes half of a v6 game's board.** With
   `honor_game_colours` off, scopa's felt table disappeared and left a black
   card table with two green stripes across it — the only survivors being the bands
