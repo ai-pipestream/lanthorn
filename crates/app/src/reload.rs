@@ -121,12 +121,13 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         state.colors.theme = resolve_theme_layered(&gs, &global, &garglk_decls, &per_game);
     }
 
-    // SQ-0700: the upper-window frame's STYLE still lives on `ColorScheme` (the
-    // renderer frames and reserves from it), but the file it is written in is the
-    // new schema, where the selector sits in `[elements]` and lands in the theme
-    // just rebuilt above. Lower it back so `upper_window_border = { style = "none" }`
-    // reaches the frame instead of dying in the theme.
-    crate::style::lower_upper_window_border(&mut state.colors);
+    // SQ-0700/SQ-0703: the frame STYLES still live on `ColorScheme` (the renderers
+    // frame and reserve from them), but the file they are written in is the new
+    // schema, where the selectors sit in `[elements]` and land in the theme just
+    // rebuilt above. Lower them back so `upper_window_border = { style = "none" }`,
+    // `input_line = { style = "single" }` and `suggestion_line = { style = "single" }`
+    // reach their frames instead of dying in the theme.
+    crate::style::lower_element_borders(&mut state.colors);
 
     // SQ-0663: append the freshly-rebuilt theme's own diagnostics (a `parent`
     // re-root naming an unknown selector, or a cycle) after style::resolve's.

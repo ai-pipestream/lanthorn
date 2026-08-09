@@ -623,42 +623,61 @@ fn apply_structural_decls(cs: &mut ColorScheme, selectors: &BTreeMap<String, Dec
     }
 }
 
-/// Lower the registry theme's `upper_window_border` STRUCTURAL channels — the
-/// `style` / `style_<side>` keys — onto the [`ColorScheme`] fields the renderer
-/// actually frames the upper window with (SQ-0700).
+/// Lower ONE selector's STRUCTURAL border channels — the `style` /
+/// `style_<side>` keys, as the registry theme resolved them — onto the
+/// `(base style, per-side styles)` pair the renderer actually frames with.
 ///
-/// Those two fields had exactly one writer, [`apply_structural_decls`], which
-/// reads the LEGACY `[colors]` selector table. The shipped `style.toml` (the
-/// registry-generated template `style.example.toml` mirrors) has no `[colors]`
-/// section at all — `upper_window_border` lives in `[elements]` — so its
-/// `style = "none"` parsed into the theme and stopped there, and the frame could
-/// not be turned off from the file every user is handed. Call this after the
-/// theme is rebuilt and the documented spelling reaches
-/// [`crate::render::upper_window::resolved_grid_sides`] and
-/// [`crate::render::screen::story_screen_dims`] alike, so the frame stops being
-/// drawn AND stops reserving the rows/columns it was drawn in.
-///
-/// A theme that says nothing structural about the selector (the default, and any
-/// file that only colours it) leaves both fields untouched, so the legacy
-/// `[colors]` spelling — and the built-in single-line default — still stand.
-pub fn lower_upper_window_border(cs: &mut ColorScheme) {
-    let r = cs.theme.get("upper_window_border");
+/// Precedence matches [`resolve_sides`]: a named side wins, an unnamed one takes
+/// the selector's base `style`, and with no base at all the current value stands.
+/// A selector the theme says nothing structural about leaves both outputs
+/// untouched, so the legacy `[colors]` spelling — and the built-in default —
+/// still stand.
+fn lower_border(
+    r: &crate::theme::resolve::Resolved,
+    base_out: &mut paneframe::BorderStyle,
+    sides_out: &mut paneframe::PaneSides,
+) {
     let per_side = [r.border_top, r.border_bottom, r.border_left, r.border_right];
     if r.border.is_none() && per_side.iter().all(Option::is_none) {
         return;
     }
     if let Some(base) = r.border {
-        cs.virtual_window_border = base;
+        *base_out = base;
     }
-    let legacy = cs.upper_window_border_sides;
-    // Same precedence as `resolve_sides`: a named side wins, an unnamed one takes
-    // the selector's base style, and with no base at all the current value stands.
-    cs.upper_window_border_sides = paneframe::PaneSides {
+    let legacy = *sides_out;
+    *sides_out = paneframe::PaneSides {
         top: r.border_top.or(r.border).unwrap_or(legacy.top),
         bottom: r.border_bottom.or(r.border).unwrap_or(legacy.bottom),
         left: r.border_left.or(r.border).unwrap_or(legacy.left),
         right: r.border_right.or(r.border).unwrap_or(legacy.right),
     };
+}
+
+/// Lower every frameable `[elements]` selector's structural channels back onto
+/// the [`ColorScheme`] fields the renderers read (SQ-0700, SQ-0703).
+///
+/// Those fields had exactly one writer, [`apply_structural_decls`], which reads
+/// the LEGACY `[colors]` selector table. The shipped `style.toml` (the
+/// registry-generated template `style.example.toml` mirrors) has no `[colors]`
+/// section at all — `upper_window_border`, `input_line` and `suggestion_line`
+/// all live in `[elements]` — so a `style = "single"` parsed into the theme and
+/// stopped there. Every one of those spellings is documented in the template
+/// comments, and none of them worked from the file every user is handed.
+///
+/// Call this after the theme is rebuilt, so the documented spelling reaches
+/// [`crate::render::upper_window::resolved_grid_sides`],
+/// [`crate::render::screen::story_screen_dims`] and
+/// [`crate::render::transcript::render_transcript`] alike — the frames stop (or
+/// start) being drawn AND reserving the rows they are drawn in.
+pub fn lower_element_borders(cs: &mut ColorScheme) {
+    // `Theme::get` returns by value, so resolve all three first and the theme
+    // borrow is over before the `&mut` field borrows begin.
+    let upper = cs.theme.get("upper_window_border");
+    let input = cs.theme.get("input_line");
+    let suggestion = cs.theme.get("suggestion_line");
+    lower_border(&upper, &mut cs.virtual_window_border, &mut cs.upper_window_border_sides);
+    lower_border(&input, &mut cs.input_line_style, &mut cs.input_line_sides);
+    lower_border(&suggestion, &mut cs.suggestion_line_style, &mut cs.suggestion_line_sides);
 }
 
 // ── resolve ───────────────────────────────────────────────────────────────────
