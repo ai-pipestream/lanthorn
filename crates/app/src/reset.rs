@@ -43,9 +43,11 @@ pub(crate) fn reset_game(
             // source and a boot-picture flush to drain the art the boot drew
             // before that source existed. Restarting without them left Shogun
             // with a mis-sized status band and no inline graphics at all.
-            let mut picts = app::graphics::PictSource::new(
-                if state.config.images { blorb::resolve_resource_blorb(story_path).map(|(b, _)| b) } else { None }
-            );
+            let mut picts = if state.config.images {
+                app::graphics::PictSource::resolve(story_path)
+            } else {
+                app::graphics::PictSource::new(None)
+            };
             let picture_dims = picts.all_pict_dims();
             let v6_screen_px = picts.std_window();
             let host_default_colours = if state.config.honor_game_colours {

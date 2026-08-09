@@ -594,10 +594,29 @@ impl LoadedStory {
 }
 
 /// Read a story file's executable bytes, transparently unwrapping a ZIP whose
-/// first `.z3/.z5/.z8` entry is the story. Does not classify the engine — see
-/// [`load_story`] / [`extract_story`].
+/// first `.z3/.z5/.z8` entry is the story, or an Amiga `.adf` disk image whose
+/// filesystem holds one. Does not classify the engine — see [`load_story`] /
+/// [`extract_story`].
 fn read_story_file(path: &Path) -> io::Result<Vec<u8>> {
     let raw = std::fs::read(path)?;
+    // SQ-0719: an original Amiga release floppy. Mount it and take the file
+    // whose CONTENT is a story — AmigaDOS has no extensions, and the disk's
+    // `Story.data` convention is a tiebreak, not a guarantee.
+    if blorb::adf::Adf::looks_like_adf(&raw) {
+        let adf = blorb::adf::Adf::mount(raw)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
+        return match adf.story() {
+            Some((_, bytes)) => Ok(bytes),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "no story file on the disk image {} ({} files; is this the boot disk?)",
+                    path.display(),
+                    adf.files().len()
+                ),
+            )),
+        };
+    }
     if raw.starts_with(ZIP_MAGIC) {
         // It's a ZIP — find the first story entry.
         let pred = |name: &str| {

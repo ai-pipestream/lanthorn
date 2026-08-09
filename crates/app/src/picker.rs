@@ -90,9 +90,11 @@ pub struct StoryEntry {
 
 /// Candidate story-file extensions (matched case-insensitively). `.zblorb` /
 /// `.blorb` / zips are handled by `load_story_bytes`; `.dat` covers some
-/// Infocom releases.
+/// Infocom releases; `.adf` is an Amiga release floppy, whose story
+/// `load_story` mounts out of the disk image (SQ-0719).
 const STORY_EXTS: &[&str] = &[
     "z3", "z4", "z5", "z6", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
+    "adf",
 ];
 
 pub(crate) fn has_story_ext(path: &Path) -> bool {
@@ -1140,6 +1142,14 @@ mod tests {
         assert_eq!(stories[0].filename, "game.z5");
         // No known title for this synthetic IFID → falls back to the stem.
         assert_eq!(stories[0].title, "game");
+    }
+
+    /// An Amiga release floppy is a listable story file (SQ-0719) — the picker
+    /// offers it and `load_story` mounts the game out of it.
+    #[test]
+    fn disk_images_are_listed_as_stories() {
+        assert!(has_story_ext(Path::new("Zork Zero.adf")));
+        assert!(has_story_ext(Path::new("DISK1.ADF")), "matched case-insensitively");
     }
 
     #[test]

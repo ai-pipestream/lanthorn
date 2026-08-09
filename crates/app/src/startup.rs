@@ -378,9 +378,13 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // — and header-sniff every Pict's size (no full decode). This MUST
             // run before `new_with_trace`: `picture_data` is called during boot,
             // which happens inside `new_with_trace` itself (Phase 0 lesson).
-            let mut picts = app::graphics::PictSource::new(
-                if cfg.images { blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b) } else { None }
-            );
+            // SQ-0719: `PictSource::resolve` also covers an Amiga `.adf` the
+            // story was mounted out of, whose own `Pic.data` is its artwork.
+            let mut picts = if cfg.images {
+                app::graphics::PictSource::resolve(&story_path)
+            } else {
+                app::graphics::PictSource::new(None)
+            };
             let picture_dims = picts.all_pict_dims();
             // v6: the Blorb `Reso` standard window (e.g. Zork0 → 320×200) is the
             // game's native ART resolution. `new_with_trace` advertises 2× it —

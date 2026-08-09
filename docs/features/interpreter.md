@@ -27,6 +27,38 @@ playing.
   `.dat` text engine and shows the bundled images — it does **not** decode the
   original SAGA line-draw graphics format.
 
+## What counts as a story file
+
+Point babelmap at whatever the game arrived in and it digs the story out itself.
+
+- **Bare images** — `.z3`–`.z8`, `.ulx`, and Scott Adams `.dat` are read straight.
+- **Blorb containers** — `.zblorb`/`.gblorb`/`.blorb`/`.blb` yield their executable
+  chunk, and the same file's `Pict`/`Snd `/`Data` resources become the game's art
+  and audio. A resources-only Blorb sitting *beside* the story counts too.
+- **ZIP archives** — the first `.z3`/`.z5`/`.z8` entry is unwrapped in memory.
+- **Amiga `.adf` disk images** — the original release floppy, played as it shipped.
+
+That last one is worth its own paragraph. Infocom's Amiga releases came on 880 KB
+floppies, and the disk images those turned into are still how the graphical
+titles circulate in their native form. Hand babelmap one — `babelmap "Zork
+Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem (both OFS and FFS),
+walks it, and plays what it finds. No unpacking step, no loose files, nothing to
+rename.
+
+AmigaOS has no filename extensions to go by, and while Infocom's convention was
+`Story.data` beside `Pic.data`, the convention is not a promise — one Zork Zero
+disk lists a file in its own manifest that was never written to it. So babelmap
+identifies the story by **content**: a Z-machine header whose version, memory
+map, serial, and declared length all agree with the bytes actually present. The
+two saved games sitting on the Zork Zero disk look superficially like v3 stories
+and are rejected on exactly those grounds. Conventional names only break a tie if
+a disk somehow offers two candidates; a disk with none — the plain AmigaDOS boot
+floppy that ships as Disk 0 — says so instead of booting a system library.
+
+The artwork comes along for free: a native Infocom picture archive on the *same*
+image is that story's art, because a shared floppy is as strong a guarantee of
+pairing as a Blorb is. See [Graphical v6](v6-graphics.md#where-the-pictures-come-from).
+
 ## Z-machine
 
 - **Standard Quetzal save/restore** — the game's own SAVE/RESTORE writes and reads

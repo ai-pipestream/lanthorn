@@ -1,6 +1,7 @@
 //! Zero-dependency parser for the IFF "Blorb" interactive-fiction resource
 //! container. Exposes the embedded executable and a generic resource accessor.
 
+pub mod adf;
 pub mod bpal;
 pub mod infocom_pics;
 

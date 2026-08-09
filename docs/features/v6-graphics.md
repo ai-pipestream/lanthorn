@@ -25,6 +25,34 @@ then height, big-endian) with no pixel data at all. babelmap recognizes a
 mechanism these games rely on — it isn't a general Blorb image feature, it's a
 placement protocol these specific titles speak.
 
+## Where the pictures come from
+
+Most of the time: a Blorb. Either the story file *is* one, or a `.blb`/`.blorb`
+sibling beside it carries the `Pict` resources, and babelmap resolves that on its
+own.
+
+There is a second source, for anyone playing from original media. Infocom's Amiga
+releases stored their artwork in a single `Pic.data` archive on the game disk — a
+big-endian Huffman + run-length + per-scanline-XOR codec of Infocom's own design,
+nothing to do with PNG — and babelmap decodes it directly. Launch a game from its
+[`.adf` disk image](interpreter.md#what-counts-as-a-story-file) and the archive
+that shipped on that same floppy becomes the game's art. Nothing to configure:
+the story and the pictures came off one disk, so the pairing is guaranteed by the
+medium rather than guessed from a filename.
+
+The two sources are close but not identical, and where they disagree the original
+media wins. Five *Zork Zero* pictures are cropped in the circulating Blorb —
+ids 5, 6 and 7 keep only a 29–39 row band of what are full 320×200 decorative
+frames, id 8 is flattened to a plain rectangle, and id 33 loses most of a
+"Four Fantastic Flies of Famathria" plate. The floppy has all five whole. The
+other 383 pictures decode byte-for-byte identically to the Blorb's, which is its
+own quiet confirmation that those Blorbs were converted from the Amiga release.
+
+Native archives carry no `Reso` chunk, so a story loaded this way falls back to
+the standard 320×200 art resolution — which is precisely what every Infocom v6
+Blorb's `Reso` chunk declares anyway, so the geometry below is unchanged either
+way.
+
 ## Splitting the screen TILES it
 
 A v6 game reserves room for artwork by splitting the screen, and the standard is
