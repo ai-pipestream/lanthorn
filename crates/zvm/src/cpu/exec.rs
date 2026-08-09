@@ -79,6 +79,25 @@ pub struct PictureEvent {
     /// text margin right after drawing an inline picture to make text flow
     /// beside it. `None` when no such call followed.
     pub margin_after: Option<u16>,
+    /// Whether the picture was placed on the window's CURRENT TEXT LINE — i.e.
+    /// its resolved `y` is the window's `y_cursor` at draw time (either because
+    /// the game passed `0`, ZMSD §15's "use the cursor coordinate", or because
+    /// it named the row the cursor is already on).
+    ///
+    /// This is the only surviving evidence of whether the game meant the picture
+    /// to FLOW WITH THE TEXT or to sit at a position it chose for itself: the
+    /// engine resolves a `0` operand to the cursor before publishing, so by the
+    /// time the host sees `y` the two are indistinguishable. The host uses it to
+    /// tell a window-0 inline float (Zork Zero's drop-caps and room icons, drawn
+    /// at the cursor; Shogun's opening ship, `y = 0` with a right margin) from an
+    /// absolutely-placed backdrop the game centred in the window itself (Arthur's
+    /// intro illustrations at `y = 5` while the cursor sits at `y = 1`) — SQ-0695.
+    ///
+    /// Only the VERTICAL axis counts. A picture that flows with the text is
+    /// anchored to the text's own line; its `x` is a margin choice (Shogun draws
+    /// its ship at `x = 229` to reserve the right column) and says nothing about
+    /// whether the picture belongs to the text or to the window.
+    pub at_cursor: bool,
 }
 
 /// Result of executing one instruction.
@@ -1877,6 +1896,11 @@ impl Machine {
                             erase: true,
                             out_chars,
                             margin_after: None,
+                            // A whole-canvas clear, not a positioned picture: the
+                            // erase reset the cursor to (1,1) just above, so `y == 1`
+                            // IS the cursor. The host's `number == 0` arm returns
+                            // before reading this either way.
+                            at_cursor: true,
                         });
                     }
                 } else {
@@ -2787,7 +2811,12 @@ impl Machine {
                         ));
                     }
                     let out_chars = self.v6_win0_out_chars;
-                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: false, out_chars, margin_after: None });
+                    self.pending_pictures.push(PictureEvent {
+                        number, window, x, y, erase: false, out_chars, margin_after: None,
+                        // Placed on the window's current text line — see
+                        // `PictureEvent::at_cursor` (SQ-0695).
+                        at_cursor: y == cy,
+                    });
                 }
                 StepResult::Continue
             }
@@ -2816,7 +2845,10 @@ impl Machine {
                         ));
                     }
                     let out_chars = self.v6_win0_out_chars;
-                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: true, out_chars, margin_after: None });
+                    self.pending_pictures.push(PictureEvent {
+                        number, window, x, y, erase: true, out_chars, margin_after: None,
+                        at_cursor: y == cy,
+                    });
                 }
                 StepResult::Continue
             }
@@ -4402,7 +4434,7 @@ pub(crate) mod tests {
         m.state.frames.clear();                          // simulate stack unwound mid-run
         m.state.eval_stack.push(0xDEAD);
         m.undo_stack.push(UndoSnapshot { blob: Vec::new(), store: None });
-        m.pending_pictures.push(PictureEvent { number: 1, window: 0, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None });
+        m.pending_pictures.push(PictureEvent { number: 1, window: 0, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: true });
 
         m.restart();
 
@@ -9788,7 +9820,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 m.pending_pictures.last(),
-                Some(&PictureEvent { number: 0, window: 2, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None }),
+                Some(&PictureEvent { number: 0, window: 2, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: true }),
                 "erase_window rides the picture queue as a number-0 erase"
             );
         }
@@ -10069,7 +10101,7 @@ pub(crate) mod tests {
         let r = m.exec_ext(0x05, &[5, 1, 1], None, None); // draw_picture(5, y=1, x=1)
         assert!(matches!(r, StepResult::Continue));
         assert_eq!(m.pending_pictures, vec![
-            PictureEvent { number: 5, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None }
+            PictureEvent { number: 5, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: true }
         ]);
     }
 
@@ -10080,7 +10112,7 @@ pub(crate) mod tests {
         let r = m.exec_ext(0x07, &[5, 2, 4], None, None); // erase_picture(5, y=2, x=4)
         assert!(matches!(r, StepResult::Continue));
         assert_eq!(m.pending_pictures, vec![
-            PictureEvent { number: 5, window: 3, x: 4, y: 2, erase: true, out_chars: 0, margin_after: None }
+            PictureEvent { number: 5, window: 3, x: 4, y: 2, erase: true, out_chars: 0, margin_after: None, at_cursor: false }
         ]);
     }
 

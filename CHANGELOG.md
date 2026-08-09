@@ -57,6 +57,24 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Arthur's intro illustrations actually appear — where Arthur put them.** The
+  three plates that open Arthur (the sword in the stone, the churchyard, Merlin)
+  never rendered at all. Arthur lays those screens out itself: it clears every
+  window, asks window 0 how big it is, centres the 584×392 plate by hand at
+  x=29, y=5, and narrates over it. babelmap treated *every* window-0 picture as
+  an inline drop-cap — the Zork Zero idiom, where the art is drawn on the text
+  cursor and has to scroll with the paragraph beside it — so Arthur's backdrops
+  were pushed into the transcript as floats, no window canvas was ever made, and
+  the art never rasterized. The two plates of the Merlin screen would also have
+  stacked as separate bands instead of compositing, losing the effect of Merlin
+  appearing *on* the graveyard. The engine now records whether a picture was
+  placed on the window's current text line or at a position the game chose, and
+  a placed one gets a real canvas at the pixel origin the game named, with later
+  draws compositing into it. The margin Arthur deliberately left around each
+  plate stays the page — the art is not stretched to fill it. Drop-caps, room
+  icons and Shogun's margin-parked ship are untouched: all three are drawn on
+  the cursor, and still float with the prose.
+
 - **Zork Zero's room icons stop sitting on a black box.** The little compass and
   room icons in Zork Zero's banner are line art on a *clear* ground — 95% of
   each 45×40 picture is fully transparent — and the bottom of every one of them

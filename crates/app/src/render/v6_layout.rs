@@ -469,6 +469,23 @@ fn blit_chrome_graphics(canvas: &mut RgbaImage, chrome: &[&PositionedWindow]) {
     }
 }
 
+/// Blit the STORY window's own absolutely-placed artwork ([`V6Layout::story_gfx`])
+/// onto `canvas` at its native origin (SQ-0695).
+///
+/// `classify_windows` has always set this entry aside — a `WinNode::Graphics` whose
+/// `win` is 0 is story content, not chrome — but nothing ever drew it, so it was
+/// classified and dropped. Arthur's intro is what needs it: each illustrated screen
+/// centres a 584×392 plate in window 0 and narrates over it, so the plate is a
+/// BACKDROP for the story text rather than part of the frame ring.
+///
+/// Callers blit it after the story page fill and before the story text, which is
+/// the painter's order the game itself used: page, then plate, then prose.
+pub fn blit_story_gfx(canvas: &mut RgbaImage, story_gfx: Option<&PositionedWindow>) {
+    let Some(it) = story_gfx else { return };
+    let WinNode::Graphics(gwn) = &it.node else { return };
+    blit_clipped(canvas, &gwn.canvas, it.x_px as u32, it.y_px as u32, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
+}
+
 /// Build a native-resolution canvas containing ONLY the chrome frame graphics —
 /// no status/menu text. Used by the hybrid band decomposition to tell a band
 /// strip that sits over real artwork (keeps the pixel ring) from a pure-text

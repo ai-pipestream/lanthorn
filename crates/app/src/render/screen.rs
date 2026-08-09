@@ -628,7 +628,7 @@ fn render_node(
                 // picture takeover, which has no ring to draw (SQ-0570) — fall
                 // through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
-                    if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, native)) {
+                    if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, layout.story_gfx, native)) {
                         // This frame renders as chrome bands, not the raster
                         // composite — drop the cached composite so a later
                         // fall-through to raster (map/rebus takeover) cannot
@@ -2043,9 +2043,9 @@ pub fn build_v6_raster_canvas(
     // hundreds of keypresses to drain. No cell fits → the picture owns the
     // screen: ship the art alone and report no scroll metrics, exactly like the
     // no-story-window case.
-    if let Some((sx, sy, sw, sh)) =
-        v6::story_clear_native(layout.story, &canvas).filter(|&(_, _, w, h)| w >= 8 && h >= 16)
-    {
+    let story_clear =
+        v6::story_clear_native(layout.story, &canvas).filter(|&(_, _, w, h)| w >= 8 && h >= 16);
+    if let Some((sx, sy, sw, sh)) = story_clear {
         // Paint the story page opaque (SQ-0510, reopened). Leaving it
         // transparent let whoever composites the image pick the colour
         // instead of us. `story_clear_native` has already inset past any
@@ -2053,6 +2053,14 @@ pub fn build_v6_raster_canvas(
         // degenerate case where that inset leaves nothing; inline-image
         // floats redraw on top in `draw_story_text`. So no artwork is covered.
         v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
+        // …then the story window's OWN absolutely-placed artwork, before any
+        // prose: Arthur's intro centres a 584×392 plate in window 0 and narrates
+        // over it, so the plate is the page's backdrop, not part of the frame
+        // ring — and the page fill just above would otherwise wipe it. The probe
+        // for the clear interior ran BEFORE this blit, so the text box is still
+        // measured against the frame art alone and the narration lands on the
+        // plate exactly as the game intended. (SQ-0695)
+        v6::blit_story_gfx(&mut canvas, layout.story_gfx);
         // Window-0 inline pictures (drop-caps, room icons) arrive as
         // transcript-anchored floats (`transcript_images` sidecar):
         // build_main_text wraps text beside them and draw_story_text
@@ -2094,6 +2102,10 @@ pub fn build_v6_raster_canvas(
             }
         }
         raster_metrics = Some(rm);
+    } else {
+        // No usable text box — the picture owns the screen (SQ-0578), or there is
+        // no story window at all. The story window's own plate still has to ship.
+        v6::blit_story_gfx(&mut canvas, layout.story_gfx);
     }
     // Every layer has now drawn. Raster mode ships the WHOLE canvas as
     // one image, so any pixel still fully transparent would be resolved
@@ -2837,6 +2849,7 @@ enum BottomPlan {
 fn picture_takeover(
     story: &crate::engine::PositionedWindow,
     chrome: &[&crate::engine::PositionedWindow],
+    story_gfx: Option<&crate::engine::PositionedWindow>,
     native: (u16, u16),
 ) -> bool {
     // One native text row of slack per edge, so a game that leaves a hairline
@@ -2850,22 +2863,31 @@ fn picture_takeover(
         return false;
     }
     // Sample an 8×8 grid across the screen; every point must be painted by some
-    // chrome graphics window.
+    // graphics window — chrome, or the STORY window's own plate. Arthur's intro
+    // is the latter: it erases every window, then centres a 584×392 illustration
+    // inside full-screen window 0 and narrates over it (SQ-0695). There is no
+    // chrome ring at all on those screens, so scanning chrome alone found nothing
+    // painted and hybrid opened a pane-wide transcript viewport over art it then
+    // never uploaded — the same "sudden drop into frameless mode" the Zork Zero
+    // map showed. Counting `story_gfx` sends the frame to the raster composite,
+    // which draws the plate and rasterizes the narration onto it in one canvas.
     const N: u32 = 8;
+    let painted_at = |x: u32, y: u32, pw: &crate::engine::PositionedWindow| {
+        let crate::engine::WinNode::Graphics(gw) = &pw.node else { return false };
+        let (wx, wy) = (pw.x_px as u32, pw.y_px as u32);
+        let img = &gw.canvas;
+        x >= wx
+            && y >= wy
+            && x - wx < img.width()
+            && y - wy < img.height()
+            && img.get_pixel(x - wx, y - wy)[3] >= 128
+    };
     (0..N).all(|iy| {
         let y = native.1 as u32 * (2 * iy + 1) / (2 * N);
         (0..N).all(|ix| {
             let x = native.0 as u32 * (2 * ix + 1) / (2 * N);
-            chrome.iter().any(|pw| {
-                let crate::engine::WinNode::Graphics(gw) = &pw.node else { return false };
-                let (wx, wy) = (pw.x_px as u32, pw.y_px as u32);
-                let img = &gw.canvas;
-                x >= wx
-                    && y >= wy
-                    && x - wx < img.width()
-                    && y - wy < img.height()
-                    && img.get_pixel(x - wx, y - wy)[3] >= 128
-            })
+            chrome.iter().any(|pw| painted_at(x, y, pw))
+                || story_gfx.is_some_and(|pw| painted_at(x, y, pw))
         })
     })
 }
