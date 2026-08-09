@@ -2063,21 +2063,29 @@ pub fn build_v6_raster_canvas(
         // floats redraw on top in `draw_story_text`. So no artwork is covered.
         v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
         // …then the story window's OWN absolutely-placed artwork, before any
-        // prose: Arthur's intro centres a 584×392 plate in window 0 and narrates
-        // over it, so the plate is the page's backdrop, not part of the frame
-        // ring — and the page fill just above would otherwise wipe it. The probe
-        // for the clear interior ran BEFORE this blit, so the text box is still
-        // measured against the frame art alone and the narration lands on the
-        // plate exactly as the game intended. (SQ-0695)
+        // prose: Arthur's intro centres a 584×392 plate in window 0, so the plate
+        // is the page's backdrop, not part of the frame ring — and the page fill
+        // just above would otherwise wipe it. The probe for the clear interior ran
+        // BEFORE this blit, so the text box is still measured against the frame
+        // art alone. (SQ-0695)
         v6::blit_story_gfx(&mut canvas, layout.story_gfx);
+        // Whether any prose belongs on THIS frame, and where (SQ-0707). An
+        // absolutely-placed plate is drawn INSTEAD of prose, not under it: the
+        // game erases, draws, and waits, so the narration is its own picture-less
+        // screen. `None` = the plate owns the screen, and rasterizing scrollback
+        // onto it would paint the PREVIOUS screen's text across the art.
+        let Some((tx, ty, tw, th)) = v6::story_prose_box((sx, sy, sw, sh), layout.story_gfx) else {
+            return finish_v6_raster_canvas(canvas, page, raster_metrics);
+        };
         // Window-0 inline pictures (drop-caps, room icons) arrive as
         // transcript-anchored floats (`transcript_images` sidecar):
         // build_main_text wraps text beside them and draw_story_text
         // blits each at its anchored row — they scroll with the text.
         // Non-square 8×16 v6 cell (SQ-0479): columns divide the
         // clear width by FONT_W(8), rows the height by FONT_H(16).
-        let cols = (sw / 8).max(1) as u16;
-        let rows = (sh / 16).max(1) as u16;
+        let (sx, sy) = (tx, ty);
+        let cols = (tw / 8).max(1) as u16;
+        let rows = (th / 16).max(1) as u16;
         let (main, rm) = build_main_text(state, cols, rows);
         v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink);
         // [more] pager indicator (SQ-0455): when a single turn's output
@@ -2127,7 +2135,18 @@ pub fn build_v6_raster_canvas(
     // identical on every protocol/terminal. Touches alpha==0 pixels
     // ONLY — art, status bands, glyphs and drop-caps are all opaque and
     // are left byte-for-byte alone. (SQ-0510)
-    v6::flatten_onto_page(&mut canvas, page);
+    finish_v6_raster_canvas(canvas, page, raster_metrics)
+}
+
+/// Seal a v6 raster composite: resolve every still-transparent pixel to the story
+/// page so the image is self-contained (SQ-0510). Shared by the normal tail of
+/// [`build_v6_raster_canvas`] and its plate-owns-the-screen early return (SQ-0707).
+fn finish_v6_raster_canvas(
+    mut canvas: image::RgbaImage,
+    page: image::Rgba<u8>,
+    raster_metrics: Option<RasterMetrics>,
+) -> (image::RgbaImage, Option<RasterMetrics>) {
+    crate::render::v6_layout::flatten_onto_page(&mut canvas, page);
     (canvas, raster_metrics)
 }
 

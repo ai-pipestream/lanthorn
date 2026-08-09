@@ -4,10 +4,17 @@
 //! Arthur opens with three illustrated screens. For each one it erases every
 //! window, asks window 0 for its OWN size (`get_wind_prop` props 2 and 3 → 400
 //! and 640), centres the plate itself — x = (640 − 584)/2 + 1 = **29**,
-//! y = (400 − 392)/2 + 1 = **5** — draws it there with the text cursor still at
-//! (1,1), and only then narrates. The Merlin screen redraws the same graveyard
-//! plate at that same origin and composites picture 3 (480×300 at (81,51))
-//! *inside* it, so Merlin appears on the graveyard within one frame.
+//! y = (400 − 392)/2 + 1 = **5** — and draws it there. The Merlin screen redraws
+//! the same graveyard plate at that same origin and composites picture 3 (480×300
+//! at (81,51)) *inside* it, so Merlin appears on the graveyard within one frame.
+//!
+//! An illustrated screen carries NO prose (SQ-0707). The measured op sequence is
+//! `@erase_window(-1)` → `@draw_picture` → `@set_cursor(row=-1)` (ZMSD §8.8.3.4:
+//! hide the cursor) → a timed `@read_char`; the whole graveyard→Merlin turn is 31
+//! instructions and prints not one character. The narration is a SEPARATE screen
+//! that the game erases before printing and erases again before the next plate.
+//! So a plate frame's prose is empty, and rasterizing the app's scrollback onto
+//! the plate paints the PREVIOUS screen's text across the artwork.
 //!
 //! What went wrong: `GameSession::apply_picture_event` treated EVERY window-0
 //! draw as inline story content — Zork Zero's drop-caps and room icons, which
@@ -43,8 +50,8 @@
 //! Both v6 pixel modes are pinned. HYBRID is the default and what the player
 //! sees: an intro screen has no chrome ring at all, so it must take the
 //! `picture_takeover` fall-through to the raster composite (SQ-0570) — which
-//! draws the plate and rasterizes the narration onto it in one canvas — rather
-//! than opening a pane-wide transcript viewport over art it never uploads.
+//! ships the plate as one image — rather than opening a pane-wide transcript
+//! viewport over art it never uploads. RASTER ships the same composite directly.
 //! Both `honor_game_colours` modes are pinned too (`true` is the shipped
 //! default): the declared placement is the game's geometry, not its palette, so
 //! it must be identical under both.
@@ -342,6 +349,169 @@ fn arthur_hybrid_takes_the_picture_takeover_path() {
             "honor={honor}: an intro plate fills the screen with no ring to draw, so hybrid must \
              fall through to the raster composite rather than open a transcript viewport over it"
         );
+    }
+}
+
+// ── SQ-0707: the plate owns its screen — no scrollback is painted over it ────
+
+/// Drive the intro the way the APP does — accumulating the transcript turn by
+/// turn — and stop on the graveyard→Merlin plate. Returns the session parked on
+/// that frame plus the `AppState` carrying the narration that preceded it.
+///
+/// This is the difference that let SQ-0707 through: the older cases above render
+/// against a default `AppState` whose transcript is EMPTY, so nothing could be
+/// painted over the art and the composite looked correct. The bug only exists
+/// once there is scrollback to paint.
+fn arthur_plate_frame_with_scrollback(
+    mode: app::config::V6RenderMode,
+    honor: bool,
+) -> Option<(GameSession, app::state::AppState)> {
+    let story_path = stories_dir().join("arthur-r74-s890714.z6");
+    let story_bytes = std::fs::read(&story_path).ok().or_else(|| {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        None
+    })?;
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session = GameSession::new_with_trace(
+        story_bytes, honor, false, None, false, picture_dims, picts.std_window(), None, None,
+    )
+    .expect("Arthur (v6) should load and boot without a ZError");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+
+    let mut state = render_state(mode, honor);
+    // Tap forward until a window-0 plate is up AND real narration is behind it.
+    // Frame order: title plate → restore prompt → graveyard narration → the
+    // graveyard+Merlin plate. The restore prompt loops on a bare Enter, so it is
+    // answered explicitly, exactly as `arthur_intro_plates` does.
+    for _ in 0..8 {
+        let r = match session.pending_input() {
+            InputKind::Line => session.submit(""),
+            InputKind::Char => session.submit_char(13),
+            InputKind::Event => session.submit(""),
+        };
+        state.push_transcript_kind(&r.transcript, app::state::TranscriptKind::Story);
+        if r.transcript.to_lowercase().contains("y or n") {
+            let r2 = session.submit_char(b'n');
+            state.push_transcript_kind(&r2.transcript, app::state::TranscriptKind::Story);
+        }
+        let narrated = state.transcript.iter().any(|l| l.contains("shivering in the cold"));
+        if narrated && session.pictures_canvas.contains_key(&0) {
+            return Some((session, state));
+        }
+    }
+    panic!("Arthur's intro should reach a plate frame with the graveyard narration behind it");
+}
+
+/// The plate reaches the composite PIXEL-FOR-PIXEL, with a full transcript
+/// behind it. Every painted pixel of the plate must equal the artwork — not one
+/// glyph of the previous screen's narration may land on it.
+///
+/// Before the fix this failed on the very first plate pixel a letter covered:
+/// the graveyard→Merlin frame came back with the whole "You are shivering in the
+/// cold night air…" block rasterized across Merlin.
+///
+/// Both pixel modes and both `honor_game_colours` modes are pinned: the plate is
+/// the game's geometry, not its palette, so the artwork must survive identically
+/// under all four combinations.
+#[test]
+fn arthur_plate_is_never_overpainted_by_scrollback_prose() {
+    for mode in [app::config::V6RenderMode::Hybrid, app::config::V6RenderMode::Raster] {
+        for honor in [true, false] {
+            let Some((session, state)) = arthur_plate_frame_with_scrollback(mode, honor) else {
+                return;
+            };
+            assert!(
+                state.transcript.iter().any(|l| l.contains("shivering in the cold")),
+                "harness sanity: there IS scrollback that could be painted over the art"
+            );
+            let model = session.screen();
+            let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+            let native = app::render::v6_layout::native_extent(items);
+            let layout = app::render::v6_layout::classify_windows(items);
+            let plate = layout.story_gfx.expect("a plate is up").clone();
+            let WinNode::Graphics(gw) = &plate.node else { panic!("story_gfx is a Graphics leaf") };
+
+            let (canvas, metrics) =
+                app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+            let (px0, py0, pw, ph) = PLATE;
+            let mut checked = 0usize;
+            for y in py0..py0 + ph {
+                for x in px0..px0 + pw {
+                    let src = gw.canvas.get_pixel(x, y).0;
+                    if src[3] == 0 {
+                        continue;
+                    }
+                    assert_eq!(
+                        canvas.get_pixel(x, y).0,
+                        src,
+                        "{mode:?}/honor={honor}: ({x},{y}) inside the plate differs from the \
+                         artwork — the story window's scrollback was rasterized over the \
+                         illustration. Arthur erases the screen before it narrates, so a plate \
+                         frame carries no prose at all (SQ-0707)"
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 200_000, "{mode:?}/honor={honor}: sampled {checked} plate pixels");
+            assert!(
+                metrics.is_none(),
+                "{mode:?}/honor={honor}: the plate owns the screen, so there is no story text box \
+                 to report scroll metrics for (matches the full-window-picture case, SQ-0578)"
+            );
+            // Raster ships one image, so nothing may be left transparent (SQ-0510).
+            assert!(
+                canvas.pixels().all(|p| p.0[3] == 255),
+                "{mode:?}/honor={honor}: the composite is self-contained even on the early-out"
+            );
+        }
+    }
+}
+
+/// HYBRID, end to end and across pane sizes: a plate frame reaches the terminal
+/// as pure artwork — the takeover fall-through holds at every pane geometry, so
+/// the plate is never composited into a cell-based transcript viewport with the
+/// scrollback wrapped around it.
+///
+/// Swept over several pane sizes because the hybrid/raster decision is driven by
+/// cell-quantized geometry and can flip between them. NOTE this is not the
+/// SQ-0707 guard: on the takeover path the prose is rasterized INTO the uploaded
+/// image, so it never appears as terminal letter cells either way (the original
+/// bug report measured 0 letter cells and 2718 halfblock cells). The overpaint
+/// itself is pinned per-pixel, in both modes, by the test above.
+#[test]
+fn arthur_hybrid_plate_frame_draws_no_text_cells_at_any_pane_size() {
+    for honor in [true, false] {
+        let Some((session, state)) =
+            arthur_plate_frame_with_scrollback(app::config::V6RenderMode::Hybrid, honor)
+        else {
+            return;
+        };
+        let model = session.screen();
+        for (w, h) in [(80u16, 24u16), (100, 30), (120, 40), (160, 50), (200, 60)] {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+            let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+            assert_eq!(
+                path, "raster",
+                "honor={honor} {w}x{h}: a full-screen plate has no ring to draw, so hybrid falls \
+                 through to the raster composite"
+            );
+            let letters = buf
+                .content()
+                .iter()
+                .filter(|c| c.symbol().chars().next().is_some_and(|ch| ch.is_alphabetic()))
+                .count();
+            assert_eq!(
+                letters, 0,
+                "honor={honor} {w}x{h}: the plate frame must be pure artwork — {letters} letter \
+                 cells means the narration is being drawn on the illustration (SQ-0707)"
+            );
+        }
     }
 }
 

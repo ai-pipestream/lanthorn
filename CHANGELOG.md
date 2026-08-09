@@ -71,6 +71,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Arthur's opening illustrations are no longer scribbled over.** The sword in
+  the churchyard, and Merlin rising out of it, came up with the previous screen's
+  narration rasterized straight across the artwork — a wall of text over the
+  picture, unreadable in both directions. Arthur never asks for that: it clears
+  the screen, draws the plate, hides the cursor and waits for a key, and its
+  narration is a *separate* screen it erases before the next illustration goes up.
+  The whole graveyard-to-Merlin turn prints not one character. babelmap was
+  painting its own scrollback onto the plate. Now a placed picture that leaves no
+  column wide enough to wrap prose into owns the screen outright — exactly as a
+  window-filling picture already did — so the illustration ships alone, in both
+  `hybrid` and `raster`. A picture that *does* leave a real column, like a margin
+  illustration, still gets prose beside it.
+
 - **Shogun's title screen is centred again — because Shogun centres it.** The
   header that opens Shogun (`SHOGUN`, `A Story of Japan`, the copyright block)
   arrived jammed against the left margin. Shogun does the centring itself, in
