@@ -2118,6 +2118,9 @@ pub fn build_v6_raster_canvas(
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+    // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
+    // canvas does not draw. The story page below spares them like any chrome text.
+    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors);
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
     // `fill_window_pages`), so `story_clear_native` below still finds it clear.
@@ -2329,6 +2332,12 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
             }
             WinNode::Buffer(b) => {
                 (b.bg, b.fg, b.primary).hash(&mut h);
+                // A SECONDARY prose window's lines are drawn into the composite
+                // (SQ-0729), so a change to them must rebuild it — without this the
+                // cached canvas outlives the text it was built from.
+                if !b.primary {
+                    b.lines.hash(&mut h);
+                }
             }
             _ => {}
         }
@@ -3013,12 +3022,27 @@ enum BottomPlan {
 /// rasterizes the story text over it in one canvas, and already renders this screen
 /// correctly. Detection is deliberately narrow — the story window must cover the
 /// whole screen (within one native text row per edge) AND opaque graphics must sit
-/// behind it across that whole area. An ordinary gameplay screen keeps window 0
-/// inset inside its frame, so it can never qualify.
+/// behind it, either FILLING it or FRAMING it (below). An ordinary gameplay screen
+/// keeps window 0 inset inside its frame, so it can never qualify.
 ///
 /// The opacity test samples a coarse grid rather than every pixel: it runs on every
 /// hybrid frame, and a fully painted picture versus a frame-only (or empty) canvas
 /// is not a close call.
+///
+/// SQ-0729: filling the screen was too strong a test. fmvpoker paints a 640×400
+/// poker table into full-screen window 0 and prints its whole title inside it, and
+/// that table is a FRAME — 17% of its pixels opaque, the middle a hole — so the
+/// grid below misses it at every point that matters and hybrid kept its (empty)
+/// ring. The game drew not one picture on screen. What actually decides this is
+/// the story window covering the screen: that alone leaves `chrome_bands` with
+/// nothing to carve, so NO art behind it can be uploaded whatever its shape. So a
+/// second arm asks whether the art ENCLOSES the screen instead — painted pixels
+/// within a native text row of all four edges, which is "the painted bounding box
+/// spans the screen" without scanning the interior. Measured across the v6 corpus,
+/// this moves fmvpoker alone: Zork Zero and Shogun keep window 0 inset, advent and
+/// scopa paint nothing behind it, Arthur's intro plate and Journey's title already
+/// fill the screen, and mysterious01's plate (a 512×192 band across the lower half)
+/// reaches neither the top edge nor the right one.
 fn picture_takeover(
     story: &crate::engine::PositionedWindow,
     chrome: &[&crate::engine::PositionedWindow],
@@ -3055,14 +3079,30 @@ fn picture_takeover(
             && y - wy < img.height()
             && img.get_pixel(x - wx, y - wy)[3] >= 128
     };
-    (0..N).all(|iy| {
+    let painted = |x: u32, y: u32| {
+        chrome.iter().any(|pw| painted_at(x, y, pw)) || story_gfx.is_some_and(|pw| painted_at(x, y, pw))
+    };
+    let fills_screen = (0..N).all(|iy| {
         let y = native.1 as u32 * (2 * iy + 1) / (2 * N);
         (0..N).all(|ix| {
             let x = native.0 as u32 * (2 * ix + 1) / (2 * N);
-            chrome.iter().any(|pw| painted_at(x, y, pw))
-                || story_gfx.is_some_and(|pw| painted_at(x, y, pw))
+            painted(x, y)
         })
-    })
+    });
+    if fills_screen {
+        return true;
+    }
+    // Or the art FRAMES the screen (SQ-0729): painted pixels within one native text
+    // row of every edge. Probed edge strip by edge strip, so a hollow frame answers
+    // on its border instead of failing on its hole.
+    let (w, h) = (native.0 as u32, native.1 as u32);
+    let any_painted = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+        ys.step_by(2).any(|y| xs.clone().step_by(2).any(|x| painted(x, y)))
+    };
+    any_painted(0..w, 0..slop)
+        && any_painted(0..w, h.saturating_sub(slop)..h)
+        && any_painted(0..slop, 0..h)
+        && any_painted(w.saturating_sub(slop)..w, 0..h)
 }
 
 /// Classify what sits below the story window natively, to pick the [`BottomPlan`]
@@ -3682,6 +3722,37 @@ fn draw_chrome_text_strip(
                 buf.set_stringn(c, *row as u16, " ", 1, fill);
             }
         }
+        // SQ-0727: the cells this row's GLYPH runs occupy, so a blank run cannot
+        // erase one. A run is POSITIONED by its scale-mapped native pixel, but its
+        // characters then advance ONE TERMINAL COLUMN each — two different rates
+        // wherever the pane is not exactly one column per native 8px text cell (at
+        // 120 columns of a 640px screen it is one and a half). So a blank run the
+        // game painted over another run's OWN whitespace no longer lands on that
+        // whitespace once mapped: it lands on a neighbouring glyph.
+        //
+        // advent.z6's help screen is the report. It paints each bar row as one
+        // label run plus the reversed blank cells of the bar around and between the
+        // labels, and at 120 columns the blanks at native x=17/33/73 mapped onto
+        // "N = next subject"'s columns 3/6/14 — its `=` and both lowercase `e`s —
+        // while the blank at x=113, one native cell past the label's last character,
+        // mapped INSIDE its cell span and clipped the tail off "RETURN = read
+        // subjec[t]". Interior drops and a clipped tail, one mechanism. At 80
+        // columns the two rates coincide and the row was always correct, which is
+        // why this reads as a font bug and is a scale bug.
+        //
+        // A blank run carries no glyphs: the strip and row floods above already put
+        // its background down, and in NATIVE pixels it only ever covers whitespace
+        // the glyph run drew itself. So it may still paint the cells no glyph run
+        // claimed (the bar's own gaps), and must skip the rest.
+        let claimed: Vec<(i32, i32)> = row_runs
+            .iter()
+            .filter(|t| !t.text.trim().is_empty())
+            .map(|t| {
+                let (c, _) = run_cell(t, scale, cell_px, pane);
+                (c, c + t.text.chars().count() as i32)
+            })
+            .collect();
+        let is_claimed = |c: i32| claimed.iter().any(|&(lo, hi)| c >= lo && c < hi);
         for t in row_runs {
             let (col, _) = run_cell(t, scale, cell_px, pane);
             if col < rect.x as i32 || col >= rect.right() as i32 {
@@ -3689,9 +3760,19 @@ fn draw_chrome_text_strip(
             }
             let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
             let max_w = rect.right() as usize - col as usize;
-            if max_w > 0 {
-                // Untrusted game text (SQ-0639).
-                let text = crate::render::blank_control_chars(&t.text);
+            if max_w == 0 {
+                continue;
+            }
+            // Untrusted game text (SQ-0639).
+            let text = crate::render::blank_control_chars(&t.text);
+            if t.text.trim().is_empty() {
+                for (i, ch) in text.chars().take(max_w).enumerate() {
+                    let c = col + i as i32;
+                    if !is_claimed(c) {
+                        buf.set_stringn(c as u16, *row as u16, ch.encode_utf8(&mut [0u8; 4]), 1, style);
+                    }
+                }
+            } else {
                 buf.set_stringn(col as u16, *row as u16, text.as_ref(), max_w, style);
             }
         }

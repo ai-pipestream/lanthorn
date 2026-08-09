@@ -87,6 +87,37 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **advent.z6's help bar stops losing letters, and wide terminals stop clipping the
+  line.** Opening `help` in Adventure showed a navigation bar reading
+  `N   n xt subj ct` and `RETURN = r ad subjec` — the `=`, three lowercase `e`s and
+  the tail of "subject", gone. It looked like a font problem and was arithmetic. A
+  line of v6 status text is *positioned* by the game's own pixel coordinates but
+  *drawn* one terminal column per character, and those two only advance at the same
+  rate when the pane happens to be one column per 8-pixel game cell. Widen the
+  terminal past that and they drift: at 120 columns a game cell is a column and a
+  half, so the blank cells the game paints across the bar — harmless where they
+  are, sitting over the label's own spaces — landed on its neighbouring *letters*
+  instead and wiped them, and the blank just past the end of a label reached back
+  inside it and took the last character with it. Blank runs now paint only the
+  cells no text claimed, so the bar reads whole at every terminal width.
+- **fmvpoker draws its poker table in `hybrid` mode, instead of nothing at all.**
+  Frobozz Magic Videopoker paints a full-screen frame and prints its title, bets
+  and winnings inside it; hybrid showed all of that text on a blank white page with
+  not one picture anywhere. Hybrid shows artwork as a ring *around* the story text,
+  so a game that grows its story window over the whole screen leaves no ring to
+  draw in and nothing can be shown — which is why such screens are handed to the
+  full-picture composite instead. That handover asked whether the art *filled* the
+  screen, and fmvpoker's table is a frame with a hollow middle: 17% painted, and
+  missed at every point the test looked. It now also recognises art that *encloses*
+  the screen, so the table arrives with the text still on it. Every other v6 title
+  renders exactly as before.
+- **The pixel composite stopped skipping a second text window.** A v6 game can run
+  more than one scrolling text window, and the composite drew graphics and status
+  grids and simply ignored those — so fmvpoker's bottom menu and its "Select an
+  option with your mouse or by typing the first letter." hint were missing from
+  `raster` mode entirely, on a screen where the terminal-cell paths showed both.
+  They are drawn now, in the game's own ink where you are honouring game colours
+  and the theme's where you are not, and the story page no longer paints over them.
 - **The Mysterious Adventures now draw a map instead of nothing at all.** All
   eleven of Brian Howarth's games — Scott Adams adventures rebuilt as v6 Z-code —
   played from start to finish with a completely empty automap, even though every

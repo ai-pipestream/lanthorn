@@ -132,6 +132,14 @@ session-only switch that never touches your saved config:
   into an ordinary text strip — a solid bar with the transcript starting beneath it,
   rather than glyphs stamped over scrolling prose. Such a bar need not be
   reverse-video to fill the row; a window that shape *is* the status bar.
+  A ring is also nothing when the story window covers the **whole screen**: there
+  are no bands left to carve, so no artwork behind it can be shown at all. Such a
+  frame is handed to the full-picture composite instead — whether the art *fills*
+  the screen (Zork Zero's map, Arthur's illustrated intro plates, Journey's title)
+  or merely *encloses* it. fmvpoker's poker table is the second kind: a 640×400
+  frame with a hollow middle that the game prints its whole title inside, only 17%
+  of its pixels painted. Asking whether the art filled the screen missed it at
+  every point that mattered, and the game drew not one picture in hybrid mode.
   Not every v6 game *has* a story window to ring, though. scopa's card table
   streams no prose at all — its screen is three grid windows and a table drawn out
   of filled rectangles, with two button labels on top — and a ring around nothing
@@ -153,7 +161,12 @@ session-only switch that never touches your saved config:
   buffer, drawn in its own rect. A secondary window is **live
   screen state**: what it currently shows, with no scrollback, cleared when the game
   erases it — but persisted with the rest of the screen, because a game that splits
-  the display does not necessarily repaint it after a restore (advent doesn't).
+  the display does not necessarily repaint it after a restore (advent doesn't). Its
+  lines are drawn on the **pixel composite** too, stacked from the window's own
+  origin one text row each — fmvpoker prints its bottom menu and its "Select an
+  option…" hint into one, and the composite used to draw graphics and grid windows
+  and nothing else, so a screen the cell paths showed in full came out with that
+  strip blank.
 - **Erased windows are opaque.** On a real interpreter every v6 window is a
   clipping region over one shared screen bitmap, so erasing a window paints its
   rect with that window's background — which is what makes a hint menu hide the

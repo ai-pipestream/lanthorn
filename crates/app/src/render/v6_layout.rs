@@ -528,6 +528,11 @@ pub fn fill_story_page_clear(
 fn chrome_text_rects(chrome: &[&PositionedWindow]) -> Vec<(u32, u32, u32, u32)> {
     let mut rects = Vec::new();
     for it in chrome {
+        // A secondary prose window's lines are drawn onto the composite too
+        // (SQ-0729), so the story page must spare them exactly as it spares a
+        // grid's runs — else fmvpoker's menu bar, printed inside window 0's box,
+        // is painted out the moment it is painted in.
+        rects.extend(buffer_line_rects(it));
         let WinNode::Grid(g) = &it.node else { continue };
         if !g.px_texts.is_empty() {
             for t in &g.px_texts {
@@ -1135,6 +1140,82 @@ pub fn build_chrome_canvas(
     }
 
     canvas
+}
+
+/// Draw every SECONDARY PROSE window's lines onto the pixel composite (SQ-0729).
+///
+/// A v6 game's second flowing-text window is published as a non-primary `Buffer`
+/// (SQ-0585), and [`build_chrome_canvas`] draws Graphics and Grid windows and
+/// nothing else — so every line such a window carried was absent from the raster
+/// screen while both cell paths showed it. fmvpoker is the report: it prints its
+/// menu bar and "Select an option with your mouse or by typing the first letter."
+/// into one, and the composite showed neither. It matters more since the same
+/// quest routed fmvpoker's hybrid frames here.
+///
+/// Separate from `build_chrome_canvas` because the ink is `honor_game_colours`-
+/// gated and that function is not: `ink` is the caller's already-resolved page ink
+/// (the game's own where honored, else the host's), and the window's OWN colour is
+/// consulted only when the player is honoring game colours. Painting fmvpoker's
+/// declared black regardless put black glyphs on the host's black page.
+///
+/// Placement — and therefore what [`fill_story_page_under_chrome_text`] must spare
+/// — is [`buffer_line_rects`].
+pub fn draw_secondary_prose(
+    canvas: &mut RgbaImage,
+    chrome: &[&PositionedWindow],
+    ink: Rgba<u8>,
+    honor: bool,
+    colors: &ColorScheme,
+) {
+    for it in chrome {
+        let WinNode::Buffer(b) = &it.node else { continue };
+        let fg = match b.fg.filter(|_| honor) {
+            Some(p) => packed_to_rgba(p, ink, colors),
+            None => ink,
+        };
+        let right = it.x_px as u32 + it.w_px as u32;
+        for (line, (x0, y0, _, _)) in b.lines.iter().zip(buffer_line_rects(it)) {
+            for (i, ch) in line.chars().enumerate() {
+                let px = x0 + i as u32 * FONT_W;
+                if px + FONT_W > right {
+                    break;
+                }
+                crate::render::bitfont::blit_glyph(canvas, ch, px, y0, FONT_W, FONT_H, fg, None);
+            }
+        }
+    }
+}
+
+/// Where a SECONDARY prose window's lines land on the pixel composite (SQ-0729),
+/// one `(x0, y0, x1, y1)` per line it carries, in the order of `lines`.
+///
+/// A `Buffer` is flowing prose with no pixel runs to place, so its lines stack from
+/// the window's origin (plus the game's own left margin), one 16px text row each,
+/// and stop at the bottom of the box the game declared — which is where the cell
+/// paths put them too. Shared by the draw in [`build_chrome_canvas`] and by
+/// [`chrome_text_rects`], whose caller must spare exactly the pixels the draw
+/// claims; measuring them twice is how Shogun's menu got erased once already.
+///
+/// A PRIMARY buffer is the transcript and is not drawn here at all — it yields
+/// nothing.
+fn buffer_line_rects(it: &PositionedWindow) -> Vec<(u32, u32, u32, u32)> {
+    let WinNode::Buffer(b) = &it.node else { return Vec::new() };
+    if b.primary {
+        return Vec::new();
+    }
+    let x0 = it.x_px as u32 + it.left_margin as u32;
+    let bottom = it.y_px as u32 + it.h_px as u32;
+    let right = it.x_px as u32 + it.w_px as u32;
+    let mut out = Vec::new();
+    for (row, line) in b.lines.iter().enumerate() {
+        let y0 = it.y_px as u32 + row as u32 * FONT_H;
+        if y0 + FONT_H > bottom {
+            break;
+        }
+        let x1 = (x0 + line.chars().count() as u32 * FONT_W).min(right);
+        out.push((x0, y0, x1, y0 + FONT_H));
+    }
+    out
 }
 
 /// A uniform (aspect-preserving) letterbox scale from native game pixels to
