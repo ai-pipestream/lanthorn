@@ -350,22 +350,41 @@ fn fmvpoker_text_reaches_the_composite(honor: bool) {
         pw * ph
     );
 
-    let (img, metrics) = composite(&session, &state);
-    let m = metrics.expect(
-        "fmvpoker prints its title INTO the frame it drew, so the backdrop cannot own the \
-         screen — the raster must report a story text box (SQ-0729)",
-    );
-    assert!(m.viewport_rows > 0, "honor={honor}: the prose box measures no rows");
-
+    // The hollow frame leaves a real text box: `story_prose_box` measures the
+    // largest rectangle of the clear interior the plate painted no pixel of, and a
+    // frame's BOUNDING box (which is the whole screen) used to make it answer "the
+    // plate owns the screen" — which is why not one line of text was drawn.
     let prose = app::render::v6_layout::story_prose_box((0, 0, 640, 400), layout.story_gfx)
         .expect("the hollow frame leaves a prose box");
-    let (blank, _) = composite(&session, &without_transcript(&state));
-    let changed = differing(&img, &blank, prose);
+
     assert!(
-        changed > 200,
-        "honor={honor}: only {changed} pixel(s) inside the frame carry story text — fmvpoker's \
-         raster shows no text at all (SQ-0729)"
+        prose.2 >= 8 * 8 && prose.3 >= 16,
+        "honor={honor}: the frame's interior measured {}x{} — a hollow frame's BOUNDING box is \
+         the whole screen, and measuring it that way answered \"the plate owns the screen\", which \
+         is why not one line of text was drawn (SQ-0729)",
+        prose.2,
+        prose.3
     );
+
+    // …and the game's own text reaches the composite inside it. It arrives as
+    // PAINT, not as transcript (SQ-0729 rule (d): this story window's art ENCLOSES
+    // it, so it is a canvas and its runs are drawn where the game's own set_cursor
+    // put them) — so the probe is for ink at those coordinates, which is where a
+    // real interpreter shows them too. "Current Bet: / 10 / Total Winnings: / 1000"
+    // are printed into window 0 at (76,247), (76,265), (420,247) and (420,265),
+    // 1-based, all of them inside the frame.
+    let (img, _) = composite(&session, &state);
+    for (x, y, label) in
+        [(76u32, 247u32, "Current Bet:"), (76, 265, "10"), (420, 247, "Total Winnings:"), (420, 265, "1000")]
+    {
+        let rect = (x - 1, y - 1, label.chars().count() as u32 * 8, 16);
+        let seen = colours_in(&img, rect);
+        assert!(
+            seen.len() >= 2,
+            "honor={honor}: {label:?} is one flat colour at the ({x},{y}) the game named — \
+             fmvpoker's raster shows no text at all (SQ-0729)"
+        );
+    }
 }
 
 #[test]

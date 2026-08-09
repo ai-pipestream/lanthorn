@@ -1200,6 +1200,56 @@ pub fn draw_secondary_prose(
     }
 }
 
+/// Draw the STORY window's own streamed runs where they are sitting on the v6
+/// screen (SQ-0729) — [`crate::engine::BufferWindow::px_runs`].
+///
+/// For a story window that is a CANVAS rather than a page (see
+/// `screen::story_window_is_a_canvas`) this replaces the transcript entirely: the
+/// window's live screen state is these runs, at the coordinates the game's own
+/// `set_cursor` named, and a scrolling re-render of everything it ever printed is
+/// the wrong reading of it. fmvpoker is the shape — it prints "HOLD" under each
+/// card it is holding at `set_cursor(row=203, col=70/183/296/409/522)` and its
+/// running totals at (76,247), (76,265), (420,247), (420,265), and every one of
+/// them arrived in the story scroll instead.
+///
+/// Colour follows the same gate as [`draw_secondary_prose`]: the game's own pair
+/// only when the player is honoring game colours, else the host's `ink` on its
+/// `page`. Reverse (§8.7.1 bit 1) swaps the pair, which is how fmvpoker marks a
+/// held card; a blank run in the game's own background is how it un-marks one, so
+/// an explicit background is painted as a block rather than skipped.
+pub fn draw_story_canvas_runs(
+    canvas: &mut RgbaImage,
+    story: Option<&PositionedWindow>,
+    ink: Rgba<u8>,
+    page: Rgba<u8>,
+    honor: bool,
+    colors: &ColorScheme,
+) {
+    let Some(it) = story else { return };
+    let WinNode::Buffer(b) = &it.node else { return };
+    for t in &b.px_runs {
+        let (mut fg, mut bg) = if honor {
+            (
+                packed_to_rgba(t.fg, ink, colors),
+                packed_explicit(t.bg).then(|| packed_to_rgba(t.bg, page, colors)),
+            )
+        } else {
+            (ink, None)
+        };
+        if t.style & 1 != 0 {
+            let block = bg.unwrap_or(page);
+            bg = Some(fg);
+            fg = block;
+        }
+        // Screen-absolute 1-based pixels, stamped where the run was printed —
+        // no window-origin offset, exactly like a grid window's `px_texts`.
+        let (px0, py) = (t.x.max(1) as u32 - 1, t.y.max(1) as u32 - 1);
+        for (i, ch) in t.text.chars().enumerate() {
+            crate::render::bitfont::blit_glyph_styled(canvas, ch, px0 + i as u32 * FONT_W, py, FONT_W, FONT_H, fg, bg, t.style);
+        }
+    }
+}
+
 /// Where a SECONDARY prose window's lines land on the pixel composite (SQ-0729),
 /// one `(x0, y0, x1, y1)` per line it carries, in the order of `lines`.
 ///

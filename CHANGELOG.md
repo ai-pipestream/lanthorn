@@ -87,6 +87,22 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **HOLD lands under the card you are holding.** Frobozz Magic VideoPoker positions
+  everything it says: `HOLD` under each held card, the running totals in the panel
+  below the table. babelmap read its story window as a transcript, so all of it
+  scrolled past as narration instead — and the game's own player was right that
+  there is not supposed to be a scroll window in it at all. What settles it is not
+  what a run *means* — a game moving the cursor before a run usually means "resume
+  the story here", which is what Arthur does before every room name — but what kind
+  of **surface** the window is. Arthur's story window is a transcript that happens
+  to have pictures drawn on it; fmvpoker's is a picture frame that happens to have
+  text positioned in it: its own art encloses the window on all four sides without
+  filling it. A window like that now renders as what is sitting on it, where the
+  game put it, with no transcript at all. HOLD appears under its card, the totals
+  sit at the top of the bottom panel, and the hand you drew reads below them. One
+  game in the whole v6 corpus answers to this; every other title's story window is
+  untouched.
+
 - **The line telling you what you drew stops being written over.** Deal a hand in
   Frobozz Magic VideoPoker and the game announces it in the panel under the table —
   *You draw (a) an Eight, (b) a Three, (c) an Ace…* — which is the only place the
