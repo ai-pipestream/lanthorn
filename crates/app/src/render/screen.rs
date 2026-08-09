@@ -680,6 +680,9 @@ fn render_node(
                         // clear ground for the terminal to colour in (Zork Zero's
                         // room icons came out on an opaque black box). Same live
                         // `honor_game_colours` gate as the pane flood above.
+                        // The painted ground goes under the ring's art and glyphs
+                        // and before the pages claim the rest (SQ-0706).
+                        v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
                         if state.config.honor_game_colours {
                             v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
                             // …and the story window's own page under the pixels the
@@ -692,9 +695,6 @@ fn render_node(
                             // after the chrome half of this fix landed.
                             v6::fill_story_page_clear(&mut canvas, layout.story, &state.colors);
                         }
-                        // …then anything the game PAINTED with erase_window fills
-                        // (SQ-0706): on its own table, under its own prose.
-                        v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
                         let pane_dev = (
@@ -2049,12 +2049,14 @@ pub fn build_v6_raster_canvas(
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
     // `fill_window_pages`), so `story_clear_native` below still finds it clear.
+    // The game's own painted ground — erase_window fills (SQ-0706) — goes UNDER
+    // the art and glyphs already on the canvas and BEFORE the window pages claim
+    // what is left, because a fill is the oldest thing on the screen: the game
+    // filled its rectangle, then printed the label on top of it.
+    v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
     if honor {
         v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
     }
-    // The game's own painted ground — erase_window fills (SQ-0706). Before the
-    // story box below, so prose and inline art still land on top of it.
-    v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
     // one full 8x16 text cell. A full-screen picture (Zork Zero's rebus) grows

@@ -539,17 +539,23 @@ fn blit_chrome_graphics(canvas: &mut RgbaImage, chrome: &[&PositionedWindow]) {
 /// Composite the v6 PAINTED GROUND onto `canvas` — the filled rectangles an
 /// `erase_window` left behind (SQ-0706), at their absolute native positions.
 ///
-/// Drawn after the window pages and before the story text, so a game that paints
-/// with fills (scopa's cards) sits on its own table and under its own prose. Only
-/// opaque pixels transfer: the surface is empty everywhere the game never painted,
-/// and those pixels belong to whatever the ordinary window machinery resolved.
+/// It is GROUND: it goes UNDER everything already drawn, and is itself drawn
+/// before the window pages claim the rest.
+///
+/// A painted fill is the oldest thing on the screen — the game filled a rectangle,
+/// then printed its label on top. Compositing the surface OVER the chrome canvas
+/// erased exactly those labels: scopa's menu came out as white buttons with no
+/// text, because its button fills landed on top of the glyphs that had already
+/// been rasterized. So only pixels no layer has touched take paint, and the order
+/// is: chrome art and glyphs, then this ground beneath them, then the window pages
+/// filling whatever neither claimed.
 pub fn blit_paint_ground(canvas: &mut RgbaImage, paint: Option<&RgbaImage>) {
     let Some(src) = paint else { return };
     let (w, h) = (src.width().min(canvas.width()), src.height().min(canvas.height()));
     for y in 0..h {
         for x in 0..w {
             let p = *src.get_pixel(x, y);
-            if p[3] > 0 {
+            if p[3] > 0 && canvas.get_pixel(x, y)[3] == 0 {
                 canvas.put_pixel(x, y, p);
             }
         }
