@@ -2,6 +2,7 @@
 //! container. Exposes the embedded executable and a generic resource accessor.
 
 pub mod bpal;
+pub mod infocom_pics;
 
 /// Errors that can arise while parsing a Blorb container.
 #[derive(Debug, PartialEq, Eq)]
