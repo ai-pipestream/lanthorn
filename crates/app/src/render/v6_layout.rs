@@ -781,7 +781,38 @@ fn fill_explicit_bg_rows(
     }
     for (py, runs) in rows {
         if let Some(bg) = row_flood_bg(&runs, default_bg, colors) {
-            fill_cell(canvas, ox, py, win_w, FONT_H, bg);
+            // Only as wide as the row's own runs — never the whole window.
+            //
+            // The point of this flood is to close the GAPS BETWEEN runs, so a bar
+            // the game painted as several runs reads as one solid block. Painting
+            // the full window width also paints where the game printed nothing,
+            // and a window is not always a bar: scopa positions its "abort"/"OK"
+            // labels with a scratch window it moves around, so flooding that
+            // window's box smeared each button's colour out to the screen edge,
+            // past the rounded outline the game had drawn (SQ-0706 follow-up).
+            //
+            // Shogun's status bar — the case this flood exists for (SQ-0519) — is
+            // unaffected in practice: its runs span 49..592 inside a 46..594
+            // window, so the bar loses three pixels at one end and two at the
+            // other, and still reads as one solid block.
+            let lo = runs.iter().map(|t| u32::from(t.x.max(1)) - 1).min().unwrap_or(ox);
+            let hi = runs
+                .iter()
+                .map(|t| (u32::from(t.x.max(1)) - 1) + t.text.chars().count().max(1) as u32 * FONT_W)
+                .max()
+                .unwrap_or(ox + win_w);
+            // A window whose own runs sit INSIDE its box is describing a bar, and
+            // the bar is the window: flood it edge to edge. Shogun's status band is
+            // this — runs at 49..592 in a 46..594 window.
+            //
+            // A window whose runs fall OUTSIDE its box is not a bar at all. scopa
+            // positions its "abort"/"OK" labels with a scratch window it moves for
+            // every draw, so its runs land at 568..608 while the box reads 579..640;
+            // flooding that box smeared each button's colour past the rounded
+            // outline the game had drawn. There, flood only what the runs occupy.
+            let contained = lo >= ox && hi <= ox + win_w;
+            let (fx, fw) = if contained { (ox, win_w) } else { (lo, hi.saturating_sub(lo)) };
+            fill_cell(canvas, fx, py, fw, FONT_H, bg);
         }
     }
 }
