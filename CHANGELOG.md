@@ -124,6 +124,27 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **`/dump-windows` answers the question it was asked.** The command exists to
+  say what the game's last frame looked like, and it could not: it is reached
+  through the command palette or a hotkey dialog, both modal overlays that route
+  the v6 pane off its pixel path, so the frame it described was always the
+  overlay's — every window reporting `NOT DRAWN this frame` with six palette
+  frames stacked over the one anybody wanted. It now describes the last frame the
+  **game** drew: that frame's render path, pane, story viewport, window
+  placements, chrome strips and ring clip, with a `frame described:` line saying
+  which frame it is and how many modal frames have passed since. The game's own
+  window table and the model built from it are still read live — a modal runs no
+  game code — and anything genuinely unrecoverable is reported as `UNAVAILABLE`
+  rather than silently replaced by the overlay's numbers.
+
+- **…and you can copy it.** The dump is drawn into a v6 pane made of graphics
+  placeholder glyphs, so selecting it took them along: the first real capture came
+  back placeholder-dense with fields truncated mid-word, the diagnostic corrupted
+  by the protocol it was diagnosing. Every capture is now also appended to
+  `~/.babelmap/dump-windows.log`, timestamped, with the path named in the
+  transcript — readable from a second terminal while the game is still running,
+  and still there afterwards.
+
 - **Shogun has its artwork back on the Amiga floppy.** Played off its disk image,
   *James Clavell's Shogun* showed no graphics at all — not even a title screen —
   while *Zork Zero*, *Journey* and *Arthur* all drew theirs. Infocom's picture

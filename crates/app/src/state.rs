@@ -1938,6 +1938,24 @@ pub struct V6CellRect {
     pub cells: (u16, u16, u16, u16),
 }
 
+/// One finished non-modal v6 frame, held for `/dump-windows` (SQ-0756).
+///
+/// Only what the FRAME owns is snapshotted. The game's window table and the model
+/// built from it are live state and are read live at dump time: a modal overlay runs
+/// no game code, so they still describe the same frame. Where the renderer PUT each
+/// window does not survive — the next frame overwrites it — so it is captured here,
+/// with the ring's own plan/clip for that frame beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V6GameFrame {
+    /// This frame's `v6_cell_map`: its render path, pane, story viewport, per-window
+    /// placements and chrome strips.
+    pub cells: Vec<V6CellRect>,
+    pub ring_plan: &'static str,
+    pub ring_clip: Option<(u16, u16)>,
+    /// Frames drawn since, all of them with a modal overlay up — how stale this is.
+    pub modal_frames_since: u32,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
@@ -2192,6 +2210,16 @@ pub struct AppState {
     /// that mapping — art scales by pixel, text by cell, and the two disagree.
     /// Rebuilt every frame by the v6 render paths.
     pub v6_cell_map: std::cell::RefCell<Vec<V6CellRect>>,
+    /// The last frame the GAME drew — the one `/dump-windows` describes (SQ-0756).
+    ///
+    /// `v6_cell_map` above is the frame just rendered, and by the time the command
+    /// runs that is always the command's own: it is reached through the palette or a
+    /// hotkey dialog, both modal overlays, and a modal routes the v6 pane away from
+    /// the pixel path. Every window then reports `NOT DRAWN this frame`, which is
+    /// precisely the question the command exists to answer. So each non-modal frame
+    /// puts its mapping here as it finishes ([`AppState::note_v6_frame_end`]), and
+    /// the dump reads THIS.
+    pub v6_last_game_frame: std::cell::RefCell<Option<V6GameFrame>>,
     /// Recent v6 render paths, newest last, consecutive repeats collapsed to a count
     /// (SQ-0587). `/dump-windows` cannot observe the steady state on its own: typing
     /// `/` opens the command palette, a modal overlay, which itself routes the frame
@@ -2582,6 +2610,7 @@ impl Default for AppState {
             v6_story_page: std::cell::Cell::new(None),
             v6_paint: std::cell::RefCell::new(None),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
+            v6_last_game_frame: std::cell::RefCell::new(None),
             v6_path_log: std::cell::RefCell::new(Vec::new()),
             v6_save_log: std::cell::RefCell::new(Vec::new()),
             v6_ring_plan: std::cell::Cell::new("—"),
@@ -3036,6 +3065,62 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// The frame `/dump-windows` describes, and the line that says which frame that
+    /// is (SQ-0756).
+    ///
+    /// `None` means no game frame has been recorded — the placements and the ring
+    /// plan are then genuinely unknown, and the caller must report them as
+    /// unavailable rather than fall back to the modal frame standing in
+    /// `v6_cell_map`, which is the defect this exists to fix.
+    pub fn v6_dump_frame(&self) -> (Option<V6GameFrame>, String) {
+        match self.v6_last_game_frame.borrow().clone() {
+            Some(f) => {
+                let age = match f.modal_frames_since {
+                    0 => "the frame on screen now".to_string(),
+                    n => format!("{n} modal frame(s) ago — NOT the palette/dialog frame this command runs in"),
+                };
+                (Some(f), format!("  frame described: the last frame the game drew, {age}"))
+            }
+            None => (
+                None,
+                "  frame described: none — no frame has been drawn without a modal overlay up, so \
+                 the per-window cells, the story viewport and the ring plan are UNAVAILABLE"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Close a story-pane frame: if the GAME drew it, keep its mapping for
+    /// `/dump-windows` (SQ-0756).
+    ///
+    /// Called once per frame by `render_story_pane`. A frame drawn under a modal
+    /// overlay is the command's own, not the game's, so it only ages the snapshot —
+    /// the count it bumps is what the dump reports as "modal frames since". Frames
+    /// that recorded no v6 mapping at all (every non-v6 game) are not frames of the
+    /// kind this describes and leave it alone.
+    ///
+    /// `&self` because the render pass holds an immutable `AppState` (same reason as
+    /// [`note_v6_path`](Self::note_v6_path)).
+    pub fn note_v6_frame_end(&self) {
+        let cells = self.v6_cell_map.borrow();
+        if cells.is_empty() {
+            return;
+        }
+        let mut slot = self.v6_last_game_frame.borrow_mut();
+        if self.any_modal_overlay_open() {
+            if let Some(f) = slot.as_mut() {
+                f.modal_frames_since = f.modal_frames_since.saturating_add(1);
+            }
+            return;
+        }
+        *slot = Some(V6GameFrame {
+            cells: cells.clone(),
+            ring_plan: self.v6_ring_plan.get(),
+            ring_clip: self.v6_ring_clip.get(),
+            modal_frames_since: 0,
+        });
     }
 
     /// The modal overlays currently open, by name (SQ-0587). A v6 story drops its

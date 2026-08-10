@@ -93,40 +93,50 @@ pub(crate) fn dispatch_slash_outcome(
             // table, the model, and where the last frame put each on the terminal —
             // the three things that have to agree (SQ-0585). The engine owns the
             // first two; the render mapping lives here, so hand it over.
-            let cells = state.v6_cell_map.borrow().clone();
-            // Typing `/` opened the palette, so the frame this dump reads is a palette
-            // frame by construction. The history says what the frames before it did.
+            //
+            // The mapping is the LAST GAME FRAME's, not the live one (SQ-0756). This
+            // command is reached through the palette or a hotkey dialog, so the frame
+            // in `v6_cell_map` is always the modal's, in which the game's windows are
+            // all "NOT DRAWN this frame" — the one thing a reader is here to learn.
+            // The game halves stay live: a modal runs no game code, so the window
+            // table and the model still describe the frame being reported.
+            let (frame, frame_line) = state.v6_dump_frame();
+            let cells = frame.as_ref().map(|f| f.cells.clone()).unwrap_or_default();
             let history: Vec<String> = state
                 .v6_path_log
                 .borrow()
                 .iter()
                 .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
                 .collect();
-            let lines = match session.as_any().downcast_ref::<app::session::GameSession>() {
+            let mut out: Vec<String> = match session.as_any().downcast_ref::<app::session::GameSession>() {
                 Some(gs) if !gs.v6_window_dump(&cells).is_empty() => gs.v6_window_dump(&cells),
                 _ => session.window_dump(),
             };
-            for line in lines {
-                state.push_transcript_internal(&line, TranscriptKind::Meta);
-            }
-            let clip = match state.v6_ring_clip.get() {
-                Some((art, row)) if art == u16::MAX => {
-                    format!("plan {}, ring clipped at row {row} — NO opaque art found in the canvas", state.v6_ring_plan.get())
-                }
-                Some((art, row)) => format!(
-                    "plan {}, ring clipped at row {row} (art opaque down to native y={art})",
-                    state.v6_ring_plan.get()
-                ),
-                None => format!("plan {}, ring not clipped", state.v6_ring_plan.get()),
+            out.push(frame_line);
+            // The ring's plan and clip belong to the frame that drew them, so they
+            // ride the same snapshot; with no game frame recorded there is nothing
+            // honest to print (SQ-0756).
+            let clip = match frame.as_ref() {
+                None => "unavailable — no game frame recorded".to_string(),
+                Some(f) => match f.ring_clip {
+                    Some((art, row)) if art == u16::MAX => {
+                        format!("plan {}, ring clipped at row {row} — NO opaque art found in the canvas", f.ring_plan)
+                    }
+                    Some((art, row)) => format!(
+                        "plan {}, ring clipped at row {row} (art opaque down to native y={art})",
+                        f.ring_plan
+                    ),
+                    None => format!("plan {}, ring not clipped", f.ring_plan),
+                },
             };
-            state.push_transcript_internal(&format!("  ring: {clip}"), TranscriptKind::Meta);
+            out.push(format!("  ring: {clip}"));
             // SQ-0588: windows whose recorded ops did not reproduce their canvas at
             // save time. Each is a draw path we are not recording — the archive fell
             // back to a PNG for it, so it restores correctly but cannot be recoloured
             // by a later palette change.
             let save_diags: Vec<String> = state.v6_save_log.borrow().clone();
             for msg in &save_diags {
-                state.push_transcript_internal(&format!("  save: {msg}"), TranscriptKind::Meta);
+                out.push(format!("  save: {msg}"));
             }
             // SQ-0593: the character-cell pixel size we hand the game. EVERYTHING a
             // Glulx game sizes in pixels is derived from it — advent.blb's toolbar
@@ -148,30 +158,34 @@ pub(crate) fn dispatch_slash_outcome(
             // What the game actually sees, after SQ-0593 scaling. Reporting the raw
             // terminal value alone was misleading the moment the divisor existed.
             let (cw, ch) = state.config.glk_pixel_scale.apply((raw_w, raw_h));
-            state.push_transcript_internal(
-                &format!(
-                    "  cell size: terminal says {raw_w}x{raw_h} px ({src}); glk_pixel_scale \
-                     → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px to the game",
-                    story_rect.width, story_rect.height,
-                    cw * story_rect.width as u32, ch * story_rect.height as u32
-                ),
-                TranscriptKind::Meta,
-            );
+            out.push(format!(
+                "  cell size: terminal says {raw_w}x{raw_h} px ({src}); glk_pixel_scale \
+                 → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px to the game",
+                story_rect.width, story_rect.height,
+                cw * story_rect.width as u32, ch * story_rect.height as u32
+            ));
             let encodes = state.graphics_render.borrow().band_encodes;
-            state.push_transcript_internal(
-                &format!("  band uploads since launch: {encodes}"),
-                TranscriptKind::Meta,
-            );
+            out.push(format!("  band uploads since launch: {encodes}"));
             let bands = state.graphics_render.borrow().band_log.clone();
             for b in bands {
-                state.push_transcript_internal(&format!("  {b}"), TranscriptKind::Meta);
+                out.push(format!("  {b}"));
             }
             if !history.is_empty() {
-                state.push_transcript_internal(
-                    &format!("  recent render paths (oldest first): {}", history.join(" · ")),
-                    TranscriptKind::Meta,
-                );
+                out.push(format!("  recent render paths (oldest first): {}", history.join(" · ")));
             }
+            for line in &out {
+                state.push_transcript_internal(line, TranscriptKind::Meta);
+            }
+            // …and the same text to a file, because the on-screen copy cannot be
+            // copied: a v6 pane is drawn out of kitty unicode placeholder glyphs, and
+            // a terminal selection over the dump takes them with it — the user's paste
+            // came back placeholder-dense and truncated mid-field (SQ-0756). The log
+            // is readable from another terminal while the game is still running.
+            let msg = match app::export::append_window_dump(&state.config.user_dir, &out) {
+                Ok(p) => format!("  [dump appended to {} — copy it from there, not off the screen]", crate::abbreviate_home(&p)),
+                Err(e) => format!("  [dump log failed: {e}]"),
+            };
+            state.push_transcript_internal(&msg, TranscriptKind::Meta);
         }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {

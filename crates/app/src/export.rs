@@ -40,6 +40,38 @@ pub fn export_transcript(
     Ok(target)
 }
 
+/// The `/dump-windows` log, under the babelmap home: `<user_dir>/dump-windows.log`.
+pub fn window_dump_path(user_dir: &Path) -> PathBuf {
+    user_dir.join("dump-windows.log")
+}
+
+/// Append one `/dump-windows` capture to that log, stamped with the instant it was
+/// taken, and return the path (SQ-0756).
+///
+/// The dump is drawn into the terminal, and selecting it there also selects the kitty
+/// unicode placeholder glyphs the v6 pane is made of — the user's paste came back
+/// dense with placeholders and truncated mid-field, corrupted by the very protocol
+/// the dump exists to diagnose. A file is the same text with nothing composited over
+/// it, readable from another terminal while the TUI is still running, and it outlives
+/// the session.
+///
+/// APPENDS rather than replaces: an investigation takes several dumps — before a
+/// move, after it — and each is evidence about a different frame.
+pub fn append_window_dump(user_dir: &Path, lines: &[String]) -> io::Result<PathBuf> {
+    use std::io::Write;
+    let target = window_dump_path(user_dir);
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&target)?;
+    writeln!(f, "=== /dump-windows {} ===", jiff::Timestamp::now())?;
+    for line in lines {
+        writeln!(f, "{line}")?;
+    }
+    writeln!(f)?;
+    Ok(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

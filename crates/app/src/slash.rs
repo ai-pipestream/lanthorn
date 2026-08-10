@@ -466,7 +466,7 @@ pub static COMMANDS: &[CommandSpec] = &[
 
     // ── Help ──────────────────────────────────────────────────────────────
     CommandSpec { name: "dump-windows", category: Category::Help, context: Context::Global,
-        usage: "dump-windows", description: "dump the live Glk window layout (sizes, borders, colours)",
+        usage: "dump-windows", description: "dump the last game frame's window layout, here and to ~/.babelmap/dump-windows.log",
         dispatch: |_| SlashOutcome::DumpWindows },
     CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
         usage: "debug", description: "toggle the Z-machine debug inspector pane",
