@@ -187,6 +187,31 @@ pub(crate) fn dispatch_slash_outcome(
             };
             state.push_transcript_internal(&msg, TranscriptKind::Meta);
         }
+        SlashOutcome::DumpCells => {
+            // The rendered cells, glyphs AND styling, as plain text (SQ-0761). Only
+            // the file gets the grid: it is two lines per terminal row, so echoing it
+            // into the transcript would scroll the very frame the next capture is
+            // meant to describe — and the transcript cannot be copied off a v6 pane
+            // anyway, which is the whole reason SQ-0756 started writing files.
+            let snapshot = state.last_frame_cells.borrow().clone();
+            let msg = match snapshot {
+                None => "[dump-cells] no frame has been drawn yet — nothing to dump".to_string(),
+                Some(frame) => {
+                    let lines = frame.lines();
+                    match app::export::append_cell_dump(&state.config.user_dir, &lines) {
+                        Ok(p) => format!(
+                            "[dump-cells] {} rows x {} cols of glyphs + styling appended to {} \
+                             — copy it from there, not off the screen",
+                            frame.buf.area.height,
+                            frame.buf.area.width,
+                            crate::abbreviate_home(&p)
+                        ),
+                        Err(e) => format!("[dump-cells] log failed: {e}"),
+                    }
+                }
+            };
+            state.push_transcript_internal(&msg, TranscriptKind::Meta);
+        }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {
             let history = state.notifications.history().to_vec();

@@ -72,6 +72,34 @@ pub fn append_window_dump(user_dir: &Path, lines: &[String]) -> io::Result<PathB
     Ok(target)
 }
 
+/// The `/dump-cells` log, under the babelmap home: `<user_dir>/dump-cells.log`.
+pub fn cell_dump_path(user_dir: &Path) -> PathBuf {
+    user_dir.join("dump-cells.log")
+}
+
+/// Append one `/dump-cells` capture to that log, stamped, and return the path
+/// (SQ-0761).
+///
+/// A separate file from the window dump on purpose: this one is a hundred-odd lines
+/// of fixed-width grid per capture, and interleaving it with the geometry dump would
+/// bury both. Appends for the same reason `append_window_dump` does — an
+/// investigation takes a dump before a move and another after it, and the pair is
+/// the evidence.
+pub fn append_cell_dump(user_dir: &Path, lines: &[String]) -> io::Result<PathBuf> {
+    use std::io::Write;
+    let target = cell_dump_path(user_dir);
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&target)?;
+    writeln!(f, "=== /dump-cells {} ===", jiff::Timestamp::now())?;
+    for line in lines {
+        writeln!(f, "{line}")?;
+    }
+    writeln!(f)?;
+    Ok(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

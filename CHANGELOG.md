@@ -16,6 +16,26 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **`/dump-cells` writes the screen itself — glyphs *and* colours — as plain
+  text.** `/dump-windows` says where each window landed; nothing said what colour
+  landed in which cell, which is what a v6 layout defect nearly always turns out to
+  be. A panel fill painting rows under a menu, a border cell wearing the fill's
+  colour instead of the frame's, a label the buffer holds and the screen does not —
+  geometry shows none of the three, and each one cost a round trip through a
+  screenshot. The new command writes two lines per terminal row: the glyph row, so
+  borders and labels read as text, and under it a style row, one key per cell into a
+  legend of the distinct styles with their exact colours, attributes, cell counts and
+  extents. Above the grid, the rows owned end to end by a single background are
+  listed as ranges — "these nine rows all carry the panel fill" as one line — and
+  every region an uploaded image covers is named, its glyphs marked `#` because the
+  image draws over them while its cells' colours, untouched by the placement, stay
+  in the style row. No escape sequences anywhere: the capture is meant to be copied,
+  pasted and diffed. It appends to `~/.babelmap/dump-cells.log` with the path named
+  in the transcript, and describes the last frame drawn with no modal over it — a
+  modal paints straight onto the cells, so a capture taken through the palette would
+  report the palette's box sitting where the game's picture was. Bind it and no modal
+  opens at all: `"ctrl+g" = "dump-cells"` under `[keymap.global]`.
+
 - **The story browser names the container, not just the format.** A game played
   off its original Amiga release floppy now lists as `Z6 (ADF)`, beside the
   existing `Z5 (blorb)` — so a disk image is distinguishable from a loose story

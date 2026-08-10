@@ -4,6 +4,7 @@
 
 pub mod anim;
 pub mod archive;
+pub mod cell_dump;
 pub mod aux_store;
 pub mod clipboard;
 pub mod export;

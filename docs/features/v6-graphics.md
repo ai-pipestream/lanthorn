@@ -897,6 +897,65 @@ file is the same text with nothing composited over it. Read it from a second
 terminal while the game is still running, take several captures across a turn,
 and paste any of them intact.
 
+## `/dump-cells` writes the rendered screen — glyphs *and* colours — as plain text
+
+`/dump-windows` answers *where did each window land*. It cannot answer the
+question a v6 layout defect nearly always turns out to be: **which colour landed
+in which cell**. A panel fill painting rows underneath a menu, a border cell
+wearing the fill's colour instead of the frame's, a label the cell buffer holds
+and the screen does not — geometry shows none of the three, and each one used to
+cost a round trip through a screenshot.
+
+`/dump-cells` writes the frame itself. Two lines per terminal row: the **glyph**
+row, so borders and labels read as text, and directly under it the **style** row,
+one key character per cell indexing a legend of the distinct styles. No ANSI
+escapes anywhere — the whole point is text you can copy, paste and diff.
+
+```
+ 52 g|│──────────────────────────The P──────────────────────────────────Individual Comm──│
+ 52 s|ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+```
+
+Above the grid, three summaries do the counting for you:
+
+- **`graphics:`** — every region an uploaded image covers, by rect. Those cells
+  read `#` in the glyph row, because an image draws *over* the terminal's text
+  layer and whatever character is underneath is not on screen. Their **style** row
+  survives, though: placing an image does not touch the colours of the cells it
+  covers, which is exactly how a fill painted beneath an art strip stays visible.
+  Placements the renderer recorded are listed beside the rects recovered from the
+  buffer, because halfblock and sixel backends paint without leaving escape cells
+  behind at all.
+- **`row backgrounds:`** — the rows every cell of which shares one background,
+  as ranges. "These nine rows all carry the panel fill's colour" is one line here
+  instead of a count done by eye off a screenshot.
+- **`styles:`** — the distinct styles, commonest first, each with its exact
+  foreground, background, attributes, cell count and bounding box, plus the rows
+  it owns end to end. A picture rendered *into* cells can run to hundreds of
+  styles (one per pixel pair); past the first 48 the tail is bucketed under `*`
+  with its own count and extent, so the legend never buries the dozen that matter.
+
+The whole capture goes to **`~/.babelmap/dump-cells.log`**, appended and
+timestamped, and the transcript line names the path — only the path, because the
+grid is two lines per row and echoing it would scroll the very frame your next
+capture is meant to describe. Like the window dump, it lands in a file because a
+selection dragged off a v6 pane brings the graphics protocol's placeholder glyphs
+with it.
+
+It describes the last frame drawn with **no modal over it**, for a reason sharper
+than the window dump's: a modal is painted straight onto the cells, so a capture
+taken through the palette would not report a stale frame — it would report the
+palette's box sitting where the game's picture was. Bind it to a Ctrl key and no
+modal ever opens:
+
+```toml
+[keymap.global]
+"ctrl+g" = "dump-cells"
+```
+
+A bound-key capture moves neither the render-path history nor the band-upload
+count; the palette route moves both.
+
 ## Not yet there
 - **Proportional fonts** — status and chrome text currently use fixed-width
   metrics; the v6 titles' proportional font tables aren't honored yet.

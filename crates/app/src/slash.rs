@@ -68,6 +68,10 @@ pub enum SlashOutcome {
     /// Diagnostic: dump the live Glk window layout (sizes, borders, per-window
     /// colours) to the transcript as Meta lines. Handled in `slash_dispatch`.
     DumpWindows,
+    /// Diagnostic: write the last frame's rendered CELLS — glyphs plus per-cell
+    /// colours and attributes — to `~/.babelmap/dump-cells.log` as plain text
+    /// (SQ-0761). Handled in `slash_dispatch`.
+    DumpCells,
     /// Toggle the Z-machine debug inspector tiled pane. Handled in `slash_dispatch`
     /// (needs AppState + the engine's debugger capability).
     ToggleDebug,
@@ -468,6 +472,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "dump-windows", category: Category::Help, context: Context::Global,
         usage: "dump-windows", description: "dump the last game frame's window layout, here and to ~/.babelmap/dump-windows.log",
         dispatch: |_| SlashOutcome::DumpWindows },
+    CommandSpec { name: "dump-cells", category: Category::Help, context: Context::Global,
+        usage: "dump-cells", description: "write the last frame's cells — glyphs, colours and attributes — to ~/.babelmap/dump-cells.log",
+        dispatch: |_| SlashOutcome::DumpCells },
     CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
         usage: "debug", description: "toggle the Z-machine debug inspector pane",
         dispatch: |_| SlashOutcome::ToggleDebug },
@@ -826,7 +833,8 @@ mod tests {
         // and `mark-maze-layer` arrived with the matrix view.
         // SQ-0692 added `toggle-room-dock`; `toggle-inspector` kept its name and
         // now flips the SAME dock to its diagnostics body.
-        assert_eq!(COMMANDS.len(), 61, "registry must match the spec's Full command table");
+        // SQ-0761 added `dump-cells`, the cell-buffer half of `dump-windows`.
+        assert_eq!(COMMANDS.len(), 62, "registry must match the spec's Full command table");
     }
 
     #[test]

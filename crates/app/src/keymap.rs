@@ -479,6 +479,11 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     // binding and the whole Map context, and Ctrl is the only class of key the
     // run loop's char-mode gate lets past a story waiting on a keypress.
     "dump-windows",
+    // SQ-0761, and for exactly the same reason: a cell dump taken through the
+    // palette describes the palette. Worse here than for `/dump-windows`, because
+    // this one reports the CELLS — the modal is drawn over them, so its frame is
+    // not a stale answer but a different picture entirely.
+    "dump-cells",
 ];
 
 /// Default groups for the hotkey dialog (title, authored leader-key + full command-string).

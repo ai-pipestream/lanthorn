@@ -196,6 +196,7 @@ switches that make babelmap feel like yours without opening the whole registry.
   ```toml
   [keymap.global]
   "ctrl+d" = "dump-windows"
+  "ctrl+g" = "dump-cells"
   ```
 - **Command palette** — press `/` at an empty prompt (or `/` inside the leader
   panel) to open a fuzzy search over every command; its rows theme via five
