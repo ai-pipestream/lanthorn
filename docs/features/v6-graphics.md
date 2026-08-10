@@ -856,10 +856,10 @@ block per window, merging the game's own window table, the model babelmap built
 from it, and where the renderer actually put each one on the terminal — the three
 things that have to agree.
 
-There is a catch built into asking. The command is reached through the command
-palette or a hotkey dialog, and both are modal overlays that route the v6 pane off
-its pixel path — so the frame *most recently drawn* when the dump runs is always
-the palette's, in which every one of the game's windows is honestly reported as
+There is a catch built into asking. Reach the command through the command palette
+or a hotkey dialog and you are opening a modal overlay, which routes the v6 pane
+off its pixel path — so the frame *most recently drawn* when the dump runs is the
+palette's, in which every one of the game's windows is honestly reported as
 `NOT DRAWN this frame`. That is the one thing nobody opened the dump to learn. So
 babelmap keeps the mapping from each frame the **game** drew, and the dump
 describes that one: its render path, its pane, its story viewport, its per-window
@@ -870,6 +870,24 @@ live, because a modal overlay runs no game code and they still describe the fram
 being reported. If no frame has ever been drawn without an overlay up, the
 placements are reported as `UNAVAILABLE` rather than quietly swapped for the
 overlay's.
+
+Better still, don't open a modal at all. Reporting the right frame stops the dump
+*lying*; it does not stop the palette **churning** the very numbers the dump
+prints. Opening it costs a run of `cell — modal overlay open: palette` entries in
+the render-path history, and coming back out invalidates every cached chrome band
+so they all re-upload — visibly moving `band uploads since launch` and pushing the
+frame of interest further into the past. Bind the command to a key instead and the
+capture reads the counters without touching them:
+
+```toml
+[keymap.global]
+"ctrl+d" = "dump-windows"
+```
+
+Ctrl rather than a bare key on purpose: while a v6 story waits on a single
+keypress — Journey's menus, any "press any key" — plain keys go to the game, and
+`F9` would answer the prompt instead of dumping. The Ctrl binding fires from map
+focus too.
 
 The dump also lands in **`~/.babelmap/dump-windows.log`**, appended, with a
 timestamp per capture, and the transcript line names the path. Selecting the

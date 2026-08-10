@@ -364,22 +364,25 @@ const GROUPS: &[Group] = &[
 ];
 
 /// Free-form trailing blocks for the open-ended tables, which have no fixed set of
-/// keys to enumerate: `[keymap.*]` maps any command name to any key spec, and
+/// keys to enumerate: `[keymap.*]` maps any key spec to any command string, and
 /// `[hotkeys]` holds an arbitrary list of groups. Shown as commented examples.
 const TRAILER: &str = r#"
-# Bind commands to keys. Each entry is command_name = "key-spec"; a value may list
-# several specs separated by spaces. Names are the snake_case command names from the
-# command registry (see /help).
+# Bind keys to commands. Each entry is "key-spec" = "command args" — the KEY on the
+# left, the command it runs on the right. Bind a command to two keys by writing two
+# entries. Names are the hyphenated command names from the command registry (see
+# /help); a command with arguments keeps them in the value ("zoom-map in").
 #
 # [keymap.global]
-# quit = "ctrl+q"
-# toggle_map = "f2 ctrl+m"
+# "ctrl+q" = "quit"
+# "f2" = "toggle-map"
+# "ctrl+m" = "toggle-map"
+# "ctrl+d" = "dump-windows"
 #
 # [keymap.map]
-# zoom_in = "+"
+# "+" = "zoom-map in"
 #
 # [keymap.anim]
-# animate_tidy = "ctrl+t"
+# "ctrl+t" = "animate-tidy"
 
 # ── Hotkey dialog ─────────────────────────────────────────────────────────────
 # prefix       — the key that opens the hotkey dialog
@@ -388,11 +391,11 @@ const TRAILER: &str = r#"
 #
 # [hotkeys]
 # prefix = "ctrl+p"
-# direct = ["toggle_map", "quit"]
+# direct = ["toggle-map", "quit"]
 #
 # [[hotkeys.group]]
 # title = "Map"
-# commands = ["zoom_in", "zoom_out", "retidy"]
+# commands = ["zoom-map in", "zoom-map out", "tidy-map"]
 "#;
 
 /// Render the whole commented `config.toml`.
@@ -519,6 +522,46 @@ mod tests {
             shape(&Config::default()),
             "the commented template must yield exactly the default config"
         );
+    }
+
+    /// The `[keymap.*]` and `[hotkeys]` examples must be **live config**, not prose
+    /// (SQ-0759). The shipped block used to document the entry backwards and in
+    /// snake_case — `quit = "ctrl+q"`, `direct = ["toggle_map"]` — so a user who
+    /// copied it got `cannot parse key 'quit'` and no binding. Uncomment the whole
+    /// trailer and run it through the real resolvers: any warning at all means the
+    /// example does not work as written.
+    #[test]
+    fn the_commented_keymap_and_hotkey_examples_actually_bind() {
+        // Keep the prose comments; take only the lines that are config — a table
+        // header on its own, or a `key = value` assignment.
+        let uncommented: String = TRAILER
+            .lines()
+            .filter_map(|l| l.strip_prefix("# "))
+            .filter(|l| {
+                let header = l.starts_with('[') && l.ends_with(']');
+                let assignment = l.split_once(" = ").is_some_and(|(k, _)| {
+                    !k.contains(' ') && !k.is_empty()
+                });
+                header || assignment
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cfg: Config = toml::from_str(&uncommented)
+            .unwrap_or_else(|e| panic!("the examples must parse as TOML: {e}\n{uncommented}"));
+        assert!(
+            uncommented.contains("[keymap.global]") && uncommented.contains("[[hotkeys.group]]"),
+            "both example blocks must be picked up, or this guard proves nothing:\n{uncommented}"
+        );
+
+        let (km, warns) = crate::keymap::KeyMap::resolve(&cfg.keymap);
+        assert!(warns.is_empty(), "the [keymap.*] examples must resolve cleanly: {warns:?}");
+        // …and actually bind: a resolver that silently dropped every entry would
+        // also produce no warnings.
+        let ctrl_q: crate::keymap::KeySpec = "ctrl+q".parse().unwrap();
+        assert_eq!(km.lookup(&ctrl_q, crate::keymap::Context::Global), Some("quit"));
+
+        let (_layout, warns) = crate::keymap::HotkeyLayout::resolve(&cfg.hotkeys);
+        assert!(warns.is_empty(), "the [hotkeys] examples must resolve cleanly: {warns:?}");
     }
 
     /// Uncommenting a `Line::Default` row must reproduce the default it claims to

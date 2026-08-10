@@ -388,6 +388,17 @@ impl KeyMap {
             .map(|(s, cmd, _)| (s, cmd.as_str()))
     }
 
+    /// The registry command `token` names, if it names one (SQ-0759).
+    ///
+    /// Used only to explain a rejected `[keymap.*]` entry: a token that is a
+    /// command name sitting where a key belongs means the line is inverted, not
+    /// that the key is unspellable. Underscores are accepted as well as hyphens
+    /// because the config template used to advertise the snake_case spelling.
+    fn command_name_hint(token: &str) -> Option<&'static str> {
+        let kebab = token.replace('_', "-");
+        crate::slash::find_command(&kebab).map(|c| c.name)
+    }
+
     /// Build a keymap from config overrides.
     ///
     /// Returns the resolved `KeyMap` and a list of warning strings for
@@ -403,11 +414,34 @@ impl KeyMap {
             for (key, command) in section {
                 let spec = match key.parse::<KeySpec>() {
                     Ok(s) => s,
-                    Err(e) => { warnings.push(format!("keymap: cannot parse key '{key}': {e}; skipped")); continue; }
+                    Err(e) => {
+                        // SQ-0759: the left-hand side is the KEY and the right-hand
+                        // side the command, and a user who writes the pair the other
+                        // way round was told their *key* was unparseable — true, but
+                        // it names the wrong half of the line. Say what actually
+                        // happened when the token is recognisably a command name.
+                        warnings.push(match Self::command_name_hint(key) {
+                            Some(name) => format!(
+                                "keymap: '{key} = \"{command}\"' is written backwards — the entry is \
+                                 key = \"command\", so write '{command} = \"{name}\"'; skipped"
+                            ),
+                            None => format!("keymap: cannot parse key '{key}': {e}; skipped"),
+                        });
+                        continue;
+                    }
                 };
                 let cmd_name = command.split_whitespace().next().unwrap_or("");
                 if crate::slash::find_command(cmd_name).is_none() {
-                    warnings.push(format!("keymap: unknown command '{command}'; skipped"));
+                    // The registry spells its names with hyphens; the template used
+                    // to say snake_case, so say which spelling to use rather than
+                    // leaving the user to guess (SQ-0759).
+                    warnings.push(match Self::command_name_hint(cmd_name) {
+                        Some(name) => format!(
+                            "keymap: unknown command '{command}' — the registry spells it \
+                             '{name}'; skipped"
+                        ),
+                        None => format!("keymap: unknown command '{command}'; skipped"),
+                    });
                     continue;
                 }
                 km.bindings.retain(|(s, _, c)| !(*s == spec && *c == ctx));
@@ -436,6 +470,15 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     "select-room prev",
     "center-map",
     "toggle-focus",
+    // SQ-0759: a diagnostic that can only be reached through a modal reports the
+    // modal. Opening the palette drops a v6 pane off its pixel path, and coming
+    // back re-uploads every chrome band — so the palette route churns the render
+    // history and the upload count that `/dump-windows` exists to print. It has no
+    // default binding (it is a debugging command, not a play key), but a user who
+    // binds one needs it to actually fire: `is_direct_name` gates every Ctrl
+    // binding and the whole Map context, and Ctrl is the only class of key the
+    // run loop's char-mode gate lets past a story waiting on a keypress.
+    "dump-windows",
 ];
 
 /// Default groups for the hotkey dialog (title, authored leader-key + full command-string).

@@ -178,9 +178,25 @@ switches that make babelmap feel like yours without opening the whole registry.
   still live in `[keymap.global]`, `[keymap.map]` (reached only while the debug
   inspector holds the right-hand pane; it ships no defaults of its own), and
   `[keymap.anim]` as
-  `"key" = "command args"` (each value a slash-command string the key runs); set
-  `use_defaults = false` under `[keymap]` to clear the built-ins and define your
-  own from scratch.
+  `"key" = "command args"` — the **key on the left**, the command it runs on the
+  right, spelled the way the registry spells it (hyphenated: `save-state`,
+  `zoom-map in`). Bind one command to two keys by writing two entries. Get the two
+  sides the wrong way round and the entry is skipped with a warning at game start
+  that says so and quotes the corrected line. Set `use_defaults = false` under
+  `[keymap]` to clear the built-ins and define your own from scratch.
+
+  Two things worth knowing before you pick a key. A binding for a command outside
+  the always-available `direct` set only fires from the story prompt, not from map
+  focus and not with a Ctrl modifier — that set is what "available without opening
+  the leader panel" means. And while a story is waiting on a single keypress
+  (menus, "press any key"), every *plain* key goes to the game; only Ctrl and Alt
+  combos are held back for babelmap. So a diagnostic you want reachable at any
+  moment wants a Ctrl binding:
+
+  ```toml
+  [keymap.global]
+  "ctrl+d" = "dump-windows"
+  ```
 - **Command palette** — press `/` at an empty prompt (or `/` inside the leader
   panel) to open a fuzzy search over every command; its rows theme via five
   `[elements]` selectors: `palette_query` (the input line), `palette_name` (a

@@ -124,6 +124,29 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Key bindings work again — the shipped config was teaching a format the parser
+  rejects.** `~/.babelmap/config.toml`'s own `[keymap.*]` example was written
+  backwards and in the wrong case (`quit = "ctrl+q"`, `toggle_map = …`), while the
+  parser reads the **key** on the left and the registry's **hyphenated** command on
+  the right. TOML is happy with either, so the file loaded cleanly and simply did
+  nothing, with one easily-missed warning at game start — which then blamed the
+  key. The template now shows entries that work, an inverted line is reported as
+  inverted and quotes the corrected version, a snake_case command name is told the
+  registry's spelling, and a test uncomments the template's own examples and runs
+  them through the real resolvers, so the file can no longer document something
+  babelmap does not accept.
+
+- **Capturing `/dump-windows` no longer disturbs what it reports.** The command
+  had to be reached through the command palette, which is a modal: it drops a
+  graphical v6 pane off its pixel path for as long as it is open, and coming back
+  re-uploads every cached chrome band — so the act of asking added
+  `modal overlay open: palette` runs to the render-path history and inflated
+  `band uploads since launch`, two of the lines the dump exists to print.
+  `dump-windows` is now directly bindable, so a key can take the capture without
+  opening anything; bind it with `"ctrl+d" = "dump-windows"` under
+  `[keymap.global]`. Ctrl rather than a bare key because a story waiting on a
+  single keypress receives every plain key itself.
+
 - **A cleared v6 screen stays cleared.** A graphical v6 game that erased its
   screen was never able to say so: the flag the host watches for is the v1–5 lower
   window's, and the v6 erase path never raised anything. So the transcript went on
