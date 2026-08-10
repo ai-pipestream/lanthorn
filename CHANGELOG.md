@@ -118,6 +118,25 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Journey's Amiga border reaches the edge of the window, and its menu answers
+  the mouse.** Playing Journey with the Amiga interpreter selected, the frame it
+  draws around the screen stopped short of the pane — the prose ran straight
+  through the right-hand rule — and clicking a command did nothing unless you
+  aimed well above the one you wanted. Shrinking the terminal until it matched the
+  game's own eighty columns made both problems vanish, which was the clue: they
+  were one fault. Journey draws its frame as *text*, and the Amiga profile swaps
+  the IBM PC's reverse-video spaces for line-drawing characters. Those characters
+  share every row of the story window, and the test for "the game has painted a
+  menu over its story" looked only at rows — so an ordinary scene was mistaken for
+  a menu takeover and sent down the path that lays the game's screen out one
+  terminal column per game column, while the prose and the click map were still
+  being placed proportionally across the pane. Two placements for one screen; they
+  agree only at eighty columns. The takeover test now asks whether a run is inside
+  the story window at all, not merely level with it, and a repeated-glyph rule is
+  drawn across the width it was drawn across rather than one cell per character —
+  so the border spans the pane at any size, the way the IBM PC profile's
+  reverse-video bars already did.
+
 - **The poker menu can be clicked where it is printed.** *Play Current Bet*,
   *Change Current Bet*, *Save*, *Restore* and *Quit* all ignored the mouse in
   Frobozz Magic VideoPoker — and so did the *Continue* button between hands. The

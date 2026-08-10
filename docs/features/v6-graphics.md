@@ -153,7 +153,18 @@ session-only switch that never touches your saved config:
   status, painted directly *onto* its banner art, stays in the ring. A pure
   reverse-video row (a status/menu bar) fills **edge to edge across the full pane
   width**, so a bar the game drew as separate runs with bare cells between and
-  around them reads as one solid block. A game that never reserves a band and
+  around them reads as one solid block. A **rule** — three or more abutting
+  fragments of the same symbol glyph, which is how a game draws a horizontal line —
+  gets the same treatment one layer up: it is drawn across the width its own pixels
+  span, not one terminal cell per fragment, and it closes the seams the scale opens
+  around its corners and titles. That is what lets Journey's line-drawing border
+  (which is what the Amiga interpreter profile makes it draw instead of reverse-video
+  spaces) reach both edges of the pane at any window size, with the prose wrapping
+  inside it. Prose is untouched by the rule: a label's character count is its width,
+  because it has to stay legible. The predicate is narrow on purpose — a game with
+  proportional metrics emits one run per glyph, so "two equal abutting fragments"
+  would read every doubled letter in the corpus as a rule, and Arthur's status bar
+  loses its character's name the moment it does. A game that never reserves a band and
   instead **overlays** its bar on the top row of a full-screen prose window
   (advent.z6) is given one: a full-width strip of at most two rows, pinned to the
   top of the screen, has its rows reserved off the story viewport so it decomposes
@@ -268,6 +279,13 @@ session-only switch that never touches your saved config:
     Journey's verb menu stays welded to the last row at any pane height instead
     of floating over the prose. Chrome text *inside* the story box — Shogun's
     boot menu, a hint screen — paints over the transcript where the game put it.
+    "Inside" means inside on **both axes**: a run merely level with the story is
+    frame, not a takeover. Journey under the Amiga profile is the case that proves
+    it — its border rules are line-drawing glyphs beside the story on every one of
+    its rows, and a row-only test called an ordinary scene a menu screen and sent
+    the whole frame down this path, where the game's eighty columns are laid out
+    one per terminal column while the prose and the mouse map are still placed
+    proportionally across the pane. The two agree only at eighty columns wide.
     All three are painted *after* the windows' erase fills go down, because a
     window's erase is the ground its own text is written on, not a lid over it:
     paint the band first and Adventure's status bar disappears under the very
