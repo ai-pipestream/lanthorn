@@ -116,6 +116,57 @@ pub fn status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<St
     None
 }
 
+/// The values of the `Label: value` fields painted on the status line, in the
+/// order they are painted.
+///
+/// A status line is not always a room name with a score block beside it. *The
+/// Impossible Stairs* paints `" Year: 2001  Place: Front Lawn"`: the room is the
+/// value of a LABELLED FIELD, and the left-justified first segment the common
+/// form takes — `"Year: 2001"`, or here the whole row, since the fields are
+/// separated by single spaces — is not a room at all. Believing it mints a brand
+/// new room every time the year changes, for a place the player never left.
+///
+/// Nothing here knows which label means "room", and it must not — a rule keyed to
+/// the word `Place` would be a per-title special case in disguise. Every value is
+/// handed to `detect_location`, which subjects it to the SAME object-tree
+/// validation the ordinary candidate gets and believes only what the avatar's own
+/// ancestor chain confirms. A score, a date or a time simply fails to validate,
+/// so the parse does not have to be perfect — only generous.
+///
+/// The parse: split a row on `':'`. Each colon ends a label and opens a value,
+/// and that value runs up to the start of the NEXT label, which is the last word
+/// before the next colon. So `" Year: 2001  Place: Front Lawn"` yields `"2001"`
+/// and `"Front Lawn"`, and `" Location:  Foo Bar   Date:  3/16/2031"` yields
+/// `"Foo Bar"` and `"3/16/2031"`.
+fn status_line_field_values(upper: &UpperWindow, active_rows: u16) -> Vec<String> {
+    let scan = active_rows.min(2).min(upper.rows);
+    let mut out = Vec::new();
+    for r in 1..=scan {
+        let line: String = (1..=upper.cols).map(|c| deframe(upper.cell(r, c).ch)).collect();
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        for (i, part) in parts.iter().enumerate().skip(1) {
+            // Every chunk but the last ends with the next field's label; drop it.
+            let value = if i + 1 < parts.len() {
+                match part.trim_end().rsplit_once(char::is_whitespace) {
+                    Some((head, _label)) => head,
+                    // The whole chunk is the next label, so this field has no value.
+                    None => continue,
+                }
+            } else {
+                part
+            };
+            let candidate = clean_room_text(value);
+            if !candidate.is_empty() {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
 /// Centered-title fallback for row 1 when the common form yields nothing.
 ///
 /// Some v4+ games (e.g. BeyondZork) CENTER the room name in row 1 with leading
@@ -747,6 +798,26 @@ fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot> 
     best.map(|(_, obj)| object_snapshot(mem, obj))
 }
 
+/// True when some object's short name is `name` with the spaces taken out.
+///
+/// A compiler's object identifier is not the name the player reads. Dialog calls
+/// The Impossible Stairs' front lawn `FrontLawn`, and frankenfingers' parts room
+/// is `partsRoom`: both are the printed name with its spaces elided. That is
+/// plenty to ANSWER A QUESTION about the tree — which of the status line's
+/// labelled fields names a room — but not to answer with, which is why the one
+/// caller keeps the screen's own text as the room's label and uses this purely to
+/// arbitrate. Deliberately not folded into `status_name_matches`: relaxing that
+/// would start putting `partsRoom` on the map in place of "Parts Room".
+fn names_an_object_ignoring_spaces(machine: &Machine, name: &str) -> bool {
+    let mem = &machine.mem;
+    let wanted = normalize_name(name).replace(' ', "");
+    if wanted.is_empty() {
+        return false;
+    }
+    (1..=max_object_number(mem))
+        .any(|obj| normalize_name(&short_name(mem, obj)).replace(' ', "") == wanted)
+}
+
 /// How the current room was determined (drives the map indicator label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationMethod {
@@ -825,6 +896,23 @@ pub fn detect_location(machine: &Machine) -> Option<Location> {
             // No avatar reaches a room at all: the tree has nothing better to offer, so the status
             // line stands — this is what keeps games with no identifiable player object working.
             return Some(Location::StatusName(shown));
+        }
+        // The whole left half names nothing in the tree. The status line may still be naming the
+        // room, just as one LABELLED FIELD among several — The Impossible Stairs paints
+        // " Year: 2001  Place: Front Lawn", and taking the left half whole mints a brand new room
+        // on every year change for a place the player never left.
+        //
+        // Which label means "room" is not ours to decide, and a rule keyed to the word `Place`
+        // would be a per-title special case in disguise. The object tree answers instead: the
+        // field that names a room is the one the tree has an object for. The tree only ARBITRATES
+        // here — the name that reaches the map is the screen's own text, because the object's
+        // short name is a compiler identifier the player never sees.
+        for field in
+            status_line_field_values(&machine.screen.upper, machine.screen.upper_window_rows)
+        {
+            if names_an_object_ignoring_spaces(machine, &field) {
+                return Some(Location::NameOnly(field));
+            }
         }
         return Some(Location::NameOnly(name));
     }
@@ -973,6 +1061,37 @@ mod tests {
     fn status_room_name_empty_grid_is_none() {
         let u = upper_with(&["                                "]);
         assert_eq!(status_line_room_name(&u, 1), None);
+    }
+
+    #[test]
+    fn status_field_values_split_labelled_fields() {
+        // The Impossible Stairs: single spaces between the fields, so the common
+        // form swallows the whole row and the fields are the only way through.
+        let stairs = upper_with(&[" Year: 2001 Place: Front Lawn"]);
+        assert_eq!(
+            status_line_room_name(&stairs, 1).as_deref(),
+            Some("Year: 2001 Place: Front Lawn"),
+            "the common form takes the row whole — which is the bug the fields fix"
+        );
+        assert_eq!(status_line_field_values(&stairs, 1), vec!["2001", "Front Lawn"]);
+    }
+
+    #[test]
+    fn status_field_values_handle_wide_gaps_and_a_score_block() {
+        // Wide 2+-space gaps between label and value, as the `Location:` form uses.
+        let labelled = upper_with(&[" Location:  Foo Bar     Date:  3/16/2031"]);
+        assert_eq!(status_line_field_values(&labelled, 1), vec!["Foo Bar", "3/16/2031"]);
+        // An ordinary room-plus-score line has no room in its fields, only numbers.
+        // Harmless: `detect_location` reaches the fields only once the room name
+        // itself has failed, and a score never names an object.
+        let plain = upper_with(&[" Bedroom                    Score: 0     Moves: 1"]);
+        assert_eq!(status_line_field_values(&plain, 1), vec!["0", "1"]);
+    }
+
+    #[test]
+    fn status_field_values_none_without_a_label() {
+        let plain = upper_with(&[" Kitchen                                         "]);
+        assert!(status_line_field_values(&plain, 1).is_empty());
     }
 
     #[test]

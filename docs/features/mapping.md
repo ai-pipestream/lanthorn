@@ -34,6 +34,20 @@ still there long after the turn that discovered it.
   player object's room when the game re-parents the player, Inform-style
   (`via player object`), and falling back to a name-only room otherwise
   (`via name match`, or `via name (unlinked)` when it can't be tied to an object).
+  A status line can also label several things at once — *The Impossible Stairs*
+  reads `Year: 2001  Place: Front Lawn` — and babelmap does not assume which label
+  means "room": each labelled field is offered to the object tree, and the one the
+  game recognises as a place is the one mapped, under the name on screen rather
+  than the compiler's identifier for it.
+- **Games with no room objects to find** (*The Impossible Bottle* and *The
+  Impossible Stairs*, both compiled by Dialog; *Facility*; *frankenfingers*) name
+  their rooms only on screen — there is nothing in the object tree to tie the name
+  back to, ever. A name with nothing behind it is trusted to open a map only when
+  the **story itself** printed it too, as a heading in the prose and not just on
+  the status bar: real rooms are named twice, in two independent places, while a
+  title screen or a character sheet is named once. That is what keeps *Beyond
+  Zork*'s character sheet — which shows your name exactly where a room name goes —
+  off the map, and it is the same evidence the Glulx side asks for.
   Games that **center** their room title in a custom status display (Beyond Zork,
   Trinity) are parsed too — the centered heading is accepted only once it
   validates against the player's room — so those now automap as well.

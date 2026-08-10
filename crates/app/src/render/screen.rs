@@ -651,6 +651,13 @@ fn render_node(
                 // through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
                     if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, layout.story_gfx, native)) {
+                        // The op log's frame boundary (SQ-0590) opens HERE, not at
+                        // the band draw further down: the two calls below are the
+                        // frame's first protocol traffic, and starting the log after
+                        // them erased the very records a lifecycle audit needs — the
+                        // full-frame composite this frame drops, and the bands a
+                        // resume re-uploads (SQ-0747).
+                        state.graphics_render.borrow_mut().begin_band_log();
                         // This frame renders as chrome bands, not the raster
                         // composite — drop the cached composite so a later
                         // fall-through to raster (map/rebus takeover) cannot
@@ -1062,22 +1069,66 @@ fn render_node(
                         } else {
                             Vec::new()
                         };
+                        // SQ-0747: and the rects the flank PANELS are drawn at, for the
+                        // same reason. A Menu-plan flank's art goes to `menu_flank_panel`'s
+                        // DEST rect, not to the strip's own rect, and the band cache is
+                        // keyed on the rect a band is drawn at — so the strip rect alone in
+                        // the live set left the panel's key unclaimed. `retain_chrome_bands`
+                        // evicted it every frame, and one eviction clears the WHOLE cache,
+                        // so every band re-encoded and re-uploaded on every frame (three
+                        // uploads a frame on Journey's menu, for pixels the terminal already
+                        // had — the user's `band uploads since launch: 78` over 26 ring
+                        // frames). Resolved once, up here, and reused by the draw below.
+                        let flank_panels: Vec<(Rect, FlankPanel)> = if matches!(plan, BottomPlan::Menu) {
+                            strips
+                                .iter()
+                                .filter_map(|s| match s {
+                                    ChromeStrip::Art(r) if r.width < area.width && strip_has_art(r) => {
+                                        let div = divider_exts
+                                            .iter()
+                                            .map(|(e, _)| *e)
+                                            .find(|e| e.x >= r.x && e.x < r.right());
+                                        menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, div)
+                                            .map(|p| (*r, p))
+                                    }
+                                    _ => None,
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         {
                             let mut gr = state.graphics_render.borrow_mut();
-                            gr.begin_band_log();
+                            // An Art strip with no art behind it is skipped below and never
+                            // drawn, so its key must NOT be claimed here: a live key nothing
+                            // re-places keeps a cached upload the terminal is no longer being
+                            // pointed at, which is the stale-placement shape SQ-0587 records
+                            // (SQ-0747). Only `strips` is filtered — the menu strips below
+                            // draw unconditionally.
                             let live: std::collections::HashSet<_> = strips
                                 .iter()
+                                .filter(|s| !matches!(s, ChromeStrip::Art(r) if !strip_has_art(r)))
                                 .chain(menu_strips.iter())
                                 .filter_map(|s| match s {
                                     ChromeStrip::Art(r) => Some((r.x, r.y, r.width, r.height)),
                                     ChromeStrip::Text(..) => None,
                                 })
                                 .chain(divider_exts.iter().map(|(r, _)| (r.x, r.y, r.width, r.height)))
+                                .chain(flank_panels.iter().map(|(_, (_, d, _))| (d.x, d.y, d.width, d.height)))
                                 .collect();
                             gr.retain_chrome_bands(&live);
                             for strip in &strips {
                                 if let ChromeStrip::Art(r) = strip {
                                     if !strip_has_art(r) {
+                                        continue;
+                                    }
+                                    // SQ-0742: a flank that IS its border column has a divider
+                                    // extension covering exactly its rect. Both were drawn, to
+                                    // the same cache key, so the flank's upload was overwritten
+                                    // by the extension's and both re-encoded on every frame —
+                                    // two images sent, one ever seen. The extension supersedes
+                                    // it; the frame is unchanged, one upload lighter.
+                                    if divider_exts.iter().any(|(e, _)| e == r) {
                                         continue;
                                     }
                                 }
@@ -1097,15 +1148,8 @@ fn render_node(
                                         // instead of top-anchoring the art over bare backdrop.
                                         // The divider extension below re-draws over this fill, and
                                         // the frame bands stay wherever their own strips put them.
-                                        // The flank's own divider extension, so the art can
-                                        // leave a column of panel fill beside it.
-                                        let div = divider_exts
-                                            .iter()
-                                            .map(|(e, _)| *e)
-                                            .find(|e| e.x >= r.x && e.x < r.right());
-                                        let panel = (matches!(plan, BottomPlan::Menu) && r.width < area.width)
-                                            .then(|| menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, div))
-                                            .flatten();
+                                        // Resolved above so the dest rect could join the live set.
+                                        let panel = flank_panels.iter().find(|(sr, _)| sr == r).map(|(_, p)| *p);
                                         if let Some((bg, dest, crop)) = panel {
                                             fill_pane_page(*r, bg, buf);
                                             gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, buf);
@@ -1232,6 +1276,25 @@ fn render_node(
                                         map.push(rec(&format!("strip:text({} runs)", runs.len()), (0, 0, 0, 0), *r))
                                     }
                                 }
+                            }
+                            // The bottom-anchored menu band's own strips (SQ-0742). They
+                            // are classified through a DIFFERENT scale from the ring's and
+                            // were absent from this dump entirely, so the rows between the
+                            // menu and the pane bottom could not be accounted for at all.
+                            for strip in &menu_strips {
+                                match strip {
+                                    ChromeStrip::Art(r) => map.push(rec("menu:art", (0, 0, 0, 0), *r)),
+                                    ChromeStrip::Text(r, runs) => {
+                                        map.push(rec(&format!("menu:text({} runs)", runs.len()), (0, 0, 0, 0), *r))
+                                    }
+                                }
+                            }
+                            // The flank border columns carried down the reclaimed gap to the
+                            // menu (SQ-0742). Their absence is invisible in every other line
+                            // of this dump — the flank band is still there, still the right
+                            // height, and simply has no ink below the game's own canvas.
+                            for (ext, _) in &divider_exts {
+                                map.push(rec("flank-divider", (0, 0, 0, 0), *ext));
                             }
                         }
                         // Only windows that START inside the story viewport fill here.
@@ -3535,24 +3598,41 @@ fn flank_divider_extension(
     // flank → run starting at the story's right edge), sampled at that mid-story row.
     let story_x0 = story.x_px as u32;
     let story_x1 = (story.x_px as u32 + story.w_px as u32).min(native.0 as u32);
+    // SQ-0742: a border is not always a filled block. Journey under the Amiga profile
+    // draws its frame with box-drawing GLYPHS, and a `│`'s ink sits in the middle of
+    // its 8-pixel text cell — so the native column immediately abutting the story box
+    // is that cell's own blank padding. Probing that one column found nothing and the
+    // whole extension was abandoned, which is why the Amiga frame produced NO divider
+    // bands at all while the IBM PC profile produced one per flank. The side borders
+    // then stopped where the game's canvas ends (native row 400 — terminal row 39 of a
+    // 68-row pane) and the frame was simply absent for the eighteen rows between there
+    // and the menu: the user's "big chunk of the border missing from the right side (at
+    // the bottom)". Look across ONE text cell for the ink before giving up. A
+    // reverse-video block border inks offset 0, so it takes exactly the path it did.
+    const FONT_W: u32 = 8;
+    let seek_ink = |from: u32, outward_is_left: bool| -> Option<u32> {
+        (0..FONT_W).find_map(|d| {
+            let x = if outward_is_left { from.checked_sub(d + 1)? } else { from + d };
+            opaque(x, mid).then_some(x)
+        })
+    };
     let (dnx0, dnx1) = if band.x < viewport.x {
-        if story_x0 == 0 || !opaque(story_x0 - 1, mid) {
-            return None;
-        }
-        let mut x = story_x0;
+        let mut x = seek_ink(story_x0, true)?;
+        let right = x + 1;
         while x > 0 && opaque(x - 1, mid) {
             x -= 1;
         }
-        (x, story_x0)
+        (x, right)
     } else {
-        if story_x1 >= native.0 as u32 || !opaque(story_x1, mid) {
+        if story_x1 >= native.0 as u32 {
             return None;
         }
-        let mut x = story_x1;
+        let left = seek_ink(story_x1, false).filter(|x| *x < native.0 as u32)?;
+        let mut x = left;
         while x < native.0 as u32 && opaque(x, mid) {
             x += 1;
         }
-        (story_x1, x)
+        (left, x)
     };
     if dnx1 <= dnx0 {
         return None;

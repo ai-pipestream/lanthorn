@@ -139,6 +139,61 @@ identifies which beta it is without reading its git hash.
   retouched what the floppy still has whole. The three games that already worked
   decode bit-for-bit as they did.
 
+- **A room the game never made an object of still reaches the map.** *The
+  Impossible Bottle*, *frankenfingers* and *Facility* each printed a room name in
+  the top-left corner of the status bar and mapped absolutely nothing, for the
+  whole game. The room was never the problem: babelmap had read every one of those
+  names correctly, then thrown them away, because it would not seed an empty map
+  with a room it could not also find in the story's object tree. That was a
+  sensible-sounding rule with a false premise — it assumed every game eventually
+  offers such a room, and these never do. *The Impossible Bottle* is compiled by
+  Dialog, whose objects carry no names at all; the others keep their room text
+  outside the tree entirely. So the rule was not a delay, it was a permanent mute.
+  The test is now corroboration: a room with nothing behind it has to be one the
+  **story itself** named, printed as a heading in the prose as well as painted on
+  the status bar. Real rooms are named twice, in two independent places. A title
+  screen or a character sheet is named once — *Beyond Zork*'s setup still shows
+  your character's name where a room name goes, and it still isn't mistaken for a
+  room. It is also the rule the Glulx side already used, so both engines now ask
+  for the same evidence.
+
+- **The Impossible Stairs maps a place, not a place and a date.** Its status bar
+  reads `Year: 2001  Place: Front Lawn`, and babelmap took the lot as the room's
+  name — so every time the story turned a year, the same lawn arrived on the map
+  as a brand new room the player had never walked to. A status bar can label
+  several things at once, and which label means "room" is not something babelmap
+  gets to assume: it now offers each labelled field to the story's own object
+  tree, and maps the one the game recognises as a place. The name that reaches the
+  map is the one on screen, since the object behind it is called `FrontLawn` and
+  no player should have to read that.
+- **Journey stops re-sending its frame to the terminal on every frame.** Playing
+  Journey in hybrid mode, babelmap re-encoded and re-uploaded all three pieces of
+  the game's on-screen frame — the picture panel, the right-hand border and the
+  bottom rule — every single time the screen was drawn, for pixels the terminal
+  already had. The cache that exists to prevent exactly that was being emptied
+  each frame by a bookkeeping mismatch: Journey's picture panel is drawn at a rect
+  of its own, the cache is keyed on where a band is drawn, and only the rect it was
+  *measured* at was being declared still-in-use. One unclaimed key evicts the whole
+  cache, so every band went with it. An unchanged frame now sends the terminal
+  nothing at all, and the images the terminal holds are released when the frame
+  that owns them goes away — including the full-screen composite from the title
+  sequence, which no longer has to be argued about because it is now recorded like
+  everything else.
+
+- **Journey's frame gets its sides back.** Under the Amiga interpreter profile the
+  frame around the game drew its top, its bottom and its menu, and then simply
+  stopped partway down: below the game's own artwork the left and right borders
+  were missing entirely, leaving the frame open down both sides for the whole
+  stretch between the picture and the command menu. babelmap already knew how to
+  carry a border column down that reclaimed space — it had been doing it for the
+  IBM PC profile all along. The two profiles draw the same frame with different
+  ink: IBM PC uses reverse-video blocks that fill their character cell, Amiga uses
+  `│` glyphs whose stroke sits in the middle of theirs. babelmap looked for the
+  border in exactly one pixel column, found the glyph's blank margin, and gave up.
+  It now looks across the whole character cell, so both profiles frame the gap. The
+  right-hand border is also one image lighter per frame: it was being drawn twice,
+  once as artwork and once as the extension over the top of it.
+
 - **Zork Zero's compass keeps its colours off the Amiga floppy.** Booted from the
   disk image, the compass arrows and room icons came out bright blue, purple and
   yellow-green, and the colours changed as you walked from room to room — while
