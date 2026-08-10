@@ -59,8 +59,17 @@ const EF_XOR2: u16 = 4; // picture was XORed on alternate lines
 const EF_MONO: u16 = 8; // two-colour picture
 const EF_IFF: u16 = 32; // picture is IFFed
 
-/// Size of one Amiga/Mac directory record.
+/// Header flag bits, from `amiga/gfx.c`. Byte 1 of the file is `gh.flags`.
+const HF_EHUFF: u8 = 2; // directory records carry a Huffman-tree pointer
+const HF_GHUFF: u8 = 4; // the file header carries one global Huffman-tree pointer
+
+/// Size of one Amiga/Mac directory record without a per-entry Huffman pointer:
+/// `picID`, `picX`, `picY`, `eFlags` (2 bytes each) then `dataOff` and `palOff`
+/// (3 bytes each). `ReadGFXEntry` reads exactly these, in this order.
 const ENTRY_SIZE: usize = 14;
+/// A per-entry Huffman-tree pointer adds a word to the record — the 16-byte
+/// flavour. See [`InfocomPics::parse`].
+const HUFF_PTR_SIZE: usize = 2;
 /// Bytes of length prefix in front of each picture's compressed data
 /// (`LBYTES` in `amiga/gfx.c`), twice over: `minSize` then `midSize`.
 const LBYTES: usize = 3;
@@ -108,6 +117,9 @@ pub struct PicEntry {
     pub flags: u16,
     data: usize,
     palette: usize,
+    /// Byte offset of the 256-byte Huffman tree this picture decodes through —
+    /// the file's one global tree, or the record's own, per the header flags.
+    huff: usize,
 }
 
 impl PicEntry {
@@ -179,39 +191,81 @@ impl Picture {
 pub struct InfocomPics {
     data: Vec<u8>,
     entries: Vec<PicEntry>,
-    huff: usize,
     part: u8,
 }
 
 impl InfocomPics {
     /// Parse an Amiga/Mac `Pic.data`.
     ///
+    /// # Header
+    ///
+    /// `InitGFX` in `amiga/gfx.c` reads the 16-byte header field by field, and
+    /// that is where every constant below comes from:
+    ///
+    /// | offset | field | note |
+    /// |---|---|---|
+    /// | 0 | `gh.fileID` | byte; "not used on Amiga" |
+    /// | 1 | `gh.flags` | byte; the `HF_*` set |
+    /// | 2..4 | `gh.huffOff` | word, **doubled** to a byte offset |
+    /// | 4..6 | `gh.nPics` | records in this file |
+    /// | 6..8 | `gh.ngPics` | records in the global file, if any |
+    /// | 8 | `gh.dirEntryLen` | byte; directory record size |
+    ///
+    /// # Two record sizes, and which one a file uses
+    ///
+    /// Byte 1 is a **flag set**, not a version number, and it decides the record
+    /// size. `ReadGFXEntry` copies 8 bytes of `picID`/`picX`/`picY`/`eFlags`,
+    /// then 3-byte `dataOff` and `palOff`, and then:
+    ///
+    /// ```text
+    /// if (BAND (gh.flags, HF_EHUFF+HF_GHUFF) == HF_EHUFF)
+    ///     { ge.huffOff = 0; doCopy (pEnt, (UBYTE *)(&ge.huffOff) + 2, 2); ge.huffOff *= 2; }
+    /// else    ge.huffOff = gh.huffOff;
+    /// ```
+    ///
+    /// So a file that declares `HF_EHUFF` *without* `HF_GHUFF` gives every
+    /// picture its own Huffman tree, named by a further word in the record —
+    /// 16 bytes rather than 14. Zork Zero, Journey and Arthur declare `6`
+    /// (`HF_EHUFF | HF_GHUFF`) and share one global tree in 14-byte records;
+    /// Shogun declares `2` (`HF_EHUFF` alone) and carries 48 trees in 16-byte
+    /// records. Both are read here; the record size the header declares must be
+    /// the one its flags imply.
+    ///
+    /// # Validation
+    ///
     /// The format carries no signature, so this validates structurally: the
-    /// record size must be the Amiga/Mac 14, the directory and the Huffman
-    /// tree must fit, and every non-empty entry must point inside the file.
+    /// declared record size must match the flags, the directory must fit, ids
+    /// must ascend (`ReadGFXEntry` binary-searches the directory, so they have
+    /// to), and every offset a record names must land inside the file.
     pub fn parse(data: Vec<u8>) -> Result<InfocomPics, PicError> {
         if data.len() < 16 {
             return Err(PicError::Truncated);
         }
         // Amiga/Mac headers are big-endian throughout; the PC ones are not, and
-        // put a different record size at offset 8.
-        if usize::from(data[8]) != ENTRY_SIZE {
+        // put a record size at offset 8 that no flag combination here implies.
+        let per_entry_huff = data[1] & (HF_EHUFF | HF_GHUFF) == HF_EHUFF;
+        let entry_size = ENTRY_SIZE + if per_entry_huff { HUFF_PTR_SIZE } else { 0 };
+        if usize::from(data[8]) != entry_size {
             return Err(PicError::UnsupportedContainer);
         }
         let count = usize::from(be16(&data, 4));
         // `gh.huffOff`, stored as a word that addresses words.
-        let huff = usize::from(be16(&data, 2)) * 2;
-        let dir_end = 16 + count * ENTRY_SIZE;
+        let global_huff = usize::from(be16(&data, 2)) * 2;
+        let dir_end = 16 + count * entry_size;
         if count == 0 || dir_end > data.len() {
             return Err(PicError::UnsupportedContainer);
         }
-        if huff < dir_end || huff >= data.len() {
+        // A tree must sit past the directory and inside the file. With one
+        // global tree that is a single check; with per-entry trees the header
+        // word is unused (zero in Shogun) and each record answers for itself.
+        let in_range = |off: usize| (dir_end..data.len()).contains(&off);
+        if !per_entry_huff && !in_range(global_huff) {
             return Err(PicError::UnsupportedContainer);
         }
 
-        let mut entries = Vec::with_capacity(count);
+        let mut entries: Vec<PicEntry> = Vec::with_capacity(count);
         for i in 0..count {
-            let o = 16 + i * ENTRY_SIZE;
+            let o = 16 + i * entry_size;
             let e = PicEntry {
                 id: be16(&data, o),
                 width: be16(&data, o + 2),
@@ -219,9 +273,20 @@ impl InfocomPics {
                 flags: be16(&data, o + 6),
                 data: be24(&data, o + 8),
                 palette: be24(&data, o + 11),
+                huff: if per_entry_huff {
+                    usize::from(be16(&data, o + 14)) * 2
+                } else {
+                    global_huff
+                },
             };
             if e.data >= data.len() || e.palette >= data.len() {
                 return Err(PicError::Truncated);
+            }
+            if e.has_pixels() && e.flags & EF_PHUFF != 0 && !in_range(e.huff) {
+                return Err(PicError::UnsupportedContainer);
+            }
+            if entries.last().is_some_and(|p| p.id >= e.id) {
+                return Err(PicError::UnsupportedContainer);
             }
             entries.push(e);
         }
@@ -229,7 +294,6 @@ impl InfocomPics {
         Ok(InfocomPics {
             data,
             entries,
-            huff,
             part,
         })
     }
@@ -291,7 +355,7 @@ impl InfocomPics {
             .get(hdr..hdr + min_size)
             .ok_or(PicError::Truncated)?;
 
-        let mut indices = unhuff_unrle(self.huff_tree(), payload, mid_size, w * h)?;
+        let mut indices = unhuff_unrle(self.huff_tree(e.huff), payload, mid_size, w * h)?;
         // Undo step 1: each line was XORed with the line above it. Infocom's own
         // decoder zero-fills a virtual row -1, so row 0 comes through unchanged.
         // `EF_XOR2` claims alternate lines, but every known decoder — Infocom's
@@ -310,9 +374,11 @@ impl InfocomPics {
         })
     }
 
-    fn huff_tree(&self) -> &[u8] {
-        let end = (self.huff + HUFF_LEN).min(self.data.len());
-        &self.data[self.huff..end]
+    /// The 256-byte Huffman tree at `off` — the file's global one, or the one a
+    /// 16-byte record names for itself.
+    fn huff_tree(&self, off: usize) -> &[u8] {
+        let end = (off + HUFF_LEN).min(self.data.len());
+        &self.data[off..end]
     }
 
     /// Build the 16-entry colour table for an entry. The stored RGB triples
@@ -436,6 +502,102 @@ mod tests {
         f.extend_from_slice(&[0, 0, 4]); // midSize: four symbols
         f.push(0b0111_0110);
         f
+    }
+
+    /// A hand-built TWO-picture archive in the 16-byte flavour: header flags
+    /// `HF_EHUFF` alone, so every record names its own Huffman tree and the
+    /// header's global tree word is unused (zero, as it is in Shogun).
+    ///
+    /// The two trees deliberately decode the *same* bit patterns to different
+    /// symbols, so reading either picture through the other's tree produces
+    /// different pixels. Picture 7 is `synthetic`'s: tree A codes `0` -> 2,
+    /// `10` -> 1, `11` -> 18, bit stream `0b0111_0110`. Picture 9 uses tree B —
+    /// `1` -> 4, `00` -> 6, `01` -> 18 — over `[4, 18, 6, 18]`, bit stream
+    /// `1 01 00 01` padded to `0b1010_0010`, which un-XORs to rows `4444`,
+    /// `2222`.
+    fn synthetic_per_entry_huff() -> Vec<u8> {
+        const E: usize = ENTRY_SIZE + HUFF_PTR_SIZE;
+        let mut f = vec![0u8; 16];
+        f[0] = 1;
+        f[1] = HF_EHUFF; // no HF_GHUFF: the trees live in the records
+        f[5] = 2; // two pictures
+        f[8] = E as u8;
+        let dir_end = 16 + 2 * E;
+        let (tree_a, tree_b) = (dir_end, dir_end + HUFF_LEN);
+        let data_a = tree_b + HUFF_LEN;
+        let data_b = data_a + 2 * LBYTES + 1;
+        let mut record = |id: u16, data: usize, huff: usize| {
+            f.extend_from_slice(&id.to_be_bytes());
+            f.extend_from_slice(&[0, 4, 0, 2, 0, (EF_TRANS | EF_PHUFF) as u8]);
+            f.extend_from_slice(&[(data >> 16) as u8, (data >> 8) as u8, data as u8]);
+            f.extend_from_slice(&[0, 0, 0]); // no palette
+            f.extend_from_slice(&u16::try_from(huff / 2).unwrap().to_be_bytes());
+        };
+        record(7, data_a, tree_a);
+        record(9, data_b, tree_b);
+
+        let mut a = vec![0u8; HUFF_LEN];
+        a[0] = 128 + 2; // `0`  -> symbol 2
+        a[1] = 1; // `1`  -> node 1
+        a[2] = 128 + 1; // `10` -> symbol 1
+        a[3] = 128 + 18; // `11` -> repeat 3 more
+        let mut b = vec![0u8; HUFF_LEN];
+        b[0] = 1; // `0`  -> node 1
+        b[1] = 128 + 4; // `1`  -> symbol 4
+        b[2] = 128 + 6; // `00` -> symbol 6
+        b[3] = 128 + 18; // `01` -> repeat 3 more
+        f.extend_from_slice(&a);
+        f.extend_from_slice(&b);
+        f.extend_from_slice(&[0, 0, 1, 0, 0, 4, 0b0111_0110]);
+        f.extend_from_slice(&[0, 0, 1, 0, 0, 4, 0b1010_0010]);
+        f
+    }
+
+    /// SQ-0744. Shogun's Amiga archive declares `HF_EHUFF` without `HF_GHUFF`,
+    /// which by `ReadGFXEntry` gives every picture its own Huffman tree in a
+    /// 16-byte record. Both record sizes must read, and each picture must go
+    /// through *its own* tree — decoding picture 9 with picture 7's would give
+    /// `[2, 2, 2, 2, 3, 3, 3, 3]` here.
+    #[test]
+    fn decodes_a_sixteen_byte_archive_through_per_entry_huffman_trees() {
+        let pics = InfocomPics::parse(synthetic_per_entry_huff()).unwrap();
+        assert_eq!(pics.entries().len(), 2);
+
+        let p = pics.decode(7).unwrap();
+        assert_eq!(p.indices, vec![2, 2, 2, 2, 3, 3, 3, 3]);
+        let q = pics.decode(9).unwrap();
+        assert_eq!(q.indices, vec![4, 4, 4, 4, 2, 2, 2, 2]);
+    }
+
+    /// The record size a file declares must be the one its header flags imply:
+    /// 16 bytes exactly when `HF_EHUFF` stands alone, 14 otherwise. Neither
+    /// size is accepted on its own say-so, which is what keeps a PC `.MG1` (a
+    /// little-endian LZW container with its own byte at offset 8) out.
+    #[test]
+    fn the_record_size_must_match_the_header_flags() {
+        let mut f = synthetic_per_entry_huff();
+        f[8] = ENTRY_SIZE as u8;
+        assert_eq!(InfocomPics::parse(f).err(), Some(PicError::UnsupportedContainer));
+
+        let mut f = synthetic();
+        f[8] = (ENTRY_SIZE + HUFF_PTR_SIZE) as u8;
+        assert_eq!(InfocomPics::parse(f).err(), Some(PicError::UnsupportedContainer));
+
+        // `HF_EHUFF | HF_GHUFF` — Zork Zero's 6 — is the global-tree flavour and
+        // stays 14 bytes, so a header that sets both must not grow its records.
+        let mut f = synthetic();
+        f[1] = HF_EHUFF | HF_GHUFF;
+        assert!(InfocomPics::parse(f).is_ok());
+    }
+
+    /// `ReadGFXEntry` binary-searches the directory, so a real archive's ids
+    /// ascend. A container whose "ids" wander is not one of these files.
+    #[test]
+    fn rejects_a_directory_whose_ids_do_not_ascend() {
+        let mut f = synthetic_per_entry_huff();
+        f[16] = 0;
+        f[17] = 9; // both records now claim id 9
+        assert_eq!(InfocomPics::parse(f).err(), Some(PicError::UnsupportedContainer));
     }
 
     #[test]
@@ -590,5 +752,98 @@ mod tests {
         assert_eq!(pal[2], [0xcc, 0xcc, 0xcc]);
         assert_eq!(pal[15], [0xee, 0xee, 0xee]);
         assert_eq!(p.rgba().len(), 320 * 200 * 4);
+    }
+
+    /// The picture archive off an Amiga release floppy, or `None` (with a SKIP
+    /// note) when the gitignored disk image is not there.
+    fn adf_pictures(image: &str) -> Option<InfocomPics> {
+        let p: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(image);
+        let Ok(bytes) = std::fs::read(&p) else {
+            eprintln!("SKIP: gitignored disk image missing at {}", p.display());
+            return None;
+        };
+        let adf = crate::adf::Adf::mount(bytes).expect("an Amiga release floppy mounts");
+        Some(adf.pictures().expect("the floppy carries a picture archive").1)
+    }
+
+    /// FNV-1a over every decoded picture's indices *and* its resolved palette,
+    /// in directory order — one number that moves if any pixel or any colour of
+    /// an archive changes.
+    fn fingerprint(pics: &InfocomPics) -> (usize, usize, u64) {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut n = 0;
+        let mut feed = |h: &mut u64, b: u8| *h = (*h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+        for e in pics.entries() {
+            if !e.has_pixels() {
+                continue;
+            }
+            n += 1;
+            let p = pics.decode(e.id).expect("a picture with pixels decodes");
+            assert_eq!(
+                p.indices.len(),
+                usize::from(e.width) * usize::from(e.height),
+                "picture {} decoded to the wrong size",
+                e.id
+            );
+            for &i in &p.indices {
+                feed(&mut h, i);
+            }
+            for c in p.palette.unwrap_or(DEFAULT_PALETTE) {
+                for b in c {
+                    feed(&mut h, b);
+                }
+            }
+        }
+        (pics.entries().len(), n, h)
+    }
+
+    /// SQ-0744, real media: Shogun's Amiga floppy, the 16-byte flavour.
+    ///
+    /// Before this reader learned the flavour, `parse` rejected the whole file
+    /// on its record size and Shogun booted with no artwork at all — no title
+    /// screen. `stories/` is gitignored, so this skips vacuously.
+    #[test]
+    fn reads_amiga_shogun() {
+        let Some(pics) = adf_pictures("James Clavell's Shogun.adf") else { return };
+        assert_eq!(pics.entries().len(), 48);
+
+        // 42 records carry pixels; the other 6 are size-only placeholders, and
+        // they are id for id the 6 `Rect` resources in `Shogun.blb` — the same
+        // 1:1 correspondence SQ-0713 measured for Zork Zero's 107.
+        let placeholders: Vec<u16> =
+            pics.entries().iter().filter(|e| !e.has_pixels()).map(|e| e.id).collect();
+        assert_eq!(placeholders, vec![2, 45, 46, 47, 48, 49]);
+
+        // Every one decodes, and to the bytes the Blorb oracle validated:
+        // 34 of the 39 pictures `Shogun.blb` also holds are byte-exact
+        // (`crates/app/tests/v6_shogun_native_archive.rs` runs that comparison).
+        assert_eq!(fingerprint(&pics), (48, 42, 0x85ce_26b1_aa1f_20db));
+
+        // SQ-0743's correspondence, checked on this flavour: every record with
+        // pixels names a palette of its own, so nothing here is adaptive — and
+        // `Shogun.blb` carries no `APal` chunk at all. The two agree, as they do
+        // for Zork Zero's 172.
+        assert!(pics.adaptive_pictures().is_empty());
+
+        // Picture 1 is the title screen the report is about.
+        let p = pics.decode(1).unwrap();
+        assert_eq!((p.width, p.height), (320, 200));
+        assert_eq!(p.palette.expect("the title screen carries a palette")[2], [0x00, 0x00, 0xff]);
+    }
+
+    /// The 14-byte flavour must not move. Zork Zero, Journey and Arthur declare
+    /// `HF_EHUFF | HF_GHUFF` and share one global Huffman tree; these
+    /// fingerprints were taken before this quest touched `parse` and are
+    /// byte-identical after it.
+    #[test]
+    fn the_global_huffman_tree_archives_are_unmoved() {
+        for (image, want) in [
+            ("Zork Zero - The Revenge of Megaboz.adf", (495, 388, 0x6c01_a84b_8143_80bfu64)),
+            ("Journey - The Quest Begins.adf", (134, 134, 0x3c7e_9a34_6ab8_41f2)),
+            ("Arthur - The Quest for Excalibur.adf", (169, 135, 0x4f95_fb95_3640_f18f)),
+        ] {
+            let Some(pics) = adf_pictures(image) else { continue };
+            assert_eq!(fingerprint(&pics), want, "{image} decoded differently");
+        }
     }
 }
