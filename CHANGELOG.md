@@ -118,6 +118,20 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Drop caps and room icons survive the trip off an Amiga floppy.** Boot Zork
+  Zero from its `.adf` and the illuminated initial that opens each chapter, and the
+  little engraved room icons that punctuate the prose, simply were not there — even
+  though the very same pictures drew perfectly inside the in-game map. The art was
+  decoding fine; it was being filed in the wrong place. Zork Zero doesn't draw its
+  inline art exactly at the text cursor: it looks up a tiny placement record in the
+  picture file and nudges the picture a pixel or two in from the line. That record
+  is `0×0` in the converted Blorb and `2×1` on the original floppy, so with genuine
+  Amiga art every drop cap missed the cursor by two pixels and was reclassified as
+  a picture the game had placed for itself — painted onto a window nobody was
+  showing instead of floated beside its paragraph. babelmap now also listens for
+  the margin the game reserves immediately after such a draw, which is the story
+  saying "the text flows around this one" in as many words.
+
 - **The poker menu can be clicked where it is printed.** *Play Current Bet*,
   *Change Current Bet*, *Save*, *Restore* and *Quit* all ignored the mouse in
   Frobozz Magic VideoPoker — and so did the *Continue* button between hands. The
