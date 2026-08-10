@@ -567,13 +567,29 @@ fn scale_and_cell(state: &app::state::AppState) -> (f32, u16, u16) {
 
 /// The flank border extensions this frame drew: `(cell rect, native crop)`.
 fn flank_dividers(state: &app::state::AppState) -> Vec<(Quad, Quad)> {
+    flank_records(state, "flank-divider")
+}
+
+/// Every `/dump-windows` record under one label: `(cell rect, native rect)`.
+fn flank_records(state: &app::state::AppState, label: &str) -> Vec<(Quad, Quad)> {
     state
         .v6_cell_map
         .borrow()
         .iter()
-        .filter(|e| e.label == "flank-divider")
+        .filter(|e| e.label == label)
         .map(|e| (e.cells, e.native))
         .collect()
+}
+
+/// The story viewport this frame resolved, in pane-absolute cells.
+fn viewport_of(state: &app::state::AppState) -> Quad {
+    state
+        .v6_cell_map
+        .borrow()
+        .iter()
+        .find(|e| e.label == "viewport")
+        .map(|e| e.cells)
+        .expect("a hybrid ring frame records its story viewport")
 }
 
 /// The panes the two side-border cases sweep: the user's own first, then sizes this
@@ -749,6 +765,172 @@ fn journey_menu_header_labels_are_whole_at_the_users_pane() {
                     e.label,
                     e.cells
                 );
+            }
+        }
+    }
+}
+
+// ── SQ-0747 item (A) / SQ-0758: the flank's own extent ──
+//
+// The user, on the left picture column: *"maybe we should start by fixing the left
+// side graphics overlap so it renders within it's alloted space?"* Two symptoms, one
+// region, opposite directions — and one calculation behind both, which is why they are
+// pinned together here: the panel was bounded by the BAND (everything between the pane
+// edge and the story viewport) instead of by its own two border columns. So it ran past
+// the inner rule at one end and buried the outer border at the other.
+
+/// The panel colour Journey paints around its picture, which the flank flood samples.
+const PANEL_BG: ratatui::style::Color = ratatui::style::Color::Rgb(34, 34, 34);
+
+/// (i) SQ-0747(A) — no panel flood stands between the frame's inner rule and the story
+/// text.
+///
+/// A band runs to the story VIEWPORT's edge, and the viewport is quantized INWARD to
+/// whole cells while the rule's extension is quantized OUTWARD to the cells its ink
+/// covers. Between them there can be a column belonging to neither, and flooding the
+/// whole band put the picture column's ground in it — the panel painted past its own
+/// rule and up against the prose. Width-dependent by construction: one column at the
+/// user's 159- and 163-column panes, none at 138, which is why it came and went.
+///
+/// Asserted on the CELLS, not on the rects, so it reads as the symptom does. The IBM PC
+/// profile rides along as the A/B: its rule is a reverse-video SPACE that inks its whole
+/// 8-pixel text cell, so the rule's cells already reach the viewport and there was never
+/// a gap there to flood — same code, different geometry, nothing to change.
+///
+/// FALSIFY by flooding the band again (`let fill = band;` in `menu_flank_panel`):
+/// `Amiga honor=true pane 163x61: 46 cell(s) of the picture column's own ground
+/// (Rgb(34, 34, 34)) stand between the frame's inner rule (ends at column 68) and the
+/// story text (starts at column 69) — the panel is flooding the whole band instead of
+/// its own extent. First at (68, 3).`
+#[test]
+fn journey_flank_panel_fill_stops_at_the_frames_inner_rule() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
+        let Some(mut session) = journey_at_menu(profile) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for pane in SIDE_PANES {
+                let (state, _, buf) = render_pane(&model, honor, pane, &transcript);
+                let ctx = format!("{profile:?} honor={honor} pane {}x{}", pane.2, pane.3);
+                let vp = viewport_of(&state);
+                // The LEFT flank's rule: the divider extension that lies left of the story.
+                let Some((rule, _)) = flank_dividers(&state).into_iter().find(|(c, _)| c.0 < vp.0)
+                else {
+                    panic!("{ctx}: the left flank carries a border rule");
+                };
+                let rule_end = rule.0 + rule.2;
+                let mut stray = 0usize;
+                let mut first = None;
+                for x in rule_end..vp.0 {
+                    for y in rule.1..rule.1 + rule.3 {
+                        if buf.cell((x, y)).and_then(|c| c.style().bg) == Some(PANEL_BG) {
+                            stray += 1;
+                            first.get_or_insert((x, y));
+                        }
+                    }
+                }
+                assert_eq!(
+                    stray, 0,
+                    "{ctx}: {stray} cell(s) of the picture column's own ground ({PANEL_BG:?}) \
+                     stand between the frame's inner rule (ends at column {rule_end}) and the \
+                     story text (starts at column {}) — the panel is flooding the whole band \
+                     instead of its own extent. First at {:?}",
+                    vp.0,
+                    first.unwrap_or((0, 0))
+                );
+            }
+        }
+    }
+}
+
+/// (j) SQ-0758 — the flank's OUTER border is drawn, and it is the game's own.
+///
+/// Under a Menu plan the flank band is never drawn as art: `menu_flank_panel` floods the
+/// column and draws only the picture's bounding box, and the frame's outer edge lies
+/// outside that box. So Journey's left border simply did not exist between the `┌` on
+/// the top rule and the `└` on the bottom one — the honest half of *"unmatched lines on
+/// the outside edges"*: one edge was font glyphs, one a bitmap, and one was nothing.
+/// The inner rule survived only because its extension redraws it, and the fix is that
+/// same extension, run from the other side.
+///
+/// The A/B that keeps this from being "Amiga is special": under the IBM PC profile there
+/// IS no outer border — Journey's picture starts at native x 5 with nothing outside it —
+/// so the outward probe finds the ILLUSTRATION, and carrying a one-pixel slice of that
+/// down the whole column would be the same defect in the other direction. The graphics-
+/// only canvas is what tells them apart, per SQ-0750's rule: a band is art only when it
+/// is actually artwork.
+///
+/// FALSIFY by dropping the outer probe (return `None` for `FlankBorder::Outer`):
+/// `Amiga honor=true pane 163x61: the flank's outer border is not drawn at all — no
+/// flank-border record left of the story viewport (dividers [((66, 3, 2, 46), ...)])`.
+#[test]
+fn journey_flank_outer_border_is_drawn_when_the_game_drew_one() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
+        let Some(mut session) = journey_at_menu(profile) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for pane in SIDE_PANES {
+                let (state, _, buf) = render_pane(&model, honor, pane, &transcript);
+                let (s, cell_w, _) = scale_and_cell(&state);
+                let ctx = format!("{profile:?} honor={honor} pane {}x{}", pane.2, pane.3);
+                let vp = viewport_of(&state);
+                let outer: Vec<(Quad, Quad)> =
+                    flank_records(&state, "flank-border").into_iter().filter(|(c, _)| c.0 < vp.0).collect();
+                match profile {
+                    InterpreterProfile::Amiga => {
+                        let Some((ext, crop)) = outer.first().copied() else {
+                            panic!(
+                                "{ctx}: the flank's outer border is not drawn at all — no \
+                                 flank-border record left of the story viewport (dividers {:?})",
+                                flank_dividers(&state)
+                            );
+                        };
+                        // It is the frame's edge, so it stands at the pane's own outer column —
+                        // the one the `┌` and `└` on the rules above and below it stand in.
+                        assert_eq!(
+                            ext.0, pane.0,
+                            "{ctx}: the outer border stands in the pane's outer column, with the \
+                             frame's corners — got {ext:?}"
+                        );
+                        // …drawn at the ring's scale, like every other pixel in it (SQ-0750).
+                        let mag = (ext.2 as f32 * cell_w as f32) / (crop.2.max(1) as f32);
+                        assert!(
+                            (mag - s).abs() <= s * 0.2,
+                            "{ctx}: the outer border is magnified {mag:.2}x against a letterbox \
+                             scale of {s:.2}x (ext {ext:?}, crop {crop:?})"
+                        );
+                        // …and at the pane the user reported, something is visibly there: the
+                        // column no longer reads as an unbroken run of the panel's own flood.
+                        //
+                        // Pinned at that pane only, and deliberately. The border is ONE native
+                        // pixel of stroke; whether it survives being resampled into a terminal
+                        // cell is the letterbox scale's business, not this fix's — at 100x71
+                        // (s=1.25) the stroke averages into the ground exactly, which is
+                        // SQ-0750's still-open glyph-versus-raster split and not a border that
+                        // failed to draw. What this case owns is that the band is produced,
+                        // placed and scaled; the geometry asserts above cover every pane.
+                        if pane == USER_PANE {
+                            let flooded = (ext.1..ext.1 + ext.3)
+                                .filter(|&y| buf.cell((ext.0, y)).and_then(|c| c.style().bg) == Some(PANEL_BG))
+                                .count();
+                            assert!(
+                                flooded < ext.3 as usize,
+                                "{ctx}: all {flooded} rows of the outer border column read as the \
+                                 panel flood ({PANEL_BG:?}) — the border is not being drawn over it"
+                            );
+                        }
+                    }
+                    // No border out there to draw, and the picture is not one.
+                    _ => assert!(
+                        outer.is_empty(),
+                        "{ctx}: this frame has no outer border on the left flank — its picture \
+                         runs to the screen edge — so anything drawn there is a slice of the \
+                         ILLUSTRATION replicated down the column: {outer:?}"
+                    ),
+                }
             }
         }
     }
