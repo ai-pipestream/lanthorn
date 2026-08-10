@@ -432,3 +432,79 @@ fn journey_amiga_menu_dividers_line_up_down_the_panel() {
         }
     }
 }
+
+/// (e) THE FRAME'S SIDES REACH THE MENU — SQ-0742's second half, the VERTICAL
+/// extent. `c7bd0bd8` fixed the frame's width; nothing addressed its height.
+///
+/// The report: *"there is still a big chunk of the border missing from the right
+/// side (at the bottom), and a gap at the top."* Measured at the user's own pane
+/// (138x68 cells, 8x18), the right flank band is 55 rows and reaches the menu — the
+/// band is not short. Its IMAGE is. The game's canvas is 400 native pixels tall and
+/// the flank is drawn at the uniform scale, so the border's pixels run out at
+/// terminal row 39 and the remaining eighteen rows down to the menu are transparent.
+/// Carrying the border through that reclaimed gap is exactly what
+/// `flank_divider_extension` exists for — and under the Amiga profile it produced
+/// NOTHING, for either flank, at any pane size.
+///
+/// The cause is a one-pixel probe. The extension locates the border as the opaque
+/// native column abutting the story box; Journey/Amiga draws its frame with `│`
+/// glyphs, whose ink sits in the middle of an 8-pixel text cell, so the column
+/// immediately outside the story box is that cell's blank padding. The IBM PC
+/// profile draws the same border as reverse-video spaces, which ink that column —
+/// which is why one profile framed the reclaimed gap and the other did not.
+///
+/// The A/B is the assertion: the two profiles draw the same frame, so both must
+/// carry both flanks' borders down to the menu.
+///
+/// FALSIFY by restoring the single-column probe in `flank_divider_extension`: every
+/// Amiga case fails with `0 flank dividers`.
+#[test]
+fn journey_frame_sides_reach_the_menu_under_both_profiles() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for profile in [InterpreterProfile::IbmPc, InterpreterProfile::Amiga] {
+        let Some(session) = journey_at_menu(profile) else { return };
+        let model = session.screen();
+        for honor in [true, false] {
+            // The user's pane first, then the widths this file already sweeps, at a
+            // tall pane and a short one — the reclaimed gap only exists when the pane
+            // is taller than the game's scaled canvas, and it is what this is about.
+            for (cols, rows) in [(138, 68), (96, 51), (110, 51), (138, 51), (150, 84)] {
+                let (state, area, _) = render_hybrid_at(&model, honor, cols, rows);
+                let ctx = format!("{profile:?} honor={honor} pane {cols}x{rows}");
+                let map = state.v6_cell_map.borrow();
+                let viewport = map
+                    .iter()
+                    .find(|e| e.label == "viewport")
+                    .unwrap_or_else(|| panic!("{ctx}: the ring records its viewport"))
+                    .cells;
+                let dividers: Vec<(u16, u16, u16, u16)> =
+                    map.iter().filter(|e| e.label == "flank-divider").map(|e| e.cells).collect();
+                assert!(
+                    dividers.len() >= 2,
+                    "{ctx}: {} flank dividers — the frame's side borders are drawn from the \
+                     game's own canvas, which ends well above the menu, so without an extension \
+                     per flank the frame has no sides through the reclaimed gap.\n{:#?}",
+                    dividers.len(),
+                    map.iter().map(|e| (e.label.clone(), e.cells)).collect::<Vec<_>>()
+                );
+                let menu_top = viewport.1 + viewport.3;
+                for d in &dividers {
+                    assert_eq!(
+                        d.1 + d.3,
+                        menu_top,
+                        "{ctx}: divider {d:?} stops before the menu at row {menu_top}"
+                    );
+                    assert!(
+                        d.0 >= area.x && d.0 + d.2 <= area.right(),
+                        "{ctx}: divider {d:?} falls outside the pane {area:?}"
+                    );
+                }
+                // One per flank, on opposite sides of the story viewport.
+                assert!(
+                    dividers.iter().any(|d| d.0 < viewport.0) && dividers.iter().any(|d| d.0 >= viewport.0),
+                    "{ctx}: both flanks carry a border — got {dividers:?} against viewport {viewport:?}"
+                );
+            }
+        }
+    }
+}

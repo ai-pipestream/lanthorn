@@ -356,6 +356,13 @@ pub enum GraphicsTarget {
     Window(u32),
     /// One chrome-ring band, by its cell rect `(x, y, w, h)`.
     Band(u16, u16, u16, u16),
+    /// The v6 RASTER path's full-frame composite (SQ-0747). There is only ever one,
+    /// and it covers the whole pane — so a frame that stops drawing it without
+    /// dropping it strands an image over everything the next path draws. Journey
+    /// boots through this path (`raster x2 · hybrid-ring x27`) before its menu
+    /// switches to the ring, and the transition was invisible to the op log until
+    /// this target existed.
+    Raster,
 }
 
 impl GraphicsOp {
@@ -730,6 +737,12 @@ impl GraphicsRender {
     /// must not flash it while the new encode is in flight (SQ-0578). The next
     /// raster frame re-encodes synchronously (see [`spawn_v6_encode`]).
     pub fn invalidate_v6(&mut self) {
+        // The composite the terminal was last pointed at is being abandoned; record
+        // it, so "placed on the previous frame, neither re-placed nor dropped on this
+        // one" is answerable for the raster→ring transition too (SQ-0747).
+        if self.v6.is_some() {
+            self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Raster });
+        }
         self.v6 = None;
         self.v6_job = None;
     }
@@ -775,6 +788,11 @@ impl GraphicsRender {
         // pixels and its native extent is the canvas dimensions.
         let fs = picker.font_size();
         let (cw, ch) = (fs.width.max(1), fs.height.max(1));
+        let (native_w, native_h) = (ready.native_w, ready.native_h);
+        self.note_op(GraphicsOp::Place {
+            target: GraphicsTarget::Raster,
+            at: (dest.x, dest.y, dest.width, dest.height),
+        });
         self.last_v6_map = Some(V6ClickMap {
             pane_x: area.x,
             pane_y: area.y,
@@ -784,8 +802,8 @@ impl GraphicsRender {
             img_y: (dest.y - area.y) as f32 * ch as f32,
             img_w: dest.width as f32 * cw as f32,
             img_h: dest.height as f32 * ch as f32,
-            native_w: ready.native_w,
-            native_h: ready.native_h,
+            native_w,
+            native_h,
             text_rows: None,
         });
     }
