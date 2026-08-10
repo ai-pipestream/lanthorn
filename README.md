@@ -42,6 +42,10 @@ roof; one engine-agnostic mapper that charts them all.
 
 ![Zork Zero with hybrid rendering mode](docs/zork-zero.png)
 
+![Frobozz Magic VideoPoker: a v6 game's painted card table, banner and clickable menu, drawn inside its own illustrated frame](docs/frobozz-poker.png)
+
+![Scopa dealt on a green baize table — a v6 game whose entire screen, cards and buttons included, is artwork](docs/scopa.png)
+
 ![A Glulx game using a multi-window Glk layout with story-set colours](docs/multi-window-layout.png)
 
 ![The matrix map view: Colossal Cave's all-alike maze as a direction table — one row per room, every passage's true behaviour in its cell](docs/maze-grid.png)
@@ -102,11 +106,21 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
 - **Live automapping** — rooms and connections placed, routed, and de-overlapped
   as you explore, split across switchable multi-level **layers**, and
   continuously re-tidied. Engine-agnostic: the same map grows for *Zork*,
-  *Counterfeit Monkey*, or *Adventureland*. → [mapping](docs/features/mapping.md)
+  *Counterfeit Monkey*, or *Adventureland*. Click any room — on the map or in
+  the **matrix** view — and babelmap highlights the way there from where you
+  stand; a docked **room panel** follows you with the current room's exits,
+  contents and connections. → [mapping](docs/features/mapping.md)
 - **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
   columns, per-room compass, illuminated drop-caps) rendered faithfully at an
   authentic 640×400 with a `hybrid` / `raster` / `frameless` render choice.
   → [v6 graphics](docs/features/v6-graphics.md)
+- **Play straight off the original Amiga floppies** — hand babelmap an `.adf`
+  disk image and it mounts the AmigaDOS filesystem, finds the story *and* its
+  native Infocom picture archive, and plays it as an Amiga would: interpreter
+  number 4, the Amiga palette and default colours, and artwork decoded from the
+  disk's own format rather than a converted Blorb. *Zork Zero*, *Arthur*,
+  *Journey* and *Shogun* boot from the media they shipped on.
+  → [interpreter](docs/features/interpreter.md)
 - **Pictures in your terminal** — cover art, in-game Glulx graphics windows, and
   inline images render with your terminal's best protocol (Kitty / iTerm2 /
   Sixel) and a universal half-block fallback. → [interface](docs/features/interface.md)
