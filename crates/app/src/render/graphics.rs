@@ -265,6 +265,27 @@ struct V6Ready {
 /// time, and `poll_v6_job` installs its result (see `spawn_v6_encode`).
 type V6Job = std::thread::JoinHandle<Option<V6Ready>>;
 
+/// Which of a frame's draws a cached chrome band belongs to (SQ-0755).
+///
+/// A band's cache key is the cell rect it is drawn at — but one rect can legitimately
+/// be drawn twice on a single frame. Journey's right flank IS its border column, so the
+/// flank's own art and the divider extension replicated down the reclaimed gap land on
+/// exactly the same cells. With the rect alone as the key each overwrote the other's
+/// entry, every frame, so neither was ever a cache hit and both re-encoded forever.
+/// Skipping one of the draws is not the answer: they carry different pixels — the flank
+/// the column's true native extent, the extension one native row replicated past where
+/// the canvas ends — and dropping either loses ink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BandSlot {
+    /// The band's own artwork, at the letterbox scale or stretched to a flank.
+    Art = 0,
+    /// A flank border column replicated down the gap between the art and the menu.
+    DividerExtension = 1,
+}
+
+/// A chrome-band cache key: its [`BandSlot`] plus the cell rect it is drawn at.
+pub type BandKey = (u8, u16, u16, u16, u16);
+
 #[derive(Default)]
 pub struct GraphicsRender {
     cache: std::collections::HashMap<u32, (u64, u16, u16, Protocol)>,
@@ -283,7 +304,11 @@ pub struct GraphicsRender {
     /// so a change confined to one band leaves the other bands' uploads fresh
     /// (SQ-0514). Pruned each frame to the live band set by
     /// [`GraphicsRender::retain_chrome_bands`].
-    chrome_bands: std::collections::HashMap<(u16, u16, u16, u16), (u64, Protocol)>,
+    /// Keyed on the rect a band is DRAWN at, plus a [`BandSlot`]: one rect can carry
+    /// two different images on one frame — a flank's own art and the divider extension
+    /// replicated over it — and keying on the rect alone made each overwrite the
+    /// other's cache entry, so both re-encoded on every frame forever (SQ-0755).
+    chrome_bands: std::collections::HashMap<BandKey, (u64, Protocol)>,
     /// What happened to each chrome band on the last v6 frame, for `/dump-windows`
     /// (SQ-0587). Whether a band was a cache hit, whether it encoded, and what size
     /// the protocol reported — the questions that decide whether a missing image is a
@@ -918,12 +943,12 @@ impl GraphicsRender {
     pub fn invalidate_chrome_bands(&mut self) {
         let dropped: Vec<_> = self.chrome_bands.keys().copied().collect();
         self.chrome_bands.clear();
-        for (x, y, w, h) in dropped {
+        for (_, x, y, w, h) in dropped {
             self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Band(x, y, w, h) });
         }
     }
 
-    pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<(u16, u16, u16, u16)>) {
+    pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<BandKey>) {
         let before: Vec<_> = self.chrome_bands.keys().copied().collect();
         self.chrome_bands.retain(|k, _| live.contains(k));
         // SQ-0587: dropping a cached band drops its image PROTOCOL, and a graphics
@@ -940,7 +965,7 @@ impl GraphicsRender {
             // Everything that was cached is gone — the ones `retain` evicted and
             // the survivors cleared with them — so every one of them must
             // re-upload before it can be seen again.
-            for (x, y, w, h) in before {
+            for (_, x, y, w, h) in before {
                 self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Band(x, y, w, h) });
             }
         }
@@ -950,7 +975,7 @@ impl GraphicsRender {
     /// (observability hook, SQ-0514). A band whose hash is unchanged across two
     /// frames did NOT re-encode — used to confirm that a change confined to one
     /// band leaves the other bands' uploads fresh.
-    pub fn chrome_band_hashes(&self) -> std::collections::HashMap<(u16, u16, u16, u16), u64> {
+    pub fn chrome_band_hashes(&self) -> std::collections::HashMap<BandKey, u64> {
         self.chrome_bands.iter().map(|(k, (h, _))| (*k, *h)).collect()
     }
 
@@ -1042,7 +1067,7 @@ impl GraphicsRender {
         (cw, ch).hash(&mut h);
         (rel_x0, rel_y0, bw, bh).hash(&mut h);
         let hash = h.finish();
-        let key = (band.x, band.y, band.width, band.height);
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
         let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
         if !fresh {
             // Copy the sub-rect under this band out of the frame-shared scaled
@@ -1073,7 +1098,7 @@ impl GraphicsRender {
                     self.band_encodes += 1;
                     self.chrome_bands.insert(key, (hash, p));
                     self.note_op(GraphicsOp::Upload {
-                        target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                        target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
                         cells: (band.width, band.height),
                     });
@@ -1082,7 +1107,7 @@ impl GraphicsRender {
             }
         } else {
             self.note_op(GraphicsOp::Reuse {
-                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 id: None,
             });
         }
@@ -1102,7 +1127,7 @@ impl GraphicsRender {
             self.band_log.push(note);
             Image::new(proto).render(dest, buf);
             self.note_op(GraphicsOp::Place {
-                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 at: (dest.x, dest.y, dest.width, dest.height),
             });
         } else {
@@ -1136,6 +1161,7 @@ impl GraphicsRender {
         chrome_canvas: &image::RgbaImage,
         band: Rect,
         crop: (u32, u32, u32, u32),
+        slot: BandSlot,
         buf: &mut Buffer,
     ) {
         let (cx, cy, cw_n, ch_n) = crop;
@@ -1157,7 +1183,7 @@ impl GraphicsRender {
         // device size — the stretch factor is (bw,bh)/(cw_n,ch_n), so both ends are
         // covered. A change outside this native rect (e.g. the banner's Score/Moves)
         // never alters the hash, keeping the flank's cached upload fresh (SQ-0514).
-        1u8.hash(&mut h); // discriminator vs. draw_chrome_band keys on the same map
+        (slot as u8).hash(&mut h); // discriminator vs. draw_chrome_band keys on the same map
         (cx, cy, cw_n, ch_n).hash(&mut h);
         let x1 = (cx + cw_n).min(canvas_w);
         let y1 = (cy + ch_n).min(canvas_h);
@@ -1168,7 +1194,7 @@ impl GraphicsRender {
         }
         (bw, bh).hash(&mut h);
         let hash = h.finish();
-        let key = (band.x, band.y, band.width, band.height);
+        let key = (slot as u8, band.x, band.y, band.width, band.height);
         let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
         if !fresh {
             // Copy the native crop (clamped to the canvas) into its own image, then
@@ -1195,7 +1221,7 @@ impl GraphicsRender {
                     self.band_encodes += 1;
                     self.chrome_bands.insert(key, (hash, p));
                     self.note_op(GraphicsOp::Upload {
-                        target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                        target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
                         cells: (band.width, band.height),
                     });
@@ -1204,7 +1230,7 @@ impl GraphicsRender {
             }
         } else {
             self.note_op(GraphicsOp::Reuse {
-                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 id: None,
             });
         }
@@ -1215,7 +1241,7 @@ impl GraphicsRender {
             let dest = Rect::new(band.x, band.y, w, ht);
             Image::new(proto).render(dest, buf);
             self.note_op(GraphicsOp::Place {
-                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 at: (dest.x, dest.y, dest.width, dest.height),
             });
         }
@@ -1820,7 +1846,7 @@ mod tests {
 
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
         assert_eq!(gr.chrome_bands.len(), 1, "first draw uploads + caches the band protocol");
-        let key = (band.x, band.y, band.width, band.height);
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
         let hash0 = gr.chrome_bands.get(&key).unwrap().0;
         // Same content + band → cache hit, no rebuild.
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
@@ -1857,8 +1883,8 @@ mod tests {
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, top, &mut buf);
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, bottom, &mut buf);
         let before = gr.chrome_band_hashes();
-        let top_key = (top.x, top.y, top.width, top.height);
-        let bot_key = (bottom.x, bottom.y, bottom.width, bottom.height);
+        let top_key = (BandSlot::Art as u8, top.x, top.y, top.width, top.height);
+        let bot_key = (BandSlot::Art as u8, bottom.x, bottom.y, bottom.width, bottom.height);
         assert!(before.contains_key(&top_key) && before.contains_key(&bot_key), "both bands cached");
 
         // Change a pixel that lives ONLY in the top band's native footprint.

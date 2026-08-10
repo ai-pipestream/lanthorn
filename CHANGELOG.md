@@ -180,6 +180,15 @@ identifies which beta it is without reading its git hash.
   sequence, which no longer has to be argued about because it is now recorded like
   everything else.
 
+- **A band drawn twice on one frame keeps two cached images, not one.** Journey's
+  right-hand border is both the frame's flank artwork and the column carried down
+  to the menu, and both land on exactly the same cells. babelmap cached images by
+  where they are drawn, so each overwrote the other's cache entry and both were
+  re-sent to the terminal on every single frame, forever. They now occupy separate
+  cache slots. The earlier attempt at this — skipping one of the two draws — is
+  reverted: the two carry different pixels, and dropping either loses part of the
+  border.
+
 - **Journey's frame gets its sides back.** Under the Amiga interpreter profile the
   frame around the game drew its top, its bottom and its menu, and then simply
   stopped partway down: below the game's own artwork the left and right borders

@@ -1110,11 +1110,15 @@ fn render_node(
                                 .filter(|s| !matches!(s, ChromeStrip::Art(r) if !strip_has_art(r)))
                                 .chain(menu_strips.iter())
                                 .filter_map(|s| match s {
-                                    ChromeStrip::Art(r) => Some((r.x, r.y, r.width, r.height)),
+                                    ChromeStrip::Art(r) => Some((crate::render::graphics::BandSlot::Art as u8, r.x, r.y, r.width, r.height)),
                                     ChromeStrip::Text(..) => None,
                                 })
-                                .chain(divider_exts.iter().map(|(r, _)| (r.x, r.y, r.width, r.height)))
-                                .chain(flank_panels.iter().map(|(_, (_, d, _))| (d.x, d.y, d.width, d.height)))
+                                .chain(divider_exts.iter().map(|(r, _)| {
+                                    (crate::render::graphics::BandSlot::DividerExtension as u8, r.x, r.y, r.width, r.height)
+                                }))
+                                .chain(flank_panels.iter().map(|(_, (_, d, _))| {
+                                    (crate::render::graphics::BandSlot::Art as u8, d.x, d.y, d.width, d.height)
+                                }))
                                 .collect();
                             gr.retain_chrome_bands(&live);
                             for strip in &strips {
@@ -1122,15 +1126,14 @@ fn render_node(
                                     if !strip_has_art(r) {
                                         continue;
                                     }
-                                    // SQ-0742: a flank that IS its border column has a divider
-                                    // extension covering exactly its rect. Both were drawn, to
-                                    // the same cache key, so the flank's upload was overwritten
-                                    // by the extension's and both re-encoded on every frame —
-                                    // two images sent, one ever seen. The extension supersedes
-                                    // it; the frame is unchanged, one upload lighter.
-                                    if divider_exts.iter().any(|(e, _)| e == r) {
-                                        continue;
-                                    }
+                                    // SQ-0755: a flank whose rect an extension also covers is
+                                    // drawn TWICE, to one cache key — two encodes a frame for
+                                    // one visible image. Skipping the flank draw looked free and
+                                    // is not: the extension replicates ONE native row, while the
+                                    // flank band carries the column's whole native extent, and
+                                    // dropping it measurably lost ink (one row, at a 138x68 pane
+                                    // under halfblocks). The waste is real but it is an upload,
+                                    // not a pixel; the pixels are not ours to throw away for it.
                                 }
                                 match strip {
                                     // SQ-0511: a SIDE flank band (narrower than the pane)
@@ -1152,12 +1155,12 @@ fn render_node(
                                         let panel = flank_panels.iter().find(|(sr, _)| sr == r).map(|(_, p)| *p);
                                         if let Some((bg, dest, crop)) = panel {
                                             fill_pane_page(*r, bg, buf);
-                                            gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, buf);
+                                            gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, crate::render::graphics::BandSlot::Art, buf);
                                         } else if let Some(crop) = (matches!(plan, BottomPlan::Frame) && r.width < area.width)
                                             .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
                                             .flatten()
                                         {
-                                            gr.draw_chrome_band_stretched(picker, &canvas, *r, crop, buf);
+                                            gr.draw_chrome_band_stretched(picker, &canvas, *r, crop, crate::render::graphics::BandSlot::Art, buf);
                                         } else {
                                             gr.draw_chrome_band(picker, &canvas, &scale, area, *r, buf);
                                         }
@@ -1173,7 +1176,7 @@ fn render_node(
                             // left undrawn (theme backdrop, matching the flank's own
                             // never-painted background beside the divider).
                             for (ext, crop) in &divider_exts {
-                                gr.draw_chrome_band_stretched(picker, &canvas, *ext, *crop, buf);
+                                gr.draw_chrome_band_stretched(picker, &canvas, *ext, *crop, crate::render::graphics::BandSlot::DividerExtension, buf);
                             }
                             if let Some(ms) = &menu {
                                 for strip in &menu_strips {
