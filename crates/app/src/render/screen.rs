@@ -4113,9 +4113,11 @@ fn draw_chrome_text_strip(
     // SQ-0509: merge horizontally-contiguous same-style fragments before mapping.
     // Runs separated by a genuine gap (Journey's menu items / column dividers,
     // 8px apart) stay distinct and keep their proportional spacing, so the strip
-    // bridges only ABUTTING fragments. SQ-0742 first collapses each repeated-glyph
-    // RULE to the width of its own scaled span, and flags it, so the stamping below
-    // can close the seams around it (see `collapse_row_rules`).
+    // bridges only ABUTTING fragments — and never bridges INK to PADDING, which is
+    // what let Shogun's two status rows disagree about where native x 503 is
+    // (SQ-0757). SQ-0742 first collapses each repeated-glyph RULE to the width of
+    // its own scaled span, and flags it, so the stamping below can close the seams
+    // around it (see `collapse_row_rules`).
     let mut by_row: BTreeMap<i32, Vec<(PxText, bool)>> = BTreeMap::new();
     for (row, mut rr) in raw {
         rr.sort_by_key(|t| t.x);
@@ -4407,7 +4409,7 @@ fn collapse_row_rules(
         }
         if j + 1 - i >= RULE_MIN {
             // A rule. Flush what came before it, then emit it at its scaled width.
-            out.extend(merge_row_fragments(&pending, 4).into_iter().map(|t| (t, false)));
+            out.extend(merge_strip_fragments(&pending).into_iter().map(|t| (t, false)));
             pending.clear();
             let (col0, _) = run_cell(t, scale, cell_px, pane);
             let cw = cell_px.0.max(1) as f32;
@@ -4424,7 +4426,7 @@ fn collapse_row_rules(
         // before it and stamp each fragment on its own, so the merge cannot drag it
         // off the column the game drew it at.
         if single_glyph(t).is_some_and(box_glyph) {
-            out.extend(merge_row_fragments(&pending, 4).into_iter().map(|t| (t, false)));
+            out.extend(merge_strip_fragments(&pending).into_iter().map(|t| (t, false)));
             pending.clear();
             out.extend(row_runs[i..=j].iter().map(|t| ((*t).clone(), false)));
             i = j + 1;
@@ -4433,7 +4435,77 @@ fn collapse_row_rules(
         pending.push(t);
         i += 1;
     }
-    out.extend(merge_row_fragments(&pending, 4).into_iter().map(|t| (t, false)));
+    out.extend(merge_strip_fragments(&pending).into_iter().map(|t| (t, false)));
+    out
+}
+
+/// SQ-0757: merge a text strip's fragments the way [`merge_row_fragments`] does,
+/// but never glue a field to the PADDING in front of it.
+///
+/// The merge exists to re-assemble text the game printed as one stream and
+/// proportional pixel metrics scattered into one run per glyph. A merged run is
+/// POSITIONED once through the letterbox scale and then advances ONE TERMINAL COLUMN
+/// per character, and those two rates coincide only where a terminal column is
+/// exactly one native 8px text cell. Inside a phrase that is the point — prose has
+/// to stay legible, so its character count is what it is, and Arthur's
+/// "St Anne's Day, Compline" has to arrive as that and not as four words at four
+/// independently rounded columns. Across the PADDING between two FIELDS it is simply
+/// wrong: gluing them hands the second field the first one's starting column plus a
+/// native-width advance, so it lands correctly at the one pane width where the rates
+/// agree and drifts everywhere else, by an amount that grows with how much padding
+/// it was glued to.
+///
+/// The line between the two is the width of the blank stretch. One blank cell is a
+/// word space — part of what the game printed. [`FIELD_GAP_PX`] or more is layout,
+/// and what lies past it is a field with a column of its own.
+///
+/// Shogun off its Amiga release floppy is the report. Under interpreter 4 the game
+/// paints its status band one run per CELL, padding included, so the strip received
+/// row 0 as `Erasmus` `:` + 23 blanks + `SHOGUN` + 21 blanks + `Score:` … and row 1
+/// as `Bridge` + 51 blanks + `Moves:` … — each glued into one run, and the two rows
+/// began at different native x. Both put their right-hand field at native x 503, and
+/// the glue placed them in DIFFERENT columns at every pane width except the one where
+/// a terminal column is a native cell: at an 80-column story pane (82–83 terminal
+/// columns once the frame's borders are counted) `Score:` and `Moves:` lined up, and
+/// nowhere else did they. The same game under the IBM PC profile emits one run per
+/// FIELD with no padding runs at all, so nothing was ever glued and it right-justifies
+/// at every width — the report's own control, and the reason this reads as an Amiga
+/// defect when it is a padding defect.
+///
+/// Padding still merges with itself, so a row of it is one run rather than fifty; and
+/// a blank run only ever paints the cells no glyph run claimed (SQ-0727), so wherever
+/// it lands it cannot rub a field out.
+fn merge_strip_fragments(row_runs: &[&crate::engine::PxText]) -> Vec<crate::engine::PxText> {
+    use crate::engine::PxText;
+    /// Blank native pixels that separate two FIELDS rather than two words: more than
+    /// the single 8px cell a game puts between words when it prints them.
+    const FIELD_GAP_PX: u16 = 8;
+    let ink = |t: &PxText| !t.text.trim().is_empty();
+    let width = |t: &PxText| 8 * t.text.chars().count() as u16;
+    let mut out: Vec<PxText> = Vec::new();
+    let mut group: Vec<&PxText> = Vec::new();
+    // Blank fragments since the last inked one, held back until the next inked one
+    // says whether they were a word space or a field gap.
+    let (mut blanks, mut blank_px): (Vec<&PxText>, u16) = (Vec::new(), 0);
+    for t in row_runs {
+        if !ink(t) {
+            blanks.push(t);
+            blank_px = blank_px.saturating_add(width(t));
+            continue;
+        }
+        if blank_px > FIELD_GAP_PX {
+            out.extend(merge_row_fragments(&group, 4));
+            group.clear();
+            out.extend(merge_row_fragments(&blanks, 4));
+        } else {
+            group.extend(blanks.iter().copied());
+        }
+        blanks.clear();
+        blank_px = 0;
+        group.push(t);
+    }
+    out.extend(merge_row_fragments(&group, 4));
+    out.extend(merge_row_fragments(&blanks, 4));
     out
 }
 

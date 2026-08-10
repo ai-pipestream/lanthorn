@@ -144,6 +144,22 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun's score and moves line up at every window width, not just two of
+  them.** Playing off the Amiga release floppy, the status band's `Score:` and
+  `Moves:` fields agreed on a column at 82 and 83 columns and drifted apart at
+  every other size — while the IBM PC build right-justified them everywhere. The
+  game does the justifying itself: both labels are painted at the same pixel, so
+  the two rows were aligned before the renderer saw them. Under interpreter 4 it
+  paints the band one run per character cell, padding included, and the renderer
+  glued each row's padding onto the field behind it — after which the field was
+  positioned by the pane's scale and then advanced one terminal column per
+  character, two rates that agree only where a column is exactly one of the game's
+  own. Row one had more padding in front of it than row two, so the two rows
+  disagreed by more and more as the window grew. Padding is no longer glued to
+  ink, so every field keeps the column the game gave it. Journey's command menu
+  gains the same: on the floppy release its `-->` markers now stand in one column
+  instead of stepping left beside the shorter party names.
+
 - **Journey's menu headings are whole again.** On the Amiga release floppy the
   command menu's titles came out chewed — `The P` at one window size, `The Pa` at
   another, `Individual Comm` beside them — with the number of surviving letters
