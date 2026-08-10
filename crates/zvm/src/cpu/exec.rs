@@ -309,6 +309,22 @@ pub struct Machine {
     /// stamp — each retirement supersedes the one before it as the live screen's
     /// beginning. Set-only here; `GameSession::drain_turn` takes it.
     pub v6_prose_retired: Option<u64>,
+    /// Where the host's transcript stands at the moment an `erase_window` cleared
+    /// the window whose prose the HOST is holding — a [`Machine::v6_win0_out_chars`]
+    /// stamp, `None` when no such erase happened this turn (SQ-0755).
+    ///
+    /// The same boundary [`Machine::v6_prose_retired`] carries, from the other
+    /// cause, and deliberately NOT the same field: that one means "this prose is
+    /// now PAINT and the window owns it", which is a claim about frozen runs that
+    /// an erase does not make — it simply took the text off the screen. Sharing the
+    /// field would have made every v6 erase read as a freeze.
+    ///
+    /// A v6 erase never set `erase_lower_requested` (the v1–5 lower window's flag),
+    /// so before this the host was never told a v6 story had cleared its screen at
+    /// all, and its transcript went on re-rendering everything the game had ever
+    /// printed into whatever the story window is now. Set-only here;
+    /// `GameSession::drain_turn` takes it.
+    pub v6_screen_cleared: Option<u64>,
     /// A `(window, pixel column, pixel row)` a v6 `set_cursor` just DECLARED,
     /// pending the next print to that window — see
     /// [`Machine::v6_take_declared_indent`] (SQ-0697; the row joined it in
@@ -517,6 +533,7 @@ impl Machine {
             pending_erase_fills: Vec::new(),
             v6_win0_out_chars: 0,
             v6_prose_retired: None,
+            v6_screen_cleared: None,
             v6_declared_x: None,
             v6_input_window: 0,
             diagnostics: Vec::new(),
@@ -1941,6 +1958,40 @@ impl Machine {
                 if self.trace_screen { self.screen_trace.push(format!("@erase_window({})", zscreen_window_name(win as u16))); }
                 let screen_w = self.mem.read_word(0x22);
                 let screen_h = self.mem.read_word(0x24);
+                // SQ-0755: does this erase take the prose the HOST is holding off the
+                // screen? A v6 erase never set `erase_lower_requested` — that flag is
+                // the v1–5 path's — so on a v6 story the host was never told the screen
+                // had been cleared, and its transcript went on re-rendering everything
+                // the game had ever printed into whatever the story window is NOW.
+                // Journey's boot is the plain case: it prints its title block while
+                // window 0 is the whole screen, erases, opens the play layout, and
+                // prints the intro into a 368x272 panel on the right — and the title,
+                // the copyright and "[Press any key to begin]" all came back with it,
+                // pushing the intro to the bottom of the panel and, once the two
+                // together overflowed it, hard against the command menu.
+                //
+                // The boundary rides the SAME channel a prose window MOVED out from
+                // under its own text already uses (SQ-0697): a `ScreenClear` element at
+                // this point in the turn's output, which pins what follows to the top of
+                // the window and leaves everything above it reachable by scrolling. Not
+                // `erase_lower_requested`: the app TRUNCATES the transcript on a
+                // game-driven one (SQ-0407's menu-redraw collapse), and Journey's every
+                // move is a keystroke, so that would eat the narrative it had just
+                // printed.
+                //
+                // `v6_diverts_prose` is the same rule the print path routes by, so this
+                // asks about exactly the window the transcript belongs to; `streamed`
+                // non-empty is the same precondition `retire_streamed` applies on a move,
+                // so an erase of an empty window — Shogun's 1px caret, a scopa card
+                // rect — emits no boundary.
+                let host_prose_win = self.screen.v6.as_ref().and_then(|v6| {
+                    (0..v6.windows.len())
+                        .find(|&i| v6.windows[i].prose_window() && !self.v6_diverts_prose(i))
+                });
+                let clears_host_prose = host_prose_win.is_some_and(|i| {
+                    (matches!(win, -1 | -2) || win == i as i16)
+                        && self.screen.v6.as_ref().is_some_and(|v6| !v6.windows[i].streamed.is_empty())
+                });
                 let mut mirror = None;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     // v6 erase is PAINT: background fills the window's CURRENT
@@ -2171,6 +2222,9 @@ impl Machine {
                         }
                         _ => {}
                     }
+                }
+                if clears_host_prose {
+                    self.v6_screen_cleared = Some(self.v6_win0_out_chars);
                 }
                 self.mirror_v6_colours(mirror);
                 StepResult::Continue

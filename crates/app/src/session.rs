@@ -1353,19 +1353,37 @@ impl GameSession {
         let prose_retired_at = std::mem::take(&mut self.machine.v6_prose_retired);
         let prose_retired = prose_retired_at
             .map(|at| (at.saturating_sub(win0_base) as usize).min(transcript.chars().count()));
+        // SQ-0755: the same boundary from the other cause — the game ERASED the
+        // window the host's transcript belongs to. A v6 erase never reached the host
+        // at all (`erase_lower_requested` is the v1–5 lower window's flag), so the
+        // transcript kept re-rendering every line the game had ever printed into
+        // whatever the story window is now: Journey's boot brought its full-screen
+        // title block, copyright and "[Press any key to begin]" into the 368x272 panel
+        // the play layout opens on the right, pushing the intro to the bottom of it.
+        // It rides the elems channel rather than `erase_lower` because the app
+        // TRUNCATES the transcript on a game-driven `erase_lower` (SQ-0407's
+        // menu-redraw collapse) and Journey's every move is a keystroke.
+        let screen_cleared_at = std::mem::take(&mut self.machine.v6_screen_cleared);
         let pictures = self.drain_pictures();
         // Window-0 inline pictures interleave into this turn's text as ordered
         // elements; empty for turns without them (the app then uses the flat
         // transcript path unchanged).
-        let transcript_elems = if self.story_pics.is_empty() && prose_retired_at.is_none() {
+        let transcript_elems = if self.story_pics.is_empty()
+            && prose_retired_at.is_none()
+            && screen_cleared_at.is_none()
+        {
             Vec::new()
         } else {
             let mut marks: Vec<(u64, TranscriptElem)> = std::mem::take(&mut self.story_pics)
                 .into_iter()
                 .map(|(at, img)| (at, TranscriptElem::Image(img)))
                 .collect();
-            if let Some(at) = prose_retired_at {
-                marks.push((at, TranscriptElem::ScreenClear));
+            for at in [prose_retired_at, screen_cleared_at].into_iter().flatten() {
+                // One boundary per offset: a turn that both retires and erases at the
+                // same point in its output has cleared the screen once.
+                if !marks.iter().any(|(m, e)| *m == at && matches!(e, TranscriptElem::ScreenClear)) {
+                    marks.push((at, TranscriptElem::ScreenClear));
+                }
             }
             interleave_story_elems(&transcript, &transcript_runs, marks, win0_base)
         };
@@ -2428,8 +2446,18 @@ impl GameSession {
             }
         }
 
-        let strips: Vec<&crate::state::V6CellRect> =
-            cells.iter().filter(|c| c.label.starts_with("strip:")).collect();
+        // SQ-0755: the bottom-anchored MENU band's strips are listed too. They were
+        // not, and the omission cost a whole investigation: at the user's 159x61 pane
+        // the ring's strips stop at the story viewport's bottom (row 49) and the only
+        // other line in the dump was a one-row band at row 61 — eleven rows of the
+        // pane that nothing in the dump claimed. They belong to `menu:text`, which is
+        // classified through a different scale from the ring's and so was filtered out
+        // by a `strip:` prefix test. A dump that cannot account for the whole pane
+        // invites the reader to invent an explanation for the gap.
+        let strips: Vec<&crate::state::V6CellRect> = cells
+            .iter()
+            .filter(|c| c.label.starts_with("strip:") || c.label.starts_with("menu:"))
+            .collect();
         if !strips.is_empty() {
             out.push("  chrome ring strips:".to_string());
             for s in strips {

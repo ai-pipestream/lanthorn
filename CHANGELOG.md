@@ -124,6 +124,39 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **A cleared v6 screen stays cleared.** A graphical v6 game that erased its
+  screen was never able to say so: the flag the host watches for is the v1–5 lower
+  window's, and the v6 erase path never raised anything. So the transcript went on
+  re-rendering every line the game had ever printed into whatever the story window
+  happens to be *now*. Journey's boot is the plain case — it prints its title
+  block while window 0 is the whole screen, erases, opens the play layout, and
+  prints the opening passage into a narrow panel on the right; and the title, the
+  copyright and *[Press any key to begin]* all came back with it, pushing the
+  passage down the panel and, once the two together overflowed it, hard against
+  the command menu. Mysterious Adventures stacked its ASCII banner three deep for
+  the same reason. An erase now marks the same screen boundary a story window
+  moved out from under its own text already marks: what follows is pinned to the
+  top of the window and everything before it stays reachable by scrolling up.
+
+- **Journey's picture column keeps to its own frame.** The left-hand panel was
+  measured against the whole band between the pane edge and the story text rather
+  than against the two borders that bound it, so its background flooded past the
+  frame's inner rule and up against the prose, and buried the frame's outer edge —
+  which, under the Amiga profile, meant the left border simply did not exist
+  between the corner on the top rule and the corner on the bottom one. Both edges
+  now come out of one probe, run from each side of the column: the fill stops at
+  the rule, and the outer border is drawn in the pane column its corners stand in.
+  A border that turns out to be *artwork* is refused, so the IBM PC frame — whose
+  illustration runs to the screen edge with no border outside it — is untouched,
+  as are Zork Zero's and Shogun's flanks.
+
+- **`/dump-windows` accounts for the whole pane.** The bottom-anchored command
+  strip is classified through a different scale from the chrome ring's and was
+  filtered out of the strip list entirely, so on Journey's frame eleven rows of
+  the pane had nothing in the dump claiming them — an unexplained gap that invited
+  the reader to invent a reason for it. The menu band's strips are now listed
+  beside the ring's.
+
 - **Journey's frame stops drawing two of its four sides in the wrong alphabet.**
   Played under the Amiga profile, the frame's top, bottom and menu rules came out
   as the crisp line-drawing characters the game prints, while its left and right
