@@ -836,6 +836,37 @@ impl Machine {
         }
     }
 
+    /// Is this v6 window's flowing prose DIVERTED to the window's own `prose`
+    /// buffer (SQ-0585) instead of streamed to the host transcript?
+    ///
+    /// One rule, read by the print path here and by the host's screen model, which
+    /// has to agree about which window IS the transcript or it publishes the panel
+    /// the game is printing into as the story window (SQ-0746).
+    ///
+    /// ZMSD §8.8.3.1 attribute 2 — "text copied to output stream 2" — is the game's
+    /// own declaration, and it decides: a window that sets it is the transcript's,
+    /// any other flowing-prose window is a display panel. The window the game reads
+    /// INPUT through is only a fallback for a game that declares nothing, which is
+    /// what SQ-0585 needed it for; advent.z6 sets attribute 2 on window 7, the very
+    /// window it reads through, so the fallback has never been what protected it.
+    ///
+    /// SQ-0746 is why the fallback is now conditional. fmvpoker prints "Enter the
+    /// new bet: " into its bottom panel and then reads the bet through that panel,
+    /// which has attribute 2 CLEAR while window 0 has it set. Letting the read
+    /// re-designate the panel mid-prompt split one screen across two sinks: the
+    /// prompt stayed in the panel's buffer (printed before the read) while the
+    /// panel became the transcript window, and every consumer — the story window,
+    /// the money lines window 0 was still holding, the input line — moved with it.
+    pub fn v6_diverts_prose(&self, win: usize) -> bool {
+        let Some(v6) = self.screen.v6.as_ref() else { return false };
+        let Some(w) = v6.windows.get(win) else { return false };
+        if !w.prose_window() || w.copy_to_transcript() {
+            return false;
+        }
+        win as u8 != self.v6_input_window
+            || v6.windows.iter().any(|o| o.prose_window() && o.copy_to_transcript())
+    }
+
     /// Enable/disable honoring game-driven colour. Advertises (or clears) the
     /// Flags1 colour bit immediately so a not-yet-run game sees the capability.
     pub fn set_honor_game_colours(&mut self, on: bool) {
@@ -3970,19 +4001,20 @@ impl Machine {
             // if selected)", and a game that splits its display sets it on the window
             // whose text is the transcript. advent does exactly that — window 7, where
             // the player types, has it; the window 3 it opens across the top does not.
-            // So the game's own declaration decides, corroborated by the window it asks
-            // for input through. Text bound for any other prose window is that window's
-            // live screen state and goes to its own buffer.
+            // So the game's own declaration decides, and the window it asks for input
+            // through is the fallback for a game that declares nothing (SQ-0746). Text
+            // bound for any other prose window is that window's live screen state and
+            // goes to its own buffer. See [`Machine::v6_diverts_prose`].
             //
             // Only the DESTINATION changes here. Everything the game can observe —
             // the window cursor (props 4/5) and the §8.8.3.2.2 newline interrupt below
             // — happens either way, exactly as it would if the text had streamed.
-            let diverted = self.screen.v6.as_ref().and_then(|v6| {
-                let cur = v6.current as usize;
-                let w = &v6.windows[cur];
-                (w.prose_window() && !w.copy_to_transcript() && v6.current != self.v6_input_window)
-                    .then_some(cur)
-            });
+            let diverted = self
+                .screen
+                .v6
+                .as_ref()
+                .map(|v6| v6.current as usize)
+                .filter(|&cur| self.v6_diverts_prose(cur));
             if let Some(cur) = diverted {
                 // The column this window's own `set_cursor` DECLARED for this run
                 // (SQ-0729). The streaming branch below carries such a column into
@@ -7346,6 +7378,51 @@ pub(crate) mod tests {
         assert!(
             m.screen.v6.as_ref().unwrap().windows[7].prose.is_empty(),
             "a transcript-marked window streams, so nothing lands in its buffer"
+        );
+    }
+
+    // Test (SQ-0746): reading input through a panel does not make the panel the
+    // transcript, when the game has already declared which window that is.
+    //
+    // fmvpoker prints "Enter the new bet: " into its bottom panel — attribute 2
+    // CLEAR, so diverted — and then reads the bet THROUGH that panel while window 0
+    // keeps attribute 2 set. Letting the read re-designate it split one screen
+    // across two sinks: the prompt stayed behind in the panel's buffer while
+    // everything downstream followed the new designation, and the player got a
+    // blank panel with no prompt, no money lines and no echo of what they typed.
+    #[test]
+    fn reading_through_a_declared_panel_leaves_it_a_panel() {
+        let mut m = diverted_prose_machine();
+        // Window 0 boots with attribute 2 set (attributes 15), so the game HAS
+        // declared its transcript window — and it is not this one.
+        assert!(m.screen.v6.as_ref().unwrap().windows[0].copy_to_transcript());
+        m.v6_input_window = 3; // …and now the player types into the panel
+        m.print_text("Enter the new bet: ");
+
+        assert!(m.v6_diverts_prose(3), "the game's own attribute 2 decides, not the read");
+        assert_eq!(
+            m.screen.v6.as_ref().unwrap().windows[3].prose,
+            vec!["Enter the new bet: ".to_string()],
+            "the prompt belongs to the panel it was printed into, whichever window the \
+             game happens to read the answer through",
+        );
+    }
+
+    // Test (SQ-0585, preserved by SQ-0746): with NO window declaring attribute 2 the
+    // window the game reads through is still the answer. That fallback is what the
+    // original split rule was built on, and a game that declares nothing has nothing
+    // else to go on — divert it and the transcript would be empty.
+    #[test]
+    fn with_nothing_declared_the_input_window_is_still_the_transcript() {
+        let mut m = diverted_prose_machine();
+        m.screen.v6.as_mut().unwrap().windows[0].attributes = 0b1011; // …and not even window 0
+        m.v6_input_window = 3;
+        m.print_text("you are in a maze\n");
+
+        assert!(!m.v6_diverts_prose(3), "nothing is declared, so the window read through wins");
+        assert!(
+            m.screen.v6.as_ref().unwrap().windows[3].prose.is_empty(),
+            "its prose streams to the host transcript as before"
         );
     }
 

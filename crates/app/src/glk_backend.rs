@@ -816,7 +816,7 @@ impl AppGlk {
         let buf = self.buffers.get(&id);
         let (lines, runs, para, images) = buf.map(|b| log_to_lines(&b.log)).unwrap_or_default();
         let scroll = buf.map(|b| b.scroll).unwrap_or(0);
-        BufferWindow { lines, runs, para, images, scroll, primary: false, bg: None, fg: None, panel: false, px_runs: Vec::new() }
+        BufferWindow { lines, runs, para, images, scroll, primary: false, bg: None, fg: None, panel: false, px_runs: Vec::new(), reads_input: false }
     }
 }
 

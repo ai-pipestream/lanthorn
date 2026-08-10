@@ -257,6 +257,15 @@ pub struct BufferWindow {
     /// story window whose own art ENCLOSES it, which is a canvas the game paints
     /// into rather than a page it narrates on. Empty for non-v6 engines.
     pub px_runs: Vec<crate::engine::PxText>,
+    /// True when the player is typing INTO this window — the game is reading input
+    /// through it (SQ-0746). Only a non-primary buffer ever sets it: the primary
+    /// window's live input line rides the transcript and is drawn with it.
+    ///
+    /// A v6 game may read through a display panel it has declared is not the
+    /// transcript (fmvpoker's bet and quit prompts), and the host echo has to follow
+    /// the read: it belongs after that window's own prompt, not in a story window
+    /// the player is not typing into. Always false for other engines.
+    pub reads_input: bool,
 }
 
 /// How a [`WinNode::Pair`] divides its space.

@@ -118,6 +118,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **fmvpoker's bet and quit prompts are back on the screen, and so is what you
+  type.** Choosing CHANGE CURRENT BET left the whole bottom panel empty: no "Enter
+  the new bet:", no Current Bet / Total Winnings totals, and every digit you typed
+  invisible — though pressing Enter still applied the bet, so the game was
+  listening the whole time. QUIT did the same, which was the giveaway: nothing
+  about the bet screen was at fault, only that the game had started reading through
+  that panel. babelmap decides which window is the story's transcript, and it had
+  been letting a *read* settle the question. The game says so itself — the
+  Z-machine gives every window a "copy this to the transcript" flag, and fmvpoker
+  sets it on the table window and clears it on the panel — so a read no longer
+  overrules the declaration. The panel stays a panel and keeps its prompt, the
+  table stays the story window and keeps its running totals, and the live input
+  line now follows the read into whichever window you are actually typing into.
 - **Drop caps and room icons survive the trip off an Amiga floppy.** Boot Zork
   Zero from its `.adf` and the illuminated initial that opens each chapter, and the
   little engraved room icons that punctuate the prose, simply were not there — even
