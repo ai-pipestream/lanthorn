@@ -1125,16 +1125,16 @@ fn render_node(
                                 .iter()
                                 .filter_map(|s| match s {
                                     ChromeStrip::Art(r) if r.width < area.width && strip_has_art(r) => {
-                                        // The INNER rule, specifically: it is what bounds
-                                        // the panel and what the art insets away from. The
-                                        // old lookup took the first extension inside the
-                                        // strip, which is the OUTER border now that one is
-                                        // produced.
-                                        let div = flank_borders
-                                            .iter()
-                                            .find(|(sr, _, _)| sr == r)
-                                            .and_then(|(_, i, _)| i.map(|(e, _)| e));
-                                        menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, div)
+                                        // BOTH of the flank's borders: the inner rule is
+                                        // what the art insets away from, and the two
+                                        // together are what the panel fill stops short of
+                                        // (SQ-0747). The old lookup took the first
+                                        // extension inside the strip, which is the OUTER
+                                        // border now that one is produced.
+                                        let bord = flank_borders.iter().find(|(sr, _, _)| sr == r);
+                                        let inner = bord.and_then(|(_, i, _)| i.map(|(e, _)| e));
+                                        let outer = bord.and_then(|(_, _, o)| o.map(|(e, _)| e));
+                                        menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, inner, outer)
                                             .map(|p| (*r, p))
                                     }
                                     _ => None,
@@ -3554,7 +3554,9 @@ type FlankPanel = (image::Rgba<u8>, Rect, Rect, BandCrop);
 ///     of the flank art — the colour Journey paints around its picture (rgb 34,34,34)
 ///     — so the filled column matches the art instead of the theme or the letterbox;
 ///   * the FILL rect is the panel's own extent, which is NOT the band's (SQ-0747
-///     item A). See the comment on it below;
+///     item A): it runs strictly BETWEEN the flank's two border columns, `inner`
+///     (the rule against the story box) and `outer` (the frame's far edge), so
+///     neither border stands on the panel's ground. See the comment on it below;
 ///   * the destination rect keeps the band's horizontal placement exactly and
 ///     centres the art VERTICALLY in the column, at the uniform scale (the art's
 ///     own aspect ratio is preserved — SQ-0511's fix must not regress);
@@ -3576,7 +3578,8 @@ fn menu_flank_panel(
     story: &crate::engine::PositionedWindow,
     native: (u16, u16),
     gfx: &image::RgbaImage,
-    divider: Option<Rect>,
+    inner: Option<Rect>,
+    outer: Option<Rect>,
 ) -> Option<FlankPanel> {
     if band.width == 0 || band.height == 0 {
         return None;
@@ -3637,7 +3640,7 @@ fn menu_flank_panel(
     // ratio is untouched (the draw stretches the crop into this rect). Only applies
     // when the divider lies to the RIGHT of the art — i.e. a left-hand flank, the
     // only kind any Menu-plan game has; a right-hand flank keeps today's placement.
-    if let Some(dx) = divider.map(|d| d.x).filter(|&dx| dx > x) {
+    if let Some(dx) = inner.map(|d| d.x).filter(|&dx| dx > x) {
         let limit = dx.saturating_sub(x).saturating_sub(1);
         if limit > 0 && cols > limit {
             let f = limit as f32 / cols as f32;
@@ -3661,17 +3664,29 @@ fn menu_flank_panel(
     // rule is a reverse-video SPACE, which inks its whole 8-pixel text cell, so the
     // rule's cells already reach the viewport and there is no leftover column. The
     // discriminator is the geometry, not the profile.
-    let fill = match divider {
-        Some(d) if band.x < viewport.x => {
-            let right = d.right().clamp(band.x, band.right());
-            Rect::new(band.x, band.y, right.saturating_sub(band.x), band.height)
-        }
-        Some(d) => {
-            let x0 = d.x.clamp(band.x, band.right());
-            Rect::new(x0, band.y, band.right().saturating_sub(x0), band.height)
-        }
-        None => band,
+    //
+    // SQ-0747, second pass: and it stops SHORT of the rule, not level with it. The
+    // bound was inclusive on both ends — the fill began at the band's own left edge,
+    // which is the OUTER border's column, and ran through the inner rule's last
+    // column — so the panel's ground was painted into the two cells the frame's side
+    // borders stand in. Those borders reach the screen as an image whose crop is the
+    // whole text cell (SQ-0750), and a box glyph's padding is transparent, so the
+    // panel colour showed through around the stroke: the user's *"the amiga build
+    // border lines around the art have the artwork's background color … it is the
+    // fill color that matches the artwork"*. A border is not part of the panel. Left
+    // out of the fill, its cell keeps the ring's own never-painted ground — the same
+    // ground the frame's top and bottom rules stand on — and the stroke reads as one
+    // line with them.
+    let (lo, hi) = if band.x < viewport.x {
+        // Left flank: outer border at the pane edge, inner rule against the story.
+        (outer.map_or(band.x, |o| o.right()), inner.map_or(band.right(), |d| d.x))
+    } else {
+        // Right flank: the inner rule is its LEFT edge, the outer border its right.
+        (inner.map_or(band.x, |d| d.right()), outer.map_or(band.right(), |o| o.x))
     };
+    let lo = lo.clamp(band.x, band.right());
+    let hi = hi.clamp(lo, band.right());
+    let fill = Rect::new(lo, band.y, hi - lo, band.height);
     Some((panel, fill, Rect::new(x, y, cols, rows), (ax0, ay0, art_w, art_h)))
 }
 
@@ -4203,22 +4218,70 @@ fn draw_chrome_text_strip(
         let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());
         for (i, (t, rule)) in row_runs.iter().enumerate() {
             let (c0, c1) = base_span(t);
-            spans.push(if *rule {
-                let left = spans.last().map_or(c0, |&(_, prev_end)| prev_end);
+            let span = if *rule {
+                // SQ-0747: "where the last thing before it ends" is the end of the last
+                // thing DRAWN, which is not always the immediately preceding run.
+                //
+                // A run is POSITIONED through the scale but advances ONE TERMINAL
+                // COLUMN per character, and the two rates only coincide at one column
+                // per native 8px cell. So a BLANK run the game paints after a label —
+                // over the label's own trailing whitespace, in native pixels — maps to
+                // a column INSIDE the label once the label has advanced at the other
+                // rate, and ends there. Taking that as the rule's left edge started the
+                // rule inside the label and stamped its glyph over the tail: Journey's
+                // release-30 menu header came out `The P` at a 115-column pane and
+                // `The Pa` at 157, with `Individual Comm` beside it — the eaten labels
+                // this quest has carried through five passes, and the reason the count
+                // varied with the pane rather than staying put. SQ-0727 fixed the same
+                // rate mismatch for the blank run's OWN stamping; this is it one level
+                // up, in what the blank's span is then used to bound.
+                //
+                // So the rule starts no further left than the end of every GLYPH span
+                // before it. Monotone: this can only ever move a rule's left edge to
+                // the RIGHT of where it is today, and only past ink.
+                let prev = spans.last().map_or(c0, |&(_, prev_end)| prev_end);
+                let left = row_runs[..i]
+                    .iter()
+                    .zip(&spans)
+                    .filter(|((p, _), _)| !p.text.trim().is_empty())
+                    .map(|(_, &(_, e))| e)
+                    .max()
+                    .map_or(prev, |ink| prev.max(ink));
                 let right = row_runs.get(i + 1).map_or(c1, |n| base_span(&n.0).0);
                 (left, right.max(left))
             } else {
                 (c0, c1)
-            });
+            };
+            spans.push(span);
         }
-        let claimed: Vec<(i32, i32)> = row_runs
+        // The cells each run's own glyphs occupy, kept alongside the run's index so a
+        // run can ask what OTHER runs claim (SQ-0747). `WORD` is a multi-character
+        // label — a word the game printed, which nothing single-glyph may overwrite.
+        let claimed: Vec<(usize, (i32, i32), bool)> = row_runs
             .iter()
             .zip(&spans)
-            .filter(|((t, _), _)| !t.text.trim().is_empty())
-            .map(|(_, &s)| s)
+            .enumerate()
+            .filter(|(_, ((t, _), _))| !t.text.trim().is_empty())
+            .map(|(i, ((t, _), &s))| (i, s, t.text.chars().count() > 1))
             .collect();
-        let is_claimed = |c: i32| claimed.iter().any(|&(lo, hi)| c >= lo && c < hi);
-        for ((t, rule), &(col, end)) in row_runs.iter().zip(&spans) {
+        let is_claimed = |c: i32| claimed.iter().any(|&(_, (lo, hi), _)| c >= lo && c < hi);
+        // …and the same question asked by a lone frame glyph: is this cell already a
+        // WORD's, drawn by a different run?
+        //
+        // SQ-0747: Journey's release 30 prints its menu header by drawing the rule
+        // FIRST and then printing the title over it, so the row carries both — dozens
+        // of `─` fragments and, at overlapping native columns, one run per letter of
+        // "The Party". The letters split the rule into groups of one and two, which are
+        // too few to be a rule ([`RULE_MIN`]) and so take the DIVIDER path: stamped
+        // individually at their own scaled columns. A label advances one terminal
+        // column per character while a fragment is positioned through the scale, so
+        // those columns land INSIDE the title, and each stray `─` punched a hole in it
+        // — `The P─rty`, `Individual Comm─nds`. A divider exists to hold a column the
+        // merge would drag off; it has no business overwriting a word.
+        let over_word = |i: usize, c: i32| {
+            claimed.iter().any(|&(j, (lo, hi), word)| word && j != i && c >= lo && c < hi)
+        };
+        for (i, ((t, rule), &(col, end))) in row_runs.iter().zip(&spans).enumerate() {
             if col < rect.x as i32 || col >= rect.right() as i32 {
                 continue;
             }
@@ -4235,12 +4298,14 @@ fn draw_chrome_text_strip(
             // Untrusted game text (SQ-0639).
             let text = crate::render::blank_control_chars(&t.text);
             if t.text.trim().is_empty() {
-                for (i, ch) in text.chars().take(max_w).enumerate() {
-                    let c = col + i as i32;
+                for (k, ch) in text.chars().take(max_w).enumerate() {
+                    let c = col + k as i32;
                     if !is_claimed(c) {
                         buf.set_stringn(c as u16, *row as u16, ch.encode_utf8(&mut [0u8; 4]), 1, style);
                     }
                 }
+            } else if text.chars().count() == 1 && over_word(i, col) {
+                continue;
             } else {
                 buf.set_stringn(col as u16, *row as u16, text.as_ref(), max_w, style);
             }

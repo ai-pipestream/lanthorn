@@ -1047,11 +1047,18 @@ impl GraphicsRender {
         // native bounding box of the scaled pixels this band samples; the Nearest
         // scaled→native map is monotone, so it covers exactly the native pixels
         // that can alter the band.
+        // …and the same footprint is what this band PAINTS, so the dump reports it
+        // (SQ-0747): a band's cell rect says where an image lands, never which rows
+        // of the game's screen were rasterized into it, and "which canvas rows is
+        // this band showing?" is the question a band painting the wrong region of
+        // the screen is answered by.
+        let mut footprint = None;
         if sx_lo < sx_hi && sy_lo < sy_hi {
             let nx0 = scaled_to_native(sx_lo as u32, nw, sw);
             let nx1 = scaled_to_native(sx_hi as u32 - 1, nw, sw) + 1;
             let ny0 = scaled_to_native(sy_lo as u32, nh, sh);
             let ny1 = scaled_to_native(sy_hi as u32 - 1, nh, sh) + 1;
+            footprint = Some((nx0, ny0, nx1 - nx0, ny1 - ny0));
             (nx0, nx1, ny0, ny1).hash(&mut h);
             for ny in ny0..ny1 {
                 for nx in nx0..nx1 {
@@ -1119,10 +1126,14 @@ impl GraphicsRender {
             // top-left (no centering — the crop is already positioned).
             let dest = Rect::new(band.x, band.y, w, ht);
             let note = format!(
-                "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{}",
+                "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{} at ({},{}) · native {}",
                 band.width, band.height, band.x, band.y,
                 if fresh { "cache HIT" } else { "encoded" },
-                sz.width, sz.height, dest.width, dest.height,
+                sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+                match footprint {
+                    Some((x, y, w, h)) => format!("{w}x{h}@({x},{y})"),
+                    None => "— (entirely in the letterbox margin)".to_string(),
+                },
             );
             self.band_log.push(note);
             Image::new(proto).render(dest, buf);
@@ -1234,16 +1245,36 @@ impl GraphicsRender {
                 id: None,
             });
         }
+        // SQ-0747: a STRETCHED band goes in the band log too. It never did, and that
+        // is why every `/dump-windows` capture of Journey's menu listed the right-hand
+        // flank and the bottom strip and no left flank at all — the picture column is
+        // drawn by this function, at a dest rect derived from the panel rather than
+        // from the strip, so the one band an investigation most wanted to see was the
+        // one band the dump could not name. Two passes were spent inferring it from
+        // the strip rect beside it. The crop rides along for the same reason it does
+        // above: it says which rows of the game's screen this image is showing.
         if let Some((_, proto)) = self.chrome_bands.get(&key) {
             let sz = proto.size();
             let w = sz.width.min(band.width);
             let ht = sz.height.min(band.height);
             let dest = Rect::new(band.x, band.y, w, ht);
+            let note = format!(
+                "band {}x{}@({},{}) [{slot:?}, stretched]: {} · proto {}x{} · placed {}x{} at ({},{}) · native {cw_n}x{ch_n}@({cx},{cy})",
+                band.width, band.height, band.x, band.y,
+                if fresh { "cache HIT" } else { "encoded" },
+                sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+            );
+            self.band_log.push(note);
             Image::new(proto).render(dest, buf);
             self.note_op(GraphicsOp::Place {
                 target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 at: (dest.x, dest.y, dest.width, dest.height),
             });
+        } else {
+            self.band_log.push(format!(
+                "band {}x{}@({},{}) [{slot:?}, stretched]: NO PROTOCOL (encode failed)",
+                band.width, band.height, band.x, band.y
+            ));
         }
     }
 }

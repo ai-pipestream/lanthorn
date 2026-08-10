@@ -889,6 +889,16 @@ keypress — Journey's menus, any "press any key" — plain keys go to the game,
 `F9` would answer the prompt instead of dumping. The Ctrl binding fires from map
 focus too.
 
+Under the window blocks the **band list** names every image the ring placed on that
+frame: its cell rect, where it was placed, whether it re-encoded or came out of the
+cache, and — the part that matters when a picture turns up somewhere it shouldn't —
+the **native crop** it is showing, so you can read which rows of the game's own
+screen an image is painting. A flank's picture is drawn at a rect the panel derives
+rather than at the strip's, and it used to be missing from this list entirely: two
+investigations of Journey's picture column reasoned about it from the strip beside
+it, because the one band they wanted to see was the one band the dump could not
+name.
+
 The dump also lands in **`~/.babelmap/dump-windows.log`**, appended, with a
 timestamp per capture, and the transcript line names the path. Selecting the
 on-screen copy off a v6 pane drags the graphics protocol's own placeholder glyphs
