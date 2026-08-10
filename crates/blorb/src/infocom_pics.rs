@@ -116,6 +116,18 @@ impl PicEntry {
     pub fn has_pixels(&self) -> bool {
         self.data != 0 && self.width != 0 && self.height != 0
     }
+
+    /// Whether this entry names a palette of its own.
+    ///
+    /// A zero palette offset is the native format's way of saying *adaptive*:
+    /// the picture has no colours of its own and must be drawn through whatever
+    /// palette the interpreter last loaded. It is exactly the condition Blorb
+    /// spells out with a top-level `APal` chunk — for Zork Zero the 172 entries
+    /// here that have pixels and no palette are, id for id, the 172 numbers
+    /// `Zork0.blb` lists in `APal`.
+    pub fn has_own_palette(&self) -> bool {
+        self.palette != 0
+    }
 }
 
 /// A decoded picture: palette indices plus the palette to read them through.
@@ -138,8 +150,20 @@ impl Picture {
     /// Straight RGBA8 expansion, row-major. Falls back to [`DEFAULT_PALETTE`]
     /// when the picture carries no palette of its own; the transparent index,
     /// if any, gets alpha 0.
+    ///
+    /// A picture with no palette is *adaptive* (see [`PicEntry::has_own_palette`])
+    /// and the fallback is only what to show when nothing has been loaded yet —
+    /// a caller that has a current palette should pass it to [`rgba_with`].
+    ///
+    /// [`rgba_with`]: Picture::rgba_with
     pub fn rgba(&self) -> Vec<u8> {
-        let pal = self.palette.unwrap_or(DEFAULT_PALETTE);
+        self.rgba_with(&self.palette.unwrap_or(DEFAULT_PALETTE))
+    }
+
+    /// RGBA8 expansion through a caller-supplied colour table — the adaptive
+    /// path, where the palette comes from the interpreter rather than the
+    /// picture.
+    pub fn rgba_with(&self, pal: &[Rgb; 16]) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.indices.len() * 4);
         for &i in &self.indices {
             let c = pal[usize::from(i) & 15];
@@ -223,6 +247,25 @@ impl InfocomPics {
     /// The directory record for a picture number.
     pub fn entry(&self, id: u16) -> Option<&PicEntry> {
         self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// Every picture that must be drawn through the interpreter's current
+    /// palette rather than one of its own — this format's `APal` (see
+    /// [`PicEntry::has_own_palette`]). Placeholders are excluded: an entry with
+    /// no pixels has nothing to colour.
+    pub fn adaptive_pictures(&self) -> Vec<u16> {
+        self.entries
+            .iter()
+            .filter(|e| e.has_pixels() && !e.has_own_palette())
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// A picture's own 16-entry colour table, without decoding its pixels —
+    /// what a non-adaptive draw establishes as the current palette. `None` for
+    /// an unknown id or an adaptive picture, which has no table of its own.
+    pub fn palette_of(&self, id: u16) -> Option<[Rgb; 16]> {
+        self.palette(self.entry(id)?)
     }
 
     /// Decode one picture to palette indices plus its palette.
@@ -411,6 +454,49 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_palette_offset_marks_a_picture_adaptive() {
+        // The synthetic archive's one picture names no palette, so it is
+        // adaptive: it has no colours of its own and must be drawn through
+        // whatever the caller supplies.
+        let pics = InfocomPics::parse(synthetic()).unwrap();
+        assert!(!pics.entry(7).unwrap().has_own_palette());
+        assert_eq!(pics.adaptive_pictures(), vec![7]);
+        assert_eq!(pics.palette_of(7), None, "an adaptive picture has no palette to hand out");
+
+        let p = pics.decode(7).unwrap();
+        let mut current = DEFAULT_PALETTE;
+        current[2] = [1, 2, 3];
+        assert_eq!(&p.rgba_with(&current)[..4], &[1, 2, 3, 255], "drawn through the supplied palette");
+        assert_eq!(&p.rgba()[..4], &[0, 170, 0, 255], "and through the fallback without one");
+
+        // A picture that DOES name a palette is not adaptive, and answers with
+        // it — the per-picture distinction the format makes.
+        let mut f = synthetic();
+        let pal_off = f.len();
+        f[16 + 11] = (pal_off >> 16) as u8;
+        f[16 + 12] = (pal_off >> 8) as u8;
+        f[16 + 13] = pal_off as u8;
+        f.extend_from_slice(&[1, 9, 8, 7]); // one colour, landing at index 2
+        let pics = InfocomPics::parse(f).unwrap();
+        assert!(pics.entry(7).unwrap().has_own_palette());
+        assert!(pics.adaptive_pictures().is_empty());
+        assert_eq!(pics.palette_of(7).unwrap()[2], [9, 8, 7]);
+    }
+
+    #[test]
+    fn a_placeholder_is_not_adaptive() {
+        // No pixels means nothing to colour: a size-only entry is a rectangle
+        // the game fills, not an adaptive picture.
+        let mut f = synthetic();
+        f[16 + 8] = 0;
+        f[16 + 9] = 0;
+        f[16 + 10] = 0;
+        let pics = InfocomPics::parse(f).unwrap();
+        assert!(!pics.entry(7).unwrap().has_own_palette());
+        assert!(pics.adaptive_pictures().is_empty());
+    }
+
+    #[test]
     fn rejects_non_amiga_containers() {
         let mut f = synthetic();
         f[8] = 8; // a record size this module does not read
@@ -487,6 +573,14 @@ mod tests {
             }
         }
         assert_eq!(hash, 0xde67_de1e_0b55_f2fb);
+
+        // 172 of those 388 name no palette at all and are therefore adaptive —
+        // among them the 16 compass overlays, ids 9..=24. That set is, id for
+        // id, the 172 numbers `Zork0.blb` lists in its `APal` chunk.
+        let adaptive = pics.adaptive_pictures();
+        assert_eq!(adaptive.len(), 172);
+        assert!((9..=24).all(|id| adaptive.contains(&id)), "the compass overlays are adaptive");
+        assert_eq!(pics.palette_of(10), None, "an adaptive picture has no palette of its own");
 
         // Picture 1 is the 320x200 title screen, on a 14-colour palette whose
         // first entry lands at colour index 2.
