@@ -12,7 +12,7 @@ identifies which beta it is without reading its git hash.
 
 ---
 
-## 0.1.0-beta.5 — 2026-08-10
+## v0.1.0-beta.5 — 2026-08-10
 
 ### Added
 
