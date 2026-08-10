@@ -183,11 +183,11 @@ fn evicting_one_band_makes_the_survivors_re_upload_too() {
 
     // Everything EXCEPT the first band stays live — the shape change a restore and
     // its first move produce.
-    let live: std::collections::HashSet<(u16, u16, u16, u16)> = placed
+    let live: std::collections::HashSet<app::render::graphics::BandKey> = placed
         .iter()
         .skip(1)
         .map(|t| match *t {
-            GraphicsTarget::Band(x, y, w, h) => (x, y, w, h),
+            GraphicsTarget::Band(x, y, w, h) => (app::render::graphics::BandSlot::Art as u8, x, y, w, h),
             GraphicsTarget::Window(_) | GraphicsTarget::Raster => unreachable!("filtered to bands"),
         })
         .collect();

@@ -275,11 +275,11 @@ fn the_band_cache_holds_only_what_this_frame_placed() {
             let _ = frame(&session, &state, area);
             let gr = state.graphics_render.borrow();
             let live_now = placed(gr.ops());
-            for (x, y, w, h) in gr.chrome_band_hashes().keys().copied() {
+            for (slot, x, y, w, h) in gr.chrome_band_hashes().keys().copied() {
                 assert!(
                     live_now.contains(&GraphicsTarget::Band(x, y, w, h)),
-                    "honor={honor}: the band cache holds ({x},{y},{w}x{h}) but this \
-                     {}x{} frame never placed it.\nplaced: {live_now:?}\nband log:\n{:#?}",
+                    "honor={honor}: the band cache holds slot {slot} ({x},{y},{w}x{h}) but \
+                     this {}x{} frame never placed it.\nplaced: {live_now:?}\nband log:\n{:#?}",
                     area.width,
                     area.height,
                     gr.band_log
