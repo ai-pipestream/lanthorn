@@ -588,22 +588,40 @@ fn render_node(
             // SQ-0487) — a raster-mode user wants the pixel aesthetic even
             // on menus.
             let hybrid = state.config.v6_render == crate::config::V6RenderMode::Hybrid;
-            let story_rows = items.iter().find_map(|pw| {
+            let story_box = items.iter().find_map(|pw| {
                 // The PRIMARY buffer only: a v6 game can publish a second, non-primary
                 // prose window (SQ-0585), and taking its rows as the story box made an
                 // ordinary split look like a menu takeover.
                 matches!(&pw.node, WinNode::Buffer(b) if b.primary).then(|| {
                     let top = pw.y_px / 16;
-                    (top, top + pw.h_px.max(1).div_ceil(16))
+                    (top, top + pw.h_px.max(1).div_ceil(16), pw.x_px as u32, pw.x_px as u32 + pw.w_px as u32)
                 })
             });
             let has_menu = items.iter().any(|pw| {
                 matches!(&pw.node, WinNode::Grid(g)
                     if g.px_texts.iter().any(|t| {
                         let row = (t.y.max(1) - 1) / 16;
+                        // SQ-0742: the run must be inside the story box on BOTH axes. The
+                        // row test alone calls any chrome glyph that merely shares a row
+                        // with the story a takeover — and a game whose frame is drawn with
+                        // LINE-DRAWING characters rather than reverse-video spaces has one
+                        // on every row of the box. Journey under the Amiga profile draws
+                        // exactly that: `│` rules at native x 0 / 256 / 632, all outside
+                        // its story box (264..632), on every one of its rows. That routed a
+                        // perfectly ordinary gameplay screen to the cell path, which draws
+                        // the game's 80 columns 1:1 into a pane of any width — the frame
+                        // stopped short of the pane edge and the click map (proportional
+                        // over the whole pane) no longer matched where anything was drawn.
+                        // Under the IBM PC profile the same rules are reverse-video SPACES,
+                        // which trim to empty and never tripped the gate, which is why only
+                        // the Amiga route showed it.
+                        let x0 = t.x.max(1) as u32 - 1;
+                        let x1 = x0 + t.text.chars().count().max(1) as u32 * 8;
                         !t.text.trim().is_empty()
                             && row >= STATUS_BAND_ROWS
-                            && story_rows.is_some_and(|(top, bot)| row >= top && row < bot)
+                            && story_box.is_some_and(|(top, bot, left, right)| {
+                                row >= top && row < bot && x1 > left && x0 < right
+                            })
                     }))
             });
             // MODAL overlays only (SQ-0587). The fall-through exists because image
@@ -3807,11 +3825,13 @@ fn draw_chrome_text_strip(
     // SQ-0509: merge horizontally-contiguous same-style fragments before mapping.
     // Runs separated by a genuine gap (Journey's menu items / column dividers,
     // 8px apart) stay distinct and keep their proportional spacing, so the strip
-    // bridges only ABUTTING fragments.
-    let mut by_row: BTreeMap<i32, Vec<PxText>> = BTreeMap::new();
+    // bridges only ABUTTING fragments. SQ-0742 first collapses each repeated-glyph
+    // RULE to the width of its own scaled span, and flags it, so the stamping below
+    // can close the seams around it (see `collapse_row_rules`).
+    let mut by_row: BTreeMap<i32, Vec<(PxText, bool)>> = BTreeMap::new();
     for (row, mut rr) in raw {
         rr.sort_by_key(|t| t.x);
-        by_row.insert(row, merge_row_fragments(&rr, 4));
+        by_row.insert(row, collapse_row_rules(&rr, scale, cell_px, pane));
     }
 
     // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run in
@@ -3822,11 +3842,11 @@ fn draw_chrome_text_strip(
     // status bar, already filled edge to edge below) contributes none.
     let mut divider_cols: Vec<u16> = Vec::new();
     for row_runs in by_row.values() {
-        let mixed = row_runs.iter().any(|t| t.style & 1 == 0);
+        let mixed = row_runs.iter().any(|(t, _)| t.style & 1 == 0);
         if !mixed {
             continue;
         }
-        for t in row_runs {
+        for (t, _) in row_runs {
             if t.style & 1 != 0 && t.text.trim().is_empty() {
                 let (c, _) = run_cell(t, scale, cell_px, pane);
                 if c >= rect.x as i32 && c < rect.right() as i32 {
@@ -3862,9 +3882,9 @@ fn draw_chrome_text_strip(
         // reversed dividers) is NOT flood-reversed; its reversed divider runs re-stamp
         // over an un-reversed flood below. Colourless non-reverse rows keep the strip
         // `base` flood untouched (byte-identical), so Journey's menu body is unchanged.
-        let all_rev = !row_runs.is_empty() && row_runs.iter().all(|t| t.style & 1 != 0);
-        let row_fg = row_runs.iter().map(|t| t.fg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
-        let row_bg = row_runs.iter().map(|t| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+        let all_rev = !row_runs.is_empty() && row_runs.iter().all(|(t, _)| t.style & 1 != 0);
+        let row_fg = row_runs.iter().map(|(t, _)| t.fg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+        let row_bg = row_runs.iter().map(|(t, _)| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
         if all_rev
             || crate::render::v6_layout::packed_explicit(row_fg)
             || crate::render::v6_layout::packed_explicit(row_bg)
@@ -3896,23 +3916,47 @@ fn draw_chrome_text_strip(
         // its background down, and in NATIVE pixels it only ever covers whitespace
         // the glyph run drew itself. So it may still paint the cells no glyph run
         // claimed (the bar's own gaps), and must skip the rest.
+        //
+        // SQ-0742: a RULE ([`collapse_row_rules`]) closes the seams a scale leaves
+        // around it — it runs from the end of whatever is drawn before it to the
+        // start of whatever comes after, so a border reads as one unbroken line
+        // through its own corners and titles instead of a rule with a hole either
+        // side of every neighbour. Everything else keeps exactly the span its
+        // characters occupy.
+        let base_span = |t: &PxText| {
+            let (c, _) = run_cell(t, scale, cell_px, pane);
+            (c, c + t.text.chars().count() as i32)
+        };
+        let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());
+        for (i, (t, rule)) in row_runs.iter().enumerate() {
+            let (c0, c1) = base_span(t);
+            spans.push(if *rule {
+                let left = spans.last().map_or(c0, |&(_, prev_end)| prev_end);
+                let right = row_runs.get(i + 1).map_or(c1, |n| base_span(&n.0).0);
+                (left, right.max(left))
+            } else {
+                (c0, c1)
+            });
+        }
         let claimed: Vec<(i32, i32)> = row_runs
             .iter()
-            .filter(|t| !t.text.trim().is_empty())
-            .map(|t| {
-                let (c, _) = run_cell(t, scale, cell_px, pane);
-                (c, c + t.text.chars().count() as i32)
-            })
+            .zip(&spans)
+            .filter(|((t, _), _)| !t.text.trim().is_empty())
+            .map(|(_, &s)| s)
             .collect();
         let is_claimed = |c: i32| claimed.iter().any(|&(lo, hi)| c >= lo && c < hi);
-        for t in row_runs {
-            let (col, _) = run_cell(t, scale, cell_px, pane);
+        for ((t, rule), &(col, end)) in row_runs.iter().zip(&spans) {
             if col < rect.x as i32 || col >= rect.right() as i32 {
                 continue;
             }
             let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
             let max_w = rect.right() as usize - col as usize;
             if max_w == 0 {
+                continue;
+            }
+            if let Some(g) = rule.then(|| t.text.chars().next()).flatten() {
+                let text: String = std::iter::repeat_n(g, (end - col).max(0) as usize).collect();
+                buf.set_stringn(col as u16, *row as u16, &text, max_w, style);
                 continue;
             }
             // Untrusted game text (SQ-0639).
@@ -3929,6 +3973,102 @@ fn draw_chrome_text_strip(
             }
         }
     }
+}
+
+/// SQ-0742: collapse each repeated-glyph RULE in one native text row to the width
+/// of its own SCALED span, then merge what is left with [`merge_row_fragments`].
+///
+/// A text strip POSITIONS a run through the letterbox scale but then advances ONE
+/// TERMINAL COLUMN per character — the two rates only coincide where the pane is
+/// exactly one column per native 8px text cell. For a label that is exactly right:
+/// prose has to stay legible, so its character count is what it is. For a RULE it
+/// is wrong, because a rule is a *distance* the game drew across, not a string of
+/// that many characters. Journey under the Amiga interpreter draws its whole frame
+/// that way — `┌`, seventy-eight `─` fragments, `┐` — and one cell per fragment
+/// stopped the border at column 79 of a 138-column pane while the prose beside it
+/// wrapped to the pane. The same frame under the IBM PC profile is reverse-video
+/// SPACES, which the row flood already spreads edge to edge, which is why only the
+/// Amiga route ever showed it.
+///
+/// A rule is [`RULE_MIN`] or more ABUTTING fragments, each a single SYMBOL glyph
+/// (never a letter or digit), all at the same style and colours. Each such group
+/// becomes one run repeating that glyph across the cells its native span maps to,
+/// and is kept OUT of the fragment merge so an adjoining corner or title cannot
+/// glue itself on and drag the row back to one cell per native character.
+///
+/// The predicate is deliberately narrow, because the fragments it reads are the
+/// same ones SQ-0509 exists to reassemble: a game with proportional metrics emits
+/// one run per GLYPH, so "Anne" arrives as `A` `n` `n` `e` and a rule test of "two
+/// abutting equal fragments" reads every doubled letter in the corpus as a rule —
+/// Arthur's status bar lost its character's name to exactly that. Requiring a
+/// non-alphanumeric glyph and three of them in a row leaves prose alone while
+/// still catching every frame rule, which no game draws in two segments.
+///
+/// Blank runs are left alone as well: the strip and row floods already spread a
+/// reverse-video bar edge to edge, so skipping them keeps every game that draws
+/// its chrome that way byte-identical.
+fn collapse_row_rules(
+    row_runs: &[&crate::engine::PxText],
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+) -> Vec<(crate::engine::PxText, bool)> {
+    use crate::engine::PxText;
+    /// Fewest abutting fragments that count as a rule rather than as prose.
+    const RULE_MIN: usize = 3;
+    // Is `t` one glyph the game could have repeated into a rule?
+    let single_glyph = |t: &PxText| -> Option<char> {
+        let mut cs = t.text.chars();
+        match (cs.next(), cs.next()) {
+            (Some(c), None) if !c.is_whitespace() && !c.is_alphanumeric() => Some(c),
+            _ => None,
+        }
+    };
+    let end_px = |t: &PxText| (t.x.max(1) as i32 - 1) + t.text.chars().count() as i32 * 8;
+    let mut out: Vec<(PxText, bool)> = Vec::new();
+    // Pending non-rule fragments, merged together on the far side of each rule so
+    // SQ-0509's fragment bridging is unchanged everywhere a rule is not involved.
+    let mut pending: Vec<&PxText> = Vec::new();
+    let mut i = 0usize;
+    while i < row_runs.len() {
+        let t = row_runs[i];
+        // How far does a run of this same glyph, abutting, continue?
+        let mut j = i;
+        if let Some(g) = single_glyph(t) {
+            while j + 1 < row_runs.len() {
+                let n = row_runs[j + 1];
+                if single_glyph(n) == Some(g)
+                    && (n.x.max(1) as i32 - 1) == end_px(row_runs[j])
+                    && n.style == t.style
+                    && n.fg == t.fg
+                    && n.bg == t.bg
+                {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        if j + 1 - i >= RULE_MIN {
+            // A rule. Flush what came before it, then emit it at its scaled width.
+            out.extend(merge_row_fragments(&pending, 4).into_iter().map(|t| (t, false)));
+            pending.clear();
+            let (col0, _) = run_cell(t, scale, cell_px, pane);
+            let cw = cell_px.0.max(1) as f32;
+            let end_dev = scale.off_x as f32 + end_px(row_runs[j]) as f32 * scale.s;
+            let col1 = pane.x as i32 + (end_dev / cw).round() as i32;
+            let cells = (col1 - col0).max(1) as usize;
+            let mut rule = t.clone();
+            rule.text = std::iter::repeat_n(single_glyph(t).expect("checked above"), cells).collect();
+            out.push((rule, true));
+            i = j + 1;
+            continue;
+        }
+        pending.push(t);
+        i += 1;
+    }
+    out.extend(merge_row_fragments(&pending, 4).into_iter().map(|t| (t, false)));
+    out
 }
 
 /// SQ-0509: merge horizontally-contiguous same-style fragments of ONE native text
