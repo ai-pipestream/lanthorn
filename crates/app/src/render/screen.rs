@@ -1122,6 +1122,15 @@ fn render_node(
                                     if !strip_has_art(r) {
                                         continue;
                                     }
+                                    // SQ-0742: a flank that IS its border column has a divider
+                                    // extension covering exactly its rect. Both were drawn, to
+                                    // the same cache key, so the flank's upload was overwritten
+                                    // by the extension's and both re-encoded on every frame —
+                                    // two images sent, one ever seen. The extension supersedes
+                                    // it; the frame is unchanged, one upload lighter.
+                                    if divider_exts.iter().any(|(e, _)| e == r) {
+                                        continue;
+                                    }
                                 }
                                 match strip {
                                     // SQ-0511: a SIDE flank band (narrower than the pane)
@@ -1267,6 +1276,25 @@ fn render_node(
                                         map.push(rec(&format!("strip:text({} runs)", runs.len()), (0, 0, 0, 0), *r))
                                     }
                                 }
+                            }
+                            // The bottom-anchored menu band's own strips (SQ-0742). They
+                            // are classified through a DIFFERENT scale from the ring's and
+                            // were absent from this dump entirely, so the rows between the
+                            // menu and the pane bottom could not be accounted for at all.
+                            for strip in &menu_strips {
+                                match strip {
+                                    ChromeStrip::Art(r) => map.push(rec("menu:art", (0, 0, 0, 0), *r)),
+                                    ChromeStrip::Text(r, runs) => {
+                                        map.push(rec(&format!("menu:text({} runs)", runs.len()), (0, 0, 0, 0), *r))
+                                    }
+                                }
+                            }
+                            // The flank border columns carried down the reclaimed gap to the
+                            // menu (SQ-0742). Their absence is invisible in every other line
+                            // of this dump — the flank band is still there, still the right
+                            // height, and simply has no ink below the game's own canvas.
+                            for (ext, _) in &divider_exts {
+                                map.push(rec("flank-divider", (0, 0, 0, 0), *ext));
                             }
                         }
                         // Only windows that START inside the story viewport fill here.
@@ -3570,24 +3598,41 @@ fn flank_divider_extension(
     // flank → run starting at the story's right edge), sampled at that mid-story row.
     let story_x0 = story.x_px as u32;
     let story_x1 = (story.x_px as u32 + story.w_px as u32).min(native.0 as u32);
+    // SQ-0742: a border is not always a filled block. Journey under the Amiga profile
+    // draws its frame with box-drawing GLYPHS, and a `│`'s ink sits in the middle of
+    // its 8-pixel text cell — so the native column immediately abutting the story box
+    // is that cell's own blank padding. Probing that one column found nothing and the
+    // whole extension was abandoned, which is why the Amiga frame produced NO divider
+    // bands at all while the IBM PC profile produced one per flank. The side borders
+    // then stopped where the game's canvas ends (native row 400 — terminal row 39 of a
+    // 68-row pane) and the frame was simply absent for the eighteen rows between there
+    // and the menu: the user's "big chunk of the border missing from the right side (at
+    // the bottom)". Look across ONE text cell for the ink before giving up. A
+    // reverse-video block border inks offset 0, so it takes exactly the path it did.
+    const FONT_W: u32 = 8;
+    let seek_ink = |from: u32, outward_is_left: bool| -> Option<u32> {
+        (0..FONT_W).find_map(|d| {
+            let x = if outward_is_left { from.checked_sub(d + 1)? } else { from + d };
+            opaque(x, mid).then_some(x)
+        })
+    };
     let (dnx0, dnx1) = if band.x < viewport.x {
-        if story_x0 == 0 || !opaque(story_x0 - 1, mid) {
-            return None;
-        }
-        let mut x = story_x0;
+        let mut x = seek_ink(story_x0, true)?;
+        let right = x + 1;
         while x > 0 && opaque(x - 1, mid) {
             x -= 1;
         }
-        (x, story_x0)
+        (x, right)
     } else {
-        if story_x1 >= native.0 as u32 || !opaque(story_x1, mid) {
+        if story_x1 >= native.0 as u32 {
             return None;
         }
-        let mut x = story_x1;
+        let left = seek_ink(story_x1, false).filter(|x| *x < native.0 as u32)?;
+        let mut x = left;
         while x < native.0 as u32 && opaque(x, mid) {
             x += 1;
         }
-        (story_x1, x)
+        (left, x)
     };
     if dnx1 <= dnx0 {
         return None;
