@@ -40,8 +40,9 @@
 //!
 //! Swept across pane widths — including deliberately wider than the game's 80
 //! column screen — because a fix that only holds where the numbers coincide is the
-//! bug in another costume. Both `honor_game_colours` modes, per the project's
-//! colour-render convention.
+//! bug in another costume, and now across pane HEIGHTS too, since the first sweep
+//! sampled exactly one and could not have seen a defect confined to another. Both
+//! `honor_game_colours` modes, per the project's colour-render convention.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
@@ -63,6 +64,14 @@ static PALETTE: Mutex<()> = Mutex::new(());
 /// path's 1:1 chrome and the proportional transcript happen to agree, and five
 /// wider panes where they do not.
 const WIDTHS: [u16; 6] = [80, 96, 110, 124, 138, 150];
+
+/// Pane HEIGHTS swept by the divider case. 51 is what every case here used to run
+/// at; 71 and 84 cover the tall-terminal regime a full-height window on a modern
+/// display puts the story pane in, and 30 the short one, where the letterbox scale
+/// stops being width-limited and the whole placement arithmetic changes. The first
+/// sweep sampled one height and could not have seen a defect confined to another —
+/// the SQ-0548 lesson, on the other axis.
+const HEIGHTS: [u16; 4] = [30, 51, 71, 84];
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -122,20 +131,31 @@ fn journey_at_menu(profile: InterpreterProfile) -> Option<GameSession> {
 /// all — so the sweep has to run at a plausible font cell (the same lesson
 /// SQ-0548 recorded).
 #[allow(deprecated)]
-fn render_hybrid(
+fn render_hybrid_at(
     model: &app::engine::ScreenModel,
     honor: bool,
     cols: u16,
+    rows: u16,
 ) -> (app::state::AppState, Rect, Buffer) {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
     state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
-    let area = Rect::new(0, 0, cols, 51);
+    let area = Rect::new(0, 0, cols, rows);
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
     (state, area, buf)
+}
+
+/// The original sweep's pane height, kept so the cases that pin one height read
+/// exactly as they did.
+fn render_hybrid(
+    model: &app::engine::ScreenModel,
+    honor: bool,
+    cols: u16,
+) -> (app::state::AppState, Rect, Buffer) {
+    render_hybrid_at(model, honor, cols, 51)
 }
 
 fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
@@ -350,9 +370,9 @@ fn journey_amiga_menu_dividers_line_up_down_the_panel() {
     let Some(session) = journey_at_menu(InterpreterProfile::Amiga) else { return };
     let model = session.screen();
     for honor in [true, false] {
-        for cols in WIDTHS {
-            let (state, area, buf) = render_hybrid(&model, honor, cols);
-            let ctx = format!("honor={honor} w={cols}");
+        for (cols, pane_h) in WIDTHS.iter().flat_map(|&c| HEIGHTS.iter().map(move |&h| (c, h))) {
+            let (state, area, buf) = render_hybrid_at(&model, honor, cols, pane_h);
+            let ctx = format!("honor={honor} w={cols} h={pane_h}");
             let rows: Vec<String> = (0..area.height).map(|y| row_text(&buf, area, y)).collect();
             // The menu's body rows: the ones carrying a party member or the trailing
             // "Game" row, which is the row whose missing `-->` exposed the drift.
