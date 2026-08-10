@@ -1275,11 +1275,20 @@ fn render_node(
                             });
                             for pw in &layout.chrome {
                                 let r = px_rect_to_cells(pw, &scale, cell_px, area, 0);
+                                // SQ-0747: only the primary Buffer is DRAWN at the rect
+                                // beside it here — the story viewport, as terminal cells.
+                                // Every chrome Grid/Graphics window is rasterised into the
+                                // chrome canvas and reaches the screen only through the
+                                // strips listed below, so its line is where the window MAPS
+                                // to, not a draw. Two investigations read a chrome grid's
+                                // full-canvas mapping as a second paint over the top border's
+                                // text strip — the two share row 1 by construction — and
+                                // chased an overlap that does not exist. Say which is which.
                                 let kind = match &pw.node {
                                     WinNode::Buffer(b) if b.primary => "story",
                                     WinNode::Buffer(_) => "panel",
-                                    WinNode::Grid(_) => "grid",
-                                    WinNode::Graphics(_) => "art",
+                                    WinNode::Grid(_) => "grid (rasterised into the ring)",
+                                    WinNode::Graphics(_) => "art (rasterised into the ring)",
                                     _ => "?",
                                 };
                                 map.push(rec(kind, (pw.x_px, pw.y_px, pw.w_px, pw.h_px), r));
@@ -1315,8 +1324,14 @@ fn render_node(
                             // menu (SQ-0742). Their absence is invisible in every other line
                             // of this dump — the flank band is still there, still the right
                             // height, and simply has no ink below the game's own canvas.
-                            for (ext, _) in &divider_exts {
-                                map.push(rec("flank-divider", (0, 0, 0, 0), *ext));
+                            // The native crop rides along (SQ-0750): the crop is resized to
+                            // fill the band, so crop width vs band width IS the extension's
+                            // horizontal magnification — and it has to be the letterbox
+                            // scale, like everything else in the ring. Nothing else in the
+                            // dump can show that it is not.
+                            for (ext, crop) in &divider_exts {
+                                let c = (crop.0 as u16, crop.1 as u16, crop.2 as u16, crop.3 as u16);
+                                map.push(rec("flank-divider", c, *ext));
                             }
                         }
                         // Only windows that START inside the story viewport fill here.
@@ -3674,7 +3689,30 @@ fn flank_divider_extension(
     // longer drawn — and the divider column lies to the RIGHT of the picture, so
     // running it full height covers the gap without touching the art.
     let ext = Rect::new(dcell0, band.y, dcell1 - dcell0, menu_top_row - band.y);
-    Some((ext, (dnx0, mid, dnx1 - dnx0, 1)))
+    // SQ-0750: the crop is the native columns those CELLS cover, not the inked run
+    // alone. `draw_chrome_band_stretched` resizes the crop to fill the band, so the
+    // crop's width IS the horizontal magnification — and cropping to the ink alone
+    // magnifies by (cell span / ink width) instead of by the uniform letterbox scale.
+    // For a border the game drew as a reverse-video SPACE that is the same number
+    // (the run inks its whole 8px text cell) and nothing moves. For one drawn with a
+    // box-drawing GLYPH it is not: a `│`'s stroke is ONE pixel inside its 8-pixel
+    // cell, a sixteenfold blow-up at the pane this was measured at, so Journey's
+    // Amiga frame had its two vertical borders inflated into solid filled bars two
+    // and one terminal columns wide for their whole height — the IBM PC profile's
+    // reverse-video idiom, standing in the same line as the box glyphs the top,
+    // bottom and menu rows draw as crisp text. The user's *"we are mixing the reverse
+    // space into the amiga line drawing"*. Taking the whole cell keeps the glyph's own
+    // blank padding, so the stroke comes out at the width the game drew it and the
+    // padding stays transparent over the panel behind. Widened, never narrowed: the
+    // ink itself must survive whatever way the two roundings fall.
+    let inv_x =
+        |cell: u16| ((((cell.saturating_sub(pane.x)) as f32 * cw) - scale.off_x as f32) / s).round().max(0.0) as u32;
+    let cnx0 = inv_x(dcell0).min(dnx0);
+    let cnx1 = inv_x(dcell1).max(dnx1).min(canvas.width());
+    if cnx1 <= cnx0 {
+        return None;
+    }
+    Some((ext, (cnx0, mid, cnx1 - cnx0, 1)))
 }
 
 /// Map a chrome run's native top-left game pixel to its pane-absolute terminal

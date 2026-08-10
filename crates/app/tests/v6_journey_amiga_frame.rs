@@ -508,3 +508,248 @@ fn journey_frame_sides_reach_the_menu_under_both_profiles() {
         }
     }
 }
+
+// ── SQ-0747 / SQ-0750: the frame's SIDE borders, at the pane the user captured ──
+//
+// Everything above renders the pane at the buffer's origin and lets Journey's prose go
+// undrawn. Neither is what the player has. `/dump-windows` on the real frame
+// (2026-08-10) reports `pane 163x61 at (1,1)` — the story pane sits INSIDE the app's
+// panel border — and Journey's prose never reaches the story window's `lines` at all:
+// it arrives as the session TRANSCRIPT and is drawn from `AppState`. A harness that
+// renders the model without feeding the transcript renders a frame with no story text
+// in it, which is what four earlier sweeps of this defect were measuring.
+
+/// A rect as `/dump-windows` records it: `(x, y, w, h)`, cells or native pixels.
+type Quad = (u16, u16, u16, u16);
+
+/// The pane from the user's own `/dump-windows`: 163x61 at (1,1), cell 8x18, hybrid.
+const USER_PANE: Quad = (1, 1, 163, 61);
+
+/// A hybrid render at an arbitrary pane ORIGIN with the session transcript fed in, so
+/// the frame carries Journey's prose the way the player's does.
+#[allow(deprecated)]
+fn render_pane(
+    model: &app::engine::ScreenModel,
+    honor: bool,
+    pane: Quad,
+    transcript: &str,
+) -> (app::state::AppState, Rect, Buffer) {
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.honor_game_colours = honor;
+    for line in transcript.lines() {
+        state.push_transcript(line);
+    }
+    let area = Rect::new(pane.0, pane.1, pane.2, pane.3);
+    let mut buf = Buffer::empty(Rect::new(0, 0, area.right() + 1, area.bottom() + 1));
+    let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
+    (state, area, buf)
+}
+
+fn pane_row(buf: &Buffer, area: Rect, y: u16) -> String {
+    (area.x..area.right()).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+}
+
+/// The letterbox scale and cell metrics this frame resolved, out of the same record
+/// `/dump-windows` prints them from.
+fn scale_and_cell(state: &app::state::AppState) -> (f32, u16, u16) {
+    let e = state
+        .v6_cell_map
+        .borrow()
+        .iter()
+        .find(|e| e.label == "scale")
+        .map(|e| e.native)
+        .expect("a hybrid ring frame records its scale");
+    (e.0 as f32 / 100.0, e.2, e.3)
+}
+
+/// The flank border extensions this frame drew: `(cell rect, native crop)`.
+fn flank_dividers(state: &app::state::AppState) -> Vec<(Quad, Quad)> {
+    state
+        .v6_cell_map
+        .borrow()
+        .iter()
+        .filter(|e| e.label == "flank-divider")
+        .map(|e| (e.cells, e.native))
+        .collect()
+}
+
+/// The panes the two side-border cases sweep: the user's own first, then sizes this
+/// file already covers, so a fix that only holds at one pane fails here.
+const SIDE_PANES: [Quad; 5] =
+    [USER_PANE, (1, 1, 138, 68), (0, 0, 138, 68), (0, 0, 100, 71), (0, 0, 96, 51)];
+
+/// (f) SQ-0750 — THE SIDE BORDER IS DRAWN AT THE LETTERBOX SCALE, like every other
+/// pixel in the ring.
+///
+/// `flank_divider_extension` locates the frame's border column and
+/// `draw_chrome_band_stretched` RESIZES the native crop it returns to fill the band. So
+/// the crop's width against the band's width IS the extension's horizontal
+/// magnification — and it cropped to the border's INK alone. For a border the game
+/// printed as a reverse-video SPACE that is the same number, because the run inks its
+/// whole 8-pixel text cell. For one printed with a box-drawing GLYPH it is not: a `│`'s
+/// stroke is ONE pixel inside its 8-pixel cell, so the magnification came out sixteen
+/// times the letterbox scale and a hairline was inflated into a solid filled bar.
+///
+/// The invariant is the ring's own: `crop_width · s == band_width · cell_w`.
+///
+/// FALSIFY by cropping to the ink alone again (`(dnx0, mid, dnx1 - dnx0, 1)`):
+/// `Amiga honor=true pane 163x61: the left flank border is magnified 16.00x while the
+/// ring's letterbox scale is 2.03x … (ext (66, 3, 2, 46), crop (259, 152, 1, 1))`.
+#[test]
+fn journey_flank_border_is_drawn_at_the_letterbox_scale() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
+        let Some(mut session) = journey_at_menu(profile) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for pane in SIDE_PANES {
+                let (state, _, _) = render_pane(&model, honor, pane, &transcript);
+                let (s, cell_w, _) = scale_and_cell(&state);
+                let dividers = flank_dividers(&state);
+                let ctx = format!("{profile:?} honor={honor} pane {}x{}", pane.2, pane.3);
+                assert_eq!(dividers.len(), 2, "{ctx}: both flanks carry a border ({dividers:?})");
+                for (i, (ext, crop)) in dividers.iter().enumerate() {
+                    let side = if i == 0 { "left" } else { "right" };
+                    assert!(crop.2 > 0, "{ctx}: the {side} flank border has an empty crop {crop:?}");
+                    let mag = (ext.2 as f32 * cell_w as f32) / crop.2 as f32;
+                    assert!(
+                        (mag - s).abs() <= s * 0.2,
+                        "{ctx}: the {side} flank border is magnified {mag:.2}x while the ring's \
+                         letterbox scale is {s:.2}x — the crop must be the native columns the \
+                         band's CELLS cover, not the ink alone, or a glyph's thin stroke is \
+                         inflated into a solid filled bar (ext {ext:?}, crop {crop:?})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// (g) SQ-0750, the same defect as the player sees it: *"we are mixing the reverse
+/// space into the amiga line drawing."*
+///
+/// Under the Amiga profile Journey prints its whole frame with box-drawing glyphs and
+/// emits no reverse-video run anywhere on this screen — measured: every run in the menu
+/// band arrives with `style & 1 == 0`. So a solid filled block standing in that frame's
+/// line is not the game's, it is ours. Under the IBM PC profile the same border IS a
+/// reverse-video space and a solid block there is exactly right — which is what makes
+/// this an A/B rather than "Amiga is special": the discriminator is what the band
+/// CONTAINS, never which profile is loaded.
+///
+/// FALSIFY by cropping to the ink alone again: `Amiga honor=true: 138 filled cell(s) in
+/// the frame's side borders … the left flank border column 66 is a solid filled block
+/// (Rgb(220, 220, 220)) at row 3`.
+#[test]
+fn journey_amiga_flank_border_is_a_stroke_not_a_filled_block() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    // A cell wholly covered by bright ink: `fg == bg` means the halfblock renderer found
+    // both halves the same colour, i.e. the cell is filled edge to edge.
+    let filled = |c: &ratatui::buffer::Cell| -> Option<ratatui::style::Color> {
+        let (fg, bg) = (c.style().fg?, c.style().bg?);
+        let ratatui::style::Color::Rgb(r, g, b) = fg else { return None };
+        (fg == bg && r >= 128 && g >= 128 && b >= 128).then_some(fg)
+    };
+    for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
+        let Some(mut session) = journey_at_menu(profile) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            let (state, _, buf) = render_pane(&model, honor, USER_PANE, &transcript);
+            let ctx = format!("{profile:?} honor={honor}");
+            let dividers = flank_dividers(&state);
+            let mut blocks = 0usize;
+            let mut first: Option<String> = None;
+            for (i, (ext, _)) in dividers.iter().enumerate() {
+                let side = if i == 0 { "left" } else { "right" };
+                for y in ext.1..ext.1 + ext.3 {
+                    for x in ext.0..ext.0 + ext.2 {
+                        if let Some(col) = buf.cell((x, y)).and_then(filled) {
+                            blocks += 1;
+                            first.get_or_insert_with(|| {
+                                format!(
+                                    "the {side} flank border column {x} is a solid filled block \
+                                     ({col:?}) at row {y}"
+                                )
+                            });
+                        }
+                    }
+                }
+            }
+            match profile {
+                InterpreterProfile::Amiga => assert_eq!(
+                    blocks, 0,
+                    "{ctx}: {blocks} filled cell(s) in the frame's side borders — Journey prints \
+                     this frame with box-drawing glyphs and no reverse-video run at all, so a \
+                     solid block standing in its line is ours, not the game's. {}",
+                    first.unwrap_or_default()
+                ),
+                // The A/B: the same code path, a border the game really did print as a
+                // reverse-video space, and the block is right there.
+                _ => assert!(
+                    blocks > 0,
+                    "{ctx}: the IBM PC frame's side border must stay a solid block — it is a \
+                     reverse-video SPACE in the game's own output, and thinning it would be the \
+                     same defect in the other direction"
+                ),
+            }
+        }
+    }
+}
+
+/// (h) SQ-0747 — the menu header's labels are WHOLE at the pane the user captured, and
+/// no uploaded image covers the row they are on.
+///
+/// The report is a truncated `The Pa` in hybrid. Four investigations swept 18414, 960,
+/// 22000 and 800 configurations for it without a reproduction; this pins the null result
+/// at the exact frame the user's `/dump-windows` describes — pane origin, transcript and
+/// all — so the search space never has to be re-swept from scratch, and so any future
+/// change that DOES start eating the labels fails here.
+///
+/// Both halves matter. The cells carry the labels, and nothing the terminal composites
+/// above the cells covers their row: an art strip is an uploaded image, and under kitty
+/// an image draws over the text layer, which is the one mechanism a cell-level assertion
+/// on its own cannot see.
+#[test]
+fn journey_menu_header_labels_are_whole_at_the_users_pane() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
+        let Some(mut session) = journey_at_menu(profile) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            let (state, area, buf) = render_pane(&model, honor, USER_PANE, &transcript);
+            let ctx = format!("{profile:?} honor={honor}");
+            let rows: Vec<String> = (area.y..area.bottom()).map(|y| pane_row(&buf, area, y)).collect();
+            let (idx, header) = rows
+                .iter()
+                .enumerate()
+                .find(|(_, r)| r.contains("The Party"))
+                .unwrap_or_else(|| panic!("{ctx}: the menu header is on screen\n{}", rows.join("\n")));
+            assert!(
+                header.contains("Individual Commands"),
+                "{ctx}: the header carries BOTH labels whole — got {header:?}"
+            );
+            let header_row = area.y + idx as u16;
+            // …and nothing the terminal composites above the cells covers that row.
+            for e in state.v6_cell_map.borrow().iter() {
+                let art = e.label.starts_with("strip:art") && !e.label.contains("skipped");
+                if !(art || e.label == "menu:art") {
+                    continue;
+                }
+                let (_, y, _, h) = e.cells;
+                assert!(
+                    header_row < y || header_row >= y + h,
+                    "{ctx}: {} at {:?} covers the menu header row {header_row} — an uploaded image \
+                     draws ABOVE the terminal cells, so the labels would be eaten on screen while \
+                     the buffer still holds them",
+                    e.label,
+                    e.cells
+                );
+            }
+        }
+    }
+}

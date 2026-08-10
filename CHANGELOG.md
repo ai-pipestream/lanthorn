@@ -124,6 +124,29 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Journey's frame stops drawing two of its four sides in the wrong alphabet.**
+  Played under the Amiga profile, the frame's top, bottom and menu rules came out
+  as the crisp line-drawing characters the game prints, while its left and right
+  edges came out as fat solid bars — the IBM PC profile's reverse-video idiom,
+  standing in the same line as the box glyphs, on a screen where Journey emits no
+  reverse-video run at all. The side borders are carried down to the menu as a
+  one-pixel-tall slice of the game's own canvas stretched to fill the column, and
+  that slice was cropped to the border's *ink*: for a border printed as a
+  reverse-video space that is the whole 8-pixel text cell and the stretch is the
+  ordinary letterbox scale, but a `│`'s stroke is a single pixel inside its cell,
+  so it was blown up sixteenfold into a filled block. The crop is now the native
+  columns the band actually covers, so a border is drawn at the width the game
+  drew it — whichever characters the game drew it with. The IBM PC frame is
+  untouched, as are Zork Zero's and Shogun's flanks, which are genuinely artwork.
+
+- **`/dump-windows` says which of its rectangles are draws.** Under the hybrid
+  ring only the story window is drawn at the rectangle beside it; every chrome
+  window is rasterised into the ring and reaches the screen through the strips
+  listed below. The dump printed both alike, so a chrome grid spanning the whole
+  screen read as a second paint over the top border's row — an overlap that does
+  not exist, and one that cost two investigations. Those lines now say
+  `rasterised into the ring`.
+
 - **`/dump-windows` answers the question it was asked.** The command exists to
   say what the game's last frame looked like, and it could not: it is reached
   through the command palette or a hotkey dialog, both modal overlays that route
