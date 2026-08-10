@@ -114,7 +114,7 @@ fn second_prose_window_keeps_its_own_text() {
     );
 
     let v6 = session.machine.screen.v6.as_ref().expect("v6 screen");
-    assert_eq!(session.machine.v6_input_window, 7, "advent reads input through window 7");
+    assert_eq!(session.machine.screen.v6_input_window, 7, "advent reads input through window 7");
     let top: String = v6.windows[3].prose.join(" ");
     assert!(
         top.contains("You are standing at the end of a road"),

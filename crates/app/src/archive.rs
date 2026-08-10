@@ -258,6 +258,15 @@ struct ScreenDto {
     current_fg: ZColourDto,
     #[serde(default)]
     current_bg: ZColourDto,
+    /// The v6 window the game last asked for INPUT through (SQ-0749). It is an
+    /// input to what the screen must show — `BufferWindow::reads_input` derives
+    /// straight from it — and Quetzal saves no screen state by design, so this is
+    /// ours to carry. Unpersisted, a Save State taken mid-read through a secondary
+    /// panel came back with it at 0: the panel's typed-input echo went dark until
+    /// the next read re-established it. `#[serde(default)]` keeps pre-SQ-0749
+    /// archives loading (as window 0, the pre-existing behaviour).
+    #[serde(default)]
+    v6_input_window: u8,
 }
 
 /// Upper bound on a restored grid's dimensions (SQ-0647). Well past any real
@@ -315,6 +324,7 @@ impl ScreenDto {
                 Some(_) => ZColourDto::Default,
                 None => ZColourDto::from_z(s.current_bg),
             },
+            v6_input_window: s.v6_input_window,
         }
     }
 
@@ -344,6 +354,7 @@ impl ScreenDto {
             v6: self.v6.as_ref().map(V6WindowsDto::to_v6),
             current_fg: self.current_fg.to_z(),
             current_bg: self.current_bg.to_z(),
+            v6_input_window: self.v6_input_window,
             ..Default::default()
         }
     }
