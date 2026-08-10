@@ -789,6 +789,20 @@ rather than serving a stale copy. All the v6 render modes — ring, raster,
 frameless inline, cell fallback — share this decode path, so the fix lands
 everywhere at once.
 
+The original Amiga archive has no `APal` chunk, because it never needed one: it
+writes a plain **zero** where each picture's palette would go, and a picture with
+no palette can only be drawn through the one that is current. That is the same
+statement, made per picture rather than in a list — and for *Zork Zero* it marks
+exactly the same 172 pictures the Blorb's `APal` names, id for id, which is
+another sign of where those Blorbs came from. So native artwork goes through the
+machinery above rather than beside it: one Current Palette, in the same colours a
+Blorb `PLTE` holds, tracked the same way and carried into a save the same way.
+The check is Infocom's own: their converter pre-computed every
+(illustration, overlay) pairing and shipped the results inside the Blorb, and the
+Amiga archive reproduces 36980 of those 37152 answers exactly. The remainder are
+all one illustration — picture 8, one of the five the Blorb replaced — where the
+floppy is the source that is right.
+
 ## Arrow keys: movement or map panning, your call
 
 Several v6 titles bind the arrow keys straight to movement — press ↑ and your

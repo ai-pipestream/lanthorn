@@ -182,9 +182,14 @@ impl Canvas {
 ///
 /// A story mounted out of an Amiga `.adf` disk image has no Blorb at all: its
 /// art is the native `Pic.data` archive that shipped on the same floppy, held
-/// here as `native` (SQ-0719 / SQ-0734 tier 2). That format has no `APal`
-/// concept and no `Data` resources, so every palette path below simply stays
-/// on its no-adaptive fast lane; only picture lookup and dimensions branch.
+/// here as `native` (SQ-0719 / SQ-0734 tier 2). That format carries no `APal`
+/// chunk, but it states the same thing per picture: a directory record whose
+/// palette offset is ZERO has no colours of its own and must be drawn through
+/// the Current Palette. For Zork Zero those records are, id for id, exactly the
+/// 172 numbers `Zork0.blb` lists in `APal` — the Blorb's chunk was derived from
+/// this field — so a native archive feeds the machinery below through the same
+/// `adaptive` set and the same Current Palette, expressed in the same RGB
+/// triples a `PLTE` holds. (SQ-0743)
 #[derive(Debug)]
 pub struct PictSource {
     blorb: Option<blorb::Blorb>,
@@ -230,7 +235,8 @@ impl PictSource {
     /// rather than a Blorb — the artwork that shipped on the same disk image as
     /// the story (SQ-0719).
     pub fn from_native(pics: blorb::infocom_pics::InfocomPics) -> PictSource {
-        PictSource { native: Some(pics), ..PictSource::new(None) }
+        let adaptive = pics.adaptive_pictures().iter().map(|&id| u32::from(id)).collect();
+        PictSource { native: Some(pics), adaptive, ..PictSource::new(None) }
     }
 
     /// Resolve the picture source for `story_path` (SQ-0734's tiers 1 and 2).
@@ -320,7 +326,7 @@ impl PictSource {
                 (Some(b), _) => b
                     .resource(b"Pict", resnum)
                     .and_then(|(_ty, bytes)| crate::cover::decode(bytes)),
-                (None, Some(pics)) => native_image(pics, resnum),
+                (None, Some(pics)) => native_image(pics, resnum, None),
                 (None, None) => None,
             };
             self.cache.insert(resnum, decoded.map(Arc::new));
@@ -361,13 +367,24 @@ impl PictSource {
 
     /// Remember Pict `resnum`'s PLTE as the Current Palette (§11.3). No-op for a
     /// non-indexed picture (no PLTE); bumps `palette_gen` only on a real change.
+    ///
+    /// A native archive names its palette in the directory record instead of a
+    /// `PLTE` chunk, and answers here without decoding the picture's pixels; the
+    /// 16 RGB triples it yields are the same shape a `PLTE` holds, so the
+    /// Current Palette — including the copy a host Save State carries — is one
+    /// representation across both archives.
     fn set_current_palette_from(&mut self, resnum: u32) {
-        let Some(plte) = self
-            .blorb
-            .as_ref()
-            .and_then(|b| b.resource(b"Pict", resnum))
-            .and_then(|(_ty, bytes)| png_plte(bytes))
-        else {
+        let plte = match (&self.blorb, &self.native) {
+            (Some(b), _) => b
+                .resource(b"Pict", resnum)
+                .and_then(|(_ty, bytes)| png_plte(bytes)),
+            (None, Some(pics)) => u16::try_from(resnum)
+                .ok()
+                .and_then(|id| pics.palette_of(id))
+                .map(|pal| pal.concat()),
+            (None, None) => None,
+        };
+        let Some(plte) = plte else {
             return;
         };
         if self.current_plte.as_deref() != Some(plte.as_slice()) {
@@ -382,20 +399,28 @@ impl PictSource {
     fn adaptive_image(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
         let key = (resnum, self.palette_gen);
         if !self.adaptive_cache.contains_key(&key) {
-            // Clone the raw PNG bytes so the immutable blorb borrow ends before
-            // we mutate the cache.
-            let raw = self
-                .blorb
-                .as_ref()
-                .and_then(|b| b.resource(b"Pict", resnum))
-                .map(|(_ty, bytes)| bytes.to_vec());
-            let decoded = raw.and_then(|raw| {
-                let spliced = self
-                    .current_plte
-                    .as_ref()
-                    .and_then(|plte| splice_plte(&raw, plte));
-                crate::cover::decode(spliced.as_deref().unwrap_or(&raw))
-            });
+            let decoded = match (&self.blorb, &self.native) {
+                // Clone the raw PNG bytes so the immutable blorb borrow ends
+                // before we mutate the cache.
+                (Some(b), _) => b
+                    .resource(b"Pict", resnum)
+                    .map(|(_ty, bytes)| bytes.to_vec())
+                    .and_then(|raw| {
+                        let spliced = self
+                            .current_plte
+                            .as_ref()
+                            .and_then(|plte| splice_plte(&raw, plte));
+                        crate::cover::decode(spliced.as_deref().unwrap_or(&raw))
+                    }),
+                // A native picture is palette indices already: there is no PLTE
+                // to splice, the Current Palette IS the colour table it expands
+                // through. With none loaded yet it falls back to its own — §11.3
+                // leaves that case undefined and the Blorb path does the same.
+                (None, Some(pics)) => {
+                    native_image(pics, resnum, self.current_plte.as_deref().map(colour_table).as_ref())
+                }
+                (None, None) => None,
+            };
             self.adaptive_cache.insert(key, decoded.map(Arc::new));
         }
         self.adaptive_cache.get(&key).and_then(|o| o.clone())
@@ -470,10 +495,32 @@ impl PictSource {
 /// transparent index alpha 0, which is exactly what `Canvas`'s alpha-honoring
 /// overlay wants. `None` covers every "no image here" case alike: an unknown
 /// id, a size-only placeholder, or a compression variant we do not decode.
-fn native_image(pics: &blorb::infocom_pics::InfocomPics, resnum: u32) -> Option<DynamicImage> {
+///
+/// `palette`, when given, overrides the picture's own — the Current Palette an
+/// adaptive picture is drawn through (SQ-0743).
+fn native_image(
+    pics: &blorb::infocom_pics::InfocomPics,
+    resnum: u32,
+    palette: Option<&[blorb::infocom_pics::Rgb; 16]>,
+) -> Option<DynamicImage> {
     let pic = pics.decode(u16::try_from(resnum).ok()?).ok()?;
-    let buf = image::RgbaImage::from_raw(u32::from(pic.width), u32::from(pic.height), pic.rgba())?;
+    let rgba = match palette {
+        Some(pal) => pic.rgba_with(pal),
+        None => pic.rgba(),
+    };
+    let buf = image::RgbaImage::from_raw(u32::from(pic.width), u32::from(pic.height), rgba)?;
     Some(DynamicImage::ImageRgba8(buf))
+}
+
+/// The Current Palette's raw RGB triples as a native 16-entry colour table.
+/// Entries the palette does not reach keep the archive's default, so no pixel
+/// index is ever left without a colour.
+fn colour_table(plte: &[u8]) -> [blorb::infocom_pics::Rgb; 16] {
+    let mut pal = blorb::infocom_pics::DEFAULT_PALETTE;
+    for (slot, c) in pal.iter_mut().zip(plte.chunks_exact(3)) {
+        *slot = [c[0], c[1], c[2]];
+    }
+    pal
 }
 
 /// PNG 8-byte signature.

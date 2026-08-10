@@ -118,6 +118,21 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Zork Zero's compass keeps its colours off the Amiga floppy.** Booted from the
+  disk image, the compass arrows and room icons came out bright blue, purple and
+  yellow-green, and the colours changed as you walked from room to room — while
+  the same game booted from its Blorb drew them properly. Neither archive was at
+  fault: both say those pictures have no colours of their own and must borrow the
+  palette of the last full illustration drawn, and babelmap was only listening to
+  one of them. A Blorb announces it in a chunk; the original Amiga archive writes
+  a plain zero where a picture's palette would go — which, for *Zork Zero*, marks
+  exactly the same 172 pictures, id for id. babelmap now reads that zero as what
+  it is, and the native artwork joins the palette machinery the Blorb path has
+  always used, so the compass takes the mood of the room it sits beside instead of
+  falling back to a stock EGA table. Checked against Infocom's own converter: of
+  the 37152 palette combinations it pre-computed and shipped in the Blorb, the
+  Amiga archive now reproduces 36980 exactly, and the rest differ only where the
+  two archives genuinely hold different art.
 - **fmvpoker's bet and quit prompts are back on the screen, and so is what you
   type.** Choosing CHANGE CURRENT BET left the whole bottom panel empty: no "Enter
   the new bet:", no Current Bet / Total Winnings totals, and every digit you typed
