@@ -177,7 +177,26 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
 
 /// Render the engine's screen into the story-pane `area`, returning scrollbar /
 /// scroll metrics for the (primary) transcript.
+///
+/// The frame is closed here (SQ-0756): a v6 mapping this pass recorded is handed to
+/// [`AppState::note_v6_frame_end`], which keeps the game's own frames for
+/// `/dump-windows`. It has to be the frame BOUNDARY rather than any one render path —
+/// five of them write the mapping, each from a different arm — and it has to be after
+/// the path has run, since the mapping is what is being kept.
 pub fn render_story_pane(
+    model: &ScreenModel,
+    char_mode: bool,
+    introspect: Option<&dyn Introspect>,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) -> StoryPaneMetrics {
+    let m = render_story_pane_frame(model, char_mode, introspect, state, area, buf);
+    state.note_v6_frame_end();
+    m
+}
+
+fn render_story_pane_frame(
     model: &ScreenModel,
     char_mode: bool,
     introspect: Option<&dyn Introspect>,

@@ -849,6 +849,36 @@ echo as the turn's movement command. A compass-clicked move draws the same
 directional edge on the map, and records the direction as tried, as if you had
 typed it.
 
+## `/dump-windows` reports the last frame the *game* drew
+
+When a v6 layout looks wrong, `/dump-windows` is how you say what you saw: one
+block per window, merging the game's own window table, the model babelmap built
+from it, and where the renderer actually put each one on the terminal — the three
+things that have to agree.
+
+There is a catch built into asking. The command is reached through the command
+palette or a hotkey dialog, and both are modal overlays that route the v6 pane off
+its pixel path — so the frame *most recently drawn* when the dump runs is always
+the palette's, in which every one of the game's windows is honestly reported as
+`NOT DRAWN this frame`. That is the one thing nobody opened the dump to learn. So
+babelmap keeps the mapping from each frame the **game** drew, and the dump
+describes that one: its render path, its pane, its story viewport, its per-window
+cells and chrome strips, and the ring's own plan and clip for that frame. A
+`frame described:` line says which frame it is and how many modal frames have
+gone by since. The game-side halves — the window table and the model — are read
+live, because a modal overlay runs no game code and they still describe the frame
+being reported. If no frame has ever been drawn without an overlay up, the
+placements are reported as `UNAVAILABLE` rather than quietly swapped for the
+overlay's.
+
+The dump also lands in **`~/.babelmap/dump-windows.log`**, appended, with a
+timestamp per capture, and the transcript line names the path. Selecting the
+on-screen copy off a v6 pane drags the graphics protocol's own placeholder glyphs
+along with it — the diagnostic corrupted by the thing it is diagnosing — and the
+file is the same text with nothing composited over it. Read it from a second
+terminal while the game is still running, take several captures across a turn,
+and paste any of them intact.
+
 ## Not yet there
 - **Proportional fonts** — status and chrome text currently use fixed-width
   metrics; the v6 titles' proportional font tables aren't honored yet.
