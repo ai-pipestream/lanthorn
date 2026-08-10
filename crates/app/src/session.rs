@@ -2472,9 +2472,18 @@ impl GameSession {
         // the status bar to the middle and leaves prose in the bottom 200px) the
         // story rect still claimed the whole screen — transcript viewport, chrome
         // ring and mapper band all aimed at it.
+        //
+        // …and a prose window whose text the engine DIVERTS to its own buffer is not
+        // that window (SQ-0746): it is a display panel, and publishing it as the
+        // primary Buffer hands the renderer a story window with no lines in it (a
+        // primary Buffer's prose is the host transcript by construction) while the
+        // text the game actually printed sits unread in the panel. fmvpoker is the
+        // report — it prints "Enter the new bet: " into its bottom panel and reads
+        // the bet through it — and the two sides must answer with one rule or the
+        // model contradicts the engine that filled it.
         let prose_idx = {
             let cur = v6.current as usize;
-            if v6.windows[cur].attributes & 0b11 == 0b11 { cur } else { 0 }
+            if v6.windows[cur].attributes & 0b11 == 0b11 && !self.machine.v6_diverts_prose(cur) { cur } else { 0 }
         };
         for (i, win) in v6.windows.iter().enumerate() {
             // Window 0 with nothing of its own, while the prose streams elsewhere:
@@ -2652,6 +2661,10 @@ impl GameSession {
                     fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
                     panel: false,
                     px_runs: Vec::new(),
+                    // …and whether the player is typing into it (SQ-0746): a v6 game
+                    // may read through a panel it has declared is not the transcript,
+                    // and the host's echo belongs after that panel's own prompt.
+                    reads_input: self.machine.v6_input_window as usize == i,
                 })
             } else {
                 WinNode::Grid(GridWindow {

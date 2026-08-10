@@ -204,9 +204,17 @@ session-only switch that never touches your saved config:
   window's text away with the story (the game warns about exactly that). Which
   window carries the narrative is the game's own declaration: ZMSD §8.8.3.1's
   attribute 2, "text copied to output stream 2", is set on the transcript's window
-  and cleared on a display window. babelmap follows that — corroborated by the
-  window the game reads input through — and gives every other prose window its own
-  buffer, drawn in its own rect. A secondary window is **live
+  and cleared on a display window. babelmap follows that — with the window the game
+  reads input through as the fallback for a game that declares nothing — and gives
+  every other prose window its own buffer, drawn in its own rect. A **read does not
+  overrule the declaration**: fmvpoker prints "Enter the new bet:" into its bottom
+  panel and reads the answer through that panel, and treating the read as the
+  answer split one screen across two sinks — the prompt stayed behind in the
+  panel's buffer while the panel was published as the story window, whose lines are
+  empty by construction, so the player got a blank panel with no prompt, no running
+  totals and no echo of what they typed. The **live input line follows the read**
+  rather than the story window, so it appears after the prompt in the window the
+  player is actually typing into. A secondary window is **live
   screen state**: what it currently shows, with no scrollback, cleared when the game
   erases it — but persisted with the rest of the screen, because a game that splits
   the display does not necessarily repaint it after a restore (advent doesn't). Its

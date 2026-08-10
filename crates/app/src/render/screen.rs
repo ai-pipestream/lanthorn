@@ -2138,7 +2138,12 @@ pub fn build_v6_raster_canvas(
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
     // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
     // canvas does not draw. The story page below spares them like any chrome text.
-    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors);
+    // …and the live input line into whichever of them the player is typing into
+    // (SQ-0746), on the same "only when the view is at the bottom" rule
+    // `build_main_text` applies to the transcript's own live line.
+    let panel_input =
+        (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
+    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors, panel_input);
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
     // `fill_window_pages`), so `story_clear_native` below still finds it clear.
@@ -5174,6 +5179,7 @@ mod tests {
             fg: None,
             panel: false,
             px_runs: Vec::new(),
+            reads_input: false,
         }
     }
 
@@ -5197,7 +5203,7 @@ mod tests {
             WinNode::Graphics(crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false })
         }
         fn buf(bg: u32, primary: bool) -> WinNode {
-            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false, px_runs: Vec::new() })
+            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false, px_runs: Vec::new(), reads_input: false })
         }
         fn grid(bg: u32) -> WinNode {
             let mut g = GridWindow::default();
@@ -5765,6 +5771,7 @@ mod tests {
             fg: None,
             panel: false,
             px_runs: Vec::new(),
+            reads_input: false,
         };
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();

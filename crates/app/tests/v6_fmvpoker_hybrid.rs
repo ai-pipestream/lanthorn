@@ -236,6 +236,15 @@ fn fmvpoker_is_the_only_title_this_moves() {
 /// So the frame must keep taking the composite, and the assertion is the player's
 /// own test: the screen above the bottom panel is byte-identical to the screen they
 /// were looking at when they chose the option.
+///
+/// SQ-0746 REWROTE THE PREMISE, and the assertion is why it is still here. The story
+/// window no longer moves at all: reading through a panel the game has declared is
+/// NOT its transcript (attribute 2 clear, while window 0 sets it) never made that
+/// panel the story window, and publishing it as one is what emptied the screen. So
+/// the plate no longer escapes anything and `picture_takeover`'s SQ-0739 arm no
+/// longer has to fire for this title — the enclosure arm keeps the frame here
+/// exactly as it does at the menu. What the player sees is unchanged, which is what
+/// these pixels check.
 fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
     let Some((mut session, mut state)) = fmvpoker_title(honor) else { return };
     // The frame as the player last saw it, at the menu.
@@ -259,15 +268,16 @@ fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
     let native = app::render::v6_layout::native_extent(items);
     let layout = app::render::v6_layout::classify_windows(items);
 
-    // Premise: the story window is now the bottom panel the game reads through…
-    let story = layout.story.expect("the bet prompt's window is the primary Buffer");
+    // Premise: the story window did not move (SQ-0746) — it is window 0, the window
+    // that declares itself the transcript, exactly as at the menu…
+    let story = layout.story.expect("window 0 is still the primary Buffer");
     assert_eq!(
         (story.x_px, story.y_px, story.w_px, story.h_px),
-        (22, 235, 594, 156),
-        "premise (honor={honor}): choosing CHANGE CURRENT BET makes fmvpoker's bottom panel the \
-         window it reads input through, so the story window moves there"
+        (0, 0, 640, 400),
+        "premise (honor={honor}): the game reads the bet through a panel whose attribute 2 is \
+         CLEAR, so that panel is a display panel and window 0 stays the story window"
     );
-    // …while the table is exactly where it always was, on window 0.
+    // …and the table is exactly where it always was, on window 0.
     let plate = layout.story_gfx.expect("window 0 still holds the poker table");
     assert_eq!(
         (plate.x_px, plate.y_px, plate.w_px, plate.h_px),
@@ -275,36 +285,22 @@ fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
         "premise (honor={honor}): the game redrew nothing — the plate has not moved"
     );
     assert!(
-        app::render::screen::story_plate_escapes_story_window(story, Some(plate)),
-        "premise (honor={honor}): the plate now paints outside the story window's box, so the \
-         story viewport cannot show it"
-    );
-    // …and the ring cannot show it either: its canvas is empty.
-    let ring_canvas = app::render::v6_layout::build_chrome_canvas(
-        &layout.chrome,
-        native,
-        image::Rgba([255, 255, 255, 255]),
-        image::Rgba([0, 0, 0, 255]),
-        &state.colors,
-    );
-    assert_eq!(
-        ring_canvas.pixels().filter(|p| p.0[3] != 0).count(),
-        0,
-        "premise (honor={honor}): the chrome canvas the ring's bands are cropped from carries \
-         nothing at all on this frame"
+        !app::render::screen::story_plate_escapes_story_window(story, Some(plate)),
+        "premise (honor={honor}): with the story window where it belongs the plate is inside it \
+         again, so the SQ-0739 escape arm is not what carries this frame"
     );
 
     assert_eq!(
         render_path(&session, &state),
         "raster",
-        "honor={honor}: hybrid must not take the ring on a frame whose ring canvas is empty — the \
-         art is on the story window's plate, outside the story viewport, so no band would carry it \
-         and the poker frame vanished for as long as the player took to type a bet (SQ-0739)"
+        "honor={honor}: hybrid has no ring to draw on a frame whose art encloses the screen, so \
+         this must stay a composite — the poker frame vanished for as long as the player took to \
+         type a bet (SQ-0739)"
     );
 
     // And what ships is the same frame they were looking at.
     let bet_shot = app::render::screen::build_v6_raster_canvas(&layout, native, &state).0;
-    for y in 0..story.y_px as u32 {
+    for y in 0..PANEL.1 as u32 {
         for x in 0..native.0 as u32 {
             assert_eq!(
                 menu_shot.get_pixel(x, y),
@@ -316,6 +312,10 @@ fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
         }
     }
 }
+
+/// fmvpoker's bottom panel — window 2 — as the game declares it: 594x156 at native
+/// (23,236), 1-based, so (22,235) on the 0-based composite.
+const PANEL: (u16, u16, u16, u16) = (22, 235, 594, 156);
 
 #[test]
 fn fmvpoker_bet_entry_keeps_its_frame_honoring_game_colours() {
@@ -1137,5 +1137,321 @@ fn fmvpoker_is_the_only_canvas_story_window() {
             "{game}: which frames read as a CANVAS changed. Rule (d) turns off a v6 title's whole \
              transcript, so a game that starts qualifying loses its narration (SQ-0729)."
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SQ-0746: the bet screen's panel was BLANK — no prompt, no money lines, and no
+// echo of the digits the player typed (though the bet still applied on Enter, so
+// only the display was lost). The same on QUIT, which is the discriminator: the
+// trigger is window 2 becoming the window the game reads through, not anything
+// about the bet screen's content.
+//
+// One cause under all three. zvm diverts a flowing-prose window's text to the
+// window's own buffer unless the game declared it the transcript (ZMSD §8.8.3.1
+// attribute 2) — with the window the game READS through as a fallback for a game
+// that declares nothing. fmvpoker declares: window 0 sets attribute 2, its bottom
+// panel does not. Letting the read re-designate the panel anyway split one screen
+// across two sinks:
+//
+//   * the PROMPT was printed into the panel's buffer (before the read), and the
+//     panel was then published as the primary `Buffer`, whose `lines` are empty by
+//     construction — a primary window's prose is the host transcript;
+//   * the MONEY LINES were window 0's streamed shadow, published only while window
+//     0 is the primary Buffer, and it had just stopped being one;
+//   * the ECHO went with the story window. The host draws its live input line in
+//     the story window, and the story window was now a panel with no text box:
+//     `story_clear_native` measures the story box against the game's own painted
+//     ground, and fmvpoker had just `erase_window`ed that very panel — 92664 of
+//     92664 pixels — so the box insetted to height 0 and `build_v6_raster_canvas`
+//     took its "the picture owns the screen" branch and drew no story text at all.
+//
+// The rule now: the game's own attribute 2 decides which window is the transcript,
+// and reading through a panel does not re-designate it. Window 0 stays the story
+// window (and its px_runs with it), the panel stays a secondary prose window with
+// its prompt in it — and the host's input line follows the READ into that panel,
+// which is where the player is typing.
+
+/// Reach a prompt fmvpoker reads through its bottom panel: `key` from the menu.
+fn fmvpoker_panel_prompt(honor: bool, key: u8) -> Option<(GameSession, app::state::AppState)> {
+    let (mut session, mut state) = fmvpoker_title(honor)?;
+    let r = session.submit_char(key);
+    assert!(r.fault.is_none(), "fmvpoker faulted on {:?}: {:?}", key as char, r.fault);
+    app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+    *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+    Some((session, state))
+}
+
+/// The composite for this frame, and the same composite with `edit` applied to the
+/// model first — the difference is exactly what `edit` was responsible for drawing.
+/// Read back from pixels rather than recomputed, and immune to the poker table
+/// showing through behind the panel (which is why a plain ink scan will not do).
+fn shot_and_shot_without(
+    session: &GameSession,
+    state: &app::state::AppState,
+    edit: impl Fn(&mut app::engine::ScreenModel),
+) -> (image::RgbaImage, image::RgbaImage) {
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, state);
+    let mut stripped = session.screen();
+    edit(&mut stripped);
+    let WinNode::Layered(sitems) = &stripped.root else { panic!("v6 Layered root") };
+    let slayout = app::render::v6_layout::classify_windows(sitems);
+    let (bare, _) = app::render::screen::build_v6_raster_canvas(&slayout, native, state);
+    (img, bare)
+}
+
+/// The bounding box of the pixels two composites disagree on; `None` when identical.
+fn diff_box(a: &image::RgbaImage, b: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for y in 0..a.height().min(b.height()) {
+        for x in 0..a.width().min(b.width()) {
+            if a.get_pixel(x, y) != b.get_pixel(x, y) {
+                (x0, y0) = (x0.min(x), y0.min(y));
+                (x1, y1) = (x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    (x0 < x1).then_some((x0, y0, x1, y1))
+}
+
+/// The bottom panel's lines, as the model publishes them.
+///
+/// Found by its BOX, not by its classification, so that a frame which publishes the
+/// panel as the primary `Buffer` is reported by what the player sees — no lines —
+/// rather than by the panel going missing. A primary buffer's `lines` are empty by
+/// construction (the host transcript is its prose), so republishing the panel as one
+/// discards every line the game printed into it: that is the blank panel of SQ-0746.
+fn panel_lines(session: &GameSession) -> Vec<String> {
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let panel = items
+        .iter()
+        .find(|it| (it.x_px, it.y_px, it.w_px, it.h_px) == PANEL)
+        .expect("fmvpoker publishes its bottom panel as a window of its own");
+    let WinNode::Buffer(b) = &panel.node else { panic!("the panel is a prose Buffer") };
+    b.lines.clone()
+}
+
+/// SQ-0746: the prompt the game prints into the panel it then reads through must
+/// reach the model AND the screen. Both of fmvpoker's are checked, because the QUIT
+/// one is what proved the trigger is the read and not the bet screen.
+fn fmvpoker_a_panel_prompt_reaches_the_screen(honor: bool, key: u8, prompt: &str) {
+    let Some((session, state)) = fmvpoker_panel_prompt(honor, key) else { return };
+    let lines = panel_lines(&session);
+    let row = lines
+        .iter()
+        .position(|l| l.starts_with(prompt))
+        .unwrap_or_else(|| panic!("honor={honor}: {prompt:?} never reached the model. Panel lines: {lines:?}"));
+
+    // …and it is DRAWN: the composite differs from the same frame with that line
+    // blanked out of the model, on the line's own row.
+    let (img, bare) = shot_and_shot_without(&session, &state, |m| {
+        let WinNode::Layered(items) = &mut m.root else { panic!("v6 Layered root") };
+        for it in items.iter_mut() {
+            if let WinNode::Buffer(b) = &mut it.node {
+                if !b.primary && b.lines.len() > row {
+                    b.lines[row] = String::new();
+                }
+            }
+        }
+    });
+    let (_, y0, _, y1) = diff_box(&img, &bare).unwrap_or_else(|| {
+        panic!(
+            "honor={honor}: {prompt:?} puts nothing on the composite. The panel is blank while the \
+             player answers it — no prompt, no money lines, no echo (SQ-0746)."
+        )
+    });
+    let top = PANEL.1 as u32 + row as u32 * 16;
+    assert!(
+        (top..top + 16).contains(&y0) && y1 <= top + 16,
+        "honor={honor}: {prompt:?} is drawn at rows {y0}..{y1}, not on its own row {top}..{}",
+        top + 16
+    );
+}
+
+#[test]
+fn fmvpoker_the_bet_prompt_reaches_the_screen_honoring_game_colours() {
+    fmvpoker_a_panel_prompt_reaches_the_screen(true, b'c', "Enter the new bet:");
+}
+
+#[test]
+fn fmvpoker_the_bet_prompt_reaches_the_screen_theme_only() {
+    fmvpoker_a_panel_prompt_reaches_the_screen(false, b'c', "Enter the new bet:");
+}
+
+#[test]
+fn fmvpoker_the_quit_prompt_reaches_the_screen_honoring_game_colours() {
+    fmvpoker_a_panel_prompt_reaches_the_screen(true, b'q', "Are you sure you want to quit?");
+}
+
+#[test]
+fn fmvpoker_the_quit_prompt_reaches_the_screen_theme_only() {
+    fmvpoker_a_panel_prompt_reaches_the_screen(false, b'q', "Are you sure you want to quit?");
+}
+
+/// SQ-0746: the money lines are window 0's, and window 0 does not stop being the
+/// story window because the game reads a bet through a panel.
+///
+/// "Current Bet: / 10 / Total Winnings: / 1000" are printed into window 0 at
+/// (76,247), (76,265), (420,247) and (420,265) and reach the host as that window's
+/// streamed shadow (`px_runs`, SQ-0729) — published only while window 0 is the
+/// primary `Buffer`. They vanished off the bet screen without the game touching
+/// them.
+fn fmvpoker_the_money_lines_survive_a_panel_prompt(honor: bool) {
+    let Some((session, state)) = fmvpoker_panel_prompt(honor, b'c') else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let layout = app::render::v6_layout::classify_windows(items);
+    let story = layout.story.expect("window 0 is still the primary Buffer");
+    let WinNode::Buffer(b) = &story.node else { panic!("the story window is a prose Buffer") };
+    let at = |x: u16, y: u16| b.px_runs.iter().find(|t| (t.x, t.y) == (x, y)).map(|t| t.text.clone());
+    for (x, y, text) in [(76u16, 247u16, "Current Bet:"), (420, 247, "Total Winnings:")] {
+        assert_eq!(
+            at(x, y).as_deref(),
+            Some(text),
+            "honor={honor}: {text:?} is still on window 0's glass at ({x},{y}) — the game printed \
+             it and has not erased it. Runs: {:?}",
+            b.px_runs.iter().map(|t| (t.x, t.y, t.text.clone())).collect::<Vec<_>>()
+        );
+    }
+
+    // …and they are drawn: the composite differs from the same frame with the runs
+    // taken out of the model, inside the rows the game printed them on.
+    let (img, bare) = shot_and_shot_without(&session, &state, |m| {
+        let WinNode::Layered(items) = &mut m.root else { panic!("v6 Layered root") };
+        for it in items.iter_mut() {
+            if let WinNode::Buffer(b) = &mut it.node {
+                if b.primary {
+                    b.px_runs.clear();
+                }
+            }
+        }
+    });
+    let (_, y0, _, y1) = diff_box(&img, &bare).unwrap_or_else(|| {
+        panic!("honor={honor}: window 0's running totals put nothing on the bet screen (SQ-0746)")
+    });
+    assert!(
+        (246..=280).contains(&y0) && y1 <= 282,
+        "honor={honor}: the money lines drew at rows {y0}..{y1}, not the 247/265 rows the game \
+         named for them"
+    );
+}
+
+#[test]
+fn fmvpoker_the_money_lines_survive_a_panel_prompt_honoring_game_colours() {
+    fmvpoker_the_money_lines_survive_a_panel_prompt(true);
+}
+
+#[test]
+fn fmvpoker_the_money_lines_survive_a_panel_prompt_theme_only() {
+    fmvpoker_the_money_lines_survive_a_panel_prompt(false);
+}
+
+/// SQ-0746: what the player types has to appear where they are typing it.
+///
+/// The digits are HOST-side — the app holds the in-progress line and the game never
+/// sees it until Enter — so they must reach the screen whatever the game's own
+/// windows carry. They reached nothing: the host draws its live input line in the
+/// STORY window, the panel had been published as the story window, and that panel's
+/// text box measured to nothing because the game had just erased it (a fill covers
+/// every pixel, so `story_clear_native` insetted the box away to height 0). Typing a
+/// bet and pressing Enter still applied it, which is what made the loss purely
+/// visual — and unnerving.
+///
+/// The echo follows the READ now: the window the game is reading through carries it,
+/// continuing that window's own prompt line.
+fn fmvpoker_echoes_the_digits_the_player_types(honor: bool) {
+    let Some((session, mut state)) = fmvpoker_panel_prompt(honor, b'c') else { return };
+    let lines = panel_lines(&session);
+    let row = lines.iter().position(|l| l.starts_with("Enter the new bet:")).expect("the bet prompt");
+    let prompt_cols = lines[row].chars().count() as u32;
+
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let (quiet, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    state.input.value = "25".into();
+    let (typed, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+    let (x0, y0, x1, y1) = diff_box(&quiet, &typed).unwrap_or_else(|| {
+        panic!(
+            "honor={honor}: typing \"25\" at the bet prompt changed NOTHING on the screen. The \
+             digits are the host's own input line, and with them invisible the player has no \
+             feedback at all that the game is listening (SQ-0746)."
+        )
+    });
+    let top = PANEL.1 as u32 + row as u32 * 16;
+    let after_prompt = PANEL.0 as u32 + prompt_cols * 8;
+    assert!(
+        (top..top + 16).contains(&y0) && y1 <= top + 16,
+        "honor={honor}: the echo drew at rows {y0}..{y1}, not on the prompt's own row {top}..{}",
+        top + 16
+    );
+    assert!(
+        x0 >= after_prompt,
+        "honor={honor}: the echo drew from x={x0}, over the prompt itself — it continues {:?}, \
+         which ends at x={after_prompt}",
+        lines[row]
+    );
+    assert!(
+        x1 <= after_prompt + 3 * 8,
+        "honor={honor}: the echo drew out to x={x1}; two digits and a caret reach {}",
+        after_prompt + 3 * 8
+    );
+}
+
+#[test]
+fn fmvpoker_echoes_the_digits_the_player_types_honoring_game_colours() {
+    fmvpoker_echoes_the_digits_the_player_types(true);
+}
+
+#[test]
+fn fmvpoker_echoes_the_digits_the_player_types_theme_only() {
+    fmvpoker_echoes_the_digits_the_player_types(false);
+}
+
+/// The corpus guard on SQ-0746's rule: which window is the transcript's must not
+/// move for anybody else.
+///
+/// It is the guard `fmvpoker_is_the_only_title_this_moves` puts on the render path,
+/// one level down — at the model, where a title that lost its story window would
+/// lose its narration whatever the path did. Every corpus title reads input through
+/// a window that DECLARES attribute 2 (advent through its window 7, which sets it;
+/// everyone else through window 0), so the fallback this quest made conditional was
+/// never what any of them relied on.
+#[test]
+fn no_corpus_title_reads_through_a_panel() {
+    for game in [
+        "zork0-r393-s890714.z6",
+        "arthur-r74-s890714.z6",
+        "shogun-r322-s890706.z6",
+        "journey-r83-s890706.z6",
+        "advent.z6",
+        "scopa.z6",
+        "mysterious01.z6",
+        "fmvpoker.z6",
+    ] {
+        let Some((mut session, mut state)) = boot(game, true) else { continue };
+        for step in 0..8 {
+            let input = session.machine.v6_input_window as usize;
+            assert!(
+                !session.machine.v6_diverts_prose(input),
+                "{game} frame {step}: the game is reading input through window {input}, whose \
+                 prose is DIVERTED to its own buffer — so its narration is a display panel and \
+                 the host transcript is some other window's (SQ-0746)"
+            );
+            let r = match session.pending_input() {
+                InputKind::Char => session.submit_char(13),
+                _ => session.submit(""),
+            };
+            assert!(r.fault.is_none(), "{game} faulted at step {step}: {:?}", r.fault);
+            app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+            *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+        }
     }
 }
