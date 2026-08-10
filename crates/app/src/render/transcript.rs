@@ -924,8 +924,20 @@ pub(crate) fn anchor_wrapped_rows(
 /// [`wrap_lines_kinded_indexed`]). `None` when the anchor is unset or past the end
 /// of the transcript. Clamped to `total` so it can never index past the rows.
 /// (SQ-0640)
+///
+/// An anchor sitting exactly AT the end (`a == starts.len()`) is not out of range:
+/// it is a screen the game has cleared and printed nothing into yet — every row
+/// precedes it, so the post-clear screen is *empty*. That is one row past the last
+/// `starts` entry, so a bare `get` returned `None` and the viewport fell back to
+/// bottom-sticking the very scrollback the game just erased. Beyond Zork's title
+/// repaint is exactly that turn: `erase_window(-1)`, `split_window(20)`, the whole
+/// centred title placed in the upper window, and not one character printed below
+/// it (SQ-0748).
 pub(crate) fn anchor_row_at(starts: &[usize], total: usize, clear_anchor: Option<usize>) -> Option<usize> {
     let a = clear_anchor?;
+    if a == starts.len() {
+        return Some(total);
+    }
     starts.get(a).map(|&r| r.min(total))
 }
 
@@ -2907,6 +2919,32 @@ mod tests {
             anchor_wrapped_rows(&transcript, &kinds, &styles, &runs, &[], &[], (8, 8), false, true, 40, None),
             None
         );
+    }
+
+    #[test]
+    fn an_anchor_at_the_end_is_an_empty_screen_not_an_absent_one() {
+        // SQ-0748: the game cleared the screen and printed nothing into it — Beyond
+        // Zork's title repaint, which places every character in the upper window.
+        // The anchor is then one past the last `starts` entry, and reading that as
+        // "no anchor" bottom-sticks the scrollback the game just erased.
+        let transcript = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let kinds = vec![TranscriptKind::Story; 3];
+        let styles = vec![Style::default(); 3];
+        let runs = vec![Vec::new(); 3];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &[], (8, 8), false, true, 40);
+        let anchor = anchor_wrapped_rows(
+            &transcript, &kinds, &styles, &runs, &[], &[], (8, 8), false, true, 40, Some(3),
+        );
+        assert_eq!(anchor, Some(3), "every row precedes the anchor");
+        let (visible, total, first) = window_wrapped_rows(&rows, anchor, 10, 0);
+        assert_eq!(
+            (visible.len(), total, first),
+            (0, 3, 3),
+            "the post-clear screen is blank; the three erased rows stay in scrollback"
+        );
+        // Scrolling back still reaches them.
+        let (back, _, _) = window_wrapped_rows(&rows, anchor, 2, 1);
+        assert_eq!(back.len(), 2, "the erased screen is still reachable above the anchor");
     }
 
     #[test]
