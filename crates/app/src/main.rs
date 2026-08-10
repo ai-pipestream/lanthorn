@@ -1049,6 +1049,13 @@ fn draw_frame(
             full,
         );
         app::render::transcript::render_notifications(buf, toast_area, state);
+
+        // The frame is finished — every widget and the whole overlay ladder have
+        // written. Keep its cells for `/dump-cells` (SQ-0761). This is the only
+        // point at which the buffer is the frame the terminal is about to receive,
+        // and the command runs long after it has been swapped away, so the dump has
+        // to read a snapshot rather than the live buffer.
+        state.note_frame_cells(buf);
     })?;
 
     // The draw closure runs exactly once, so the overlay ladder always ran.

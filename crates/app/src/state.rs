@@ -2220,6 +2220,17 @@ pub struct AppState {
     /// puts its mapping here as it finishes ([`AppState::note_v6_frame_end`]), and
     /// the dump reads THIS.
     pub v6_last_game_frame: std::cell::RefCell<Option<V6GameFrame>>,
+    /// The last frame's rendered CELLS — glyphs and styling — for `/dump-cells`
+    /// (SQ-0761).
+    ///
+    /// `v6_last_game_frame` above records where each window LANDED; this records
+    /// what was actually painted into every cell of the terminal, which is a
+    /// different question and the one every Journey colour defect turned out to be.
+    /// Filed at the end of each frame that no modal covers
+    /// ([`AppState::note_frame_cells`]) for the same reason the v6 mapping is: the
+    /// command may be reached through the palette, and the palette's own frame is
+    /// not the one anybody wants to look at.
+    pub last_frame_cells: std::cell::RefCell<Option<crate::cell_dump::FrameCells>>,
     /// Recent v6 render paths, newest last, consecutive repeats collapsed to a count
     /// (SQ-0587). `/dump-windows` cannot observe the steady state on its own: typing
     /// `/` opens the command palette, a modal overlay, which itself routes the frame
@@ -2611,6 +2622,7 @@ impl Default for AppState {
             v6_paint: std::cell::RefCell::new(None),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
             v6_last_game_frame: std::cell::RefCell::new(None),
+            last_frame_cells: std::cell::RefCell::new(None),
             v6_path_log: std::cell::RefCell::new(Vec::new()),
             v6_save_log: std::cell::RefCell::new(Vec::new()),
             v6_ring_plan: std::cell::Cell::new("—"),
@@ -3120,6 +3132,51 @@ impl AppState {
             ring_plan: self.v6_ring_plan.get(),
             ring_clip: self.v6_ring_clip.get(),
             modal_frames_since: 0,
+        });
+    }
+
+    /// Close a rendered frame: if no modal covered it, keep its CELLS for
+    /// `/dump-cells` (SQ-0761).
+    ///
+    /// Called once per frame from the terminal draw closure, at the point every
+    /// widget and the whole overlay ladder have finished writing — so what is kept
+    /// is the frame as the terminal received it, not an intermediate state.
+    ///
+    /// A modal frame only ages the snapshot, exactly as [`note_v6_frame_end`] ages
+    /// its own: a dump taken from the palette must describe the game's frame, not
+    /// the palette's. Bound to a key no modal ever opens and this is simply the
+    /// frame on screen.
+    ///
+    /// The v6 render path and this frame's art placements ride along, because both
+    /// are rebuilt by the next frame and the grid is far easier to read when the
+    /// regions an image covers are named beside it.
+    ///
+    /// `&self` for the same reason as [`note_v6_frame_end`]: the render pass holds
+    /// an immutable `AppState`.
+    pub fn note_frame_cells(&self, buf: &ratatui::buffer::Buffer) {
+        let mut slot = self.last_frame_cells.borrow_mut();
+        if self.any_modal_overlay_open() {
+            if let Some(f) = slot.as_mut() {
+                f.modal_frames_since = f.modal_frames_since.saturating_add(1);
+            }
+            return;
+        }
+        let map = self.v6_cell_map.borrow();
+        let path = map.iter().find(|e| e.label.starts_with("path:")).map(|e| e.label.clone());
+        // An art strip is an uploaded image: under kitty it draws ABOVE the cells,
+        // so a region it covers can hold intact text that nobody can see (SQ-0747).
+        // Naming those rects beside the grid is what keeps such a region from
+        // reading as ordinary cells.
+        let images = map
+            .iter()
+            .filter(|e| e.label.contains("art") && !e.label.contains("rasterised"))
+            .map(|e| crate::cell_dump::ImagePlacement { label: e.label.clone(), rect: e.cells })
+            .collect();
+        *slot = Some(crate::cell_dump::FrameCells {
+            buf: buf.clone(),
+            modal_frames_since: 0,
+            path,
+            images,
         });
     }
 

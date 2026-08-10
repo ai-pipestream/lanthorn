@@ -377,6 +377,7 @@ const TRAILER: &str = r#"
 # "f2" = "toggle-map"
 # "ctrl+m" = "toggle-map"
 # "ctrl+d" = "dump-windows"
+# "ctrl+g" = "dump-cells"
 #
 # [keymap.map]
 # "+" = "zoom-map in"
