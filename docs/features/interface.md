@@ -369,13 +369,19 @@ know which side you're on).
 Point babelmap at a directory instead of a story file
 (`babelmap path/to/stories/`) and it opens a picker of your whole library. Each
 row shows the title (or filename), and a right-hand **TYPE** column names the
-engine and version at a glance — `Z5`, `Z5 (blorb)`, `G3.1.2`, `Scott`, or
-`Scott (blorb)` — so all three engines are told apart on sight. Two artifact
-badges ride beside it: an existing **Save** and a **Hint** file — the hint badge
-is uppercase (`H`) when a hint file is present locally and lowercase (`h`) when
-none is local but a matching *InvisiClues* can be downloaded with `H` (see below).
-(Blorb-wrapped stories advertise that with the `(blorb)` suffix on the type
-label rather than a separate badge.)
+engine and version at a glance — `Z5`, `Z5 (blorb)`, `Z6 (ADF)`, `G3.1.2`,
+`Scott`, or `Scott (blorb)` — so all three engines are told apart on sight. Two
+artifact badges ride beside it: an existing **Save** and a **Hint** file — the
+hint badge is uppercase (`H`) when a hint file is present locally and lowercase
+(`h`) when none is local but a matching *InvisiClues* can be downloaded with `H`
+(see below). (Blorb-wrapped stories advertise that with the `(blorb)` suffix on
+the type label rather than a separate badge.)
+
+The container is part of that label, so a story you're playing off its original
+Amiga release floppy reads `Z6 (ADF)` and is never mistaken for a loose story
+file. The disk says so, not the filename: the suffix comes from the mount that
+found the story inside the image, so a `.adf` named anything at all is labelled
+one, and a plain story file that happens to be called `.adf` is not.
 
 When you launch from a directory this way, `/quit-to-library` drops the current
 story and returns you to the picker to choose another (honouring the usual
