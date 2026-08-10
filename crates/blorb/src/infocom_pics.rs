@@ -772,7 +772,7 @@ mod tests {
     fn fingerprint(pics: &InfocomPics) -> (usize, usize, u64) {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         let mut n = 0;
-        let mut feed = |h: &mut u64, b: u8| *h = (*h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+        let feed = |h: &mut u64, b: u8| *h = (*h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
         for e in pics.entries() {
             if !e.has_pixels() {
                 continue;
