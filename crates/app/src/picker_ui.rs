@@ -215,6 +215,13 @@ fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
 /// (SQ-0369). A Scott game shows "Scott", with " (blorb)" for the graphic
 /// `.blb` versions (`.dat` is not blorbed, so the suffix distinguishes them).
 /// Bare "Z"/"Glulx" when the version is unknown.
+///
+/// A story mounted out of an Amiga release floppy takes " (ADF)" in the same
+/// slot — `Z6 (ADF)` — so a disk image is not mistaken for a bare story file
+/// (SQ-0737). It is the disk that says so, not the filename: `meta.disk_image`
+/// is the mount's own answer. A disk image is never also a blorb, so the two
+/// suffixes cannot collide. (The container names keep their own casing: "blorb"
+/// is a format name, "ADF" an acronym.)
 fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
     match meta.engine {
         app::picker::Engine::ZCode => {
@@ -222,7 +229,9 @@ fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
                 Some(v) if !v.is_empty() => format!("Z{v}"),
                 _ => "Z".to_string(),
             };
-            if blorb {
+            if meta.disk_image {
+                format!("{base} (ADF)")
+            } else if blorb {
                 format!("{base} (blorb)")
             } else {
                 base
@@ -2533,7 +2542,8 @@ mod tests {
         let meta = |engine: Engine, version: Option<&str>| StoryMeta {
             size_bytes: 0, modified: None, engine, format: String::new(),
             version: version.map(String::from), serial: None, release: None, ifid: String::new(),
-            features: Features::default(), self_blorb: None, author: None, year: None,
+            features: Features::default(), self_blorb: None, disk_image: false,
+            author: None, year: None,
             genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         // Z-code: "Z<v>", plus " (blorb)" only when blorb'd.
@@ -2549,6 +2559,67 @@ mod tests {
         // Widest label ("Scott (blorb)") fits the column.
         assert!(super::interp_label(&meta(Engine::Scott, None), true).len() <= super::INTERP_COL_W as usize);
         assert!(super::interp_label(&meta(Engine::ZCode, Some("8")), true).len() <= super::INTERP_COL_W as usize);
+    }
+
+    /// SQ-0737: a story mounted off an Amiga release floppy names that container
+    /// in the same slot the blorb suffix uses, so the disk image is not shown as
+    /// a bare story file.
+    #[test]
+    fn interp_label_names_the_disk_image_container() {
+        use app::picker::{Engine, Features, StoryMeta};
+        let meta = |disk_image: bool| StoryMeta {
+            size_bytes: 0, modified: None, engine: Engine::ZCode, format: String::new(),
+            version: Some("6".into()), serial: None, release: None, ifid: String::new(),
+            features: Features::default(), self_blorb: None, disk_image,
+            author: None, year: None,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+        };
+        assert_eq!(super::interp_label(&meta(true), false), "Z6 (ADF)");
+        // Not a disk image: exactly what it rendered before.
+        assert_eq!(super::interp_label(&meta(false), false), "Z6");
+        assert_eq!(super::interp_label(&meta(false), true), "Z6 (blorb)");
+        assert!(super::interp_label(&meta(true), false).len() <= super::INTERP_COL_W as usize);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// every `.adf` in the story directory resolves through the picker's own
+    /// scan and lands in the TYPE column as `Z<v> (ADF)`, while a `.z*` file
+    /// beside it keeps a plain `Z<v>`. The disk image is identified by its boot
+    /// block during the mount, not by its extension.
+    #[test]
+    fn a_real_disk_image_lists_with_its_container() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return; // no story media here — skip
+        };
+        let data_base = std::env::temp_dir().join(format!("babelmap-adf-label-{}", std::process::id()));
+        let mut saw_adf = false;
+        let mut saw_bare = false;
+        for e in entries.flatten() {
+            let path = e.path();
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+            if ext != "adf" && ext != "z5" && ext != "z6" {
+                continue;
+            }
+            let Some(entry) = app::picker::resolve_entry(&path, &data_base) else {
+                continue; // not launchable — the picker wouldn't list it either
+            };
+            let label = super::interp_label(&entry.meta, false);
+            if ext == "adf" {
+                saw_adf = true;
+                assert!(entry.meta.disk_image, "{} mounted off a disk image", path.display());
+                let v = entry.meta.version.clone().unwrap_or_default();
+                assert_eq!(label, format!("Z{v} (ADF)"), "{}", path.display());
+            } else {
+                saw_bare = true;
+                assert!(!entry.meta.disk_image, "{} is a plain story file", path.display());
+                assert!(!label.contains("ADF"), "{} untouched: {label:?}", path.display());
+            }
+        }
+        let _ = std::fs::remove_dir_all(&data_base);
+        if saw_adf {
+            assert!(saw_bare, "the bare-story half of the comparison needs a .z5/.z6 present");
+        }
     }
 
     fn row_text(buf: &ratatui::buffer::Buffer, y: u16, area: ratatui::layout::Rect) -> String {
@@ -2574,7 +2645,7 @@ mod tests {
             meta: StoryMeta {
                 size_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
-                features: Features::default(), self_blorb: None,
+                features: Features::default(), self_blorb: None, disk_image: false,
                 author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
             },
             hint_sidecar: None,
@@ -2593,7 +2664,7 @@ mod tests {
             meta: StoryMeta {
                 size_bytes: 1, modified: None, engine: Engine::ZCode, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
-                features: Features::default(), self_blorb: None,
+                features: Features::default(), self_blorb: None, disk_image: false,
                 author: author.map(String::from), year: year.map(String::from),
                 genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
             },
@@ -3102,7 +3173,7 @@ mod tests {
             size_bytes: 0, modified: None, engine: app::picker::Engine::ZCode,
             format: "Z-code".into(), version: Some("3".into()), serial: None, release: None,
             ifid: "ZCODE-88-840726".into(), features: app::picker::Features::default(),
-            self_blorb: None, author: None, year: None, genre: None, language: None,
+            self_blorb: None, disk_image: false, author: None, year: None, genre: None, language: None,
             description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 40, 12);
@@ -3136,6 +3207,7 @@ mod tests {
             release: Some(88),
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features { sound: true, graphics: true, colour: Some(false), hints: true },
+            disk_image: false,
             self_blorb: Some(vec![
                 app::picker::ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 92 * 1024, detail: None },
                 app::picker::ChunkInfo {
@@ -3244,6 +3316,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
+            disk_image: false,
             author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 34, 10);
@@ -3280,7 +3353,7 @@ mod tests {
             size_bytes: 1, modified: None, engine: app::picker::Engine::Glulx,
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
-            features: app::picker::Features::default(), self_blorb: None,
+            features: app::picker::Features::default(), self_blorb: None, disk_image: false,
             author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         }
     }
@@ -4007,6 +4080,7 @@ mod tests {
             self_blorb: Some(vec![ChunkInfo {
                 usage: "Pict".into(), number: 3, chunk_type: "PNG ".into(), len: 100, detail: None,
             }]),
+            disk_image: false,
             author: None, year: None, genre: None, language: None, description: None,
             ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };

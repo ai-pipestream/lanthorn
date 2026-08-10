@@ -59,6 +59,11 @@ The artwork comes along for free: a native Infocom picture archive on the *same*
 image is that story's art, because a shared floppy is as strong a guarantee of
 pairing as a Blorb is. See [Graphical v6](v6-graphics.md#where-the-pictures-come-from).
 
+Disk images are first-class in the library too: point babelmap at a directory of
+them and the picker's TYPE column names the container alongside the format —
+`Z6 (ADF)` — from the same content-based identification, so a floppy is never
+listed as a bare story file. See [Story picker](interface.md#story-picker).
+
 ## Z-machine
 
 - **Standard Quetzal save/restore** — the game's own SAVE/RESTORE writes and reads

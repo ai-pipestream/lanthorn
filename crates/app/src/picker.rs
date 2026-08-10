@@ -53,6 +53,11 @@ pub struct StoryMeta {
     pub ifid: String,
     pub features: Features,
     pub self_blorb: Option<Vec<ChunkInfo>>, // Some when the story file itself is a blorb
+    /// The story was mounted out of an Amiga release floppy rather than read as
+    /// a plain file, so the TYPE column names that container: `Z6 (ADF)`
+    /// (SQ-0737). Decided by the mount, from the disk's own boot block — never
+    /// from the filename.
+    pub disk_image: bool,
     /// Resolved per `resolve`'s precedence: IFmd > fetched sidecar. No TSV/stem
     /// source for these (title-only), so absent means genuinely unknown.
     pub author: Option<String>,
@@ -706,7 +711,7 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
 /// story right after its sidecar is (re)written so a completed fetch's title/
 /// author/year land in the list without a full re-scan.
 pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
-    let loaded = crate::hints::load_story(path).ok()?;
+    let (loaded, disk_image) = crate::hints::load_mounted_story(path).ok()?;
     // Only list stories babelmap can actually launch: Z-code via the
     // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
     // Glulx loader, Scott Adams via the Scott database parser.
@@ -825,6 +830,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         ifid,
         features,
         self_blorb,
+        disk_image,
         author: resolved.author,
         year: resolved.year,
         genre: resolved.genre,
@@ -1202,6 +1208,7 @@ mod tests {
                 ifid: String::new(),
                 features: Features::default(),
                 self_blorb: None,
+                disk_image: false,
                 author: author.map(|s| s.to_string()),
                 year: year.map(|s| s.to_string()),
                 genre: None,
@@ -1743,7 +1750,7 @@ mod tests {
                 size_bytes: 1, modified: None, engine: Engine::ZCode,
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
-                features: Features::default(), self_blorb,
+                features: Features::default(), self_blorb, disk_image: false,
                 author: None, year: None, genre: None, language: None, description: None,
                 ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None,
                 fetch_not_found: false,
