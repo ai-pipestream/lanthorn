@@ -124,6 +124,31 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Journey's menu headings are whole again.** On the Amiga release floppy the
+  command menu's titles came out chewed — `The P` at one window size, `The Pa` at
+  another, `Individual Comm` beside them — with the number of surviving letters
+  changing as you resized. Release 30 draws that row by ruling it first and
+  printing the titles over it, so the row carries the rule's own dashes *and* one
+  run per letter at the same places; the letters split the rule into pieces too
+  short to be read as a rule, and each stray dash was then stamped at the column
+  its pixel position implied rather than the column the title had reached. A rule
+  now begins after everything already drawn on the row, and a lone frame glyph
+  will not overwrite a word. Five investigations missed it by measuring the `.z6`
+  release, which draws the row differently and was never affected.
+
+- **Journey's picture column stops painting its own borders.** The panel behind
+  the illustration filled right through the two frame lines that bound it, so the
+  frame's sides carried the picture's background instead of the frame's, while its
+  top and bottom carried the game's — the user's *"the border lines around the art
+  have the artwork's background color"*. A border is not part of the panel, and the
+  fill now stops short of both.
+
+- **`/dump-windows` names every image the v6 ring places**, with the rows of the
+  game's screen each one is showing. A picture column is drawn at a rect derived
+  from its panel rather than from the strip beside it, and that draw was absent
+  from the band list entirely — so the one band an investigation most wanted to
+  see was the one band the dump could not name.
+
 - **Key bindings work again — the shipped config was teaching a format the parser
   rejects.** `~/.babelmap/config.toml`'s own `[keymap.*]` example was written
   backwards and in the wrong case (`quit = "ctrl+q"`, `toggle_map = …`), while the

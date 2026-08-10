@@ -737,34 +737,48 @@ fn journey_menu_header_labels_are_whole_at_the_users_pane() {
         let transcript = session.take_transcript();
         let model = session.screen();
         for honor in [true, false] {
-            let (state, area, buf) = render_pane(&model, honor, USER_PANE, &transcript);
-            let ctx = format!("{profile:?} honor={honor}");
-            let rows: Vec<String> = (area.y..area.bottom()).map(|y| pane_row(&buf, area, y)).collect();
-            let (idx, header) = rows
-                .iter()
-                .enumerate()
-                .find(|(_, r)| r.contains("The Party"))
-                .unwrap_or_else(|| panic!("{ctx}: the menu header is on screen\n{}", rows.join("\n")));
-            assert!(
-                header.contains("Individual Commands"),
-                "{ctx}: the header carries BOTH labels whole — got {header:?}"
-            );
-            let header_row = area.y + idx as u16;
-            // …and nothing the terminal composites above the cells covers that row.
-            for e in state.v6_cell_map.borrow().iter() {
-                let art = e.label.starts_with("strip:art") && !e.label.contains("skipped");
-                if !(art || e.label == "menu:art") {
-                    continue;
-                }
-                let (_, y, _, h) = e.cells;
+            // The user's own pane, and the two they have since reported from — 157
+            // bad, 159 good. Every sighting of this label eaten (`─The─`, `The Par`,
+            // `The Pa`, and finally "The Party" gone entirely) differs only in how
+            // many of its leading columns are covered, so the case has to sweep the
+            // widths rather than pin one.
+            for pane in [USER_PANE, (1, 1, 157, 61), (1, 1, 159, 61)] {
+                let (state, area, buf) = render_pane(&model, honor, pane, &transcript);
+                let ctx = format!("{profile:?} honor={honor} pane {}x{}", pane.2, pane.3);
+                let rows: Vec<String> = (area.y..area.bottom()).map(|y| pane_row(&buf, area, y)).collect();
+                let (idx, header) = rows
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| r.contains("The Party"))
+                    .unwrap_or_else(|| panic!("{ctx}: the menu header is on screen\n{}", rows.join("\n")));
                 assert!(
-                    header_row < y || header_row >= y + h,
-                    "{ctx}: {} at {:?} covers the menu header row {header_row} — an uploaded image \
-                     draws ABOVE the terminal cells, so the labels would be eaten on screen while \
-                     the buffer still holds them",
-                    e.label,
-                    e.cells
+                    header.contains("Individual Commands"),
+                    "{ctx}: the header carries BOTH labels whole — got {header:?}"
                 );
+                let header_row = area.y + idx as u16;
+                // …and nothing the terminal composites above the cells covers that
+                // row. Asked of the PLACEMENTS, not of the strip records: a Menu-plan
+                // flank's picture is drawn at a rect the panel derives, not at the
+                // strip's own, so a strip-level test could not see the one band whose
+                // rows the user reports over the menu (SQ-0747).
+                let placed: Vec<Quad> = {
+                    let gr = state.graphics_render.borrow();
+                    gr.ops()
+                        .iter()
+                        .filter_map(|o| match o {
+                            app::render::graphics::GraphicsOp::Place { at, .. } => Some(*at),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                for p in &placed {
+                    assert!(
+                        header_row < p.1 || header_row >= p.1 + p.3,
+                        "{ctx}: a band placed at {p:?} covers the menu header row {header_row} — \
+                         an uploaded image draws ABOVE the terminal cells, so the labels would be \
+                         eaten on screen while the buffer still holds them"
+                    );
+                }
             }
         }
     }
@@ -930,6 +944,440 @@ fn journey_flank_outer_border_is_drawn_when_the_game_drew_one() {
                          runs to the screen edge — so anything drawn there is a slice of the \
                          ILLUSTRATION replicated down the column: {outer:?}"
                     ),
+                }
+            }
+        }
+    }
+}
+
+// ── SQ-0747, second pass: the fill stops SHORT of the borders, not level with them ──
+//
+// The user, on frames whose layout is otherwise right: *"the amiga build border lines
+// around the art have the artwork's background color"* — and, correcting the obvious
+// reading themselves, *"this background color is not part of the artwork pixels
+// themselves (artwork fits). it is the fill color that matches the artwork."*
+//
+// So it is `menu_flank_panel`'s FILL, not the picture. The bound added above was
+// inclusive at both ends: the fill began at the band's own left edge, which is the
+// column the OUTER border stands in, and ran through the INNER rule's last column. A
+// border reaches the screen as an image cropped to its whole text cell (SQ-0750), and a
+// box glyph's padding is transparent, so the panel's ground showed through around both
+// strokes and the frame's sides read in the picture's colour while its top and bottom
+// read in the game's.
+
+/// The panes the fill/border cases sweep. Wide, and one column apart around the sizes
+/// the user has reported from, because the defect this file keeps finding is always the
+/// one that comes and goes as the letterbox rounding falls — a fix pinned to 157 columns
+/// would not be a fix.
+const FILL_WIDTHS: [u16; 12] = [96, 110, 130, 138, 150, 155, 156, 157, 158, 159, 163, 170];
+/// …at three pane heights, since the flank's rows come out of the same rounding.
+const FILL_HEIGHTS: [u16; 3] = [51, 61, 68];
+
+/// Which Journey this case is looking at — and they are DIFFERENT GAMES, not one game
+/// under two profiles.
+///
+/// `journey-r83-s890706.z6` is release 83; `Journey - The Quest Begins.adf` is the Amiga
+/// release FLOPPY, release 30, serial 890322. `InterpreterProfile::resolve` reads the
+/// medium and picks Amiga off the disk, and the two releases narrate through different
+/// windows and lay their menu out differently. **The user plays the floppy**, and every
+/// investigation of this frame before 2026-08-10 drove the `.z6` — measuring a build
+/// they never see. Both are pinned here; the floppy is the one that has to hold.
+#[derive(Clone, Copy, Debug)]
+enum JourneyBuild {
+    /// The in-repo `.z6`, under an explicitly chosen profile.
+    Z6(InterpreterProfile),
+    /// The original Amiga release floppy, mounted the way the app mounts it.
+    Floppy,
+}
+
+/// Every Journey build the flank cases sweep.
+const BUILDS: [JourneyBuild; 3] =
+    [JourneyBuild::Z6(InterpreterProfile::Amiga), JourneyBuild::Z6(InterpreterProfile::IbmPc), JourneyBuild::Floppy];
+
+/// Boot one of them and drive it to the command menu. `None` (with a SKIP note) when
+/// the gitignored fixture is absent.
+fn journey_build(build: JourneyBuild) -> Option<GameSession> {
+    match build {
+        JourneyBuild::Z6(profile) => journey_at_menu(profile),
+        JourneyBuild::Floppy => journey_floppy_at_menu(),
+    }
+}
+
+/// Journey mounted straight off its Amiga release floppy — story, artwork and profile
+/// all resolved from the medium, exactly as `startup` does it.
+fn journey_floppy_at_menu() -> Option<GameSession> {
+    journey_floppy(40)
+}
+
+/// …driven `steps` inputs from boot, or stopped early at the command menu. `steps = 0`
+/// is the BOOT frame — the one the user's non-perturbing capture describes, and a
+/// different band composition from the play frame (no `menu:art` at all at 115x61).
+fn journey_floppy(steps: usize) -> Option<GameSession> {
+    let path = stories_dir().join("Journey - The Quest Begins.adf");
+    let story_bytes = match app::hints::load_story(&path) {
+        Ok(s) => s.into_bytes(),
+        Err(_) => {
+            eprintln!("SKIP: gitignored release floppy missing at {}", path.display());
+            return None;
+        }
+    };
+    let profile = InterpreterProfile::resolve(&path, None);
+    zvm::screen::set_palette(profile.palette());
+    let mut picts = PictSource::resolve(&path);
+    let picture_dims = picts.all_pict_dims();
+    let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
+    let mut session = GameSession::new_with_trace(
+        story_bytes,
+        true,
+        false,
+        profile.interpreter_number(),
+        false,
+        picture_dims,
+        v6_screen_px,
+        profile.default_colours(),
+        None,
+    )
+    .expect("Journey's release floppy should mount and boot without a ZError");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    for _ in 0..steps {
+        let r = match session.pending_input() {
+            InputKind::Line => session.submit(""),
+            InputKind::Char => session.submit_char(13),
+            InputKind::Event => session.submit(""),
+        };
+        if r.transcript.contains("Praxix") || r.transcript.contains("magical resources") {
+            break;
+        }
+    }
+    Some(session)
+}
+
+/// A hybrid render through a real kitty picker, so a border column's cell keeps the
+/// GROUND something painted under it: kitty places an image by writing placeholder
+/// symbols and leaves the cell's background alone, which is exactly what the terminal
+/// then shows through the glyph's transparent padding. Halfblocks draws the image INTO
+/// the cell and would answer a colour question with the picker's own arithmetic.
+fn render_pane_kitty(
+    model: &app::engine::ScreenModel,
+    honor: bool,
+    pane: Quad,
+    transcript: &str,
+) -> (app::state::AppState, Rect, Buffer) {
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(app::render::graphics::kitty_picker(8, 18));
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.honor_game_colours = honor;
+    for line in transcript.lines() {
+        state.push_transcript(line);
+    }
+    let area = Rect::new(pane.0, pane.1, pane.2, pane.3);
+    let mut buf = Buffer::empty(Rect::new(0, 0, area.right() + 1, area.bottom() + 1));
+    let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
+    (state, area, buf)
+}
+
+fn rects_overlap(a: Quad, b: Quad) -> bool {
+    a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+}
+
+/// Every border column this frame drew, either side of the story: the inner rules and
+/// the outer edges together.
+fn flank_border_columns(state: &app::state::AppState) -> Vec<Quad> {
+    flank_records(state, "flank-divider")
+        .into_iter()
+        .chain(flank_records(state, "flank-border"))
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// (k) SQ-0747 — the panel's ground never reaches either of the flank's border columns.
+///
+/// The geometry half, swept across 48 panes per profile per honour mode, because a
+/// bound that is right at one rounding and wrong at the next is what this whole quest
+/// has been made of.
+///
+/// FALSIFY by restoring the inclusive bound in `menu_flank_panel`
+/// (`lo = band.x`, `hi = inner.right()`):
+/// `Amiga honor=true pane 96x51: the panel fill (1, 3, 39, 42) covers the flank's own
+/// border column (39, 3, 1, 42) — a border is not part of the panel …`.
+#[test]
+fn journey_flank_panel_fill_stops_short_of_both_border_columns() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for build in BUILDS {
+        let Some(mut session) = journey_build(build) else { continue };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for h in FILL_HEIGHTS {
+                for w in FILL_WIDTHS {
+                    let (state, _, _) = render_pane(&model, honor, (1, 1, w, h), &transcript);
+                    let ctx = format!("{build:?} honor={honor} pane {w}x{h}");
+                    let fills = flank_records(&state, "flank-panel");
+                    let borders = flank_border_columns(&state);
+                    for (fill, _) in &fills {
+                        for b in &borders {
+                            assert!(
+                                !rects_overlap(*fill, *b),
+                                "{ctx}: the panel fill {fill:?} covers the flank's own border \
+                                 column {b:?} — a border is not part of the panel, and the fill's \
+                                 colour shows through the transparent padding of the glyph drawn \
+                                 over it"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// (l) …and the colour half, which is what the user actually sees: no cell of either
+/// border column carries the panel's own ground.
+///
+/// Read through a kitty picker, the shipped hybrid backend, so the cell under the
+/// border image is the ground the terminal composites the glyph's transparent padding
+/// against. The panel colour is sampled from the fill itself rather than hardcoded —
+/// it is the picture's own, and the picture is the game's.
+///
+/// FALSIFY by restoring the inclusive bound: `Amiga honor=true pane 157x61: 47 of the
+/// 47 cells in the flank's border column (64, 3, 1, 47) stand on the picture panel's
+/// own ground (Rgb(34, 34, 34))`.
+#[test]
+fn journey_flank_border_columns_do_not_stand_on_the_panels_ground() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for build in BUILDS {
+        let Some(mut session) = journey_build(build) else { continue };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for pane in [(1, 1, 115, 61), (1, 1, 157, 61), (1, 1, 159, 61), USER_PANE] {
+                let (state, _, buf) = render_pane_kitty(&model, honor, pane, &transcript);
+                let ctx = format!("{build:?} honor={honor} pane {}x{}", pane.2, pane.3);
+                let Some((fill, _)) = flank_records(&state, "flank-panel").first().copied() else {
+                    continue; // no panel on this frame — nothing to bleed
+                };
+                // The panel's own colour, off its last filled row: below the picture, so
+                // it is the flood and not the illustration.
+                let ground = buf
+                    .cell((fill.0, fill.1 + fill.3 - 1))
+                    .and_then(|c| c.style().bg)
+                    .expect("the flank panel floods its own extent, so its ground is a colour");
+                for b in flank_border_columns(&state) {
+                    let on_panel = (b.0..b.0 + b.2)
+                        .flat_map(|x| (b.1..b.1 + b.3).map(move |y| (x, y)))
+                        .filter(|&(x, y)| buf.cell((x, y)).and_then(|c| c.style().bg) == Some(ground))
+                        .count();
+                    assert_eq!(
+                        on_panel, 0,
+                        "{ctx}: {on_panel} of the {} cells in the flank's border column {b:?} \
+                         stand on the picture panel's own ground ({ground:?})",
+                        b.2 as usize * b.3 as usize
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// (n) SQ-0747 — `/dump-windows` names every band the pixel path places.
+///
+/// It did not, and that is what cost two passes on this quest. A Menu-plan flank's
+/// picture is drawn by `draw_chrome_band_stretched`, at a dest rect the panel derives
+/// rather than the strip's own — and only `draw_chrome_band` was writing to the band
+/// log. So every capture the user sent listed the right-hand flank and the bottom strip
+/// and NO left flank at all, and two investigations reasoned about the picture column
+/// from the strip rect beside it: *"the left flank is not in the band list at all, at
+/// this or any earlier capture"*. A diagnostic that cannot see the draw it exists to
+/// diagnose is worse than none.
+///
+/// FALSIFY by dropping the `band_log.push` from `draw_chrome_band_stretched`:
+/// `Amiga honor=true pane 157x61: a band was placed at (6, 12, 55, 28) that
+/// /dump-windows' band list does not name …`.
+#[test]
+fn every_placed_band_is_named_in_the_window_dump() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for build in BUILDS {
+        let Some(mut session) = journey_build(build) else { continue };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for pane in [(1, 1, 115, 61), (1, 1, 157, 61), (1, 1, 159, 61), USER_PANE] {
+                let (state, _, _) = render_pane(&model, honor, pane, &transcript);
+                let ctx = format!("{build:?} honor={honor} pane {}x{}", pane.2, pane.3);
+                let log = state.graphics_render.borrow().band_log.clone();
+                let placed: Vec<Quad> = {
+                    let gr = state.graphics_render.borrow();
+                    gr.ops()
+                        .iter()
+                        .filter_map(|o| match o {
+                            app::render::graphics::GraphicsOp::Place { at, .. } => Some(*at),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                assert!(!placed.is_empty(), "{ctx}: this frame places bands at all");
+                for p in &placed {
+                    let named = format!("band {}x{}@({},{})", p.2, p.3, p.0, p.1);
+                    assert!(
+                        log.iter().any(|l| l.starts_with(&named)),
+                        "{ctx}: a band was placed at {p:?} that /dump-windows' band list does \
+                         not name — the dump cannot see the draw it exists to diagnose\n{log:#?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// (p) SQ-0747 — THE EATEN MENU LABELS, on the release the user actually plays.
+///
+/// Five passes chased `─The─`, `─Individual C─`, `The Par` and `The Pa` through
+/// 18414, then 960, then 22000, then 800 configurations and every one came back clean,
+/// because every one of them drove `journey-r83-s890706.z6`. **The user plays the Amiga
+/// release FLOPPY, release 30**, and release 30 draws this row differently: it prints
+/// the rule first and the title over it, so the row carries dozens of `─` fragments AND
+/// one run per letter of the title at overlapping native columns. The letters split the
+/// rule into groups too short to BE a rule, those fragments took the divider path and
+/// were stamped at their own scaled columns, and the columns land inside a title that
+/// advanced at the other rate. `The P` at 115 columns, `The Pa` at 157 — the count
+/// varying with the pane, which is the signature every sighting had.
+///
+/// FALSIFY, either half of the fix in `draw_chrome_text_strip`, verbatim at the first
+/// pane swept. The lone-glyph `over_word` guard, dropped — the rule fragments punch
+/// through the titles:
+/// `floppy honor=true pane 96x51: the menu header is missing a label — got
+/// "│──────────────────────The─Party───────────────────────Individual C─mmands─────────────────────│"`.
+/// The rule's own left edge, back to the immediately preceding run — the titles' tails
+/// are painted over wholesale:
+/// `floppy honor=true pane 96x51: the menu header is missing a label — got
+/// "│──────────────────────The ────────────────────────────Individual Co───────────────────────────│"`.
+#[test]
+fn journey_release_30_menu_header_labels_are_whole() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut session) = journey_floppy_at_menu() else { return };
+    let transcript = session.take_transcript();
+    let model = session.screen();
+    for honor in [true, false] {
+        for h in FILL_HEIGHTS {
+            for w in FILL_WIDTHS {
+                let (_, area, buf) = render_pane(&model, honor, (1, 1, w, h), &transcript);
+                let ctx = format!("floppy honor={honor} pane {w}x{h}");
+                let rows: Vec<String> = (area.y..area.bottom()).map(|y| pane_row(&buf, area, y)).collect();
+                // Found by the tail of the right-hand label, which no sighting has ever
+                // eaten — so the row is located even when the left one is in pieces.
+                let header = rows
+                    .iter()
+                    .find(|r| r.contains("ndividual"))
+                    .unwrap_or_else(|| panic!("{ctx}: the menu header is on screen\n{}", rows.join("\n")));
+                assert!(
+                    header.contains("The Party") && header.contains("Individual Commands"),
+                    "{ctx}: the menu header is missing a label — got {header:?}"
+                );
+            }
+        }
+    }
+}
+
+/// (o) SQ-0747 — the picture is drawn INSIDE the flank that holds it, on the boot frame
+/// as well as the play frame.
+///
+/// The user's capture at pane 115x61 (scale 1.43) reads `win3 … cells: 45x22 at (2,2)`
+/// against a left flank of `48x50 at (1,3)`, which looks like the picture's top row
+/// escaping one row above its column — *"the top is peeking out"*. It is not a draw: a
+/// window's `cells:` line is the diagnostic MAPPING of its native rect onto the pane,
+/// pushed for every chrome window, and in the ring a chrome Graphics leaf is rasterized
+/// into the canvas and reaches the screen only through the strips (which is why the dump
+/// labels it `rasterised into the ring`). What is actually drawn is the flank panel's
+/// dest, and this case asserts on THAT — over the widths where the mapping does escape
+/// and the ones where it does not, so the difference is pinned as harmless rather than
+/// re-inferred every pass.
+///
+/// Boot frame AND play frame: they compose different bands (at 115x61 the boot frame has
+/// no `menu:art` at all), so a bound that holds in one need not hold in the other.
+#[test]
+fn journey_flank_picture_is_drawn_inside_its_own_flank() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for steps in [0usize, 40] {
+        let Some(mut session) = journey_floppy(steps) else { continue };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for pane in [(1, 1, 115, 61), (1, 1, 138, 68), (1, 1, 157, 61), USER_PANE] {
+                let (state, _, _) = render_pane(&model, honor, pane, &transcript);
+                let ctx = format!("floppy steps={steps} honor={honor} pane {}x{}", pane.2, pane.3);
+                let strips: Vec<Quad> = state
+                    .v6_cell_map
+                    .borrow()
+                    .iter()
+                    .filter(|e| e.label == "strip:art")
+                    .map(|e| e.cells)
+                    .collect();
+                for art in flank_records(&state, "flank-art").into_iter().map(|(c, _)| c) {
+                    let inside = strips.iter().any(|s| {
+                        art.0 >= s.0 && art.1 >= s.1 && art.0 + art.2 <= s.0 + s.2 && art.1 + art.3 <= s.1 + s.3
+                    });
+                    assert!(
+                        inside,
+                        "{ctx}: the flank picture is drawn at {art:?}, which no flank strip \
+                         {strips:?} contains — the column's art has left the column"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// (m) …and the standing invariant the earlier passes could not check, now that a
+/// stretched band reports itself: NOTHING the pixel path places lands on the menu.
+///
+/// The user's *"the left side (graphics) are overruning and showing up in the menu below
+/// as garbage"*, stated as a rule rather than as one pane. An uploaded image composites
+/// ABOVE the cell layer, so a band whose rows reach the command strip eats the menu's
+/// text whatever the buffer says is written there — which is why every cell-level sweep
+/// of the truncated header came back clean. Asserted on the PLACEMENTS, across the same
+/// 48 panes per profile per honour mode.
+#[test]
+fn journey_no_pixel_band_is_placed_on_the_menu_rows() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for build in BUILDS {
+        let Some(mut session) = journey_build(build) else { continue };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            for h in FILL_HEIGHTS {
+                for w in FILL_WIDTHS {
+                    let (state, _, _) = render_pane(&model, honor, (1, 1, w, h), &transcript);
+                    let ctx = format!("{build:?} honor={honor} pane {w}x{h}");
+                    let menus: Vec<Quad> = state
+                        .v6_cell_map
+                        .borrow()
+                        .iter()
+                        .filter(|e| e.label.starts_with("menu:text"))
+                        .map(|e| e.cells)
+                        .collect();
+                    let placed: Vec<Quad> = {
+                        let gr = state.graphics_render.borrow();
+                        gr.ops()
+                            .iter()
+                            .filter_map(|o| match o {
+                                app::render::graphics::GraphicsOp::Place { at, .. } => Some(*at),
+                                _ => None,
+                            })
+                            .collect()
+                    };
+                    for p in &placed {
+                        for m in &menus {
+                            assert!(
+                                !rects_overlap(*p, *m),
+                                "{ctx}: an uploaded band placed at {p:?} covers the command \
+                                 menu's own rows {m:?} — an image composites above the cells, so \
+                                 the menu's labels are eaten however whole the buffer holds them"
+                            );
+                        }
+                    }
                 }
             }
         }
