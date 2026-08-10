@@ -597,7 +597,10 @@ impl LoadedStory {
 /// first `.z3/.z5/.z8` entry is the story, or an Amiga `.adf` disk image whose
 /// filesystem holds one. Does not classify the engine — see [`load_story`] /
 /// [`extract_story`].
-fn read_story_file(path: &Path) -> io::Result<Vec<u8>> {
+///
+/// The flag says the bytes were mounted out of a disk image rather than read as
+/// a plain file, so callers can name the container the story came off (SQ-0737).
+fn read_story_file(path: &Path) -> io::Result<(Vec<u8>, bool)> {
     let raw = std::fs::read(path)?;
     // SQ-0719: an original Amiga release floppy. Mount it and take the file
     // whose CONTENT is a story — AmigaDOS has no extensions, and the disk's
@@ -606,7 +609,7 @@ fn read_story_file(path: &Path) -> io::Result<Vec<u8>> {
         let adf = blorb::adf::Adf::mount(raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
         return match adf.story() {
-            Some((_, bytes)) => Ok(bytes),
+            Some((_, bytes)) => Ok((bytes, true)),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
@@ -624,14 +627,14 @@ fn read_story_file(path: &Path) -> io::Result<Vec<u8>> {
             lower.ends_with(".z3") || lower.ends_with(".z5") || lower.ends_with(".z8")
         };
         match read_zip_entry(path, pred)? {
-            Some(bytes) => Ok(bytes),
+            Some(bytes) => Ok((bytes, false)),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("no .z3/.z5/.z8 entry found in zip: {}", path.display()),
             )),
         }
     } else {
-        Ok(raw)
+        Ok((raw, false))
     }
 }
 
@@ -641,7 +644,18 @@ fn read_story_file(path: &Path) -> io::Result<Vec<u8>> {
 /// (`Glul` magic) is recognised as Glulx, and any other raw bytes are treated
 /// as Z-code (preserving the historical default).
 pub fn load_story(path: &Path) -> io::Result<LoadedStory> {
-    extract_story(read_story_file(path)?)
+    Ok(load_mounted_story(path)?.0)
+}
+
+/// As [`load_story`], plus whether the story was **mounted out of an Amiga disk
+/// image** rather than read as a plain file (SQ-0737).
+///
+/// The answer is the mount's own — the image is recognised by its AmigaDOS boot
+/// block, never by its name — so a `.adf` with any extension is reported as one
+/// and a mis-named ordinary story file is not.
+pub fn load_mounted_story(path: &Path) -> io::Result<(LoadedStory, bool)> {
+    let (bytes, disk_image) = read_story_file(path)?;
+    Ok((extract_story(bytes)?, disk_image))
 }
 
 /// Load story bytes from `path`, restricted to **Z-code** images.

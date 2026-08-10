@@ -16,6 +16,12 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **The story browser names the container, not just the format.** A game played
+  off its original Amiga release floppy now lists as `Z6 (ADF)`, beside the
+  existing `Z5 (blorb)` — so a disk image is distinguishable from a loose story
+  file at a glance. The suffix comes from the mount that identified the story
+  inside the image, so it follows the disk rather than the filename.
+
 - **A story off an Amiga floppy is played on an Amiga.** Header byte `0x1E` was
   always settable, but setting it alone produced a machine that never existed: a
   game told it was running on an Amiga, then told its artwork was IBM PC-sized and
