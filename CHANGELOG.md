@@ -118,6 +118,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **A screen the game clears and paints nothing into is blank.** Type `BEGIN` on
+  Beyond Zork's opening screen, read the prologue, and the game repaints its
+  centred title — with the screen you had just typed on still sitting underneath
+  it, `[Type BEGIN, RESTORE or QUIT.] >begin` and all. Every character of that
+  title is *placed* in the upper window, so the turn prints nothing at all into
+  the story window below; the screen-clear boundary therefore landed at the very
+  end of the transcript, one row past the last line, and was read as "no boundary"
+  rather than "an empty screen". With no boundary the view fell back to sticking
+  to the bottom of the scrollback — and the bottom of the scrollback was the exact
+  screen the game had just erased. It now reads as what it is, so the title stands
+  alone and the erased screen stays where a clear has always left it in babelmap:
+  above the fold, one scroll away. Anchorhead's `* THE FIRST DAY *` quote box, the
+  same shape of screen, stops showing the title splash beneath it too.
 - **fmvpoker's bet and quit prompts are back on the screen, and so is what you
   type.** Choosing CHANGE CURRENT BET left the whole bottom panel empty: no "Enter
   the new bet:", no Current Bet / Total Winnings totals, and every digit you typed
