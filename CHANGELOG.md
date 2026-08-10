@@ -137,6 +137,13 @@ identifies which beta it is without reading its git hash.
   the same reason. An erase now marks the same screen boundary a story window
   moved out from under its own text already marks: what follows is pinned to the
   top of the window and everything before it stays reachable by scrolling up.
+  Which window that is, is asked of the window the game erased rather than
+  assumed to be the first one — Journey's Amiga release narrates through window 2
+  and leaves window 0 behind as an empty strip off the bottom of the screen, so
+  played off its floppy it went on showing its title screen underneath the
+  opening passage, with *[Press any key to begin]* twice over, while the IBM PC
+  release of the same game cleared correctly. Adventure's boot notice, which had
+  been standing above the game's banner in just the same way, goes with it.
 
 - **Journey's picture column keeps to its own frame.** The left-hand panel was
   measured against the whole band between the pane edge and the story text rather

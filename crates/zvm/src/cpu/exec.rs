@@ -884,6 +884,26 @@ impl Machine {
             || v6.windows.iter().any(|o| o.prose_window() && o.copy_to_transcript())
     }
 
+    /// Is window `win` showing live prose that reached the HOST's transcript?
+    ///
+    /// [`ZWindow::streamed`] is shadowed only for text that STREAMED — the
+    /// `shadow` flag in `v6_advance_prose_cursor` is `diverted.is_none()`, the
+    /// same routing decision the print path makes — so a non-empty `streamed` on
+    /// a window whose prose is not diverted is exactly the host transcript's own
+    /// live screen, whatever index that window happens to have.
+    ///
+    /// Which is the whole point: "the transcript's window" is not "window 0", and
+    /// not "the first prose window" either. Journey's Amiga release keeps window 0
+    /// as an empty 640x0 leftover and narrates through window 2 (SQ-0755).
+    pub fn v6_holds_host_prose(&self, win: usize) -> bool {
+        self.screen
+            .v6
+            .as_ref()
+            .and_then(|v6| v6.windows.get(win))
+            .is_some_and(|w| w.prose_window() && !w.streamed.is_empty())
+            && !self.v6_diverts_prose(win)
+    }
+
     /// Enable/disable honoring game-driven colour. Advertises (or clears) the
     /// Flags1 colour bit immediately so a not-yet-run game sees the capability.
     pub fn set_honor_game_colours(&mut self, on: bool) {
@@ -1979,19 +1999,22 @@ impl Machine {
                 // move is a keystroke, so that would eat the narrative it had just
                 // printed.
                 //
-                // `v6_diverts_prose` is the same rule the print path routes by, so this
-                // asks about exactly the window the transcript belongs to; `streamed`
-                // non-empty is the same precondition `retire_streamed` applies on a move,
-                // so an erase of an empty window — Shogun's 1px caret, a scopa card
-                // rect — emits no boundary.
-                let host_prose_win = self.screen.v6.as_ref().and_then(|v6| {
-                    (0..v6.windows.len())
-                        .find(|&i| v6.windows[i].prose_window() && !self.v6_diverts_prose(i))
-                });
-                let clears_host_prose = host_prose_win.is_some_and(|i| {
-                    (matches!(win, -1 | -2) || win == i as i16)
-                        && self.screen.v6.as_ref().is_some_and(|v6| !v6.windows[i].streamed.is_empty())
-                });
+                // The question is asked of the ERASED window itself, through
+                // [`Machine::v6_holds_host_prose`] — never of "the first prose window",
+                // which is only the transcript's window when the game happens to keep
+                // its narrative in window 0. Journey's Amiga release (r30/890322) does
+                // not: it leaves window 0 behind as a 640x0 strip at y=401 with the
+                // prose attributes still set and opens window 2 for the narrative, so
+                // an index scan answered 0, the game erases 2, and the boundary the
+                // IBM PC release (r83/890706) emits was never emitted at all (SQ-0755,
+                // reopened). Read before the fill below, which empties `streamed`.
+                let clears_host_prose = match win {
+                    // -1/-2 erase the whole screen, so any window's live prose goes.
+                    -1 | -2 => (0..self.screen.v6.as_ref().map_or(0, |v6| v6.windows.len()))
+                        .any(|i| self.v6_holds_host_prose(i)),
+                    w if w >= 0 => self.v6_holds_host_prose(w as usize),
+                    _ => false,
+                };
                 let mut mirror = None;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     // v6 erase is PAINT: background fills the window's CURRENT

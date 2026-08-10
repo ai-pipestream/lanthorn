@@ -67,17 +67,29 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
-fn boot(profile: InterpreterProfile) -> Option<GameSession> {
-    let story_path = stories_dir().join("journey-r83-s890706.z6");
-    let story_bytes = match std::fs::read(&story_path) {
-        Ok(b) => b,
-        Err(_) => {
+/// The IBM PC release, as an ordinary story file.
+const PC_RELEASE: &str = "journey-r83-s890706.z6";
+
+/// The Amiga release, still on its release floppy — which is how babelmap is given
+/// it, and why it is a DIFFERENT BUILD (r30/890322 against the PC's r83/890706)
+/// rather than the same one under another profile. See
+/// [`journey_never_shows_an_erased_title_block_on_either_release`].
+const AMIGA_RELEASE: &str = "Journey - The Quest Begins.adf";
+
+/// Boot the release in `file` the way `startup` does: the story out of whatever
+/// container it came in (a disk image holds it as `Story.data`), its own artwork
+/// resolved from that same container, under `profile`.
+fn boot_release(file: &str, profile: InterpreterProfile) -> Option<GameSession> {
+    let story_path = stories_dir().join(file);
+    let story_bytes = match app::hints::load_story(&story_path) {
+        Ok(app::hints::LoadedStory::ZCode(b)) => b,
+        _ => {
             eprintln!("SKIP: gitignored story missing at {}", story_path.display());
             return None;
         }
     };
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let mut picts = PictSource::resolve(&story_path);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
     let mut session = GameSession::new_with_trace(
@@ -95,6 +107,10 @@ fn boot(profile: InterpreterProfile) -> Option<GameSession> {
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
     Some(session)
+}
+
+fn boot(profile: InterpreterProfile) -> Option<GameSession> {
+    boot_release(PC_RELEASE, profile)
 }
 
 /// What `turn::apply_game_driven_result` does with one turn's output — the path every
@@ -170,6 +186,102 @@ fn viewport(state: &app::state::AppState) -> (u16, u16, u16, u16) {
         .find(|e| e.label == "viewport")
         .map(|e| e.cells)
         .expect("a hybrid ring frame records its story viewport")
+}
+
+/// The "press any key" prompt Journey ends each of its boot screens with. The
+/// report is that it shows up TWICE at once, which is one screen standing on top of
+/// another and needs no interpretation at all.
+const ANY_KEY: &str = "[Press any key to begin]";
+
+/// SQ-0755, REOPENED — no keypress of either release's boot leaves an erased screen
+/// standing under the one that replaced it.
+///
+/// > *"Journey has several small updates with [press any key to begin] between them.
+/// > the ibm-pc build the screen is reset (scroll back still exists) between each
+/// > keypress. amiga build is not resetting."*
+///
+/// The two builds are two BUILDS, which is the thing the first fix missed. babelmap
+/// takes the Amiga release off its release floppy (`InterpreterProfile::resolve`
+/// reads the medium, and `Adf::story` reads `Story.data` out of it), and that is
+/// r30/890322 — not r83/890706 under another palette. The two lay their windows out
+/// differently, and only one of them narrates through window 0:
+///
+/// | release | story window | erases its title with |
+/// |---|---|---|
+/// | r83 (IBM PC) | win0 `(241,1) 392×304` | `erase_window(0)` |
+/// | r30 (Amiga)  | win2 `(265,17) 368×272`, win0 left behind as a `640×0` strip at y=401 | `erase_window(2)` |
+///
+/// The first fix asked "is the erase aimed at the first prose window?", which is
+/// window 0 either way — right for r83 by luck, and never true for r30, whose
+/// leftover window 0 still carries the prose attributes. So the boundary fired on
+/// one build and never on the other, and r30's title block stayed on the pane with
+/// the opening passage printed under it and `[Press any key to begin]` twice over.
+/// The erase now asks the ERASED window whether it holds the host's live prose
+/// ([`zvm`'s `v6_holds_host_prose`]), which is a property of that window rather than
+/// of its index.
+///
+/// Asserted at EVERY keypress, not at the end: the frames the report is about are
+/// the intermediate title screens, and the last frame of the boot was already
+/// correct on both builds before this fix.
+#[test]
+fn journey_never_shows_an_erased_title_block_on_either_release() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for (file, profile) in [
+        (AMIGA_RELEASE, InterpreterProfile::Amiga),
+        (PC_RELEASE, InterpreterProfile::IbmPc),
+        // …and the PC build under the Amiga profile, which is what the first pass
+        // measured and must stay fixed.
+        (PC_RELEASE, InterpreterProfile::Amiga),
+    ] {
+        for honor in [true, false] {
+            let Some(mut session) = boot_release(file, profile) else { return };
+            let mut state = fresh_state(honor);
+            let opening = session.take_transcript();
+            state.push_transcript_runs(&opening, TranscriptKind::Story, &[]);
+            let ctx = format!("{file} {profile:?} honor={honor}");
+            let mut seen_intro = false;
+            for key in 1..=8 {
+                let r = match session.pending_input() {
+                    InputKind::Line => session.submit(""),
+                    InputKind::Char => session.submit_char(13),
+                    InputKind::Event => session.submit(""),
+                };
+                apply(&mut state, &r);
+                let model = session.screen();
+                let (area, buf) = render(&state, &model);
+                let rows = pane_rows(&buf, area);
+
+                // One screen at a time: the prompt each boot screen ends with can
+                // never be on the pane twice, because that is two screens at once.
+                let prompts: Vec<u16> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.contains(ANY_KEY))
+                    .map(|(i, _)| area.y + i as u16)
+                    .collect();
+                assert!(
+                    prompts.len() < 2,
+                    "{ctx}: after keypress {key} the pane carries {ANY_KEY:?} at rows {prompts:?} \
+                     — an erased screen is still standing under the one that replaced it"
+                );
+
+                // …and once the opening passage is up, the title block the game
+                // erased to make room for it is gone.
+                seen_intro |= rows.iter().any(|r| r.contains(INTRO_LINE));
+                if seen_intro {
+                    if let Some(i) = rows.iter().position(|r| r.contains(TITLE_LINE)) {
+                        panic!(
+                            "{ctx}: after keypress {key} the story panel still carries the erased \
+                             title block — {TITLE_LINE:?} at pane row {}\n{}",
+                            area.y + i as u16,
+                            rows.join("\n")
+                        );
+                    }
+                }
+            }
+            assert!(seen_intro, "{ctx}: the boot passage is reached within eight keypresses");
+        }
+    }
 }
 
 /// SQ-0755 — the boot passage starts at the top of the story panel, and the title
