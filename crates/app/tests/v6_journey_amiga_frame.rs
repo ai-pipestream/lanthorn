@@ -28,6 +28,16 @@
 //!      rather than one terminal cell per fragment, so the border reaches the pane
 //!      edge the way the IBM PC profile's reverse-video bars already do.
 //!
+//! SECOND PASS, on the user's *"the bottom menu columns are not aligned at most
+//! widths"*: a lone box-drawing/block glyph is a DIVIDER, and it is now kept out of
+//! SQ-0509's fragment merge and stamped at its own scaled column. The merge exists
+//! to re-assemble a WORD out of proportional-metric fragments, and then advances one
+//! terminal cell per character; Journey abuts each party member's `-->` marker to
+//! the `▌` dividing the party column from the commands (native px 246 and 248), so
+//! that `▌` rode along on the marker's character advance and landed three columns
+//! left of its own column — but only on the rows that carry a marker. The menu's
+//! column dividers therefore zig-zagged, at 83% of the pane sizes swept.
+//!
 //! Swept across pane widths — including deliberately wider than the game's 80
 //! column screen — because a fix that only holds where the numbers coincide is the
 //! bug in another costume. Both `honor_game_colours` modes, per the project's
@@ -313,6 +323,92 @@ fn journey_menu_click_where_drawn_reaches_the_game() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// (d) SECOND PASS — the command menu's COLUMN DIVIDERS line up down the panel, at
+/// every width. The user's *"the bottom menu columns are not aligned at most
+/// widths"*.
+///
+/// Journey draws each party member's row as `… -->▌ <command>`: a `-->` marker whose
+/// native pixels END at 246 and the `▌` column divider that STARTS at 248. Two
+/// abutting fragments, so SQ-0509's word merge glued them into one run — and a run
+/// is positioned by its scale-mapped pixel but then advances one terminal cell per
+/// character. The `▌` therefore rode the marker's advance instead of its own column,
+/// landing three columns left of where the same divider lands on the "Game" row,
+/// which carries no marker. The panel's divider zig-zagged row to row.
+///
+/// The invariant asserted is the game's own: every body row's dividers stand in the
+/// SAME columns, and those columns are where the native pixels map to.
+///
+/// FALSIFY by dropping the box-glyph branch from `collapse_row_rules`: every width
+/// fails with two different `▌` columns in one panel.
+#[test]
+fn journey_amiga_menu_dividers_line_up_down_the_panel() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(session) = journey_at_menu(InterpreterProfile::Amiga) else { return };
+    let model = session.screen();
+    for honor in [true, false] {
+        for cols in WIDTHS {
+            let (state, area, buf) = render_hybrid(&model, honor, cols);
+            let ctx = format!("honor={honor} w={cols}");
+            let rows: Vec<String> = (0..area.height).map(|y| row_text(&buf, area, y)).collect();
+            // The menu's body rows: the ones carrying a party member or the trailing
+            // "Game" row, which is the row whose missing `-->` exposed the drift.
+            let body: Vec<(usize, &String)> = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    ["Proceed", "Praxix", "Minar", "Tag", "Game"].iter().any(|w| r.contains(w))
+                })
+                .collect();
+            assert!(body.len() >= 4, "{ctx}: the command menu is on screen (rows found: {})", body.len());
+            let cols_of = |r: &str, g: char| -> Vec<usize> {
+                r.char_indices().filter(|&(_, c)| c == g).map(|(i, _)| i).collect()
+            };
+            for glyph in ['▌', '│'] {
+                let mut seen: Vec<usize> =
+                    body.iter().flat_map(|(_, r)| cols_of(r, glyph)).collect();
+                seen.sort_unstable();
+                seen.dedup();
+                let want = if glyph == '▌' { 2 } else { 4 };
+                assert_eq!(
+                    seen.len(),
+                    want,
+                    "{ctx}: the menu's {glyph:?} dividers stand in {} different columns ({seen:?}) — \
+                     a divider is a POSITION, and every body row must put it in the same one\n{}",
+                    seen.len(),
+                    body.iter()
+                        .map(|(y, r)| format!("{y:3}|{}|", r.trim_end()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+            // …and each divider stands the same distance from the column it heads.
+            // The game puts BOTH `▌` exactly 16 native pixels (two text cells) left
+            // of their column's text — `▌`@121 before "Praxix"@137, `▌`@249 before
+            // "Cast"@265 — so through any one scale the two gaps must come out the
+            // same. Pre-fix the second was dragged onto the `-->` marker's character
+            // advance and the gaps differed (4 and 6 columns at a 138-column pane).
+            let member = rows
+                .iter()
+                .find(|r| r.contains("Praxix") && r.contains("Cast"))
+                .unwrap_or_else(|| panic!("{ctx}: Praxix's row carries his 'Cast' command"));
+            let bars = cols_of(member, '▌');
+            let (a, b) = (bars[0], bars[1]);
+            let (name, cmd) = (member.find("Praxix").unwrap(), member.find("Cast").unwrap());
+            // One column of slack: two native pixel positions 16px apart can round to
+            // cell distances differing by one, which is the sub-cell rounding this
+            // renderer lives with everywhere. Pre-fix the gap differed by three.
+            assert!(
+                (name as i64 - a as i64 - (cmd as i64 - b as i64)).abs() <= 1,
+                "{ctx}: the party divider sits {} columns before its column's text and the \
+                 command divider {} — the game drew both 16 native pixels ahead\n{member:?}",
+                name - a,
+                cmd - b
+            );
+            let _ = &state;
         }
     }
 }
