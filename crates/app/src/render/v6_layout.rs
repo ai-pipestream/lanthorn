@@ -1174,12 +1174,21 @@ pub fn build_chrome_canvas(
 ///
 /// Placement — and therefore what [`fill_story_page_under_chrome_text`] must spare
 /// — is [`buffer_line_rects`].
+///
+/// `input` is the host's live input line, drawn (with its caret) after the last line
+/// of the window the game is reading through — `BufferWindow::reads_input`, SQ-0746.
+/// A game may read through a panel it has declared is not the transcript, and the
+/// echo of what the player types has to appear where they are typing it: fmvpoker's
+/// "Enter the new bet: " is printed into its bottom panel and read from there, and
+/// every digit typed was invisible. `None` when the view is scrolled back, matching
+/// the transcript's own rule for the live line.
 pub fn draw_secondary_prose(
     canvas: &mut RgbaImage,
     chrome: &[&PositionedWindow],
     ink: Rgba<u8>,
     honor: bool,
     colors: &ColorScheme,
+    input: Option<&str>,
 ) {
     for it in chrome {
         let WinNode::Buffer(b) = &it.node else { continue };
@@ -1188,12 +1197,39 @@ pub fn draw_secondary_prose(
             None => ink,
         };
         let right = it.x_px as u32 + it.w_px as u32;
-        for (line, (x0, y0, _, _)) in b.lines.iter().zip(buffer_line_rects(it)) {
+        let rects = buffer_line_rects(it);
+        for (line, &(x0, y0, _, _)) in b.lines.iter().zip(&rects) {
             for (i, ch) in line.chars().enumerate() {
                 let px = x0 + i as u32 * FONT_W;
                 if px + FONT_W > right {
                     break;
                 }
+                crate::render::bitfont::blit_glyph(canvas, ch, px, y0, FONT_W, FONT_H, fg, None);
+            }
+        }
+        // The live input line, when the player is typing into THIS window
+        // (SQ-0746). It continues the window's last line — the prompt the game
+        // printed and then read after, "Enter the new bet: " — exactly as
+        // `draw_story_text` continues the transcript's kept prompt row, with the
+        // caret one cell past what has been typed.
+        let Some(input) = input.filter(|_| b.reads_input) else { continue };
+        // With nothing in the window yet the read starts at its own top-left, the
+        // same place the window's first line would have gone.
+        let (x0, y0) = rects.last().map_or(
+            (it.x_px as u32 + it.left_margin as u32, it.y_px as u32),
+            |&(x0, y0, _, _)| (x0, y0),
+        );
+        let start = x0 + rects.len().checked_sub(1).map_or(0, |i| b.lines[i].chars().count() as u32) * FONT_W;
+        for (i, ch) in input.chars().chain(std::iter::once(' ')).enumerate() {
+            let px = start + i as u32 * FONT_W;
+            if px + FONT_W > right {
+                break;
+            }
+            // The caret is the cell after the input, drawn as the block the
+            // transcript's own caret uses.
+            if i == input.chars().count() {
+                fill_cell(canvas, px, y0, FONT_W, FONT_H, fg);
+            } else {
                 crate::render::bitfont::blit_glyph(canvas, ch, px, y0, FONT_W, FONT_H, fg, None);
             }
         }
