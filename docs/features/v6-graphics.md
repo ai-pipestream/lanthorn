@@ -315,6 +315,16 @@ entirely: you have placed it. (An inline float's horizontal position is a margin
 choice — Shogun parks its ship at the right edge and still means "beside this
 paragraph".)
 
+A game can also say it in words, and Zork Zero does. It follows an inline draw
+with `set_margins`, reserving the column its prose is about to flow in, and that
+declaration counts as much as landing on the cursor — which matters because the
+cursor test is pixel-exact and Zork Zero does not always hit it. Booted off its
+original Amiga floppy, the game reads a tiny placement record out of the native
+picture archive and nudges each drop-cap a couple of pixels in from the line; the
+converted Blorb records that same placeholder as zero-sized, so the same story
+lands exactly on the cursor there and two pixels off it here. The reserved margin
+is the same claim either way.
+
 There is a second question, because clearing the screen also puts the cursor
 back at its top-left corner: **is there any room left beside the picture?** A
 float, by definition, has prose flowing next to it. A picture that spans window

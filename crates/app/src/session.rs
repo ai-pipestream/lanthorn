@@ -1626,10 +1626,31 @@ impl GameSession {
     /// Whether a picture event is an INLINE TRANSCRIPT FLOAT — art the game meant
     /// to flow with window 0's prose — rather than art it placed on the window.
     ///
-    /// Two things have to hold. The engine's [`PictureEvent::at_cursor`] says the
-    /// picture landed on window 0's current text line (SQ-0695), which is what
-    /// separates Zork Zero's drop-caps and Shogun's opening ship from Arthur's
-    /// centred plates. That alone is not enough: `erase_window` puts the cursor
+    /// Two things have to hold. First, the game has to have meant the picture to
+    /// belong to the prose, which it declares in one of two ways.
+    ///
+    /// The engine's [`PictureEvent::at_cursor`] says the picture landed on window
+    /// 0's current text line (SQ-0695), which is what separates Zork Zero's
+    /// drop-caps and Shogun's opening ship from Arthur's centred plates.
+    ///
+    /// But `at_cursor` is a pixel-exact `y == y_cursor`, and a game that offsets
+    /// its inline art by a pixel or two inside the line fails it. Zork Zero does
+    /// exactly that when its art comes off the original Amiga floppy rather than a
+    /// Blorb: it reads placement picture 478 through `picture_data` and adds it to
+    /// the cursor, and that placeholder is `2×1` in the native `Pic.data` where the
+    /// Blorb's `Rect` is `0×0` — so the drop-cap is drawn at cursor + (4, 2) in unit
+    /// space and every drop-cap and room icon fell through to the canvas path,
+    /// vanishing from the transcript entirely (SQ-0741).
+    ///
+    /// So [`PictureEvent::margin_after`] counts too: a `set_margins` issued on this
+    /// window immediately after the draw is ZMSD §15's margin-picture idiom, i.e.
+    /// the game reserving the column the prose is to flow in. **That is the game
+    /// saying "text flows beside this picture" in as many words** — a stronger
+    /// statement of intent than a coordinate that happens to match, and one no
+    /// placed backdrop in the corpus makes (Arthur, Journey, fmvpoker and
+    /// mysterious01 all draw their plates with no margin call after).
+    ///
+    /// Intent alone is not enough: `erase_window` puts the cursor
     /// back at (1,1), so a game that erases the screen and then paints a backdrop
     /// at (1,1) — fmvpoker's 640×400 poker table, Journey's opening illustration,
     /// mysterious01's title art — draws "at the cursor" by pure coincidence
@@ -1649,10 +1670,14 @@ impl GameSession {
     /// |-------------|--------------|--------|-----------|----------|---------|
     /// | Zork Zero   | 2 (drop-cap) | 1      | 84        | 468      | float   |
     /// | Zork Zero   | 216 (icon)   | 1      | 42        | 468      | float   |
+    /// | Zork Zero¹  | 2 (drop-cap) | 5      | 84        | 464      | float   |
+    /// | Zork Zero¹  | 216 (icon)   | 5      | 42        | 464      | float   |
     /// | Shogun      | 7 (ship)     | 229    | 320       | 548      | float   |
     /// | Journey     | 160          | 1      | 640       | 640      | canvas  |
     /// | fmvpoker    | 99           | 1      | 640       | 640      | canvas  |
     /// | mysterious01| 33           | 1      | 1024      | 640      | canvas  |
+    ///
+    /// ¹ the same game booted off its Amiga `.adf`, art from the native archive.
     ///
     /// The gap is not a tuned threshold — the widest float covers 58% of its
     /// window, the narrowest canvas covers 100%.
@@ -1660,7 +1685,7 @@ impl GameSession {
     /// Art that will not resolve keeps the old answer: neither path paints
     /// anything for it, and guessing a canvas would only create an empty one.
     fn is_win0_inline_float(&mut self, ev: &PictureEvent) -> bool {
-        if ev.window != 0 || !ev.at_cursor {
+        if ev.window != 0 || !(ev.at_cursor || ev.margin_after.is_some()) {
             return false;
         }
         let win_w = self
@@ -6044,6 +6069,74 @@ mod tests {
         sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) });
         sess.apply_picture_event(&draw);
         assert_eq!(sess.story_pics.len(), 2, "after a canvas clear a fresh draw anchors again");
+    }
+
+    /// SQ-0741: a window-0 picture the game followed with `set_margins` is an
+    /// inline float even when its `y` misses the cursor by a pixel or two.
+    ///
+    /// Zork Zero booted off its Amiga floppy does exactly that: it adds native
+    /// placement picture 478 (`2×1`, where the Blorb's `Rect` is `0×0`) to the
+    /// cursor, so the drop-cap lands at `y = cursor + 2` and `at_cursor` — a
+    /// pixel-exact comparison — says no. The `set_margins` that follows is the
+    /// game reserving the prose column, which is the same claim `at_cursor` makes
+    /// and a stronger one.
+    ///
+    /// Fixture-free, so it holds wherever `stories/` is absent. Falsified by
+    /// restoring `!ev.at_cursor`: the float count drops to 0 and window 0 takes a
+    /// canvas.
+    #[test]
+    fn a_margin_declared_after_a_win0_draw_makes_it_an_inline_float() {
+        use zvm::screen::{V6Windows, ZWindow};
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        // Window 0 as Zork Zero frames it: a 464×320 prose column inside the
+        // graphical border, wide enough that a 4×4 unit-space tile cannot span it.
+        windows[0] = ZWindow { x_size: 464, y_size: 320, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 0 });
+
+        let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: V6_ART_SCALE,
+            paint: None,
+            paced_frames: std::collections::VecDeque::new(),
+            window_fills: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+        };
+        sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
+
+        // Off the cursor by the native placement inset, but with the margin the
+        // prose is to flow in declared right after — an inline float.
+        sess.apply_picture_event(&PictureEvent {
+            number: 1, window: 0, x: 5, y: 19, erase: false, out_chars: 0,
+            margin_after: Some(96), at_cursor: false, win_box: (89, 81, 464, 320),
+        });
+        assert_eq!(sess.story_pics.len(), 1, "the declared margin marks it as flowing with the text");
+        assert_eq!(sess.story_pics[0].1.source, crate::inline_image::ImageSource::Story);
+        assert_eq!(sess.story_pics[0].1.align, crate::inline_image::ImageAlign::MarginLeft);
+        assert_eq!(sess.story_pics[0].1.margin_px, Some(96), "the game's own left margin rides along");
+        assert!(!sess.pictures_canvas.contains_key(&0), "a float never takes a window canvas");
+
+        // Neither signal: art the game placed for itself, which keeps the canvas
+        // (Arthur's centred intro plates — SQ-0695).
+        sess.apply_picture_event(&PictureEvent {
+            number: 1, window: 0, x: 29, y: 5, erase: false, out_chars: 0,
+            margin_after: None, at_cursor: false, win_box: (1, 1, 464, 320),
+        });
+        assert_eq!(sess.story_pics.len(), 1, "placed art anchors no new float");
+        assert!(sess.pictures_canvas.contains_key(&0), "placed art gets the window canvas");
     }
 
     #[test]
