@@ -266,7 +266,17 @@ session-only switch that never touches your saved config:
   reassembled: fragments whose pixel start touches the previous run's end merge into
   one word stamped from a single cell (so "Churchyard" stays whole instead of
   scattering into "Chu rch yard"), while runs held apart by a real pixel gap (menu
-  items, column dividers) keep their spacing and never fuse.
+  items, column dividers) keep their spacing and never fuse. The glue stops at
+  **padding**: a merged run is positioned once by the scale and then advances one
+  terminal cell per character, so a field glued to the blank cells in front of it
+  inherits their starting column and drifts away from its own as the pane grows.
+  One blank cell is a word space and still merges — Arthur's "St Anne's Day,
+  Compline" is one phrase — but a wider blank stretch is layout, and what follows
+  it is a field with a column of its own. Shogun off the Amiga floppy paints its
+  whole status band one run per cell, padding included, and that is why its `Score:`
+  and `Moves:` used to line up only at an 80-column story pane and drift apart at
+  every other width; Journey's `-->` party markers, glued to the names in front of
+  them, stepped left beside the shorter ones for the same reason.
   The ring layout is also **dynamic**: on a pane taller than the game's native
   aspect there is vertical letterbox dead space, and hybrid mode reclaims it rather
   than centring the frame in it. When nothing sits below the story — header art,
