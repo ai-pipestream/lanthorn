@@ -1075,19 +1075,41 @@ fn render_node(
                         // up front so their cache keys join the live set (else they'd be
                         // pruned and re-encoded every frame). The Frame plan (Zork0/Shogun)
                         // still stretches its whole flank (border art, no story picture).
-                        let divider_exts: Vec<(Rect, (u32, u32, u32, u32))> = if matches!(plan, BottomPlan::Menu) {
-                            strips
-                                .iter()
-                                .filter_map(|s| match s {
-                                    ChromeStrip::Art(r) if r.width < area.width => flank_divider_extension(
-                                        *r, area, viewport, &scale, cell_px, story, native, &canvas, viewport.bottom(),
-                                    ),
-                                    _ => None,
-                                })
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
+                        // SQ-0758: BOTH of a flank's border columns, per flank strip —
+                        // `(strip, inner rule, outer border)`. One probe, run from each
+                        // side, so the panel's extent and the two borders that bound it
+                        // come out of the same calculation instead of the band's rect.
+                        let flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)> =
+                            if matches!(plan, BottomPlan::Menu) {
+                                strips
+                                    .iter()
+                                    .filter_map(|s| match s {
+                                        ChromeStrip::Art(r) if r.width < area.width => {
+                                            let ext = |which| {
+                                                flank_border_extension(
+                                                    *r, area, viewport, &scale, cell_px, story, native, &canvas,
+                                                    &gfx, viewport.bottom(), which,
+                                                )
+                                            };
+                                            let inner = ext(FlankBorder::Inner);
+                                            // A flank only one border wide — Journey's
+                                            // right-hand column is exactly that — finds
+                                            // the SAME run from both sides. Drawing it
+                                            // twice would put two bands on one cache key.
+                                            let outer = ext(FlankBorder::Outer)
+                                                .filter(|(o, _)| inner.is_none_or(|(i, _)| i != *o));
+                                            Some((*r, inner, outer))
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                        let divider_exts: Vec<FlankBorderExt> = flank_borders
+                            .iter()
+                            .flat_map(|(_, i, o)| i.iter().chain(o.iter()).copied())
+                            .collect();
                         // SQ-0747: and the rects the flank PANELS are drawn at, for the
                         // same reason. A Menu-plan flank's art goes to `menu_flank_panel`'s
                         // DEST rect, not to the strip's own rect, and the band cache is
@@ -1103,10 +1125,15 @@ fn render_node(
                                 .iter()
                                 .filter_map(|s| match s {
                                     ChromeStrip::Art(r) if r.width < area.width && strip_has_art(r) => {
-                                        let div = divider_exts
+                                        // The INNER rule, specifically: it is what bounds
+                                        // the panel and what the art insets away from. The
+                                        // old lookup took the first extension inside the
+                                        // strip, which is the OUTER border now that one is
+                                        // produced.
+                                        let div = flank_borders
                                             .iter()
-                                            .map(|(e, _)| *e)
-                                            .find(|e| e.x >= r.x && e.x < r.right());
+                                            .find(|(sr, _, _)| sr == r)
+                                            .and_then(|(_, i, _)| i.map(|(e, _)| e));
                                         menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, div)
                                             .map(|p| (*r, p))
                                     }
@@ -1135,7 +1162,7 @@ fn render_node(
                                 .chain(divider_exts.iter().map(|(r, _)| {
                                     (crate::render::graphics::BandSlot::DividerExtension as u8, r.x, r.y, r.width, r.height)
                                 }))
-                                .chain(flank_panels.iter().map(|(_, (_, d, _))| {
+                                .chain(flank_panels.iter().map(|(_, (_, _, d, _))| {
                                     (crate::render::graphics::BandSlot::Art as u8, d.x, d.y, d.width, d.height)
                                 }))
                                 .collect();
@@ -1172,8 +1199,8 @@ fn render_node(
                                         // the frame bands stay wherever their own strips put them.
                                         // Resolved above so the dest rect could join the live set.
                                         let panel = flank_panels.iter().find(|(sr, _)| sr == r).map(|(_, p)| *p);
-                                        if let Some((bg, dest, crop)) = panel {
-                                            fill_pane_page(*r, bg, buf);
+                                        if let Some((bg, fill, dest, crop)) = panel {
+                                            fill_pane_page(fill, bg, buf);
                                             gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, crate::render::graphics::BandSlot::Art, buf);
                                         } else if let Some(crop) = (matches!(plan, BottomPlan::Frame) && r.width < area.width)
                                             .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
@@ -1329,9 +1356,25 @@ fn render_node(
                             // horizontal magnification — and it has to be the letterbox
                             // scale, like everything else in the ring. Nothing else in the
                             // dump can show that it is not.
-                            for (ext, crop) in &divider_exts {
-                                let c = (crop.0 as u16, crop.1 as u16, crop.2 as u16, crop.3 as u16);
-                                map.push(rec("flank-divider", c, *ext));
+                            // The inner rule and the OUTER border are listed apart: they
+                            // are the two edges the panel is bounded by, and "the outer
+                            // one is missing" is a sentence this dump could not say
+                            // before (SQ-0758).
+                            for (_, inner, outer) in &flank_borders {
+                                for (label, e) in
+                                    [("flank-divider", inner), ("flank-border", outer)]
+                                {
+                                    if let Some((ext, crop)) = e {
+                                        let c = (crop.0 as u16, crop.1 as u16, crop.2 as u16, crop.3 as u16);
+                                        map.push(rec(label, c, *ext));
+                                    }
+                                }
+                            }
+                            // …and the panel FILL, which is the band clipped to the
+                            // panel's own extent rather than the band itself (SQ-0747).
+                            for (_, (_, fill, dest, _)) in &flank_panels {
+                                map.push(rec("flank-panel", (0, 0, 0, 0), *fill));
+                                map.push(rec("flank-art", (0, 0, 0, 0), *dest));
                             }
                         }
                         // Only windows that START inside the story viewport fill here.
@@ -3487,21 +3530,17 @@ fn flank_crop(
     Some((nx0, ny0, nx1 - nx0, ny1 - ny0))
 }
 
-/// SQ-0511 fix (Journey Menu plan): the divider/border-column extension for one side
-/// flank. The flank picture is drawn at the UNIFORM scale (aspect preserved), so a gap
-/// opens between the flank art's uniform-scaled bottom (the story's native bottom) and
-/// the bottom-anchored menu. This returns a NARROW band spanning that gap over the
-/// flank's full-height border column — the reversed-run divider abutting the story on
-/// the LEFT flank, the matching border on the RIGHT — plus a 1-native-pixel crop of
-/// those columns to replicate down the gap. The column is uniform, so the vertical
-/// replicate is invisible; the rest of the gap is left undrawn (transparent → theme
-/// backdrop, matching the flank's own never-painted background beside the divider).
-/// Returns `None` when the flank has no border column abutting the story or the gap is
-/// empty. `menu_top_row` is the bottom-anchored menu strip's top cell (viewport bottom).
-/// What [`menu_flank_panel`] resolves for a side flank: the panel background to
-/// flood the column with, the destination rect for the vertically centred art,
+/// A native `(x, y, w, h)` crop of the chrome canvas, as a band draw takes it.
+type BandCrop = (u32, u32, u32, u32);
+
+/// One of a flank's border columns carried down the reclaimed gap: where it is
+/// drawn, and the native crop it replicates.
+type FlankBorderExt = (Rect, BandCrop);
+
+/// What [`menu_flank_panel`] resolves for a side flank: the panel background, the
+/// rect to flood with it, the destination rect for the vertically centred art,
 /// and the native `(x, y, w, h)` crop of the canvas to draw into it.
-type FlankPanel = (image::Rgba<u8>, Rect, (u32, u32, u32, u32));
+type FlankPanel = (image::Rgba<u8>, Rect, Rect, BandCrop);
 
 /// SQ-0547: treat a Menu-plan side flank as a PANEL rather than a top-anchored
 /// strip of art over bare backdrop.
@@ -3509,11 +3548,13 @@ type FlankPanel = (image::Rgba<u8>, Rect, (u32, u32, u32, u32));
 /// Journey's left column holds an illustration far shorter than the column is at
 /// a tall pane, so the reclaimed space below it showed the theme backdrop and the
 /// column stopped reading as part of the game. Returns
-/// `(panel background, destination rect for the art, native crop)`:
+/// `(panel background, fill rect, destination rect for the art, native crop)`:
 ///
 ///   * the background is the game's OWN panel colour, sampled from the outer edge
 ///     of the flank art — the colour Journey paints around its picture (rgb 34,34,34)
 ///     — so the filled column matches the art instead of the theme or the letterbox;
+///   * the FILL rect is the panel's own extent, which is NOT the band's (SQ-0747
+///     item A). See the comment on it below;
 ///   * the destination rect keeps the band's horizontal placement exactly and
 ///     centres the art VERTICALLY in the column, at the uniform scale (the art's
 ///     own aspect ratio is preserved — SQ-0511's fix must not regress);
@@ -3605,10 +3646,59 @@ fn menu_flank_panel(
         }
     }
     let y = band.y + (band.height - rows) / 2;
-    Some((panel, Rect::new(x, y, cols, rows), (ax0, ay0, art_w, art_h)))
+    // SQ-0747 item (A): the FILL is the panel's own extent, and the band is wider than
+    // that. A band runs to the story VIEWPORT's edge, and the viewport is quantized
+    // INWARD to whole cells (`story_viewport_box` ceils its left edge), while the
+    // frame's inner rule is quantized OUTWARD to the cells its ink covers. Between the
+    // two there can be a leftover column belonging to neither — one, at the user's
+    // 159- and 163-column panes; none at 138, which is why this came and went with the
+    // pane. Flooding the whole band put the picture column's ground into that column,
+    // i.e. the panel painted past the rule and up against the story text. Stop the
+    // flood at the rule and the column falls back to the story's own ground, which is
+    // what stands beside it.
+    //
+    // Under the IBM PC profile this changes nothing anywhere measured: that frame's
+    // rule is a reverse-video SPACE, which inks its whole 8-pixel text cell, so the
+    // rule's cells already reach the viewport and there is no leftover column. The
+    // discriminator is the geometry, not the profile.
+    let fill = match divider {
+        Some(d) if band.x < viewport.x => {
+            let right = d.right().clamp(band.x, band.right());
+            Rect::new(band.x, band.y, right.saturating_sub(band.x), band.height)
+        }
+        Some(d) => {
+            let x0 = d.x.clamp(band.x, band.right());
+            Rect::new(x0, band.y, band.right().saturating_sub(x0), band.height)
+        }
+        None => band,
+    };
+    Some((panel, fill, Rect::new(x, y, cols, rows), (ax0, ay0, art_w, art_h)))
 }
 
-fn flank_divider_extension(
+/// Which of a flank's two border columns [`flank_border_extension`] is asked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FlankBorder {
+    /// The rule dividing the flank from the story box.
+    Inner,
+    /// The frame's OUTER edge — the far side of the flank, against the pane margin.
+    Outer,
+}
+
+/// SQ-0511 fix (Journey Menu plan): a border-column extension for one side flank. The
+/// flank picture is drawn at the UNIFORM scale (aspect preserved), so a gap opens
+/// between the flank art's uniform-scaled bottom (the story's native bottom) and the
+/// bottom-anchored menu. This returns a NARROW band spanning that gap over one of the
+/// flank's full-height border columns, plus a 1-native-row crop of those columns to
+/// replicate down it. The column is uniform, so the vertical replicate is invisible;
+/// the rest of the gap is left undrawn (transparent → theme backdrop, matching the
+/// flank's own never-painted background beside the divider).
+///
+/// `which` picks the column: [`FlankBorder::Inner`] is the rule abutting the story box,
+/// [`FlankBorder::Outer`] the frame's far edge (SQ-0758). Both are located by the same
+/// probe from their own side, so one calculation bounds the panel and draws both of its
+/// borders. Returns `None` when that column is not there or the gap is empty.
+/// `menu_top_row` is the bottom-anchored menu strip's top cell (viewport bottom).
+fn flank_border_extension(
     band: Rect,
     pane: Rect,
     viewport: Rect,
@@ -3617,8 +3707,10 @@ fn flank_divider_extension(
     story: &crate::engine::PositionedWindow,
     native: (u16, u16),
     canvas: &image::RgbaImage,
+    gfx: &image::RgbaImage,
     menu_top_row: u16,
-) -> Option<(Rect, (u32, u32, u32, u32))> {
+    which: FlankBorder,
+) -> Option<FlankBorderExt> {
     let cw = cell_px.0.max(1) as f32;
     let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
     let sy0 = story.y_px as u32;
@@ -3653,25 +3745,59 @@ fn flank_divider_extension(
             opaque(x, mid).then_some(x)
         })
     };
-    let (dnx0, dnx1) = if band.x < viewport.x {
-        let mut x = seek_ink(story_x0, true)?;
-        let right = x + 1;
-        while x > 0 && opaque(x - 1, mid) {
-            x -= 1;
+    // The run grows from wherever the ink was found, so one arm serves both edges:
+    // `from` is the native column the probe starts at, `grows_right` says which way it
+    // runs from there, and `(lo, hi)` are the FLANK's own native columns — a run must
+    // never leave them. Without that bound the outward probe on a right-hand flank
+    // walks left out of the flank, straight through the story window's own opaque page,
+    // and reports a "border" four hundred pixels wide.
+    let run_from = |from: u32, grows_right: bool, lo: u32, hi: u32| -> Option<(u32, u32)> {
+        if grows_right {
+            let left = seek_ink(from, false).filter(|x| (lo..hi).contains(x))?;
+            let mut x = left;
+            while x < hi && opaque(x, mid) {
+                x += 1;
+            }
+            Some((left, x))
+        } else {
+            let mut x = seek_ink(from, true).filter(|x| (lo..hi).contains(x))?;
+            let right = x + 1;
+            while x > lo && opaque(x - 1, mid) {
+                x -= 1;
+            }
+            Some((x, right))
         }
-        (x, right)
-    } else {
-        if story_x1 >= native.0 as u32 {
-            return None;
-        }
-        let left = seek_ink(story_x1, false).filter(|x| *x < native.0 as u32)?;
-        let mut x = left;
-        while x < native.0 as u32 && opaque(x, mid) {
-            x += 1;
-        }
-        (left, x)
+    };
+    let left_flank = band.x < viewport.x;
+    // The flank's own native columns: left of the story box, or right of it.
+    let (lo, hi) = if left_flank { (0, story_x0) } else { (story_x1, native.0 as u32) };
+    if hi <= lo {
+        return None;
+    }
+    let (dnx0, dnx1) = match (which, left_flank) {
+        // The rule abutting the story box: probe from the story edge, outward.
+        (FlankBorder::Inner, true) => run_from(story_x0, false, lo, hi)?,
+        (FlankBorder::Inner, false) => run_from(story_x1, true, lo, hi)?,
+        // SQ-0758: the frame's OUTER edge — the far side of the flank. Probed from
+        // the screen edge inward, one text cell's worth, exactly as the inner rule is
+        // probed from the story edge outward. It was never located at all, so under a
+        // Menu plan the flank's outer border simply did not exist between the `┌` on
+        // the top rule and the `└` on the bottom one: `menu_flank_panel` floods the
+        // column and draws only the picture's bounding box, and that box does not
+        // reach the border.
+        (FlankBorder::Outer, true) => run_from(lo, true, lo, hi)?,
+        (FlankBorder::Outer, false) => run_from(hi, false, lo, hi)?,
     };
     if dnx1 <= dnx0 {
+        return None;
+    }
+    // …and an outer run that is ARTWORK is not a border. Under the IBM PC profile
+    // Journey's picture starts at native x 5 with no border outside it, so the outward
+    // probe finds the illustration itself and would carry a one-pixel slice of it down
+    // the whole column. The chrome canvas cannot tell the two apart — the picture is
+    // rasterized into it — so ask the graphics-only canvas, the same discriminator
+    // SQ-0750 settled on: a band is art only when it is actually artwork.
+    if which == FlankBorder::Outer && (dnx0..dnx1).any(|x| x < gfx.width() && mid < gfx.height() && gfx.get_pixel(x, mid)[3] >= 128) {
         return None;
     }
     // Device cell x-range covering the divider columns (through the uniform scale), and
