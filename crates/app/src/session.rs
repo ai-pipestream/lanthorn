@@ -2893,19 +2893,32 @@ pub fn apply_turn(
         death.unresolved = true;
     }
     if let Some(snap) = &result.location {
-        // Suppress an unvalidated NameOnly location until the map holds a real,
-        // object-backed room. A NameOnly before any room is a pre-game
-        // banner/menu/character-sheet — e.g. BeyondZork's VT220 setup shows the
-        // player's name ("Frank Booth") in a status-line-shaped character sheet.
-        // Because NameOnly is gated while the map is empty, the first room to
-        // populate it is always object-backed; thereafter NameOnly still works
-        // as a legitimate mid-game fallback.
+        let arrived = reprinted_room_heading(&result.transcript, &snap.name);
+        // The map's FIRST room, when nothing in the object tree backs it, must be one the
+        // STORY ITSELF named: the status line alone is not evidence. A pre-game
+        // banner/menu/character-sheet paints a room-shaped status line and prints no matching
+        // heading — BeyondZork's VT220 setup shows the player's name ("Frank Booth", beside
+        // "Level 0 Male Peasant") in a status-line-shaped character sheet while the story text
+        // says only "Press any key to begin the story." A real room is named twice, in two
+        // independent channels: the status line and the game's own prose.
+        //
+        // This replaces the old rule, which waited for an OBJECT-BACKED room to seed the map
+        // (SQ-0752). That presumed every story eventually produces one, and four titles never
+        // do — so the gate was not a delay but a permanent mute, and their maps stayed empty
+        // forever. The Impossible Bottle is compiled by Dialog, whose 492 objects carry no
+        // short names at all; Facility.z8 and frankenfingers keep their room text outside the
+        // object tree. All three paint the room on the status line and print it as a heading,
+        // and all three were detected correctly by `detect_location` and then thrown away here.
+        //
+        // Corroboration is also the rule Glulx already uses — `RoomHeading` reads the room from
+        // the story buffer and bypasses this gate for exactly this reason (a Glulx game never
+        // produces an object-backed room either). The two engines now agree on the evidence.
         if result.location_method == Some(LocationMethod::NameOnly)
             && mapper.graph.rooms().next().is_none()
+            && !arrived
         {
             return;
         }
-        let arrived = reprinted_room_heading(&result.transcript, &snap.name);
         let moved_room = mapper.graph.current() != Some(snap.number);
         if fatal {
             // The game said the player died this turn and moved them somewhere that is NOT
