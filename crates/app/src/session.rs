@@ -2353,7 +2353,7 @@ impl GameSession {
         let fmt_cells = |c: (u16, u16, u16, u16)| format!("{}x{} at ({},{})", c.2, c.3, c.0, c.1);
 
         let mut out = Vec::new();
-        let mut head = format!("v6 layout — current window {}, input window {}", v6.current, self.machine.v6_input_window);
+        let mut head = format!("v6 layout — current window {}, input window {}", v6.current, self.machine.screen.v6_input_window);
         if let Some(scale) = find("scale") {
             let (s100, off_y, cw, ch) = scale.native;
             head.push_str(&format!(", scale {:.2}, cell {cw}x{ch}px, y-offset {off_y}", s100 as f32 / 100.0));
@@ -2390,7 +2390,7 @@ impl GameSession {
             if w.attributes & 0b1000 != 0 { flags.push("buffered"); }
             let mut marks = Vec::new();
             if v6.current as usize == i { marks.push("current"); }
-            if self.machine.v6_input_window as usize == i { marks.push("input"); }
+            if self.machine.screen.v6_input_window as usize == i { marks.push("input"); }
             // The flag names spell the attribute bits out, so the raw value rides the
             // detail line below — this one has to stay short enough not to wrap.
             out.push(format!(
@@ -2692,7 +2692,7 @@ impl GameSession {
                     // …and whether the player is typing into it (SQ-0746): a v6 game
                     // may read through a panel it has declared is not the transcript,
                     // and the host's echo belongs after that panel's own prompt.
-                    reads_input: self.machine.v6_input_window as usize == i,
+                    reads_input: self.machine.screen.v6_input_window as usize == i,
                 })
             } else {
                 WinNode::Grid(GridWindow {

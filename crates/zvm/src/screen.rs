@@ -866,6 +866,22 @@ pub struct ScreenState {
     /// The v6 8-window table; `Some` only when the loaded story is v6
     /// (v1–5/v7/v8 keep the classic 2-window model above and this stays `None`).
     pub v6: Option<V6Windows>,
+    /// The v6 window the game last asked for INPUT through, when that window was a
+    /// flowing-prose one (SQ-0585). It is the game's main text window by definition
+    /// — the one the player types into — so its output is what the host mirrors as
+    /// the transcript. Any OTHER prose window is a display panel, and its text goes
+    /// to that window's own `prose` buffer instead of being spliced into the same
+    /// stream. `0` until the first input request, which is right for boot: window 0
+    /// is the classic main window, and text printed before any read (the banner)
+    /// belongs to the transcript.
+    ///
+    /// Lives on `ScreenState`, not `Machine`, for the same reason as `current_fg`/
+    /// `current_bg`: it is an input to what the screen must show, and archiving the
+    /// whole `ScreenState` (SQ-0749) is what carries it through a host Save State —
+    /// a restore taken mid-read through a secondary panel used to come back with
+    /// this at 0, so the panel's typed-input echo went dark until the next read
+    /// re-established it.
+    pub v6_input_window: u8,
 }
 
 impl Default for ScreenState {
@@ -886,6 +902,7 @@ impl Default for ScreenState {
             current_fg: ZColour::Default,
             current_bg: ZColour::Default,
             v6: None,
+            v6_input_window: 0,
         }
     }
 }

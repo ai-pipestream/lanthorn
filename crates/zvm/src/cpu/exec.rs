@@ -333,15 +333,6 @@ pub struct Machine {
     /// story's own `set_cursor` on any path that matters, so it carries no
     /// snapshot weight.
     pub v6_declared_x: Option<(u8, u16, u16)>,
-    /// The v6 window the game last asked for INPUT through, when that window was a
-    /// flowing-prose one (SQ-0585). It is the game's main text window by definition
-    /// — the one the player types into — so its output is what the host mirrors as
-    /// the transcript. Any OTHER prose window is a display panel, and its text goes
-    /// to that window's own `prose` buffer instead of being spliced into the same
-    /// stream. `0` until the first input request, which is right for boot: window 0
-    /// is the classic main window, and text printed before any read (the banner)
-    /// belongs to the transcript.
-    pub v6_input_window: u8,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
@@ -535,7 +526,6 @@ impl Machine {
             v6_prose_retired: None,
             v6_screen_cleared: None,
             v6_declared_x: None,
-            v6_input_window: 0,
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
@@ -629,7 +619,8 @@ impl Machine {
         self.pending_pictures.clear();
         self.buffer_screen_mode = 0;
         self.v6_win0_out_chars = 0;
-        self.v6_input_window = 0; // a reboot is back to the classic main window (SQ-0585)
+        // `self.screen = screen` above already reset `screen.v6_input_window` to 0
+        // (a reboot is back to the classic main window, SQ-0585).
         self.newline_interrupt_active = false;
 
         // Re-stamp the interpreter capability bits over the pristine header, then
@@ -848,7 +839,7 @@ impl Machine {
         if let Some(v6) = self.screen.v6.as_ref() {
             let cur = v6.current as usize;
             if v6.windows[cur].prose_window() {
-                self.v6_input_window = v6.current;
+                self.screen.v6_input_window = v6.current;
             }
         }
     }
@@ -880,7 +871,7 @@ impl Machine {
         if !w.prose_window() || w.copy_to_transcript() {
             return false;
         }
-        win as u8 != self.v6_input_window
+        win as u8 != self.screen.v6_input_window
             || v6.windows.iter().any(|o| o.prose_window() && o.copy_to_transcript())
     }
 
@@ -7365,7 +7356,7 @@ pub(crate) mod tests {
             w.interrupt_countdown = 3;
             w.interrupt_routine = 0xA0;
         }
-        m.v6_input_window = 7; // the player types elsewhere
+        m.screen.v6_input_window = 7; // the player types elsewhere
         m.print_text("hello\n");
 
         let w = &m.screen.v6.as_ref().unwrap().windows[3];
@@ -7390,7 +7381,7 @@ pub(crate) mod tests {
             w.y_cursor = 1;
             w.x_cursor = 1;
         }
-        m.v6_input_window = 7;
+        m.screen.v6_input_window = 7;
         m
     }
 
@@ -7471,7 +7462,7 @@ pub(crate) mod tests {
             w.y_size = 200;
             w.x_size = 640;
         }
-        m.v6_input_window = 0; // e.g. before the first read, at boot
+        m.screen.v6_input_window = 0; // e.g. before the first read, at boot
         m.print_text("banner\n");
         assert!(
             m.screen.v6.as_ref().unwrap().windows[7].prose.is_empty(),
@@ -7494,7 +7485,7 @@ pub(crate) mod tests {
         // Window 0 boots with attribute 2 set (attributes 15), so the game HAS
         // declared its transcript window — and it is not this one.
         assert!(m.screen.v6.as_ref().unwrap().windows[0].copy_to_transcript());
-        m.v6_input_window = 3; // …and now the player types into the panel
+        m.screen.v6_input_window = 3; // …and now the player types into the panel
         m.print_text("Enter the new bet: ");
 
         assert!(m.v6_diverts_prose(3), "the game's own attribute 2 decides, not the read");
@@ -7514,7 +7505,7 @@ pub(crate) mod tests {
     fn with_nothing_declared_the_input_window_is_still_the_transcript() {
         let mut m = diverted_prose_machine();
         m.screen.v6.as_mut().unwrap().windows[0].attributes = 0b1011; // …and not even window 0
-        m.v6_input_window = 3;
+        m.screen.v6_input_window = 3;
         m.print_text("you are in a maze\n");
 
         assert!(!m.v6_diverts_prose(3), "nothing is declared, so the window read through wins");

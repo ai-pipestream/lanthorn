@@ -1438,7 +1438,7 @@ fn no_corpus_title_reads_through_a_panel() {
     ] {
         let Some((mut session, mut state)) = boot(game, true) else { continue };
         for step in 0..8 {
-            let input = session.machine.v6_input_window as usize;
+            let input = session.machine.screen.v6_input_window as usize;
             assert!(
                 !session.machine.v6_diverts_prose(input),
                 "{game} frame {step}: the game is reading input through window {input}, whose \
