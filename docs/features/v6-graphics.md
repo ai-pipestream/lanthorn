@@ -48,6 +48,15 @@ frames, id 8 is flattened to a plain rectangle, and id 33 loses most of a
 other 383 pictures decode byte-for-byte identically to the Blorb's, which is its
 own quiet confirmation that those Blorbs were converted from the Amiga release.
 
+*Shogun*'s floppy tells the same story from the other side of the format. Its
+archive is built the second way the format allows — every picture carrying its
+own compression table rather than sharing one for the whole file, which costs two
+extra bytes in each directory entry. The header says which shape a file is, and
+babelmap reads both. Of the 39 pictures *Shogun*'s Blorb also holds, 34 come off
+the floppy byte-for-byte identical; two of the rest differ only in how the Blorb
+rounded the Amiga's 4-bit colours, and the others are places the Blorb kept a
+band, or a retouched version, of art the floppy still has whole.
+
 Native archives carry no `Reso` chunk, so a story loaded this way falls back to
 the standard 320×200 art resolution — which is precisely what every Infocom v6
 Blorb's `Reso` chunk declares anyway, so the geometry below is unchanged either

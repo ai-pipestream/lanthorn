@@ -124,6 +124,21 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun has its artwork back on the Amiga floppy.** Played off its disk image,
+  *James Clavell's Shogun* showed no graphics at all — not even a title screen —
+  while *Zork Zero*, *Journey* and *Arthur* all drew theirs. Infocom's picture
+  archive comes in two shapes, and babelmap only knew one: the other three games
+  share a single compression table for the whole file, while Shogun gives every
+  picture its own and needs two more bytes per directory entry to say where it
+  is. The file says which it is in its own header, and babelmap now reads that
+  instead of insisting on one layout, so all 48 of Shogun's pictures decode and
+  the title screen paints. Held to the same standard as before: of the 39
+  pictures Shogun's Blorb also carries, 34 come off the floppy byte-for-byte
+  identical, and of the five that do not, two differ only in how the Blorb
+  rounded the Amiga's colours, and the rest are places the Blorb cropped or
+  retouched what the floppy still has whole. The three games that already worked
+  decode bit-for-bit as they did.
+
 - **A room the game never made an object of still reaches the map.** *The
   Impossible Bottle*, *frankenfingers* and *Facility* each printed a room name in
   the top-left corner of the status bar and mapped absolutely nothing, for the
