@@ -114,6 +114,72 @@ Input is engine-neutral too. A VM's `step()` returns a request —
 terminal types cross the boundary), so the same host loop drives every engine and
 the CLIs can feed input from a pipe for deterministic testing.
 
+## Reading back the bytes we actually emit
+
+Every other harness in the repo renders into a ratatui `Buffer` and asserts on
+cells — babelmap's own model of the screen. None of them can see the *stream*,
+so a defect that is right in the model and wrong on the glass is invisible to
+all of them. `crates/app/tests/pty_stream/` closes that gap: it runs the real
+`babelmap` binary under a pty, plays the part of the terminal, and decodes the
+escape bytes that come back.
+
+Three parts, and the split matters for Windows:
+
+| file | what it is |
+| --- | --- |
+| `tests/pty_stream/driver.rs` | The pty (`posix_openpt` + `libc`, no new dependency), the terminal-query answers, the keystroke script. **Unix only** — a pty is. |
+| `tests/pty_stream/decode.rs` | Bytes → named sequences → a screen model: cursor, SGR, kitty APC commands, U+10EEEE placeholder cells. **Portable**, and unit-tested on every platform. |
+| `tests/pty_stream/mod.rs` | The report — protocol verdict, uploads, placement rects, a background map, and the finding. |
+
+**It verifies the protocol first, and says so out loud.** babelmap picks its
+graphics backend from `Picker::from_query_stdio`, which asks the terminal three
+questions before the UI starts and falls back to half-blocks when nobody
+answers. A bare pty answers nothing, so a naive harness silently measures the
+half-block path and every number it produces is worthless. The driver answers
+the kitty capability query, DA1, `CSI 16 t` (the cell size — not cosmetic: v6 art
+is scaled by pixel and placed by cell) and the OSC 10/11 colour probes, and the
+capture then *proves* kitty from the stream rather than from hope: no APC `_G`
+traffic means no kitty, and the test refuses to go on.
+
+**What it can tell apart that nothing else can.** A kitty placement is virtual:
+the upload (`a=T,U=1`) says how big the image is and nothing about where it
+goes, and the position comes from the placeholder cells printed afterwards. So
+"this row is that colour" has two entirely different causes — an image is placed
+over it, or a background was painted into the cells — and they are different
+bugs with different fixes. The decoder builds a grid, marks which cells carry
+placeholders, and the report's background map names each row's runs with
+`(image)` on the ones an upload covers. SQ-0747's flank-panel fill was settled
+this way in one run: the overrun rows were **painted cells, not a placement
+rect**.
+
+Ad hoc:
+
+```sh
+cargo build -p app                       # the harness drives the REAL binary
+cargo run -p app --example pty_capture -- \
+    --story "stories/Journey - The Quest Begins.adf" \
+    --size 117x64 --keys "wait:1500,cr,wait:800,cr,wait:800,cr,wait:1200" \
+    --out /tmp/journey.stream.txt
+```
+
+`--size` is the terminal, not the story pane: at `117x64` with the map hidden
+(the default here) the frame border and the help row leave the story pane the
+`115x61` a finding is usually quoted at. Exit status 3 means the run did not
+negotiate kitty. `cargo run -p app --example pty_capture -- --help` lists the
+rest.
+
+From a test: `cargo test -p app --test pty_emitted_stream -- --nocapture`, which
+writes its report to `target/pty-capture/`. It asserts that the harness measured
+the right backend and could read a placement back, and deliberately does **not**
+pin any particular defect's presence — a test that fails when a bug is fixed is
+a trap for the next person, so the image-versus-paint reading is printed as a
+finding instead. On Windows the whole thing compiles and the decoder's unit
+tests run; the pty case is an explicit skip.
+
+Its complement is `/dump-cells` ([Graphical v6](features/v6-graphics.md)), which
+dumps the same screen from the *inside*: that shows what we computed, this shows
+what we sent. Disagreement between the two is the interesting case.
+
 ## See also
 
 - [Interactive-fiction standards babelmap implements](standards.md) (Z-Machine,
