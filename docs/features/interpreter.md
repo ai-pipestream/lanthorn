@@ -64,6 +64,40 @@ them and the picker's TYPE column names the container alongside the format —
 `Z6 (ADF)` — from the same content-based identification, so a floppy is never
 listed as a bare story file. See [Story picker](interface.md#story-picker).
 
+### A floppy is a different release
+
+Worth knowing before you compare two runs: the disk image is not the same story
+as the `.z6` sitting beside it. It is a different **build** of the game, and the
+builds do not always behave alike. *Journey*'s floppy is release 30; the bare
+story file is release 83 — and where r83 narrates through window 0, r30 narrates
+through window 2. A screen rule that is right on one of them can be wrong on the
+other, which is exactly what happened once.
+
+What each medium carries, measured across the collection:
+
+| Title | Amiga floppy | Bare story file |
+| --- | --- | --- |
+| Journey | release 30, serial 890322 | release 83, serial 890706 |
+| Zork Zero | release 366, serial 890323 | release 393, serial 890714 |
+| Shogun | release 295, serial 890321 | release 322, serial 890706 |
+| Arthur | release 54, serial 890606 | release 74, serial 890714 |
+| Beyond Zork | release 57, serial 871221 | release 57, serial 871221 |
+| Zork I | release 88, serial 840726 | release 88, serial 840726 |
+| Zork II | release 48, serial 840904 | release 48, serial 840904 |
+| Zork III | release 17, serial 840727 | release 17, serial 840727 |
+| Zork: The Undiscovered Underground | release 16, serial 970828 | — |
+
+Every graphical title ships a *different* build on its floppy; the v3/v5 ones
+ship the same build on both media. A resource `.blb` beside a story is never a
+third build — it holds artwork and no executable, so the release you play is
+decided entirely by the file you open.
+
+The practical rule, and the one the interpreter's own tests follow: a report made
+on a disk image is reproduced on that disk image, and a finding names the release
+it was measured on. `crates/app/tests/real_media_releases.rs` pins this whole
+table, plus the frame each build lays out, so an upgraded fixture announces
+itself instead of quietly rebasing someone's investigation.
+
 ## Z-machine
 
 - **Standard Quetzal save/restore** — the game's own SAVE/RESTORE writes and reads
