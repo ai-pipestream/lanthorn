@@ -164,7 +164,16 @@ session-only switch that never touches your saved config:
   because it has to stay legible. The predicate is narrow on purpose — a game with
   proportional metrics emits one run per glyph, so "two equal abutting fragments"
   would read every doubled letter in the corpus as a rule, and Arthur's status bar
-  loses its character's name the moment it does. A game that never reserves a band and
+  loses its character's name the moment it does. A **lone** line-drawing or block
+  glyph gets the other half of the same idea: it is a column **divider**, so it is
+  kept out of the fragment merge and stamped at its own scaled column. Abutting
+  fragments are otherwise glued back together, because a game with proportional
+  lettering hands over one word as several runs and they must read as one word — but
+  a glued run then advances one terminal cell per character, and Journey sets each
+  party member's `-->` marker flush against the divider after it, so the divider rode
+  the marker's letters and stood in a different column on every row that had one. A
+  rule is a distance, a divider is a position, and both are placed by pixels; prose
+  is neither. A game that never reserves a band and
   instead **overlays** its bar on the top row of a full-screen prose window
   (advent.z6) is given one: a full-width strip of at most two rows, pinned to the
   top of the screen, has its rows reserved off the story viewport so it decomposes

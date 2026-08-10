@@ -149,6 +149,19 @@ identifies which beta it is without reading its git hash.
   drawn across the width it was drawn across rather than one cell per character —
   so the border spans the pane at any size, the way the IBM PC profile's
   reverse-video bars already did.
+- **Journey's command menu keeps its columns straight.** With that border fixed,
+  the panel along the bottom went visibly crooked: the divider between the party
+  and their commands stood in one column on the four rows that show a `-->` marker
+  and a column or three further right on the row that doesn't, so the menu read as
+  a set of columns that never quite lined up — at most window widths. Word
+  fragments that touch are glued back together before being drawn, because a game
+  with proportional lettering hands over "Churchyard" as three pieces and they have
+  to read as one word; but a run, once glued, advances one terminal column per
+  letter. Journey sets each marker flush against the divider that follows it, so
+  the divider rode the marker's letters instead of standing where the game put it.
+  A line-drawing or block character is now never glued to its neighbours: a rule is
+  a distance and a divider is a position, and both are placed by the pixels the
+  game drew them at.
 
 - **The poker menu can be clicked where it is printed.** *Play Current Bet*,
   *Change Current Bet*, *Save*, *Restore* and *Quit* all ignored the mouse in

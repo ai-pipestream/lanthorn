@@ -4007,6 +4007,20 @@ fn draw_chrome_text_strip(
 /// Blank runs are left alone as well: the strip and row floods already spread a
 /// reverse-video bar edge to edge, so skipping them keeps every game that draws
 /// its chrome that way byte-identical.
+///
+/// SQ-0742 (second pass): a LONE box-drawing or block glyph is likewise kept out
+/// of the fragment merge, and stamped at its own scaled column. A rule is a
+/// *distance*; a divider is a *position* — and SQ-0509's merge, which exists to
+/// re-assemble a WORD, drags one along with whatever abuts it and then advances
+/// one terminal cell per character. Journey's command menu abuts each party
+/// member's `-->` marker to the `▌` that divides the party column from the
+/// commands (native px 246 and 248), so the divider drew three columns left of
+/// where it belongs on every row that carries a marker and at its true column on
+/// the row that does not — the menu's columns visibly zig-zagged, at 83% of the
+/// pane widths swept. Prose has no box glyphs in it, so nothing else moves: the
+/// class is exactly the characters a game frames with (U+2500 box drawing,
+/// U+2580 block elements), not "punctuation", which Arthur emits one run per
+/// glyph of and which must keep merging into its words.
 fn collapse_row_rules(
     row_runs: &[&crate::engine::PxText],
     scale: &crate::render::v6_layout::Scale,
@@ -4025,6 +4039,10 @@ fn collapse_row_rules(
         }
     };
     let end_px = |t: &PxText| (t.x.max(1) as i32 - 1) + t.text.chars().count() as i32 * 8;
+    // A glyph from the frame-drawing blocks: box drawing (U+2500..) and block
+    // elements (U+2580..). What a game builds chrome geometry out of, and nothing
+    // any game's prose contains.
+    let box_glyph = |c: char| ('\u{2500}'..='\u{259F}').contains(&c);
     let mut out: Vec<(PxText, bool)> = Vec::new();
     // Pending non-rule fragments, merged together on the far side of each rule so
     // SQ-0509's fragment bridging is unchanged everywhere a rule is not involved.
@@ -4061,6 +4079,16 @@ fn collapse_row_rules(
             let mut rule = t.clone();
             rule.text = std::iter::repeat_n(single_glyph(t).expect("checked above"), cells).collect();
             out.push((rule, true));
+            i = j + 1;
+            continue;
+        }
+        // Too few for a rule, but still frame geometry: a DIVIDER. Flush what came
+        // before it and stamp each fragment on its own, so the merge cannot drag it
+        // off the column the game drew it at.
+        if single_glyph(t).is_some_and(box_glyph) {
+            out.extend(merge_row_fragments(&pending, 4).into_iter().map(|t| (t, false)));
+            pending.clear();
+            out.extend(row_runs[i..=j].iter().map(|t| ((*t).clone(), false)));
             i = j + 1;
             continue;
         }
