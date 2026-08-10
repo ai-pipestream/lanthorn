@@ -144,6 +144,19 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Shogun's title stays on screen behind its boot menu.** Played from the Amiga
+  release floppy, the nine centred lines of Shogun's header — the title, the
+  copyrights, the licence — vanished the instant the START/RESTORE/QUIT menu came
+  up, and a scroll up to find them snapped straight back down. They were still
+  being *printed*; they were being thrown away. A v6 `split_window` tiles windows
+  0 and 1 together, which places the story window somewhere new, and the prose a
+  window leaves behind when it moves is frozen where it was drawn — but only a
+  `move_window` or a `window_size` was doing the freezing. Release 295 moves its
+  story window with the split where release 322 uses the other two, so eight of
+  the nine lines stayed live text in a window the game erased one instruction
+  later, surviving only as scrollback above a screen-clear boundary. The split
+  now retires prose exactly as its two siblings do.
+
 - **Journey's menu headings are whole again.** On the Amiga release floppy the
   command menu's titles came out chewed — `The P` at one window size, `The Pa` at
   another, `Individual Comm` beside them — with the number of surviving letters

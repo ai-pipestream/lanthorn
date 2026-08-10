@@ -1857,23 +1857,44 @@ impl Machine {
                     // altogether": window 0 lands at y=401 with height 0, and the
                     // game re-places it with its own move_window once the splash is
                     // dismissed.
+                    //
+                    // The tiling MOVES AND RESIZES both windows, so it retires the
+                    // prose its new boxes leave behind exactly as `move_window` and
+                    // `window_size` do (SQ-0697) — a window's own text "does not
+                    // change the current display" when the window goes elsewhere,
+                    // whichever opcode sent it. Shogun's Amiga release (r295/890321)
+                    // is the case that needed it: it prints its nine centred title
+                    // lines across native rows 1–9 through window 0, then re-places
+                    // window 0 at the foot of the screen with `@split_window(336)`
+                    // where its IBM PC release (r322/890706) uses
+                    // `move_window`+`window_size`. Only the PC release froze the
+                    // header, so on the floppy the eight lines the split stranded
+                    // stayed live prose in a window the game erased on the next
+                    // instruction — gone from the pane, and left in the transcript
+                    // above a screen-clear boundary where only a scroll could reach
+                    // them and the bottom-stick snapped straight back (SQ-0745).
                     let screen_w = self.mem.read_word(0x22);
                     let screen_h = self.mem.read_word(0x24);
+                    let mut retired = false;
                     if let Some(v6) = self.screen.v6.as_mut() {
-                        let upper = &mut v6.windows[1];
-                        upper.x_coord = 1;
-                        upper.y_coord = 1;
-                        if screen_w > 0 {
-                            upper.x_size = screen_w;
+                        // (window, new top, new height) — window 1 across the top,
+                        // window 0 tiled below it, both the full screen width.
+                        let tiling =
+                            [(1usize, 1u16, rows), (0, rows.saturating_add(1), screen_h.saturating_sub(rows))];
+                        for (win, y, h) in tiling {
+                            let w = &mut v6.windows[win];
+                            let nw = if screen_w > 0 { screen_w } else { w.x_size };
+                            if (w.y_coord, w.x_coord, w.y_size, w.x_size) != (y, 1, h, nw) {
+                                retired |= w.retire_streamed(1, y, nw, h);
+                            }
+                            w.x_coord = 1;
+                            w.y_coord = y;
+                            w.x_size = nw;
+                            w.y_size = h;
                         }
-                        upper.y_size = rows;
-                        let lower = &mut v6.windows[0];
-                        lower.x_coord = 1;
-                        lower.y_coord = rows.saturating_add(1);
-                        if screen_w > 0 {
-                            lower.x_size = screen_w;
-                        }
-                        lower.y_size = screen_h.saturating_sub(rows);
+                    }
+                    if retired {
+                        self.v6_prose_retired = Some(self.v6_win0_out_chars);
                     }
                 } else {
                     // Cap the row count like EXT window_size does (GRID_CELL_CAP):

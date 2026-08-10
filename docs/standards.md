@@ -65,17 +65,7 @@ you can check our behaviour against the source of truth. Section references (e.g
 
 ## Where we knowingly differ
 
-Almost everything above is implemented to the letter. Two places are not, and both are deliberate:
-
-- **ZMSD §8.8.4.1 — Version 6 `split_window` placement.** The spec tiles windows 0 and 1
-  together, so that "window 1 has the given height and is placed at the top left, while window
-  0 is placed just below it". babelmap resizes both windows exactly as described but leaves
-  window 0's **origin** where the game put it, rather than pushing it down below window 1.
-  Zork Zero's boot splash is why: it splits the full screen height to hang its title art in
-  window 1, and relocating window 0 for the duration would drag the story viewport across the
-  picture — and leave it there, since the game only ever restores window 0's *size*. Geometry
-  reporting is unaffected: `get_wind_prop` still answers with each window's true position and
-  size, so a game that measures the screen sees exactly what the spec promises.
+Almost everything above is implemented to the letter. One place is not, and it is deliberate:
 
 - **ZMSD §15 — Version 6 `scroll_window` on window 0.** Windows 1–7 scroll their pixels
   exactly as specified. Window 0 — the main scrolling window — is owned by babelmap's
