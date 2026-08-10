@@ -651,6 +651,13 @@ fn render_node(
                 // through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
                     if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, layout.story_gfx, native)) {
+                        // The op log's frame boundary (SQ-0590) opens HERE, not at
+                        // the band draw further down: the two calls below are the
+                        // frame's first protocol traffic, and starting the log after
+                        // them erased the very records a lifecycle audit needs — the
+                        // full-frame composite this frame drops, and the bands a
+                        // resume re-uploads (SQ-0747).
+                        state.graphics_render.borrow_mut().begin_band_log();
                         // This frame renders as chrome bands, not the raster
                         // composite — drop the cached composite so a later
                         // fall-through to raster (map/rebus takeover) cannot
@@ -1062,17 +1069,52 @@ fn render_node(
                         } else {
                             Vec::new()
                         };
+                        // SQ-0747: and the rects the flank PANELS are drawn at, for the
+                        // same reason. A Menu-plan flank's art goes to `menu_flank_panel`'s
+                        // DEST rect, not to the strip's own rect, and the band cache is
+                        // keyed on the rect a band is drawn at — so the strip rect alone in
+                        // the live set left the panel's key unclaimed. `retain_chrome_bands`
+                        // evicted it every frame, and one eviction clears the WHOLE cache,
+                        // so every band re-encoded and re-uploaded on every frame (three
+                        // uploads a frame on Journey's menu, for pixels the terminal already
+                        // had — the user's `band uploads since launch: 78` over 26 ring
+                        // frames). Resolved once, up here, and reused by the draw below.
+                        let flank_panels: Vec<(Rect, FlankPanel)> = if matches!(plan, BottomPlan::Menu) {
+                            strips
+                                .iter()
+                                .filter_map(|s| match s {
+                                    ChromeStrip::Art(r) if r.width < area.width && strip_has_art(r) => {
+                                        let div = divider_exts
+                                            .iter()
+                                            .map(|(e, _)| *e)
+                                            .find(|e| e.x >= r.x && e.x < r.right());
+                                        menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, div)
+                                            .map(|p| (*r, p))
+                                    }
+                                    _ => None,
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         {
                             let mut gr = state.graphics_render.borrow_mut();
-                            gr.begin_band_log();
+                            // An Art strip with no art behind it is skipped below and never
+                            // drawn, so its key must NOT be claimed here: a live key nothing
+                            // re-places keeps a cached upload the terminal is no longer being
+                            // pointed at, which is the stale-placement shape SQ-0587 records
+                            // (SQ-0747). Only `strips` is filtered — the menu strips below
+                            // draw unconditionally.
                             let live: std::collections::HashSet<_> = strips
                                 .iter()
+                                .filter(|s| !matches!(s, ChromeStrip::Art(r) if !strip_has_art(r)))
                                 .chain(menu_strips.iter())
                                 .filter_map(|s| match s {
                                     ChromeStrip::Art(r) => Some((r.x, r.y, r.width, r.height)),
                                     ChromeStrip::Text(..) => None,
                                 })
                                 .chain(divider_exts.iter().map(|(r, _)| (r.x, r.y, r.width, r.height)))
+                                .chain(flank_panels.iter().map(|(_, (_, d, _))| (d.x, d.y, d.width, d.height)))
                                 .collect();
                             gr.retain_chrome_bands(&live);
                             for strip in &strips {
@@ -1097,15 +1139,8 @@ fn render_node(
                                         // instead of top-anchoring the art over bare backdrop.
                                         // The divider extension below re-draws over this fill, and
                                         // the frame bands stay wherever their own strips put them.
-                                        // The flank's own divider extension, so the art can
-                                        // leave a column of panel fill beside it.
-                                        let div = divider_exts
-                                            .iter()
-                                            .map(|(e, _)| *e)
-                                            .find(|e| e.x >= r.x && e.x < r.right());
-                                        let panel = (matches!(plan, BottomPlan::Menu) && r.width < area.width)
-                                            .then(|| menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, div))
-                                            .flatten();
+                                        // Resolved above so the dest rect could join the live set.
+                                        let panel = flank_panels.iter().find(|(sr, _)| sr == r).map(|(_, p)| *p);
                                         if let Some((bg, dest, crop)) = panel {
                                             fill_pane_page(*r, bg, buf);
                                             gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, buf);

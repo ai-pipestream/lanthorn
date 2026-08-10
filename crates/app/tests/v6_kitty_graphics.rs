@@ -188,7 +188,7 @@ fn evicting_one_band_makes_the_survivors_re_upload_too() {
         .skip(1)
         .map(|t| match *t {
             GraphicsTarget::Band(x, y, w, h) => (x, y, w, h),
-            GraphicsTarget::Window(_) => unreachable!("filtered to bands"),
+            GraphicsTarget::Window(_) | GraphicsTarget::Raster => unreachable!("filtered to bands"),
         })
         .collect();
     state.graphics_render.borrow_mut().retain_chrome_bands(&live);

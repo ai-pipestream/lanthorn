@@ -118,6 +118,20 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **Journey stops re-sending its frame to the terminal on every frame.** Playing
+  Journey in hybrid mode, babelmap re-encoded and re-uploaded all three pieces of
+  the game's on-screen frame — the picture panel, the right-hand border and the
+  bottom rule — every single time the screen was drawn, for pixels the terminal
+  already had. The cache that exists to prevent exactly that was being emptied
+  each frame by a bookkeeping mismatch: Journey's picture panel is drawn at a rect
+  of its own, the cache is keyed on where a band is drawn, and only the rect it was
+  *measured* at was being declared still-in-use. One unclaimed key evicts the whole
+  cache, so every band went with it. An unchanged frame now sends the terminal
+  nothing at all, and the images the terminal holds are released when the frame
+  that owns them goes away — including the full-screen composite from the title
+  sequence, which no longer has to be argued about because it is now recorded like
+  everything else.
+
 - **Zork Zero's compass keeps its colours off the Amiga floppy.** Booted from the
   disk image, the compass arrows and room icons came out bright blue, purple and
   yellow-green, and the colours changed as you walked from room to room — while
