@@ -102,6 +102,22 @@ pub struct Spec {
     /// Hard ceiling on the whole run.
     pub timeout: Duration,
     pub extra_args: Vec<String>,
+    /// Queries (by [`Responder`] name) to answer LATE rather than at once, by
+    /// [`Spec::defer_by`]. A real terminal answers when it gets round to it —
+    /// after a screenful of graphics, after an alternate-screen switch — and an
+    /// app that stops listening before the answer arrives leaves those bytes in
+    /// the tty for whoever reads next. Deferring turns that race into a fact
+    /// (SQ-0769).
+    ///
+    /// The lateness applies to the whole BATCH: once a deferred query is seen in
+    /// a burst, every reply from that one onwards is held back together. A busy
+    /// terminal goes quiet for all of a probe's questions, not for one of them —
+    /// and a probe that ends in a DSR only stops listening when the DSR answer
+    /// arrives, so answering that on time while holding the rest back would be a
+    /// terminal no one has.
+    pub defer_queries: Vec<&'static str>,
+    /// How late [`Spec::defer_queries`] are answered.
+    pub defer_by: Duration,
 }
 
 impl Spec {
@@ -120,6 +136,8 @@ impl Spec {
             tail: Duration::from_millis(900),
             timeout: Duration::from_secs(45),
             extra_args: Vec::new(),
+            defer_queries: Vec::new(),
+            defer_by: Duration::ZERO,
         }
     }
 }
@@ -420,12 +438,27 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
     let mut last_byte = Instant::now();
     let mut file = unsafe { std::fs::File::from_raw_fd(libc::dup(master.as_raw_fd())) };
     let mut timed_out = false;
+    // Replies held back by `spec.defer_queries`, each with the instant it is due.
+    let mut deferred: Vec<(Instant, &'static str, String)> = Vec::new();
 
     loop {
         if start.elapsed() > spec.timeout {
             timed_out = true;
             break;
         }
+        // Late answers first, so a deferred reply lands on time even while the app
+        // is quiet and the loop is only ticking the poll timeout.
+        let now = Instant::now();
+        let mut still_pending = Vec::new();
+        for (due, name, reply) in deferred.drain(..) {
+            if due <= now {
+                let _ = write_all(master.as_raw_fd(), reply.as_bytes());
+                answered.push(Answered { query: name, sent: reply, at: start.elapsed() });
+            } else {
+                still_pending.push((due, name, reply));
+            }
+        }
+        deferred = still_pending;
         match poll_readable(master.as_raw_fd(), Duration::from_millis(20)) {
             Ok(true) => {
                 let mut chunk = [0u8; 65536];
@@ -441,7 +474,13 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
                             _ => flushes.push(Flush { at: start.elapsed(), offset, len: n }),
                         }
                         bytes.extend_from_slice(&chunk[..n]);
+                        let mut batch_late = false;
                         for (name, reply) in responder.scan(&bytes) {
+                            batch_late |= spec.defer_queries.contains(&name);
+                            if batch_late {
+                                deferred.push((Instant::now() + spec.defer_by, name, reply));
+                                continue;
+                            }
                             let _ = write_all(master.as_raw_fd(), reply.as_bytes());
                             answered.push(Answered { query: name, sent: reply, at: start.elapsed() });
                         }
@@ -470,8 +509,10 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
                     }
                     Some(Key::Wait(d)) => pending_wait = Some(d),
                     // Keys exhausted: give the app a longer silence to finish
-                    // whatever the last one started, then stop.
-                    None if quiet_for >= spec.tail => break,
+                    // whatever the last one started, then stop — but never while a
+                    // deferred reply is still owed, or the run would end before the
+                    // very lateness it is measuring.
+                    None if quiet_for >= spec.tail && deferred.is_empty() => break,
                     None => {}
                 }
             }

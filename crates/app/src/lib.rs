@@ -49,6 +49,7 @@ pub mod pcset_store;
 pub mod pixel_mouse;
 pub mod persist_files;
 pub mod picker;
+pub mod query_sweep;
 pub mod reload;
 pub mod render;
 pub mod roomid;

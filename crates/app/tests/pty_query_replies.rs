@@ -1,0 +1,168 @@
+//! A terminal that answers our startup questions LATE must not have its answers
+//! read as keystrokes by the story (SQ-0769).
+//!
+//! WHAT THIS PINS. babelmap asks the terminal for its default fg/bg (OSC 10 /
+//! OSC 11) just before a story boots, and ends the batch with a DSR so it knows
+//! when the answers are in. In the field the answers sometimes arrived after the
+//! probe had stopped listening — a picker launch leaves the terminal busy with a
+//! screenful of kitty graphics — and the player got
+//!
+//! ```text
+//! 0;rgb:ffff/ffff/ffff11;rgb:2828/2c2c/3434
+//! ```
+//!
+//! typed into the game: the intro skipped, the restore prompt fired, the terminal
+//! beeped. It reproduced perhaps one launch in several, which is why it was once
+//! closed as "no longer happening" and had to be reopened.
+//!
+//! WHY IT IS DETERMINISTIC HERE. The pty harness answers those queries itself
+//! (SQ-0762), so it can answer them deliberately late — [`Spec::defer_queries`].
+//! The race stops being a race: the answer is guaranteed to arrive after the
+//! probe's own patience has run out, every run. A test that only passed because
+//! the race was won would be worth nothing here.
+//!
+//! THE FIXTURE IS DELIBERATELY THE TRACKED ONE. `stories/` is gitignored, so a
+//! test that reached for it would skip vacuously in a worktree and in CI — and a
+//! silent skip is exactly how this defect survived once already. Mini-Zork ships
+//! in `crates/zvm/tests/fixtures/`, so this always really runs.
+
+#[cfg(not(unix))]
+#[test]
+fn the_late_reply_test_is_unix_only() {
+    eprintln!("SKIP: driving a real terminal needs a pty, which this platform does not have");
+}
+
+// Only the driving half of the SQ-0762 harness is wanted here; the decoder is
+// another test binary's business, and the parts of the driver this file does not
+// call are not dead code, just unused by this caller.
+#[cfg(unix)]
+#[allow(dead_code)]
+#[path = "pty_stream/driver.rs"]
+mod driver;
+
+#[cfg(unix)]
+mod unix {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use super::driver::{self, Key, Spec};
+
+    /// Every byte of an OSC colour answer that must never reach the story. `rgb:`
+    /// is the shape of the answer; `c0c0` and `0000` are this harness's own
+    /// values, so a hit is provably ours and not the story's prose.
+    const LEAKED: [&str; 2] = ["rgb:", "c0c0/c0c0/c0c0"];
+
+    /// Answer the colour queries this long after they are asked — comfortably
+    /// past the probe's own silence window, so the answer always lands after it
+    /// has stopped listening.
+    const LATE: Duration = Duration::from_millis(400);
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/pty-capture").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// A one-story library plus a user dir that already knows it, so the launch
+    /// goes straight to the picker with no first-use prompt in the way.
+    fn library(root: &Path) -> (PathBuf, PathBuf) {
+        let lib = root.join("library");
+        let user = root.join("user");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        let story = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../zvm/tests/fixtures/minizork.z3");
+        assert!(story.is_file(), "tracked fixture missing at {}", story.display());
+        std::fs::copy(&story, lib.join("minizork.z3")).unwrap();
+        std::fs::write(user.join("config.toml"), format!("default_story_dir = '{}'\n", lib.display())).unwrap();
+        (lib, user)
+    }
+
+    fn spec(lib: &Path, user: &Path) -> Spec {
+        let mut spec = Spec::new(env!("CARGO_BIN_EXE_babelmap"), lib, user);
+        spec.cols = 100;
+        spec.rows = 40;
+        // The per-game sidecar `hide_map` writes is keyed off the story path, and
+        // here that path is a directory — leave the map alone rather than seed a
+        // sidecar for something that is not a story.
+        spec.hide_map = false;
+        spec.tail = Duration::from_millis(1500);
+        spec.defer_queries = vec!["default foreground (OSC 10)", "default background (OSC 11)"];
+        spec.defer_by = LATE;
+        spec
+    }
+
+    /// The run really did what the test claims: the story booted from the picker,
+    /// and the colour answers really were held back until after the boot.
+    fn assert_the_scenario_ran(cap: &driver::Capture, text: &str) {
+        assert!(
+            text.contains("Mini-Zork"),
+            "the story never booted from the picker, so nothing here was measured"
+        );
+        let late: Vec<&str> = cap
+            .answered
+            .iter()
+            .filter(|a| a.query.starts_with("default f") || a.query.starts_with("default b"))
+            .map(|a| a.query)
+            .collect();
+        assert_eq!(late.len(), 2, "both colour queries must have been answered (late): {late:?}");
+    }
+
+    #[test]
+    fn a_late_colour_answer_never_reaches_the_story() {
+        let root = scratch("query-replies-leak");
+        let (lib, user) = library(&root);
+        let mut spec = spec(&lib, &user);
+        spec.keys = vec![
+            Key::Wait(Duration::from_millis(1000)),
+            Key::Bytes(b"\r".to_vec()), // launch the selected story from the picker
+            Key::Wait(Duration::from_millis(2500)),
+        ];
+
+        let cap = driver::run(spec).expect("pty run");
+        let text = String::from_utf8_lossy(&cap.bytes).to_string();
+        assert_the_scenario_ran(&cap, &text);
+
+        for needle in LEAKED {
+            assert!(
+                !text.contains(needle),
+                "the terminal's colour answer was typed into the story: {needle:?} appears in \
+                 what babelmap painted, which is the SQ-0769 symptom verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keystroke_during_the_wait_still_reaches_the_story() {
+        // The other half of the bargain: dropping the terminal's answers must not
+        // cost the player a key. This types a command while the answers are still
+        // owed — the window in which the fix owns the terminal — and asks the
+        // story to prove it arrived.
+        let root = scratch("query-replies-typeahead");
+        let (lib, user) = library(&root);
+        let mut spec = spec(&lib, &user);
+        // Later than the colour answers' own lateness would allow, so the typing
+        // lands while the fix is holding the terminal rather than after it.
+        spec.defer_by = Duration::from_millis(900);
+        spec.keys = vec![
+            Key::Wait(Duration::from_millis(1000)),
+            Key::Bytes(b"\r".to_vec()),
+            Key::Wait(Duration::from_millis(320)),
+            Key::Bytes(b"open mailbox\r".to_vec()),
+            Key::Wait(Duration::from_millis(2500)),
+        ];
+
+        let cap = driver::run(spec).expect("pty run");
+        let text = String::from_utf8_lossy(&cap.bytes).to_string();
+        assert_the_scenario_ran(&cap, &text);
+
+        assert!(
+            text.contains("leaflet"),
+            "the typed command never reached the story — Mini-Zork answers `open mailbox` by \
+             revealing a leaflet, and that never appeared"
+        );
+        for needle in LEAKED {
+            assert!(!text.contains(needle), "and the answers still must not leak: {needle:?}");
+        }
+    }
+}

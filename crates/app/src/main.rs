@@ -1573,6 +1573,17 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // every ~50ms, so this is checked promptly.
         exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
 
+        // ── Late probe answers (SQ-0769) ──────────────────────────────────────
+        // The startup OSC 10/11 probe ends in a DSR so it knows when the terminal
+        // has finished answering. If it gave up first — a terminal busy with the
+        // picker's last frame is slower than the drain's patience — the answers
+        // are still coming, and read as keystrokes they skip the intro and answer
+        // the restore prompt. Until the DSR answer arrives this owns the tty (the
+        // `poll`/`read` below stand down), dropping the terminal's escape traffic
+        // and keeping anything the player typed for replay. A no-op — one bool —
+        // on every launch where the terminal answered on time.
+        state.query_sweep.pump();
+
         // ── Game clocks (SQ-0650) ─────────────────────────────────────────────
         // Timed-input interrupts, Glk timer events, sound finish-routines and
         // Sound2 volume-notify used to be dispatched only from the poll-TIMEOUT
@@ -1720,20 +1731,32 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             }
             None => base_poll_ms,
         };
-        let event_ready = match poll(Duration::from_millis(poll_ms)) {
-            Ok(r) => r,
-            Err(e) => {
-                // A closed controlling terminal can surface here as a poll error
-                // (e.g. on Linux). If a termination signal is what killed the tty,
-                // take the auto-save + conventional signal exit rather than the
-                // bare error exit below. (SQ-0502)
-                exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
-                restore_terminal();
-                eprintln!("babelmap: poll error: {}", e);
-                // Same reasoning as the draw/read error exits: the terminal died,
-                // the engine did not. (SQ-0651)
-                exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
-                std::process::exit(1);
+        // SQ-0769: while the sweep owns the tty, crossterm must not touch it —
+        // and `poll` is not a peek: it READS the fd into its own parser buffer to
+        // decide whether an event is complete. So the whole poll/read pair stands
+        // down and the loop paces itself on a short sleep instead. A keystroke in
+        // that window is not lost; the sweep kept it and replays it below.
+        let event_ready = if state.query_sweep.has_event() {
+            true // a keystroke the sweep held back, ready to replay below
+        } else if state.query_sweep.owns_input() {
+            std::thread::sleep(Duration::from_millis(poll_ms.min(10)));
+            false
+        } else {
+            match poll(Duration::from_millis(poll_ms)) {
+                Ok(r) => r,
+                Err(e) => {
+                    // A closed controlling terminal can surface here as a poll error
+                    // (e.g. on Linux). If a termination signal is what killed the tty,
+                    // take the auto-save + conventional signal exit rather than the
+                    // bare error exit below. (SQ-0502)
+                    exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
+                    restore_terminal();
+                    eprintln!("babelmap: poll error: {}", e);
+                    // Same reasoning as the draw/read error exits: the terminal died,
+                    // the engine did not. (SQ-0651)
+                    exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
+                    std::process::exit(1);
+                }
             }
         };
 
@@ -1817,15 +1840,20 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // (SQ-0502)
         exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
 
-        let event = match read() {
-            Ok(e) => e,
-            Err(e) => {
-                restore_terminal();
-                eprintln!("babelmap: read error: {}", e);
-                // Input is gone, but the engine is not: keep the progress. (SQ-0651)
-                exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
-                std::process::exit(1);
-            }
+        // A keystroke the sweep held back while it owned the tty outranks the
+        // terminal, so type-ahead reaches the story in the order it was typed.
+        let event = match state.query_sweep.next_event() {
+            Some(e) => e,
+            None => match read() {
+                Ok(e) => e,
+                Err(e) => {
+                    restore_terminal();
+                    eprintln!("babelmap: read error: {}", e);
+                    // Input is gone, but the engine is not: keep the progress. (SQ-0651)
+                    exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
+                    std::process::exit(1);
+                }
+            },
         };
         // Pixel mouse reporting (SQ-0563): normalise ONCE, here, before the event
         // reaches any handler. Coordinates become cells — so every hit test in the
