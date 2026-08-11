@@ -45,7 +45,11 @@ fn is_divider(buf: &Buffer, x: u16, y: u16) -> bool {
         Color::Rgb(r, g, b) => r as u16 + g as u16 + b as u16,
         _ => 0,
     };
-    lum > 400 || c.style().add_modifier.contains(Modifier::REVERSED) || !c.symbol().trim().is_empty()
+    // A frame rule is a box-drawing or block glyph (U+2500..U+259F) — the same class
+    // `collapse_row_rules` treats as a divider. Accepting ANY non-blank symbol would
+    // let a stray character in the flank column stand in for a rule that is missing.
+    let frame_glyph = c.symbol().chars().next().is_some_and(|ch| ('\u{2500}'..='\u{259F}').contains(&ch));
+    lum > 400 || c.style().add_modifier.contains(Modifier::REVERSED) || frame_glyph
 }
 
 fn stories_dir() -> PathBuf {
