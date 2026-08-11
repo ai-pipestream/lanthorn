@@ -12,6 +12,52 @@ identifies which beta it is without reading its git hash.
 
 ---
 
+## Unreleased
+
+### Changed
+
+- **The story pane names the adventure, and its file when the two differ.** The
+  border used to show whatever the file was called. It now shows the resolved
+  title, with the filename in parentheses when the two disagree —
+  `Journey: The Quest Begins (journey-r83-s890706.z6)` — and just the title when
+  the file is already named after its story. The comparison normalises first, so
+  a release-stamped filename or an Amiga disk image's container name stays
+  visible while `bureaucracy.z4` beside "Bureaucracy" does not earn a redundant
+  parenthetical. A story with no resolved title falls back to the bare filename
+  rather than an empty `()`.
+
+### Fixed
+
+- **The terminal's answers stop being typed into your story.** Launching a game
+  could skip the intro and leave `0;rgb:ffff/ffff/ffff11;rgb:2828/2c2c/3434` on
+  the first input line, with a beep and a stack of "restore a saved position?"
+  prompts. babelmap asks the terminal for its default colours and terminates the
+  question with a status report it waits on; a terminal busy swallowing a
+  screenful of graphics — exactly what a picker launch leaves behind — answers
+  *after* that wait gives up, and by then nobody is reading, so the replies sit
+  in the tty until the game reads them as keystrokes. The digits and semicolons
+  then answer every prompt in their path. The probe now reports whether it
+  actually read the answer it asked for, and while one is owed the terminal is
+  held until it arrives: bytes inside an escape sequence are discarded, and
+  anything outside one is your own type-ahead and is replayed intact. Two probes
+  run on a picker launch and both are covered.
+- **Type-ahead during a slow boot is no longer binned.** The same drain returned
+  an empty string when it gave up waiting, discarding everything it had already
+  read — including keys pressed while a large story loaded.
+- **Windows stops asking a question it cannot hear the answer to.** The colour
+  query was sent on every platform, but the non-blocking drain behind it has
+  always been a no-op on Windows, so those replies reached the app as key events
+  on *every* launch rather than only on a slow one. The query is now gated on
+  having a way to read the reply. The cost is that the v6 raster canvas falls
+  back to its built-in default ink and page there, as it did before the query
+  existed; restoring it needs a Windows console reader.
+- **A draft release with no changelog section says so in its own body.** The
+  release workflow already warned when it could not find a heading for the tag,
+  then published the draft anyway — and nobody reads a warning on a green run.
+  The marker now sits where the release is actually reviewed.
+
+---
+
 ## v0.1.0-beta.5 — 2026-08-10
 
 ### Added
