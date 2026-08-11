@@ -96,11 +96,43 @@ pub(crate) struct QueryReply {
 /// stops at the DSR reply — which drains every earlier reply with it — and a
 /// bounded wait so a silent terminal costs one timeout rather than a hang.
 ///
-/// `None` means the question was never ASKED — the terminal could not be put in
-/// raw mode, which is what a piped stdio looks like. That is a different thing
-/// from asking and hearing nothing back (`Some` with an empty `text`), because
-/// only the second one can still be answered later (SQ-0769).
+/// `None` means the question was never ASKED — either the terminal could not
+/// be put in raw mode (what a piped stdio looks like), or this platform has no
+/// way to read a reply at all (SQ-0770, see [`REPLY_DRAIN_AVAILABLE`]). That is
+/// a different thing from asking and hearing nothing back (`Some` with an
+/// empty `text`), because only the second one can still be answered later
+/// (SQ-0769).
 pub(crate) fn query_with(query: &[u8]) -> Option<QueryReply> {
+    query_with_gated(query, REPLY_DRAIN_AVAILABLE, send_and_drain)
+}
+
+/// [`query_with`] with the drain-availability gate and the actual send
+/// factored out as parameters, so the gate is exercisable in a unit test
+/// without a real terminal: a test can hand it a spy in place of
+/// [`send_and_drain`] and observe whether the gate let the call through,
+/// instead of depending on `REPLY_DRAIN_AVAILABLE` (fixed at compile time) or
+/// on `enable_raw_mode` (which needs a real tty either way).
+fn query_with_gated(
+    query: &[u8],
+    drain_available: bool,
+    send: impl FnOnce(&[u8]) -> Option<QueryReply>,
+) -> Option<QueryReply> {
+    if !drain_available {
+        // SQ-0770 step 1: a query whose reply can never be drained is pure
+        // liability — the unread bytes sit in the terminal's input queue and
+        // are later read as ordinary keystrokes. Do not ask. SQ-0770 step 2:
+        // once a platform gets a real `drain_stdin_nonblocking`, its
+        // `REPLY_DRAIN_AVAILABLE` flips to `true` and querying resumes there
+        // with no other change needed.
+        return None;
+    }
+    send(query)
+}
+
+/// Put the tty in raw mode, write `query`, and drain the reply. The actual
+/// send-and-drain step, factored out of [`query_with_gated`] so that function
+/// can be unit-tested with a stand-in in place of this.
+fn send_and_drain(query: &[u8]) -> Option<QueryReply> {
     // A non-tty (piped) stdout/stdin never answers; skip to avoid the timeout.
     if crossterm::terminal::enable_raw_mode().is_err() {
         return None;
@@ -215,6 +247,22 @@ fn drain_stdin_nonblocking() -> String {
     String::new()
 }
 
+/// Whether [`drain_stdin_nonblocking`] on this platform can actually read a
+/// query's reply. `true` exactly where the function above has a real body;
+/// `false` where it is the no-op. [`query_with_gated`] refuses to send a
+/// query at all when this is `false` (SQ-0770): sending one anyway means its
+/// answer sits unread in the terminal's input queue until crossterm's normal
+/// event loop reads it as ordinary keystrokes — crossterm 0.29 has no OSC
+/// parsing, so `ESC ]` falls through to `Alt+']'` and everything after is
+/// handed over as plain `Char`s, straight into the game.
+///
+/// SQ-0770 step 2: give this platform a real `drain_stdin_nonblocking` and
+/// flip its value here to `true` — querying resumes with no other change.
+#[cfg(unix)]
+const REPLY_DRAIN_AVAILABLE: bool = true;
+#[cfg(not(unix))]
+const REPLY_DRAIN_AVAILABLE: bool = false;
+
 /// Extract the OSC 10 (fg) and OSC 11 (bg) colours from a raw query reply.
 pub fn parse_osc_colors(reply: &str) -> TermDefaultColors {
     TermDefaultColors {
@@ -311,6 +359,34 @@ mod tests {
         assert_eq!(c, TermDefaultColors::default());
         assert_eq!(c.fg, None);
         assert_eq!(c.bg, None);
+    }
+
+    // ── SQ-0770: the reply-drain gate ─────────────────────────────────────────
+
+    #[test]
+    fn the_query_is_not_sent_when_the_drain_is_unavailable() {
+        // A spy in place of `send_and_drain`: if the gate lets the call
+        // through, this records it. With `drain_available: false` it must
+        // never run — that is the whole point of the gate (SQ-0770): a query
+        // whose reply cannot be read must not go out at all.
+        let sent = std::cell::Cell::new(false);
+        let out = query_with_gated(b"\x1b[5n", false, |_| {
+            sent.set(true);
+            None
+        });
+        assert!(out.is_none());
+        assert!(!sent.get(), "the query must not be sent when the drain is unavailable");
+    }
+
+    #[test]
+    fn the_query_is_sent_when_the_drain_is_available() {
+        let sent = std::cell::Cell::new(false);
+        let out = query_with_gated(b"\x1b[5n", true, |_| {
+            sent.set(true);
+            Some(QueryReply { text: String::new(), answered: false, typed: Vec::new() })
+        });
+        assert!(out.is_some());
+        assert!(sent.get(), "the query must be sent when the drain is available");
     }
 
     // ── SQ-0642: the non-blocking drain loop ─────────────────────────────────
