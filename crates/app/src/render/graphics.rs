@@ -508,7 +508,7 @@ impl GraphicsRender {
             let w = sz.width.min(area.width);
             let h = sz.height.min(area.height);
             let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
-            Image::new(proto).render(dest, buf);
+            place_protocol(proto, dest, buf);
         }
     }
 
@@ -632,8 +632,12 @@ impl GraphicsRender {
                     });
                 }
                 None => {
-                    // Private id range, disjoint from ratatui-image's random ids
-                    // in practice; top byte stays 0 so the id_extra diacritic is 0.
+                    // Private id range, disjoint from ratatui-image's random ids in
+                    // practice. The top byte stays 0, which is what keeps every id
+                    // this path allocates nameable by `kitty_place_rows` — it now
+                    // encodes the byte rather than assuming it (SQ-0772), but the
+                    // diacritic table tops out at 296 and an id above that could not
+                    // be placed at all.
                     self.next_kitty_id = self.next_kitty_id.wrapping_add(1) & 0x000F_FFFF;
                     let id = 0x00B0_0000 | self.next_kitty_id;
                     let mut transmit = String::new();
@@ -806,7 +810,7 @@ impl GraphicsRender {
         let w = sz.width.min(area.width);
         let ht = sz.height.min(area.height);
         let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
-        Image::new(proto).render(dest, buf);
+        place_protocol(proto, dest, buf);
         // Record the letterbox geometry so a click in the pane can be mapped
         // back to a game pixel (Lane M). The image fills `dest`'s cells
         // aspect-preserved, so the click map's image rect is `dest` in device
@@ -1136,7 +1140,7 @@ impl GraphicsRender {
                 },
             );
             self.band_log.push(note);
-            Image::new(proto).render(dest, buf);
+            place_protocol(proto, dest, buf);
             self.note_op(GraphicsOp::Place {
                 target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 at: (dest.x, dest.y, dest.width, dest.height),
@@ -1265,7 +1269,7 @@ impl GraphicsRender {
                 sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
             );
             self.band_log.push(note);
-            Image::new(proto).render(dest, buf);
+            place_protocol(proto, dest, buf);
             self.note_op(GraphicsOp::Place {
                 target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 at: (dest.x, dest.y, dest.width, dest.height),
@@ -1281,12 +1285,18 @@ impl GraphicsRender {
 
 // ── Kitty virtual-placement emission (SQ-0520) ────────────────────────────────
 
-/// The kitty row/column placeholder diacritics (first 140 of kitty's 297-entry
-/// rowcolumn-diacritics.txt). Only explicit indices need the table: rows use
-/// one entry each (emission caps at 140 rows — far above any real graphics
-/// window) and columns after the first are bare placeholders whose position the
-/// terminal infers.
-const KITTY_DIACRITICS: [char; 140] = [
+/// Kitty's `rowcolumn-diacritics.txt`, complete: the index into this table IS
+/// the value the diacritic encodes. A placeholder cell carries up to three of
+/// them — image ROW, image COLUMN, and the image id's HIGH BYTE — and every one
+/// of those three needs an arbitrary index, so the table has to be whole. It
+/// held only the first 140 entries while the emitter used exactly two values
+/// (the row, and zero for the other two); that cap silently made a wide
+/// placement and a high-byte id inexpressible (SQ-0772).
+///
+/// Transcribed from `ratatui-image` 11.0.6's `DIACRITICS` and cross-checked
+/// entry-for-entry against `qwertty-term-vt` 0.4.0's independent copy — two
+/// implementations that agree on all 297 values, rather than one recalled table.
+const KITTY_DIACRITICS: [char; 297] = [
     '\u{305}', '\u{30D}', '\u{30E}', '\u{310}', '\u{312}', '\u{33D}', '\u{33E}', '\u{33F}',
     '\u{346}', '\u{34A}', '\u{34B}', '\u{34C}', '\u{350}', '\u{351}', '\u{352}', '\u{357}',
     '\u{35B}', '\u{363}', '\u{364}', '\u{365}', '\u{366}', '\u{367}', '\u{368}', '\u{369}',
@@ -1304,7 +1314,27 @@ const KITTY_DIACRITICS: [char; 140] = [
     '\u{81B}', '\u{81C}', '\u{81D}', '\u{81E}', '\u{81F}', '\u{820}', '\u{821}', '\u{822}',
     '\u{823}', '\u{825}', '\u{826}', '\u{827}', '\u{829}', '\u{82A}', '\u{82B}', '\u{82C}',
     '\u{82D}', '\u{951}', '\u{953}', '\u{954}', '\u{F82}', '\u{F83}', '\u{F86}', '\u{F87}',
-    '\u{135D}', '\u{135E}', '\u{135F}', '\u{17DD}',
+    '\u{135D}', '\u{135E}', '\u{135F}', '\u{17DD}', '\u{193A}', '\u{1A17}', '\u{1A75}', '\u{1A76}',
+    '\u{1A77}', '\u{1A78}', '\u{1A79}', '\u{1A7A}', '\u{1A7B}', '\u{1A7C}', '\u{1B6B}', '\u{1B6D}',
+    '\u{1B6E}', '\u{1B6F}', '\u{1B70}', '\u{1B71}', '\u{1B72}', '\u{1B73}', '\u{1CD0}', '\u{1CD1}',
+    '\u{1CD2}', '\u{1CDA}', '\u{1CDB}', '\u{1CE0}', '\u{1DC0}', '\u{1DC1}', '\u{1DC3}', '\u{1DC4}',
+    '\u{1DC5}', '\u{1DC6}', '\u{1DC7}', '\u{1DC8}', '\u{1DC9}', '\u{1DCB}', '\u{1DCC}', '\u{1DD1}',
+    '\u{1DD2}', '\u{1DD3}', '\u{1DD4}', '\u{1DD5}', '\u{1DD6}', '\u{1DD7}', '\u{1DD8}', '\u{1DD9}',
+    '\u{1DDA}', '\u{1DDB}', '\u{1DDC}', '\u{1DDD}', '\u{1DDE}', '\u{1DDF}', '\u{1DE0}', '\u{1DE1}',
+    '\u{1DE2}', '\u{1DE3}', '\u{1DE4}', '\u{1DE5}', '\u{1DE6}', '\u{1DFE}', '\u{20D0}', '\u{20D1}',
+    '\u{20D4}', '\u{20D5}', '\u{20D6}', '\u{20D7}', '\u{20DB}', '\u{20DC}', '\u{20E1}', '\u{20E7}',
+    '\u{20E9}', '\u{20F0}', '\u{2CEF}', '\u{2CF0}', '\u{2CF1}', '\u{2DE0}', '\u{2DE1}', '\u{2DE2}',
+    '\u{2DE3}', '\u{2DE4}', '\u{2DE5}', '\u{2DE6}', '\u{2DE7}', '\u{2DE8}', '\u{2DE9}', '\u{2DEA}',
+    '\u{2DEB}', '\u{2DEC}', '\u{2DED}', '\u{2DEE}', '\u{2DEF}', '\u{2DF0}', '\u{2DF1}', '\u{2DF2}',
+    '\u{2DF3}', '\u{2DF4}', '\u{2DF5}', '\u{2DF6}', '\u{2DF7}', '\u{2DF8}', '\u{2DF9}', '\u{2DFA}',
+    '\u{2DFB}', '\u{2DFC}', '\u{2DFD}', '\u{2DFE}', '\u{2DFF}', '\u{A66F}', '\u{A67C}', '\u{A67D}',
+    '\u{A6F0}', '\u{A6F1}', '\u{A8E0}', '\u{A8E1}', '\u{A8E2}', '\u{A8E3}', '\u{A8E4}', '\u{A8E5}',
+    '\u{A8E6}', '\u{A8E7}', '\u{A8E8}', '\u{A8E9}', '\u{A8EA}', '\u{A8EB}', '\u{A8EC}', '\u{A8ED}',
+    '\u{A8EE}', '\u{A8EF}', '\u{A8F0}', '\u{A8F1}', '\u{AAB0}', '\u{AAB2}', '\u{AAB3}', '\u{AAB7}',
+    '\u{AAB8}', '\u{AABE}', '\u{AABF}', '\u{AAC1}', '\u{FE20}', '\u{FE21}', '\u{FE22}', '\u{FE23}',
+    '\u{FE24}', '\u{FE25}', '\u{FE26}', '\u{10A0F}', '\u{10A38}', '\u{1D185}', '\u{1D186}', '\u{1D187}',
+    '\u{1D188}', '\u{1D189}', '\u{1D1AA}', '\u{1D1AB}', '\u{1D1AC}', '\u{1D1AD}', '\u{1D242}', '\u{1D243}',
+    '\u{1D244}',
 ];
 
 /// Plain-Rust base64 (standard alphabet, padded) — only used for kitty image
@@ -1360,45 +1390,181 @@ fn canvas_hash(canvas: &image::RgbaImage) -> u64 {
     h.finish()
 }
 
-/// Write the placeholder rows for image `id` into `buf` over `area`, in the
-/// same cell shape ratatui-image uses: the whole row's escape string lives in
-/// the row's first cell (forced width 1) and the remaining cells are marked
-/// Skip so the diff never overwrites the placeholders. `transmit` (first frame
-/// after an encode) is prepended to the first row.
+/// Every placeholder cell is a real buffer cell of forced width 1: the escape it
+/// carries prints exactly one column, so ratatui's cursor bookkeeping and the
+/// terminal's agree.
+const PLACEHOLDER_WIDTH: ratatui::buffer::CellDiffOption =
+    ratatui::buffer::CellDiffOption::ForcedWidth(std::num::NonZeroU16::MIN);
+
+/// Write ONE row of a kitty virtual placement into `buf`: `width` self-describing
+/// placeholder cells starting at `(x0, y)`, each naming its own image row, image
+/// column and id high byte, with the id's low 24 bits as the cell's foreground.
+///
+/// SELF-DESCRIBING IS THE POINT (SQ-0772). The protocol lets a placeholder with no
+/// diacritics inherit its row/column/id-high-byte from the cell to its left, and
+/// both this app and `ratatui-image` used to emit exactly one anchored cell per row
+/// followed by bare continuations. That is legal until a later frame overpaints the
+/// row's left edge: the anchor dies, the survivors keep only the foreground's low 24
+/// bits, and the run either names an image the terminal does not hold (drawing
+/// nothing) or — for babelmap's own `0x00B0_xxxx` ids, whose high byte is zero —
+/// resolves to the art's FIRST row, redrawn on every row and shifted a column right.
+/// A cell that carries its own three diacritics cannot be orphaned by anything that
+/// happens to its neighbours.
+///
+/// BUFFER-VISIBLE IS THE OTHER HALF. The old shape squeezed the whole row into the
+/// first cell and marked the rest `Skip`, which made the placement invisible to
+/// ratatui's damage model: a later frame that simply stopped drawing there produced
+/// no diff, so nothing unpainted the placeholders and they outlived the frame that
+/// made them (SQ-0763). Real cells diff like any other content — a frame that stops
+/// placing writes ordinary spaces over them, and a frame that re-places writes the
+/// identical symbols, so the steady state still costs nothing.
+///
+/// `prefix` (an upload, or queued deletes) rides on the first cell, as before.
+/// Columns past the table's 297 entries fall back to bare continuation placeholders:
+/// the protocol cannot express a larger explicit index either.
+fn kitty_place_row(
+    buf: &mut Buffer,
+    (x0, y): (u16, u16),
+    width: u16,
+    fg: Color,
+    (row_d, extra_d): (char, char),
+    prefix: Option<&str>,
+) {
+    let mut symbol = String::new();
+    let mut prefix = prefix;
+    for x in 0..width {
+        symbol.clear();
+        if let Some(seq) = prefix.take() {
+            symbol.push_str(seq);
+        }
+        symbol.push('\u{10EEEE}');
+        if let Some(&col_d) = KITTY_DIACRITICS.get(usize::from(x)) {
+            symbol.push(row_d);
+            symbol.push(col_d);
+            symbol.push(extra_d);
+        }
+        let Some(cell) = buf.cell_mut((x0 + x, y)) else { continue };
+        cell.set_symbol(&symbol).set_fg(fg).set_diff_option(PLACEHOLDER_WIDTH);
+    }
+}
+
+/// Write the placeholder rows for image `id` into `buf` over `area`. `transmit`
+/// (the first frame after an encode, plus any queued deletes) rides on the very
+/// first cell.
 fn kitty_place_rows(id: u32, transmit: Option<&str>, area: Rect, buf: &mut Buffer) {
-    use ratatui::buffer::CellDiffOption;
-    use std::fmt::Write as _;
-    let [_, id_r, id_g, id_b] = id.to_be_bytes();
-    // Restore the cursor saved at the row start, then park it at the area's
-    // far corner so the terminal's cursor stays inside the drawn region.
-    let (right, down) = (area.width - 1, area.height - 1);
+    let [id_hi, id_r, id_g, id_b] = id.to_be_bytes();
+    // The third diacritic carries the id's HIGH byte; the foreground carries the
+    // other 24 bits. Emitting the byte instead of a hardcoded zero is what makes
+    // the placement agree with `kitty_transmit_virtual`'s full 32-bit `i={id}` for
+    // any id, not merely for the `0x00B0_xxxx` range this file happens to allocate
+    // from (SQ-0772). An id above the table's 296 is unplaceable in this protocol at
+    // all; drawing nothing beats pointing the terminal at a truncated id, which names
+    // a DIFFERENT image and is exactly the failure this quest is about. Unreachable
+    // from the allocation above, which never sets the top byte.
+    let Some(&extra_d) = KITTY_DIACRITICS.get(usize::from(id_hi)) else { return };
+    let fg = Color::Rgb(id_r, id_g, id_b);
     let rows = area.height.min(KITTY_DIACRITICS.len() as u16);
     let mut transmit = transmit;
     for y in 0..rows {
-        let mut symbol = String::new();
-        if let Some(seq) = transmit.take() {
-            symbol.push_str(seq);
-        }
-        write!(
-            symbol,
-            "\x1b[s\x1b[38;2;{id_r};{id_g};{id_b}m\u{10EEEE}{}{}{}",
-            KITTY_DIACRITICS[y as usize], KITTY_DIACRITICS[0], KITTY_DIACRITICS[0]
-        )
-        .unwrap();
-        for _ in 1..area.width {
-            symbol.push('\u{10EEEE}');
-        }
-        write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
-        for x in 1..area.width {
-            if let Some(cell) = buf.cell_mut((area.left() + x, area.top() + y)) {
-                cell.set_diff_option(CellDiffOption::Skip);
+        kitty_place_row(
+            buf,
+            (area.left(), area.top() + y),
+            area.width,
+            fg,
+            (KITTY_DIACRITICS[usize::from(y)], extra_d),
+            transmit.take(),
+        );
+    }
+}
+
+/// Render a `ratatui-image` protocol at `dest`, then re-lay any kitty virtual
+/// placement it just wrote into the same self-describing, buffer-visible cells
+/// [`kitty_place_row`] emits (SQ-0772).
+///
+/// WHY THIS WRAPPER EXISTS AT ALL. babelmap has two kitty emitters and only owns
+/// one. Everything drawn through a [`Protocol`] — the v6 raster composite, every
+/// chrome-ring band, inline story art, the picker's cover tiles — is placed by
+/// `ratatui-image`, whose kitty backend squeezes each row into its first cell and
+/// marks the rest `Skip`, with an explicit "use inherited diacritic values"
+/// comment. So a fix confined to our own emitter would fix none of the art the
+/// player actually looks at: the Journey capture that opened SQ-0772 has the main
+/// 920x575 composite orphaned by a later frame trimming its left edge, and that
+/// composite is a `ratatui-image` placement. Re-laying the row afterwards makes
+/// both emitters produce the same thing without forking the crate or hand-rolling
+/// its encoders.
+///
+/// It reads back what the protocol wrote rather than being told: a `Protocol`
+/// keeps its image id, its transmit sequence and its row diacritics private. The
+/// three things needed are all fixed by the kitty protocol, not by the crate's
+/// taste — the foreground SGR carrying the id's low 24 bits, the placeholder
+/// character, and the (row, column, id-high-byte) diacritic triple after it. A row
+/// that does not parse into exactly that shape is left exactly as the protocol
+/// wrote it, so a half-block or sixel protocol (no placeholders at all) and any
+/// future change to the crate's row format degrade to today's behaviour rather
+/// than to garbage.
+pub fn place_protocol(proto: &Protocol, dest: Rect, buf: &mut Buffer) {
+    Image::new(proto).render(dest, buf);
+    reseat_kitty_placement(dest, buf);
+}
+
+/// Rewrite each row of a `ratatui-image` kitty placement at `area` in place. See
+/// [`place_protocol`]; a no-op for anything that is not one.
+fn reseat_kitty_placement(area: Rect, buf: &mut Buffer) {
+    for y in area.top()..area.bottom() {
+        let Some(symbol) = buf.cell((area.left(), y)).map(|c| c.symbol().to_string()) else { continue };
+        let Some(row) = parse_placement_row(&symbol) else { continue };
+        let width = row.cells.min(area.width);
+        kitty_place_row(buf, (area.left(), y), width, row.fg, (row.row_d, row.extra_d), Some(row.prefix));
+        // Anything the protocol marked `Skip` past the run we just rewrote (a
+        // shorter row than the rect, which `full_width` clamping can produce)
+        // would otherwise stay invisible to the diff for ever.
+        for x in width..area.width {
+            if let Some(c) = buf.cell_mut((area.left() + x, y)) {
+                if c.diff_option == ratatui::buffer::CellDiffOption::Skip {
+                    c.set_diff_option(ratatui::buffer::CellDiffOption::None);
+                }
             }
         }
-        if let Some(cell) = buf.cell_mut((area.left(), area.top() + y)) {
-            cell.set_symbol(&symbol)
-                .set_diff_option(CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap()));
-        }
     }
+}
+
+/// One `ratatui-image` placeholder row, read back off the cell it was written to.
+struct PlacementRow<'a> {
+    /// Everything before the row's own escapes — the image upload, when this is
+    /// the row that carries it. Passed through untouched.
+    prefix: &'a str,
+    /// The id's low 24 bits, as the foreground the protocol chose.
+    fg: Color,
+    /// The image row and id-high-byte diacritics, verbatim: the row index is the
+    /// protocol's to decide (it slices images across rows) and the high byte is
+    /// the only part of the id the foreground cannot carry.
+    row_d: char,
+    extra_d: char,
+    /// Placeholder cells in the row.
+    cells: u16,
+}
+
+fn parse_placement_row(symbol: &str) -> Option<PlacementRow<'_>> {
+    let at = symbol.find('\u{10EEEE}')?;
+    let (head, tail) = symbol.split_at(at);
+    // `ESC[38;2;r;g;bm` immediately before the first placeholder is the id colour.
+    let sgr = head.rfind("\x1b[38;2;")?;
+    let rgb = head.get(sgr + 7..)?.strip_suffix('m')?;
+    let mut parts = rgb.split(';');
+    let mut byte = || parts.next()?.parse::<u8>().ok();
+    let fg = Color::Rgb(byte()?, byte()?, byte()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    // The protocol's own cursor-save sits between the upload and the id colour.
+    let prefix = &head[..head[..sgr].rfind("\x1b[s")?];
+
+    let mut diacritics = tail.chars().skip(1).take_while(|c| KITTY_DIACRITICS.contains(c));
+    let row_d = diacritics.next()?;
+    let _col_d = diacritics.next()?;
+    let extra_d = diacritics.next()?;
+    let cells = u16::try_from(tail.chars().filter(|&c| c == '\u{10EEEE}').count()).ok()?;
+    Some(PlacementRow { prefix, fg, row_d, extra_d, cells })
 }
 
 #[cfg(test)]
@@ -2079,5 +2245,71 @@ mod tests {
         let mut buf2 = Buffer::empty(area);
         gr.flush_kitty_deletes(area, &mut buf2);
         assert!(gr.queued_deletes().is_empty(), "flushed on the next frame that has room");
+    }
+
+    /// The half of SQ-0772 that is not ours to encode: everything drawn through a
+    /// `ratatui-image` [`Protocol`] — the v6 raster composite, every chrome band,
+    /// inline art, the picker's covers — is placed by the crate's own kitty backend,
+    /// one anchored cell per row followed by bare `Skip` continuations. [`place_protocol`]
+    /// re-lays that row into the same self-describing, buffer-visible cells our own
+    /// emitter writes, and this pins that it actually happens on a REAL protocol
+    /// rather than on a hand-written imitation of one.
+    #[test]
+    fn a_ratatui_image_placement_is_reseated_into_self_describing_cells() {
+        let picker = kitty_picker(8, 18);
+        let (cols, rows) = (7u16, 3u16);
+        let mut img = image::RgbaImage::new(u32::from(cols) * 8, u32::from(rows) * 18);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255]);
+        }
+        let proto = picker
+            .new_protocol(image::DynamicImage::ImageRgba8(img), Size::new(cols, rows), Resize::Fit(None))
+            .expect("the kitty backend encodes a plain RGBA image");
+
+        let dest = Rect::new(2, 1, cols, rows);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 5));
+        place_protocol(&proto, dest, &mut buf);
+
+        let mut row_diacritics = Vec::new();
+        let mut fg = None;
+        for y in 0..rows {
+            for x in 0..cols {
+                let cell = buf.cell((dest.x + x, dest.y + y)).expect("inside the buffer");
+                assert_eq!(
+                    cell.diff_option, PLACEHOLDER_WIDTH,
+                    "cell ({x},{y}) must be a width-1 placeholder, not a Skip the diff cannot see",
+                );
+                let sym = cell.symbol();
+                let at = sym.find('\u{10EEEE}').unwrap_or_else(|| panic!("cell ({x},{y}): {sym:?}"));
+                let mut d = sym[at..].chars().skip(1);
+                let (row_d, col_d, _extra) = (d.next(), d.next(), d.next());
+                assert_eq!(
+                    col_d,
+                    Some(KITTY_DIACRITICS[usize::from(x)]),
+                    "cell ({x},{y}) must name its OWN column, not lean on its neighbour",
+                );
+                if x == 0 {
+                    row_diacritics.push(row_d);
+                }
+                let seen = *fg.get_or_insert(cell.fg);
+                assert_eq!(cell.fg, seen, "every cell of one image carries the same id colour");
+            }
+        }
+        row_diacritics.dedup();
+        assert_eq!(row_diacritics.len(), usize::from(rows), "each row names a different image row");
+
+        // And the whole 32-bit id is readable back off the cells: the low 24 bits
+        // in the foreground, the high byte as the third diacritic's index. That is
+        // the thing SQ-0753 recorded as impossible ("the image id lives inside
+        // ratatui-image's `Kitty` struct with no accessor, so we cannot name what to
+        // delete") — worth pinning here, since a delete built on it would be silently
+        // aiming at the wrong image if this ever stopped holding.
+        let lead = buf.cell((dest.x, dest.y)).unwrap();
+        let sym = lead.symbol().to_string();
+        let Some(Color::Rgb(r, g, b)) = fg else { panic!("the id colour is truecolour") };
+        let extra_d = sym[sym.find('\u{10EEEE}').unwrap()..].chars().nth(3).expect("the third diacritic");
+        let high = KITTY_DIACRITICS.iter().position(|&c| c == extra_d).expect("a table entry");
+        let recovered = ((high as u32) << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+        assert_eq!(recovered, id_of(&sym), "the id the upload declared, read back off the screen");
     }
 }

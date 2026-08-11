@@ -13,10 +13,9 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::Widget;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
-use ratatui_image::{Image, Resize};
+use ratatui_image::Resize;
 
 use crate::render::transcript::ImageBand;
 use crate::state::AppState;
@@ -274,7 +273,7 @@ impl InlineImageRender {
             }
         }
         if let Some((_, proto)) = self.cache.get(&key) {
-            Image::new(proto).render(dest, buf);
+            crate::render::graphics::place_protocol(proto, dest, buf);
         }
     }
 

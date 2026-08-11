@@ -1727,11 +1727,7 @@ fn draw_story_gallery(
                     // matter how the render protocol reports its own size.
                     let fit = cover.fitted_tile_rect(picker, &entry.path, cover_rect);
                     if let Some(proto) = cover.tile_protocol(picker, &entry.path, fit) {
-                        ratatui::widgets::Widget::render(
-                            ratatui_image::Image::new(proto),
-                            fit,
-                            buf,
-                        );
+                        app::render::graphics::place_protocol(proto, fit, buf);
                         drew_cover = true;
                     }
                 }
@@ -1995,11 +1991,7 @@ fn draw_info_panel(
                         used_w,
                         used_h,
                     );
-                    ratatui::widgets::Widget::render(
-                        ratatui_image::Image::new(proto),
-                        dest,
-                        buf,
-                    );
+                    app::render::graphics::place_protocol(proto, dest, buf);
                 }
                 if used_h > 0 {
                     inner = Rect::new(inner.x, inner.y + used_h, inner.width, inner.height - used_h);
@@ -2406,7 +2398,7 @@ fn draw_resource_preview(
                     uw,
                     uh,
                 );
-                ratatui::widgets::Widget::render(ratatui_image::Image::new(proto), dest, buf);
+                app::render::graphics::place_protocol(proto, dest, buf);
                 drew_image = true;
             }
         }

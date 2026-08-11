@@ -208,11 +208,18 @@ full 32-bit `i=` value (`full = low24 | (high_byte << 24)`). Comparing a
 babelmap-side id against an oracle-side id means masking the oracle's down to
 the low 24 bits first, not comparing them raw.
 
-**The two decoders legitimately disagree on image coverage today.** Ours
-attributes a cell to an image by foreground colour alone and doesn't model
-the diacritic continuation rule at all; the oracle does. That gap is filed as
-SQ-0772. Until it's closed, assert cross-decoder agreement on *backgrounds*,
-not on image coverage.
+**The two decoders agree on image coverage — now.** They didn't when the
+oracle landed: ours attributes a cell to an image by foreground colour alone
+and doesn't model the diacritic continuation rule, so it counted 33 runs of
+orphaned placeholder cells a real terminal declined to draw. That was
+SQ-0772, and it was babelmap's bug, not the harness's: virtual placements
+were emitted as one anchored cell per row plus bare continuations, invisible
+to ratatui's damage model, so a later frame could destroy the anchor and
+strand the rest. Every placeholder cell now carries its own row, column and
+id high byte and lives in the buffer like any other content, and the real
+capture asserts agreement on *both* axes. Ours still can't read a high byte
+(see above), so a disagreement there remains an id-masking question, not a
+coverage one.
 
 **A stronger oracle exists in principle but isn't built.** For literal
 Ghostty ground truth (not a port of it), `libghostty-vt` — Ghostty's own C

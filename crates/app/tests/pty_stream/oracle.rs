@@ -100,6 +100,15 @@ pub struct OracleCell {
     /// `None` means a renderer would draw no image here — a different statement
     /// from "no placeholder was printed here" (see the module docs).
     pub image_id: Option<u32>,
+    /// Which PIXEL ROW of that image lands here — the resolved run's `source_y`.
+    ///
+    /// The one reading that tells a correct placement from a corrupt one. A run
+    /// that lost its row diacritic still resolves (when the id's high byte is
+    /// zero) and still covers the same cells, so a rect comparison cannot see the
+    /// damage: every screen row simply redraws the image's FIRST row. The source
+    /// row can see it — down a healthy placement this climbs, and down a broken
+    /// one it is 0 all the way (SQ-0772).
+    pub source_y: Option<u32>,
 }
 
 /// Every rendering placement of one image, aggregated from its per-row entries
@@ -217,6 +226,7 @@ pub fn resolve(bytes: &[u8], cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> 
                 fg: color(scell.style.fg),
                 bg: color(scell.style.bg),
                 image_id: None,
+                source_y: None,
             };
         }
     }
@@ -283,9 +293,10 @@ fn resolve_rects(t: &Terminal, grid: Grid, cells: &mut [OracleCell]) -> Vec<Imag
         // No resolved placement here means the terminal walked these cells and
         // declined to draw: an unknown image id, or a destination that rounds
         // away. Those cells are placeholders on screen and pixels nowhere.
-        if pending.get_mut(&(run.image_id, col, row as i32)).and_then(Vec::pop).is_none() {
+        let Some(idx) = pending.get_mut(&(run.image_id, col, row as i32)).and_then(Vec::pop) else {
             continue;
-        }
+        };
+        let source_y = resolved[idx].source_y;
         let row = row as u16;
         let z = authored.get(&run.image_id).copied().unwrap_or(0);
         let e = acc.entry((run.image_id, Origin::Virtual)).or_insert_with(|| Acc::new(z));
@@ -294,7 +305,9 @@ fn resolve_rects(t: &Terminal, grid: Grid, cells: &mut [OracleCell]) -> Vec<Imag
             if c >= grid.cols {
                 break;
             }
-            cells[row as usize * grid.cols as usize + c as usize].image_id = Some(run.image_id);
+            let cell = &mut cells[row as usize * grid.cols as usize + c as usize];
+            cell.image_id = Some(run.image_id);
+            cell.source_y = Some(source_y);
             e.add(row, c);
         }
     }

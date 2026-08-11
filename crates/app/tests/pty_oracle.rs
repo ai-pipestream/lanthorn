@@ -14,11 +14,14 @@
 //!     that makes babelmap's placement painting fragile. This is the part that
 //!     is a real test rather than a snapshot: it asserts both directions, so it
 //!     fails if the rule is broken AND if it is over-applied.
+//!   * `emitter` — PORTABLE, always runs. babelmap's real emitter driven through
+//!     a real `Terminal` over a byte sink, so the bytes judged are the ones a
+//!     player's terminal receives, frame boundaries and buffer diff included.
+//!     This is where SQ-0772 lives: the defect was a placement the damage model
+//!     could not see, which no amount of hand-authored stream proves anything
+//!     about.
 //!   * `real_capture` — unix only, drives a real story through the pty, and
-//!     asserts the two decoders agree on BACKGROUNDS. It deliberately does not
-//!     assert they agree on image coverage: they legitimately disagree there
-//!     today (a placement our decoder reports and a real terminal declines to
-//!     draw is the finding, not the failure), which is filed as SQ-0772.
+//!     asserts the two decoders agree on BOTH backgrounds and image coverage.
 //!
 //! Slow-test gating follows `pty_emitted_stream.rs`: nothing here is `#[ignore]`
 //! (SQ-0368 reserved that for the multi-second full-game walkthroughs), and the
@@ -288,6 +291,250 @@ mod protocol {
     }
 }
 
+/// The real emitter, the real ratatui diff, a real terminal — no pty, no fixture,
+/// no story (SQ-0772).
+///
+/// The `protocol` module above hand-authors the streams it judges, which pins the
+/// RULE but not babelmap's obedience to it. `real_capture` below judges babelmap's
+/// own bytes, but needs a pty, a commercial story file and a couple of seconds.
+/// This module sits between them: it drives `GraphicsRender` through a real
+/// `Terminal` over a byte sink, so the bytes are the ones a player's terminal would
+/// receive, and resolves them through the same emulator — every frame boundary,
+/// buffer diff and cell-skip decision included, which is exactly where this defect
+/// lived. It runs everywhere and takes milliseconds.
+mod emitter {
+    use ratatui::Terminal;
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Color, Style};
+    use ratatui::widgets::Widget;
+    use ratatui::{TerminalOptions, Viewport};
+
+    use app::engine::GraphicsWindow;
+    use app::render::graphics::{GraphicsRender, kitty_picker};
+
+    use crate::pty_stream::oracle;
+
+    const COLS: u16 = 40;
+    const ROWS: u16 = 12;
+    const CELL_W: u16 = 8;
+    const CELL_H: u16 = 18;
+
+    /// The graphics window's cell rect. Column 3 is the LEAD column — the one a
+    /// divider drawn down the screen's left flank lands on, and the one whose loss
+    /// used to orphan the rest of every row.
+    const ART: Rect = Rect { x: 3, y: 2, width: 12, height: 6 };
+
+    /// A canvas whose every pixel ROW is a different colour, so a placement that
+    /// draws the wrong row of it is distinguishable from one that draws the right
+    /// one. A flat canvas would let the corrupt reading pass.
+    fn window(version: u64) -> GraphicsWindow {
+        let (w, h) = (u32::from(ART.width) * u32::from(CELL_W), u32::from(ART.height) * u32::from(CELL_H));
+        let mut canvas = image::RgbaImage::new(w, h);
+        for (_, y, p) in canvas.enumerate_pixels_mut() {
+            *p = image::Rgba([(y % 251) as u8, 40, 200, 255]);
+        }
+        GraphicsWindow { win: 1, canvas: std::sync::Arc::new(canvas), version, upscale: false }
+    }
+
+    /// The backend's byte sink, kept on our side of the writer: ratatui-crossterm's
+    /// own `writer()` accessor is behind an unstable feature gate, and a shared
+    /// buffer is a smaller thing to depend on than an unstable API.
+    #[derive(Clone, Default)]
+    struct Sink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A `Terminal` writing into a byte sink we can hand to the emulator. The
+    /// viewport is FIXED so nothing consults the real terminal this test may or may
+    /// not be attached to.
+    fn terminal() -> (Terminal<CrosstermBackend<Sink>>, Sink) {
+        let sink = Sink::default();
+        let term = Terminal::with_options(
+            CrosstermBackend::new(sink.clone()),
+            TerminalOptions { viewport: Viewport::Fixed(Rect::new(0, 0, COLS, ROWS)) },
+        )
+        .expect("a fixed viewport needs no terminal to size itself against");
+        (term, sink)
+    }
+
+    /// Resolve everything written so far the way a terminal would.
+    fn resolve(sink: &Sink) -> oracle::Resolved {
+        oracle::resolve(&sink.0.borrow(), COLS, ROWS, u32::from(CELL_W), u32::from(CELL_H))
+    }
+
+    /// Draw the art, and nothing else.
+    fn frame_with_art(term: &mut Terminal<CrosstermBackend<Sink>>, gr: &mut GraphicsRender, version: u64) {
+        let picker = kitty_picker(CELL_W, CELL_H);
+        term.draw(|f| gr.render(&picker, &window(version), ART, Style::default(), f.buffer_mut()))
+            .expect("drawing into a byte sink cannot fail");
+    }
+
+    /// The art's every cell, and the image pixel row landing on each — the reading
+    /// that separates a healthy placement from an orphaned one.
+    fn source_rows(res: &oracle::Resolved) -> Vec<Option<u32>> {
+        (ART.y..ART.y + ART.height).map(|row| res.cell(row, ART.x).source_y).collect()
+    }
+
+    /// The baseline, and the direction that stops the rest passing vacuously: the
+    /// emitter's own bytes place the whole rect, and each screen row draws a
+    /// DIFFERENT row of the image.
+    #[test]
+    fn the_emitters_bytes_place_every_cell_of_the_art() {
+        let mut gr = GraphicsRender::default();
+        let (mut term, sink) = terminal();
+        frame_with_art(&mut term, &mut gr, 1);
+        let res = resolve(&sink);
+
+        assert_eq!(res.placements.len(), 1, "{}", res.describe_placements());
+        let p = &res.placements[0];
+        assert_eq!(
+            (p.top, p.bottom, p.left, p.right),
+            (ART.y, ART.y + ART.height - 1, ART.x, ART.x + ART.width - 1),
+            "the whole window rect: {}",
+            p.describe()
+        );
+        assert_eq!(p.cells, usize::from(ART.width) * usize::from(ART.height));
+
+        let rows = source_rows(&res);
+        assert!(
+            rows.windows(2).all(|w| w[0] < w[1]),
+            "each screen row must draw a LOWER row of the image than the one above it, else \
+             the placement is redrawing one row over and over: {rows:?}"
+        );
+    }
+
+    /// SQ-0772's corruption mode, through the real emitter. A later frame draws a
+    /// divider down the art's lead column and re-places the art everywhere else —
+    /// the shape of Journey's chrome ring trimming the raster composite's left edge.
+    /// The survivors must still name their own image rows.
+    ///
+    /// Before the fix the whole row leaned on that lead cell, so its loss left the
+    /// rest of the row anchorless: babelmap's ids have a zero high byte, so the run
+    /// still resolved — to the image's FIRST row, on every screen row.
+    #[test]
+    fn overpainting_the_lead_column_leaves_the_survivors_naming_their_own_rows() {
+        let mut gr = GraphicsRender::default();
+        let (mut term, sink) = terminal();
+        frame_with_art(&mut term, &mut gr, 1);
+
+        let picker = kitty_picker(CELL_W, CELL_H);
+        term.draw(|f| {
+            let buf = f.buffer_mut();
+            gr.render(&picker, &window(1), ART, Style::default(), buf);
+            // …and a divider down the art's first column, drawn after it.
+            for y in ART.y..ART.y + ART.height {
+                if let Some(cell) = buf.cell_mut((ART.x, y)) {
+                    cell.set_symbol("\u{2502}").set_style(Style::default().fg(Color::Rgb(9, 9, 9)));
+                }
+            }
+        })
+        .expect("drawing into a byte sink cannot fail");
+
+        let res = resolve(&sink);
+        assert_eq!(res.placements.len(), 1, "the art survives the trim: {}", res.describe_placements());
+        let p = &res.placements[0];
+        assert_eq!(
+            (p.left, p.right),
+            (ART.x + 1, ART.x + ART.width - 1),
+            "the divider took the first column and nothing else: {}",
+            p.describe()
+        );
+
+        let rows: Vec<Option<u32>> =
+            (ART.y..ART.y + ART.height).map(|row| res.cell(row, ART.x + 1).source_y).collect();
+        assert!(
+            rows.windows(2).all(|w| w[0] < w[1]),
+            "every surviving row must still draw its OWN row of the image; all-equal means the \
+             run lost its anchor and is redrawing the first row down the whole rect: {rows:?}"
+        );
+    }
+
+    /// The other half of the rule, and the reason the fix is buffer-visible cells
+    /// rather than only self-describing ones: a frame that simply STOPS drawing the
+    /// art must unpaint every placeholder cell it left behind.
+    ///
+    /// Honest about its own strength — this one passes on the old emitter too, in
+    /// this shape. `Skip` is part of ratatui's cell equality, so a cell that was
+    /// `Skip` last frame and plain this frame does diff and does get repainted. What
+    /// the old shape could not survive was a placement whose cells stayed `Skip`
+    /// frame after frame while its ANCHOR was overpainted (the test above), and this
+    /// is the guard that the fix did not trade that away for a leak in the simpler
+    /// direction.
+    #[test]
+    fn a_frame_that_stops_drawing_the_art_unpaints_every_placeholder_cell() {
+        let mut gr = GraphicsRender::default();
+        let (mut term, sink) = terminal();
+        frame_with_art(&mut term, &mut gr, 1);
+        assert_eq!(resolve(&sink).placements.len(), 1, "the art was placed to begin with");
+
+        // The next frame draws ordinary text over the art's left third and leaves
+        // the rest of its rows untouched — the ring/text layout that replaced the
+        // raster composite in the capture.
+        term.draw(|f| {
+            let buf = f.buffer_mut();
+            ratatui::widgets::Paragraph::new("text").render(Rect::new(ART.x, ART.y, 4, ART.height), buf);
+        })
+        .expect("drawing into a byte sink cannot fail");
+
+        let res = resolve(&sink);
+        assert!(
+            res.placements.is_empty(),
+            "nothing draws the art any more, so nothing may still be on screen: {}",
+            res.describe_placements()
+        );
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                assert_eq!(res.cell(row, col).image_id, None, "cell ({row},{col}) still carries an image");
+            }
+        }
+
+        // And our own decoder must read it the same way, or the harness is lying.
+        let mut ours = crate::pty_stream::decode::Term::new(COLS, ROWS);
+        ours.feed(&sink.0.borrow());
+        let d = oracle::disagreements(&ours, &res);
+        assert!(d.is_empty(), "the two decoders must agree that the art is gone: {d:#?}");
+    }
+
+    /// The cheapness the old shape bought, kept: re-placing an unchanged image
+    /// repaints nothing. A fix that made every cell buffer-visible by repainting it
+    /// every frame would satisfy every test above and cost a screenful of
+    /// placeholders per frame for ever.
+    ///
+    /// Measured between the SECOND and THIRD identical frames, because the second
+    /// legitimately repaints one cell: the first frame's leading cell carries the
+    /// image upload and the second's does not, so that one cell differs. From there
+    /// on the buffer is identical and the diff is silent.
+    #[test]
+    fn re_placing_an_unchanged_image_repaints_no_placeholder_cells() {
+        let mut gr = GraphicsRender::default();
+        let (mut term, sink) = terminal();
+        frame_with_art(&mut term, &mut gr, 1);
+        frame_with_art(&mut term, &mut gr, 1);
+        let settled = sink.0.borrow().len();
+        assert!(
+            String::from_utf8_lossy(&sink.0.borrow()[..settled]).contains('\u{10EEEE}'),
+            "the frames so far did paint placeholders, so the next frame's silence means something"
+        );
+
+        frame_with_art(&mut term, &mut gr, 1);
+        let added = String::from_utf8_lossy(&sink.0.borrow()[settled..]).to_string();
+        assert!(
+            !added.contains('\u{10EEEE}'),
+            "an identical frame must diff to nothing but cursor bookkeeping; it repainted \
+             placeholders: {added:?}"
+        );
+    }
+}
+
 #[cfg(not(unix))]
 #[test]
 fn the_real_capture_half_is_unix_only() {
@@ -318,15 +565,19 @@ mod real_capture {
         dir
     }
 
-    /// Both decoders on one real capture. The assertion is BACKGROUNDS ONLY:
-    /// which cells carry which SGR background is a question both models answer
-    /// from the same evidence, so a difference there is a bug in one of them.
-    /// Image coverage is not asserted — the two legitimately disagree today (our
-    /// decoder counts placeholder cells; the oracle counts pixels that land),
-    /// and that disagreement is SQ-0772, not this test's business. It is printed
-    /// as a finding so the number is visible without being a tripwire.
+    /// Both decoders on one real capture, on BOTH axes: which cells carry which
+    /// SGR background, and which cells a renderer would put image pixels on.
+    ///
+    /// Image coverage used to be printed as a finding rather than asserted, because
+    /// the two decoders legitimately disagreed: this capture left 33 runs of
+    /// placeholder cells over rows 15–46, cols 47–113 that our decoder counted as
+    /// the raster composite and a real terminal declined to draw at all, their
+    /// anchoring cell having been overpainted by the chrome ring that replaced them
+    /// (SQ-0772). With the placement now buffer-visible, the ring's frame unpaints
+    /// those cells instead of stranding them, and the two readings coincide
+    /// exactly — so the number is a tripwire again.
     #[test]
-    fn our_decoder_and_a_real_terminal_agree_on_backgrounds() {
+    fn our_decoder_and_a_real_terminal_agree_on_what_is_on_screen() {
         let story = driver::stories_dir().join(STORY);
         if !story.is_file() {
             eprintln!("SKIP: gitignored story missing at {}", story.display());
@@ -367,23 +618,20 @@ mod real_capture {
         let (bg, img): (Vec<&String>, Vec<&String>) =
             all.iter().partition(|d| d.starts_with("background"));
 
-        // The finding, not an assertion (SQ-0772).
         eprintln!(
             "oracle: {} placement(s) a real terminal would draw\n{}",
             res.placements.len(),
             res.describe_placements()
         );
-        eprintln!("oracle: {} image-coverage disagreement run(s) (SQ-0772, not asserted)", img.len());
-        for d in img.iter().take(20) {
-            eprintln!("  {d}");
-        }
 
-        assert!(
-            bg.is_empty(),
-            "our decoder and a real terminal read {} background run(s) differently on the \
-             same bytes; one of the two is wrong:\n{}",
-            bg.len(),
-            bg.iter().take(40).map(|s| format!("  {s}")).collect::<Vec<_>>().join("\n")
-        );
+        for (axis, runs) in [("background", &bg), ("image-coverage", &img)] {
+            assert!(
+                runs.is_empty(),
+                "our decoder and a real terminal read {} {axis} run(s) differently on the \
+                 same bytes; one of the two is wrong:\n{}",
+                runs.len(),
+                runs.iter().take(40).map(|s| format!("  {s}")).collect::<Vec<_>>().join("\n")
+            );
+        }
     }
 }
