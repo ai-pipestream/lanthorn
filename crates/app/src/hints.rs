@@ -170,7 +170,7 @@ const IZM_HINTS: &[(&str, &str)] = &[
 /// game keys against the normalised form lets a multi-word canonical name match
 /// while a stray word inside an unrelated title/filename (e.g. the "Beyond" in
 /// "Brain Guzzlers from Beyond") cannot.
-fn normalize_ident(s: &str) -> String {
+pub(crate) fn normalize_ident(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())

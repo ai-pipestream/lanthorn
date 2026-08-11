@@ -189,7 +189,13 @@ jobs:
             printf '> `docs/release/save-format-policy.md`); across 0.x versions the\n'
             printf '> frozen-tier formats may still break, never silently. The\n'
             printf '> `config.toml` / `style.toml` schemas remain tolerant.\n\n'
-            sed 's/^## .*//' changelog-section.md
+            if [ -s changelog-section.md ]; then
+              sed 's/^## .*//' changelog-section.md
+            else
+              printf '> **No CHANGELOG section found for this tag.** Looked for a\n'
+              printf '> heading matching `## %s` in CHANGELOG.md — add one and\n' "$GITHUB_REF_NAME"
+              printf '> re-run, or edit this draft by hand before publishing.\n\n'
+            fi
             printf '\n### Platform notes\n'
             printf -- '- **Linux** (`x86_64`, glibc, built on Ubuntu 22.04) requires\n'
             printf '  **`libasound2`** at runtime for audio —\n'

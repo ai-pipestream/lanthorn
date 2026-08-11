@@ -735,6 +735,8 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     };
     let banner_title = app::session::title_from_banner(&banner);
     state.title = app::session::resolve_title(None, &ifid, banner_title.as_deref(), &story_path);
+    let story_filename = story_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    state.pane_title = app::session::format_pane_title(&state.title, story_filename);
     state.ifid = ifid.clone();
     state.game_dir = game_dir.clone();
     // Restore the per-game map-panel visibility (SQ-0304): if the user last hid
