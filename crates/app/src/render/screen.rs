@@ -1026,23 +1026,107 @@ fn render_node(
                             .filter(|pw| matches!(&pw.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
                             .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area, 0))
                             .collect();
-                        let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs);
+                        let mut strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs);
                         // An ART strip with no actual art behind it draws a rasterized
                         // slice of the chrome canvas — which carries TEXT too, so on a
                         // text-only v6 story (advent) that is pure noise painted over the
                         // pane. Under a graphics protocol the image composites ABOVE the
                         // cells, so it cannot even be overdrawn. Skip those, and let
                         // `/dump-windows` say which ones were skipped. (SQ-0585)
+                        // SQ-0750: the question is whether art lies behind THIS STRIP, so
+                        // the test is its own native REGION — both axes. It used to ask
+                        // only about the strip's rows, across the canvas's whole width,
+                        // which is the same question for a full-width top/bottom band and
+                        // a different one for a side flank: Journey's right-hand flank is
+                        // eight native pixels of frame border with no artwork in it at
+                        // all, and it was drawn as a band anyway because the LEFT flank's
+                        // picture shares its rows. That band is a bitmap of a `│` the game
+                        // printed as a character — 16x900 px per frame to draw one rule.
+                        // Classify a strip by what is in it, not by where it sits.
                         let strip_has_art = |r: &Rect| -> bool {
+                            let cw = cell_px.0.max(1) as f32;
                             let ch = cell_px.1.max(1) as f32;
-                            let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
-                                / scale.s.max(0.001);
-                            let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
-                                / scale.s.max(0.001);
+                            let s = scale.s.max(0.001);
+                            let inv_x = |c: u16| {
+                                (((c.saturating_sub(area.x)) as f32 * cw - scale.off_x as f32) / s).max(0.0) as u32
+                            };
+                            let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / s;
+                            let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / s;
                             let y0 = top.max(0.0) as u32;
                             let h = (bot.max(0.0) as u32).saturating_sub(y0).max(1);
-                            crate::render::v6_layout::region_has_opaque(&gfx, 0, y0, gfx.width(), h)
+                            let x0 = inv_x(r.x).min(gfx.width());
+                            let x1 = inv_x(r.right()).min(gfx.width()).max(x0);
+                            crate::render::v6_layout::region_has_opaque(&gfx, x0, y0, (x1 - x0).max(1), h)
                         };
+                        // SQ-0747: the QUANTIZATION REMAINDER above the story viewport belongs
+                        // to the flanks, not to the full-width band and not to nothing.
+                        //
+                        // `story_viewport_box` quantizes the story's top edge OUTWARD to a
+                        // whole cell, while the top band runs down to that quantized row. So
+                        // a terminal row can fall between the frame's top rule and the first
+                        // prose row whose own native span is already INSIDE the story box —
+                        // it is the half-cell the viewport rounded away, not chrome. The
+                        // full-width band draws it either way, and both outcomes are wrong:
+                        // with nothing behind it the row classifies Empty → Art → skipped and
+                        // is never written at all (terminal row 2 of the captured 115-column
+                        // frame, across every column: a bare stripe through the picture panel
+                        // and a one-row hole where the frame's top rule meets its two side
+                        // rules), and with the picture's first pixels behind it the band
+                        // paints a one-row squashed slice of the WHOLE canvas across the pane
+                        // — the picture's top standing above its own panel, which is the other
+                        // half of this quest.
+                        //
+                        // The flanks own those columns and have real content in them (their
+                        // borders, their panel ground), so the strip goes to them; the story's
+                        // own columns keep the story's ground, which is what stands beside the
+                        // prose one row lower.
+                        //
+                        // Bounded by CONTENT, and WHOLE STRIPS only. A band that carries the
+                        // game's chrome art down to the viewport — Zork Zero's and Shogun's
+                        // banners, Arthur's header — is one tall strip whose first row is
+                        // above the story box, so neither test below holds for it and it is
+                        // untouched. Trimming a row off such a strip instead of leaving it
+                        // alone would take a row of banner away, which is why this walks
+                        // strips rather than rows.
+                        if strips.iter().any(|s| matches!(s, ChromeStrip::Art(r) if r.width < area.width && r.y == viewport.y)) {
+                            let ch = cell_px.1.max(1) as f32;
+                            let sc = scale.s.max(0.001);
+                            let inv_y = |row: u16| ((row.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / sc;
+                            let mut gap_top = viewport.y;
+                            while gap_top > area.y {
+                                let Some(i) = strips.iter().position(|s| {
+                                    matches!(s, ChromeStrip::Art(r) if r.width == area.width && r.bottom() == gap_top)
+                                }) else {
+                                    break;
+                                };
+                                let ChromeStrip::Art(r) = strips[i] else { unreachable!() };
+                                // Either half of the remainder qualifies, and which one it is
+                                // moves with the pane by fractions of a cell: the strip's own
+                                // native span is already inside the story box (so the band
+                                // would paint a squashed slice of the whole canvas over the
+                                // panel), or the band draws nothing there at all (so the rows
+                                // reach the screen unwritten). Anything else is real chrome and
+                                // stops the walk, as does a TEXT strip, whose runs are the
+                                // game's own.
+                                let remainder = (inv_y(r.y) + inv_y(r.y + 1)) / 2.0 >= story.y_px as f32;
+                                if !remainder && strip_has_art(&r) {
+                                    break;
+                                }
+                                strips.remove(i);
+                                gap_top = r.y;
+                            }
+                            if gap_top < viewport.y {
+                                for s in &mut strips {
+                                    if let ChromeStrip::Art(r) = s {
+                                        if r.width < area.width && r.y == viewport.y {
+                                            r.height += viewport.y - gap_top;
+                                            r.y = gap_top;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let strips = strips;
                         let menu_strips = match &menu {
                             Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs),
                             None => Vec::new(),
@@ -1088,7 +1172,7 @@ fn render_node(
                                             let ext = |which| {
                                                 flank_border_extension(
                                                     *r, area, viewport, &scale, cell_px, story, native, &canvas,
-                                                    &gfx, viewport.bottom(), which,
+                                                    &gfx, &chrome_runs, viewport.bottom(), which,
                                                 )
                                             };
                                             let inner = ext(FlankBorder::Inner);
@@ -1159,7 +1243,10 @@ fn render_node(
                                     ChromeStrip::Art(r) => Some((crate::render::graphics::BandSlot::Art as u8, r.x, r.y, r.width, r.height)),
                                     ChromeStrip::Text(..) => None,
                                 })
-                                .chain(divider_exts.iter().map(|(r, _)| {
+                                // A GLYPH border (SQ-0750) uploads nothing, so it claims no
+                                // cache key: a live key nothing re-places is the stale
+                                // placement SQ-0587 records.
+                                .chain(divider_exts.iter().filter(|(_, ink)| matches!(ink, BorderInk::Band(_))).map(|(r, _)| {
                                     (crate::render::graphics::BandSlot::DividerExtension as u8, r.x, r.y, r.width, r.height)
                                 }))
                                 .chain(flank_panels.iter().map(|(_, (_, _, d, _))| {
@@ -1221,8 +1308,28 @@ fn render_node(
                             // the vertical replicate is invisible); the rest of the gap is
                             // left undrawn (theme backdrop, matching the flank's own
                             // never-painted background beside the divider).
-                            for (ext, crop) in &divider_exts {
-                                gr.draw_chrome_band_stretched(picker, &canvas, *ext, *crop, crate::render::graphics::BandSlot::DividerExtension, buf);
+                            // SQ-0750: a border the game printed as a CHARACTER is stamped
+                            // as that character, in the game's own style and colours —
+                            // never uploaded as a bitmap of itself. This is the same
+                            // column, in the same cells, that the band path drew; only the
+                            // medium changes, so it now matches the frame's top and bottom
+                            // rules (font glyphs both) instead of standing beside them as a
+                            // resampled image of the same `│`.
+                            for (ext, ink) in &divider_exts {
+                                match ink {
+                                    BorderInk::Band(crop) => gr.draw_chrome_band_stretched(
+                                        picker, &canvas, *ext, *crop, crate::render::graphics::BandSlot::DividerExtension, buf,
+                                    ),
+                                    BorderInk::Glyph(ch, style, fg, bg) => {
+                                        let st = v6_run_style(base, *fg, *bg, *style, state.config.honor_game_colours, &state.colors);
+                                        let g = ch.to_string();
+                                        for y in ext.y..ext.bottom() {
+                                            for x in ext.x..ext.right() {
+                                                buf.set_stringn(x, y, &g, 1, st);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             if let Some(ms) = &menu {
                                 for strip in &menu_strips {
@@ -1364,9 +1471,21 @@ fn render_node(
                                 for (label, e) in
                                     [("flank-divider", inner), ("flank-border", outer)]
                                 {
-                                    if let Some((ext, crop)) = e {
-                                        let c = (crop.0 as u16, crop.1 as u16, crop.2 as u16, crop.3 as u16);
-                                        map.push(rec(label, c, *ext));
+                                    // …and a GLYPH border says so, and says which character
+                                    // it stamps (SQ-0750). "The frame's sides are a bitmap
+                                    // of a character" is the other sentence this dump could
+                                    // not say, and the whole of that quest.
+                                    match e {
+                                        Some((ext, BorderInk::Band(crop))) => {
+                                            let c = (crop.0 as u16, crop.1 as u16, crop.2 as u16, crop.3 as u16);
+                                            map.push(rec(label, c, *ext));
+                                        }
+                                        Some((ext, BorderInk::Glyph(ch, style, ..))) => map.push(rec(
+                                            &format!("{label} (glyph {ch:?} style={style:02b})"),
+                                            (0, 0, 0, 0),
+                                            *ext,
+                                        )),
+                                        None => {}
                                     }
                                 }
                             }
@@ -3533,9 +3652,22 @@ fn flank_crop(
 /// A native `(x, y, w, h)` crop of the chrome canvas, as a band draw takes it.
 type BandCrop = (u32, u32, u32, u32);
 
+/// How a flank's border column reaches the screen (SQ-0750).
+///
+/// In hybrid, never rasterise what the game printed as a character: a border made
+/// of the game's own characters is stamped as those characters, and only pixels the
+/// paint runs cannot account for — genuine artwork — are carried as a bitmap.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BorderInk {
+    /// Artwork: a one-native-row crop of the chrome canvas, replicated down the band.
+    Band(BandCrop),
+    /// The game's own character, with its Z-machine style bits and packed colours.
+    Glyph(char, u8, u32, u32),
+}
+
 /// One of a flank's border columns carried down the reclaimed gap: where it is
-/// drawn, and the native crop it replicates.
-type FlankBorderExt = (Rect, BandCrop);
+/// drawn, and what it is drawn WITH.
+type FlankBorderExt = (Rect, BorderInk);
 
 /// What [`menu_flank_panel`] resolves for a side flank: the panel background, the
 /// rect to flood with it, the destination rect for the vertically centred art,
@@ -3713,6 +3845,21 @@ enum FlankBorder {
 /// probe from their own side, so one calculation bounds the panel and draws both of its
 /// borders. Returns `None` when that column is not there or the gap is empty.
 /// `menu_top_row` is the bottom-anchored menu strip's top cell (viewport bottom).
+///
+/// SQ-0750: …unless the game printed that border as a CHARACTER, in which case the
+/// column comes back as [`BorderInk::Glyph`] and is stamped, not uploaded. The test
+/// is content, not position and not the interpreter profile: the graphics-only
+/// canvas must carry no artwork in the border's own native columns over the story's
+/// rows, AND one of the game's own paint runs must ink them. Both hold for Journey's
+/// four frame rules under either profile — box-drawing glyphs on the Amiga, reverse-
+/// video spaces on the IBM PC — and neither holds for Zork Zero's, Shogun's or
+/// Arthur's side columns, which are pictures and stay bitmaps.
+///
+/// The glyph column is placed by [`run_cell`], the very mapping the frame's top rule
+/// uses for its own corner, so the rule cannot land a column off the `┌` it hangs
+/// from — and it is one column wide by construction, where the band's cell span can
+/// be two and would have stamped a double rule.
+#[allow(clippy::too_many_arguments)]
 fn flank_border_extension(
     band: Rect,
     pane: Rect,
@@ -3723,6 +3870,7 @@ fn flank_border_extension(
     native: (u16, u16),
     canvas: &image::RgbaImage,
     gfx: &image::RgbaImage,
+    runs: &[&crate::engine::PxText],
     menu_top_row: u16,
     which: FlankBorder,
 ) -> Option<FlankBorderExt> {
@@ -3830,6 +3978,44 @@ fn flank_border_extension(
     // longer drawn — and the divider column lies to the RIGHT of the picture, so
     // running it full height covers the gap without touching the art.
     let ext = Rect::new(dcell0, band.y, dcell1 - dcell0, menu_top_row - band.y);
+    // SQ-0750, THE CONTENT TEST: do the game's own paint runs account for this
+    // column's pixels? Two conditions, and both are about what is in the column
+    // rather than where it sits or which interpreter profile is loaded:
+    //
+    //   1. the GRAPHICS-only canvas is clear across the border's native columns for
+    //      the story's whole row span — no artwork is hiding under the ink; and
+    //   2. one of the game's paint runs covers those columns at the row we sampled,
+    //      and the character it puts there actually inks something (a bare space
+    //      that is not reverse-video inks nothing, so it cannot be what we found).
+    //
+    // Then the column is a CHARACTER, and hybrid draws characters as characters.
+    // The rule reaches the screen through `run_cell` — the same mapping the frame's
+    // top rule uses to place its corner — so the two meet in one column instead of
+    // a font glyph sitting above a resampled bitmap of the same character.
+    let text_border = (|| {
+        if (dnx0..dnx1).any(|x| {
+            (sy0..sy1).any(|y| x < gfx.width() && y < gfx.height() && gfx.get_pixel(x, y)[3] >= 128)
+        }) {
+            return None;
+        }
+        let t = runs.iter().copied().find(|t| {
+            let py = t.y.max(1) as u32 - 1;
+            let px0 = t.x.max(1) as u32 - 1;
+            let w = t.text.chars().count().max(1) as u32 * 8;
+            (py..py + 16).contains(&mid) && (px0..px0 + w).contains(&dnx0)
+        })?;
+        let ch = t.text.chars().nth(((dnx0 - (t.x.max(1) as u32 - 1)) / 8) as usize)?;
+        if ch == ' ' && t.style & 1 == 0 {
+            return None;
+        }
+        let col = run_cell(t, scale, cell_px, pane).0 + ((dnx0 - (t.x.max(1) as u32 - 1)) / 8) as i32;
+        let col = u16::try_from(col).ok()?;
+        (col >= band.x && col < band.right())
+            .then_some((Rect::new(col, ext.y, 1, ext.height), BorderInk::Glyph(ch, t.style, t.fg, t.bg)))
+    })();
+    if let Some(g) = text_border {
+        return Some(g);
+    }
     // SQ-0750: the crop is the native columns those CELLS cover, not the inked run
     // alone. `draw_chrome_band_stretched` resizes the crop to fill the band, so the
     // crop's width IS the horizontal magnification — and cropping to the ink alone
@@ -3853,7 +4039,7 @@ fn flank_border_extension(
     if cnx1 <= cnx0 {
         return None;
     }
-    Some((ext, (cnx0, mid, cnx1 - cnx0, 1)))
+    Some((ext, BorderInk::Band((cnx0, mid, cnx1 - cnx0, 1))))
 }
 
 /// Map a chrome run's native top-left game pixel to its pane-absolute terminal

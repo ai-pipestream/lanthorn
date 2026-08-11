@@ -478,7 +478,10 @@ fn journey_frame_sides_reach_the_menu_under_both_profiles() {
                     .unwrap_or_else(|| panic!("{ctx}: the ring records its viewport"))
                     .cells;
                 let dividers: Vec<(u16, u16, u16, u16)> =
-                    map.iter().filter(|e| e.label == "flank-divider").map(|e| e.cells).collect();
+                    // Prefix, so a border STAMPED as the game's own character counts too
+                    // (SQ-0750) — the frame reaching the menu is the invariant here,
+                    // whichever medium carries it.
+                    map.iter().filter(|e| e.label.starts_with("flank-divider")).map(|e| e.cells).collect();
                 assert!(
                     dividers.len() >= 2,
                     "{ctx}: {} flank dividers — the frame's side borders are drawn from the \
@@ -571,14 +574,26 @@ fn flank_dividers(state: &app::state::AppState) -> Vec<(Quad, Quad)> {
 }
 
 /// Every `/dump-windows` record under one label: `(cell rect, native rect)`.
+///
+/// Matched by PREFIX. SQ-0750: a border the game printed as a character is now
+/// stamped as that character rather than uploaded as a bitmap of it, and its record
+/// says which (`flank-divider (glyph '│' style=00)`). Both media are collected here;
+/// [`is_glyph`] tells them apart where the distinction matters.
 fn flank_records(state: &app::state::AppState, label: &str) -> Vec<(Quad, Quad)> {
     state
         .v6_cell_map
         .borrow()
         .iter()
-        .filter(|e| e.label == label)
+        .filter(|e| e.label == label || e.label.starts_with(&format!("{label} (")))
         .map(|e| (e.cells, e.native))
         .collect()
+}
+
+/// Was this border STAMPED as the game's own character (SQ-0750) rather than
+/// uploaded as a bitmap of it? A glyph carries no native crop — there is nothing to
+/// crop, and nothing to magnify.
+fn is_glyph(crop: Quad) -> bool {
+    crop == (0, 0, 0, 0)
 }
 
 /// The story viewport this frame resolved, in pane-absolute cells.
@@ -630,6 +645,19 @@ fn journey_flank_border_is_drawn_at_the_letterbox_scale() {
                 assert_eq!(dividers.len(), 2, "{ctx}: both flanks carry a border ({dividers:?})");
                 for (i, (ext, crop)) in dividers.iter().enumerate() {
                     let side = if i == 0 { "left" } else { "right" };
+                    // SQ-0750: a border stamped as the game's own CHARACTER has no
+                    // magnification to check — it is not resampled at all. What it must be
+                    // is exactly one column wide, because a rule is one column: the band's
+                    // cell span can be two (it is, at the user's 163-column pane) and
+                    // stamping the glyph across both would draw a double rule.
+                    if is_glyph(*crop) {
+                        assert_eq!(
+                            ext.2, 1,
+                            "{ctx}: the {side} flank border is stamped as a character, so it \
+                             stands in ONE column — got {ext:?}"
+                        );
+                        continue;
+                    }
                     assert!(crop.2 > 0, "{ctx}: the {side} flank border has an empty crop {crop:?}");
                     let mag = (ext.2 as f32 * cell_w as f32) / crop.2 as f32;
                     assert!(
@@ -909,13 +937,18 @@ fn journey_flank_outer_border_is_drawn_when_the_game_drew_one() {
                             "{ctx}: the outer border stands in the pane's outer column, with the \
                              frame's corners — got {ext:?}"
                         );
-                        // …drawn at the ring's scale, like every other pixel in it (SQ-0750).
-                        let mag = (ext.2 as f32 * cell_w as f32) / (crop.2.max(1) as f32);
-                        assert!(
-                            (mag - s).abs() <= s * 0.2,
-                            "{ctx}: the outer border is magnified {mag:.2}x against a letterbox \
-                             scale of {s:.2}x (ext {ext:?}, crop {crop:?})"
-                        );
+                        // …drawn at the ring's scale, like every other pixel in it — or,
+                        // once SQ-0750 landed, not drawn as pixels at all: the game printed
+                        // this border as a `│`, so it is stamped as one and there is no
+                        // magnification to be wrong about.
+                        if !is_glyph(crop) {
+                            let mag = (ext.2 as f32 * cell_w as f32) / (crop.2.max(1) as f32);
+                            assert!(
+                                (mag - s).abs() <= s * 0.2,
+                                "{ctx}: the outer border is magnified {mag:.2}x against a letterbox \
+                                 scale of {s:.2}x (ext {ext:?}, crop {crop:?})"
+                            );
+                        }
                         // …and at the pane the user reported, something is visibly there: the
                         // column no longer reads as an unbroken run of the panel's own flood.
                         //

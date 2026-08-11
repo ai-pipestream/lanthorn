@@ -30,6 +30,24 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+/// Does the frame's side rule reach this cell?
+///
+/// SQ-0750: hybrid no longer uploads a bitmap of a border the game printed as a
+/// CHARACTER — it stamps the character. So the divider's ink is a reverse-video space
+/// (a solid block carried by the REVERSED modifier over the theme's own colours) or a
+/// box-drawing glyph, and a cell-BACKGROUND luminance probe, which is what every case
+/// below used, stopped seeing a divider that is drawn perfectly well. Ask about all
+/// three media instead: a light background, a reversed cell, or a glyph.
+fn is_divider(buf: &Buffer, x: u16, y: u16) -> bool {
+    use ratatui::style::{Color, Modifier};
+    let Some(c) = buf.cell((x, y)) else { return false };
+    let lum = match c.bg {
+        Color::Rgb(r, g, b) => r as u16 + g as u16 + b as u16,
+        _ => 0,
+    };
+    lum > 400 || c.style().add_modifier.contains(Modifier::REVERSED) || !c.symbol().trim().is_empty()
+}
+
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -635,20 +653,17 @@ fn journey_hybrid_tall_pane_divider_reaches_menu() {
             row_text(y)
         );
     }
-    // The grey divider (native [232,240), ~[220,220,220]) — NOT the dark gap fill — is
-    // carried on down through the reclaimed gap to the menu: on a deep reclaimed row
-    // the flank cell abutting the story is markedly lighter than the interior fill.
-    let lum = |x: u16, y: u16| match buf.cell((x, y)).unwrap().bg {
-        Color::Rgb(r, g, b) => r as u16 + g as u16 + b as u16,
-        _ => 0,
-    };
+    // The divider — NOT the dark gap fill — is carried on down through the reclaimed
+    // gap to the menu: on a deep reclaimed row the flank cell abutting the story
+    // carries the frame's rule and the interior does not.
     let deep = proceed_y.saturating_sub(2);
     assert!(deep > picture_bottom, "the deep probe row {deep} is inside the reclaimed gap (picture {picture_bottom})");
     assert!(
-        lum(vp.x - 1, deep) > 400 && lum(vp.x - 1, deep) > lum(vp.x / 2, deep) + 200,
-        "the grey divider reaches the reclaimed row {deep}: edge lum {} stands out over interior lum {}",
-        lum(vp.x - 1, deep),
-        lum(vp.x / 2, deep)
+        is_divider(&buf, vp.x - 1, deep) && !is_divider(&buf, vp.x / 2, deep),
+        "the divider reaches the reclaimed row {deep}: the flank's edge cell must carry the \
+         frame's rule and the interior must not (edge {:?}, interior {:?})",
+        buf.cell((vp.x - 1, deep)).unwrap(),
+        buf.cell((vp.x / 2, deep)).unwrap()
     );
 }
 
@@ -681,19 +696,15 @@ fn journey_hybrid_tall_pane_panel_fill_reaches_the_divider() {
         (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
     };
     let proceed_y = (0..area.height).find(|&y| row_text(y).contains("Proceed")).expect("'Proceed' menu row");
-    let lum = |x: u16, y: u16| match buf.cell((x, y)).unwrap().bg {
-        Color::Rgb(r, g, b) => r as u16 + g as u16 + b as u16,
-        _ => 0,
-    };
 
     // (b) The divider reaches every row of the column — including the rows the
     // picture sits on, and the rows ABOVE it, not just the reclaimed gap below.
     for y in [vp.y + 1, vp.y + vp.height / 2, proceed_y.saturating_sub(2)] {
         assert!(
-            lum(vp.x - 1, y) > 400,
-            "the divider runs the whole flank column: row {y} col {} has lum {} (row: {:?})",
+            is_divider(&buf, vp.x - 1, y),
+            "the divider runs the whole flank column: row {y} col {} carries {:?} (row: {:?})",
             vp.x - 1,
-            lum(vp.x - 1, y),
+            buf.cell((vp.x - 1, y)).unwrap(),
             row_text(y)
         );
     }
@@ -704,7 +715,7 @@ fn journey_hybrid_tall_pane_panel_fill_reaches_the_divider() {
     // (a plain space), not a halfblock of the picture.
     let mid = vp.y + vp.height / 2;
     let mut dx = vp.x;
-    while dx > 1 && lum(dx - 1, mid) > 400 {
+    while dx > 1 && is_divider(&buf, dx - 1, mid) {
         dx -= 1;
     }
     let gap = buf.cell((dx - 1, mid)).unwrap();
@@ -786,10 +797,28 @@ fn journey_hybrid_flank_panel_meets_the_menu_at_every_width() {
         // the header carry the SAME panel fill and the SAME divider colour. The bar
         // showed up as the bottom one of these differing from the two above it.
         let bg = |x: u16, y: u16| buf.cell((x, y)).unwrap().bg;
-        let (fill, edge) = (bg(2, header_y - 3), bg(vp.x - 1, header_y - 3));
+        // The divider is probed at ITS OWN column and compared as a whole CELL, not as
+        // the background of the column beside the viewport. Since SQ-0750 the rule is
+        // the game's own character, placed by the same mapping the frame's top rule
+        // uses for its corner, so it stands one column wide where the game drew it —
+        // which at some pane widths is not `vp.x - 1`. The viewport is quantized INWARD
+        // to whole cells and the rule OUTWARD, and the column that can fall between
+        // them belongs to neither (SQ-0747 item A): it keeps the story's own ground.
+        let rule_x = state
+            .v6_cell_map
+            .borrow()
+            .iter()
+            .filter(|e| e.label.starts_with("flank-divider"))
+            .map(|e| e.cells)
+            .find(|c| c.0 < vp.x)
+            .map(|c| c.0)
+            .unwrap_or(vp.x - 1);
+        let edge_cell = |y: u16| buf.cell((rule_x, y)).unwrap().clone();
+        let (fill, edge) = (bg(2, header_y - 3), edge_cell(header_y - 3));
         assert!(
-            matches!(fill, Color::Rgb(..)) && matches!(edge, Color::Rgb(..)),
-            "w={w}: the flank column carries the game's panel fill and divider (fill {fill:?}, edge {edge:?})"
+            matches!(fill, Color::Rgb(..)) && is_divider(&buf, rule_x, header_y - 3),
+            "w={w}: the flank column carries the game's panel fill and divider at column \
+             {rule_x} (fill {fill:?}, edge {edge:?})"
         );
         for y in (header_y - 2)..header_y {
             assert_eq!(
@@ -802,11 +831,11 @@ fn journey_hybrid_flank_panel_meets_the_menu_at_every_width() {
                 row_text(y)
             );
             assert_eq!(
-                bg(vp.x - 1, y),
+                edge_cell(y),
                 edge,
                 "w={w}: the divider runs unbroken to the menu — row {y} edge is {:?}, \
                  not the {edge:?} of row {} (row: {:?})",
-                bg(vp.x - 1, y),
+                edge_cell(y),
                 header_y - 3,
                 row_text(y)
             );

@@ -289,6 +289,20 @@ session-only switch that never touches your saved config:
   A game whose frame *encloses* the story to the screen bottom (Zork Zero's full
   frame) keeps the centred letterbox untouched, and a pane at or below the scaled
   native height (no dead space) degrades to that same centred layout.
+  In hybrid, **nothing the game printed as a character is ever rasterised**. A strip
+  is classified by what is *in* it, never by where it sits: a side column whose
+  pixels the game's own paint runs fully account for is drawn with those characters,
+  and only pixels the runs cannot explain — genuine artwork — go up as a bitmap.
+  Journey draws its frame as text under both interpreter profiles (box-drawing
+  glyphs on the Amiga, reverse-video spaces on the IBM PC), so its four vertical
+  rules are now stamped in the terminal's own font, standing in the same columns as
+  the `┌` and `┐` on the rule above them, instead of arriving as four RGBA uploads —
+  about 192 KB a frame to draw two hundred `│`s, in a different renderer from the
+  corners they hang off. Zork Zero's, Shogun's and Arthur's side columns are
+  pictures, the runs cannot account for them, and they stay pictures. The half-cell
+  a story window's top edge rounds away goes to the flanks too, so the frame closes
+  at its corner instead of leaving an unwritten row between the top rule and the
+  first line of prose.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively. Its default ink/page follow the theme; where the
@@ -907,7 +921,11 @@ screen an image is painting. A flank's picture is drawn at a rect the panel deri
 rather than at the strip's, and it used to be missing from this list entirely: two
 investigations of Journey's picture column reasoned about it from the strip beside
 it, because the one band they wanted to see was the one band the dump could not
-name.
+name. A flank's two border columns say which **medium** they came out in — a
+`flank-divider (glyph '│' style=00)` line is a rule stamped in the terminal's font,
+carrying no crop because there is nothing to crop, while a plain `flank-divider`
+with a native crop beside it is still a bitmap. "The frame's sides are a picture of
+a character" is a sentence this dump can now say in one line.
 
 The dump also lands in **`~/.babelmap/dump-windows.log`**, appended, with a
 timestamp per capture, and the transcript line names the path. Selecting the

@@ -358,8 +358,14 @@ fn journey_boot_passage_starts_at_the_top_of_the_story_panel() {
             );
 
             // …in the panel's own columns, not the picture's.
+            //
+            // Measured from the PASSAGE's own column, not from the row's first non-blank
+            // cell. SQ-0750: the frame's side rule is a `│` the game printed, and hybrid
+            // now stamps it as that character instead of uploading a bitmap of it — so the
+            // row's first non-blank cell is the frame's own edge at column 1, which says
+            // nothing about where the prose starts.
             let line = &rows[(at - area.y) as usize];
-            let first = line.find(|c: char| !c.is_whitespace()).unwrap_or(0) as u16 + area.x;
+            let first = line.find(INTRO_LINE).unwrap_or(0) as u16 + area.x;
             assert!(
                 first >= vp.0,
                 "{ctx}: the boot passage starts at pane column {first}, left of the story panel \
