@@ -271,7 +271,10 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // canvas's default ink/page so "terminal default" theme colours follow the
     // real terminal instead of a hardcoded light-grey-on-black. Never hangs;
     // terminals that don't answer leave both as None and keep today's fallbacks.
-    let term_default_colors = app::term_colors::query_terminal_default_colors();
+    // SQ-0769: the probe hands back a sweep as well as the colours. A terminal
+    // busy with the picker's last frame answers after the drain has given up, and
+    // the sweep is what keeps those replies out of the story — see `query_sweep`.
+    let (term_default_colors, query_sweep) = app::term_colors::query_terminal_default_colors();
     let char_px = game_picker
         .as_ref()
         .map(|p| {
@@ -656,6 +659,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
     state.term_default_colors = term_default_colors;
+    state.query_sweep = query_sweep;
     state.pane_sizes = app::state::PaneSizes {
         split_ratio: cfg.split_ratio,
         band_height: cfg.command_band.height,

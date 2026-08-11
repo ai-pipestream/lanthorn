@@ -2539,6 +2539,10 @@ pub struct AppState {
     /// the v6 raster canvas's default ink/page when the theme leaves them at
     /// "terminal default"; each field is `None` when the terminal didn't answer.
     pub term_default_colors: crate::term_colors::TermDefaultColors,
+    /// Unfinished business from that probe (SQ-0769): while the terminal still
+    /// owes an answer this owns the tty, so a late reply is read as the reply it
+    /// is instead of reaching the story as a burst of keystrokes.
+    pub query_sweep: crate::query_sweep::QuerySweep,
     /// Cached graphics-window protocols (interior-mutable for the render pass).
     pub graphics_render: std::cell::RefCell<crate::render::graphics::GraphicsRender>,
     /// Inline-image band blitter (interior-mutable for the render pass).
@@ -2695,6 +2699,7 @@ impl Default for AppState {
             picture_pace_next: None,
             game_picker: None,
             term_default_colors: crate::term_colors::TermDefaultColors::default(),
+            query_sweep: crate::query_sweep::QuerySweep::default(),
             graphics_render: std::cell::RefCell::new(Default::default()),
             inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,

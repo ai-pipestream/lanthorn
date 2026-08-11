@@ -46,7 +46,7 @@ static CELL_PX: OnceLock<(u16, u16)> = OnceLock::new();
 /// terminal events. Never hangs; never leaks reply bytes into the app's input.
 pub fn query_pixel_mouse_support() -> bool {
     let supported = crate::term_colors::query_with(QUERY)
-        .map(|reply| parse_decrpm_set(&reply, 1016))
+        .map(|reply| parse_decrpm_set(&reply.text, 1016))
         .unwrap_or(false);
     if !supported {
         use std::io::Write as _;

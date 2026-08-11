@@ -19,8 +19,16 @@
 //! that never answers, later swallowed up to 64 bytes of the player's first
 //! keystrokes before noticing the dead channel. The non-blocking drain leaves
 //! nothing behind: when this function returns, nobody is reading stdin.
-//! A terminal that answers nothing sent nothing, so there is nothing left to
-//! leak; we return `None` for both colours and the caller keeps its fallbacks.
+//!
+//! SQ-0769: "a terminal that answers nothing sent nothing" was the hole. A busy
+//! terminal — a picker launch leaves one, having just swallowed a screenful of
+//! kitty graphics — answers AFTER the silent window closes, and by then nobody is
+//! reading: the replies sit in the tty until the game reads them as keystrokes.
+//! So the probe now reports whether it actually read the DSR answer it asked for,
+//! and hands the outstanding case to [`crate::query_sweep`], which keeps the tty
+//! until the answer arrives. Whatever the drain read that was NOT part of a reply
+//! rides along too — that is the player's type-ahead, which this function used to
+//! read into the reply buffer and throw away with it.
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -48,14 +56,38 @@ pub struct TermDefaultColors {
 /// Query OSC 10 / OSC 11 on the current terminal. Must be called in the pre-UI
 /// query window (before the app's own raw-mode/alternate-screen, alongside the
 /// image-protocol Picker probe). Never hangs; never leaks reply bytes.
-pub fn query_terminal_default_colors() -> TermDefaultColors {
+///
+/// Returns the colours together with the [`QuerySweep`](crate::query_sweep::QuerySweep)
+/// that finishes the job: it holds the tty if the terminal has not answered yet,
+/// and carries any type-ahead the drain picked up (SQ-0769).
+pub fn query_terminal_default_colors() -> (TermDefaultColors, crate::query_sweep::QuerySweep) {
     // OSC 10 (fg) + OSC 11 (bg), each `?`-queried and BEL-terminated, then a DSR
     // that responding terminals answer last — its reply (`ESC[0n`) marks the end
     // of the drain.
-    match query_with(b"\x1b]10;?\x07\x1b]11;?\x07\x1b[5n") {
-        Some(reply) => parse_osc_colors(&reply),
-        None => TermDefaultColors::default(),
-    }
+    let reply = query_with(b"\x1b]10;?\x07\x1b]11;?\x07\x1b[5n");
+    let colors = reply.as_ref().map(|r| parse_osc_colors(&r.text)).unwrap_or_default();
+    let sweep = match reply {
+        // The terminal answered our DSR, so every reply in the batch is behind us
+        // and nothing can arrive late. Replay whatever the player typed into it.
+        Some(r) if r.answered => crate::query_sweep::QuerySweep::settled(r.typed),
+        // Either it has not answered yet or it never will; the sweep finds out
+        // without letting the answer reach the story.
+        Some(r) => crate::query_sweep::QuerySweep::owed(r.typed),
+        // Never asked (not a tty), so nothing can come back.
+        None => crate::query_sweep::QuerySweep::settled(Vec::new()),
+    };
+    (colors, sweep)
+}
+
+/// What a probe read back.
+pub(crate) struct QueryReply {
+    /// Everything the drain read, replies and all.
+    pub text: String,
+    /// The DSR answer (`ESC[0n`) was among it — the batch is complete.
+    pub answered: bool,
+    /// The bytes that were not part of any escape sequence: the player typing
+    /// while we waited. Kept for replay rather than discarded with the replies.
+    pub typed: Vec<u8>,
 }
 
 /// Run any terminal query that ends in a DSR (`ESC[5n`) and return the raw reply.
@@ -64,16 +96,20 @@ pub fn query_terminal_default_colors() -> TermDefaultColors {
 /// stops at the DSR reply — which drains every earlier reply with it — and a
 /// bounded wait so a silent terminal costs one timeout rather than a hang.
 ///
-/// `None` when the terminal cannot be put in raw mode (a piped stdio never
-/// answers) or answered nothing at all.
-pub(crate) fn query_with(query: &[u8]) -> Option<String> {
+/// `None` means the question was never ASKED — the terminal could not be put in
+/// raw mode, which is what a piped stdio looks like. That is a different thing
+/// from asking and hearing nothing back (`Some` with an empty `text`), because
+/// only the second one can still be answered later (SQ-0769).
+pub(crate) fn query_with(query: &[u8]) -> Option<QueryReply> {
     // A non-tty (piped) stdout/stdin never answers; skip to avoid the timeout.
     if crossterm::terminal::enable_raw_mode().is_err() {
         return None;
     }
-    let reply = read_query_reply(query);
+    let text = read_query_reply(query);
     let _ = crossterm::terminal::disable_raw_mode();
-    (!reply.is_empty()).then_some(reply)
+    let answered = text.contains("\x1b[0n");
+    let typed = crate::query_sweep::typed_bytes(text.as_bytes());
+    Some(QueryReply { text, answered, typed })
 }
 
 /// Write `query` and read the reply, bounded by a timeout. SQ-0642: the drain
@@ -102,12 +138,17 @@ enum ReadStep {
 }
 
 /// The pure drain loop, factored over the read primitive so it is unit-testable
-/// without a tty. Reads chunks until the DSR reply (`ESC[0n`) arrives (return
-/// the full buffer), the source closes (return what arrived), or a silent
-/// [`READ_TIMEOUT`] window passes with no bytes at all (give up → empty, the
-/// same as the old worker-thread behaviour). The window resets on every chunk
-/// so a slow-but-responsive terminal is not cut off. When this returns, no
-/// reader of any kind remains — that is the point (SQ-0642).
+/// without a tty. Reads chunks until the DSR reply (`ESC[0n`) arrives, the
+/// source closes, or a silent [`READ_TIMEOUT`] window passes; in every case it
+/// returns what it read. The window resets on every chunk so a slow-but-
+/// responsive terminal is not cut off. When this returns, no reader of any kind
+/// remains — that is the point (SQ-0642).
+///
+/// SQ-0769: the give-up path used to return an EMPTY string and drop whatever
+/// had arrived. A terminal that answers late is not the only thing that lands
+/// here — so does a player typing while a big story boots, and their keystrokes
+/// went into the bin with the half-reply. The caller sorts replies from typing
+/// (`query_sweep::typed_bytes`); this one just stops holding the bag.
 #[cfg(any(unix, test))]
 fn drain_until_dsr(mut read: impl FnMut(&mut [u8; 64]) -> ReadStep) -> String {
     let mut buf = String::new();
@@ -127,7 +168,7 @@ fn drain_until_dsr(mut read: impl FnMut(&mut [u8; 64]) -> ReadStep) -> String {
             }
             ReadStep::NotReady => {
                 if Instant::now() >= deadline {
-                    return String::new(); // silent terminal — give up
+                    return buf; // gone quiet — give up, but keep what arrived
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
