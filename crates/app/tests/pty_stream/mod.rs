@@ -14,6 +14,9 @@
 //!   * [`decode`] (portable) — bytes to named sequences and a screen model;
 //!   * [`oracle`] (portable) — the same bytes through a real terminal emulator,
 //!     so the answer above has a second, independently-authored witness (SQ-0764);
+//!   * [`raster`] (portable) — that resolved screen drawn as a PNG, so a frame
+//!     can be LOOKED at instead of reproduced (SQ-0775). Layout, art placement
+//!     and colour only; read its module docs before trusting it as a screenshot;
 //!   * the report below — the model rendered for a human to read.
 //!
 //! Ad hoc: `cargo run -p app --example pty_capture -- --help`.
@@ -26,6 +29,7 @@ pub mod decode;
 #[cfg(unix)]
 pub mod driver;
 pub mod oracle;
+pub mod raster;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

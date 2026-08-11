@@ -6,8 +6,13 @@
 //! cargo run -p app --example pty_capture -- \
 //!     --story "stories/Journey - The Quest Begins.adf" \
 //!     --size 117x64 --keys cr,wait:800,cr,wait:800,cr \
-//!     --out /tmp/journey.stream.txt
+//!     --out /tmp/journey.stream.txt --png /tmp/journey.png
 //! ```
+//!
+//! `--png` draws the screen the oracle resolved (SQ-0775), for when the question
+//! is "does this frame look right" and there is no terminal to answer it in. It
+//! is an oracle for layout, art placement and colour — not a screenshot; the
+//! caveats are in `tests/pty_stream/raster.rs`.
 //!
 //! The report names the graphics protocol that actually negotiated first, and
 //! refuses to pretend: if babelmap fell back to half-blocks, everything below it
@@ -28,6 +33,8 @@ fn main() -> std::process::ExitCode {
     let mut bin: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut raw: Option<PathBuf> = None;
+    let mut png: Option<PathBuf> = None;
+    let mut png_diff: Option<PathBuf> = None;
     let mut user_dir: Option<PathBuf> = None;
     let mut keys: Vec<Key> = Vec::new();
     let mut cols = 117u16;
@@ -61,6 +68,14 @@ fn main() -> std::process::ExitCode {
             }
             "--raw" => {
                 raw = Some(PathBuf::from(need(i)));
+                i += 1;
+            }
+            "--png" => {
+                png = Some(PathBuf::from(need(i)));
+                i += 1;
+            }
+            "--png-diff" => {
+                png_diff = Some(PathBuf::from(need(i)));
                 i += 1;
             }
             "--user-dir" => {
@@ -162,8 +177,42 @@ fn main() -> std::process::ExitCode {
         }
     }
     let term = pty_stream::decode_capture(&cap);
+    // One resolution, shared by the report and the picture: they must describe
+    // the same screen, and a second `resolve` on a multi-megabyte capture is the
+    // most expensive thing this program does.
+    let res = pty_stream::oracle::resolve(
+        &cap.bytes,
+        cap.spec.cols,
+        cap.spec.rows,
+        u32::from(cap.spec.cell_w),
+        u32::from(cap.spec.cell_h),
+    );
+    if let Some(path) = &png {
+        let mut canvas = pty_stream::raster::render(&res);
+        // A before/after pair is one flag, not a second mode: capture the old
+        // build to a PNG, then run the new one with that file as `--png-diff`.
+        // Nothing here has to know how the earlier picture was produced.
+        if let Some(before) = &png_diff {
+            match image::open(before) {
+                Ok(img) => canvas = pty_stream::raster::side_by_side(&img.to_rgba8(), &canvas),
+                Err(e) => eprintln!("pty_capture: reading {}: {e} — writing this frame alone", before.display()),
+            }
+        }
+        match canvas.save(path) {
+            Ok(()) => println!(
+                "png      : {} ({}x{} px, {} cell(s) at {}x{})",
+                path.display(),
+                canvas.width(),
+                canvas.height(),
+                u32::from(cap.spec.cols) * u32::from(cap.spec.rows),
+                cap.spec.cell_w,
+                cap.spec.cell_h
+            ),
+            Err(e) => eprintln!("pty_capture: writing {}: {e}", path.display()),
+        }
+    }
     let mut text = pty_stream::report(&cap, &term);
-    text.push_str(&oracle_section(&cap, &term));
+    text.push_str(&oracle_section(&res, &term));
     match &out {
         Some(path) => {
             if let Err(e) = std::fs::write(path, &text) {
@@ -174,7 +223,7 @@ fn main() -> std::process::ExitCode {
             let head: String = text.lines().take_while(|l| !l.starts_with("--- flushes")).collect::<Vec<_>>().join("\n");
             println!("{head}");
             print!("{}", pty_stream::screen_report(&term));
-            print!("{}", oracle_section(&cap, &term));
+            print!("{}", oracle_section(&res, &term));
             println!("\nfull report: {}", path.display());
         }
         None => print!("{text}"),
@@ -195,23 +244,16 @@ fn main() -> std::process::ExitCode {
 /// which of the two decoders to distrust.
 #[cfg(unix)]
 fn oracle_section(
-    cap: &pty_stream::driver::Capture,
+    res: &pty_stream::oracle::Resolved,
     term: &pty_stream::decode::Term,
 ) -> String {
     use std::fmt::Write as _;
 
-    let res = pty_stream::oracle::resolve(
-        &cap.bytes,
-        cap.spec.cols,
-        cap.spec.rows,
-        u32::from(cap.spec.cell_w),
-        u32::from(cap.spec.cell_h),
-    );
     let mut s = String::new();
     let _ = writeln!(s, "\n--- oracle: the placements a real terminal emulator would draw ---");
     s.push_str(&res.describe_placements());
 
-    let d = pty_stream::oracle::disagreements(term, &res);
+    let d = pty_stream::oracle::disagreements(term, res);
     let _ = writeln!(
         s,
         "\n--- oracle disagreements ({}; empty = both decoders read these bytes the same) ---",
@@ -237,6 +279,10 @@ pty_capture — drive babelmap under a pty and decode the escapes it emits
   --user-dir PATH     throwaway babelmap home (default: a temp dir)
   --out PATH          write the full report here (stdout gets the decisive part)
   --raw PATH          also write the raw captured bytes
+  --png PATH          also draw the resolved screen here (layout/art/colour only —
+                      an 8x8 bitmap font, not a screenshot; see pty_stream/raster.rs)
+  --png-diff BEFORE   put an earlier --png beside this run's, so a render change
+                      can be reviewed as a before/after pair
   --timeout SECS      hard ceiling on the run (default 45)
   --arg VALUE         extra argument passed through to babelmap
 

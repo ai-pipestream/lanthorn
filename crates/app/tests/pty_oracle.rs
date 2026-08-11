@@ -535,6 +535,203 @@ mod emitter {
     }
 }
 
+/// The rasteriser (SQ-0775): the resolved screen drawn as pixels.
+///
+/// PORTABLE, always runs. Every stream here is hand-authored so the expected
+/// picture can be stated exactly, and every assertion names a COORDINATE and a
+/// COLOUR. That shape is the point: the obvious failure mode for a PNG writer is
+/// emitting a plausible-looking blank, which "a file appeared" and "the file is
+/// 40kB" both accept happily. A blank canvas fails `art_lands_where_the_placement_put_it`
+/// on its first pixel, fails the glyph test for want of any foreground pixel,
+/// and fails both z-order tests in opposite directions.
+mod raster {
+    use super::*;
+    use crate::pty_stream::{oracle, raster};
+
+    /// The screen's fill where nothing was written: `qwertty-term-vt`'s default
+    /// palette entry 0, which is Ghostty's `Name::Black` — NOT pure black. Every
+    /// "nothing is here" assertion below is against this, so a rasteriser that
+    /// invented its own background would fail them all.
+    const DEFAULT_BG: [u8; 4] = [0x1D, 0x1F, 0x21, 255];
+
+    /// An image whose every pixel ROW is a different colour, so a placement that
+    /// draws the wrong row of it is distinguishable from one that draws the right
+    /// one. Row `r` is `[20 + r, 0, 0]`; the `+ 20` keeps row 0 clear of black,
+    /// so "drew the first row" and "drew nothing" cannot be confused.
+    fn gradient_transmit(id: u32) -> String {
+        let (w, h) = (u32::from(ART_COLS) * CELL_W, u32::from(ART_ROWS) * CELL_H);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for _ in 0..w {
+                rgba.extend_from_slice(&[20 + y as u8, 0, 0, 255]);
+            }
+        }
+        format!(
+            "\x1b_Gq=2,a=T,U=1,i={id},f=32,t=d,s={w},v={h},c={ART_COLS},r={ART_ROWS},z=3,m=0;{}\x1b\\",
+            b64(&rgba)
+        )
+    }
+
+    /// The gradient art, placed the way babelmap places art: one placeholder run
+    /// per row, lead cell carrying the diacritic triple.
+    fn gradient_frame() -> String {
+        let mut s = gradient_transmit(ID_HIGH);
+        for row in 0..ART_ROWS {
+            s.push_str(&placeholder_row(row, HIGH_164));
+        }
+        s
+    }
+
+    fn draw(bytes: &str) -> image::RgbaImage {
+        raster::render(&oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H))
+    }
+
+    fn px(canvas: &image::RgbaImage, x: u32, y: u32) -> [u8; 4] {
+        canvas.get_pixel(x, y).0
+    }
+
+    /// The art occupies exactly the pixels the placement resolved to, and each
+    /// screen row draws its OWN row of the image.
+    ///
+    /// The gradient is what makes the second half real: dest and source are both
+    /// 32x32 here, so screen row `ART_TOP` must show image rows 0..15 and screen
+    /// row `ART_TOP + 1` image rows 16..31. A rasteriser that drew the image once
+    /// into its bounding box, or one that lost `source_y` the way SQ-0772's
+    /// orphaned runs do, paints the same band twice and fails on the second row.
+    #[test]
+    fn art_lands_where_the_placement_put_it() {
+        let canvas = draw(&gradient_frame());
+        assert_eq!(
+            (canvas.width(), canvas.height()),
+            (u32::from(COLS) * CELL_W, u32::from(ROWS) * CELL_H),
+            "the canvas is the screen at its own cell size"
+        );
+
+        let (x0, y0) = (u32::from(ART_LEFT) * CELL_W, u32::from(ART_TOP) * CELL_H);
+        let (x1, y1) = (x0 + u32::from(ART_COLS) * CELL_W, y0 + u32::from(ART_ROWS) * CELL_H);
+
+        // Top-left corner of the rect, and the row of the image it must show.
+        assert_eq!(px(&canvas, x0, y0), [20, 0, 0, 255], "the rect's first pixel is the image's first row");
+        // One pixel down is one image row down (1:1 scale).
+        assert_eq!(px(&canvas, x0, y0 + 1), [21, 0, 0, 255]);
+        // The SECOND screen row of the placement — a different resolved run, with
+        // its own source row. This is the assertion an aggregated rect cannot pass.
+        assert_eq!(
+            px(&canvas, x0, y0 + CELL_H),
+            [20 + CELL_H as u8, 0, 0, 255],
+            "screen row {} must draw image row {CELL_H}, not the first row again",
+            ART_TOP + 1
+        );
+        // The rect's far corner, one pixel inside.
+        assert_eq!(px(&canvas, x1 - 1, y1 - 1), [20 + (2 * CELL_H - 1) as u8, 0, 0, 255]);
+
+        // …and nothing outside it, on all four sides.
+        assert_eq!(px(&canvas, x0 - 1, y0), DEFAULT_BG, "one pixel left of the art");
+        assert_eq!(px(&canvas, x1, y0), DEFAULT_BG, "one pixel right of the art");
+        assert_eq!(px(&canvas, x0, y0 - 1), DEFAULT_BG, "one pixel above the art");
+        assert_eq!(px(&canvas, x0, y1), DEFAULT_BG, "one pixel below the art");
+    }
+
+    /// A painted background fills its cell, and a glyph paints foreground pixels
+    /// inside it without erasing it.
+    ///
+    /// The direction that matters: a blank-canvas bug passes nothing here. The
+    /// space cell is asserted to be UNIFORMLY the painted colour, and the letter
+    /// cell to hold both colours — so a rasteriser that skipped backgrounds, or
+    /// one that skipped glyphs, fails a different assertion.
+    #[test]
+    fn a_painted_cell_is_filled_and_its_glyph_is_drawn_over_it() {
+        // Row 4 (1-based row 5), from column 0: "A" then a space, on a painted bg.
+        let canvas = draw("\x1b[5;1H\x1b[48;2;40;30;90m\x1b[38;2;200;10;20mA \x1b[0m");
+        let y = 4 * CELL_H;
+        let (bg, fg) = ([40, 30, 90, 255], [200, 10, 20, 255]);
+
+        let letter: Vec<[u8; 4]> =
+            (0..CELL_W).flat_map(|x| (0..CELL_H).map(move |dy| (x, dy))).map(|(x, dy)| px(&canvas, x, y + dy)).collect();
+        assert!(letter.contains(&fg), "the 'A' painted no foreground pixel — the glyph never drew");
+        assert!(letter.contains(&bg), "the 'A' covered its whole cell — the background never drew");
+        assert!(
+            letter.iter().all(|p| *p == fg || *p == bg),
+            "a cell may only hold its own two colours"
+        );
+
+        // The space cell beside it: all background, no glyph.
+        for dy in 0..CELL_H {
+            for x in CELL_W..2 * CELL_W {
+                assert_eq!(px(&canvas, x, y + dy), bg, "the space cell at ({x},{})", y + dy);
+            }
+        }
+        // And a cell nothing ever wrote to keeps the screen's own fill.
+        assert_eq!(px(&canvas, 0, 0), DEFAULT_BG);
+    }
+
+    /// A `z=-1` placement draws UNDER the text; a `z=1` placement draws OVER it.
+    ///
+    /// Both directions, because either alone passes for a rasteriser that ignores
+    /// z entirely and always picks that one order. The image is pin-anchored
+    /// rather than virtual so the text can be printed over it without destroying
+    /// the placeholder run that positions it (the SQ-0772 failure, which is a
+    /// different subject).
+    fn pinned_art_under_text(z: i32) -> image::RgbaImage {
+        let (w, h) = (2 * CELL_W, CELL_H);
+        let rgba = [0u8, 200, 0, 255].repeat((w * h) as usize);
+        draw(&format!(
+            "\x1b_Gq=2,a=T,i=7,f=32,t=d,s={w},v={h},c=2,r=1,z={z},m=0;{}\x1b\\\
+             \x1b[1;1H\x1b[38;2;255;255;255mW\x1b[0m",
+            b64(&rgba)
+        ))
+    }
+
+    #[test]
+    fn a_negative_z_placement_draws_under_the_text() {
+        let canvas = pinned_art_under_text(-1);
+        let cell: Vec<[u8; 4]> =
+            (0..CELL_W).flat_map(|x| (0..CELL_H).map(move |y| (x, y))).map(|(x, y)| px(&canvas, x, y)).collect();
+        assert!(
+            cell.contains(&[255, 255, 255, 255]),
+            "the 'W' must be visible over a z=-1 image"
+        );
+        assert!(cell.contains(&[0, 200, 0, 255]), "and the image must fill the rest of the cell");
+        // The cell beside it has no glyph, so it is all image.
+        assert!(
+            (CELL_W..2 * CELL_W).all(|x| px(&canvas, x, 0) == [0, 200, 0, 255]),
+            "the un-lettered half of the placement is all image"
+        );
+    }
+
+    #[test]
+    fn a_positive_z_placement_draws_over_the_text() {
+        let canvas = pinned_art_under_text(1);
+        for y in 0..CELL_H {
+            for x in 0..2 * CELL_W {
+                assert_eq!(
+                    px(&canvas, x, y),
+                    [0, 200, 0, 255],
+                    "a z=1 image covers the text under it; pixel ({x},{y}) shows through"
+                );
+            }
+        }
+    }
+
+    /// The before/after pair the whole feature is for: two rasters, side by side,
+    /// each still readable at its own coordinates.
+    #[test]
+    fn side_by_side_keeps_both_frames_intact() {
+        let before = draw("\x1b[1;1H\x1b[48;2;10;20;30m \x1b[0m");
+        let after = draw("\x1b[1;1H\x1b[48;2;90;80;70m \x1b[0m");
+        let pair = raster::side_by_side(&before, &after);
+
+        assert_eq!(pair.height(), before.height());
+        assert!(pair.width() > before.width() + after.width(), "there is a gutter between them");
+        assert_eq!(px(&pair, 0, 0), [10, 20, 30, 255], "the left frame is the before");
+        assert_eq!(
+            px(&pair, before.width() + (pair.width() - before.width() - after.width()), 0),
+            [90, 80, 70, 255],
+            "the right frame is the after"
+        );
+    }
+}
+
 #[cfg(not(unix))]
 #[test]
 fn the_real_capture_half_is_unix_only() {

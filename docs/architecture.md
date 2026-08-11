@@ -123,12 +123,14 @@ all of them. `crates/app/tests/pty_stream/` closes that gap: it runs the real
 `babelmap` binary under a pty, plays the part of the terminal, and decodes the
 escape bytes that come back.
 
-Three parts, and the split matters for Windows:
+Five parts, and the split matters for Windows:
 
 | file | what it is |
 | --- | --- |
 | `tests/pty_stream/driver.rs` | The pty (`posix_openpt` + `libc`, no new dependency), the terminal-query answers, the keystroke script. **Unix only** — a pty is. |
 | `tests/pty_stream/decode.rs` | Bytes → named sequences → a screen model: cursor, SGR, kitty APC commands, U+10EEEE placeholder cells. **Portable**, and unit-tested on every platform. |
+| `tests/pty_stream/oracle.rs` | The same bytes through a real terminal emulator — see [the placement oracle](#a-second-reader-for-the-same-bytes-the-placement-oracle). **Portable.** |
+| `tests/pty_stream/raster.rs` | That resolved screen drawn as a PNG — see [looking at the frame](#looking-at-the-frame-the-rasteriser). **Portable.** |
 | `tests/pty_stream/mod.rs` | The report — protocol verdict, uploads, placement rects, a background map, and the finding. |
 
 **It verifies the protocol first, and says so out loud.** babelmap picks its
@@ -232,6 +234,58 @@ matrix (IPv4-only runners, so no fetch-wall failures) that publishes
 `libghostty-vt.a` plus headers and the generated `.pc`, consumed on a dev
 machine through the `-sys` crate's `pkg-config` feature — which skips zig
 entirely. Full findings live on SQ-0764; don't re-derive this, extend it.
+
+## Looking at the frame: the rasteriser
+
+Everything above answers questions *about* a frame. `pty_stream/raster.rs`
+(SQ-0775) draws it. The oracle already resolves a capture to a cell grid with
+per-cell colours plus every placement's source rect, destination size and
+position; the rasteriser composites that into an RGBA canvas at the capture's
+own cell size and writes a PNG. Development happens over ssh as often as not,
+and half the render quests in the tracker end in "the user must go look at it" —
+this turns that into "here is the picture, is this right?", and a before/after
+pair makes a render change reviewable with no terminal at all.
+
+```sh
+cargo run -p app --example pty_capture -- \
+    --story "stories/Journey - The Quest Begins.adf" \
+    --size 117x64 --keys cr,wait:800,cr,wait:800,cr \
+    --out /tmp/j.txt --png /tmp/j.png
+```
+
+A before/after pair is one more flag, not a second mode: capture the old build
+to a PNG, then run the new one with `--png-diff /tmp/before.png --png
+/tmp/pair.png` and the two frames come back side by side with a divider between
+them.
+
+**It is not a screenshot, and the difference is not cosmetic.** Text is drawn
+with the repo's own 8×8 bitmap font (`render/bitfont.rs`, the one the v6 pixel
+composite uses), nearest-neighbour-scaled to fill each cell: no real font
+metrics, no hinting, no ligatures, no italics, no bold. It is an oracle for
+**layout, art placement and colour** — where the panes are, where the art
+landed, what was painted under it, which of two overlapping things won — drawn
+with our glyphs from what Ghostty's *algorithm* resolved. Judge geometry from
+it; never judge typography from it. Two more honest limits: cells the app never
+painted show the emulator's own default background (palette entry 0, Ghostty's
+`#1D1F21`) rather than whatever the real terminal answered the OSC 11 probe
+with, because the capture only sees the app→terminal direction; and a
+below-background placement (kitty `z < -1073741824`) is bucketed on the z the
+*renderer* sorts by, which upstream hardcodes to `-1` for every virtual
+placement whatever the client asked for.
+
+**It refuses to hide the bug it was built beside.** Each placement is
+rasterised from its OWN resolved source rect, one draw per resolved placement,
+never from the aggregated cell rect. A virtual placement resolves one entry per
+screen row, and an orphaned run redraws the image's *first* row down the whole
+rect (SQ-0772) — sampling per draw means the picture shows that as the banded
+smear it is on the glass. A rasteriser that drew each image once into its
+bounding box would render a clean, plausible, wrong picture of exactly the
+defect worth seeing.
+
+The tests are in `tests/pty_oracle.rs`'s `raster` module: hand-authored streams
+whose expected picture can be stated exactly, asserting **colours at
+coordinates** — a PNG writer's obvious failure mode is emitting a plausible
+blank, and "a file appeared" accepts one.
 
 ## See also
 

@@ -59,9 +59,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use qwertty_term_vt::kitty::storage::Location;
-use qwertty_term_vt::kitty::{TerminalGeometry, resolve_placements, unicode};
+use qwertty_term_vt::kitty::{TerminalGeometry, resolve_placements, resolve_window, unicode};
 use qwertty_term_vt::point::Tag;
-use qwertty_term_vt::snapshot::SnapshotColor;
+use qwertty_term_vt::snapshot::{SnapshotColor, SnapshotWindow};
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
 use qwertty_term_vt::terminal::{Options, Terminal};
 
@@ -109,6 +109,12 @@ pub struct OracleCell {
     /// row can see it — down a healthy placement this climbs, and down a broken
     /// one it is 0 all the way (SQ-0772).
     pub source_y: Option<u32>,
+    /// SGR 7. Carried rather than folded into `fg`/`bg` because [`disagreements`]
+    /// compares this cell's colours against our own decoder's, which does not
+    /// swap either — pre-swapping here would invent a divergence out of an
+    /// attribute both models read the same way. The rasteriser swaps; the
+    /// comparison does not.
+    pub inverse: bool,
 }
 
 /// Every rendering placement of one image, aggregated from its per-row entries
@@ -150,13 +156,120 @@ impl ImageRect {
     }
 }
 
+/// One resolved placement's PIXEL geometry: which pixels of which image land
+/// where on the screen.
+///
+/// [`ImageRect`] answers a different question — which CELLS an image covers —
+/// and answers it aggregated, one entry per image. A rasteriser cannot use that:
+/// a virtual placement resolves one entry per screen row, each with its own
+/// source row, and collapsing them loses exactly the reading that tells a
+/// healthy placement from one redrawing its first row (see [`OracleCell::source_y`]).
+/// So the draws stay one-per-resolved-placement, unaggregated, and a picture
+/// drawn from them shows that corruption instead of smoothing it over.
+#[derive(Clone, Copy, Debug)]
+pub struct Draw {
+    pub image_id: u32,
+    /// The z a RENDERER orders by — NOT [`ImageRect::z`], which reports the z the
+    /// client asked for. Upstream hardcodes `-1` for every virtual placement, and
+    /// a picture that wants to look like the screen has to obey the number the
+    /// renderer actually sorts on, not the one the client wished for.
+    pub z: i32,
+    /// Top-left destination pixel. Signed: a placement whose top has scrolled
+    /// above the window has a negative row, and a rasteriser clips it the way a
+    /// GPU would.
+    pub dest_x: i64,
+    pub dest_y: i64,
+    pub dest_w: u32,
+    pub dest_h: u32,
+    /// The source rectangle within the image, already clamped to its bounds.
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+}
+
+/// One image the terminal holds, decoded to tightly-packed RGBA. babelmap
+/// transmits `f=32` (raw RGBA) so this is usually a straight copy, but the
+/// decode goes through the crate's own converter, which handles the gray/RGB
+/// formats too — the rasteriser must not care which format arrived.
+#[derive(Clone, Debug)]
+pub struct RasterImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// The numbers a [`Color`] needs before it can become pixels: the terminal's
+/// live 256-entry palette (OSC 4 changes it) and the defaults an unstyled cell
+/// falls back to (OSC 10/11 change those).
+///
+/// When the app never set a dynamic default — babelmap does not — the fallback
+/// is the palette's own black and light grey rather than an invented pair, so
+/// every colour in a rendered picture traces back to something the stream said.
+#[derive(Clone)]
+pub struct Colors {
+    palette: [[u8; 3]; 256],
+    default_fg: [u8; 3],
+    default_bg: [u8; 3],
+}
+
+impl Colors {
+    fn from_window(win: &SnapshotWindow) -> Colors {
+        let mut palette = [[0u8; 3]; 256];
+        for (dst, src) in palette.iter_mut().zip(win.palette.iter()) {
+            *dst = [src.r, src.g, src.b];
+        }
+        Colors {
+            default_fg: win.default_fg.map_or(palette[7], |c| [c.r, c.g, c.b]),
+            default_bg: win.default_bg.map_or(palette[0], |c| [c.r, c.g, c.b]),
+            palette,
+        }
+    }
+
+    /// The colour to draw a glyph in. `Default` resolves to the terminal's
+    /// default foreground.
+    pub fn fg(&self, c: Color) -> [u8; 3] {
+        self.resolve(c, self.default_fg)
+    }
+
+    /// The colour to fill a cell with. `Default` resolves to the terminal's
+    /// default background.
+    pub fn bg(&self, c: Color) -> [u8; 3] {
+        self.resolve(c, self.default_bg)
+    }
+
+    /// The default background, which is also the colour the screen starts as.
+    pub fn default_bg(&self) -> [u8; 3] {
+        self.default_bg
+    }
+
+    fn resolve(&self, c: Color, default: [u8; 3]) -> [u8; 3] {
+        match c {
+            Color::Default => default,
+            Color::Idx(i) => self.palette[i as usize],
+            Color::Rgb(r, g, b) => [r, g, b],
+        }
+    }
+}
+
 /// A real terminal's reading of a byte stream: the grid it built and the images
 /// it would actually draw on it.
 pub struct Resolved {
     pub cols: u16,
     pub rows: u16,
+    /// Pixels per cell, as answered to `CSI 16 t` — the units every pixel number
+    /// below is in.
+    pub cell_w: u32,
+    pub cell_h: u32,
     cells: Vec<OracleCell>,
     pub placements: Vec<ImageRect>,
+    /// Every placement's pixel geometry, for [`super::raster`]. Unaggregated and
+    /// in no particular order; a renderer sorts them by z.
+    pub draws: Vec<Draw>,
+    /// The pixels of every image a `draws` entry names, by image id.
+    pub images: BTreeMap<u32, RasterImage>,
+    /// The palette and defaults the cell colours above are indices into.
+    pub colors: Colors,
 }
 
 impl Resolved {
@@ -227,13 +340,52 @@ pub fn resolve(bytes: &[u8], cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> 
                 bg: color(scell.style.bg),
                 image_id: None,
                 source_y: None,
+                inverse: scell.style.inverse,
             };
         }
     }
+    let colors = Colors::from_window(&win);
 
     let grid = Grid { cols, rows, cell_w, cell_h, window_top: win.window_top };
     let placements = resolve_rects(&t, grid, &mut cells);
-    Resolved { cols, rows, cells, placements }
+    let (draws, images) = capture_draws(&t, grid);
+    Resolved { cols, rows, cell_w, cell_h, cells, placements, draws, images, colors }
+}
+
+/// The same placements again, kept as pixels instead of cells (SQ-0775).
+///
+/// A second resolution rather than a second return value out of [`resolve_rects`]
+/// on purpose: that function's whole subject is the join between the placeholder
+/// walk and the resolved list, and it is hard enough to follow without a second
+/// bookkeeping job threaded through it. Re-resolving costs one more pass over a
+/// placement list that is tens of entries long; the byte feed above it dominates
+/// by orders of magnitude.
+fn capture_draws(t: &Terminal, grid: Grid) -> (Vec<Draw>, BTreeMap<u32, RasterImage>) {
+    let geo = TerminalGeometry::new(t.cols, t.rows, t.width_px, t.height_px);
+    let screen = t.screen();
+    let (placements, images, _live) = resolve_window(&screen.kitty_images, &screen.pages, &geo, 0);
+
+    let draws = placements
+        .iter()
+        .map(|p| Draw {
+            image_id: p.image_id,
+            z: p.z,
+            dest_x: i64::from(p.grid_col) * i64::from(grid.cell_w) + i64::from(p.cell_offset_x),
+            dest_y: i64::from(p.grid_row) * i64::from(grid.cell_h) + i64::from(p.cell_offset_y),
+            dest_w: p.dest_width,
+            dest_h: p.dest_height,
+            src_x: p.source_x,
+            src_y: p.source_y,
+            src_w: p.source_width,
+            src_h: p.source_height,
+        })
+        .collect();
+
+    let images = images
+        .into_iter()
+        .map(|i| (i.id, RasterImage { width: i.width, height: i.height, rgba: i.rgba.to_vec() }))
+        .collect();
+    (draws, images)
 }
 
 /// Work out which cells an image actually lands on, and aggregate the per-row
