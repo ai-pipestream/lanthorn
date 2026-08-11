@@ -37,7 +37,11 @@ still reach in and override any single selector by name.
   inset in the top border (every framed pane — story, map, dialogs, the command
   band and inventory dock, the debug inspector's window tabs, the story-list info
   panel — renders through this one shared panel component and these same
-  selectors). The strip's bracket caps and divider track the pane's border
+  selectors). The story pane's strip text is the resolved adventure title,
+  with the story's filename appended in parentheses when it differs from the
+  title (e.g. `Journey: The Quest Begins (journey-r83-s890706.z6)`) — a bare
+  filename with no known title (or a file already named after it) shows with
+  no parenthetical. The strip's bracket caps and divider track the pane's border
   style by default (`┤ … ├` on single, `┫ … ┣` on thick, `╡ … ╞` on double);
   set `panel.terminator_left` / `panel.terminator_right` / `panel.tab_divider`
   to a `glyph` to override any of them. The map additionally sets

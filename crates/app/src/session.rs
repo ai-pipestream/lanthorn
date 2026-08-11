@@ -3468,6 +3468,34 @@ pub fn resolve_title(
         .to_owned()
 }
 
+/// Format the story pane's border title from a resolved name and the story's
+/// bare filename (SQ-0766): `name` alone, or `name (filename)` when the two
+/// differ. "Differ" compares normalized forms — [`crate::hints::normalize_ident`]
+/// applied to `name` and to the filename's stem (extension excluded, so
+/// `bureaucracy.z4` doesn't get a redundant `(bureaucracy.z4)` beside the title
+/// "Bureaucracy") — so a release/serial-suffixed filename like
+/// `zork1-r88-s840726.z3` reads as different from "Zork I" while a file already
+/// named after its title reads as the same. `name` empty (title genuinely
+/// unknown) falls back to today's behavior: the bare filename, no parenthetical.
+///
+/// For a story mounted from a disk image (`.adf`), `filename` is the
+/// container's name, not the game's — the parenthetical is more useful there,
+/// not less, since the container name rarely matches the title.
+pub fn format_pane_title(name: &str, filename: &str) -> String {
+    if name.is_empty() {
+        return filename.to_owned();
+    }
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    if crate::hints::normalize_ident(name) == crate::hints::normalize_ident(stem) {
+        name.to_owned()
+    } else {
+        format!("{name} ({filename})")
+    }
+}
+
 // ── Engine adapter (zvm) ────────────────────────────────────────────────────
 //
 // `GameSession` implements the engine-neutral `Engine` trait so the app can
@@ -6816,6 +6844,31 @@ mod tests {
         assert_eq!(resolve_title(None, "UNKNOWN", Some("ZORK I"), Path::new("/x/zork1.z3")), "ZORK I");
         // unknown IFID + no banner title → filename.
         assert_eq!(resolve_title(None, "UNKNOWN", None, Path::new("/x/zork1.z3")), "zork1");
+    }
+
+    #[test]
+    fn format_pane_title_same_name_omits_parenthetical() {
+        // Normalized name equals normalized stem (extension excluded) → bare name.
+        assert_eq!(format_pane_title("Bureaucracy", "bureaucracy.z4"), "Bureaucracy");
+        // Case/punctuation-insensitive: still "the same" after normalizing.
+        assert_eq!(format_pane_title("Zork I", "zork-i.z3"), "Zork I");
+    }
+
+    #[test]
+    fn format_pane_title_differing_name_appends_filename() {
+        // Release/serial-suffixed filename reads as different from the title.
+        assert_eq!(
+            format_pane_title("Journey: The Quest Begins", "journey-r83-s890706.z6"),
+            "Journey: The Quest Begins (journey-r83-s890706.z6)"
+        );
+        // A single-character difference (I vs 1) still counts as differing.
+        assert_eq!(format_pane_title("Zork I", "zork1.z3"), "Zork I (zork1.z3)");
+    }
+
+    #[test]
+    fn format_pane_title_unknown_name_falls_back_to_filename() {
+        // No title resolved at all: today's behavior, no empty parenthetical.
+        assert_eq!(format_pane_title("", "mystery.z5"), "mystery.z5");
     }
 
     // ── strip_read_prompt unit tests ──────────────────────────────────────────

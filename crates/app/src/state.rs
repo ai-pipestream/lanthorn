@@ -2413,8 +2413,15 @@ pub struct AppState {
     // ── Adventure title ───────────────────────────────────────────────────────
 
     /// Resolved adventure title (override > banner > filename stem).
-    /// Set once at startup; used by pane chrome to label the story pane.
+    /// Set once at startup. Used bare by the statusbar `{title}` placeholder;
+    /// the pane border uses `pane_title` instead.
     pub title: String,
+
+    /// The story pane's border-title text (SQ-0766): `title`, with the story's
+    /// filename appended in parentheses when it differs from `title` (see
+    /// [`crate::session::format_pane_title`]). Set once at startup alongside
+    /// `title`.
+    pub pane_title: String,
 
     /// The current story's IFID (set at session creation). Used for
     /// title/hint lookup. Empty until set.
@@ -2665,6 +2672,7 @@ impl Default for AppState {
             history_cursor: None,
             history_draft: String::new(),
             title: String::new(),
+            pane_title: String::new(),
             ifid: String::new(),
             game_dir: std::path::PathBuf::new(),
             show_inventory: false,

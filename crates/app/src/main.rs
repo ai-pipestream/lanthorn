@@ -706,7 +706,7 @@ fn draw_frame(
             let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
             let story_focused = resize_split_hl || state.focus == Focus::Game;
             let story_title_style = state.colors.theme.get("story_title").style;
-            let story_segs = [InsetSegment { text: &state.title, active: false }];
+            let story_segs = [InsetSegment { text: &state.pane_title, active: false }];
             let story_fp = draw_panel(buf, &PanelSpec {
                 area: pane_layout.story,
                 border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
@@ -739,7 +739,7 @@ fn draw_frame(
                 Layout::TranscriptFull => {
                     let story_focused = state.focus == Focus::Game;
                     let story_title_style = state.colors.theme.get("story_title").style;
-                    let story_segs = [InsetSegment { text: &state.title, active: false }];
+                    let story_segs = [InsetSegment { text: &state.pane_title, active: false }];
                     let story_fp = draw_panel(buf, &PanelSpec {
                         area: pane_layout.story,
                         border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
@@ -772,7 +772,7 @@ fn draw_frame(
                     let map_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
                     let story_focused = resize_split_hl || state.focus == Focus::Game;
                     let story_title_style = state.colors.theme.get("story_title").style;
-                    let story_segs = [InsetSegment { text: &state.title, active: false }];
+                    let story_segs = [InsetSegment { text: &state.pane_title, active: false }];
                     let story_fp = draw_panel(buf, &PanelSpec {
                         area: pane_layout.story,
                         border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
