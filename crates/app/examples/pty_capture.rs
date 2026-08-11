@@ -162,7 +162,8 @@ fn main() -> std::process::ExitCode {
         }
     }
     let term = pty_stream::decode_capture(&cap);
-    let text = pty_stream::report(&cap, &term);
+    let mut text = pty_stream::report(&cap, &term);
+    text.push_str(&oracle_section(&cap, &term));
     match &out {
         Some(path) => {
             if let Err(e) = std::fs::write(path, &text) {
@@ -173,6 +174,7 @@ fn main() -> std::process::ExitCode {
             let head: String = text.lines().take_while(|l| !l.starts_with("--- flushes")).collect::<Vec<_>>().join("\n");
             println!("{head}");
             print!("{}", pty_stream::screen_report(&term));
+            print!("{}", oracle_section(&cap, &term));
             println!("\nfull report: {}", path.display());
         }
         None => print!("{text}"),
@@ -183,6 +185,42 @@ fn main() -> std::process::ExitCode {
         eprintln!("pty_capture: the graphics protocol did not negotiate to kitty — see the VERDICT above");
         std::process::ExitCode::from(3)
     }
+}
+
+/// The second opinion (SQ-0764). Everything above this section is our own
+/// decoder's reading of the stream; this is a real terminal emulator's reading of
+/// the identical bytes. Two things it can say that ours cannot: which placements
+/// would actually put PIXELS on the screen (a placeholder run whose image id no
+/// longer resolves is cells on screen and nothing drawn), and — by disagreeing —
+/// which of the two decoders to distrust.
+#[cfg(unix)]
+fn oracle_section(
+    cap: &pty_stream::driver::Capture,
+    term: &pty_stream::decode::Term,
+) -> String {
+    use std::fmt::Write as _;
+
+    let res = pty_stream::oracle::resolve(
+        &cap.bytes,
+        cap.spec.cols,
+        cap.spec.rows,
+        u32::from(cap.spec.cell_w),
+        u32::from(cap.spec.cell_h),
+    );
+    let mut s = String::new();
+    let _ = writeln!(s, "\n--- oracle: the placements a real terminal emulator would draw ---");
+    s.push_str(&res.describe_placements());
+
+    let d = pty_stream::oracle::disagreements(term, &res);
+    let _ = writeln!(
+        s,
+        "\n--- oracle disagreements ({}; empty = both decoders read these bytes the same) ---",
+        if d.is_empty() { "none".to_string() } else { format!("{} run(s)", d.len()) }
+    );
+    for line in &d {
+        let _ = writeln!(s, "  {line}");
+    }
+    s
 }
 
 #[cfg(unix)]

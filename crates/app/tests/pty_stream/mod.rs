@@ -9,9 +9,11 @@
 //! an image was placed over those rows, or a background colour was painted into
 //! those cells. Those are different bugs with different fixes.
 //!
-//! Three parts:
+//! Four parts:
 //!   * [`driver`] (unix only) — the pty, the terminal-query answers, the keys;
 //!   * [`decode`] (portable) — bytes to named sequences and a screen model;
+//!   * [`oracle`] (portable) — the same bytes through a real terminal emulator,
+//!     so the answer above has a second, independently-authored witness (SQ-0764);
 //!   * the report below — the model rendered for a human to read.
 //!
 //! Ad hoc: `cargo run -p app --example pty_capture -- --help`.
@@ -23,6 +25,7 @@
 pub mod decode;
 #[cfg(unix)]
 pub mod driver;
+pub mod oracle;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
