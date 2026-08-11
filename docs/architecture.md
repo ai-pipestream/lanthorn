@@ -180,6 +180,52 @@ Its complement is `/dump-cells` ([Graphical v6](features/v6-graphics.md)), which
 dumps the same screen from the *inside*: that shows what we computed, this shows
 what we sent. Disagreement between the two is the interesting case.
 
+## A second reader for the same bytes: the placement oracle
+
+`pty_stream/decode.rs` is *our* reading of the emitted stream — a hand-rolled
+decoder that shares whatever assumptions we built it with. When the model
+looks right (Layer 1) and the stream also looks right by our own reading
+(Layer 2) but the screen is still wrong, the next question is whether our
+reading of the stream is itself the bug. `crates/app/tests/pty_stream/oracle.rs`
+(SQ-0764) answers that by resolving the same captured bytes through
+`qwertty-term-vt`, a dev-dependency that is a pure-Rust port of Ghostty's
+terminal core (tracking upstream Ghostty commit `2da015cd6`, including the
+297-entry diacritic table matching kitty's published list) — one dependency,
+no build script, builds on all three platforms. Reach for it for placement
+lifetime, z-order, overlap, stale placements, missing deletes, and anything
+turning on the unicode-placeholder continuation rules our decoder doesn't
+model.
+
+**It's a port, not Ghostty.** `qwertty-term-vt` tracks Ghostty's algorithm
+faithfully enough to answer "does this placement cover these cells" — but a
+port can diverge from what a real terminal does in ways nobody's hit yet.
+Before writing up a user-visible bug on the oracle's word alone, eyeball it
+on a real terminal too.
+
+**The two decoders name images differently.** Ours keys an image by the low
+24 bits of the placeholder's foreground colour; the oracle keys it by the
+full 32-bit `i=` value (`full = low24 | (high_byte << 24)`). Comparing a
+babelmap-side id against an oracle-side id means masking the oracle's down to
+the low 24 bits first, not comparing them raw.
+
+**The two decoders legitimately disagree on image coverage today.** Ours
+attributes a cell to an image by foreground colour alone and doesn't model
+the diacritic continuation rule at all; the oracle does. That gap is filed as
+SQ-0772. Until it's closed, assert cross-decoder agreement on *backgrounds*,
+not on image coverage.
+
+**A stronger oracle exists in principle but isn't built.** For literal
+Ghostty ground truth (not a port of it), `libghostty-vt` — Ghostty's own C
+library — is reachable in theory, but only as a prebuilt artifact. Building
+it from source needs zig plus a full ghostty source checkout, which drags in
+the entire GUI dependency graph (sentry, imgui, freetype, glslang, …) even
+to get the headless VT core, and it doesn't build at all on macOS 26 with the
+pinned toolchain. The viable route, not yet set up, is a GitHub Actions
+matrix (IPv4-only runners, so no fetch-wall failures) that publishes
+`libghostty-vt.a` plus headers and the generated `.pc`, consumed on a dev
+machine through the `-sys` crate's `pkg-config` feature — which skips zig
+entirely. Full findings live on SQ-0764; don't re-derive this, extend it.
+
 ## See also
 
 - [Interactive-fiction standards babelmap implements](standards.md) (Z-Machine,
