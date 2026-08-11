@@ -67,6 +67,19 @@ type Quad = (u16, u16, u16, u16);
 /// of the 117x64 terminal the defect was captured at.
 const WIDTHS: [u16; 6] = [80, 96, 110, 115, 138, 150];
 
+/// SQ-0779: panes with NO letterbox slack, where the ring takes the `Letterbox` plan.
+///
+/// The reclaim plans all need vertical slack to reclaim; a pane whose rows are at or
+/// below the scaled native height has none, and `hybrid_bottom_plan` returns
+/// `Letterbox` before it looks at anything else. For a 640x400 native screen at an
+/// 8x18 cell that is `18·rows <= 5·cols` — an ASPECT threshold, not a width one, which
+/// is why the report's 121x36 terminal (a 119x33 pane) showed the defect while its
+/// 117x64 control did not. Two panes per width: one right at the boundary and one well
+/// inside it. Each case asserts the plan it actually got, so the sweep cannot quietly
+/// drift into the Menu regime the other cases here already cover.
+const SHORT_PANES: [(u16, u16); 10] =
+    [(96, 26), (96, 20), (115, 31), (115, 24), (119, 33), (119, 28), (138, 38), (138, 30), (150, 41), (150, 32)];
+
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -319,6 +332,120 @@ fn journeys_frame_side_rules_are_the_characters_the_game_printed() {
     }
 }
 
+/// SQ-0779 — and at a pane with NO letterbox slack, where the ring takes the
+/// `Letterbox` plan and none of the reclaim machinery runs.
+///
+/// The user, sweeping widths over the SQ-0750 fix: *"journey breaks with a blank line
+/// at top any time artwork width fills its entire allocated space (e.g. 121x36)"* and
+/// *"l/r borders are broken with first scenario"*. Off the release floppy at 121x36
+/// (a 119x33 pane) the picture's band was placed at columns 1..50 — spanning the
+/// frame's own left rule AND the rule dividing the picture from the prose — while the
+/// right-hand flank, one rule wide with no art in it, classified art-less and was
+/// skipped outright. The frame had a `┌─┐` and a `└─┘` and nothing down either side.
+///
+/// The border extension was a Menu-plan privilege; every other plan drew the flank as
+/// one band from edge to edge, borders included. The ruling that decides the fix is the
+/// user's: **if a game draws a border, the artwork should not overlap it** — a LAYOUT
+/// change, not a compositing one. So the two assertions are:
+///
+///   * no drawn ART strip may stand in a column the game printed a border rule in; and
+///   * every one of those rules reaches the screen as the character the game printed,
+///     on every row from the frame's top rule down to the story's last.
+///
+/// FALSIFY by restoring the `matches!(plan, BottomPlan::Menu)` gate on `flank_borders`
+/// in `screen.rs`: every case fails with `the picture's band (1, 1, 50, 22) stands in
+/// column 0, where the game printed its frame's rule "│"`.
+#[test]
+fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for (file, profile, want_glyphs) in [
+        ("Journey - The Quest Begins.adf", None, 3),
+        ("journey-r83-s890706.z6", Some(InterpreterProfile::Amiga), 3),
+        ("journey-r83-s890706.z6", Some(InterpreterProfile::IbmPc), 1),
+    ] {
+        let Some(mut session) = boot(file, profile, 40) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        let rules = side_rule_runs(&model);
+        assert!(!rules.is_empty(), "{file} {profile:?}: Journey prints its frame's side rules as characters");
+        for honor in [true, false] {
+            for (w, h) in SHORT_PANES {
+                let (state, area, buf) = render_pane(&model, honor, (0, 0, w, h), &transcript);
+                let ctx = format!("{file} {profile:?} honor={honor} pane {w}x{h}");
+                assert_eq!(
+                    state.v6_ring_plan.get(),
+                    "letterbox",
+                    "{ctx}: this sweep exists to cover the no-slack regime, and this pane is not in it"
+                );
+                let vp = viewport_of(&state);
+                // Every side ART strip the ring actually DREW (a skipped one says so in
+                // its own label), and the picture is one of them.
+                let drawn: Vec<Quad> = records(&state, "strip:art")
+                    .into_iter()
+                    .filter(|(label, r)| label == "strip:art" && r.2 < w)
+                    .map(|(_, r)| r)
+                    .collect();
+                // THE RULING: artwork does not overlap a border the game draws.
+                for t in &rules {
+                    let col = run_col(t, &model, area);
+                    for r in &drawn {
+                        assert!(
+                            !(r.0..r.0 + r.2).contains(&col),
+                            "{ctx}: the picture's band {r:?} stands in column {col}, where the game \
+                             printed its frame's rule {:?} (native x {}) — a border is not the \
+                             artwork's ground to stand on, so the art's span must stop short of it",
+                            t.text,
+                            t.x
+                        );
+                    }
+                }
+                // …and each of those rules is on screen AS that character, for the whole
+                // height of the flank: from the frame's top rule down to the story's
+                // last row. (The row below that is the ring's own bottom band.)
+                let mut borders = records(&state, "flank-divider");
+                borders.extend(records(&state, "flank-border"));
+                let top = records(&state, "strip:text").into_iter().map(|(_, r)| r.1 + r.3).min().unwrap_or(area.y);
+                let mut glyphs = 0usize;
+                for t in &rules {
+                    let col = run_col(t, &model, area);
+                    let Some((label, r)) = borders.iter().find(|(_, r)| r.0.abs_diff(col) <= 1) else {
+                        panic!(
+                            "{ctx}: the frame's side rule {:?} (native x {}, column {col}) reaches \
+                             the screen through nothing at all — no border column was resolved for \
+                             it.\nstrips: {:#?}",
+                            t.text,
+                            t.x,
+                            records(&state, "strip")
+                        )
+                    };
+                    assert!(
+                        label.contains("glyph"),
+                        "{ctx}: the frame's side rule at column {} came out as a BITMAP ({label}) — \
+                         a run the game printed covers it, so hybrid draws it as that character",
+                        r.0
+                    );
+                    glyphs += 1;
+                    for y in top..vp.1 + vp.3 {
+                        assert!(
+                            holds(&buf, r.0, y, t),
+                            "{ctx}: the frame's side rule {:?} is missing from column {} on row \
+                             {y} — the cell holds {:?}",
+                            t.text,
+                            r.0,
+                            buf.cell((r.0, y)).map(|c| c.symbol().to_string()).unwrap_or_default()
+                        );
+                    }
+                }
+                assert_eq!(
+                    glyphs, want_glyphs,
+                    "{ctx}: this frame's side rules are {want_glyphs} characters the game printed, \
+                     and every one of them must reach the screen as a character\n{borders:#?}"
+                );
+            }
+        }
+    }
+}
+
 /// SQ-0747 — no unwritten row between the frame's top rule and the story's first row.
 ///
 /// The gap is one row of ceil-quantization, and it belonged to nothing: no runs map
@@ -414,7 +541,11 @@ fn a_side_column_that_is_artwork_stays_a_bitmap() {
         let transcript = session.take_transcript();
         let model = session.screen();
         for honor in [true, false] {
-            for pane in WIDTHS.iter().flat_map(|&w| [(0, 0, w, 61), (1, 1, w, 64)]) {
+            // SQ-0779: and at panes with no letterbox slack, where the ring takes the
+            // `Letterbox` plan. The border extension now runs under every plan, not just
+            // Menu — reserved to the glyph ink, precisely so these frames keep the bands
+            // they have always had. This regime was swept by nothing before.
+            for pane in WIDTHS.iter().flat_map(|&w| [(0, 0, w, 61), (1, 1, w, 64), (0, 0, w, w * 5 / 18)]) {
                 let (state, _, _) = render_pane(&model, honor, pane, &transcript);
                 let ctx = format!("{file} honor={honor} pane {pane:?}");
                 let vp = viewport_of(&state);

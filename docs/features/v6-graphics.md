@@ -302,7 +302,14 @@ session-only switch that never touches your saved config:
   pictures, the runs cannot account for them, and they stay pictures. The half-cell
   a story window's top edge rounds away goes to the flanks too, so the frame closes
   at its corner instead of leaving an unwritten row between the top rule and the
-  first line of prose.
+  first line of prose. And this holds at *every* pane shape, reclaimed layout or
+  centred letterbox alike — a short, wide pane leaves no dead space to reclaim and
+  used to hand the whole flank, border columns included, to one uploaded band, which
+  swallowed the frame's rules into the picture beside them.
+  **If a game draws a border, the artwork does not overlap it**: the picture's
+  allocated span stops where the rule's column begins, and the rule is stamped as
+  the character the game printed. Nothing is lost in the trade — the column was
+  already established to hold no artwork before the rule can claim it.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively. Its default ink/page follow the theme; where the

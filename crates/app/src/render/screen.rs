@@ -1126,7 +1126,6 @@ fn render_node(
                                 }
                             }
                         }
-                        let strips = strips;
                         let menu_strips = match &menu {
                             Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs),
                             None => Vec::new(),
@@ -1163,33 +1162,91 @@ fn render_node(
                         // `(strip, inner rule, outer border)`. One probe, run from each
                         // side, so the panel's extent and the two borders that bound it
                         // come out of the same calculation instead of the band's rect.
-                        let flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)> =
-                            if matches!(plan, BottomPlan::Menu) {
-                                strips
-                                    .iter()
-                                    .filter_map(|s| match s {
-                                        ChromeStrip::Art(r) if r.width < area.width => {
-                                            let ext = |which| {
-                                                flank_border_extension(
-                                                    *r, area, viewport, &scale, cell_px, story, native, &canvas,
-                                                    &gfx, &chrome_runs, viewport.bottom(), which,
-                                                )
-                                            };
-                                            let inner = ext(FlankBorder::Inner);
-                                            // A flank only one border wide — Journey's
-                                            // right-hand column is exactly that — finds
-                                            // the SAME run from both sides. Drawing it
-                                            // twice would put two bands on one cache key.
-                                            let outer = ext(FlankBorder::Outer)
-                                                .filter(|(o, _)| inner.is_none_or(|(i, _)| i != *o));
-                                            Some((*r, inner, outer))
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
+                        // SQ-0779: and under every OTHER plan too — but only for a border
+                        // the game printed as a CHARACTER. The extension used to be a
+                        // Menu-plan privilege, so a pane short enough to leave no letterbox
+                        // slack (`slack == 0` → `Letterbox`, i.e. any pane whose rows are
+                        // at or below the scaled native height) got no border columns at
+                        // all: Journey's Amiga frame lost BOTH of its left flank's rules
+                        // into the picture band that spans them, and its right-hand flank —
+                        // one rule wide, with no art in it — classified art-less and was
+                        // skipped, so the frame simply had no sides between its `┌─┐` and
+                        // its `└─┘`. Reported at a 121x36 terminal, correct at 117x64;
+                        // the discriminator is the pane's ASPECT, not its width.
+                        //
+                        // Reserved to the GLYPH ink outside the Menu plan, which is what
+                        // keeps the corpus still: an artwork flank (Zork Zero's, Shogun's,
+                        // Arthur's side columns) comes back `Band` here and is dropped, so
+                        // those frames draw exactly the bands they drew before. The
+                        // extension's bottom is the flank strip's own, since outside the
+                        // Menu plan there is no bottom-anchored strip to reach down to.
+                        let glyph_borders_only = !matches!(plan, BottomPlan::Menu);
+                        let flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)> = strips
+                            .iter()
+                            .filter_map(|s| match s {
+                                ChromeStrip::Art(r) if r.width < area.width => {
+                                    let bottom = if glyph_borders_only { r.bottom() } else { viewport.bottom() };
+                                    let ext = |which| {
+                                        flank_border_extension(
+                                            *r, area, viewport, &scale, cell_px, story, native, &canvas, &gfx,
+                                            &chrome_runs, bottom, which,
+                                        )
+                                        .filter(|(_, ink)| !glyph_borders_only || matches!(ink, BorderInk::Glyph(..)))
+                                    };
+                                    let inner = ext(FlankBorder::Inner);
+                                    // A flank only one border wide — Journey's
+                                    // right-hand column is exactly that — finds
+                                    // the SAME run from both sides. Drawing it
+                                    // twice would put two bands on one cache key.
+                                    let outer = ext(FlankBorder::Outer)
+                                        .filter(|(o, _)| inner.is_none_or(|(i, _)| i != *o));
+                                    Some((*r, inner, outer))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        // SQ-0779, the user's ruling: **if a game draws a border, the
+                        // artwork should not overlap it.** A flank strip runs the whole
+                        // width of the flank, borders included, and outside the Menu plan
+                        // that whole strip is one uploaded band — so the picture's own
+                        // placement rect covered the columns the frame's rules stand in.
+                        // The rules were then unstampable (a glyph must not be written
+                        // over an image that composites above the cells) and reached the
+                        // screen, if at all, as a resampled bitmap of themselves, which is
+                        // the thing hybrid exists not to do.
+                        //
+                        // So the LAYOUT stops short of them: the art's allocated span is
+                        // trimmed to end where the border column begins, and the border is
+                        // stamped as the character the game printed. No pixel is lost —
+                        // the glyph path's content test has already established that the
+                        // graphics-only canvas is clear across those native columns — and
+                        // the Menu plan needs none of it, since its panel fill and its art
+                        // rect are already bounded by the two rules (SQ-0747/0758).
+                        if glyph_borders_only {
+                            for s in &mut strips {
+                                let ChromeStrip::Art(r) = s else { continue };
+                                if r.width >= area.width {
+                                    continue;
+                                }
+                                let Some((_, inner, outer)) = flank_borders.iter().find(|(sr, _, _)| sr == r) else {
+                                    continue;
+                                };
+                                // Which rule stands on which side: a LEFT flank is bounded
+                                // by its outer border on the left and the story-side rule
+                                // on the right; a right flank the other way about.
+                                let (lo, hi) = if r.x < viewport.x { (outer, inner) } else { (inner, outer) };
+                                let (mut x0, mut x1) = (r.x, r.right());
+                                if let Some((e, _)) = lo.filter(|(e, _)| (x0..x1).contains(&e.x)) {
+                                    x0 = e.right();
+                                }
+                                if let Some((e, _)) = hi.filter(|(e, _)| (x0..x1).contains(&e.x)) {
+                                    x1 = e.x;
+                                }
+                                *r = Rect::new(x0, r.y, x1.saturating_sub(x0), r.height);
+                            }
+                            strips.retain(|s| !matches!(s, ChromeStrip::Art(r) if r.width == 0));
+                        }
+                        let strips = strips;
                         let divider_exts: Vec<FlankBorderExt> = flank_borders
                             .iter()
                             .flat_map(|(_, i, o)| i.iter().chain(o.iter()).copied())
