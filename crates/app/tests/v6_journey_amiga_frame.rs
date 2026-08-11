@@ -1314,6 +1314,75 @@ fn journey_release_30_menu_header_labels_are_whole() {
     }
 }
 
+/// (q) SQ-0780 — …and the rule ABUTS each of those labels, on both sides.
+///
+/// The user, at a 159-column terminal: *"starting at 159 width a blank space is added
+/// after 'Individual Commands' and the horizontal line."* One blank cell between the
+/// right-hand title and the rule that continues past it, while `The Party`'s rule
+/// abutted its title at the same width — and that asymmetry is the whole mechanism.
+///
+/// Release 30 draws the header rule first and the two titles over it, and a stray `─`
+/// survives inside each title's native span (`The Party` runs native 152..224 with one
+/// at 176, `Individual Commands` runs 368..520 with one at 448). A title is positioned
+/// through the letterbox scale and then advances ONE TERMINAL COLUMN per character; a
+/// fragment is positioned through the scale and stops. Past about 1.9 columns per
+/// native cell the second rate outruns the first, and 80 native pixels into a
+/// 19-character title that is a whole column: the stray landed one past the title's
+/// last drawn cell, too far right for SQ-0747's over-a-word guard, and the rule behind
+/// it — which starts no further left than the last thing DRAWN — began one further
+/// right again. `The Party`'s stray is only 24 native pixels in and still lands inside
+/// its nine drawn columns at every width swept, so it was suppressed and its rule
+/// abutted. Not a regression from the SQ-0750 frame fix: 3b21009d, the commit before
+/// it, shows the identical gap at 159x64.
+///
+/// The pane widths here bracket the onset exactly — 154 is clean, 155 is the first
+/// width that shows it, 156 is clean again, and every width from 157 up shows it, which
+/// is why one width proves nothing in this lineage.
+///
+/// FALSIFY by dropping the `under_label` filter from `collapse_row_rules`' divider
+/// branch: `floppy honor=true pane 155x51: the menu header's rule does not reach
+/// "Individual Commands" — one blank cell stands between the label and the rule …`.
+#[test]
+fn journey_release_30_menu_header_rule_abuts_both_labels() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut session) = journey_floppy_at_menu() else { return };
+    let transcript = session.take_transcript();
+    let model = session.screen();
+    for honor in [true, false] {
+        for h in FILL_HEIGHTS {
+            for w in FILL_WIDTHS {
+                let (_, area, buf) = render_pane(&model, honor, (1, 1, w, h), &transcript);
+                let ctx = format!("floppy honor={honor} pane {w}x{h}");
+                let rows: Vec<String> = (area.y..area.bottom()).map(|y| pane_row(&buf, area, y)).collect();
+                let header: Vec<char> = rows
+                    .iter()
+                    .find(|r| r.contains("ndividual"))
+                    .unwrap_or_else(|| panic!("{ctx}: the menu header is on screen"))
+                    .chars()
+                    .collect();
+                let text: String = header.iter().collect();
+                for label in ["The Party", "Individual Commands"] {
+                    let at = text[..text.find(label).unwrap_or_else(|| panic!("{ctx}: {label:?} is on screen"))]
+                        .chars()
+                        .count();
+                    for (side, c) in [("before", at.checked_sub(1)), ("after", Some(at + label.chars().count()))] {
+                        let Some(cell) = c.and_then(|i| header.get(i)).copied() else { continue };
+                        assert_eq!(
+                            cell,
+                            '─',
+                            "{ctx}: the menu header's rule does not reach {label:?} — one blank \
+                             cell stands {side} the label and the rule. A rule is a DISTANCE the \
+                             game drew across, and a leftover fragment the game printed the label \
+                             over must not push its edge off the label's own last column.\n{}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// (o) SQ-0747 — the picture is drawn INSIDE the flank that holds it, on the boot frame
 /// as well as the play frame.
 ///

@@ -4626,6 +4626,45 @@ fn collapse_row_rules(
     // elements (U+2580..). What a game builds chrome geometry out of, and nothing
     // any game's prose contains.
     let box_glyph = |c: char| ('\u{2500}'..='\u{259F}').contains(&c);
+    // SQ-0780: …unless the game printed that glyph UNDERNEATH a label, in which case
+    // it is not a divider and not a position — it is a leftover of the rule the label
+    // was printed over, and the label owns those pixels.
+    //
+    // Journey's release-30 menu header draws the rule first and the two titles over it,
+    // and a stray `─` survives inside each title's native span: `The Party` runs native
+    // 152..224 with one at 176, `Individual Commands` runs 368..520 with one at 448.
+    // A LABEL is positioned through the scale and then advances one terminal column per
+    // character; a fragment is positioned through the scale and stops there. Past about
+    // 1.9 columns per native cell the second rate outruns the first, and 80 native
+    // pixels into a 19-character title that is a whole column: the stray landed at 110
+    // where the title had only reached 109, so it was too far right for SQ-0747's
+    // over-a-word guard to suppress, and the rule behind it — which starts no further
+    // left than the last thing drawn — began at 111. One blank cell between the title
+    // and its rule, at a 159-column terminal and at 83% of the widths swept from there
+    // up. `The Party`'s own stray is only 24 native pixels in, still lands inside the
+    // title's nine drawn columns at every width swept, and is suppressed — which is
+    // exactly why the row's two labels behaved differently and why the asymmetry was
+    // the lead.
+    //
+    // Decided in the game's OWN coordinates, native against native, so the answer
+    // cannot move with the pane: mixing a scaled column against a character-advanced
+    // span is the ceil-vs-round-on-a-shared-boundary trap this whole area is prone to.
+    // The menu body's real dividers are untouched — Journey abuts each `▌` to the END
+    // of a `-->` marker (native 246 and 248), never inside one — and SQ-0742's whole
+    // point, that a divider holds a column of its own, stands.
+    let native_span = |t: &PxText| {
+        let x0 = t.x.max(1) as i32 - 1;
+        (x0, x0 + t.text.chars().count() as i32 * 8)
+    };
+    let under_label = |t: &PxText| {
+        let (a0, a1) = native_span(t);
+        row_runs.iter().any(|p| {
+            p.text.chars().count() > 1 && !p.text.trim().is_empty() && {
+                let (b0, b1) = native_span(p);
+                a0 >= b0 && a1 <= b1
+            }
+        })
+    };
     let mut out: Vec<(PxText, bool)> = Vec::new();
     // Pending non-rule fragments, merged together on the far side of each rule so
     // SQ-0509's fragment bridging is unchanged everywhere a rule is not involved.
@@ -4671,7 +4710,7 @@ fn collapse_row_rules(
         if single_glyph(t).is_some_and(box_glyph) {
             out.extend(merge_strip_fragments(&pending).into_iter().map(|t| (t, false)));
             pending.clear();
-            out.extend(row_runs[i..=j].iter().map(|t| ((*t).clone(), false)));
+            out.extend(row_runs[i..=j].iter().filter(|t| !under_label(t)).map(|t| ((*t).clone(), false)));
             i = j + 1;
             continue;
         }

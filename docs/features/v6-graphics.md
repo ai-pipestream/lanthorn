@@ -277,6 +277,15 @@ session-only switch that never touches your saved config:
   and `Moves:` used to line up only at an 80-column story pane and drift apart at
   every other width; Journey's `-->` party markers, glued to the names in front of
   them, stepped left beside the shorter ones for the same reason.
+  A game that prints a **label over its own rule** leaves stray fragments of that
+  rule buried inside the label's pixels — Journey's release-30 menu header has one
+  under each of its two titles — and those are the label's, not dividers: they are
+  dropped in the game's own coordinates, native against native, so a title's rule
+  closes up against it at every pane. Judged in terminal columns instead, the answer
+  moved with the pane: a stray 80 native pixels into a 19-character title fell one
+  column past the title's last cell once the pane passed about 1.9 columns per native
+  cell, and pushed the rule behind it one further right again — a single blank cell
+  after `Individual Commands`, at 155 columns, and 157 and up, but not at 154 or 156.
   The ring layout is also **dynamic**: on a pane taller than the game's native
   aspect there is vertical letterbox dead space, and hybrid mode reclaims it rather
   than centring the frame in it. When nothing sits below the story — header art,
