@@ -336,6 +336,19 @@ re-seed the new template, or hand-write the new shape from
   and it refuses to save settings over a file it couldn't read, so the text you
   need in order to find the mistake is never overwritten. Fix the file (or move
   it aside and let babelmap seed a fresh one) and saving resumes.
+- **A choice for one run stays a choice for one run.** `--no-sound`, `--user-dir`
+  and `--interpreter-number` are instructions for the launch you typed them on,
+  and so are the things babelmap works out for itself: an interpreter number this
+  game's own sidecar pins, a `garglk.ini` sitting beside the story, a `/game-colours`
+  choice, or two-colour artwork that has no colours to give and so switches
+  `honor_game_colours` off for that one rendition. None of them can reach
+  `config.toml`. That matters because saving settings is not always something you
+  set out to do — the story browser's "remember this directory?" prompt writes the
+  file too, and before this a single `--no-sound` session was enough to leave every
+  later launch silent with nothing on screen to say why. The rule is one line: while
+  a value is still the one that launch handed it, the file keeps whatever *it* said.
+  Change the setting on the settings screen and it becomes yours from then on —
+  including when you change it to exactly what the flag asked for.
 - **Settings are written atomically.** Every file babelmap owns — `config.toml`,
   saves and archives, the aux/VFS sidecars — is built beside its target and moved
   into place in one step, so a crash, a power cut, or a kill during a write leaves

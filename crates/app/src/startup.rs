@@ -280,19 +280,18 @@ pub(crate) fn boot_story(
     // specific first: this launch, then the CLI flag (a deliberate instruction
     // for the run), then the game's sidecar, then the global config.
     //
-    // Set through `interpreter_number_cli` as well as `interpreter_number`,
-    // which is what marks a value as belonging to THIS RUN: `write_config_at`
-    // leaves the global config.toml's own key alone while the two agree. Without
-    // that, opening the settings screen during a game whose sidecar pins the
-    // Amiga would quietly bake 4 into the GLOBAL config and hand every other
-    // story the wrong machine.
+    // PINNED as one-run as well as set, which is what marks a value as belonging
+    // to THIS RUN: `write_config_at` leaves the global config.toml's own key alone
+    // while the live value is still the pinned one. Without that, opening the
+    // settings screen during a game whose sidecar pins the Amiga would quietly
+    // bake 4 into the GLOBAL config and hand every other story the wrong machine.
     if let Some(n) = overrides
         .interpreter_number
-        .or(cfg.interpreter_number_cli)
+        .or_else(|| cfg.interpreter_number_one_run())
         .or_else(|| app::styles::read_per_game_interpreter_number(&game_dir))
     {
         cfg.interpreter_number = Some(n);
-        cfg.interpreter_number_cli = Some(n);
+        cfg.one_run.pin(app::config::keys::INTERPRETER_NUMBER, n);
     }
     cfg.interpreter_profile = app::interpreter::InterpreterProfile::resolve(
         &story_path,
@@ -403,7 +402,10 @@ pub(crate) fn boot_story(
     let garglk_line = garglk_overlay.as_ref().map(|ov| {
         let summary = ov.apply(&mut cs);
         if let Some(h) = ov.honor_game_colours {
+            // A garglk.ini found beside THIS story speaks for this story, so it is
+            // pinned as one-run: the global config must not learn it (SQ-0807).
             cfg.honor_game_colours = h;
+            cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, h);
         }
         summary.console_line()
     });
@@ -413,7 +415,10 @@ pub(crate) fn boot_story(
     // bytes) and reused for the map dir / identity below.
     let ifid = compute_ifid(&story_bytes);
     if let Some(v) = app::styles::read_per_game_honor(&game_dir) {
+        // The sidecar's key is this game's, not the global default's — pinned for
+        // the same reason the garglk overlay above is (SQ-0807).
         cfg.honor_game_colours = v;
+        cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, v);
     }
     // SQ-0341: per-game borderless-windows override (default off → honor the Glk
     // border hint). Applies to Glulx layout from the first relayout at boot.
@@ -517,12 +522,12 @@ pub(crate) fn boot_story(
             // costs Shogun its entire RIGHT border — measured, ~11,000 opaque
             // pixels gone on `.cg1` and `.eg1` alike.
             //
-            // Marked as forced so a later settings write cannot bake "never
+            // Pinned as one-run so a later settings write cannot bake "never
             // honour game colours" into the global config (SQ-0646's hazard, and
-            // the same guard `interpreter_number_cli` gets).
+            // the same guard every other one-run source now gets — SQ-0807).
             if picts.is_monochrome() && cfg.honor_game_colours {
                 cfg.honor_game_colours = false;
-                cfg.honor_game_colours_forced_by_art = true;
+                cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, false);
             }
             let v6_screen_px = picts
                 .std_window()

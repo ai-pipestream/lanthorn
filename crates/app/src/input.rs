@@ -2164,6 +2164,10 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             state.set_status(if state.config.honor_timed_input { "timed input on" } else { "timed input off" });
         }
         Action::ToggleSound => {
+            // Reaching for the key is a decision, so it ends any hold `--no-sound`
+            // had on this run's value — the same rule the settings rows follow
+            // (SQ-0807).
+            state.config.one_run.release(crate::config::keys::ENABLE_SOUND);
             state.config.enable_sound = !state.config.enable_sound;
             state.set_status(if state.config.enable_sound { "sound on" } else { "sound off" });
             if !state.config.enable_sound {
@@ -3426,7 +3430,10 @@ pub fn apply_text_entry(dlg: TextEntryDialog, state: &mut AppState, mapper: &mut
             if let Some(cs) = &mut state.overlays.config_screen {
                 match field {
                     crate::state::ConfigPathField::UserDir => {
+                        // Typing a path is the deliberate act `--user-dir` was not,
+                        // so it ends any one-run hold on the key (SQ-0807).
                         cs.working.user_dir = std::path::PathBuf::from(&value);
+                        cs.working.one_run.release(crate::config::keys::USER_DIR);
                     }
                 }
             }
@@ -3661,6 +3668,11 @@ fn config_path_field(row: usize) -> Option<crate::state::ConfigPathField> {
 
 /// Apply ConfigToggle to the selected row: toggle bool, advance enum by 1, or open path edit.
 fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
+    if let (Some(key), Some(cs)) =
+        (one_run_key_for_row(selected), state.overlays.config_screen.as_mut())
+    {
+        cs.working.one_run.release(key);
+    }
     match selected {
         0 => {
             // user_dir — open the text-entry path edit dialog.
@@ -3721,8 +3733,28 @@ fn config_cycle_v6_render(val: &mut crate::config::V6RenderMode, delta: i32) {
     *val = variants[((pos + delta).rem_euclid(n)) as usize];
 }
 
+/// The `config.toml` key a settings-screen row owns, for the rows a one-run source
+/// can have pinned (SQ-0807). Editing the row is a deliberate decision, so it ends
+/// the one-run hold outright — without that, "toggle away and back" would land on
+/// the pinned value again and silently fail to persist.
+///
+/// Row 0 (`user_dir`) is deliberately absent: it only OPENS a path dialog here, and
+/// the user may cancel. Its release lives where the typed path is applied.
+fn one_run_key_for_row(row: usize) -> Option<&'static str> {
+    use crate::config::keys;
+    match row {
+        8 => Some(keys::HONOR_GAME_COLOURS),
+        10 => Some(keys::ENABLE_SOUND),
+        19 => Some(keys::INTERPRETER_NUMBER),
+        _ => None,
+    }
+}
+
 /// Apply ConfigCycle to the selected row.
 fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
+    if let Some(key) = one_run_key_for_row(row) {
+        working.one_run.release(key);
+    }
     match row {
         0 => {} // path: no cycling
         1 => working.auto_load = !working.auto_load,
@@ -4587,6 +4619,45 @@ mod tests {
         apply_action(Action::ConfigSave, &mut s, &mut Mapper::default());
         assert_eq!(s.pending_watch_style, Some(true), "ConfigSave should queue a live watch reconcile");
         assert!(s.config.watch_style, "ConfigSave should apply the working config");
+    }
+
+    /// SQ-0807: editing a settings row ends the one-run hold on its key. `--no-sound`
+    /// pins `enable_sound = false`; toggling the row on and back off again lands on
+    /// the very value the flag asked for, and the value-equality rule alone would
+    /// read that as "still the flag's" and refuse to save the user's actual choice.
+    #[test]
+    fn editing_a_settings_row_promotes_a_one_run_value_to_a_persisted_one() {
+        audio::disable_output_for_tests();
+        let dir = std::env::temp_dir().join(format!("bm-row-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "enable_sound = true\n").unwrap();
+
+        // What `--no-sound` leaves behind.
+        let mut s = AppState::default();
+        s.config.config_file = cfg_path.clone();
+        s.config.enable_sound = false;
+        s.config.one_run.pin(crate::config::keys::ENABLE_SOUND, false);
+
+        // Open the settings screen and work the sound row: on, then off again.
+        let mut m = Mapper::default();
+        apply_action(Action::OpenConfig, &mut s, &mut m);
+        let sound_row = 10;
+        if let Some(cs) = &mut s.overlays.config_screen {
+            config_cycle(&mut cs.working, sound_row, 1);
+            config_cycle(&mut cs.working, sound_row, 1);
+            assert!(!cs.working.enable_sound, "two toggles land back on off");
+        }
+        apply_action(Action::ConfigSave, &mut s, &mut m);
+        crate::config::write_config_file(&s.config).unwrap();
+
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !toml::from_str::<crate::config::Config>(&back).unwrap().enable_sound,
+            "the user's own off must persist even though it matches the flag: {back}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

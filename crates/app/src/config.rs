@@ -706,6 +706,100 @@ impl Default for AnimationConfig {
     }
 }
 
+// ── One-run overrides ─────────────────────────────────────────────────────────
+
+/// The `config.toml` key names a one-run source can pin. Spelled once, used at
+/// both ends — the pin site and [`write_config_at`] — because a typo in either
+/// half silently disables the guard and the bleed comes back with no test to
+/// catch it (the whole point of [`OneRunOverrides`] is that nothing about it is
+/// per-key by hand).
+pub mod keys {
+    pub const USER_DIR: &str = "user_dir";
+    pub const HONOR_GAME_COLOURS: &str = "honor_game_colours";
+    pub const ENABLE_SOUND: &str = "enable_sound";
+    pub const INTERPRETER_NUMBER: &str = "interpreter_number";
+}
+
+/// A value a one-run source pinned, in the shape the TOML key holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OneRunValue {
+    Bool(bool),
+    Int(i64),
+    Str(String),
+}
+
+impl From<bool> for OneRunValue {
+    fn from(v: bool) -> Self { OneRunValue::Bool(v) }
+}
+impl From<u8> for OneRunValue {
+    fn from(v: u8) -> Self { OneRunValue::Int(i64::from(v)) }
+}
+impl From<String> for OneRunValue {
+    fn from(v: String) -> Self { OneRunValue::Str(v) }
+}
+impl From<&str> for OneRunValue {
+    fn from(v: &str) -> Self { OneRunValue::Str(v.to_string()) }
+}
+
+/// Which `config.toml` keys are in force for THIS LAUNCH ONLY, and what the
+/// one-run source put in them (SQ-0807).
+///
+/// A CLI flag, a per-game sidecar key, a discovered `garglk.ini`, a choice the
+/// launch-options dialog made without persisting it, something inferred from the
+/// story's artwork — all of them mutate the live [`Config`], and [`write_config_at`]
+/// writes any value that differs from the default. So without this, the first
+/// settings save of the session — the story browser's "remember this directory?"
+/// prompt is enough — makes a throwaway choice permanent AND global. `--no-sound`
+/// once, and sound is off for every story forever.
+///
+/// One rule covers every key: **while the live value still equals what the one-run
+/// source pinned, the file's own value (or its absence) is left exactly as it is.**
+/// The moment the value differs, the pin no longer describes it and the key persists
+/// like anything else — which is the promotion case, and why this compares values
+/// rather than tracking a "was overridden" bit. A deliberate edit that lands back on
+/// the pinned value releases the pin outright ([`OneRunOverrides::release`], wired to
+/// the settings panel's row edits and [`Config::set_interpreter_number`]) so even
+/// "toggle away and back" persists.
+///
+/// Never serialized: it describes this process, not the file.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OneRunOverrides(std::collections::BTreeMap<&'static str, OneRunValue>);
+
+impl OneRunOverrides {
+    /// Record that a one-run source put `value` in `key` for this launch. The
+    /// caller sets the [`Config`] field itself — this only says where it came from.
+    pub fn pin(&mut self, key: &'static str, value: impl Into<OneRunValue>) {
+        self.0.insert(key, value.into());
+    }
+
+    /// End the one-run hold on `key`: from here it persists like any other setting.
+    /// A deliberate user edit is exactly this event.
+    pub fn release(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+
+    /// The integer a one-run source pinned on `key`, if any. (The `interpreter_number`
+    /// resolution order in `boot_story` needs to tell a CLI value apart from the
+    /// global config's, and both live in the same field.)
+    pub fn int(&self, key: &str) -> Option<i64> {
+        match self.0.get(key) {
+            Some(OneRunValue::Int(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// True while `live` — the value [`write_config_at`] is about to write — is still
+    /// the one the one-run source pinned, i.e. nothing has changed it since.
+    fn still_holds(&self, key: &str, live: &toml_edit::Value) -> bool {
+        match (self.0.get(key), live) {
+            (Some(OneRunValue::Bool(p)), toml_edit::Value::Boolean(v)) => p == v.value(),
+            (Some(OneRunValue::Int(p)), toml_edit::Value::Integer(v)) => p == v.value(),
+            (Some(OneRunValue::Str(p)), toml_edit::Value::String(v)) => p == v.value(),
+            _ => false,
+        }
+    }
+}
+
 /// Current `config.toml` schema version. Bump when a config change means an
 /// older hand-written file may behave unexpectedly. `write_config` stamps this
 /// as `version = N`; a future babelmap can compare a file's `version` against
@@ -722,12 +816,17 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 ///      each or the crate won't compile, which is the good case);
 ///   3. `resolve`'s field-by-field merge from `from_file` — MISS THIS and a
 ///      value in the file is ignored (default always wins on load);
-///   4. `write_config`'s `doc["…"] = …` — MISS THIS and a settings-panel edit
+///   4. `write_config`'s `doc.put("…", …)` — MISS THIS and a settings-panel edit
 ///      is never written, so it reverts to the default on the next launch.
 ///
 /// Steps 3 and 4 fail SILENTLY (they still compile); the round-trip test
 /// `write_config_persists_panel_editable_scalars_round_trip` guards the class.
 /// Runtime-only fields (`#[serde(skip)]`, e.g. `acceleration`) skip 3 and 4.
+///
+/// AND if anything can set the field for ONE LAUNCH — a CLI flag, this game's
+/// sidecar, a value inferred from the story or its artwork — pin it as it lands
+/// (see [`OneRunOverrides`], and add the key to [`keys`]). Miss that and the next
+/// settings save bakes the throwaway choice into the user's global config.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// Schema stamp (see [`CONFIG_SCHEMA_VERSION`]). A file written before
@@ -887,16 +986,6 @@ pub struct Config {
     /// window. Set false to use only the configured color scheme.
     #[serde(default = "default_honor_game_colours")]
     pub honor_game_colours: bool,
-    /// Set at boot when the chosen ARTWORK forced `honor_game_colours` off — a
-    /// two-colour rendition, which has no colours to give (SQ-0806).
-    ///
-    /// Same contract as [`Self::interpreter_number_cli`]: it belongs to THIS
-    /// story, so [`write_config_at`] leaves the file's own value alone while it
-    /// holds, and a later settings write cannot bake "never honour game colours"
-    /// into the global config because someone opened *Zork Zero*'s CGA artwork
-    /// once. Never persisted itself.
-    #[serde(skip)]
-    pub honor_game_colours_forced_by_art: bool,
     /// When true (default), honor the Z-machine's timed-input (`read`/`read_char`
     /// `time`+`routine` operands). Set false to treat all reads as untimed.
     #[serde(default = "default_honor_timed_input")]
@@ -925,21 +1014,11 @@ pub struct Config {
     /// which is why [`write_config_at`] gates on this field rather than on re-parsing.
     #[serde(skip)]
     pub config_error: Option<String>,
-    /// The interpreter number supplied for THIS RUN only, if any (SQ-0646).
-    ///
-    /// `--interpreter-number` is the original source; since SQ-0789 the
-    /// launch-options dialog and the per-game sidecar's `interpreter_number` key
-    /// set it too, because they are the same shape of thing — a value in force
-    /// for one launch of one story, which the global config must never learn.
-    ///
-    /// A one-run override must not be baked into config.toml by a later settings
-    /// write, so [`write_config_at`] leaves the file's own value alone while
-    /// `interpreter_number` still holds this. An explicit settings-panel edit is not a
-    /// CLI override, though — it changes the value (or calls
-    /// [`Config::set_interpreter_number`], which clears this outright), and from then
-    /// on it persists like any other setting. Never persisted itself.
+    /// Which keys above a one-run source pinned for this launch, and to what —
+    /// see [`OneRunOverrides`] (SQ-0646, SQ-0806, SQ-0807). Never persisted, and
+    /// not part of the file's schema.
     #[serde(skip)]
-    pub interpreter_number_cli: Option<u8>,
+    pub one_run: OneRunOverrides,
     /// The machine babelmap presents itself to this story as (SQ-0719).
     ///
     /// Not a config key — it is INFERRED per story at boot by
@@ -988,21 +1067,29 @@ pub struct Config {
 }
 
 impl Config {
-    /// True while `interpreter_number` is still the one-run `--interpreter-number`
-    /// value and nothing has changed it (SQ-0646). [`write_config_at`] uses this to
-    /// decide whether the key belongs in the file: a CLI override is for this run
-    /// only, but a settings-panel edit is a decision the user expects to keep.
+    /// True while `interpreter_number` is still the one a one-run source pinned
+    /// — `--interpreter-number`, the launch-options dialog, or this game's own
+    /// sidecar — and nothing has changed it (SQ-0646/0789). A convenience over
+    /// [`OneRunOverrides`] for the callers that ask about this one key by name.
     pub fn interpreter_number_from_cli(&self) -> bool {
-        self.interpreter_number_cli.is_some() && self.interpreter_number_cli == self.interpreter_number
+        self.interpreter_number
+            .is_some_and(|n| self.one_run.int(keys::INTERPRETER_NUMBER) == Some(i64::from(n)))
+    }
+
+    /// The interpreter number a one-run source pinned for this launch, if any.
+    /// `boot_story` needs it because the CLI's value and the global config's value
+    /// live in the same field and outrank the per-game sidecar differently.
+    pub fn interpreter_number_one_run(&self) -> Option<u8> {
+        self.one_run.int(keys::INTERPRETER_NUMBER).map(|n| n as u8)
     }
 
     /// Set `interpreter_number` as a deliberate user edit (the settings panel), which
-    /// ends the CLI override's hold on the key — including the case where the user
-    /// picks the very number `--interpreter-number` supplied. `None` means "default"
-    /// (the per-version auto rule) and REMOVES the key on the next save.
+    /// ends the one-run hold on the key — including the case where the user picks the
+    /// very number `--interpreter-number` supplied. `None` means "default" (the
+    /// per-version auto rule) and REMOVES the key on the next save.
     pub fn set_interpreter_number(&mut self, n: Option<u8>) {
         self.interpreter_number = n;
-        self.interpreter_number_cli = None;
+        self.one_run.release(keys::INTERPRETER_NUMBER);
     }
 }
 
@@ -1045,12 +1132,11 @@ impl Default for Config {
             text_margin_y: 0,
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
-            honor_game_colours_forced_by_art: false,
             honor_timed_input: default_honor_timed_input(),
             config_file: default_config_file(),
             config_error: None,
             interpreter_number: None,
-            interpreter_number_cli: None,
+            one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             pictures_override: None,
             enable_sound: default_enable_sound(),
@@ -1174,9 +1260,19 @@ pub fn resolve(cli: &Cli) -> Config {
         // document, so there is no half-loaded config to salvage.
     }
 
-    // CLI overrides beat the file.
+    // CLI overrides beat the file — and every one of them that lands on a key
+    // `write_config_at` persists is PINNED as it lands, so a later settings save
+    // cannot bake this run's instruction into the file (SQ-0807; see
+    // `OneRunOverrides`). `--no-accel`, `--image-protocol`, `--no-images`,
+    // `--trace` and `--pictures` need no pin: their fields are `#[serde(skip)]`
+    // and never written at all.
     if let Some(dir) = &cli.user_dir {
         cfg.user_dir = dir.clone();
+        // `--user-dir` relocates BOTH the file and the data root for one run,
+        // which is not the same thing as the `user_dir` key (that moves the data
+        // only). With `--config` naming a different file, writing it back would
+        // pin this run's temporary root into the user's real config.
+        cfg.one_run.pin(keys::USER_DIR, dir.to_string_lossy().into_owned());
     }
 
     cfg.acceleration = !cli.no_accel;
@@ -1186,13 +1282,14 @@ pub fn resolve(cli: &Cli) -> Config {
     // absence must not turn on a config that persisted `enable_sound = false`.
     if cli.no_sound {
         cfg.enable_sound = false;
+        cfg.one_run.pin(keys::ENABLE_SOUND, false);
     }
 
     // `--interpreter-number N` beats the file's `interpreter_number`; absent, the
     // file's value (or the auto rule, when it too is unset) stands.
     if let Some(n) = cli.interpreter_number {
         cfg.interpreter_number = Some(n);
-        cfg.interpreter_number_cli = Some(n);
+        cfg.one_run.pin(keys::INTERPRETER_NUMBER, n);
     }
 
     if let Some(list) = &cli.trace {
@@ -1208,27 +1305,68 @@ pub fn resolve(cli: &Cli) -> Config {
 
 // ── Write helpers ─────────────────────────────────────────────────────────────
 
-/// Set `key` only when it is worth persisting (SQ-0573).
-///
-/// A setting at its default belongs in the seeded commented template, not as a live
-/// key: `write_config` used to stamp all ~36 keys unconditionally, so the first
-/// settings save — the story browser's "remember this directory?" prompt is enough —
-/// appended the whole flat key list to a freshly seeded config.toml, pinning every
-/// default and burying the comments (they land BELOW the inserted keys, since an
-/// all-comment file parses as trailing trivia).
-///
-/// So: add a key only when its value differs from the default, but ALWAYS update one
-/// the file already has. That second half matters twice over — it keeps a setting the
-/// user flipped back to its default from silently reverting on the next launch, and
-/// it means nothing is ever removed, so a comment the user wrote above their own key
-/// (which toml_edit attaches to that key as decor) is never dropped.
-fn put(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Value, is_default: bool) {
-    if !is_default || doc.contains_key(key) {
-        doc[key] = toml_edit::Item::Value(value);
+/// The `config.toml` document being written, plus the one-run pins that must not
+/// reach it (SQ-0807). Every top-level key goes through [`ConfigDoc::put`] or
+/// [`ConfigDoc::put_or_remove`], which is the single place the one-run rule is
+/// applied — there is no per-key guard anywhere below. Derefs to the document so
+/// `doc["version"] = …`, `doc.contains_key(…)` and `doc.remove(…)` read as before.
+struct ConfigDoc<'a> {
+    doc: toml_edit::DocumentMut,
+    one_run: &'a OneRunOverrides,
+}
+
+impl std::ops::Deref for ConfigDoc<'_> {
+    type Target = toml_edit::DocumentMut;
+    fn deref(&self) -> &Self::Target { &self.doc }
+}
+impl std::ops::DerefMut for ConfigDoc<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.doc }
+}
+
+impl ConfigDoc<'_> {
+    /// Set `key` only when it is worth persisting (SQ-0573).
+    ///
+    /// A setting at its default belongs in the seeded commented template, not as a
+    /// live key: `write_config` used to stamp all ~36 keys unconditionally, so the
+    /// first settings save — the story browser's "remember this directory?" prompt is
+    /// enough — appended the whole flat key list to a freshly seeded config.toml,
+    /// pinning every default and burying the comments (they land BELOW the inserted
+    /// keys, since an all-comment file parses as trailing trivia).
+    ///
+    /// So: add a key only when its value differs from the default, but ALWAYS update
+    /// one the file already has. That second half matters twice over — it keeps a
+    /// setting the user flipped back to its default from silently reverting on the
+    /// next launch, and it means nothing is ever removed, so a comment the user wrote
+    /// above their own key (which toml_edit attaches to that key as decor) is never
+    /// dropped.
+    ///
+    /// …and neither half applies while a one-run source still owns the value: this
+    /// run's `--no-sound` is not a setting, so the file keeps whatever it said.
+    fn put(&mut self, key: &str, value: toml_edit::Value, is_default: bool) {
+        if self.one_run.still_holds(key, &value) {
+            return;
+        }
+        if !is_default || self.doc.contains_key(key) {
+            self.doc[key] = toml_edit::Item::Value(value);
+        }
+    }
+
+    /// [`ConfigDoc::put`] for a key whose "default" is ABSENCE rather than a value:
+    /// `Some` writes it whatever it is, `None` REMOVES it. Leaving a `None` in place
+    /// meant a reset-to-default in the settings panel held for exactly as long as the
+    /// session, since an absent key and a present one are different states here.
+    fn put_or_remove(&mut self, key: &str, value: Option<toml_edit::Value>) {
+        match value {
+            Some(v) if self.one_run.still_holds(key, &v) => {}
+            Some(v) => { self.doc[key] = toml_edit::Item::Value(v); }
+            None => { self.doc.remove(key); }
+        }
     }
 }
 
-/// [`put`] for a key inside a table.
+/// [`ConfigDoc::put`] for a key inside a table. No one-run source pins a table key
+/// (`[search]`, `[animation]`, `[command_band]` have no CLI flag, sidecar key or
+/// inferred value), so this stays the plain default-elision rule.
 fn put_in(tbl: &mut toml_edit::Item, key: &str, value: toml_edit::Value, is_default: bool) {
     let present = tbl.get(key).is_some();
     if !is_default || present {
@@ -1250,10 +1388,12 @@ pub fn write_config_file(cfg: &Config) -> std::io::Result<()> {
 /// Does NOT emit `[colors]`/`[symbols]` — those now live in the style file.
 /// Preserves all other content (comments, `[keymap]`, `[hotkeys]`, any visual sections, etc.).
 ///
-/// NOTE: every persisted field needs a `doc["…"] = …` line below — a field
+/// NOTE: every persisted field needs a `doc.put("…", …)` line below — a field
 /// that's missing here is never written, so a settings-panel edit silently
 /// reverts on the next launch. See the checklist on `struct Config` (and mirror
-/// any new field in `resolve`).
+/// any new field in `resolve`). Going through `put`/`put_or_remove` rather than
+/// assigning `doc[key]` directly is also what applies the one-run rule
+/// ([`OneRunOverrides`]), so a key written by hand quietly loses that guard.
 pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
     write_config_at(&dir.join("config.toml"), cfg)
 }
@@ -1291,7 +1431,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     // every comment — with a fresh doc, destroying the very text they need to see to
     // fix the typo. Refuse instead, and say why (SQ-0580). An absent or empty file
     // parses fine, so this only ever fires on real syntax errors.
-    let mut doc: toml_edit::DocumentMut = match existing.parse() {
+    let parsed: toml_edit::DocumentMut = match existing.parse() {
         Ok(doc) => doc,
         Err(e) => {
             return Err(std::io::Error::new(
@@ -1304,106 +1444,93 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
             ));
         }
     };
-    // Defaults to compare against, so a setting nobody changed is not written out.
+    // Defaults to compare against, so a setting nobody changed is not written out —
+    // and the one-run pins, so a value this launch was handed is not written out at
+    // all (SQ-0807).
     let def = Config::default();
+    let mut doc = ConfigDoc { doc: parsed, one_run: &cfg.one_run };
 
     // Top-level scalar fields. Always stamp the current schema version — writing
     // the file brings it up to the format this build produces.
     doc["version"] = toml_edit::value(CONFIG_SCHEMA_VERSION as i64);
-    put(&mut doc, "user_dir", cfg.user_dir.to_string_lossy().as_ref().into(), cfg.user_dir == def.user_dir);
-    match &cfg.default_story_dir {
-        Some(p) => { doc["default_story_dir"] = toml_edit::value(p.to_string_lossy().as_ref()); }
-        None => { doc.remove("default_story_dir"); }
-    }
-    put(&mut doc, "auto_load", cfg.auto_load.into(), cfg.auto_load == def.auto_load);
-    put(&mut doc, "auto_save", cfg.auto_save.into(), cfg.auto_save == def.auto_save);
-    put(&mut doc, "mouse_wheel_invert", cfg.mouse_wheel_invert.into(), cfg.mouse_wheel_invert == def.mouse_wheel_invert);
-    put(&mut doc, "mouse", cfg.mouse.into(), cfg.mouse == def.mouse);
-    put(&mut doc, "command_bar", cfg.command_bar.into(), cfg.command_bar == def.command_bar);
-    put(&mut doc, "prompt_save_on_quit", cfg.prompt_save_on_quit.into(), cfg.prompt_save_on_quit == def.prompt_save_on_quit);
-    put(&mut doc, "prompt_load_on_launch", cfg.prompt_load_on_launch.into(), cfg.prompt_load_on_launch == def.prompt_load_on_launch);
+    doc.put("user_dir", cfg.user_dir.to_string_lossy().as_ref().into(), cfg.user_dir == def.user_dir);
+    doc.put_or_remove(
+        "default_story_dir",
+        cfg.default_story_dir.as_ref().map(|p| p.to_string_lossy().as_ref().into()),
+    );
+    doc.put("auto_load", cfg.auto_load.into(), cfg.auto_load == def.auto_load);
+    doc.put("auto_save", cfg.auto_save.into(), cfg.auto_save == def.auto_save);
+    doc.put("mouse_wheel_invert", cfg.mouse_wheel_invert.into(), cfg.mouse_wheel_invert == def.mouse_wheel_invert);
+    doc.put("mouse", cfg.mouse.into(), cfg.mouse == def.mouse);
+    doc.put("command_bar", cfg.command_bar.into(), cfg.command_bar == def.command_bar);
+    doc.put("prompt_save_on_quit", cfg.prompt_save_on_quit.into(), cfg.prompt_save_on_quit == def.prompt_save_on_quit);
+    doc.put("prompt_load_on_launch", cfg.prompt_load_on_launch.into(), cfg.prompt_load_on_launch == def.prompt_load_on_launch);
     let bg_str = match cfg.background_tidy {
         BackgroundTidy::Off => "off",
         BackgroundTidy::EveryRoom => "every_room",
         BackgroundTidy::OnOverlap => "on_overlap",
         BackgroundTidy::Debounced => "debounced",
     };
-    put(&mut doc, "background_tidy", bg_str.into(), cfg.background_tidy == def.background_tidy);
+    doc.put("background_tidy", bg_str.into(), cfg.background_tidy == def.background_tidy);
     let aux_str = match cfg.aux_storage {
         AuxStorage::Ask => "ask",
         AuxStorage::Archive => "archive",
         AuxStorage::Global => "global",
     };
-    put(&mut doc, "aux_storage", aux_str.into(), cfg.aux_storage == def.aux_storage);
+    doc.put("aux_storage", aux_str.into(), cfg.aux_storage == def.aux_storage);
     let v6_str = match cfg.v6_render {
         V6RenderMode::Hybrid => "hybrid",
         V6RenderMode::Raster => "raster",
         V6RenderMode::Frameless => "frameless",
     };
-    put(&mut doc, "v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
+    doc.put("v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
     let scale_val: toml_edit::Value = match cfg.glk_pixel_scale {
         GlkPixelScale::Native => "native".into(),
         GlkPixelScale::Auto => "auto".into(),
         GlkPixelScale::Fixed(n) => (n as i64).into(),
     };
-    put(&mut doc, "glk_pixel_scale", scale_val, cfg.glk_pixel_scale == def.glk_pixel_scale);
-    put(&mut doc, "v6_arrow_keys", cfg.v6_arrow_keys.into(), cfg.v6_arrow_keys == def.v6_arrow_keys);
-    put(&mut doc, "show_room_numbers", cfg.show_room_numbers.into(), cfg.show_room_numbers == def.show_room_numbers);
-    put(&mut doc, "show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
-    put(&mut doc, "hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
-    put(&mut doc, "watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
-    put(&mut doc, "record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
-    // …unless the ARTWORK forced it off for this story (SQ-0806) — see
-    // `honor_game_colours_forced_by_art`.
-    if !cfg.honor_game_colours_forced_by_art {
-        put(&mut doc, "honor_game_colours", cfg.honor_game_colours.into(), cfg.honor_game_colours == def.honor_game_colours);
-    }
-    put(&mut doc, "honor_timed_input", cfg.honor_timed_input.into(), cfg.honor_timed_input == def.honor_timed_input);
-    put(&mut doc, "enable_sound", cfg.enable_sound.into(), cfg.enable_sound == def.enable_sound);
-    put(&mut doc, "volume", (cfg.volume as i64).into(), cfg.volume == def.volume);
-    put(&mut doc, "undo_levels", (cfg.undo_levels as i64).into(), cfg.undo_levels == def.undo_levels);
-    // A `--interpreter-number` override is for THIS run only: writing it here would
-    // silently make it permanent the next time anything saves settings, so leave the
-    // file's own value (or its absence) untouched in that case — but ONLY while the
-    // value is still the CLI's. Once the settings panel changes it, it is the user's
-    // choice and persists like anything else (SQ-0646); the old `!from_cli` flag made
+    doc.put("glk_pixel_scale", scale_val, cfg.glk_pixel_scale == def.glk_pixel_scale);
+    doc.put("v6_arrow_keys", cfg.v6_arrow_keys.into(), cfg.v6_arrow_keys == def.v6_arrow_keys);
+    doc.put("show_room_numbers", cfg.show_room_numbers.into(), cfg.show_room_numbers == def.show_room_numbers);
+    doc.put("show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
+    doc.put("hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
+    doc.put("watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
+    doc.put("record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
+    // Three one-run sources reach this key and `put` skips all three the same way:
+    // a discovered garglk.ini, this game's own sidecar, and two-colour ARTWORK,
+    // which has no colours to give and so declares the interpreter colourless for
+    // one story (SQ-0806). Opening Zork Zero's CGA rendition once must not teach
+    // the global config to never honour game colours again.
+    doc.put("honor_game_colours", cfg.honor_game_colours.into(), cfg.honor_game_colours == def.honor_game_colours);
+    doc.put("honor_timed_input", cfg.honor_timed_input.into(), cfg.honor_timed_input == def.honor_timed_input);
+    doc.put("enable_sound", cfg.enable_sound.into(), cfg.enable_sound == def.enable_sound);
+    doc.put("volume", (cfg.volume as i64).into(), cfg.volume == def.volume);
+    doc.put("undo_levels", (cfg.undo_levels as i64).into(), cfg.undo_levels == def.undo_levels);
+    // `--interpreter-number`, a launch-options choice and this game's sidecar all
+    // pin this key for one run, and `put_or_remove` skips all three — but ONLY while
+    // the value is still theirs. Once the settings panel changes it, it is the user's
+    // choice and persists like anything else (SQ-0646); the old "from CLI" flag made
     // a `--interpreter-number` session ignore panel edits forever, reporting success
     // and saving nothing.
-    //
-    // `None` means "default" (the per-version auto rule), which has to REMOVE the key:
-    // leaving it meant resetting to default in the panel silently reverted on the next
-    // launch, since an absent key and a present one are different states here — same
-    // rule as `virtual_screen_cols` below.
-    if !cfg.interpreter_number_from_cli() {
-        match cfg.interpreter_number {
-            Some(n) => { doc["interpreter_number"] = toml_edit::value(n as i64); }
-            None => { doc.remove("interpreter_number"); }
-        }
-    }
+    doc.put_or_remove(
+        "interpreter_number",
+        cfg.interpreter_number.map(|n| (n as i64).into()),
+    );
     // Written only when the user pinned one: an absent key means "follow the
     // story pane" (ZMSD §8.4), and emitting the measured size would silently turn
     // this session's terminal into a permanent override. (SQ-0532/A-F1)
-    match cfg.virtual_screen_cols {
-        Some(n) => { doc["virtual_screen_cols"] = toml_edit::value(i64::from(n)); }
-        None => { doc.remove("virtual_screen_cols"); }
-    }
-    match cfg.virtual_screen_rows {
-        Some(n) => { doc["virtual_screen_rows"] = toml_edit::value(i64::from(n)); }
-        None => { doc.remove("virtual_screen_rows"); }
-    }
-    put(&mut doc, "split_ratio", i64::from(cfg.split_ratio).into(), cfg.split_ratio == def.split_ratio);
-    put(&mut doc, "inv_dock_pct", i64::from(cfg.inv_dock_pct).into(), cfg.inv_dock_pct == def.inv_dock_pct);
-    put(&mut doc, "room_dock_pct", i64::from(cfg.room_dock_pct).into(), cfg.room_dock_pct == def.room_dock_pct);
-    put(&mut doc, "text_margin_x", i64::from(cfg.text_margin_x).into(), cfg.text_margin_x == def.text_margin_x);
-    put(&mut doc, "text_margin_y", i64::from(cfg.text_margin_y).into(), cfg.text_margin_y == def.text_margin_y);
+    doc.put_or_remove("virtual_screen_cols", cfg.virtual_screen_cols.map(|n| i64::from(n).into()));
+    doc.put_or_remove("virtual_screen_rows", cfg.virtual_screen_rows.map(|n| i64::from(n).into()));
+    doc.put("split_ratio", i64::from(cfg.split_ratio).into(), cfg.split_ratio == def.split_ratio);
+    doc.put("inv_dock_pct", i64::from(cfg.inv_dock_pct).into(), cfg.inv_dock_pct == def.inv_dock_pct);
+    doc.put("room_dock_pct", i64::from(cfg.room_dock_pct).into(), cfg.room_dock_pct == def.room_dock_pct);
+    doc.put("text_margin_x", i64::from(cfg.text_margin_x).into(), cfg.text_margin_x == def.text_margin_x);
+    doc.put("text_margin_y", i64::from(cfg.text_margin_y).into(), cfg.text_margin_y == def.text_margin_y);
 
     // style pointer — the only visual key written to config.toml. The actual
     // colors/symbols live in the style file ([colors]/[symbols] are no longer
     // emitted here). Visual override sections, if present, are preserved as-is.
-    match &cfg.style {
-        Some(s) => { doc["style"] = toml_edit::value(s.as_str()); }
-        None => { doc.remove("style"); }
-    }
+    doc.put_or_remove("style", cfg.style.as_deref().map(|s| s.into()));
 
     // [search] table — only materialized once something in it is non-default, so a
     // seeded config keeps the commented block instead of gaining an all-defaults table.
@@ -2014,12 +2141,11 @@ use_defaults = false
             show_room_numbers: false,
             show_status_bar: true,
             honor_game_colours: true,
-            honor_game_colours_forced_by_art: false,
             honor_timed_input: true,
             config_file: default_config_file(),
             config_error: None,
             interpreter_number: None,
-            interpreter_number_cli: None,
+            one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             pictures_override: None,
             enable_sound: true,
@@ -2618,6 +2744,116 @@ use_defaults = false
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `--no-sound` silences ONE run. Before SQ-0807 `write_config_at` put
+    /// `enable_sound` unconditionally, so the first settings save of a `--no-sound`
+    /// session — the story browser's "remember this directory?" prompt is enough —
+    /// wrote `enable_sound = false` into config.toml and every later launch was
+    /// silent, with nothing on screen to say why.
+    #[test]
+    fn no_sound_flag_does_not_persist_enable_sound() {
+        let dir = std::env::temp_dir().join(format!("bm-nosound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        // Present AND at its default — the case `put` rewrites either way.
+        std::fs::write(&cfg_path, "# mine\nenable_sound = true\n").unwrap();
+
+        let cli = Cli { no_sound: true, ..cli_with_config(&cfg_path, None) };
+        let mut cfg = resolve(&cli);
+        assert!(!cfg.enable_sound, "the flag silences this run");
+
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            toml::from_str::<Config>(&back).unwrap().enable_sound,
+            "--no-sound is for one run; the FILE must still say true: {back}"
+        );
+        assert!(back.contains("# mine"), "and the user's comment survives: {back}");
+
+        // The settings panel turning sound off IS a decision, and it persists.
+        cfg.one_run.release(keys::ENABLE_SOUND);
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(!toml::from_str::<Config>(&back).unwrap().enable_sound, "an explicit off persists");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--user-dir` relocates the data root for one run. With `--config` naming a
+    /// different file, a settings save used to stamp that temporary root into the
+    /// user's real config — so a single `--user-dir /tmp/x` run left every later
+    /// launch reading maps and saves out of `/tmp/x` (SQ-0807).
+    #[test]
+    fn user_dir_flag_does_not_persist_into_a_named_config() {
+        let dir = std::env::temp_dir().join(format!("bm-userdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        let real_root = dir.join("real");
+        let one_run_root = dir.join("scratch");
+        std::fs::write(&cfg_path, format!("user_dir = {:?}\n", real_root.to_string_lossy())).unwrap();
+
+        let cli = Cli {
+            user_dir: Some(one_run_root.clone()),
+            ..cli_with_config(&cfg_path, None)
+        };
+        let mut cfg = resolve(&cli);
+        assert_eq!(cfg.user_dir, one_run_root, "the flag moves the data root for this run");
+
+        write_config_at(&cfg_path, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&back).unwrap().user_dir,
+            real_root,
+            "the FILE keeps the user's own root: {back}"
+        );
+
+        // Typing a path into the settings panel is a decision, and it persists.
+        let chosen = dir.join("chosen");
+        cfg.user_dir = chosen.clone();
+        cfg.one_run.release(keys::USER_DIR);
+        write_config_at(&cfg_path, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert_eq!(toml::from_str::<Config>(&back).unwrap().user_dir, chosen, "an edit persists");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Promotion, the half that makes the guard safe to generalise: a value a one-run
+    /// source pinned STOPS being one-run the moment something changes it, and from
+    /// then on it persists like any other setting — including when the user changes
+    /// it straight back to what the flag asked for, which is why the settings panel
+    /// releases the pin outright rather than relying on the value differing.
+    #[test]
+    fn a_panel_edit_promotes_a_one_run_value_to_a_persisted_one() {
+        let dir = std::env::temp_dir().join(format!("bm-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "enable_sound = true\n").unwrap();
+
+        let cli = Cli { no_sound: true, ..cli_with_config(&cfg_path, None) };
+        let mut cfg = resolve(&cli);
+
+        // Merely differing from the pin is enough: the pin no longer describes it.
+        cfg.enable_sound = true;
+        write_config(&dir, &cfg).unwrap();
+        assert!(
+            std::fs::read_to_string(&cfg_path).unwrap().contains("enable_sound = true"),
+            "a value that is no longer the pinned one is written normally"
+        );
+
+        // …and changing it BACK to the flag's value still persists, because the
+        // panel released the pin when the row was edited.
+        cfg.one_run.release(keys::ENABLE_SOUND);
+        cfg.enable_sound = false;
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !toml::from_str::<Config>(&back).unwrap().enable_sound,
+            "toggling back to the flag's value is still the user's choice: {back}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Artwork that forces `honor_game_colours` off for ONE story must not be
     /// written back (SQ-0806): opening *Zork Zero*'s CGA rendition once would
     /// otherwise bake "never honour game colours" into the global config and
@@ -2647,9 +2883,9 @@ use_defaults = false
         });
         assert!(cfg.honor_game_colours, "the file's value loads");
 
-        // Boot against two-colour artwork: off for this story, marked forced.
+        // Boot against two-colour artwork: off for this story, pinned as one-run.
         cfg.honor_game_colours = false;
-        cfg.honor_game_colours_forced_by_art = true;
+        cfg.one_run.pin(keys::HONOR_GAME_COLOURS, false);
 
         write_config(&dir, &cfg).unwrap();
         let back = std::fs::read_to_string(&cfg_path).unwrap();
@@ -2660,7 +2896,7 @@ use_defaults = false
         );
 
         // …and an ordinary off (the user's own choice) still persists.
-        cfg.honor_game_colours_forced_by_art = false;
+        cfg.one_run.release(keys::HONOR_GAME_COLOURS);
         write_config(&dir, &cfg).unwrap();
         let back = std::fs::read_to_string(&cfg_path).unwrap();
         let reread: Config = toml::from_str(&back).unwrap();

@@ -92,8 +92,18 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         crate::styles::read_per_game_honor(&state.game_dir)
     };
     let garglk_honor = state.garglk_overlay.as_ref().and_then(|o| o.honor_game_colours);
-    state.config.honor_game_colours =
-        per_game_honor.or(garglk_honor).unwrap_or(state.honor_game_colours_base);
+    let per_story_honor = per_game_honor.or(garglk_honor);
+    state.config.honor_game_colours = per_story_honor.unwrap_or(state.honor_game_colours_base);
+    // SQ-0807: whatever this recompute lands on, say where it came from. A per-game
+    // (or garglk) value is in force for THIS story and must not reach the global
+    // config.toml — `/game-colours off` followed by a settings save would otherwise
+    // turn one game's choice into everyone's. Falling back to the global base is the
+    // opposite event: nothing is overriding the key any more, so any earlier pin
+    // (the boot-time artwork force included) no longer describes the live value.
+    match per_story_honor {
+        Some(v) => state.config.one_run.pin(crate::config::keys::HONOR_GAME_COLOURS, v),
+        None => state.config.one_run.release(crate::config::keys::HONOR_GAME_COLOURS),
+    }
 
     // SQ-0309: rebuild the registry theme from the same global + per-game files, with
     // provenance. Render still reads the legacy fields above; the theme is consumed by
@@ -226,6 +236,52 @@ mod tests {
         crate::styles::write_per_game_honor(&game_dir, None).unwrap();
         reload_style(&mut state);
         assert!(state.config.honor_game_colours, "auto falls back to global base");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0807: `/game-colours off` writes THIS game's sidecar and reload_style folds
+    /// the result into `state.config` — where the next settings save used to write it
+    /// straight into the global config.toml, so one game's choice became every game's.
+    /// The recompute pins it as one-run instead, and clearing the override (`auto`)
+    /// releases the pin because nothing is overriding the key any more.
+    #[test]
+    fn a_per_game_honor_override_never_reaches_the_global_config() {
+        let dir = temp_dir("honor-global");
+        let global = seed_style(&dir);
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "honor_game_colours = true\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.config_file = cfg_path.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+        state.game_dir = game_dir.clone();
+        state.honor_game_colours_base = true;
+        state.config.honor_game_colours = true;
+
+        crate::styles::write_per_game_honor(&game_dir, Some(false)).unwrap();
+        reload_style(&mut state);
+        assert!(!state.config.honor_game_colours, "the live session honours the choice");
+
+        crate::config::write_config_file(&state.config).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            toml::from_str::<crate::config::Config>(&back).unwrap().honor_game_colours,
+            "the GLOBAL file still says true — one game spoke, not all of them: {back}"
+        );
+
+        // Back to `auto`: the key is nobody's override now, so it persists as usual.
+        crate::styles::write_per_game_honor(&game_dir, None).unwrap();
+        reload_style(&mut state);
+        state.config.honor_game_colours = false; // as if the settings panel turned it off
+        crate::config::write_config_file(&state.config).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !toml::from_str::<crate::config::Config>(&back).unwrap().honor_game_colours,
+            "a global choice persists as always: {back}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
