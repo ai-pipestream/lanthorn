@@ -23,3 +23,6 @@ mod v6_sunburst_char_echo;
 mod v6_split_tiles_window_zero;
 #[path = "suites/v6_win0_backdrop.rs"]
 mod v6_win0_backdrop;
+
+#[path = "suites/v6_mysterious01_boot.rs"]
+mod v6_mysterious01_boot;

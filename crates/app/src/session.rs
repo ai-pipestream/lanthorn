@@ -1716,26 +1716,48 @@ impl GameSession {
     /// Measured across the v6 corpus (unit pixels; picture dims doubled by
     /// [`V6_ART_SCALE`] to match the window box, which is already unit space):
     ///
-    /// | game        | picture      | draw x | picture w | window w | verdict |
-    /// |-------------|--------------|--------|-----------|----------|---------|
-    /// | Zork Zero   | 2 (drop-cap) | 1      | 84        | 468      | float   |
-    /// | Zork Zero   | 216 (icon)   | 1      | 42        | 468      | float   |
-    /// | Zork Zero¹  | 2 (drop-cap) | 5      | 84        | 464      | float   |
-    /// | Zork Zero¹  | 216 (icon)   | 5      | 42        | 464      | float   |
-    /// | Shogun      | 7 (ship)     | 229    | 320       | 548      | float   |
-    /// | Journey     | 160          | 1      | 640       | 640      | canvas  |
-    /// | fmvpoker    | 99           | 1      | 640       | 640      | canvas  |
-    /// | mysterious01| 33           | 1      | 1024      | 640      | canvas  |
+    /// | game        | picture      | draw x | picture w | window w | out_chars | verdict |
+    /// |-------------|--------------|--------|-----------|----------|-----------|---------|
+    /// | Zork Zero   | 2 (drop-cap) | 1      | 84        | 468      | 1         | float   |
+    /// | Zork Zero   | 216 (icon)   | 1      | 42        | 468      | 270       | float   |
+    /// | Zork Zero¹  | 2 (drop-cap) | 5      | 84        | 464      | 1         | float   |
+    /// | Zork Zero¹  | 216 (icon)   | 5      | 42        | 464      | 270       | float   |
+    /// | Shogun      | 7 (ship)     | 229    | 320       | 548      | 526       | float   |
+    /// | Journey     | 160          | 1      | 640       | 640      | 37        | canvas  |
+    /// | fmvpoker    | 99           | 1      | 640       | 640      | 151       | canvas  |
+    /// | mysterious01| 33           | 1      | 512       | 640      | 0         | canvas  |
     ///
     /// ¹ the same game booted off its Amiga `.adf`, art from the native archive.
     ///
-    /// The gap is not a tuned threshold — the widest float covers 58% of its
-    /// window, the narrowest canvas covers 100%.
+    /// The width gap is not a tuned threshold — the widest float covers 58% of its
+    /// window, the narrowest canvas that the WIDTH arm decides covers 100%.
+    ///
+    /// **mysterious01 is the row the width arm cannot reach, and the reason the
+    /// `out_chars` column is here** (SQ-0722). Its title card is 512 px in a 640 px
+    /// window, so it spans neither the window nor a threshold anyone would want to
+    /// defend — 80% of the window, against Shogun's 58%. This row USED to read
+    /// `1024` and pass comfortably, because every v6 picture was doubled by
+    /// [`V6_ART_SCALE`]; SQ-0715/SQ-0718 gave the story its true `art_scale` of 1
+    /// (its Blorb has no `Reso` chunk, so Blorb §11 draws it 1:1) and the product
+    /// silently halved. Nothing in the width arm noticed, and the card fell back to
+    /// being a float — into the transcript, where it scrolled away with the prose.
+    /// A measured table is only as good as the quantity it measures staying put.
+    ///
+    /// So the intent test above carries the real discriminator for this row, and it
+    /// costs no threshold at all: with **nothing ever streamed to window 0**,
+    /// `at_cursor` is comparing against a cursor no text ever moved.
     ///
     /// Art that will not resolve keeps the old answer: neither path paints
     /// anything for it, and guessing a canvas would only create an empty one.
     fn is_win0_inline_float(&mut self, ev: &PictureEvent) -> bool {
-        if ev.window != 0 || !(ev.at_cursor || ev.margin_after.is_some()) {
+        // `at_cursor` is evidence only when the cursor means something. It is a
+        // pixel-exact `y == y_cursor`, and with NOTHING ever streamed to window 0
+        // the cursor is simply where `erase_window` left it — home. A picture
+        // drawn there matches a position no text ever produced, so the match
+        // carries no intent at all (SQ-0722). `margin_after` is unconditional:
+        // a `set_margins` is the game speaking, not a coordinate coinciding.
+        let intent = (ev.at_cursor && ev.out_chars > 0) || ev.margin_after.is_some();
+        if ev.window != 0 || !intent {
             return false;
         }
         let win_w = self

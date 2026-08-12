@@ -419,12 +419,19 @@ session-only switch that never touches your saved config:
   reverse-video to fill the row; a window that shape *is* the status bar.
   A ring is also nothing when the story window covers the **whole screen**: there
   are no bands left to carve, so no artwork behind it can be shown at all. Such a
-  frame is handed to the full-picture composite instead — whether the art *fills*
-  the screen (Zork Zero's map, Arthur's illustrated intro plates, Journey's title)
-  or merely *encloses* it. fmvpoker's poker table is the second kind: a 640×400
-  frame with a hollow middle that the game prints its whole title inside, only 17%
-  of its pixels painted. Asking whether the art filled the screen missed it at
-  every point that mattered, and the game drew not one picture in hybrid mode.
+  frame is handed to the full-picture composite instead — and the rule is simply
+  that, with no ring to draw in, a story window whose own picture paints *anything*
+  has nowhere else to put it. That was arrived at the long way round, by asking
+  first whether the art *filled* the screen (Zork Zero's map, Arthur's illustrated
+  intro plates, Journey's title) and then whether it merely *enclosed* it. fmvpoker's
+  poker table is the second kind: a 640×400 frame with a hollow middle that the game
+  prints its whole title inside, only 17% of its pixels painted, which the fill test
+  missed at every point that mattered. The Mysterious Adventures are neither kind —
+  their boot stacks two 512×192 title cards down the left of the screen, leaving the
+  right-hand quarter bare — and for a while babelmap drew neither card, because two
+  tests for two particular shapes had quietly stood in for the one fact that
+  mattered. Both shapes are special cases of it, and the general rule moves no other
+  title: crisp terminal cells are worth having, but not at the price of the picture.
   A third way to have no ring: the story window's **own** picture is left out of the
   band canvas on purpose (it belongs inside the story viewport, blitted there as a
   float), which is right only while the picture is inside the window it belongs to.
@@ -711,12 +718,24 @@ back at its top-left corner: **is there any room left beside the picture?** A
 float, by definition, has prose flowing next to it. A picture that spans window
 0 from edge to edge leaves no column for that prose, so it cannot be one — it is
 a backdrop, and it goes on the window's own canvas with the story text drawn
-over it. Frobozz Magic Videopoker paints its whole card table that way, Journey
-its title illustration, the Mysterious Adventures their title cards; every one of
-them draws at (1,1) immediately after erasing the screen and would otherwise be
-mistaken for the world's largest drop-cap. The margin between the two readings is
-not a fine one: the widest genuine float in the Infocom v6 catalogue — Shogun's
-ship — covers 58% of its window, and every backdrop covers all of it.
+over it. Frobozz Magic Videopoker paints its whole card table that way, and
+Journey its title illustration; both draw at (1,1) immediately after erasing the
+screen and would otherwise be mistaken for the world's largest drop-cap. The
+margin there is not a fine one: the widest genuine float in the Infocom v6
+catalogue — Shogun's ship — covers 58% of its window, and both of those
+backdrops cover all of it.
+
+The Mysterious Adventures are the reason there is a third question. Their title
+cards are 512 pixels wide on a 640-pixel screen, so they span neither the window
+nor any threshold worth arguing about, and no reading of "how wide is it?" was
+ever going to place them. What settles them instead is asking what the cursor
+test is actually worth on that frame: landing on the text cursor means the
+picture belongs to the line being written, and at boot **nothing has been written
+at all**. The cursor is simply where the screen-clear left it, so a picture that
+matches it matches nothing. babelmap now counts the characters window 0 has
+streamed, and treats hitting the cursor as evidence only when there were some.
+Every genuine float in the catalogue is drawn into a window that has already
+printed something; every coincidence is not.
 
 ## Full-page plates — art the game placed itself
 
