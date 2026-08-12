@@ -3602,10 +3602,10 @@ enum BottomPlan {
 /// second arm asks whether the art ENCLOSES the screen instead — painted pixels
 /// within a native text row of all four edges, which is "the painted bounding box
 /// spans the screen" without scanning the interior. Measured across the v6 corpus,
-/// this moves fmvpoker alone: Zork Zero and Shogun keep window 0 inset, advent and
+/// this moved fmvpoker alone: Zork Zero and Shogun keep window 0 inset, advent and
 /// scopa paint nothing behind it, Arthur's intro plate and Journey's title already
-/// fill the screen, and mysterious01's plate (a 512×192 band across the lower half)
-/// reaches neither the top edge nor the right one.
+/// fill the screen, and mysterious01's plate reached neither the right edge nor
+/// (at the time) the top one. That last exception is the SQ-0725 arm below.
 ///
 /// SQ-0739: a third way to have no ring to draw. The ring's bands are cropped from
 /// the CHROME canvas, and the story window's own plate is deliberately not in it —
@@ -3613,6 +3613,32 @@ enum BottomPlan {
 /// holds only while the plate is inside the window it belongs to. When it is not,
 /// the escaping art is in neither place: no band carries it and no viewport shows
 /// it. See [`story_plate_escapes_story_window`].
+///
+/// SQ-0725 GENERALISED THE FIRST TWO ARMS INTO ONE. Both were proxies for a fact
+/// the premise already states outright: `blit_story_gfx` is reachable from the
+/// RASTER path alone, so once the story window covers the screen — no ring — a
+/// plate that goes anywhere but the composite goes nowhere. "Fills" and
+/// "encloses" were two shapes that happen to satisfy that; they were never the
+/// reason. mysterious01 is the title that is neither shape and still has no ring:
+/// its boot stacks two 512×192 title cards down the left of a 640×400 screen, so
+/// the art misses the fill grid on the right-hand quarter and misses the
+/// enclosure test on the right edge, and hybrid — the shipped default — drew
+/// **not one pixel of either card**. Only the card the SQ-0722 misclassification
+/// smuggled down the transcript-float path was ever visible, which is why the two
+/// quests read as separate bugs.
+///
+/// So the third arm is the premise itself: a full-screen story window whose plate
+/// paints ANYTHING must take the composite. Measured over the corpus, every frame
+/// that has both a full-screen story window and a painted plate already took
+/// raster by one of the old arms — Arthur's intro and Journey's title at 64/64
+/// probe points, fmvpoker's hollow frame at 4–10/64 — and mysterious01 (48/64 at
+/// boot, 24/64 after) is the sole frame the generalisation moves. There is no
+/// corpus frame where a full-screen story window has a painted plate and the ring
+/// is the right answer, so this is a categorical rule and not a tuned threshold.
+///
+/// The tradeoff is real and deliberate: a frame that stops taking the ring renders
+/// as a pixel image instead of crisp terminal cells. It is still the right trade,
+/// because the alternative for such a frame is not crisper art — it is no art.
 fn picture_takeover(
     story: &crate::engine::PositionedWindow,
     chrome: &[&crate::engine::PositionedWindow],
@@ -3620,8 +3646,31 @@ fn picture_takeover(
     native: (u16, u16),
 ) -> bool {
     (story_covers_screen(story, native)
-        && (art_fills_screen(chrome, story_gfx, native) || art_encloses_screen(chrome, story_gfx, native)))
+        && (art_paints_anything(story_gfx, native)
+            || art_fills_screen(chrome, story_gfx, native)
+            || art_encloses_screen(chrome, story_gfx, native)))
         || story_plate_escapes_story_window(story, story_gfx)
+}
+
+/// Does the story window's own plate paint anything at all (SQ-0725)?
+///
+/// Sampled on the same coarse 8×8 grid as [`art_fills_screen`], for the same
+/// reason — this runs on every hybrid frame, and a plate with art on it versus an
+/// empty canvas is not a close call. Only `story_gfx` is asked: CHROME art has a
+/// ring to live in and is none of this arm's business.
+fn art_paints_anything(
+    story_gfx: Option<&crate::engine::PositionedWindow>,
+    native: (u16, u16),
+) -> bool {
+    const N: u32 = 8;
+    let painted = art_painted_probe(&[], story_gfx);
+    (0..N).any(|iy| {
+        let y = native.1 as u32 * (2 * iy + 1) / (2 * N);
+        (0..N).any(|ix| {
+            let x = native.0 as u32 * (2 * ix + 1) / (2 * N);
+            painted(x, y)
+        })
+    })
 }
 
 /// SQ-0739: does the STORY window's own plate paint outside the story window's box?

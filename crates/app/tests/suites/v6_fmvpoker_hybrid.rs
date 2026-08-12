@@ -175,9 +175,17 @@ fn fmvpoker_hybrid_draws_its_frame_theme_only() {
 /// The corpus guard: the enclosure arm is meant to move fmvpoker and nothing else.
 ///
 /// Zork Zero and Shogun keep window 0 inset inside their frames, advent and scopa
-/// paint nothing behind it, Arthur's intro plate and Journey's title already filled
-/// the screen, and mysterious01's plate is a band across the lower half that
-/// reaches neither the top edge nor the right one.
+/// paint nothing behind it, and Arthur's intro plate and Journey's title already
+/// filled the screen.
+///
+/// SQ-0725 added a third arm — a full-screen story window whose plate paints
+/// anything must take the composite, because `blit_story_gfx` is reachable from the
+/// raster path alone — and mysterious01 is the one title in the corpus it moves.
+/// Its two stacked 512x192 title cards leave the right-hand quarter of the screen
+/// bare, so they satisfy neither the fill grid nor the enclosure test, and hybrid
+/// drew NOTHING for them: its ring is empty when the story window covers the
+/// screen. `mysterious01.z6` reads `raster` below for exactly that reason, and the
+/// rest of this table is the guard that nothing else came with it.
 #[test]
 fn fmvpoker_is_the_only_title_this_moves() {
     const RING: &str = "hybrid-ring";
@@ -189,7 +197,8 @@ fn fmvpoker_is_the_only_title_this_moves() {
         ("journey-r83-s890706.z6", &[RING, "raster", RING, RING]),
         ("advent.z6", &[RING, MENU, RING, RING]),
         ("scopa.z6", &["painted (hint/menu takeover)"; 4]),
-        ("mysterious01.z6", &[RING; 4]),
+        // SQ-0725: its title cards have no ring to live in — see above.
+        ("mysterious01.z6", &["raster"; 4]),
         // …and fmvpoker, which boots with no art at all and takes the ring for that
         // one frame, then draws its table and must go to the composite from there.
         ("fmvpoker.z6", &[RING, "raster", "raster", "raster"]),
