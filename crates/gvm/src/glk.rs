@@ -602,9 +602,11 @@ pub trait GlkBackend {
     /// channel `Some(0x00RRGGBB)` or `None` when it is the terminal's own
     /// default (unknowable, so no guess). The outer `None` means the host
     /// reports no rendered colours at all (the default). Consulted by
-    /// `glk_style_measure` only for a colour hint the game did not set itself,
-    /// so games (e.g. Kerkerkruip) can detect a dark host background and adapt
-    /// (SQ-0315).
+    /// `glk_style_measure` only for a colour hint the game did not set itself
+    /// (SQ-0315), and by `glk_style_distinguish` to tell two styles apart that
+    /// the game gave no hints of its own (SQ-0803) — so a game (e.g.
+    /// Kerkerkruip) that probes what the host paints for a given style class
+    /// gets the host's real answer.
     fn default_style_colours(&self, _wintype: WinType, _style: u32) -> Option<(Option<u32>, Option<u32>)> {
         None
     }
@@ -733,6 +735,10 @@ pub struct TestBackend {
     /// Canned host-rendered default style colours `(fg, bg)`, served by
     /// [`GlkBackend::default_style_colours`] for every wintype/style when set.
     default_colours: Option<(Option<u32>, Option<u32>)>,
+    /// Per-style-class overrides of `default_colours`, keyed by the `style_*`
+    /// number — a host whose theme paints one style differently from the rest
+    /// (SQ-0803). Styles absent here fall back to `default_colours`.
+    style_colours: BTreeMap<u32, (Option<u32>, Option<u32>)>,
     /// Fixed local UTC offset in seconds served by
     /// [`GlkBackend::local_utc_offset_seconds`] for the `_local` date/time
     /// selector tests (`None` = no tz knowledge → selectors fall back to UTC).
@@ -767,6 +773,7 @@ impl TestBackend {
             sound_log: Vec::new(),
             data_resources: BTreeMap::new(),
             default_colours: None,
+            style_colours: BTreeMap::new(),
             local_offset: None,
         }
     }
@@ -801,6 +808,12 @@ impl TestBackend {
     /// [`GlkBackend::default_style_colours`] reports for every wintype/style.
     pub fn with_default_colours(mut self, fg: Option<u32>, bg: Option<u32>) -> Self {
         self.default_colours = Some((fg, bg));
+        self
+    }
+    /// Override the canned default colours for one style class (SQ-0803), the way
+    /// a host theme that paints e.g. `style_User2` in its own colour does.
+    pub fn with_style_colours(mut self, style: u32, fg: Option<u32>, bg: Option<u32>) -> Self {
+        self.style_colours.insert(style, (fg, bg));
         self
     }
     /// Set the fixed local UTC offset (seconds east of Greenwich) that
@@ -1019,8 +1032,8 @@ impl GlkBackend for TestBackend {
     fn data_resource(&mut self, num: u32) -> Option<(Vec<u8>, bool)> {
         self.data_resources.get(&num).cloned()
     }
-    fn default_style_colours(&self, _wintype: WinType, _style: u32) -> Option<(Option<u32>, Option<u32>)> {
-        self.default_colours
+    fn default_style_colours(&self, _wintype: WinType, style: u32) -> Option<(Option<u32>, Option<u32>)> {
+        self.style_colours.get(&style).copied().or(self.default_colours)
     }
     fn local_utc_offset_seconds(&self, _epoch_seconds: i64) -> Option<i32> {
         self.local_offset

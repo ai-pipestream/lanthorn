@@ -4216,11 +4216,27 @@ impl Machine {
             0x00B0 => { self.glk.set_style_hint(a(0), a(1), a(2), a(3)); 0 } // glk_stylehint_set
             0x00B1 => { self.glk.clear_style_hint(a(0), a(1), a(2)); 0 }     // glk_stylehint_clear
             // glk_style_distinguish: compares the rendered stylehints the model
-            // records — colour/reverse plus Weight/Oblique (SQ-0317). The backend's
-            // default colours (SQ-0315) are per-window-type base colours, identical
-            // across style classes, so they can never make two styles
-            // distinguishable — the model's hint-based answer is the honest one.
-            0x00B2 => self.glk.style_distinguish(a(0), a(1), a(2)) as u32,
+            // records — colour/reverse plus Weight/Oblique (SQ-0317). Since SQ-0803
+            // the backend's default colours are per STYLE CLASS, not one pair per
+            // window type, so two styles the game never hinted can still be told
+            // apart by what the host paints (a garglk.ini that colours only
+            // style_User2 is exactly that case) — hence the second arm. The model's
+            // hint-based answer still wins when it says yes: a hint the game set is
+            // what gets rendered, overriding the host default the backend reports.
+            0x00B2 => {
+                let distinguishable = self.glk.style_distinguish(a(0), a(1), a(2))
+                    || (a(1) != a(2)
+                        && a(1) < glk::NUMSTYLES
+                        && a(2) < glk::NUMSTYLES
+                        && match self.glk.window_type(a(0)) {
+                            Some(wt) => {
+                                self.backend.default_style_colours(wt, a(1))
+                                    != self.backend.default_style_colours(wt, a(2))
+                            }
+                            None => false,
+                        });
+                distinguishable as u32
+            }
             0x00B3 => {
                 // glk_style_measure(win, styl, hint, result*) -> 1 if known + stored.
                 // Answer order (SQ-0315): a game-set stylehint colour wins (it IS
@@ -12092,6 +12108,59 @@ mod tests {
         m.glk_dispatch(0x00B1, &[3, 0, 8]).unwrap(); // stylehint_clear
         assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 8, 0x110]).unwrap(), 1);
         assert_eq!(m.mem.read32(0x110).unwrap(), 0x001D1F21, "cleared hint -> backend bg again");
+    }
+
+    #[test]
+    fn glk_style_measure_reports_the_backend_per_style_colour() {
+        // SQ-0803: a host that paints one style class in its own colour (the app's
+        // per-Glk-style theme slot, e.g. a garglk.ini `tcolor 10`) must report THAT
+        // colour for that style and the window base for every other — this is the
+        // Kerkerkruip 0xF400A1 style_User2 sentinel. Constants verified against
+        // glk.h (eblong.com): style_Normal 0, style_User2 10, stylehint_TextColor 7,
+        // stylehint_BackColor 8, wintype_TextBuffer 3.
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let backend = glk::TestBackend::new()
+            .with_default_colours(Some(0x00C5C8C6), Some(0x001D1F21))
+            .with_style_colours(10, Some(0x00F400A1), Some(0x00FFFFFF));
+        let mut m = Machine::with_glk(mem, Box::new(backend));
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // wintype_TextBuffer
+        assert_ne!(win, 0);
+
+        // style_User2 reports the slot, not the window base.
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 10, 7, 0x100]).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x00F400A1, "User2 fg is the style slot");
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 10, 8, 0x104]).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0x00FFFFFF, "User2 bg is the style slot");
+        // Every other style still reports the window base.
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 7, 0x108]).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0x00C5C8C6, "Normal fg is the base");
+        // And a game-set hint still wins over the host's per-style colour.
+        m.glk_dispatch(0x00B0, &[3, 10, 7, 0x0000FF00]).unwrap(); // stylehint_set
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 10, 7, 0x10C]).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0x0000FF00, "game hint wins over the slot");
+    }
+
+    #[test]
+    fn glk_style_distinguish_sees_the_backend_per_style_colours() {
+        // SQ-0803: with no game hints at all, two styles the HOST paints
+        // differently are distinguishable; two it paints alike are not.
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let backend = glk::TestBackend::new()
+            .with_default_colours(Some(0x00C5C8C6), Some(0x001D1F21))
+            .with_style_colours(10, Some(0x00F400A1), Some(0x00FFFFFF));
+        let mut m = Machine::with_glk(mem, Box::new(backend));
+        let win = m.glk_open_window(0, 0, 0, 3, 0);
+        assert_eq!(m.glk_dispatch(0x00B2, &[win, 0, 10]).unwrap(), 1, "Normal vs User2 differ");
+        assert_eq!(m.glk_dispatch(0x00B2, &[win, 0, 3]).unwrap(), 0, "Normal vs Header alike");
+        assert_eq!(m.glk_dispatch(0x00B2, &[win, 10, 10]).unwrap(), 0, "a style equals itself");
+        // An out-of-range style class is never distinguishable (glk.h: NUMSTYLES 11).
+        assert_eq!(m.glk_dispatch(0x00B2, &[win, 0, 11]).unwrap(), 0, "style 11 is out of range");
+        // No window, no answer.
+        assert_eq!(m.glk_dispatch(0x00B2, &[0, 0, 10]).unwrap(), 0, "invalid window");
     }
 
     #[test]

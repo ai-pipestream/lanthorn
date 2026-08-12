@@ -308,6 +308,19 @@ is written back to any sidecar — and, consistent with `honor_game_colours`, an
 explicit per-game `config.toml` value always wins over the garglk.ini (the text
 margin has no per-game key today, so garglk overrides only your global default).
 
+**And we answer for it.** A game can ask the interpreter what colour it actually
+paints a given style — and at least one game asks in order to find out whether
+its own config file was applied. Kerkerkruip's ini sets `style_User2` to Fashion
+Fuchsia (`tcolor 10 F400A1 ffffff`) for no reason except that nobody else on
+earth would, then measures that style at startup; a host that answers "fuchsia"
+must be running the author's config, so the game skips its screen-reader prompt,
+switches its menus to hyperlinks and opens its graphical title screen. babelmap
+now reports the per-style colour it really renders, so the answer is honest —
+which means **shipping the ini beside the story is the opt-in for that
+presentation**. Keep `Kerkerkruip.ini` next to `Kerkerkruip.gblorb` and you get
+the author's Gargoyle look; move it away and the game asks you its questions the
+usual way. Nothing else to configure: the file's presence is the switch.
+
 **Schema note (pre-release, breaking):** the `style.toml` schema described
 above is new. An old-schema file (with top-level `[colors]` / `[symbols]`
 sections) is left untouched — it is not auto-migrated or overwritten — but its
