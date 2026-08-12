@@ -427,6 +427,17 @@ re-seed the new template, or hand-write the new shape from
   (session-only) for quick comparisons. (Applies only to graphical v6 stories;
   other games are unaffected.) See [Graphical v6](v6-graphics.md) for the full
   picture.
+- **Fusing an EGA dither** — `fuse_art_dither` (default `true`) blends the colour
+  dither in a 640-wide EGA plate, the way the card blended it for you. EGA's
+  sixteen colours were soldered in, so its artists made the missing ones by
+  alternating two they had, column by column — *Zork Zero*'s bronze arch is brown
+  against bright red — and since those columns were half as wide as an MCGA
+  pixel, the screen fused each pair into a colour the palette never held.
+  babelmap keeps all 640 columns, so it does the fusing itself. Set it `false` to
+  see the archive's own pixels instead, every column distinct. It changes nothing
+  else: two-colour CGA line art is never fused either way (blurring line art only
+  makes grey), and 320-wide MCGA and Amiga art has no dither at this frequency to
+  fuse. See [Graphical v6](v6-graphics.md#the-colours-come-with-the-card).
 - **v6 arrow keys** — `v6_arrow_keys` (default `true`) controls whether arrow
   keypresses are forwarded to a v6 story as movement input; set it `false` (in
   config.toml or the settings screen) to withhold them so arrows drive babelmap's own

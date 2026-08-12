@@ -72,16 +72,17 @@ fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
             c.rendition
         );
         assert!(c.space_width == 320 || c.space_width == 640);
-        // The caveat is EGA's dithering, not anyone's geometry. SQ-0790 landed
-        // the per-axis art scale, so 640-wide art IS drawn at true aspect now;
-        // what is left is that EGA's column-by-column dither does not fuse at
-        // 1:1 (SQ-0797). CGA is 640-wide too and carries no caveat, because
-        // two-colour line art has no dither to fuse (SQ-0794).
-        assert_eq!(
-            c.caveat().is_some(),
-            c.space_width == 640 && c.rendition != "CGA",
-            "{}",
-            c.filename
+        // NO rendition carries a caveat any more (SQ-0815). Both of the ones
+        // that stood here were fixed and then outlived their fix in this dialog:
+        // SQ-0790's per-axis art scale drew 640-wide art at true aspect, and
+        // SQ-0797 fused EGA's column dither. A warning nobody deletes is a
+        // warning that goes on being read, so this asserts the absence rather
+        // than the shape.
+        assert!(
+            c.caveat().is_none(),
+            "{} still warns about something babelmap has fixed: {:?}",
+            c.filename,
+            c.caveat()
         );
     }
 
@@ -575,9 +576,15 @@ fn the_dialog_renders_its_list_its_derived_number_and_its_checkbox() {
     assert!(!frame.contains("disks"), "and claims no second disk: {frame}");
     assert!(frame.contains("header 0x1E"), "the derived interpreter number");
     assert!(frame.contains("from the artwork"), "and where it came from");
+    // SQ-0815, reported as *"we also still have the dither warning in the dialog
+    // box"*: the EGA caveat is GONE, because SQ-0797 fused the dither it warned
+    // about. This is the assertion that would have caught it — a dialog string is
+    // only ever checked by the eye that reads it, and this one was true when it
+    // was written and false by the next morning.
     assert!(
-        frame.contains("dithered colours do not fuse"),
-        "the EGA caveat, which is SQ-0797's dithering and no longer SQ-0790's geometry",
+        !frame.contains("dithered colours do not fuse"),
+        "the EGA dithering caveat outlived its defect and is still in the dialog: {frame}",
     );
+    assert!(!frame.contains("⚠"), "no rendition warns about anything today: {frame}");
     assert!(frame.contains("[x] Save as this game's default"), "the checkbox, ticked");
 }

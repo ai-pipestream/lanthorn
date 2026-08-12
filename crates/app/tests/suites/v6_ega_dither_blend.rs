@@ -30,11 +30,33 @@
 //! grey. `PictSource::is_monochrome` is the test, read off the archive's own
 //! `EF_MONO` flags rather than off a filename.
 //!
+//! THE SIDE ART (SQ-0815). Reported the moment SQ-0797 landed — *"i noticed the
+//! ega dither is still there for the side-art"* — and the measurement says the
+//! blend reaches it: across the flank columns either side of the story window,
+//! horizontal speckle runs **62.86 raw and 12.74 fused**, and the raster
+//! composite and the tiled border extension both carry the fused pixels rather
+//! than re-fetching the picture. `the_blend_reaches_the_side_art` and
+//! `the_border_extension_tiles_fused_pixels` pin both halves of that, because
+//! nothing in SQ-0797 measured the flank at all — its cases all read the whole
+//! frame, where the arch's 22k dithered pixels dominate the average.
+//!
+//! What the flank keeps is not a missed blend but a different DITHER. The tent
+//! is a notch at one frequency: it zeroes a period-2 alternation exactly, which
+//! is why the boot frame's interior fuses to a horizontal speckle of **0.00**.
+//! Zork Zero's pillar shaft is error-diffusion dithered instead — seven EGA
+//! entries in irregular runs — and a broadband dither has energy at every
+//! frequency, most of which a three-tap kernel does not touch. Widening it does
+//! fuse the shaft (`[1, 2, 2, 2, 1] / 8` takes the flank to 6.98 against the MCGA
+//! flank's 6.05, and the whole frame's distance to MCGA from 27.79 to 26.04) and
+//! it also mushes the compass rose's N/W/E/S lettering on the same plate, which
+//! is 640-wide line art the card genuinely resolved. So the kernel stays.
+//!
 //! Every fixture here is gitignored, so each case **skips vacuously** when absent.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use app::engine::Engine;
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 use blorb::infocom_pics::InfocomPics;
@@ -135,6 +157,27 @@ fn distance(a: &image::RgbaImage, b: &image::RgbaImage) -> f64 {
         }
     }
     sum as f64 / n as f64
+}
+
+/// The SIDE ART's own columns: everything outside the story window's declared
+/// native rect, left flank and right. Read from the screen model exactly as
+/// `flank_native_box` and `extend_raster_flanks` read it, rather than pinned to
+/// Zork Zero's `(86, 78, 468, 320)` — a suite that hard-codes the rect stops
+/// measuring the flank the moment the game moves its window.
+fn flank_columns(session: &GameSession) -> (u32, u32, u32, u32) {
+    let model = session.screen();
+    let app::engine::WinNode::Layered(items) = &model.root else { panic!("v6 root is Layered") };
+    let native = app::render::v6_layout::native_extent(items);
+    let story = app::render::v6_layout::classify_windows(items).story.expect("a story window");
+    let left = u32::from(story.x_px).min(u32::from(native.0));
+    let right = (u32::from(story.x_px) + u32::from(story.w_px)).min(u32::from(native.0));
+    assert!(left > 0 && right < u32::from(native.0), "premise: the frame HAS side art");
+    (left, right, u32::from(native.0), u32::from(native.1))
+}
+
+/// Columns `[x0, x1)` of `img`, full height.
+fn columns(img: &image::RgbaImage, x0: u32, x1: u32) -> image::RgbaImage {
+    image::RgbaImage::from_fn(x1 - x0, img.height(), |x, y| *img.get_pixel(x0 + x, y))
 }
 
 /// The renderer's own unit-space→pane scale: nearest-neighbour, at every call
@@ -300,6 +343,207 @@ fn the_320_wide_renditions_are_untouched() {
             "honor={honor_game_colours}: an MCGA frame is 4 bits per channel; a blend is not"
         );
     }
+}
+
+/// THE REPORTED DEFECT (SQ-0815): the blend reaches the SIDE ART.
+///
+/// The flank is not covered by any SQ-0797 case — those all measure the whole
+/// frame, where the arch's 22,496 dithered pixels dominate — so "the boot frame
+/// fused" was never evidence about the pillars. Measured over the flank columns
+/// alone, in unit space:
+///
+/// | | left flank | right flank |
+/// | --- | --- | --- |
+/// | raw | 62.86 | 62.17 |
+/// | fused | 12.74 | 12.45 |
+///
+/// The MCGA rendition scores 6.05 and 5.68 over the same columns, but it is
+/// 320-wide art doubled onto the unit screen (`art_scale` `(2, 2)`), so every
+/// second adjacent pair is two copies of one pixel and its score is halved by
+/// construction. Folded back into the 320-wide space both artists drew in — EGA
+/// averaged in pairs, MCGA de-doubled — the honest comparison is **17.48 EGA
+/// against 12.32 MCGA**, from 25.46 raw. That is the assertion below.
+///
+/// Falsified by reverting `blend_columns` to `false` in `PictSource::from_native`:
+///
+/// ```text
+/// honor=true: the side art is still a dither at full contrast — left flank
+/// horizontal speckle 62.858, right 62.174, and the MCGA flanks score 6.045
+/// and 5.680
+/// ```
+#[test]
+fn the_blend_reaches_the_side_art() {
+    for honor_game_colours in [true, false] {
+        let Some(ega) = boot("zork0.eg1", honor_game_colours) else { return };
+        let Some(mcga) = boot("zork0.mg1", honor_game_colours) else { return };
+        let (e, m) = (frame(&ega), frame(&mcga));
+        let (left, right, w, _) = flank_columns(&ega);
+
+        for (side, x0, x1) in [("left", 0, left), ("right", right, w)] {
+            let (fe, fm) = (columns(&e, x0, x1), columns(&m, x0, x1));
+            // MEASURED: 12.74 / 12.45 fused, against 62.86 / 62.17 raw.
+            let (se, sm) = (speckle(&fe), speckle(&fm));
+            assert!(
+                se < 20.0,
+                "honor={honor_game_colours}: the side art is still a dither at full contrast \
+                 — {side} flank horizontal speckle {se:.3}, and the MCGA flank scores {sm:.3}"
+            );
+
+            // The like-for-like comparison, in the 320-wide space both artists
+            // drew in: EGA averaged in column pairs, MCGA de-doubled. MEASURED:
+            // 17.48 against MCGA's 12.32, from 25.46 raw.
+            let (fe, fm) = (fold_pairs(&fe), drop_doubles(&fm));
+            let (se, sm) = (speckle(&fe), speckle(&fm));
+            assert!(
+                se < sm * 1.7,
+                "honor={honor_game_colours}: in the 320-wide picture space the {side} flank \
+                 still carries {se:.3} against the MCGA flank's {sm:.3} — unfused it is 25.46"
+            );
+        }
+    }
+}
+
+/// EGA folded into the 320-wide space its half-width columns actually filled:
+/// each pair averaged. (Not a filter — a measurement. See
+/// [`the_blend_reaches_the_side_art`].)
+fn fold_pairs(img: &image::RgbaImage) -> image::RgbaImage {
+    image::RgbaImage::from_fn(img.width() / 2, img.height(), |x, y| {
+        let (a, b) = (*img.get_pixel(2 * x, y), *img.get_pixel(2 * x + 1, y));
+        let mid = |k: usize| ((u16::from(a.0[k]) + u16::from(b.0[k])) / 2) as u8;
+        image::Rgba([mid(0), mid(1), mid(2), a.0[3].min(b.0[3])])
+    })
+}
+
+/// MCGA back out of the unit screen: `art_scale` `(2, 2)` wrote every picture
+/// column twice, so every other one is the artist's.
+fn drop_doubles(img: &image::RgbaImage) -> image::RgbaImage {
+    image::RgbaImage::from_fn(img.width() / 2, img.height(), |x, y| *img.get_pixel(2 * x, y))
+}
+
+/// The other half of SQ-0815's question: the flank's pixels come from the CHROME
+/// CANVAS, and the tiled border extension copies them rather than re-fetching the
+/// picture — so a pane taller than the art gets fused pixels all the way down,
+/// and SQ-0808's mirrored alternate tiles cannot re-separate a fused column pair
+/// (a vertical mirror does not touch the horizontal axis the tent worked on).
+///
+/// This is the case that would have caught a genuine bypass: it asks
+/// `v6_border::flank_source` for 200 native rows MORE than Zork Zero's pillars
+/// occupy, which is the `zork_zero` → `extend_pillars` → `tile_down(flip)` path
+/// in full, and measures the manufactured rows against the art's own.
+#[test]
+fn the_border_extension_tiles_fused_pixels() {
+    for honor_game_colours in [true, false] {
+        let Some(ega) = boot("zork0.eg1", honor_game_colours) else { return };
+        let e = frame(&ega);
+        let (left, _, _, native_h) = flank_columns(&ega);
+        let art = app::render::v6_border::art_extent(&e, 0, left);
+        assert_eq!(art.1, native_h, "premise: Zork Zero's pillars reach the last native row");
+
+        // Ask for a band half again as tall as the art, so every row below
+        // `native_h` is manufactured by the tiler.
+        let rows = native_h + native_h / 2;
+        let src = app::render::v6_border::flank_source(&e, &e, 0, left, art, native_h, 0, rows)
+            .expect("Zork Zero's pillars are a recognised border art");
+        assert_eq!(src.height(), rows, "the extension paints the whole band");
+
+        let tiled = columns(&crop_rows(&src, native_h, rows), 0, left);
+        let s = speckle(&tiled);
+        assert!(
+            s < 20.0,
+            "honor={honor_game_colours}: the tiled extension is speckled ({s:.3}) where the \
+             art it repeats is fused — the tiling path is re-fetching unblended pixels"
+        );
+        // …and it is the SAME art, not merely something smooth: every colour it
+        // paints is one the fused flank already holds.
+        let art_colours: BTreeSet<[u8; 3]> = columns(&e, 0, left)
+            .pixels()
+            .filter(|p| p.0[3] == 255)
+            .map(|p| [p.0[0], p.0[1], p.0[2]])
+            .collect();
+        assert!(
+            tiled
+                .pixels()
+                .filter(|p| p.0[3] == 255)
+                .all(|p| art_colours.contains(&[p.0[0], p.0[1], p.0[2]])),
+            "honor={honor_game_colours}: the extension invented a colour the fused flank \
+             does not hold — it did not come from this canvas"
+        );
+    }
+}
+
+/// Rows `[y0, y1)` of `img`.
+fn crop_rows(img: &image::RgbaImage, y0: u32, y1: u32) -> image::RgbaImage {
+    image::RgbaImage::from_fn(img.width(), y1 - y0, |x, y| *img.get_pixel(x, y0 + y))
+}
+
+/// SQ-0816 — keeping the dither is a CHOICE, and the default is to fuse it.
+///
+/// `fuse_art_dither` defaults to true because that is what the hardware did to
+/// the eye and what SQ-0797 measured as correct; false hands back the archive's
+/// own pixels, every column distinct. The switch may only ever turn the filter
+/// OFF: eligibility stays the archive's business, so no setting can make a `.CG1`
+/// blend (the case below), and none can make a 320-wide plate blend either.
+#[test]
+fn keeping_the_dither_is_a_choice_and_fusing_is_the_default() {
+    assert!(
+        app::config::Config::default().fuse_art_dither,
+        "the shipped default fuses — SQ-0797 measured that as what the card did"
+    );
+
+    let Some(raw) = read("zork0.eg1") else { return };
+    let mut src = PictSource::from_native(InfocomPics::parse(raw).expect("parses"));
+    assert!(src.fuses_dither(), "a 640-wide sixteen-colour archive fuses out of the box");
+
+    // The archive's own pixels: only the EGA sixteen, nothing between them.
+    src.set_fuse_dither(false);
+    assert!(!src.fuses_dither());
+    let unfused = src.image(1).expect("Zork Zero's EGA border").to_rgba8();
+    let seen: BTreeSet<[u8; 3]> =
+        unfused.pixels().filter(|p| p.0[3] == 255).map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
+    assert!(
+        seen.iter().all(|c| blorb::infocom_pics::EGA_PALETTE.contains(c)),
+        "unfused art is the card's sixteen colours and nothing else, got {} distinct",
+        seen.len()
+    );
+
+    // …and turning it back on re-decodes rather than serving the cached raw
+    // image, which is the whole reason `set_fuse_dither` drops the caches.
+    src.set_fuse_dither(true);
+    let fused = src.image(1).expect("the same picture again").to_rgba8();
+    assert_eq!(fused.dimensions(), unfused.dimensions(), "fusing never resizes");
+    assert!(
+        fused.pixels().zip(unfused.pixels()).any(|(a, b)| a != b),
+        "the setting turned back on and the cache handed back the unfused image"
+    );
+    let fused_seen: BTreeSet<[u8; 3]> =
+        fused.pixels().filter(|p| p.0[3] == 255).map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
+    assert!(
+        fused_seen.iter().any(|c| !blorb::infocom_pics::EGA_PALETTE.contains(c)),
+        "fusing is back on and yet every colour is still one of the card's sixteen — the \
+         whole point of a dither is the colour BETWEEN two of them"
+    );
+}
+
+/// CGA is untouched HOWEVER the setting is set. `fuse_art_dither` is a
+/// preference about a filter, not an override of what the filter may run on:
+/// blending one-bit line work makes grey, and grey is what SQ-0806 and SQ-0808
+/// spent their time removing.
+#[test]
+fn no_setting_can_make_cga_blend() {
+    let Some(raw) = read("zork0.cg1") else { return };
+    let mut src = PictSource::from_native(InfocomPics::parse(raw).expect("parses"));
+    for fuse in [true, false, true] {
+        src.set_fuse_dither(fuse);
+        assert!(!src.fuses_dither(), "fuse_art_dither={fuse}: a .CG1 never fuses");
+    }
+    let img = src.image(1).expect("Zork Zero's CGA border").to_rgba8();
+    let seen: BTreeSet<[u8; 3]> =
+        img.pixels().filter(|p| p.0[3] == 255).map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
+    assert_eq!(
+        seen,
+        BTreeSet::from([[0, 0, 0], [255, 255, 255]]),
+        "a CGA picture stays two colours whatever the setting says"
+    );
 }
 
 /// Alpha is never blended, so a stencil keeps its edges. Every native archive

@@ -119,32 +119,40 @@ impl ArtCandidate {
 
     /// An honest one-line caveat, or `None` when the rendition draws correctly.
     ///
-    /// **Geometry is no longer the problem.** SQ-0790 landed the per-axis art
-    /// scale, so a 640-wide archive is drawn `(1, 2)` against MCGA's `(2, 2)` and
-    /// an EGA banner, pillar and compass now sit exactly where the MCGA ones do.
-    /// The caveat that used to say otherwise outlived its defect.
+    /// **Every rendition draws correctly today, so this is `None` for all of
+    /// them** — and that is the second time this function has had to be emptied
+    /// rather than edited, which is the note worth leaving for whoever adds the
+    /// third caveat. A caveat is a sentence a person reads in a dialog while
+    /// deciding; it outlives its defect silently, because nothing fails when a
+    /// warning is merely no longer true. Both of the ones that stood here were
+    /// removed by the quest that fixed what they described, only after the user
+    /// had seen the dialog still saying it.
     ///
-    /// What remains is a **colour** gap, and it belongs to EGA alone (SQ-0797).
-    /// EGA's sixteen colours were fixed in the card, so its artists dithered for
-    /// the ones they did not have — Zork Zero's bronze arch is a column-by-column
-    /// alternation of brown and bright red. On the card those columns were half a
-    /// pixel wide and fused in the eye; babelmap keeps all 640 distinct, so the
-    /// arch reads as speckle rather than as solid metal.
+    /// What they were:
     ///
-    /// CGA is 640-wide too and gets no caveat, because there is nothing there to
-    /// fuse: a `.CG1` is two-colour line art (SQ-0794 — every pixel-bearing
-    /// picture sets `EF_MONO`), and black-against-white at 1:1 is exactly what
-    /// the artist drew. MCGA and Amiga art is 320-wide and doubles cleanly.
+    /// * **Geometry** — a 640-wide archive was drawn at the 320-wide scale, so an
+    ///   EGA banner, pillar and compass all sat in the wrong place. SQ-0790's
+    ///   per-axis art scale draws it `(1, 2)` against MCGA's `(2, 2)` and they now
+    ///   land exactly where the MCGA ones do.
+    /// * **Dithered colour** — EGA's sixteen colours were fixed in the card, so
+    ///   its artists dithered for the ones they lacked, and babelmap kept all 640
+    ///   columns distinct where the card fused them in the eye. SQ-0797 fuses them
+    ///   at the archive boundary: Zork Zero's boot frame went from horizontal
+    ///   speckle 49.1 to 8.4 against the MCGA rendition's own 4.3, and the arch
+    ///   reads as bronze rather than as salmon-and-olive.
     ///
-    /// The test is "640-wide and not known to be CGA", so a 640-wide archive
-    /// whose name does not say which card it came from still warns — a caveat is
-    /// a sentence a person reads next to the very [`rendition`](ArtCandidate)
-    /// label it is reasoning from, and warning about art that turns out to be
-    /// line-art costs a line, where staying quiet about dithered art costs the
-    /// explanation of what they are looking at.
+    /// The one thing SQ-0815 measured that a caveat could still describe is
+    /// deliberately NOT here. Zork Zero's EGA pillars are error-diffusion
+    /// dithered rather than column-dithered, and the `[1, 2, 1] / 4` tent is a
+    /// notch at one frequency, not a low-pass — so their shaft keeps some speckle
+    /// (flank horizontal speckle 62.9 raw, 12.7 fused, against the MCGA flank's
+    /// 12.3 in its own 320-wide space). That is a property of two pictures on one
+    /// plate, not of the rendition a person is picking, and the honest place for
+    /// it is `docs/features/v6-graphics.md` — where it is, with the measurements.
+    /// Widening the kernel until the pillars fuse mushes the compass rose's
+    /// lettering on the same frame, which is why it was not widened.
     pub fn caveat(&self) -> Option<&'static str> {
-        (self.space_width == 640 && self.rendition != "CGA")
-            .then_some("dithered colours do not fuse at 1:1 yet — fine detail reads as speckle")
+        None
     }
 }
 
@@ -790,7 +798,10 @@ mod tests {
         if let Some(c) = by_name("zork0.eg1") {
             assert_eq!(c.rendition, "EGA");
             assert_eq!(c.space_width, 640);
-            assert!(c.caveat().is_some(), "EGA must carry the SQ-0797 dithering caveat");
+            // SQ-0815: EGA's dithering caveat is GONE, because SQ-0797 fused the
+            // dither it warned about. It had already outlived SQ-0790's geometry
+            // fix once; the user saw the dialog still warning about both.
+            assert!(c.caveat().is_none(), "EGA draws correctly since SQ-0797 fused its dither");
             // Zork Zero's 360K release gave EGA a whole disk, so this one really
             // is complete on its own — the multi-part path must not invent a
             // second file for it (SQ-0798).

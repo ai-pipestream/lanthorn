@@ -288,6 +288,37 @@ genuine one-bit line work, and blending line work only makes it grey. What the
 fusing asks is not "how wide?" but "how many colours?", off the archive's own
 two-colour flags.
 
+**And if you would rather see the pixels Infocom shipped**, set
+`fuse_art_dither = false` and every column comes back distinct, dither and all.
+The default is on, because on is what the card did to the eye — but the archive's
+own bytes are a perfectly reasonable thing to want to look at, and this is the
+only setting that changes them. It cannot make CGA blend; that answer belongs to
+the artwork, not to you.
+
+#### Where the fusing stops, and why it stays there
+
+The tent is a *notch*, not a blur. It zeroes an alternation of exactly two
+columns — which is what the arch is, and why the frame's flat interior comes out
+at a neighbour-to-neighbour variation of 0.00 — and it barely touches anything
+coarser. *Zork Zero*'s **pillars** are dithered the other way: not a clean
+two-colour alternation but error diffusion over seven EGA entries in irregular
+runs, the sort of thing an automatic colour reducer produces on a smooth bronze
+gradient. Broadband noise has energy at every frequency, so the notch removes
+only the top of it. Across the flank columns the fusing takes the pillars from
+62.9 to 12.7, against 12.3 for the MCGA pillars measured in their own 320-wide
+space — much better, and still visibly a weave where MCGA is smooth metal.
+
+Widening the kernel does finish the job: `[1, 2, 2, 2, 1] / 8` has zeros at both
+of the frequencies a 320-wide plate cannot carry, and it takes the flank to 6.98
+against MCGA's 6.05 while pulling the whole frame's distance to the MCGA
+rendition from 27.79 down to 26.04. Every number improves. It is still not what
+babelmap does, because the same frame carries the **compass rose**, whose N, W, E
+and S are 640-wide line art the card resolved perfectly well — and at that width
+they stop being letters and become smudges. One plate, two kinds of detail at the
+same frequency, and no single linear filter tells them apart. The tent keeps the
+lettering; the pillars keep some of their weave. That is the trade, made
+deliberately.
+
 **CGA** gets two colours, and that surprises people who remember CGA's cyan and
 magenta. Those belong to its 320-wide four-colour mode; the 640-wide mode these
 archives are stored for — mode 6, the only 640-wide one the card had — is one bit

@@ -324,6 +324,35 @@ impl PictSource {
         self.palette_gen
     }
 
+    /// Keep this source's dither UNFUSED, or fuse it (SQ-0816).
+    ///
+    /// `fuse` is the player's `fuse_art_dither` preference, and it can only ever
+    /// turn the filter OFF: whether an archive is eligible at all stays entirely
+    /// [`from_native`](PictSource::from_native)'s business, read off the archive's
+    /// own contents. A `.CG1` is not fused because a person said so, and cannot be
+    /// made to be — [`blend_half_width_columns`] would only make its one-bit line
+    /// work grey (SQ-0806, SQ-0808).
+    ///
+    /// Both caches are dropped when the answer changes, because every image in
+    /// them was decoded under the old one. Call it before the first draw and the
+    /// caches are empty anyway; call it later — a settings edit would — and the
+    /// next `image()` re-decodes rather than serving a stale blend.
+    pub fn set_fuse_dither(&mut self, fuse: bool) {
+        let eligible = self.art_scale().is_some_and(|(sx, _)| sx == 1) && !self.is_monochrome();
+        let want = fuse && eligible;
+        if want == self.blend_columns {
+            return;
+        }
+        self.blend_columns = want;
+        self.cache.clear();
+        self.adaptive_cache.clear();
+    }
+
+    /// Is this source fusing a 640-wide rendition's dither on the way out?
+    pub fn fuses_dither(&self) -> bool {
+        self.blend_columns
+    }
+
     /// Is the artwork a TWO-COLOUR rendition? See
     /// [`blorb::infocom_pics::InfocomPics::is_monochrome`]. `false` for a Blorb,
     /// which is never one.

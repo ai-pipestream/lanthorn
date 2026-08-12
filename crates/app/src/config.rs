@@ -917,6 +917,24 @@ pub struct Config {
     /// How the v6 graphical story pane is rendered. Default: Hybrid.
     #[serde(default)]
     pub v6_render: V6RenderMode,
+    /// Fuse a 640-wide rendition's colour dither, because the card's pixels were
+    /// half as wide as the unit screen's (SQ-0797). Default: true.
+    ///
+    /// EGA's sixteen colours were fixed in the silicon, so its artists dithered
+    /// for the ones they did not have — Zork Zero's bronze arch is a
+    /// column-by-column alternation of brown and bright red, and on a 640x200
+    /// screen those columns fused in the eye into a colour the palette does not
+    /// hold. babelmap keeps all 640 columns (that is what makes an EGA plate
+    /// cover exactly the rectangle a 320-wide one does), so it fuses them itself,
+    /// in `crate::graphics::blend_half_width_columns`.
+    ///
+    /// Set false to see the archive's own pixels instead — every column distinct,
+    /// dither and all (SQ-0816). Nothing else changes: this is a preference about
+    /// one filter, not about which artwork loads. Two-colour CGA line work is
+    /// never fused either way, and 320-wide MCGA and Amiga art has nothing at this
+    /// frequency to fuse.
+    #[serde(default = "default_true")]
+    pub fuse_art_dither: bool,
     /// Divisor applied to the terminal's reported cell size before a Glulx game
     /// sees it, so a game's fixed pixel sizes keep their proportions on a scaled
     /// display or with a large font (SQ-0593). Default: Auto.
@@ -1159,6 +1177,7 @@ impl Default for Config {
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
+            fuse_art_dither: true,
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
             keymap: KeymapConfig::default(),
@@ -1279,6 +1298,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
             cfg.v6_render = from_file.v6_render;
+            cfg.fuse_art_dither = from_file.fuse_art_dither;
             cfg.glk_pixel_scale = from_file.glk_pixel_scale;
             cfg.v6_arrow_keys = from_file.v6_arrow_keys;
             cfg.keymap = from_file.keymap;
@@ -1534,6 +1554,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         V6RenderMode::Frameless => "frameless",
     };
     doc.put("v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
+    doc.put("fuse_art_dither", cfg.fuse_art_dither.into(), cfg.fuse_art_dither == def.fuse_art_dither);
     let scale_val: toml_edit::Value = match cfg.glk_pixel_scale {
         GlkPixelScale::Native => "native".into(),
         GlkPixelScale::Auto => "auto".into(),
@@ -2219,6 +2240,29 @@ use_defaults = false
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SQ-0816: the dither preference defaults to FUSED — what the card did to
+    /// the eye, and what SQ-0797 measured as correct — and the off position
+    /// survives a save→load, because a preference that silently reverts is worse
+    /// than no preference at all.
+    #[test]
+    fn fuse_art_dither_defaults_on_and_round_trips_off() {
+        assert!(Config::default().fuse_art_dither, "the shipped default fuses");
+        let absent: Config = toml::from_str("").unwrap();
+        assert!(absent.fuse_art_dither, "an absent key is the default, not false");
+        let off: Config = toml::from_str("fuse_art_dither = false\n").unwrap();
+        assert!(!off.fuse_art_dither);
+
+        let dir = std::env::temp_dir().join(format!("babelmap-fuse-dither-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.fuse_art_dither = false;
+        write_config(&dir, &cfg).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(!back.fuse_art_dither, "keeping the dither must survive save→load");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn write_config_round_trips_scalars_and_preserves_keymap() {
         let dir = std::env::temp_dir().join(format!("babelmap_write_config_test_{}", std::process::id()));
@@ -2243,6 +2287,7 @@ use_defaults = false
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
+            fuse_art_dither: false,
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
             keymap: KeymapConfig::default(),

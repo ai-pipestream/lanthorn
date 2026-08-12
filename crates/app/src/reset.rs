@@ -74,6 +74,9 @@ pub(crate) fn reset_game(
             // interpreter number. IBM PC (every Blorb-sourced story) supplies
             // none of them and this is the prior code exactly.
             let profile = state.config.interpreter_profile;
+            // SQ-0816: and the same dither preference the launch resolved, so a
+            // restart does not quietly change what the artwork looks like.
+            picts.set_fuse_dither(state.config.fuse_art_dither);
             let picture_dims = picts.all_pict_dims();
             let v6_screen_px =
                 picts.std_window().or(named_art_std_window).or_else(|| profile.std_window());
