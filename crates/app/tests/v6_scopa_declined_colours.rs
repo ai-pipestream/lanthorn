@@ -168,6 +168,173 @@ fn declining_game_colours_keeps_the_felt_table() {
     }
 }
 
+/// SQ-0784: the score screen's row fills must not bridge the gap between two
+/// separated runs — the table shows through it.
+///
+/// The report is the end-of-hand score screen, reproduced from a host Save State
+/// taken on it: scopa prints its whole board into ONE 640x400 grid whose page is
+/// the baize, and three of its rows carry two runs with a wide gap between them —
+/// `Denari` (native x 154) and `Primiera` (466) at y 86, and the two Denari/Primiera
+/// totals at y 145 and 239. The game draws its two blue card panels either side of a
+/// green divider at native 350..360, and `fill_explicit_bg_rows` flooded each row's
+/// whole HULL (153..529, 13..385) — three blue bridges straight through the divider,
+/// which is what the player reported seeing.
+///
+/// The runs and coordinates below are the ones measured off that save; the save is
+/// the player's own and not redistributable, so the pattern travels rather than the
+/// file. Both `honor_game_colours` modes: the fill is a colour behaviour, and the
+/// divider must survive either way (the baize is only PAINTED in when the game's
+/// colours are honoured, so that is the mode that can name its colour).
+///
+/// The bar that MUST still bridge is pinned beside the fix
+/// (`explicit_bg_status_row_floods_the_whole_window_width`) and on a real fixture by
+/// `v6_shogun_gameplay::shogun_raster_status_band_floods_game_white`.
+#[test]
+fn the_score_screen_does_not_bridge_the_gap_between_two_runs() {
+    use app::engine::{BorderPref, GridWindow, PositionedWindow, PxText, ScreenModel, StatusModel, WinNode};
+
+    // scopa's own white-on-blue panel pair and its baize page, as the game names
+    // them: 15-bit true colour, 0x59A0 -> Rgb(0,107,181) and 0x0200 -> Rgb(0,132,0).
+    let ink = 0x0200_7FFF;
+    let panel = 0x0200_59A0;
+    let blue = image::Rgba([0, 107, 181, 255]);
+    let baize = image::Rgba([0, 132, 0, 255]);
+    let px = |x: u16, y: u16, s: &str| PxText { y, x, text: s.into(), style: 0, fg: ink, bg: panel };
+    let board = PositionedWindow {
+        x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
+        left_margin: 0, right_margin: 0,
+        node: WinNode::Grid(GridWindow {
+            cols: 80, rows: 25, active_rows: 25, bg: Some(0x0200_0200),
+            border: BorderPref::Unspecified,
+            px_texts: vec![
+                px(154, 86, "Denari"), px(466, 86, "Primiera"),
+                px(14, 145, "8"), px(370, 145, "72"),
+                px(14, 239, "2"), px(370, 239, "84"),
+            ],
+            ..Default::default()
+        }),
+    };
+    let model = ScreenModel {
+        root: WinNode::Layered(vec![board]),
+        status: StatusModel::HostManaged,
+        bg: 0,
+        fg: 0,
+        content_size: (80, 25),
+    };
+    let WinNode::Layered(items) = &model.root else { unreachable!() };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+
+    for honor in [true, false] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = app::config::V6RenderMode::Raster;
+        state.config.honor_game_colours = honor;
+        let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+        for (row, (left, lx), (right, rx)) in [
+            (86u32, ("Denari", 153u32), ("Primiera", 465u32)),
+            (145, ("8", 13), ("72", 369)),
+            (239, ("2", 13), ("84", 369)),
+        ] {
+            // The last scanline of the 16-pixel text cell — below every glyph on the
+            // row, so what it shows is the background alone.
+            let y = row - 1 + 15;
+            assert_ne!(
+                *canvas.get_pixel(355, y), blue,
+                "honor={honor} row {row} ({left} -> {right}): native 350..360 is the divider between \
+                 scopa's two card panels; the row fill must not bridge {left} to {right} across it"
+            );
+            if honor {
+                assert_eq!(
+                    *canvas.get_pixel(355, y), baize,
+                    "honor=true row {row}: what shows in the gap is the board window's own baize page"
+                );
+            }
+            assert_eq!(*canvas.get_pixel(lx, y), blue, "honor={honor} row {row}: {left} keeps its own panel bg");
+            assert_eq!(*canvas.get_pixel(rx, y), blue, "honor={honor} row {row}: {right} keeps its own panel bg");
+        }
+    }
+}
+
+/// The same invariant on the real story, so a change to how scopa publishes its
+/// screen cannot quietly stop the case above from describing it: no row of any
+/// chrome window may flood a bare gap between two of its runs unless that row
+/// reaches both of its window's edges.
+///
+/// Asked of the CHROME CANVAS rather than the finished composite, because that is
+/// the layer the flood belongs to — everything after it (the painted ground, the
+/// window pages) legitimately colours in what is left, and a gap this row did not
+/// claim is exactly what those layers are for. `build_chrome_canvas` takes no
+/// `honor_game_colours`, which is why one pass covers both modes here and the
+/// synthetic case above carries the two-mode composite.
+///
+/// It is a GUARD, not the reproduction: every row scopa reaches without playing a
+/// hand out carries a single run (`Help`, `Credits`, `Quit`, `Click on a card type
+/// to begin`), so this passes with the defect in place and would only start
+/// failing if the game — or the way we publish its screen — ever put two separated
+/// runs on a reachable row. The rows that do carry two are the score screen's, and
+/// reaching those needs the player's own save.
+///
+/// Skips vacuously when the gitignored story is absent.
+#[test]
+fn no_reachable_scopa_row_floods_a_gap_it_does_not_span() {
+    use app::engine::WinNode;
+
+    for deal in [false, true] {
+        let Some(session) = scopa(deal, false) else { return };
+        let model = session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let colors = app::colors::ColorScheme::terminal_default();
+        let canvas = app::render::v6_layout::build_chrome_canvas(
+            &layout.chrome,
+            native,
+            image::Rgba([200, 200, 200, 255]),
+            image::Rgba([0, 0, 0, 255]),
+            &colors,
+        );
+
+        for it in &layout.chrome {
+            let WinNode::Grid(g) = &it.node else { continue };
+            let (ox, win_w) = (it.x_px as u32, it.w_px as u32);
+            let mut rows: std::collections::BTreeMap<u16, Vec<&app::engine::PxText>> = Default::default();
+            for t in &g.px_texts {
+                rows.entry(t.y).or_default().push(t);
+            }
+            for (y, mut runs) in rows {
+                runs.sort_by_key(|t| t.x);
+                let span = |t: &app::engine::PxText| {
+                    let x0 = u32::from(t.x.max(1)) - 1;
+                    (x0, x0 + t.text.chars().count().max(1) as u32 * 8)
+                };
+                let lo = runs.first().map(|t| span(t).0).unwrap_or(ox);
+                let hi = runs.iter().map(|t| span(t).1).max().unwrap_or(ox);
+                if lo <= ox + 8 && hi + 8 >= ox + win_w {
+                    continue; // a bar: it reaches both edges, so it bridges by design
+                }
+                for w in runs.windows(2) {
+                    let (gap0, gap1) = (span(w[0]).1, span(w[1]).0);
+                    if gap1 <= gap0 {
+                        continue;
+                    }
+                    let gx = (gap0 + gap1) / 2;
+                    let gy = (u32::from(y.max(1)) - 1 + 15).min(canvas.height().saturating_sub(1));
+                    assert_eq!(
+                        canvas.get_pixel(gx, gy)[3],
+                        0,
+                        "deal={deal}: the bare gap at native x {gap0}..{gap1} on row {y} of the \
+                         {win_w}px window is not this row's to paint — {:?} then {:?}",
+                        w[0].text, w[1].text
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Half-honoured is the thing that was wrong, so pin the whole: for a game that
 /// draws its board and streams no prose, declining its colours changes nothing at
 /// all. Every pixel on scopa's screen is its own drawing.

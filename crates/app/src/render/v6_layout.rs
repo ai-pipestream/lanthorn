@@ -966,9 +966,10 @@ fn fill_explicit_bg_rows(
     for (py, runs) in rows {
         if let Some(bg) = row_flood_bg(&runs, default_bg, colors) {
             // The point of this flood is to close the GAPS BETWEEN runs, so a bar
-            // the game painted as several runs reads as one solid block. The runs'
-            // own hull is therefore the floor; whether it also reaches the window's
-            // edges is the question below.
+            // the game painted as several runs reads as one solid block — for a row
+            // that IS a bar. The runs' hull answers that question below; what the
+            // answer then licenses is both the reach past the outermost runs and the
+            // bridging between them (SQ-0784).
             let lo = runs.iter().map(|t| u32::from(t.x.max(1)) - 1).min().unwrap_or(ox);
             let hi = runs
                 .iter()
@@ -994,9 +995,32 @@ fn fill_explicit_bg_rows(
             // flooded a white tab from the button's rounded outline out to the screen
             // edge, which is what the player saw as the OK label spreading rightwards
             // (SQ-0721). There, flood only what the runs occupy.
+            //
+            // SQ-0784: and that same answer decides whether the row BRIDGES. A bar is
+            // one continuous band, so its gaps are seams to close; anything else is a
+            // set of independent labels, and the ground between two of them belongs to
+            // the window, not to either label. Flooding a non-bar row's hull painted
+            // straight across whatever the game had put in the gap: scopa's end-of-hand
+            // score screen prints `Denari` (native 154) and `Primiera` (466) on one row
+            // of its full-screen grid, and the two pairs of totals beneath them (native
+            // 14 and 370) on two more, with its two blue card panels either side of a
+            // green divider at native 350..360 — and the hull flood ran 153..529 and
+            // 13..385 through the
+            // divider, three blue bridges across a gap the game had deliberately left
+            // open. Filling each run's own cells instead leaves the divider alone;
+            // Shogun's status band, which reaches both window edges, still closes the
+            // gaps between "Erasmus :", "SHOGUN" and "Score:" through the branch above.
             let spans_window = lo <= ox + FONT_W && hi + FONT_W >= ox + win_w;
-            let (fx, fe) = if spans_window { (lo.min(ox), hi.max(ox + win_w)) } else { (lo, hi) };
-            fill_cell(canvas, fx, py, fe.saturating_sub(fx), FONT_H, bg);
+            if spans_window {
+                let (fx, fe) = (lo.min(ox), hi.max(ox + win_w));
+                fill_cell(canvas, fx, py, fe.saturating_sub(fx), FONT_H, bg);
+            } else {
+                for t in &runs {
+                    let x0 = u32::from(t.x.max(1)) - 1;
+                    let w = t.text.chars().count().max(1) as u32 * FONT_W;
+                    fill_cell(canvas, x0, py, w, FONT_H, bg);
+                }
+            }
         }
     }
 }
@@ -2367,6 +2391,64 @@ mod tests {
         assert_eq!(*c.get_pixel(24, 8), Rgba([255, 255, 255, 255]), "the inter-run gap floods the explicit white");
         // The window's far edge is flooded too — the whole window width is one bar.
         assert_eq!(*c.get_pixel(60, 8), Rgba([255, 255, 255, 255]), "the flood spans the full window width");
+    }
+
+    /// SQ-0784: the other half of the same decision — a row whose runs do NOT reach
+    /// the window's edges is not a bar, so the ground BETWEEN two of its runs is the
+    /// window's and must survive.
+    ///
+    /// The pattern is scopa's end-of-hand score screen, in its own coordinates: one
+    /// full-screen 640x400 grid printing `Denari` at native x 154 and `Primiera` at
+    /// 466 on the row at y 86, and `8`/`72` and `2`/`84` on the rows at 145 and 239 —
+    /// with the game's two blue card panels drawn either side of a green divider at
+    /// native 350..360. The hull flood bridged all three rows straight through that
+    /// divider (153..529 and 13..385), which is the report.
+    ///
+    /// FALSIFY by restoring the hull flood (`let (fx, fe) = if spans_window { .. }
+    /// else { (lo, hi) };` and one `fill_cell`): every one of the three rows fails
+    /// with "the divider between scopa's two card panels keeps the window's own
+    /// ground" — the gap painted the panel blue. The contrast that keeps this from
+    /// being a blanket "never bridge" is the test above, which must keep passing:
+    /// a row that DOES reach both window edges still floods gap and edges alike.
+    #[test]
+    fn separated_runs_keep_the_window_ground_between_them() {
+        // scopa's white-on-blue: true-colour packed, 15-bit 0x59A0 -> Rgb(0,107,181).
+        let ink = 0x0200_7FFF;
+        let panel = 0x0200_59A0;
+        let blue = Rgba([0, 107, 181, 255]);
+        let px = |x: u16, y: u16, s: &str| PxText { y, x, text: s.into(), style: 0, fg: ink, bg: panel };
+        let win = PositionedWindow {
+            x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                fill: None,
+                cols: 80, rows: 25, cells: vec![], active_rows: 25, cursor: (0, 0), cursor_active: false,
+                border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
+                px_texts: vec![
+                    px(154, 86, "Denari"), px(466, 86, "Primiera"),
+                    px(14, 145, "8"), px(370, 145, "72"),
+                    px(14, 239, "2"), px(370, 239, "84"),
+                ],
+            }),
+        };
+        let c = build_chrome_canvas(&[&win], (640, 400), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        for (row, (left, lx), (right, rx)) in [
+            (86u32, ("Denari", 153u32), ("Primiera", 465u32)),
+            (145, ("8", 13), ("72", 369)),
+            (239, ("2", 13), ("84", 369)),
+        ] {
+            // The last scanline of the 16-pixel text cell: below every glyph in this
+            // row, so what it shows is the background alone.
+            let y = row - 1 + 15;
+            assert_eq!(
+                c.get_pixel(355, y)[3], 0,
+                "row {row} ({left} -> {right}): the divider between scopa's two card panels keeps \
+                 the window's own ground, so the flood must not bridge the gap"
+            );
+            // …and the runs themselves still carry the panel colour they named.
+            assert_eq!(*c.get_pixel(lx, y), blue, "row {row}: the left run's own cells still flood {left}'s bg");
+            assert_eq!(*c.get_pixel(rx, y), blue, "row {row}: the right run's own cells still flood {right}'s bg");
+        }
     }
 
     #[test]

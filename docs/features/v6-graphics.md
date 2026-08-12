@@ -791,6 +791,21 @@ The story page itself fills with the window's own background colour (when
 the game set one) rather than leaving the terminal's theme backdrop showing
 through.
 
+**A row that names a background is filled behind its runs — and bridges the gaps
+between them only when it is a bar.** A status band a game paints as several
+separate runs has to read as one solid strip, gaps and all: Shogun prints
+`Erasmus :`, `SHOGUN` and `Score:` black-on-white across a window whose two ends
+they all but touch, so the band floods that white from one window edge to the
+other and the bare cells between the labels come out the same colour as the ones
+under them. A row whose runs stop well short of both edges is not a band, though —
+it is two labels the game happened to print on one line, and what lies between
+them belongs to the window. Scopa's end-of-hand score screen is the case: it
+prints its whole board into a single 640×400 grid, and `Denari` and `Primiera`
+(with the two pairs of totals below them) sit either side of a green divider the
+game leaves between its two blue card panels. Filling each of those rows from its
+first label to its last painted three blue bridges straight through the divider.
+Each run's own cells are filled; the table between them stays the table.
+
 Every *other* window's page follows the same rule, because ZMSD §8.8.3.2 gives
 each Version 6 window its own pair — not one page shared by the screen. It
 matters most where the art is mostly holes: Zork Zero's compass and room icons
