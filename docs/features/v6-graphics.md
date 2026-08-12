@@ -1406,6 +1406,16 @@ fresh copy of it on every move. Now each one is handed back in the same breath a
 its replacement goes out, and `band uploads since launch` counts against a terminal
 that is no longer quietly accumulating everything it was ever shown.
 
+Order matters more than it looks. A picture being *replaced* is the one your
+terminal is drawing at that moment, and its replacement can be most of a megabyte
+away — Zork Zero's banner is 618 KB every time a compass arrow changes. Free it
+first and those cells have nothing to draw until the new upload lands, which reads
+on screen as a flicker: the compass blinking as it composites, the on-screen map
+blinking as it updates its corner, Arthur's graveyard blinking as Merlin appears in
+it. So a picture nothing is showing any more is freed immediately, and a picture
+being replaced in place is freed *after* its replacement is on screen. Same frame,
+same batch, nothing held longer than the width of one placement.
+
 ## `/dump-windows` reports the last frame the *game* drew
 
 When a v6 layout looks wrong, `/dump-windows` is how you say what you saw: one

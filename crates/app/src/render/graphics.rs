@@ -355,6 +355,21 @@ pub struct GraphicsRender {
     /// ratatui's diff): they are flushed by the next placement, or by
     /// [`GraphicsRender::flush_kitty_deletes`] when no window places again.
     pending_deletes: String,
+    /// Kitty `a=d` deletes for an upload that is still COVERING ITS RECT — a chrome
+    /// band re-encoded into its own cache slot, the raster composite superseded by
+    /// the next encode (SQ-0817). These cannot ride ahead of the frame's traffic the
+    /// way [`Self::pending_deletes`] does: the id being freed is the one the terminal
+    /// is showing at that very rect, and its replacement is up to 618 KB of image data
+    /// away. Freeing it first leaves the cells with nothing to draw for the length of
+    /// that transfer — which is exactly the flicker Zork Zero's compass, its map and
+    /// Arthur's Merlin composite all showed, once per frame the game changed.
+    ///
+    /// So they ride as a SUFFIX on the placement that supersedes them, in the same
+    /// batch: transmit new, place new, free old. The rect is covered throughout, and
+    /// the memory is still freed on the same frame — deferring by a frame would work
+    /// too, but there is no reason to hold 618 KB longer than the width of one
+    /// placement.
+    deletes_after_place: String,
     /// Machine-readable record of the protocol traffic this frame produced
     /// (SQ-0590) — see [`GraphicsOp`]. `band_log` above is the human dump for
     /// `/dump-windows`; this is the same events in a form a test can assert on,
@@ -569,6 +584,23 @@ impl GraphicsRender {
         use std::fmt::Write as _;
         if let Some(id) = id {
             write!(self.pending_deletes, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\").expect("write to String");
+        }
+    }
+
+    /// Queue a delete for an upload that is being REPLACED IN PLACE — one still
+    /// covering the rect its successor is about to take (SQ-0817).
+    ///
+    /// [`Self::queue_protocol_delete`] is right for an upload nothing on screen
+    /// depends on: a closed window, a band evicted from the ring, the composite
+    /// abandoned at the raster→ring transition. Freeing those early is free. This one
+    /// is the opposite case — the terminal is drawing these pixels right now — so the
+    /// escape goes to [`Self::deletes_after_place`] and rides out behind the
+    /// placement that covers the rect again.
+    fn queue_protocol_delete_after_place(&mut self, id: Option<u32>) {
+        use std::fmt::Write as _;
+        if let Some(id) = id {
+            write!(self.deletes_after_place, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\")
+                .expect("write to String");
         }
     }
 
@@ -831,8 +863,12 @@ impl GraphicsRender {
             // terminal rather than letting the assignment orphan it (SQ-0753). A
             // raster-mode game re-encodes on every visible change, so this is the
             // heaviest leak in the app — scopa strands one full frame per move.
+            //
+            // It is also the composite the terminal is showing RIGHT NOW, and the
+            // replacement is a whole pane of image data away, so the delete rides
+            // BEHIND the placement that covers the pane again (SQ-0817).
             let stale = self.v6.replace(ready);
-            self.queue_protocol_delete(stale.and_then(|r| r.placed_id));
+            self.queue_protocol_delete_after_place(stale.and_then(|r| r.placed_id));
         }
         true
     }
@@ -856,10 +892,16 @@ impl GraphicsRender {
         let (native_w, native_h) = (ready.native_w, ready.native_h);
         // Queued deletes ride out on this placement, in the same batch (SQ-0637's
         // rule); deferred back to the queue if this backend has no row to carry them.
+        // The supersede-deletes ride BEHIND it instead (SQ-0817) — see
+        // [`Self::deletes_after_place`].
         let pending = std::mem::take(&mut self.pending_deletes);
-        let placed_id = place_protocol_with(proto, dest, buf, &pending);
+        let after = std::mem::take(&mut self.deletes_after_place);
+        let placed_id = place_protocol_with(proto, dest, buf, &pending, &after);
         if placed_id.is_none() {
             self.pending_deletes = pending;
+            // Nothing was placed, so nothing on screen depends on these either:
+            // hand them to the ordinary queue rather than stranding them.
+            self.pending_deletes.push_str(&after);
         }
         // Learn the id this composite lives under in the terminal, so whoever
         // abandons it can free it (SQ-0753).
@@ -1175,7 +1217,7 @@ impl GraphicsRender {
                     // terminal before the only record of its id is overwritten
                     // (SQ-0753).
                     let stale = self.chrome_bands.insert(key, (hash, p, None));
-                    self.queue_protocol_delete(stale.and_then(|(_, _, id)| id));
+                    self.queue_protocol_delete_after_place(stale.and_then(|(_, _, id)| id));
                     self.note_op(GraphicsOp::Upload {
                         target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
@@ -1198,13 +1240,19 @@ impl GraphicsRender {
         // to the queue when nothing was placed, or when the backend has no
         // placeholder row to carry them — a delete is deferred, never dropped.
         let pending = std::mem::take(&mut self.pending_deletes);
+        // …and this band's own predecessor rides BEHIND the placement, because it is
+        // still covering the rect that placement is about to take (SQ-0817).
+        let after = std::mem::take(&mut self.deletes_after_place);
         let placed = self.chrome_bands.get(&key).map(|(_, proto, _)| {
             let sz = proto.size();
             let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
-            (dest, sz, place_protocol_with(proto, dest, buf, &pending))
+            (dest, sz, place_protocol_with(proto, dest, buf, &pending, &after))
         });
         if !matches!(placed, Some((_, _, Some(_)))) {
             self.pending_deletes = pending;
+            // Nothing was placed, so nothing on screen depends on the supersede
+            // deletes either — hand them to the ordinary queue rather than strand them.
+            self.pending_deletes.push_str(&after);
         }
         match placed {
             Some((dest, sz, id)) => {
@@ -1322,7 +1370,7 @@ impl GraphicsRender {
                 Ok(p) => {
                     self.band_encodes += 1;
                     let stale = self.chrome_bands.insert(key, (hash, p, None));
-                    self.queue_protocol_delete(stale.and_then(|(_, _, id)| id));
+                    self.queue_protocol_delete_after_place(stale.and_then(|(_, _, id)| id));
                     self.note_op(GraphicsOp::Upload {
                         target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
@@ -1350,13 +1398,19 @@ impl GraphicsRender {
         // to the queue when nothing was placed, or when the backend has no
         // placeholder row to carry them — a delete is deferred, never dropped.
         let pending = std::mem::take(&mut self.pending_deletes);
+        // …and this band's own predecessor rides BEHIND the placement, because it is
+        // still covering the rect that placement is about to take (SQ-0817).
+        let after = std::mem::take(&mut self.deletes_after_place);
         let placed = self.chrome_bands.get(&key).map(|(_, proto, _)| {
             let sz = proto.size();
             let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
-            (dest, sz, place_protocol_with(proto, dest, buf, &pending))
+            (dest, sz, place_protocol_with(proto, dest, buf, &pending, &after))
         });
         if !matches!(placed, Some((_, _, Some(_)))) {
             self.pending_deletes = pending;
+            // Nothing was placed, so nothing on screen depends on the supersede
+            // deletes either — hand them to the ordinary queue rather than strand them.
+            self.pending_deletes.push_str(&after);
         }
         match placed {
             Some((dest, sz, id)) => {
@@ -1427,7 +1481,7 @@ impl GraphicsRender {
                 Ok(p) => {
                     self.band_encodes += 1;
                     let stale = self.chrome_bands.insert(key, (hash, p, None));
-                    self.queue_protocol_delete(stale.and_then(|(_, _, id)| id));
+                    self.queue_protocol_delete_after_place(stale.and_then(|(_, _, id)| id));
                     self.note_op(GraphicsOp::Upload {
                         target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
@@ -1447,13 +1501,19 @@ impl GraphicsRender {
         // to the queue when nothing was placed, or when the backend has no
         // placeholder row to carry them — a delete is deferred, never dropped.
         let pending = std::mem::take(&mut self.pending_deletes);
+        // …and this band's own predecessor rides BEHIND the placement, because it is
+        // still covering the rect that placement is about to take (SQ-0817).
+        let after = std::mem::take(&mut self.deletes_after_place);
         let placed = self.chrome_bands.get(&key).map(|(_, proto, _)| {
             let sz = proto.size();
             let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
-            (dest, sz, place_protocol_with(proto, dest, buf, &pending))
+            (dest, sz, place_protocol_with(proto, dest, buf, &pending, &after))
         });
         if !matches!(placed, Some((_, _, Some(_)))) {
             self.pending_deletes = pending;
+            // Nothing was placed, so nothing on screen depends on the supersede
+            // deletes either — hand them to the ordinary queue rather than strand them.
+            self.pending_deletes.push_str(&after);
         }
         match placed {
             Some((dest, sz, id)) => {
@@ -1732,11 +1792,13 @@ fn kitty_place_rows(id: u32, transmit: Option<&str>, area: Rect, buf: &mut Buffe
 /// never be freed in the terminal (SQ-0753): the crate keeps the id private, so
 /// reading it back off the placement it just wrote is how we learn to name it.
 pub fn place_protocol(proto: &Protocol, dest: Rect, buf: &mut Buffer) -> Option<u32> {
-    place_protocol_with(proto, dest, buf, "")
+    place_protocol_with(proto, dest, buf, "", "")
 }
 
 /// [`place_protocol`], with `prefix` (queued `a=d` deletes) riding on the very first
-/// placeholder cell — ahead of the protocol's own upload, in the SAME output batch.
+/// placeholder cell — ahead of the protocol's own upload, in the SAME output batch —
+/// and `suffix` (deletes for uploads this placement SUPERSEDES) on the very last, so
+/// they are freed only once the rect they cover has been covered again (SQ-0817).
 ///
 /// That is the rule SQ-0637 set for graphics windows and the reason `pending_deletes`
 /// is a queue rather than a direct write: escapes handed straight to stdout interleave
@@ -1745,17 +1807,26 @@ pub fn place_protocol(proto: &Protocol, dest: Rect, buf: &mut Buffer) -> Option<
 /// rather than by our own emitter, so they had no way to carry anything until the
 /// re-seat gave them one (SQ-0753). Returns `None` — and carries nothing — for a
 /// protocol with no placeholder rows, which is every non-kitty backend.
-fn place_protocol_with(proto: &Protocol, dest: Rect, buf: &mut Buffer, prefix: &str) -> Option<u32> {
+fn place_protocol_with(
+    proto: &Protocol,
+    dest: Rect,
+    buf: &mut Buffer,
+    prefix: &str,
+    suffix: &str,
+) -> Option<u32> {
     Image::new(proto).render(dest, buf);
-    reseat_kitty_placement(dest, buf, prefix)
+    reseat_kitty_placement(dest, buf, prefix, suffix)
 }
 
 /// Rewrite each row of a `ratatui-image` kitty placement at `area` in place, and
 /// return the image id the rows name. See [`place_protocol`]; a no-op returning
 /// `None` for anything that is not a kitty placement.
-fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str) -> Option<u32> {
+fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str, suffix: &str) -> Option<u32> {
     let mut id = None;
     let mut prefix = (!prefix.is_empty()).then_some(prefix);
+    // The last cell this re-seat writes — where a `suffix` delete goes, so it is
+    // emitted AFTER every byte of the placement it supersedes (SQ-0817).
+    let mut last: Option<(u16, u16)> = None;
     for y in area.top()..area.bottom() {
         let Some(symbol) = buf.cell((area.left(), y)).map(|c| c.symbol().to_string()) else { continue };
         let Some(row) = parse_placement_row(&symbol) else { continue };
@@ -1770,6 +1841,9 @@ fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str) -> Option<
             None => row.prefix.to_string(),
         };
         kitty_place_row(buf, (area.left(), y), width, row.fg, (row.row_d, row.extra_d), Some(&head));
+        if width > 0 {
+            last = Some((area.left() + width - 1, y));
+        }
         // Anything the protocol marked `Skip` past the run we just rewrote (a
         // shorter row than the rect, which `full_width` clamping can produce)
         // would otherwise stay invisible to the diff for ever.
@@ -1779,6 +1853,17 @@ fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str) -> Option<
                     c.set_diff_option(ratatui::buffer::CellDiffOption::None);
                 }
             }
+        }
+    }
+    // The supersede-deletes go last, appended to the final placeholder cell — after
+    // the transmit that rides on the first cell and after every placeholder row, so
+    // the rect this delete frees is already covered by its replacement (SQ-0817).
+    // Only ever attached to a placement we could NAME, for the same reason the prefix
+    // is: the caller reads the returned id as "my escapes went out".
+    if let (false, Some(pos), Some(_)) = (suffix.is_empty(), last, id) {
+        if let Some(cell) = buf.cell_mut(pos) {
+            let symbol = format!("{}{suffix}", cell.symbol());
+            cell.set_symbol(&symbol);
         }
     }
     id
@@ -2684,6 +2769,51 @@ mod tests {
         assert!(gr.queued_deletes().is_empty(), "and it went with the frame rather than waiting");
     }
 
+    /// SQ-0817: …and it rides BEHIND that placement, never ahead of it.
+    ///
+    /// The id being freed here is the one the terminal is drawing at this very rect,
+    /// and its replacement is up to 618 KB of image data away (Zork Zero's banner
+    /// band, measured). Freed first, those cells have nothing to draw for the length
+    /// of that transfer — which is the flicker the compass, the on-screen map and
+    /// Arthur's Merlin composite all showed, once per frame the game changed
+    /// anything. SQ-0753 introduced it by putting every delete in the placement's
+    /// PREFIX; before that nothing was ever freed, so nothing could blink.
+    ///
+    /// A frame's cells are emitted in row-major order, so their concatenated symbols
+    /// are the frame's byte order: the assertion is simply that this delete is the
+    /// last escape in it.
+    #[test]
+    fn the_upload_being_replaced_is_freed_only_after_its_replacement_is_placed() {
+        let (picker, mut chrome, scale, pane, band, mut buf) = band_fixture();
+        let mut gr = GraphicsRender::default();
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let first = gr.chrome_band_id(key).expect("placed");
+
+        // The replacement frame gets a clean buffer, so what it carries is its own.
+        let mut buf = Buffer::empty(pane);
+        chrome.put_pixel(1, 2, image::Rgba([255, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let second = gr.chrome_band_id(key).expect("placed again");
+        assert_ne!(second, first, "a re-encode is a new upload with a new id");
+
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        let del = format!("\x1b_Gq=2,a=d,d=I,i={first}\x1b\\");
+        let at = text.find(&del).expect("the replaced upload is freed in this frame");
+        assert!(
+            text[..at].contains(&format!("i={second}")),
+            "the replacement was still un-transmitted when its predecessor was freed — the \
+             rect draws nothing until the upload lands, which is the flicker"
+        );
+        assert_eq!(
+            at,
+            text.rfind("\x1b_G").expect("the frame carries APC traffic"),
+            "the supersede delete must be the LAST escape of the frame: anything emitted after \
+             it is traffic the freed image was still covering for"
+        );
+    }
+
     /// SQ-0753 for the biggest upload babelmap makes: the v6 raster composite is the
     /// whole pane in one image (2.8 MB on Journey at 117x64). It is abandoned twice
     /// over — wholesale when the hybrid ring takes the screen (`invalidate_v6`), and
@@ -2701,20 +2831,42 @@ mod tests {
         gr.redraw_v6(&picker, area, &mut buf);
         let first = gr.v6.as_ref().and_then(|r| r.placed_id).expect("the composite knows its id");
 
-        // A second generation replaces it on the worker thread.
+        // A second generation replaces it on the worker thread. The composite it
+        // replaces is the whole pane the terminal is showing, so its delete waits
+        // BEHIND the placement that covers the pane again rather than riding ahead of
+        // a pane-sized upload (SQ-0817).
         gr.spawn_v6_encode(&picker, canvas.clone(), 2, area);
         drain_v6_job(&mut gr);
-        assert_eq!(queued_delete_ids(&gr), vec![first], "the superseded composite is freed");
-        gr.redraw_v6(&picker, area, &mut buf);
+        assert!(
+            queued_delete_ids(&gr).is_empty(),
+            "the live composite must not be freed ahead of its own replacement"
+        );
+        assert_eq!(
+            delete_ids(&gr.deletes_after_place),
+            vec![first],
+            "…it is queued to ride out behind that replacement"
+        );
+        let mut frame = Buffer::empty(area);
+        gr.redraw_v6(&picker, area, &mut frame);
         let second = gr.v6.as_ref().and_then(|r| r.placed_id).expect("placed");
         assert_ne!(second, first, "the new generation is a different upload");
+
+        let text: String = frame.content().iter().map(|c| c.symbol()).collect();
+        let at = text
+            .find(&format!("\x1b_Gq=2,a=d,d=I,i={first}\x1b\\"))
+            .expect("the superseded composite is freed on the frame that replaces it");
+        assert_eq!(
+            at,
+            text.rfind("\x1b_G").expect("the frame carries APC traffic"),
+            "the composite is freed only after every byte of its replacement"
+        );
 
         // …and the raster→ring transition frees whatever was up. Nothing places
         // after it — that is what the transition IS — so it waits for the frame's
         // closing flush.
         gr.invalidate_v6();
         assert_eq!(queued_delete_ids(&gr), vec![second], "invalidation frees the live composite too");
-        assert_eq!(freed_ids(&gr, &buf), vec![first, second], "both generations end up freed");
+        assert_eq!(freed_ids(&gr, &frame), vec![first, second], "both generations end up freed");
     }
 
     /// The deletes above are worthless unless they reach the terminal, and the v6
