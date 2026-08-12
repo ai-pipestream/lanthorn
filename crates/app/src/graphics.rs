@@ -346,6 +346,43 @@ impl PictSource {
         self.blorb.as_ref().and_then(|b| b.std_window())
     }
 
+    /// The per-axis factor this source's art is scaled by on its way into the
+    /// 640×400 unit screen, or `None` when the source has no opinion and the
+    /// uniform [`crate::session::V6_ART_SCALE`] rule stands (SQ-0790).
+    ///
+    /// Only a NATIVE archive answers, because only a native archive states a
+    /// picture space. Every Blorb is answered by its `Reso` chunk upstream, and
+    /// a Blorb-less story (scopa) is answered by Blorb §11's non-scalable rule.
+    ///
+    /// The unit screen is the same 640×400 for every rendition — it is
+    /// babelmap's presentation space, not the card's — so the factor is simply
+    /// how many unit pixels one art pixel covers on each axis:
+    ///
+    /// | rendition                    | picture space | scale |
+    /// |------------------------------|---------------|-------|
+    /// | Amiga `Pic.data`, MCGA `.MG1`| 320×200       | (2, 2)|
+    /// | EGA `.EG1`/`.EG2`, CGA `.CG1`| 640×200       | (1, 2)|
+    ///
+    /// The 640-wide row is the whole of SQ-0790, and it is not a compromise: an
+    /// EGA pixel really is half as wide as an MCGA one. Bocfel encodes exactly
+    /// this as `pixelwidth` — 1.0 at `hw_screenwidth` 320, **0.5** at 640 — and
+    /// its final blit (`draw_image.cpp:251`) works out to `gscreenw * H / 320`
+    /// for both, i.e. the two picture spaces cover the same rectangle. Frotz
+    /// says the same thing as `x_scale = (flags & 0x08) ? 640 : 320`
+    /// (`src/curses/ux_pic.c:126`).
+    ///
+    /// And the corpus agrees, which is what makes this a measurement rather than
+    /// a reading: under this rule `arthur.mg1` and `arthur.eg1` produce
+    /// **identical** unit-space dimensions for all 125 pictures they share, and
+    /// `zork0.mg1`/`zork0.eg1` for 446 of 503 (the remainder differ by a pixel
+    /// or two because the two renditions are separately drawn artwork, not one
+    /// scaled copy).
+    pub fn art_scale(&self) -> Option<(u32, u32)> {
+        let space_w = u32::from(self.native.as_ref()?.picture_space_width()).max(1);
+        let unit_w = u32::from(INFOCOM_V6_STD_WINDOW.0) * crate::session::V6_ART_SCALE;
+        Some(((unit_w / space_w).max(1), crate::session::V6_ART_SCALE))
+    }
+
     fn get(&mut self, resnum: u32) -> Option<&Arc<DynamicImage>> {
         if !self.cache.contains_key(&resnum) {
             let decoded = match (&self.blorb, &self.native) {
@@ -514,6 +551,16 @@ impl PictSource {
     }
 }
 
+/// The Infocom Version 6 standard window: the ART resolution every v6 release
+/// was laid out against, which babelmap presents doubled as the 640×400 unit
+/// screen (SQ-0479). It is the same on every machine that shipped one of these
+/// games, and it is what every Infocom Blorb's `Reso` chunk declares — a native
+/// archive has no chunk to declare it with, so this stands in.
+///
+/// It is NOT the archive's picture space, which is 320 or 640 depending on how
+/// wide the card's pixels were; see [`PictSource::art_scale`].
+pub const INFOCOM_V6_STD_WINDOW: (u16, u16) = (320, 200);
+
 /// Tier 3 of the picture-resource policy (SQ-0734): the user names a native
 /// Infocom archive in the per-game sidecar `<game_dir>/config.toml` and thereby
 /// ASSERTS that it belongs to this story.
@@ -629,30 +676,35 @@ impl PictureOverride {
     /// concept** (SQ-0736). Blorb §11 makes the ABSENCE of `Reso` meaningful —
     /// non-scalable art, drawn one image pixel per screen pixel — so reading a
     /// native archive's silence as that declaration is what left Zork Zero's
-    /// 320×200 art at half size on a 640×400 screen. The archive is not silent;
-    /// it just says it somewhere else, in the picture space its coordinates use.
+    /// 320×200 art at half size on a 640×400 screen. The archive is not silent:
+    /// the standard window is the machine's, and every machine that wrote one of
+    /// these archives drew v6 on the same one.
     ///
-    /// - A **320-wide** archive (Amiga/Mac `Pic.data`, MCGA `.MG1`) is the
-    ///   ordinary Infocom v6 standard window, doubled onto the 640×400 unit
-    ///   screen — identical to what every Infocom Blorb's `Reso` declares, which
-    ///   is why a named `.MG1` lands pixel-for-pixel where the Blorb's art did.
-    /// - A **640-wide** archive (EGA `.EG1`/`.EG2`, CGA `.CG1`) answers `None`,
-    ///   and that is a DEFERRAL rather than a rule. Its pixels are half as wide,
-    ///   so its true presentation is a 640×200 screen on an 8×8 cell — a whole
-    ///   display mode, not a scale factor, and `V6_ART_SCALE` is one uniform
-    ///   integer applied to both axes. Until an EGA/CGA profile exists, such an
-    ///   archive falls through to Blorb §11's own answer for art with no
-    ///   declared resolution: drawn at its actual size, 1:1.
+    /// Every rendition answers with the SAME standard window, and that is the
+    /// point (SQ-0790). A 320-wide archive (Amiga/Mac `Pic.data`, MCGA `.MG1`)
+    /// and a 640-wide one (EGA `.EG1`/`.EG2`, CGA `.CG1`) are two drawings of
+    /// one screen, not two screens: the EGA plate has twice as many pixels
+    /// across because each is half as wide, so both cover the same rectangle.
+    /// What differs between them is the DENSITY of the art, which is
+    /// [`PictSource::art_scale`]'s business — 320-wide doubles onto the 640×400
+    /// unit screen, 640-wide is x1 across and x2 down.
+    ///
+    /// SQ-0734 shipped `None` here for a 640-wide archive as an explicit
+    /// deferral, on the reading that its true presentation was a 640×200 screen
+    /// on an 8×8 cell that `V6_ART_SCALE` could not express. The screen half of
+    /// that turned out to be wrong: 640×200 on an 8×8 cell is 80×25 characters,
+    /// which is the same character grid the 640×400 unit screen already provides
+    /// on its 8×16 cell. Only the art density was ever different, and a per-axis
+    /// art scale is the whole of it.
     pub fn std_window(&self) -> Option<(u16, u16)> {
         match self {
-            // Spelled out rather than borrowing `interpreter::AMIGA_STD_WINDOW`:
-            // the two are the same numbers for the same reason (this is the
-            // Infocom v6 standard window, which the Amiga also happens to use),
-            // but naming the Amiga's constant here would read as a claim that an
-            // MCGA archive is Amiga media, and it is not.
-            PictureOverride::Loaded { pics, .. } if pics.picture_space_width() == 320 => {
-                Some((320, 200))
-            }
+            // `INFOCOM_V6_STD_WINDOW` rather than
+            // `interpreter::AMIGA_STD_WINDOW`: the two are the same numbers for
+            // the same reason (this is the Infocom v6 standard window, which the
+            // Amiga also happens to use), but naming the Amiga's constant here
+            // would read as a claim that an MCGA archive is Amiga media, and it
+            // is not.
+            PictureOverride::Loaded { .. } => Some(INFOCOM_V6_STD_WINDOW),
             _ => None,
         }
     }

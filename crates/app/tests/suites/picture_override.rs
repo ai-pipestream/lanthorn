@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 use app::graphics::{PictSource, PictureOverride};
 use app::interpreter::InterpreterProfile;
+use app::session::GameSession;
 use blorb::infocom_pics::Flavour;
 
 fn stories_dir() -> PathBuf {
@@ -315,33 +316,121 @@ fn naming_a_pc_archive_leaves_the_v6_corpus_on_ibm_pc() {
 /// §11's "non-scalable, draw 1:1" declaration is what left Zork Zero's art at
 /// half size. The archive does say it, in the picture space its coordinates use.
 ///
-/// A 320-wide rendition (Amiga `Pic.data`, MCGA `.MG1`) is the ordinary Infocom
-/// v6 standard window and doubles onto the 640×400 unit screen. A 640-wide one
-/// (EGA, CGA) has half-width pixels, needs a 640×200 screen on an 8×8 cell, and
-/// is DEFERRED — `V6_ART_SCALE` is one uniform integer for both axes, so there
-/// is no scale that expresses it. Pinned here so the deferral is a recorded
-/// decision rather than an accident.
+/// Every rendition of a game is a drawing of the SAME screen, so every one of
+/// them supplies the same 320×200 standard window. What differs is how dense the
+/// drawing is, and that is the art scale, not the window (SQ-0790).
+///
+/// SQ-0734 answered `None` here for a 640-wide EGA/CGA archive, as a recorded
+/// deferral: its true presentation looked like a 640×200 screen on an 8×8 cell,
+/// which a single uniform `V6_ART_SCALE` cannot express. Half of that reading
+/// was wrong and this test is where it changes. 640×200 on an 8×8 cell is 80×25
+/// characters — the same character grid the 640×400 unit screen already gives on
+/// its 8×16 cell — so the screen never needed to move. Only the art density did.
 #[test]
-fn a_320_wide_rendition_supplies_the_standard_window_and_a_640_wide_one_defers() {
-    let cases: [(&str, Option<(u16, u16)>); 4] = [
-        ("zork0.pic", Some((320, 200))),
-        ("zork0.mg1", Some((320, 200))),
-        ("zork0.eg1", None),
-        ("zork0.cg1", None),
-    ];
-    for (name, want) in cases {
+fn every_rendition_supplies_the_same_standard_window() {
+    for name in ["zork0.pic", "zork0.mg1", "zork0.eg1", "zork0.cg1"] {
         if story(name).is_none() {
             continue;
         }
         let dir = game_dir_with(&format!("stdwin-{name}"), Some(&format!("pictures = {name:?}\n")));
         let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-        assert_eq!(over.std_window(), want, "{name}");
+        assert_eq!(over.std_window(), Some((320, 200)), "{name}");
         let _ = std::fs::remove_dir_all(&dir);
     }
     // Nothing named declares nothing.
     let none = game_dir_with("stdwin-unset", None);
     assert_eq!(PictureOverride::resolve(Path::new("/nowhere/s.z6"), &none).std_window(), None);
     let _ = std::fs::remove_dir_all(&none);
+}
+
+/// The other half of SQ-0790: the density.
+///
+/// A 320-wide rendition (Amiga `Pic.data`, MCGA `.MG1`) doubles onto the 640×400
+/// unit screen, which is what has always happened. A 640-wide one (EGA `.EG1`,
+/// CGA `.CG1`) stores the same artwork with pixels half as wide, so it arrives
+/// at **(1, 2)** — one unit pixel across per art pixel, two down.
+///
+/// Not our invention: bocfel calls it `pixelwidth` and sets it to 0.5 whenever
+/// `hw_screenwidth` is 640, and Frotz reads the same header bit as
+/// `x_scale = (flags & 0x08) ? 640 : 320`.
+///
+/// A Blorb answers `None` and keeps the uniform rule — the path every story in
+/// the corpus takes.
+#[test]
+fn a_640_wide_rendition_arrives_at_half_width_pixels() {
+    let cases: [(&str, (u32, u32)); 4] = [
+        ("zork0.pic", (2, 2)),
+        ("zork0.mg1", (2, 2)),
+        ("zork0.eg1", (1, 2)),
+        ("zork0.cg1", (1, 2)),
+    ];
+    for (name, want) in cases {
+        if story(name).is_none() {
+            continue;
+        }
+        let dir = game_dir_with(&format!("scale-{name}"), Some(&format!("pictures = {name:?}\n")));
+        let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
+        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over);
+        assert_eq!(picts.art_scale(), Some(want), "{name}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // A Blorb has no picture space to declare one with, so the uniform rule stands.
+    if let Some(z0) = story("zork0-r393-s890714.z6") {
+        if story("Zork0.blb").is_some() {
+            let none = game_dir_with("scale-blorb", None);
+            let picts =
+                PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &none));
+            assert_eq!(picts.art_scale(), None, "a Blorb keeps the uniform V6_ART_SCALE");
+            let _ = std::fs::remove_dir_all(&none);
+        }
+    }
+}
+
+/// The measurement that makes the (1, 2) rule a finding rather than a reading:
+/// the two DOS renditions of one game must land in the same places.
+///
+/// Arthur is the clean case — `arthur.mg1` (320-wide) and `arthur.eg1`
+/// (640-wide) share 125 pictures, and under this rule all 125 produce byte-equal
+/// unit-space dimensions. Zork Zero agrees on 446 of the 503 it shares; the rest
+/// differ by a pixel or two because EGA and MCGA are separately drawn artwork,
+/// not one scaled copy of the other, so the assertion there is on the bulk.
+///
+/// Falsified by reverting `art_scale` to a uniform `(2, 2)`: Arthur's agreement
+/// drops from 125/125 to 0/125, every EGA plate coming out twice as wide as the
+/// screen.
+#[test]
+fn the_ega_and_mcga_renditions_of_one_game_land_in_the_same_places() {
+    let unit_dims = |name: &str| -> Option<std::collections::BTreeMap<u16, (u32, u32)>> {
+        story(name)?;
+        let dir = game_dir_with(&format!("agree-{name}"), Some(&format!("pictures = {name:?}\n")));
+        let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
+        let mut picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over);
+        let (sx, sy) = picts.art_scale().expect("a native archive declares its picture space");
+        let table = picts
+            .all_pict_dims()
+            .into_iter()
+            .map(|(n, w, h)| (n, (u32::from(w) * sx, u32::from(h) * sy)))
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(table)
+    };
+
+    for (mcga, ega, floor) in [("arthur.mg1", "arthur.eg1", 100), ("zork0.mg1", "zork0.eg1", 85)] {
+        let (Some(a), Some(b)) = (unit_dims(mcga), unit_dims(ega)) else { continue };
+        let shared: Vec<u16> = b.keys().filter(|k| a.contains_key(k)).copied().collect();
+        assert!(shared.len() > 50, "{mcga}/{ega} share only {} pictures", shared.len());
+        let agree = shared.iter().filter(|k| a[k] == b[k]).count();
+        assert!(
+            agree * 100 >= shared.len() * floor,
+            "{mcga} vs {ega}: only {agree}/{} pictures land in the same place",
+            shared.len(),
+        );
+        // The full-screen plate is the one a player looks at first, and it must
+        // agree exactly on both games.
+        if let (Some(&am), Some(&be)) = (a.get(&1), b.get(&1)) {
+            assert_eq!(am, be, "{mcga} vs {ega}: picture 1");
+        }
+    }
 }
 
 /// The consequence of the rule above, on the case a player is most likely to
@@ -374,6 +463,88 @@ fn a_named_mcga_rendition_lands_where_the_blorb_art_did() {
 
     let _ = std::fs::remove_dir_all(&plain);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// SQ-0790 end to end, on the real game: booting Zork Zero against its EGA
+/// rendition must put the machine, the screen and the artwork exactly where its
+/// MCGA rendition does.
+///
+/// This is the assertion the whole quest reduces to. The two archives hold the
+/// same game's art at two pixel densities, so once each is mapped onto the
+/// 640×400 unit screen the ENGINE cannot tell them apart: same screen words,
+/// same `picture_data` answers, same full-screen plate.
+///
+/// The falsification is in the test, at the bottom: the same EGA boot with the
+/// art scale withheld (`None`, i.e. the uniform rule SQ-0734 shipped) reports
+/// picture 1 as 1280×400 — twice the width of the screen it is meant to fill.
+#[test]
+fn zork_zeros_ega_rendition_boots_the_geometry_its_mcga_one_does() {
+    let Some(z0) = story("zork0-r393-s890714.z6") else { return };
+    if story("zork0.mg1").is_none() || story("zork0.eg1").is_none() {
+        return;
+    }
+    let bytes = std::fs::read(&z0).expect("Zork Zero reads");
+
+    // Boot exactly the way `startup.rs` does: the sidecar names the archive, the
+    // archive supplies both the standard window and the art scale.
+    let boot = |archive: &str, scale: Option<(u32, u32)>| -> GameSession {
+        let dir = game_dir_with(&format!("boot-{archive}"), Some(&format!("pictures = {archive:?}\n")));
+        let over = PictureOverride::resolve(&z0, &dir);
+        let std_window = over.std_window();
+        let mut picts = PictSource::resolve_with_override(&z0, over);
+        let art_scale = scale.map(Some).unwrap_or_else(|| picts.art_scale());
+        let dims = picts.all_pict_dims();
+        let mut s = GameSession::new_with_art_scale(
+            bytes.clone(), false, false, None, false, dims, std_window, art_scale, None, None,
+        )
+        .expect("Zork Zero boots");
+        s.set_pict_source(Some(picts));
+        s.flush_boot_pictures();
+        let _ = std::fs::remove_dir_all(&dir);
+        s
+    };
+    let reported = |s: &GameSession, n: u16| -> Option<(u16, u16)> {
+        s.machine.picture_dims.iter().find(|&&(i, _, _)| i == n).map(|&(_, w, h)| (w, h))
+    };
+
+    let mcga = boot("zork0.mg1", None);
+    let ega = boot("zork0.eg1", None);
+
+    for (name, s) in [("MCGA", &mcga), ("EGA", &ega)] {
+        assert!(!s.quit, "{name} quit during boot");
+        assert!(s.machine.fault_trace.is_none(), "{name} faulted during boot");
+        // The unit screen is babelmap's, not the card's, and never moves.
+        assert_eq!(s.machine.mem.read_word(0x22), 640, "{name} screen width, header $22");
+        assert_eq!(s.machine.mem.read_word(0x24), 400, "{name} screen height, header $24");
+        // …on the 8×16 cell, which is the EGA 80×25 character grid too.
+        assert_eq!(s.machine.mem.read_byte(0x27), 8, "{name} font width, header $27");
+        assert_eq!(s.machine.mem.read_byte(0x26), 16, "{name} font height, header $26");
+    }
+
+    assert_eq!(reported(&ega, 1), Some((640, 400)), "the EGA plate fills the unit screen");
+    assert_eq!(reported(&ega, 1), reported(&mcga, 1), "and lands where the MCGA plate does");
+
+    // Not just picture 1: the table the game lays itself out from agrees on the
+    // overwhelming majority of the 503 pictures the two renditions share.
+    let agree = mcga
+        .machine
+        .picture_dims
+        .iter()
+        .filter(|&&(n, w, h)| reported(&ega, n) == Some((w, h)))
+        .count();
+    assert!(
+        agree * 100 >= mcga.machine.picture_dims.len() * 85,
+        "only {agree}/{} picture_data answers agree between the two renditions",
+        mcga.machine.picture_dims.len(),
+    );
+
+    // FALSIFICATION: the shipped uniform rule, applied to the same archive.
+    let uniform = boot("zork0.eg1", Some((2, 2)));
+    assert_eq!(
+        reported(&uniform, 1),
+        Some((1280, 400)),
+        "without the per-axis scale the EGA plate is twice the width of the screen",
+    );
 }
 
 // ── the motivating case, end to end ──────────────────────────────────────────

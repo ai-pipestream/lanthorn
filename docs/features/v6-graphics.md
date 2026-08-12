@@ -129,15 +129,26 @@ are structurally different and a filename can lie. An explicit
 `interpreter_number` still overrules it.
 
 Native archives carry no `Reso` chunk — the format has no such concept — so the
-art resolution comes from the archive itself: 320×200 for an Amiga `Pic.data` or
-an MCGA `.MG1`, which is precisely what every Infocom v6 Blorb's `Reso` declares
-anyway, leaving the geometry below unchanged. EGA and CGA are the exception, and
-an honest one: they addressed a 640-column screen with pixels half as wide, so
-their art is stored 640 across and wants a 640×200 screen on an 8×8 character
-cell — a whole display mode rather than a scale factor. Until babelmap has one,
-a named `.EG1`/`.EG2`/`.CG1` draws at its true size, one image pixel per screen
-pixel, which is what the Blorb spec prescribes for art that declares no
-resolution.
+standard window comes from the machine instead, and every machine that shipped
+one of these games drew v6 on the same 320×200 one. That is precisely what every
+Infocom v6 Blorb's `Reso` declares anyway, so the geometry below is unchanged.
+
+What *does* differ between renditions is how densely the art is stored. EGA and
+CGA addressed a 640-column screen with pixels half as wide, so their plates are
+640 across where MCGA's are 320 — the same picture, twice the samples, each one
+half the width. Both cover the same rectangle, so both land on the same 640×400
+screen: an MCGA or Amiga plate doubles on both axes, an EGA or CGA plate doubles
+only vertically. *Arthur* is the clean proof — all 125 pictures its `.mg1` and
+`.eg1` share come out at byte-identical sizes once each is mapped that way, and
+*Zork Zero* agrees on 446 of its 503 (the rest differ by a pixel or two, because
+these are separately drawn renditions rather than one scaled copy). Frotz reads
+the same header bit as `x_scale = (flags & 0x08) ? 640 : 320`; Spatterlight's
+bocfel calls it `pixelwidth` and sets it to 0.5.
+
+The character grid never moves. EGA ran 640×200 on an 8×8 cell, which is 80×25
+characters — the very grid the 640×400 screen already lays out on its 8×16 cell —
+so choosing a rendition changes the artwork you are looking at and nothing about
+the machine underneath it.
 
 ## Splitting the screen TILES it
 

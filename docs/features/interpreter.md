@@ -183,7 +183,13 @@ itself instead of quietly rebasing someone's investigation.
   the two containers are structurally different and a renamed file would
   otherwise lie about which machine you asked for. (The Macintosh wrote the same
   container as the Amiga and cannot be told apart from it in general, so it is
-  not claimed to be.) Setting `interpreter_number` yourself names the
+  not claimed to be.) MCGA, EGA and CGA are three video cards in one machine, so
+  all three name the IBM PC and none of them moves byte `0x1E`; what a card does
+  change is how densely its artwork was stored, which is
+  [the art's business rather than the machine's](v6-graphics.md#choosing-which-artwork-a-game-draws).
+  The character cell is 8×16 on every profile — EGA's own 640×200 mode on an 8×8
+  cell is the same 80×25 grid — so no rendition alters the screen a game is
+  handed. Setting `interpreter_number` yourself names the
   machine outright and outranks both, so `interpreter_number = 4` gets you
   the whole Amiga rather than just the byte — which is the point: a number that
   changed what games did without changing the machine it implied was never a
