@@ -1929,10 +1929,13 @@ mod tests {
         }
     }
 
-    /// Write a temp config file and return its path.  Uses a unique filename
-    /// derived from the test function name to avoid collisions in parallel runs.
+    /// Write a temp config file and return its path.  The filename carries the
+    /// test's name *and* the process id: the name keeps two tests in one process
+    /// apart, the pid keeps two concurrent runs of the same test apart (a fixed
+    /// name let one run rewrite what the other was reading — SQ-0812).
     fn write_temp_config(name: &str, contents: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("babelmap_test_{}.toml", name));
+        let path =
+            std::env::temp_dir().join(format!("babelmap_test_{}_{}.toml", name, std::process::id()));
         let mut f = std::fs::File::create(&path).unwrap();
         write!(f, "{}", contents).unwrap();
         path
@@ -1969,7 +1972,7 @@ mod tests {
         let cfg: Config = toml::from_str(r#"default_story_dir = "/tmp/stories""#).unwrap();
         assert_eq!(cfg.default_story_dir, Some(PathBuf::from("/tmp/stories")));
         // write_config persists it, and a Some value survives the round trip.
-        let dir = std::env::temp_dir().join("babelmap-dsd-test");
+        let dir = std::env::temp_dir().join(format!("babelmap-dsd-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_config(&dir, &cfg).unwrap();
         let written = std::fs::read_to_string(dir.join("config.toml")).unwrap();
@@ -1993,7 +1996,7 @@ mod tests {
             story: Some(PathBuf::from("foo.z5")),
             user_dir: Some(PathBuf::from("/tmp/from-cli")),
             data_dir: None,
-            config: Some(cfg_path),
+            config: Some(cfg_path.clone()),
             no_accel: false,
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
@@ -2006,6 +2009,7 @@ mod tests {
 
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-cli"));
+        let _ = std::fs::remove_file(&cfg_path);
     }
 
     #[test]
@@ -2036,7 +2040,7 @@ mod tests {
             story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
-            config: Some(cfg_path),
+            config: Some(cfg_path.clone()),
             no_accel: false,
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
@@ -2048,6 +2052,7 @@ mod tests {
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
+        let _ = std::fs::remove_file(&cfg_path);
     }
 
     #[test]
@@ -2943,7 +2948,9 @@ use_defaults = false
     /// launch reading maps and saves out of `/tmp/x` (SQ-0807).
     #[test]
     fn user_dir_flag_does_not_persist_into_a_named_config() {
-        let dir = std::env::temp_dir().join(format!("bm-userdir-{}", std::process::id()));
+        // Tag distinct from `user_dir_moves_the_config_file_…`: the two share a pid
+        // whenever the binary runs its tests in threads, and both wipe the dir first.
+        let dir = std::env::temp_dir().join(format!("bm-userdir-named-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cfg_path = dir.join("config.toml");

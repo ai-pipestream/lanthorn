@@ -1543,7 +1543,9 @@ mod tests {
         body.extend(line_prompt());
         body.extend(enc(0x120, &[])); // quit
 
-        let dir = std::env::temp_dir().join(format!("bm-seed-{}", std::process::id()));
+        // Tag distinct from config.rs's `bm-seed-…`: same binary, same pid when the
+        // tests run in threads, and both wipe the dir before use.
+        let dir = std::env::temp_dir().join(format!("bm-glulx-seed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp game_dir");
         std::fs::write(dir.join("foo.qzl"), b"pretend-save-bytes").expect("write foo.qzl");
