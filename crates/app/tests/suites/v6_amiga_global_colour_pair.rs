@@ -16,9 +16,19 @@
 //! that gate, because §8.3's stated purpose is to *simulate the Amiga hardware* and
 //! a reading of it that diverges from that hardware defeats its own reason for
 //! existing. The evidence is Journey: release 30 makes a single `set_colour(9, 2)`
-//! — white ink, black page — on **window 3**, and contemporary Amiga walkthrough
-//! material shows the game on light grey with white text, i.e. Infocom's own
-//! `DEF_BACK 11` / `DEF_FORE 9` defaults. The machine ignored the call.
+//! — white ink, black page — on **window 3**, and real Amiga captures of the game
+//! show grey with white text rather than black, i.e. Infocom's own
+//! `DEF_BACK` / `DEF_FORE 9` defaults. The machine ignored the call.
+//!
+//! **The shade of that grey moved in SQ-0822, and the gate did not.** `DEF_BACK` is
+//! 12 (dark grey `$444`), not the 11 (`$777`) `amiga/yzip.h` gives — the leaked
+//! header is a development snapshot, and every interpreter on every Amiga release
+//! floppy says 12 (`v6_amiga_shipped_interpreter.rs` reads it out of their 68000
+//! code). Real Amiga captures agree: lemonamiga.com's Journey release-30 gallery
+//! tallies 173,994 pixels of `#444444` under 25,878 of `#FFFFFF`. The evidence for
+//! the window-0 gate was that Journey is *not black*, and a dark-grey page is not a
+//! black one, so every case below still reads exactly as it did — with `12` where
+//! it said `11`.
 //!
 //! The mechanism, and the retroactive repaint that is the hard half of it, are
 //! unit-tested in `zvm::screen` where they live. What this suite adds is the part
@@ -229,11 +239,11 @@ fn a_colour_set_outside_window_0_never_lands_on_an_amiga() {
 
     // What the screen IS, then: the machine's own pair, straight off header
     // $2D/$2C, which under this profile is Infocom's `DEF_FORE 9` over
-    // `DEF_BACK 11` — white on medium grey.
+    // `DEF_BACK 12` — white on dark grey (SQ-0822).
     assert_eq!(
         zvm::screen::amiga_screen_pair(&s.machine.mem),
-        Some((ZColour::Standard(9), ZColour::Standard(11))),
-        "{who}: the pair the whole screen is painted with (yzip.h DEF_FORE/DEF_BACK)",
+        Some((ZColour::Standard(9), ZColour::Standard(12))),
+        "{who}: the pair the whole screen is painted with (the floppies' DEF_FORE/DEF_BACK)",
     );
 }
 
@@ -423,15 +433,24 @@ fn tally(area: Rect, buf: &Buffer) -> CellTally {
 }
 
 /// The Amiga's own default pair as the renderer must resolve it: `DEF_FORE 9`
-/// (white) over `DEF_BACK 11` (medium grey), through the ACTIVE palette rather
-/// than a hardcoded RGB, so a palette change moves the expectation with it.
+/// (white) over `DEF_BACK 12` (dark grey `$444`), through the ACTIVE palette and
+/// the profile's own constants rather than a hardcoded RGB, so a palette change
+/// moves the expectation with it.
+///
+/// The page comes out `Rgb(66, 66, 66)` and not the hardware's exact `#444444`
+/// because a 4-bit Amiga channel is widened to the Z-machine's 5 bits and then to
+/// 8 — `4/15` becomes `8/31` becomes `66/255`. Two units, and the 15-bit word is
+/// the Z-machine's own currency, so this is the faithful number rather than a
+/// rounding to paper over.
 fn amiga_pair_rgb() -> (String, String) {
-    let (r, g, b) = app::colors::standard_colour_rgb(9).expect("standard 9 is white");
-    let (gr, gg, gb) = zvm::screen::grey_rgb(11);
+    let (r, g, b) = app::colors::standard_colour_rgb(app::interpreter::AMIGA_DEFAULT_FOREGROUND)
+        .expect("standard 9 is white");
+    let (gr, gg, gb) = zvm::screen::grey_rgb(app::interpreter::AMIGA_DEFAULT_BACKGROUND);
     (format!("Rgb({r}, {g}, {b})"), format!("Rgb({gr}, {gg}, {gb})"))
 }
 
-/// **The deliverable.** Journey on its Amiga floppy renders white on medium grey —
+/// **The deliverable.** Journey on its Amiga floppy renders white on the machine's
+/// own dark grey —
 /// not "in the model", on the cells the terminal is handed.
 ///
 /// This is the case the first cut of SQ-0740 did not have. It shipped on a model
@@ -447,7 +466,7 @@ fn amiga_pair_rgb() -> (String, String) {
 /// profile is once more indistinguishable from the IBM PC one on screen — which is
 /// the user's symptom, verbatim.
 #[test]
-fn journey_renders_white_on_medium_grey_on_the_amiga_floppy() {
+fn journey_renders_white_on_the_machines_dark_grey_on_the_amiga_floppy() {
     let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(s) = boot(&JOURNEY, InterpreterProfile::Amiga, true) else { return };
     let who = ctx(&JOURNEY, InterpreterProfile::Amiga, true);
@@ -468,7 +487,7 @@ fn journey_renders_white_on_medium_grey_on_the_amiga_floppy() {
         assert_eq!(
             frame.keys().cloned().collect::<Vec<_>>(),
             vec![(white.clone(), grey.clone())],
-            "{at}: every frame glyph must be the Amiga's white ink on its medium-grey page, got {frame:?}",
+            "{at}: every frame glyph must be the Amiga's white ink on its dark-grey page, got {frame:?}",
         );
 
         // …and the page runs to the pane, not merely under the glyphs.
@@ -534,4 +553,202 @@ fn with_game_colours_off_the_amiga_page_never_reaches_the_cells() {
             "{who} (rendered with honor={honor}): the theme owns the screen — no Amiga page anywhere",
         );
     }
+}
+
+// ── (d) Arthur's page, and the notices printed on it (SQ-0822) ───────────────
+
+/// `boot` without its blank-turn tail, for a case that drives its own script.
+fn boot_unscripted(f: &Floppy, profile: InterpreterProfile, honor: bool) -> Option<GameSession> {
+    let no_turns = Floppy { turns: 0, ..*f };
+    boot(&no_turns, profile, honor)
+}
+
+/// Drive Arthur release 54 off its floppy to the church and pray, which earns the
+/// notice the report was filed against: `[You have earned ten chivalry points.]`.
+/// Returns the session and the host transcript, or `None` when the medium is absent.
+///
+/// The scripted walk matters. `boot` above taps twelve blank turns, which never
+/// gets past Arthur's *"Would you like to restore a saved position? Please press Y
+/// or N>"* — and a session parked on that prompt is why the SQ-0740 lane recorded
+/// that "Arthur … set[s] no colours". It does: a dozen `set_colour(0, 0, window=3)`
+/// calls in the first turns of play, each preceded by
+/// `get_wind_prop(win=3, prop=11)` returning 0. Both channels are the opcode's
+/// "leave this alone" sentinel, so the call moves nothing on any machine — the
+/// read-the-colours-back-and-restore-them idiom — and it is NOT where the page
+/// comes from. The page is the machine's own, which is the whole of this.
+fn arthur_at_the_church(honor: bool) -> Option<(GameSession, Vec<String>)> {
+    let profile = InterpreterProfile::Amiga;
+    let mut s = boot_unscripted(&ARTHUR, profile, honor)?;
+    let who = ctx(&ARTHUR, profile, honor);
+    let mut lines: Vec<String> = Vec::new();
+    let script = ["east", "enter church", "pray"];
+    let mut next = 0usize;
+    for _ in 0..40 {
+        let r = match s.pending_input() {
+            InputKind::Line => {
+                let cmd = script.get(next).copied().unwrap_or("");
+                next += 1;
+                s.submit(cmd)
+            }
+            InputKind::Char => s.submit_char(13),
+            InputKind::Event => s.submit(""),
+        };
+        lines.extend(r.transcript.split('\n').map(str::to_owned));
+        if r.transcript.to_lowercase().contains("y or n") {
+            let _ = s.submit_char(b'n');
+        }
+        assert!(!s.quit, "{who}: quit while driving");
+        assert!(s.machine.fault_trace.is_none(), "{who}: faulted while driving");
+        if next > script.len() {
+            break;
+        }
+    }
+    assert!(
+        lines.iter().any(|l| l.contains("one-room building")),
+        "{who}: the walk must reach the church — this case measures nothing otherwise",
+    );
+    assert!(
+        lines.iter().any(|l| l.trim() == "[You have earned ten chivalry points.]"),
+        "{who}: praying must print the bracketed notice the report is about",
+    );
+    Some((s, lines))
+}
+
+/// Render the hybrid frame WITH the host transcript in it — the reading surface the
+/// player's eye is on, which `render_hybrid` above (an empty transcript) never draws.
+#[allow(deprecated)]
+fn render_with_transcript(s: &GameSession, lines: &[String], honor: bool) -> (Rect, Buffer) {
+    use app::engine::Engine;
+    let model = s.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker =
+        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.honor_game_colours = honor;
+    for line in lines {
+        state.push_transcript_kind(line, app::state::TranscriptKind::Story);
+    }
+    let area = Rect::new(0, 0, 115, 45);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    (area, buf)
+}
+
+/// Every distinct `(fg, bg)` carried by a non-blank cell of the row containing
+/// `needle` — `None` when no row contains it.
+fn row_styles(area: Rect, buf: &Buffer, needle: &str) -> Option<Vec<(String, String)>> {
+    let text = |y: u16| -> String {
+        (0..area.width)
+            .map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+            .collect()
+    };
+    let y = (0..area.height).find(|&y| text(y).contains(needle))?;
+    let mut out: std::collections::BTreeSet<(String, String)> = Default::default();
+    for x in 0..area.width {
+        let c = buf.cell((x, y)).expect("in-bounds cell");
+        if c.symbol() != " " {
+            out.insert((format!("{:?}", c.fg), format!("{:?}", c.bg)));
+        }
+    }
+    Some(out.into_iter().collect())
+}
+
+/// **The report, both halves.** Arthur release 54 in the church, on its Amiga
+/// floppy: the page is the machine's dark grey, and the bracketed notice printed on
+/// it is the same white as the prose around it.
+///
+/// The reference is MobyGames' capture of this exact scene on a real Amiga, which
+/// measures `#444444` page under `#FFFFFF` ink across the whole text panel and
+/// nothing else — with the status bar reversed to `#444444` on `#FFFFFF`, i.e. the
+/// same two pens swapped, which is what proves the page is the text background
+/// REGISTER and not artwork. The two things that were wrong:
+///
+/// 1. the page was standard 11 (`$777`, `Rgb(115, 115, 115)`) because
+///    `AMIGA_DEFAULT_BACKGROUND` came from a development header rather than from
+///    the machine — *"the page is lighter than the real Amiga's"*;
+/// 2. the notice came out `DarkGray` on that page, because babelmap's built-in
+///    "a whole line in brackets is a message from the interpreter" rule mutes it —
+///    *"nearly invisible"*, where the walkthrough screenshots show it white.
+///
+/// FALSIFY either half independently: restore `AMIGA_DEFAULT_BACKGROUND = 11` and
+/// both rows fail on the page; drop the `machine_owns_ink` term from
+/// `ColorScheme::resolve_story_style` and only the notice row fails, on its ink.
+#[test]
+fn arthurs_notices_are_the_machines_white_on_the_machines_dark_grey() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((s, lines)) = arthur_at_the_church(true) else { return };
+    let who = ctx(&ARTHUR, InterpreterProfile::Amiga, true);
+    let (white, grey) = amiga_pair_rgb();
+    let (area, buf) = render_with_transcript(&s, &lines, true);
+
+    // The machine publishes its pair at all, straight off $2D/$2C.
+    assert_eq!(
+        zvm::screen::amiga_screen_pair(&s.machine.mem),
+        Some((ZColour::Standard(9), ZColour::Standard(12))),
+        "{who}: DEF_FORE 9 over DEF_BACK 12",
+    );
+    for needle in ["one-room building", "[You have earned ten chivalry points.]"] {
+        let styles = row_styles(area, &buf, needle)
+            .unwrap_or_else(|| panic!("{who}: {needle:?} must be on screen"));
+        assert_eq!(
+            styles,
+            vec![(white.clone(), grey.clone())],
+            "{who}: {needle:?} must be the machine's ink on the machine's page",
+        );
+    }
+
+    // …and an independent oracle for the half a player reported by eye, so this
+    // case cannot pass merely by agreeing with the constant it was derived from:
+    // the REFERENCE pixels. `#444444` page, `#FFFFFF` ink, straight off the Amiga
+    // capture, within the two units the 4→5→8-bit widening costs (see
+    // `amiga_pair_rgb`). A page of standard 11 lands on 115 and misses by 47.
+    let (pr, pg, pb) = zvm::screen::grey_rgb(app::interpreter::AMIGA_DEFAULT_BACKGROUND);
+    for (got, want, ch) in [(pr, 0x44u8, 'r'), (pg, 0x44, 'g'), (pb, 0x44, 'b')] {
+        assert!(
+            got.abs_diff(want) <= 2,
+            "{who}: the page's {ch} channel is {got}, and the real Amiga's is {want}",
+        );
+    }
+    let (ir, ig, ib) = app::colors::standard_colour_rgb(app::interpreter::AMIGA_DEFAULT_FOREGROUND)
+        .expect("standard 9 is white");
+    assert_eq!((ir, ig, ib), (0xFF, 0xFF, 0xFF), "{who}: the ink is the capture's white");
+}
+
+/// …and with `honor_game_colours` off the player has said the theme owns the
+/// screen, so the machine publishes no pair, the notice goes back to the built-in
+/// system style, and nothing on that row carries an Amiga page. A pair the
+/// INTERPRETER paints with is still a game colour.
+#[test]
+fn with_game_colours_off_arthurs_notice_keeps_the_themes_own_system_style() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((s, lines)) = arthur_at_the_church(false) else { return };
+    let who = ctx(&ARTHUR, InterpreterProfile::Amiga, false);
+    let (_, grey) = amiga_pair_rgb();
+    let (area, buf) = render_with_transcript(&s, &lines, false);
+
+    assert_eq!(
+        zvm::screen::amiga_screen_pair(&s.machine.mem),
+        None,
+        "{who}: a colourless interpreter has no pair to paint with",
+    );
+    let sys = format!(
+        "{:?}",
+        app::colors::ColorScheme::terminal_default()
+            .theme
+            .get("transcript_system")
+            .style
+            .fg
+            .expect("the system style names an ink")
+    );
+    let styles = row_styles(area, &buf, "[You have earned ten chivalry points.]")
+        .unwrap_or_else(|| panic!("{who}: the notice must be on screen"));
+    assert!(
+        styles.iter().all(|(fg, _)| *fg == sys),
+        "{who}: off the Amiga the bracketed line keeps the theme's system style, got {styles:?}",
+    );
+    assert!(
+        styles.iter().all(|(_, bg)| *bg != grey),
+        "{who}: no Amiga page may reach the cells with colours declined, got {styles:?}",
+    );
 }

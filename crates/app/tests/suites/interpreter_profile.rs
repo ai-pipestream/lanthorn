@@ -288,8 +288,9 @@ fn the_amiga_profile_reports_an_amiga_to_the_game() {
 
     // ZMSD §11.1.3: 4 = Amiga.
     assert_eq!(session.machine.mem.read_byte(0x1E), 4, "header $1E");
-    // ZMSD §8.3.3 + Infocom's `yzip.h`: medium grey page, white ink.
-    assert_eq!(session.machine.mem.read_byte(0x2C), 11, "header $2C default background");
+    // ZMSD §8.3.3 + the release floppies' own `DEF_BACK`/`DEF_FORE` (SQ-0822):
+    // dark grey page, white ink.
+    assert_eq!(session.machine.mem.read_byte(0x2C), 12, "header $2C default background");
     assert_eq!(session.machine.mem.read_byte(0x2D), 9, "header $2D default foreground");
 
     let _ = std::fs::remove_file(&disk);

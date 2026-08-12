@@ -1987,6 +1987,7 @@ fn render_middle(
                     || c.key.frameless != frameless
                     || c.key.clear_anchor != state.clear_anchor
                     || c.key.room_name.as_deref() != state.current_room_name.as_deref()
+                    || c.key.machine_pair != state.v6_page_pair.get()
                     || c.key.colors != state.colors
             }
         }
@@ -2000,6 +2001,14 @@ fn render_middle(
         // kinds use their fixed per-category style. Resolving here (not per wrapped
         // fragment) keeps whole-line matching correct when a line wraps.
         let room_name = state.current_room_name.as_deref();
+        // SQ-0822: `normal_style` already carries §8.3's Amiga machine pair when
+        // there is one (`v6_machine_page`, above), so a Story line whose channels
+        // are inherited resolves them from the MACHINE rather than from the theme —
+        // and the built-in "bracketed line came from the interpreter" rule stands
+        // down, because on that machine the line is the game's prose in the game's
+        // pens. Off the Amiga `normal_style` IS `colors.transcript` and the flag is
+        // false, so every other frame resolves exactly as before.
+        let machine_owns_ink = state.v6_page_pair.get().is_some();
         let transcript_input = state.colors.theme.get("transcript_input").style;
         let transcript_meta = state.colors.theme.get("transcript_meta").style;
         let transcript_warning = state.colors.theme.get("transcript_warning").style;
@@ -2011,7 +2020,7 @@ fn render_middle(
                     return ov;
                 }
                 match kind {
-                    TranscriptKind::Story   => state.colors.resolve_story_style(&state.transcript[i], room_name),
+                    TranscriptKind::Story   => state.colors.resolve_story_style(normal_style, &state.transcript[i], room_name, machine_owns_ink),
                     TranscriptKind::Input   => transcript_input,
                     TranscriptKind::Meta    => transcript_meta,
                     TranscriptKind::Warning => transcript_warning,
@@ -2103,6 +2112,7 @@ fn render_middle(
                 frameless,
                 clear_anchor: state.clear_anchor,
                 room_name: state.current_room_name.clone(),
+                machine_pair: state.v6_page_pair.get(),
                 colors: state.colors.clone(),
             },
             rows,

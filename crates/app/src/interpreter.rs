@@ -50,12 +50,19 @@
 //! moves unless a user writes a `pictures` key naming an Amiga archive, which is
 //! precisely the request being honoured.
 //!
-//! Authenticity can cost readability — the Amiga's own default page is a medium
-//! grey, and a game that picks white text against it was legible on a 1989
-//! monitor and is merely adequate in a modern terminal. There is deliberately no
-//! new setting for that: `honor_game_colours` already governs whether the game's
-//! colour choices are honoured at all, so turning it off returns the user's
-//! theme, profile or no profile.
+//! Authenticity can cost readability — the Amiga's own default page is a dark
+//! grey (see [`AMIGA_DEFAULT_BACKGROUND`]), and a game that picks white text
+//! against it was legible on a 1989 monitor and is merely adequate in a modern
+//! terminal. There is deliberately no new setting for that: `honor_game_colours`
+//! already governs whether the game's colour choices are honoured at all, so
+//! turning it off returns the user's theme, profile or no profile.
+//!
+//! It can also cost a babelmap CONVENIENCE, and that has to be paid too. §8.3's
+//! Amiga has exactly two pens for the whole screen, so the transcript's built-in
+//! "a whole line in brackets came from the interpreter, mute it" rule is wrong
+//! twice over there — the line is the game's prose, and the mute was picked to
+//! recede against the theme's page rather than the machine's. It stands down on
+//! this profile only; see [`crate::colors::ColorScheme::resolve_story_style`].
 
 use std::path::Path;
 
@@ -249,16 +256,52 @@ pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
 /// scaling a Blorb-sourced copy of the same game already gets.
 pub const AMIGA_STD_WINDOW: (u16, u16) = (320, 200);
 
-/// The Amiga's default background: standard colour 11, medium grey.
+/// The Amiga's default background: standard colour **12**, dark grey (`$444`).
 ///
-/// Source: `#define DEF_BACK 11 /*6*/  /* default Amiga background = med gray */`
-/// in `amiga/yzip.h` of Infocom's released Amiga Version 6 interpreter source.
-pub const AMIGA_DEFAULT_BACKGROUND: u8 = 11;
+/// **Do not "correct" this back to 11 on the strength of `amiga/yzip.h`** — that
+/// file is a development snapshot, its own `#define DEF_BACK 11 /*6*/` carries the
+/// scar of a previous edit, and the value that shipped is 12 (SQ-0822).
+///
+/// The authority is the interpreter on the release floppy, which is the program
+/// that painted the screen. `set_back()` in `amiga/yzip3.c` opens
+/// `if (id == 1) id = DEF_BACK;` — "colour 1 means the default" — and `set_fore()`
+/// opens with the same line on `DEF_FORE`. Both compile to a `cmpi.w #1` and a
+/// `moveq`, and both appear, once each and in that order, in every Amiga Version 6
+/// interpreter in `stories/`:
+///
+/// ```text
+///   0c 47 00 01   cmpi.w #1,d7      0c 47 00 01   cmpi.w #1,d7
+///   66 02         bne.s  .+2        66 02         bne.s  .+2
+///   7e 09         moveq  #9,d7      7e 0c         moveq  #12,d7
+///   … set_fore: DEF_FORE = 9        … set_back: DEF_BACK = 12
+/// ```
+///
+/// and `set_color()`'s `return ((DEF_BACK << 8) | DEF_FORE)` assembles to
+/// `30 3c 0c 09` — `move.w #$0C09,d0` — in all four. `$0B09` occurs in none of
+/// them. Offsets, per interpreter binary extracted from its floppy: Arthur
+/// (release 54) 18958/19094/18742, Journey (release 30) 17816/17952/17792,
+/// Zork Zero (release 366) and Shogun (release 295) 17820/17956/17796.
+///
+/// It is also what the screen shows. Real Amiga captures of Journey release 30
+/// (lemonamiga.com's gallery, 640×512) tally 173,994 pixels of `#444444` under
+/// 25,878 of `#FFFFFF`, and MobyGames' Arthur church capture is `#444444` page,
+/// `#FFFFFF` ink, with the status bar reversed to `#444444` ON `#FFFFFF` — which
+/// is pen 0 and pen 1 swapped, so the page really is the text background register
+/// and not artwork. `$444` is Infocom's colour 12; `$777`, colour 11, appears in
+/// neither. [`crate::colors`] resolves 12 through the Amiga palette to `(66,66,66)`
+/// — two units off `#444444` only because a 4-bit Amiga channel has to pass
+/// through the Z-machine's 5-bit true-colour word on the way.
+///
+/// This does not disturb SQ-0740's window-0 gate: the evidence for that was that
+/// Journey is *not black*, and a dark-grey page is not a black one.
+pub const AMIGA_DEFAULT_BACKGROUND: u8 = 12;
 
 /// The Amiga's default foreground: standard colour 9, white.
 ///
-/// Source: `#define DEF_FORE 9  /* default Amiga foreground = white */` in
-/// `amiga/yzip.h` of Infocom's released Amiga Version 6 interpreter source.
+/// Source: `set_fore()`'s `if (id == 1) id = DEF_FORE;` in the interpreter on every
+/// Infocom Amiga release floppy — `moveq #9` — agreeing with
+/// `#define DEF_FORE 9  /* default Amiga foreground = white */` in `amiga/yzip.h`.
+/// See [`AMIGA_DEFAULT_BACKGROUND`], where the two sources do *not* agree.
 pub const AMIGA_DEFAULT_FOREGROUND: u8 = 9;
 
 #[cfg(test)]
@@ -282,7 +325,11 @@ mod tests {
         let p = InterpreterProfile::Amiga;
         assert_eq!(p.interpreter_number(), Some(4), "ZMSD §11.1.3: 4 = Amiga");
         assert_eq!(p.std_window(), Some((320, 200)));
-        assert_eq!(p.default_colours(), Some((11, 9)), "yzip.h DEF_BACK/DEF_FORE");
+        assert_eq!(
+            p.default_colours(),
+            Some((12, 9)),
+            "the release floppies' own DEF_BACK/DEF_FORE (SQ-0822)"
+        );
         assert_eq!(p.palette(), zvm::screen::Palette::Amiga);
     }
 

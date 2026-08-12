@@ -1811,6 +1811,13 @@ pub(crate) struct TranscriptWrapKey {
     pub room_name: Option<String>,
     /// Resolved colour scheme (theme / `/reload`); Story styles resolve from it.
     pub colors: crate::colors::ColorScheme,
+    /// The MACHINE's own screen pair for this frame (`AppState::v6_page_pair`),
+    /// which under ZMSD §8.3's Amiga interpreter is the base every Story line's
+    /// style resolves from and which withdraws the built-in bracketed-system rule
+    /// (SQ-0822). `None` on every other frame. In the key because it can move
+    /// without the transcript changing — a `/set-game-colours` toggle, or the game
+    /// moving the pens — and the styles are cached alongside the wrapped rows.
+    pub machine_pair: Option<(u32, u32)>,
 }
 
 /// The cached wrapped-transcript product for one [`TranscriptWrapKey`]. Holds the

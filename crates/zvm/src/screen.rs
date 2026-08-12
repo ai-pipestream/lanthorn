@@ -999,7 +999,9 @@ pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
 /// This is the pair the machine BOOTS with, and — because Infocom's window-0 gate
 /// means Journey's only `set_colour` never lands — the pair Journey is played on:
 /// header bytes `$2D`/`$2C`, which under [`InterpreterProfile::Amiga`] carry
-/// `DEF_FORE 9` (white) over `DEF_BACK 11` (medium grey) from `amiga/yzip.h`.
+/// `DEF_FORE 9` (white) over `DEF_BACK 12` (**dark** grey `$444`), read out of the
+/// release floppies' own interpreters rather than out of `amiga/yzip.h` — see
+/// `app::interpreter::AMIGA_DEFAULT_BACKGROUND` for the disassembly (SQ-0822).
 ///
 /// **Why the host needs it, and why §8.3.3 alone was not enough.** Those two
 /// bytes are what §8.3.3 tells the *story* about the interpreter's defaults, and
@@ -1579,7 +1581,7 @@ pub const DEFAULT_FG_COLOUR: u8 = 9;
 ///
 /// The greys 10–12 exist "only in Version 6", and there they are perfectly
 /// meaningful defaults: Infocom's own Amiga Version 6 interpreter booted with
-/// `DEF_BACK 11` — medium grey — as its default page (`amiga/yzip.h`). So they
+/// `DEF_BACK 12` — dark grey — as its default page (SQ-0822). So they
 /// are accepted for Version 6 and rejected everywhere else, which is exactly
 /// what the spec's "only in Version 6" says. (SQ-0719; before that nothing ever
 /// offered a grey here, so no existing session's answer moves.)
@@ -1625,21 +1627,20 @@ pub fn standard_true_colour(n: u8) -> Option<u16> {
 
 /// The Amiga palette for standard colour numbers 2..=12, as 15-bit RGB.
 ///
-/// Source: Infocom's own Amiga YZIP (Version 6) interpreter, `amiga/yzip1.c` in
-/// the released historical interpreter sources — `colortable[]` ("Amiga RGB
-/// values for the 8 XZIP colors … The values were determined empirically") read
-/// through `colormap[]`, which maps a Z-machine colour number to a table slot.
-/// The Amiga's `SetRGB4` takes 4 bits per channel, so the raw entries are
-/// `0x0RGB`; they are widened to the Z-machine's 5-bit channels by bit
+/// Source: the `colortable[]` compiled into the Amiga Version 6 interpreter on
+/// Infocom's own **release floppies** — the one program that ever painted these
+/// colours — read through `colormap[]`, which maps a Z-machine colour number to a
+/// table slot. The Amiga's `SetRGB4` takes 4 bits per channel, so the raw entries
+/// are `0x0RGB`; they are widened to the Z-machine's 5-bit channels by bit
 /// replication (`n << 1 | n >> 3`), the expansion that keeps `$F` at full
 /// intensity and `$0` at zero.
 ///
 /// ```text
-/// colour        yzip1.c slot   raw     → 15-bit
+/// colour        slot            raw     → 15-bit
 /// 2  black      colortable[2]  $0000     $0000
 /// 3  red        colortable[4]  $0E00     $001D
 /// 4  green      colortable[3]  $00C0     $0320
-/// 5  yellow     colortable[5]  $0EE0     $03BD
+/// 5  yellow     colortable[5]  $0FD0     $037F
 /// 6  blue       colortable[0]  $005A     $5540
 /// 7  magenta    colortable[6]  $0F0F     $7C1F
 /// 8  cyan       colortable[7]  $00EE     $77A0
@@ -1649,19 +1650,29 @@ pub fn standard_true_colour(n: u8) -> Option<u16> {
 /// 12 dark grey  colortable[10] $0444     $2108
 /// ```
 ///
-/// (Slot 9 is written `0x7777` in the original; `SetRGB4` uses only the low 12
-/// bits, so the stray high nibble never reached the hardware.)
+/// (Slot 9 is written `0x7777`; `SetRGB4` uses only the low 12 bits, so the stray
+/// high nibble never reached the hardware.)
 ///
-/// Six of the eleven entries — black, red, yellow, magenta, cyan, white — come
-/// out bit-for-bit identical to ZMSD §8.3.1's table, which is a strong sign the
+/// **The floppies outrank `amiga/yzip1.c`** (SQ-0822). The leaked development
+/// source gives slot 5 as `0x0EE0`, and it is the ONE entry where the source and
+/// the shipped program disagree: the byte string
+/// `00 5A 0F FF 00 00 00 C0 0E 00 0F D0 0F 0F 00 EE 0A AA 77 77 04 44` appears,
+/// identically and once, in every Amiga Version 6 interpreter in `stories/` —
+/// `Arthur` (release 54 floppy), `Journey` (release 30), `Zork Zero` (release 366)
+/// and `Shogun` (release 295) — with `0F D0` where the source has `0E E0`. Ten
+/// entries match the source exactly, which is what makes the eleventh a shipped
+/// correction rather than a mis-transcription.
+///
+/// Five of the eleven entries — black, red, magenta, cyan, white — come out
+/// bit-for-bit identical to ZMSD §8.3.1's table, which is a strong sign the
 /// standard's "recommended" values were themselves read off an Amiga. Green,
-/// blue and the three greys are where the two genuinely differ.
+/// blue, yellow and the three greys are where the two genuinely differ.
 pub fn amiga_true_colour(n: u8) -> Option<u16> {
     Some(match n {
         2 => 0x0000,  // black       $000
         3 => 0x001D,  // red         $E00
         4 => 0x0320,  // green       $0C0
-        5 => 0x03BD,  // yellow      $EE0
+        5 => 0x037F,  // yellow      $FD0
         6 => 0x5540,  // blue        $05A
         7 => 0x7C1F,  // magenta     $F0F
         8 => 0x77A0,  // cyan        $0EE
@@ -2777,22 +2788,23 @@ mod tests {
     #[test]
     fn the_amiga_screen_pair_is_the_headers_own_default_colours() {
         let mut mem = header_for(6, 4, true);
-        // What `InterpreterProfile::Amiga` publishes: `DEF_BACK 11` (medium grey)
-        // and `DEF_FORE 9` (white), from Infocom's released `amiga/yzip.h`.
-        write_default_colours(&mut mem, 11, 9);
+        // What `InterpreterProfile::Amiga` publishes: `DEF_BACK 12` (dark grey)
+        // and `DEF_FORE 9` (white), read out of the release floppies' own Amiga
+        // interpreters (SQ-0822).
+        write_default_colours(&mut mem, 12, 9);
         assert_eq!(
             amiga_screen_pair(&mem),
-            Some((ZColour::Standard(9), ZColour::Standard(11))),
+            Some((ZColour::Standard(9), ZColour::Standard(12))),
             "(foreground, background), straight off $2D/$2C",
         );
         // Every machine that is not an Amiga has no such thing — each window
         // carries its own pair and the host theme owns everything else.
         let mut ibm = header_for(6, 6, true);
-        write_default_colours(&mut ibm, 11, 9);
+        write_default_colours(&mut ibm, 12, 9);
         assert_eq!(amiga_screen_pair(&ibm), None, "interpreter 6 publishes no screen pair");
         // …and neither does a colourless interpreter, Amiga or not.
         let mut off = header_for(6, 4, false);
-        write_default_colours(&mut off, 11, 9);
+        write_default_colours(&mut off, 12, 9);
         assert_eq!(amiga_screen_pair(&off), None, "colours withdrawn: nothing to paint with");
     }
 

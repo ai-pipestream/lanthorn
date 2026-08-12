@@ -10,6 +10,8 @@
 
 #[path = "suites/v6_amiga_global_colour_pair.rs"]
 mod v6_amiga_global_colour_pair;
+#[path = "suites/v6_amiga_shipped_interpreter.rs"]
+mod v6_amiga_shipped_interpreter;
 #[path = "suites/v6_frame_border_medium.rs"]
 mod v6_frame_border_medium;
 #[path = "suites/v6_game_colour_regression.rs"]
