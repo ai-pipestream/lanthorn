@@ -1000,7 +1000,20 @@ fn render_node(
                                 art_bottom_px.map(|y| y as u16).unwrap_or(u16::MAX),
                                 clip_row,
                             )));
+                            // SQ-0698: …and a flank whose art we know how to EXTEND is
+                            // spared that trim. The clip is what dropped Arthur's side
+                            // poles at the row his artwork happens to stop — native 379
+                            // of 400, terminal row 31 of a 64-row pane — leaving the
+                            // frame open down its whole lower half. Tiling gives that
+                            // band something to draw all the way to the story viewport's
+                            // bottom, so the band must survive to be drawn. Reserved to a
+                            // RECOGNISED flank (`v6_border::recognize`): a game with no
+                            // side art, or side art of a shape this code does not know,
+                            // is clipped exactly as before.
                             for b in &mut ring_bands {
+                                if b.width < area.width && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some() {
+                                    continue;
+                                }
                                 if b.y >= clip_row {
                                     b.height = 0;
                                 } else {
@@ -1372,6 +1385,29 @@ fn render_node(
                         } else {
                             Vec::new()
                         };
+                        // SQ-0698/SQ-0781: the side flanks of Arthur, Shogun and Zork
+                        // Zero, TILED down to the band instead of stretched to it. The
+                        // source is composed in native pixels at the uniform scale, so
+                        // the flank keeps the top plate's horizontal factor and gains no
+                        // vertical one — the whole point, since the stretch it replaces
+                        // ran to 2.2x (Zork Zero) and 3.0x (Shogun) of the horizontal at
+                        // a 117x64 terminal. The Menu plan is excluded: Journey's frame
+                        // is glyphs, not artwork (SQ-0750), and its flank is a picture
+                        // column centred in a panel rather than a border to extend.
+                        let tiled_flanks: Vec<(Rect, image::RgbaImage)> = if matches!(plan, BottomPlan::Menu) {
+                            Vec::new()
+                        } else {
+                            strips
+                                .iter()
+                                .filter_map(|s| match s {
+                                    ChromeStrip::Art(r) if r.width < area.width => {
+                                        flank_tiled_source(*r, area, &scale, cell_px, native, &canvas, &gfx)
+                                            .map(|img| (*r, img))
+                                    }
+                                    _ => None,
+                                })
+                                .collect()
+                        };
                         {
                             let mut gr = state.graphics_render.borrow_mut();
                             // An Art strip with no art behind it is skipped below and never
@@ -1434,6 +1470,10 @@ fn render_node(
                                         if let Some((bg, fill, dest, crop)) = panel {
                                             fill_pane_page(fill, bg, buf);
                                             gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, crate::render::graphics::BandSlot::Art, buf);
+                                        } else if let Some(img) = tiled_flanks.iter().find(|(sr, _)| sr == r).map(|(_, i)| i) {
+                                            // SQ-0698: a recognised side border, tiled to
+                                            // the band's own height at the uniform scale.
+                                            gr.draw_chrome_band_image(picker, img, *r, crate::render::graphics::BandSlot::Art, buf);
                                         } else if let Some(crop) = (matches!(plan, BottomPlan::Frame) && r.width < area.width)
                                             .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
                                             .flatten()
@@ -3861,6 +3901,71 @@ fn flank_crop(
         return None;
     }
     Some((nx0, ny0, nx1 - nx0, ny1 - ny0))
+}
+
+/// SQ-0698: the native geometry a side flank band occupies — its columns
+/// `[x0, x1)`, the native row its top maps back to, and how many native rows its
+/// device height is worth at the UNIFORM scale. Read back through `scale`
+/// exactly as [`flank_crop`] reads it, so a tiled band and a stretched one agree
+/// on where the flank is; only the vertical factor differs between them.
+fn flank_native_box(
+    band: Rect,
+    pane: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    native: (u16, u16),
+) -> (u32, u32, u32, u32) {
+    let cw = cell_px.0.max(1) as f32;
+    let ch = cell_px.1.max(1) as f32;
+    let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
+    let inv_x = |cell: u16| (((cell.saturating_sub(pane.x)) as f32 * cw - scale.off_x as f32) / s).round().max(0.0) as u32;
+    let x0 = inv_x(band.x).min(native.0 as u32);
+    let x1 = inv_x(band.right()).min(native.0 as u32);
+    let top = (((band.y.saturating_sub(pane.y)) as f32 * ch - scale.off_y as f32) / s).round().max(0.0) as u32;
+    let rows = ((band.height as f32 * ch) / s).round().max(0.0) as u32;
+    (x0, x1, top, rows)
+}
+
+/// SQ-0698: which border layout — if any — this side flank band is showing.
+///
+/// Measured on the GRAPHICS-ONLY canvas, so a status run rasterised into the
+/// chrome canvas can never be mistaken for border art (the same canvas
+/// `strip_has_art` asks, for the same reason).
+fn flank_border_art(
+    band: Rect,
+    pane: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    native: (u16, u16),
+    gfx: &image::RgbaImage,
+) -> Option<crate::render::v6_border::BorderArt> {
+    let (x0, x1, _, _) = flank_native_box(band, pane, scale, cell_px, native);
+    if x1 <= x0 {
+        return None;
+    }
+    crate::render::v6_border::recognize(crate::render::v6_border::art_extent(gfx, x0, x1), native.1 as u32)
+}
+
+/// SQ-0698: the tiled native source for one side flank band, or `None` when its
+/// art is unrecognised or already covers the band.
+///
+/// Sampled from the CHROME canvas (the pixels a band ships) but classified from
+/// the GRAPHICS-ONLY canvas (what is artwork).
+fn flank_tiled_source(
+    band: Rect,
+    pane: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    native: (u16, u16),
+    canvas: &image::RgbaImage,
+    gfx: &image::RgbaImage,
+) -> Option<image::RgbaImage> {
+    let (x0, x1, top, rows) = flank_native_box(band, pane, scale, cell_px, native);
+    if x1 <= x0 || rows == 0 {
+        return None;
+    }
+    let art = crate::render::v6_border::art_extent(gfx, x0, x1);
+    crate::render::v6_border::flank_source(canvas, x0, x1, art, native.1 as u32, top, rows)
 }
 
 /// A native `(x, y, w, h)` crop of the chrome canvas, as a band draw takes it.

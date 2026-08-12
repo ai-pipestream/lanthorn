@@ -1281,6 +1281,91 @@ impl GraphicsRender {
             ));
         }
     }
+
+    /// SQ-0698: draw ONE band from a source image the CALLER composed in native
+    /// pixels, rather than from a sub-rect of the chrome canvas.
+    ///
+    /// The side border extension ([`crate::render::v6_border`]) tiles a flank's
+    /// art downward past the native screen bottom, so its source does not exist
+    /// in the canvas and cannot be named as a crop. `src` is resized to the
+    /// band's device box exactly as [`Self::draw_chrome_band_stretched`] resizes
+    /// a crop — and because the caller sizes `src` at the uniform letterbox
+    /// scale, that resize is 1:1 in aspect: the flank keeps the same horizontal
+    /// factor as the top plate above it, which is the user's rule for a title
+    /// that has top artwork, and plain scaling for one that does not.
+    ///
+    /// Shares the per-band cache with the other two draws (one entry per band
+    /// rect + slot), so it participates in [`Self::retain_chrome_bands`]. The
+    /// freshness hash is the source's own pixels plus the target size, so a band
+    /// whose art did not change is not re-encoded.
+    pub fn draw_chrome_band_image(
+        &mut self,
+        picker: &Picker,
+        src: &image::RgbaImage,
+        band: Rect,
+        slot: BandSlot,
+        buf: &mut Buffer,
+    ) {
+        if band.width == 0 || band.height == 0 || src.width() == 0 || src.height() == 0 {
+            return;
+        }
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let bw = band.width as u32 * cw;
+        let bh = band.height as u32 * ch;
+
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (slot as u8).hash(&mut h);
+        (src.width(), src.height()).hash(&mut h);
+        src.as_raw().hash(&mut h);
+        (bw, bh).hash(&mut h);
+        let hash = h.finish();
+        let key = (slot as u8, band.x, band.y, band.width, band.height);
+        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
+        if !fresh {
+            let scaled = image::imageops::resize(src, bw, bh, image::imageops::FilterType::Nearest);
+            let img = image::DynamicImage::ImageRgba8(scaled);
+            match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
+                Ok(p) => {
+                    self.band_encodes += 1;
+                    self.chrome_bands.insert(key, (hash, p));
+                    self.note_op(GraphicsOp::Upload {
+                        target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                        id: None,
+                        cells: (band.width, band.height),
+                    });
+                }
+                Err(_) => return,
+            }
+        } else {
+            self.note_op(GraphicsOp::Reuse {
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                id: None,
+            });
+        }
+        if let Some((_, proto)) = self.chrome_bands.get(&key) {
+            let sz = proto.size();
+            let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
+            self.band_log.push(format!(
+                "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px",
+                band.width, band.height, band.x, band.y,
+                if fresh { "cache HIT" } else { "encoded" },
+                sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+                src.width(), src.height(),
+            ));
+            place_protocol(proto, dest, buf);
+            self.note_op(GraphicsOp::Place {
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                at: (dest.x, dest.y, dest.width, dest.height),
+            });
+        } else {
+            self.band_log.push(format!(
+                "band {}x{}@({},{}) [{slot:?}, tiled]: NO PROTOCOL (encode failed)",
+                band.width, band.height, band.x, band.y
+            ));
+        }
+    }
 }
 
 // ── Kitty virtual-placement emission (SQ-0520) ────────────────────────────────

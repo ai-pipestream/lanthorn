@@ -310,13 +310,32 @@ session-only switch that never touches your saved config:
   than centring the frame in it. When nothing sits below the story — header art,
   side borders, a status bar on top, but an open bottom (Arthur) — the ring is
   anchored to the pane top and the story viewport grows all the way to the pane
-  bottom at its exact inset width; where the side art ends, the flanks below it are
-  the theme backdrop (no stretching, no tiling). When the game has a bottom text
+  bottom at its exact inset width; where the side art runs out, the border is
+  **tiled** down the rest of the flank (below). When the game has a bottom text
   chrome instead (Journey's command menu), that strip is anchored to the pane
   *bottom* edge and the story fills the space between the top chrome and the menu.
   A game whose frame *encloses* the story to the screen bottom (Zork Zero's full
   frame) keeps the centred letterbox untouched, and a pane at or below the scaled
   native height (no dead space) degrades to that same centred layout.
+  **Side border art is TILED down the flank, never stretched into it.** Three
+  titles frame their story window with artwork drawn for a 320×200 screen —
+  Arthur's poles, Shogun's single-piece border, Zork Zero's pillars — and a modern
+  pane is taller than all of them. Stretching the band to fit elongates the art by
+  whatever the slack happens to be: measured at 1.8× vertical against 1.3×
+  horizontal on Shogun at a 100×40 terminal, and 2.2× against 1.0× on Zork Zero at
+  117×64. So each flank is now composed in the game's own native pixels — capital,
+  a repeated shaft, then the art's own foot back on at the bottom — and the whole
+  strip is scaled once, at the same factor as everything else. Two consequences
+  worth knowing: the side art keeps the header plate's horizontal factor, so the
+  frame still meets exactly at its corners at every pane width; and Arthur's flanks
+  are no longer cut off at the row his poles happen to stop (native 379 of 400,
+  which on a 64-row pane left the frame standing open down its lower half). The
+  three recipes are per title, because the artwork is: the mechanism is a port of
+  Bocfel's `draw_border.cpp`, which Spatterlight ships, and which hard-codes per
+  game *and* per platform for the same reason. `/dump-windows` labels a band
+  `[Art, tiled]` and reports the native size of the source it was composed from.
+  This is a hybrid-mode improvement only; raster mode still shows each title's art
+  at its own native extent.
   In hybrid, **nothing the game printed as a character is ever rasterised**. A strip
   is classified by what is *in* it, never by where it sits: a side column whose
   pixels the game's own paint runs fully account for is drawn with those characters,
