@@ -570,7 +570,30 @@ session-only switch that never touches your saved config:
   base are what flare out above and below it, and the cut, the repeat and the foot
   all come off that. On the MCGA and Amiga art the measurement returns Bocfel's own
   four constants to the row, which is what makes it a derivation of them rather
-  than a replacement. One trap that recipe has to dodge:
+  than a replacement. **Alternate tiles are drawn mirrored**, which is what finally
+  killed the CGA seam. Cutting in the plain shaft is not enough on its own, because
+  Zork Zero's CGA pillar is a *lit* column: mean row luminance runs 97 down to 82
+  from its capital to its base, where MCGA holds a flat 54 and EGA a flat 51. A
+  repeat that merely translates such a strip butts its darkest row against its
+  brightest and resets the shading at every join — a step of 22.98 against the 14.08
+  the art's own shaft ever manages, plainly visible once SQ-0806 stopped painting the
+  page white behind it. Flipping every other tile makes each join an exact duplicated
+  row instead, so the shading folds back on itself and the seam has nothing to show;
+  on the two flat renditions a mirror and a translation are indistinguishable, so
+  they are untouched. Spatterlight reaches the same place by hard-coding
+  `flip = true` for CGA (and forcing the first EGA tile flipped) with an 11-row
+  overlap to hide what is left; a duplicated row needs no overlap at all.
+  Which title a flank belongs to is measured too, and **reaching the bottom of the
+  screen is not what makes a flank Zork Zero's**. Shogun's DOS artwork is drawn for
+  the full 200-line screen where its Amiga art stops at 168, so `.MG1`, `.EG1`,
+  `.CG1` and the Blorb all reached the last row and were handed Zork Zero's masonry
+  recipe — cut at the shaft, repeat, stamp a foot — applied to a Japanese lacquer
+  frame, with `.CG1`'s two flanks disagreeing with each other for good measure. The
+  second measurement is the flank's *shape*: a pillar narrows below its banner, a
+  slab holds one width top to bottom. Narrowest ÷ widest painted row is 0.96–1.00
+  across every Shogun rendition and both flanks, and 0.02–0.81 across every Zork Zero
+  rendition and all three of its scene borders, so the cut sits at 9/10 in the gap
+  between them. One trap the recipe has to dodge:
   the canvas a band ships is the artwork *minus* whatever the renderer draws as
   terminal cells instead, so a repeat cut from it copies the holes those cells
   left. Shogun's status line is two 16-pixel rows the top of its border sits
