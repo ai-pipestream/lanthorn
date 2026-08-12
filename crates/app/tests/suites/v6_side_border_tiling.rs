@@ -98,7 +98,9 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
         );
         assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), serial, "{file}: serial");
     }
-    let profile = InterpreterProfile::resolve(&path, None);
+    // No tier-3 archive is named here — this suite resolves art through
+    // `PictSource::resolve`, so the profile comes from the medium alone.
+    let profile = InterpreterProfile::resolve(&path, None, None);
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path);
     let picture_dims = picts.all_pict_dims();
