@@ -497,6 +497,10 @@ pub(crate) fn boot_story(
             } else {
                 app::graphics::PictSource::new(None)
             };
+            // SQ-0816: the player may prefer the archive's own pixels to the
+            // fused ones. Before `all_pict_dims`, so nothing is decoded under the
+            // wrong answer.
+            picts.set_fuse_dither(cfg.fuse_art_dither);
             let picture_dims = picts.all_pict_dims();
             // v6: the Blorb `Reso` standard window (e.g. Zork0 → 320×200) is the
             // game's native ART resolution. `new_with_trace` advertises 2× it —

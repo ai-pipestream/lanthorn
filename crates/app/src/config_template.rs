@@ -262,6 +262,21 @@ const INTERPRETER: &[Row] = &[
         ],
     ),
     d(
+        "fuse_art_dither",
+        "true",
+        &[
+            "Fuse the colour dither in a 640-wide EGA plate, the way the card did.",
+            "EGA's sixteen colours were fixed in the silicon, so its artists dithered",
+            "for the ones they lacked — Zork Zero's bronze arch is brown and bright red",
+            "alternating column by column — and on a 640x200 screen those half-width",
+            "columns blended in the eye into a colour the palette never held. babelmap",
+            "keeps all 640 columns, so it does the blending itself.",
+            "Set false to see the archive's own pixels, dither and all. CGA line art is",
+            "never fused either way, and 320-wide MCGA and Amiga art has no dither at",
+            "this frequency to fuse.",
+        ],
+    ),
+    d(
         "v6_arrow_keys",
         "true",
         &[
