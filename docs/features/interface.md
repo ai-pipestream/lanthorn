@@ -482,7 +482,13 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   the waitingforgo set as a fallback for games SLAG doesn't cover (together
   ~50 Infocom and other titles). The download runs in the background, the file
   is validated as a real Z-machine story before it lands, and the **Hint** badge
-  lights the moment it finishes.
+  lights the moment it finishes. Which clues belong to which game is decided by
+  the *story's* identity — the release and serial the mounted image carries —
+  not by what the file on disk is called, so an Amiga floppy named for its box
+  (`Zork I - The Great Underground Empire.adf`, which spells `zork1` nowhere)
+  finds its InvisiClues just as the bare story file does, and so does a clues
+  file already sitting beside it. Filenames are consulted only for games the
+  identity table doesn't name.
 - **Cover art in the picker.** A blorb game with a frontispiece shows its cover
   right in the info panel, drawn with the terminal's best graphics protocol
   (Kitty / iTerm2 / Sixel) and a universal half-block fallback everywhere else.

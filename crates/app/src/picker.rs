@@ -699,8 +699,13 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
             .unwrap_or("")
             .to_string();
         let title = out[g].title.clone();
+        let ifid = out[g].meta.ifid.clone();
         let chosen = sidecar_idxs.iter().copied().find(|&s| {
-            hints::hint_matches_story(&out[s].filename, &stem)
+            // Identity first (SQ-0767): a story mounted out of a disk image is
+            // named for the box, so neither its stem nor its title can say
+            // which clues file is its own.
+            hints::hint_matches_identity(&out[s].filename, &ifid)
+                || hints::hint_matches_story(&out[s].filename, &stem)
                 || hints::hint_matches_story(&out[s].filename, &title)
         });
         if let Some(s) = chosen {
@@ -1069,7 +1074,7 @@ pub fn compute_row_badges(
     } else {
         // No local hint — light the lowercase glyph if one is downloadable.
         let stem = entry.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if hints::hint_download_for(stem, &entry.title).is_some() {
+        if hints::hint_download_for(&entry.meta.ifid, stem, &entry.title).is_some() {
             HintBadge::Available
         } else {
             HintBadge::None
@@ -1658,6 +1663,64 @@ mod tests {
             blorb.meta.size_bytes,
             blorb.meta.story_bytes
         );
+    }
+
+    /// SQ-0767: a `zork1inv.z5` sitting beside a story whose *file* is named for
+    /// the box is that story's InvisiClues, and only the mounted story's release
+    /// and serial can say so. Fixture-free — the header carries Zork I release
+    /// 88 / serial 840726, which is the whole of the identity.
+    #[test]
+    fn a_sidecar_is_associated_with_a_box_named_story_by_identity() {
+        let dir = temp_dir("sidecar-identity");
+        let mut zork1 = minimal_v3_story();
+        zork1[0x02] = 0x00;
+        zork1[0x03] = 88; // release 88
+        zork1[0x12..0x18].copy_from_slice(b"840726");
+        std::fs::write(dir.join("Zork I - The Great Underground Empire.z3"), &zork1).unwrap();
+        std::fs::write(dir.join("zork1inv.z5"), minimal_v3_story()).unwrap();
+
+        let stories = scan_stories(&dir, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1, "the sidecar is hidden once associated: {stories:?}");
+        let game = &stories[0];
+        assert!(
+            !crate::hints::normalize_ident(&game.filename).contains("zork1"),
+            "the premise: the name says nothing"
+        );
+        let sidecar = game.hint_sidecar.as_ref().expect("the clues file is associated by identity");
+        assert!(sidecar.ends_with("zork1inv.z5"));
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// the Zork floppies' hint badge lights, which is the surface the defect was
+    /// reported on (SQ-0767). Their containers are named for the box, so the
+    /// badge can only come from the mounted story's identity.
+    #[test]
+    fn a_real_disk_image_lights_the_downloadable_hint_badge() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let base = std::env::temp_dir().join(format!("babelmap-adf-hint-{}", std::process::id()));
+        let index = hints::load_hint_index(&base);
+        for name in [
+            "Zork I - The Great Underground Empire.adf",
+            "Zork II - The Wizard of Frobozz.adf",
+            "Zork III - The Dungeon Master.adf",
+            "Zork - The Undiscovered Underground.adf",
+            "Zork Zero - The Revenge of Megaboz.adf",
+        ] {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue; // no story media here — skip
+            }
+            let entry = resolve_entry(&path, &base).expect("the floppy mounts and is launchable");
+            assert_eq!(
+                compute_row_badges(&entry, &base, &index).hint,
+                HintBadge::Available,
+                "{name} (IFID {}): pre-fix the container's name matched no catalog key",
+                entry.meta.ifid
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// End to end on real media (skips vacuously — `stories/` is gitignored):

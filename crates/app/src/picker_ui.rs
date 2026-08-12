@@ -1241,7 +1241,11 @@ pub(crate) fn run_story_picker(
                                 } else {
                                     let stem =
                                         entry.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                                    match app::hints::hint_download_for(stem, &entry.title) {
+                                    match app::hints::hint_download_for(
+                                        &entry.meta.ifid,
+                                        stem,
+                                        &entry.title,
+                                    ) {
                                         Some(dl) => {
                                             let dest = entry.path.with_file_name(&dl.filename);
                                             progress_line =
@@ -2062,7 +2066,7 @@ fn draw_info_panel(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        if app::hints::hint_download_for(stem, title).is_some() {
+        if app::hints::hint_download_for(&meta.ifid, stem, title).is_some() {
             lines.push(("Hints: available to download (press H)".to_string(), story_info_value));
         }
     }

@@ -165,6 +165,45 @@ const IZM_HINTS: &[(&str, &str)] = &[
     ("arthrizm", "arthur"),
 ];
 
+/// Canonical titles (from `known_titles.tsv`, keyed by IFID) whose text does not
+/// spell the hint catalogs' key for them.
+///
+/// Every catalog files Zork I as `zork1`, and every title of it writes the
+/// number as a roman numeral; `Zork: The Undiscovered Underground` is filed as
+/// `ztuu`, an abbreviation that appears nowhere in its name. No substring rule
+/// can bridge either gap, so the mapping is listed.
+///
+/// Matched on the WHOLE normalised canonical title, never a substring — the TSV
+/// also names `Mini-Zork I` and `Zork I Demo`, which are different games and
+/// must fall through rather than collide with Zork I's clues.
+const TITLE_KEYS: &[(&str, &str)] = &[
+    ("zorkithegreatundergroundempire", "zork1"),
+    ("zorkiithewizardoffrobozz", "zork2"),
+    ("zorkiiithedungeonmaster", "zork3"),
+    ("zorkzerotherevengeofmegaboz", "zork0"),
+    ("zorktheundiscoveredunderground", "ztuu"),
+];
+
+/// The catalog key for a story's **identity** — nothing here reads a filename.
+///
+/// The IFID names the exact build (release + serial), `known_titles.tsv` names
+/// the game that build is, and [`TITLE_KEYS`] names the catalog key for that
+/// game. `None` when the IFID is unknown or the title spells its own key (the
+/// common case, which substring matching already handles).
+fn identity_hint_key(ifid: &str) -> Option<&'static str> {
+    let norm = normalize_ident(crate::session::known_title(ifid)?);
+    TITLE_KEYS.iter().find(|(t, _)| *t == norm).map(|(_, k)| *k)
+}
+
+/// The canonical title for a story's identity, normalised for key matching.
+///
+/// Empty when the IFID names no game we know. Unlike the caller's displayed
+/// title this cannot have come from a container's filename, so it is the first
+/// thing key matching consults (SQ-0767).
+fn identity_ident(ifid: &str) -> String {
+    crate::session::known_title(ifid).map(normalize_ident).unwrap_or_default()
+}
+
 /// Lowercase a string keeping only ASCII alphanumerics — so `"Beyond Zork"`,
 /// `"beyond_zork"`, and `"beyondzork"` all normalise to `"beyondzork"`. Matching
 /// game keys against the normalised form lets a multi-word canonical name match
@@ -234,6 +273,25 @@ pub fn hint_matches_story(hint_file_name: &str, story_stem_or_title: &str) -> bo
     }
 }
 
+/// Returns true if the hint file `hint_file_name` belongs to the story with this
+/// `ifid` — the same question as [`hint_matches_story`], asked of the story's
+/// identity instead of a name (SQ-0767).
+///
+/// A local `zork1inv.z5` sitting beside `Zork I - The Great Underground
+/// Empire.adf` is that floppy's InvisiClues, and no comparison of the two
+/// filenames can say so.
+pub fn hint_matches_identity(hint_file_name: &str, ifid: &str) -> bool {
+    let Some(key) = hint_game_key(hint_file_name) else { return false };
+    let k = normalize_ident(&key);
+    if k.len() < 3 {
+        return false;
+    }
+    match identity_hint_key(ifid) {
+        Some(ik) => normalize_ident(ik) == k,
+        None => identity_ident(ifid).contains(&k),
+    }
+}
+
 /// A downloadable InvisiClues hint file for a story: where to fetch it and what
 /// to name the file saved next to the story.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,17 +314,37 @@ fn izm_url(stem: &str) -> String {
 }
 
 /// Find a downloadable InvisiClues hint file for a story, matched by the game
-/// key appearing in the story's filename stem or title.
+/// key its **identity** resolves to — falling back to the filename stem and the
+/// displayed title only when the identity names no game we know.
+///
+/// The medium is not the story (SQ-0767): a disk image is named for its box
+/// (`Zork I - The Great Underground Empire.adf`), so its filename never
+/// contains `zork1` and neither does the title derived from it. `ifid` carries
+/// the mounted story's release and serial, which name the build regardless of
+/// what the file on disk is called, so it is consulted first.
 ///
 /// SLAG (live IF Archive) is preferred; the izm set (Internet Archive) is the
 /// fallback for games SLAG doesn't cover. Returns `None` when no catalog entry
 /// matches. A key must be ≥3 chars to match (guards against spurious hits).
-pub fn hint_download_for(game_stem: &str, game_title: &str) -> Option<HintDownload> {
+pub fn hint_download_for(ifid: &str, game_stem: &str, game_title: &str) -> Option<HintDownload> {
+    let identity_key = identity_hint_key(ifid);
+    let canonical = identity_ident(ifid);
     let stem = normalize_ident(game_stem);
     let title = normalize_ident(game_title);
     let matches = |key: &str| {
         let k = normalize_ident(key);
-        k.len() >= 3 && (stem.contains(&k) || title.contains(&k))
+        if k.len() < 3 {
+            return false;
+        }
+        match identity_key {
+            // The identity names its catalog key outright — authoritative, and
+            // exclusive: no other key can be right for this build.
+            Some(ik) => normalize_ident(ik) == k,
+            // Else the identity-resolved canonical title, then — last resort —
+            // the filename stem and the displayed title, which for a story
+            // mounted out of a container are the CONTAINER's, not the game's.
+            None => canonical.contains(&k) || stem.contains(&k) || title.contains(&k),
+        }
     };
     if let Some((s, _)) = SLAG_HINTS.iter().find(|(_, k)| matches(k)) {
         return Some(HintDownload { filename: format!("{s}.z5"), url: slag_url(s) });
@@ -854,36 +932,39 @@ mod tests {
         assert!(!is_invisiclues_name("mechanizm.z5"));
     }
 
+    /// An empty IFID means "identity says nothing", so every case here exercises
+    /// the filename/title fallback — the common path for the many stories that
+    /// are only ever bare files, which must keep working (SQ-0767).
     #[test]
     fn hint_download_prefers_slag_then_izm() {
         // A SLAG-covered game: prefer the live IF Archive file.
-        let d = hint_download_for("deadline", "Deadline").expect("deadline has a hint");
+        let d = hint_download_for("", "deadline", "Deadline").expect("deadline has a hint");
         assert_eq!(d.filename, "deadlineinv.z5");
         assert!(d.url.contains("ifarchive.org/if-archive/solutions/slag/deadlineinv.z5"), "{}", d.url);
 
         // A game only the izm set covers: fall back to the Internet Archive.
-        let w = hint_download_for("witness", "The Witness").expect("witness has an izm hint");
+        let w = hint_download_for("", "witness", "The Witness").expect("witness has an izm hint");
         assert_eq!(w.filename, "witnizm.z5");
         assert!(w.url.contains("web.archive.org"), "{}", w.url);
         assert!(w.url.ends_with("witnizm.z5"), "{}", w.url);
 
         // Match on title when the stem is opaque.
-        assert!(hint_download_for("hhgg", "The Hitchhiker's Guide to the Galaxy").is_some());
+        assert!(hint_download_for("", "hhgg", "The Hitchhiker's Guide to the Galaxy").is_some());
 
         // A game with no hint anywhere.
-        assert!(hint_download_for("adventure", "Colossal Cave").is_none());
+        assert!(hint_download_for("", "adventure", "Colossal Cave").is_none());
     }
 
     /// Beyond Zork keys on "beyond", never bare "zork", so it must not collide
     /// with zork1/2/3 (and vice-versa).
     #[test]
     fn hint_download_zork_variants_dont_collide() {
-        assert_eq!(hint_download_for("zork1", "Zork I").unwrap().filename, "zork1inv.z5");
-        assert_eq!(hint_download_for("beyondzork", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
+        assert_eq!(hint_download_for("", "zork1", "Zork I").unwrap().filename, "zork1inv.z5");
+        assert_eq!(hint_download_for("", "beyondzork", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
         // Canonical multi-word/underscored names still match via normalisation.
-        assert_eq!(hint_download_for("beyond_zork", "").unwrap().filename, "bzorkizm.z5");
-        assert_eq!(hint_download_for("", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
-        assert_eq!(hint_download_for("zork0", "Zork Zero").unwrap().filename, "zork0izm.z5");
+        assert_eq!(hint_download_for("", "beyond_zork", "").unwrap().filename, "bzorkizm.z5");
+        assert_eq!(hint_download_for("", "", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
+        assert_eq!(hint_download_for("", "zork0", "Zork Zero").unwrap().filename, "zork0izm.z5");
     }
 
     /// Regression: a stray common word in a title must not match a compound-word
@@ -891,8 +972,69 @@ mod tests {
     /// Beyond Zork, so it gets no hint (badge stays dark).
     #[test]
     fn hint_download_rejects_stray_word_match() {
-        assert!(hint_download_for("Brain_Guzzlers_from_Beyond!.gblorb", "Brain Guzzlers from Beyond!").is_none());
+        assert!(hint_download_for("", "Brain_Guzzlers_from_Beyond!.gblorb", "Brain Guzzlers from Beyond!").is_none());
         assert!(!hint_matches_story("bzorkizm.z5", "Brain Guzzlers from Beyond!"));
+    }
+
+    // ── SQ-0767: identity, not filename ─────────────────────────────────────
+
+    /// The four Amiga floppies the bug was reported on, by the release+serial
+    /// their disks actually carry (pinned in `tests/real_media_releases.rs`).
+    /// The container is named for the box, so its stem and the title derived
+    /// from it contain no catalog key — only the IFID can say which game it is.
+    #[test]
+    fn a_disk_image_finds_its_invisiclues_by_identity_not_filename() {
+        let cases = [
+            ("ZCODE-88-840726-A129", "Zork I - The Great Underground Empire", "zork1inv.z5"),
+            ("ZCODE-48-840904-D899", "Zork II - The Wizard of Frobozz", "zork2inv.z5"),
+            ("ZCODE-17-840727-2E7A", "Zork III - The Dungeon Master", "zork3inv.z5"),
+            ("ZCODE-16-970828-1185", "Zork - The Undiscovered Underground", "ztuuinv.z5"),
+            ("ZCODE-366-890323-C5CD", "Zork Zero - The Revenge of Megaboz", "zork0izm.z5"),
+        ];
+        for (ifid, stem, want) in cases {
+            // The title the picker shows for a container is the canonical one,
+            // which spells the number the way the box does — also no key.
+            let title = stem.replace(" - ", ": ");
+            assert!(
+                !normalize_ident(stem).contains("zork1") && !normalize_ident(&title).contains("ztuu"),
+                "the premise: no catalog key is in the container's name ({stem})"
+            );
+            let dl = hint_download_for(ifid, stem, &title)
+                .unwrap_or_else(|| panic!("{stem}: identity {ifid} must find its InvisiClues"));
+            assert_eq!(dl.filename, want, "{stem}");
+        }
+    }
+
+    /// The identity is authoritative and exclusive: knowing a build is Zork II
+    /// must not let Zork I's or Beyond Zork's clues match it.
+    #[test]
+    fn an_identified_story_matches_only_its_own_key() {
+        let dl = hint_download_for("ZCODE-48-840904-D899", "zork1", "Beyond Zork").unwrap();
+        assert_eq!(dl.filename, "zork2inv.z5", "identity beats a misleading stem AND title");
+    }
+
+    /// A local sidecar sitting beside a disk image is associated by identity —
+    /// comparing the two filenames cannot do it.
+    #[test]
+    fn a_local_sidecar_is_associated_with_a_disk_image_by_identity() {
+        assert!(hint_matches_identity("zork1inv.z5", "ZCODE-88-840726-A129"));
+        assert!(hint_matches_identity("zork3izm.z5", "ZCODE-17-840727-2E7A"));
+        // Beyond Zork's title spells its own key, so the canonical title path
+        // (no TITLE_KEYS row needed) carries it.
+        assert!(hint_matches_identity("bzorkizm.z5", "ZCODE-57-871221-C5AD"));
+        // Wrong game, and an unknown identity, both stay unmatched.
+        assert!(!hint_matches_identity("zork2inv.z5", "ZCODE-88-840726-A129"));
+        assert!(!hint_matches_identity("zork1inv.z5", "ZCODE-1-000000-0000"));
+    }
+
+    /// `Mini-Zork I` and `Zork I Demo` are separate entries in the title table
+    /// and separate games; matching the WHOLE canonical title keeps Zork I's
+    /// clues off them.
+    #[test]
+    fn title_keys_match_whole_titles_so_near_namesakes_dont_collide() {
+        assert_eq!(identity_hint_key("ZCODE-88-840726-A129"), Some("zork1"));
+        assert_eq!(identity_hint_key("ZCODE-34-871124-0000"), None, "Mini-Zork I");
+        assert_eq!(identity_hint_key("ZCODE-15-840330-0000"), None, "Zork I Demo");
     }
 
     #[test]
