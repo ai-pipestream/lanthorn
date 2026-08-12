@@ -210,6 +210,19 @@ fn glyphs_for(style: BorderStyle) -> &'static Glyphs {
     }
 }
 
+/// The plain RUN glyph one side of `style` is drawn with — `horizontal` picks the
+/// top/bottom run, else the left/right one.
+///
+/// A frame is not the only thing that draws a border run: the Glk inter-window
+/// separator (`render::screen::draw_window_separator`) is a single rule with no
+/// corners and no box, and it must use the same glyph the frame would, or a
+/// `style = "double"` in `style.toml` would give a doubled frame and a single
+/// separator. (SQ-0821)
+pub fn rule_glyph(style: BorderStyle, horizontal: bool) -> &'static str {
+    let g = glyphs_for(style);
+    if horizontal { g.top } else { g.side }
+}
+
 /// Return `over`'s string if set, otherwise `fallback`.
 ///
 /// Used at every border cell write to apply a per-cell glyph override from

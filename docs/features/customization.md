@@ -65,6 +65,24 @@ still reach in and override any single selector by name.
   every side you turn on costs the story a row or a column. Don't reach for
   `[statusbar]`'s `border` for this — that frames babelmap's own status bar, not
   the game's window.
+
+  The **same selector draws the rule between two Glk windows** — the line you'd
+  see under a Glulx game's status bar, or down the side of a split. Glk lets a
+  game ask for that border, but `winmethod_Border` is the *default value* of the
+  flag rather than a considered request, so honouring it drew a line under
+  practically every Glulx game whether or not its author ever thought about one.
+  Your theme decides instead, and it is off by default: no rule, and no gutter
+  reserved for one either, so the windows sit flush. Turn it on the same way you
+  turn on the status box — `style = "single"`, `double`, `thick` — and the rule
+  is drawn in that style's own glyph (`─`, `═`, `━`), horizontal between stacked
+  windows and vertical between side-by-side ones. `glyph_top` overrides the
+  horizontal rule and `glyph_left` the vertical one, and the colour is the
+  selector's own `fg`/`bg`. Two things still speak over your theme: a game that
+  explicitly asks for `winmethod_NoBorder` never gets a rule, and a game that
+  paints its *own* divider next to the gutter (Kerkerkruip does) suppresses ours
+  rather than doubling the line. A game's window colours can recolour the rule
+  too — but only while `honor_game_colours` is on, which is the setting that says
+  the game's palette wins. Turn it off and your border colour is final.
 - **The 11 standard Glk styles** — Normal, Emphasized, Preformatted, Header,
   Subheader, Alert, Note, BlockQuote, Input, User1, User2 — are first-class,
   addressable selectors under `[glk.buffer]` (text-buffer windows) and

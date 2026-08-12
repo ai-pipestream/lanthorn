@@ -106,7 +106,7 @@ pub(crate) fn draw_all(
     // Clamp to gvm's content bounding box so the graphics-rect walk matches the
     // clamped composite render (the snap-margin has no windows). (SQ-0303)
     let story_bbox = app::render::screen::content_bounds(screen_model, story_area);
-    let dialog_area = app::render::screen::dialog_bounds(screen_model, story_bbox, full);
+    let dialog_area = app::render::screen::dialog_bounds(screen_model, story_bbox, full, &state.colors);
 
     // ── Richer non-dialog modals — z-ordered, not (yet) on the Overlay trait ──
 

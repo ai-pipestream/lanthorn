@@ -173,6 +173,13 @@ pub fn render_to_text(dump: &str, area: Rect, lines_per_win: usize) -> (Vec<Vec<
         ..Default::default()
     };
     state.config.honor_game_colours = true;
+    // A dump records the origins a REAL session laid out, and that session reserved
+    // a gutter for every bordered pair. Since SQ-0821 the gutter is a theme
+    // decision, defaulting to none — so a harness that replays a dump must ask for
+    // the borders the dump was taken with, or every origin below the first split
+    // reads one row high and the harness stops reproducing the thing it captured.
+    state.colors.upper_window_border_sides =
+        crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::Single);
     for k in 0..lines_per_win {
         state.push_transcript(&format!("MAIN line {k}"));
     }

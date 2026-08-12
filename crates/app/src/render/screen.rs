@@ -521,8 +521,12 @@ fn render_node(
     }
     match node {
         WinNode::Pair { vertical, split, border, key_bg, key_fg, first, second } => {
-            let b = if *border { 1 } else { 0 };
-            let (a1, sep, a2) = split_area_bordered(area, *vertical, split.fixed, b);
+            // `*border` is the game's VETO (`winmethod_NoBorder`); the THEME decides
+            // whether a rule is drawn at all, and a rule the theme never asked for
+            // reserves no gutter either — no line, no gap (SQ-0821).
+            let sep_style = border.then(|| separator_style(*vertical, grid_colors)).flatten();
+            let (a1, sep, a2) =
+                split_area_bordered(area, *vertical, split.fixed, u16::from(sep_style.is_some()));
             let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, grid_colors);
             // Only rule between two VISIBLE siblings. A border before a collapsed
             // (zero-extent) window — e.g. Counterfeit Monkey's image pane before it
@@ -530,11 +534,19 @@ fn render_node(
             // it (SQ-0325). And skip our separator entirely when the game draws its
             // OWN divider as a graphics window adjacent to the gutter (Kerkerkruip),
             // so we don't double the line — matching a pixel interpreter that leaves
-            // the border to the game's chrome (SQ-0332).
+            // the border to the game's chrome (SQ-0332). Both SUPPRESS the rule
+            // without giving the gutter back, which is what they did before SQ-0821:
+            // the theme did ask for a border here, so its space stays reserved and no
+            // layout shifts under a window that merely collapsed.
             let game_divider = edge_touches_painted_graphics(first, *vertical, true)
                 || edge_touches_painted_graphics(second, *vertical, false);
-            if b > 0 && !a1.is_empty() && !a2.is_empty() && !game_divider {
-                draw_window_separator(sep, *vertical, *key_fg, *key_bg, grid_colors, buf);
+            let draw = !a1.is_empty() && !a2.is_empty() && !game_divider;
+            if let Some(bs) = sep_style.filter(|_| draw) {
+                // The game's key-window colours only speak when the player has asked
+                // for the game's colours at all (SQ-0821).
+                let (kf, kb) =
+                    if state.config.honor_game_colours { (*key_fg, *key_bg) } else { (None, None) };
+                draw_window_separator(sep, *vertical, bs, kf, kb, grid_colors, buf);
             }
             let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
             m1.or(m2)
@@ -2276,9 +2288,9 @@ fn layered_item_rect(area: Rect, item: &PositionedWindow) -> Rect {
 /// inside it); pass an empty rect when the story pane isn't shown.
 ///
 /// With no graphics windows this returns `frame` unchanged (today's behavior).
-pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect) -> Rect {
+pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect, colors: &ColorScheme) -> Rect {
     let mut graphics: Vec<Rect> = Vec::new();
-    collect_graphics_rects(&model.root, story_area, &mut graphics);
+    collect_graphics_rects(&model.root, story_area, &mut graphics, colors);
     let mut bounds = frame;
     for g in graphics {
         bounds = subtract_rect(bounds, g);
@@ -2288,25 +2300,31 @@ pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect) -> Rect
 
 /// Walk the tree assigning each leaf its terminal rect (exactly as `render_node`
 /// does), collecting every graphics leaf's rect.
-fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
+///
+/// `colors` is needed for the same reason `render_node` needs it: whether a pair
+/// reserves a separator gutter is a THEME decision since SQ-0821, and a walk that
+/// guessed differently would hand `dialog_bounds` rects one row off what was drawn.
+fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>, colors: &ColorScheme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     match node {
         WinNode::Pair { vertical, split, border, first, second, .. } => {
-            let b = if *border { 1 } else { 0 };
             // Reserve the same separator gutter render_node does, so the graphics
-            // rects (and thus `dialog_bounds`) match exactly what's drawn.
-            let (a1, _sep, a2) = split_area_bordered(area, *vertical, split.fixed, b);
-            collect_graphics_rects(first, a1, out);
-            collect_graphics_rects(second, a2, out);
+            // rects (and thus `dialog_bounds`) match exactly what's drawn — which
+            // since SQ-0821 means asking the THEME, not the game's border flag.
+            let sep = border.then(|| separator_style(*vertical, colors)).flatten();
+            let (a1, _sep, a2) =
+                split_area_bordered(area, *vertical, split.fixed, u16::from(sep.is_some()));
+            collect_graphics_rects(first, a1, out, colors);
+            collect_graphics_rects(second, a2, out, colors);
         }
         WinNode::Graphics(_) => out.push(area),
         WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
         WinNode::Layered(items) => {
             for item in items {
                 let sub = layered_item_rect(area, item);
-                collect_graphics_rects(&item.node, sub, out);
+                collect_graphics_rects(&item.node, sub, out, colors);
             }
         }
     }
@@ -2416,23 +2434,64 @@ fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, border: u16) -> (
     }
 }
 
+/// Whether the theme draws an inter-window rule for a split of this orientation,
+/// and in which [`BorderStyle`] — `None` for no rule, which also means NO GUTTER
+/// IS RESERVED (SQ-0821).
+///
+/// **Presence is the theme's call, not the game's.** Glk's `winmethod_Border` is
+/// the DEFAULT value of that flag, not a considered request, so honouring it drew
+/// a rule under the status bar of essentially every Glulx game whether or not its
+/// author ever thought about borders. What a game can still do is VETO one:
+/// `winmethod_NoBorder` is an explicit statement and is checked by the caller.
+///
+/// The style comes from the same `upper_window_border` selector the Z-machine
+/// status frame uses — `.top` for a horizontal rule (a stacked pair), `.left` for a
+/// vertical one (side-by-side) — whose default is [`BorderStyle::None`]. So the
+/// shipped default is no rule at all, and `style = "single"` in `style.toml` is how
+/// you ask for one. (A dedicated `window-border` selector can follow when the
+/// deferred style redesign lands — do NOT add a new selector here.)
+fn separator_style(
+    vertical: bool,
+    colors: &ColorScheme,
+) -> Option<crate::render::paneframe::BorderStyle> {
+    use crate::render::paneframe::BorderStyle;
+    let sides = &colors.upper_window_border_sides;
+    let side = if vertical { sides.top } else { sides.left };
+    (side != BorderStyle::None).then_some(side)
+}
+
 /// Fill every cell of the separator gutter `area` with the Glk inter-window
-/// rule: a horizontal `─` for a stacked/vertical pair (rule runs across the top
-/// child's bottom edge), a vertical `│` for a side-by-side/horizontal pair.
+/// rule: a horizontal run for a stacked/vertical pair (the rule runs across the top
+/// child's bottom edge), a vertical run for a side-by-side/horizontal pair.
 ///
 /// Glk provides no border styling, so this reuses the existing themeable
-/// window-border presentation rather than a dedicated selector: the rule is drawn
-/// in `colors.theme.get("upper_window_border")` (the same style the status frame
-/// uses), and a user-set glyph override from `colors.upper_window_border_glyphs` — `.top` for a
-/// horizontal rule, `.left` for a vertical one — is honoured, else the box-drawing
-/// defaults. (A dedicated `window-border` selector can follow when the deferred
-/// style redesign lands — do NOT add a new selector here.)
-fn draw_window_separator(area: Rect, vertical: bool, key_fg: Option<u32>, key_bg: Option<u32>, colors: &ColorScheme, buf: &mut Buffer) {
+/// window-border presentation rather than a dedicated selector. All three channels
+/// come from `upper_window_border`: `style` picks the run glyph (SQ-0821 — it used
+/// to draw a hard-coded `─`/`│`, so `style = "double"` parsed, landed on
+/// `upper_window_border_sides`, and was never read by this path), the per-side glyph
+/// override `.top`/`.left` still beats the style's own glyph, and the colour is the
+/// selector's `style`.
+///
+/// `key_fg`/`key_bg` are the split's KEY (new) window colours (SQ-0325 follow-up),
+/// which override the themed colour per channel — but only when the player has
+/// asked for the game's colours at all. With `honor_game_colours` off they arrive
+/// as `None`, so the theme is authoritative; before SQ-0821 they won regardless,
+/// which is one of the three reasons a styled border appeared not to work.
+fn draw_window_separator(
+    area: Rect,
+    vertical: bool,
+    border: crate::render::paneframe::BorderStyle,
+    key_fg: Option<u32>,
+    key_bg: Option<u32>,
+    colors: &ColorScheme,
+    buf: &mut Buffer,
+) {
     let g = &colors.upper_window_border_glyphs;
+    let styled = crate::render::paneframe::rule_glyph(border, vertical);
     let glyph = if vertical {
-        g.top.as_deref().unwrap_or("\u{2500}") // ─
+        g.top.as_deref().unwrap_or(styled)
     } else {
-        g.left.as_deref().unwrap_or("\u{2502}") // │
+        g.left.as_deref().unwrap_or(styled)
     };
     // The separator adopts the split's KEY (new) window colour (SQ-0325 follow-up):
     // draw the rule glyph in `key_fg` on `key_bg` when the game set them, falling
@@ -6561,6 +6620,11 @@ mod tests {
             ("transcript", Color::Rgb(9, 9, 9)), // sentinel: an unpainted pane shows this
             ("upper_window", Color::Rgb(9, 9, 9)),
         ]);
+        // Every pair in this tree is `border: true`, and since SQ-0821 that only
+        // reserves a gutter when the THEME asks for a rule. This test is about panes
+        // being painted, not about border policy, so it keeps the bordered geometry.
+        colors.upper_window_border_sides =
+            crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::Single);
         let mut state = AppState::default();
         state.colors = colors;
         state.config.honor_game_colours = true;
@@ -6590,7 +6654,15 @@ mod tests {
         let area = Rect::new(0, 0, 5, 1);
         let mut buf = Buffer::empty(area);
         // Vertical pair → horizontal rule; key fg red (0xFF0000), key bg blue (0x0000FF).
-        draw_window_separator(area, true, Some(0x00FF_0000), Some(0x0000_00FF), &colors, &mut buf);
+        draw_window_separator(
+            area,
+            true,
+            crate::render::paneframe::BorderStyle::Single,
+            Some(0x00FF_0000),
+            Some(0x0000_00FF),
+            &colors,
+            &mut buf,
+        );
         let c = buf.cell((2, 0)).unwrap();
         assert_eq!(c.style().fg, Some(Color::Rgb(0xFF, 0, 0)), "rule fg is the key window fg");
         assert_eq!(c.style().bg, Some(Color::Rgb(0, 0, 0xFF)), "rule bg is the key window bg");
@@ -7185,7 +7257,7 @@ mod tests {
         // A pure-text tree: no graphics → dialogs keep full-frame centering.
         let model = model_with(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }));
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, Rect::new(0, 0, 20, 12), frame), frame);
+        assert_eq!(dialog_bounds(&model, Rect::new(0, 0, 20, 12), frame, &ColorScheme::terminal_default()), frame);
     }
 
     #[test]
@@ -7204,7 +7276,7 @@ mod tests {
         });
         let story_area = Rect::new(0, 0, 20, 12);
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, story_area, frame), Rect::new(10, 0, 30, 12));
+        assert_eq!(dialog_bounds(&model, story_area, frame, &ColorScheme::terminal_default()), Rect::new(10, 0, 30, 12));
     }
 
     #[test]
@@ -7220,7 +7292,7 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let area = Rect::new(0, 0, 20, 12);
-        assert_eq!(dialog_bounds(&model, area, area), Rect::new(0, 3, 20, 9));
+        assert_eq!(dialog_bounds(&model, area, area, &ColorScheme::terminal_default()), Rect::new(0, 3, 20, 9));
     }
 
     #[test]
@@ -7237,7 +7309,7 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, Rect::default(), frame), frame);
+        assert_eq!(dialog_bounds(&model, Rect::default(), frame, &ColorScheme::terminal_default()), frame);
     }
 
     #[test]
@@ -7303,6 +7375,16 @@ mod tests {
         state
     }
 
+    /// The theme the separator tests need since SQ-0821: presence is the THEME's
+    /// call, so a scheme with every border off draws no inter-window rule either.
+    /// These tests are about the rule, so they ask for one.
+    fn separator_state() -> AppState {
+        let mut state = frameless_state();
+        state.colors.upper_window_border_sides =
+            crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::Single);
+        state
+    }
+
     /// SQ-0325: a bordered STACKED pair (grid above an inline buffer, `border: true`,
     /// nonzero `content_size` → generic path) draws a horizontal `─` rule filling the
     /// gutter row between the two children, in the themed border colour; the grid sits
@@ -7326,7 +7408,7 @@ mod tests {
         };
         assert!(!is_simple(&model));
 
-        let state = frameless_state();
+        let state = separator_state();
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
         render_story_pane(&model, false, None, &state, area, &mut buf);
@@ -7366,7 +7448,7 @@ mod tests {
         };
         assert!(!is_simple(&model));
 
-        let state = frameless_state();
+        let state = separator_state();
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
         render_story_pane(&model, false, None, &state, area, &mut buf);
@@ -7420,6 +7502,154 @@ mod tests {
         }
     }
 
+    /// SQ-0821: the SHIPPED default draws no inter-window rule, and reserves no
+    /// gutter for one either.
+    ///
+    /// Glk's `winmethod_Border` is the DEFAULT value of that flag rather than a
+    /// considered request, so honouring it put a rule under the status bar of
+    /// essentially every Glulx game whose author never thought about borders. The
+    /// theme decides now, and `upper_window_border`'s style defaults to `none`.
+    ///
+    /// The gutter half matters as much as the glyph: a reserved-but-blank row is
+    /// still a gap between the status bar and the story.
+    #[test]
+    fn the_default_theme_draws_no_separator_and_reserves_no_gutter() {
+        for vertical in [true, false] {
+            let model = ScreenModel {
+                root: WinNode::Pair {
+                    vertical,
+                    split: Split { fixed: if vertical { 1 } else { 6 } },
+                    // The game asks for a border, the way almost every Glk game does
+                    // simply by not asking for `winmethod_NoBorder`.
+                    border: true,
+                    key_bg: None,
+                    key_fg: None,
+                    first: Box::new(WinNode::Grid(grid_with("GRID"))),
+                    second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+                },
+                status: StatusModel::HostManaged,
+                bg: 0,
+                fg: 0,
+                content_size: (20, 6),
+            };
+            // A stock terminal-default scheme: no style.toml, no border asked for.
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            let area = Rect::new(0, 0, 20, 6);
+            let mut buf = Buffer::empty(area);
+            render_story_pane(&model, false, None, &state, area, &mut buf);
+
+            for y in 0..6 {
+                for x in 0..20 {
+                    let s = buf.cell((x, y)).unwrap().symbol();
+                    assert!(
+                        !"─│═║━┃".contains(s),
+                        "the default theme draws no rule (vertical={vertical}), found {s:?} at ({x},{y})"
+                    );
+                }
+            }
+            // …and no gutter: the second child starts where the first ends.
+            if vertical {
+                assert_eq!(row_text(&buf, 1, 4), "BODY", "no gutter row between the children");
+            } else {
+                assert_eq!(&row_text(&buf, 0, 10)[6..10], "BODY", "no gutter column between them");
+            }
+        }
+    }
+
+    /// SQ-0821: `upper_window_border`'s STYLE reaches the separator's glyph.
+    ///
+    /// It used to draw a hard-coded `─`/`│`, so `style = "double"` in `style.toml`
+    /// parsed, landed on `upper_window_border_sides`, and was read by the status
+    /// frame and by nothing else — the setting appeared to do nothing at all, which
+    /// is what the user reported. A per-side glyph override still beats the style.
+    #[test]
+    fn the_separator_glyph_follows_the_themed_border_style_and_any_override() {
+        use crate::render::paneframe::{BorderStyle, PaneSides};
+        let model = |vertical: bool| ScreenModel {
+            root: WinNode::Pair {
+                vertical,
+                split: Split { fixed: if vertical { 1 } else { 6 } },
+                border: true,
+                key_bg: None,
+                key_fg: None,
+                first: Box::new(WinNode::Grid(grid_with("GRID"))),
+                second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        let rule_cell = |state: &AppState, vertical: bool| -> String {
+            let area = Rect::new(0, 0, 20, 6);
+            let mut buf = Buffer::empty(area);
+            render_story_pane(&model(vertical), false, None, state, area, &mut buf);
+            let at = if vertical { (10, 1) } else { (6, 3) };
+            buf.cell(at).unwrap().symbol().to_string()
+        };
+
+        for (style, horizontal, vertical_glyph) in [
+            (BorderStyle::Single, "─", "│"),
+            (BorderStyle::Double, "═", "║"),
+            (BorderStyle::Thick, "━", "┃"),
+        ] {
+            let mut state = separator_state();
+            state.colors.upper_window_border_sides = PaneSides::all(style);
+            assert_eq!(rule_cell(&state, true), horizontal, "{style:?}: stacked pair's horizontal rule");
+            assert_eq!(rule_cell(&state, false), vertical_glyph, "{style:?}: side-by-side pair's vertical rule");
+        }
+
+        // An explicit glyph still wins over the style's own.
+        let mut state = separator_state();
+        state.colors.upper_window_border_sides = PaneSides::all(BorderStyle::Double);
+        state.colors.upper_window_border_glyphs.top = Some("=".to_string());
+        assert_eq!(rule_cell(&state, true), "=", "glyph_top beats the style's ═");
+    }
+
+    /// SQ-0821: the split's key-window colours only speak when the player has asked
+    /// for the game's colours.
+    ///
+    /// They used to override the themed border colour unconditionally — so with
+    /// `honor_game_colours = false`, which is precisely the setting that says
+    /// "ignore what the game wants", a styled border colour was still overridden by
+    /// the game. That was the third reason a `style.toml` border appeared not to
+    /// work, after presence and glyph.
+    #[test]
+    fn the_key_window_colour_is_ignored_when_game_colours_are_declined() {
+        use ratatui::style::Color;
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                border: true,
+                key_bg: Some(0x0000_00FF),
+                key_fg: Some(0x00FF_0000),
+                first: Box::new(WinNode::Grid(grid_with("GRID"))),
+                second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        let rule_fg = |honor: bool| {
+            let mut state = separator_state();
+            state.config.honor_game_colours = honor;
+            let area = Rect::new(0, 0, 20, 6);
+            let mut buf = Buffer::empty(area);
+            render_story_pane(&model, false, None, &state, area, &mut buf);
+            (buf.cell((10, 1)).unwrap().style().fg, state.colors.theme.get("upper_window_border").style.fg)
+        };
+
+        let (fg_on, _) = rule_fg(true);
+        assert_eq!(fg_on, Some(Color::Rgb(0xFF, 0, 0)), "honoured: the key window's red wins");
+
+        let (fg_off, themed) = rule_fg(false);
+        assert_eq!(fg_off, themed, "declined: the theme's own border colour is authoritative");
+        assert_ne!(fg_off, Some(Color::Rgb(0xFF, 0, 0)), "…and the game's red does not reach it");
+    }
+
     #[test]
     fn empty_graphics_neighbour_draws_separator_painted_one_suppresses() {
         // narco frames its story with graphics windows it never paints; the frame
@@ -7444,7 +7674,7 @@ mod tests {
             fg: 0,
             content_size: (20, 6),
         };
-        let state = frameless_state();
+        let state = separator_state();
         let area = Rect::new(0, 0, 20, 6);
         let has_rule = |m: &ScreenModel| {
             let mut buf = Buffer::empty(area);
@@ -7547,7 +7777,7 @@ mod tests {
         assert_eq!(ids, std::collections::HashSet::from([3, 5]), "every layered graphics leaf is live");
 
         let mut rects = Vec::new();
-        collect_graphics_rects(&tree, pane, &mut rects);
+        collect_graphics_rects(&tree, pane, &mut rects, &ColorScheme::terminal_default());
         assert_eq!(rects.len(), ids.len(), "the id walk and the rect walk see the same windows");
     }
 
