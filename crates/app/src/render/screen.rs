@@ -2798,6 +2798,11 @@ fn fill_pane_page(area: Rect, page: image::Rgba<u8>, buf: &mut Buffer) {
 /// generous (it hashes the built model's render fields rather than trusting a
 /// hand-maintained zvm mutation counter — the model is observed, so no v6 paint
 /// or erase can slip past). The inputs are audited in the SQ-0469 report.
+///
+/// "The model is observed" stopped covering everything the moment the painted
+/// ground arrived (SQ-0706): that surface rides BESIDE the window tree, not
+/// inside it, so a game whose drawing lands there alone moved no input this key
+/// was reading. It is folded in below.
 pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, picker: &ratatui_image::picker::Picker) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -2834,6 +2839,33 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
             }
             _ => {}
         }
+    }
+    // The painted ground (SQ-0706), which `build_v6_raster_canvas` blits under
+    // everything above and which the window model does not describe. scopa draws
+    // its entire card table with `erase_window` fills and publishes no Graphics
+    // window at all, so moving the selection outline from one hand card to the
+    // next repaints 1120 pixels of ground and changes NOTHING in the model: the
+    // key held still, `v6_wants_build` said no, and the already-uploaded frame
+    // stayed on screen while the game went on to play the card the player had
+    // actually picked. The first selection looked right only because it also
+    // relabelled the confirm button "Choose" -> "OK", and a later one looked
+    // right whenever it happened to add or drop a board highlight — both are
+    // model changes, so both bumped the key and dragged the outline along with
+    // them (SQ-0788).
+    //
+    // Hashed by CONTENT, like the hybrid path's per-band freshness hash: a
+    // mutation counter on the zvm side is the "hand-maintained" thing this key
+    // was written to avoid, and it is what would rot silently here. Measured in
+    // release over scopa's 640x400 ground: 0.30 ms against the 0.77 ms canvas
+    // rebuild this gate exists to skip, and exactly 0 for the v6 games that
+    // paint nothing (`v6_paint` is `None`, so there is no buffer to walk).
+    match state.v6_paint.borrow().as_deref() {
+        Some(ground) => {
+            1u8.hash(&mut h);
+            ground.dimensions().hash(&mut h);
+            ground.as_raw().hash(&mut h);
+        }
+        None => 0u8.hash(&mut h),
     }
     // App-side inputs to build_main_text + the pager/caret.
     state.transcript_gen.hash(&mut h);
