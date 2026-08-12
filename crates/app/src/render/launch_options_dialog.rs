@@ -165,8 +165,11 @@ pub fn draw_launch_options(
                 let c = &st.candidates[i];
                 let mark = if st.art == idx { "(•)" } else { "( )" };
                 let label = format!(
-                    "  {mark} {:<14} {:<8} {:>4} pictures  part {}",
-                    c.filename, c.rendition, c.pictures, c.part
+                    "  {mark} {:<14} {:<8} {:>4} pictures{}",
+                    c.filename,
+                    c.rendition,
+                    c.pictures,
+                    crate::launch_options::parts_note(c),
                 );
                 option_row(buf, idx, &label, &mut rows, &mut y);
             }

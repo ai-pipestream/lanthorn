@@ -65,12 +65,45 @@ Infocom's Huffman, with no run-length pass and no XOR. One picture, two codecs
 that share nothing: decode *Zork Zero*'s MCGA archive and its Amiga floppy side
 by side and all 383 pictures whose directories agree on size come out
 byte-for-byte identical, which is a nicer proof than any spec. Arthur and Journey
-split their EGA art across two files (`.EG1` and `.EG2`, and the header's first
-byte says which part you have); CGA keeps its big pictures as one bit per pixel,
+split their EGA art across two files — see [Two files, one
+archive](#two-files-one-archive) below; CGA keeps its big pictures as one bit per pixel,
 so *Arthur*, *Journey* and *Shogun* have 228 pictures between them that are
 literally black-and-white. Only MCGA stores palettes — EGA and CGA had theirs
 soldered in, so their directory records are two bytes shorter with nowhere to put
 one.
+
+#### Two files, one archive
+
+EGA art is 640 pixels wide and did not fit on a 360K floppy, so *Arthur* and
+*Journey* shipped their EGA renditions on two disks — `.EG1` and `.EG2` — and the
+header's first byte says which one you are holding. **Name the first and babelmap
+loads both.** You do not have to know the set is split, and you cannot pick half
+of it by accident: the launch dialog and the info panel show a two-disk set as a
+single row, counting the whole thing.
+
+That matters more than it sounds. The split is not a partition — each disk had to
+stand alone for its stretch of the game, so a picture wanted on both sides is
+stored on *both*, and 55 of *Arthur*'s ids live in two places. Read only disk one
+and you get 97 of *Arthur*'s 137 pictures and 80 of *Journey*'s 135; the rest are
+simply absent, including two of *Arthur*'s largest plates. Merged, the two disks
+come to exactly what `arthur.mg1` holds undivided — 171 entries, 137 of them with
+pixels — which is the nicest possible check that nothing is being lost or
+invented. (*Journey*'s EGA set carries one picture MCGA does not: id 59, a
+220×126 rectangle of solid black and the only single-colour plate in the archive,
+which looks very much like an EGA-only way of blanking the illustration window.)
+
+Following the part number to the next file is *not* the guess-the-pairing-from-a-
+filename rule the tier list below rejects, and the difference is worth being
+precise about: you have already told babelmap which archive this story uses, and
+this only follows that archive's own in-band part number to the rest of itself.
+The header is then checked — a file under the next part's name that says it is
+some other part, or was written by another codec, or adds no picture the set
+lacks, is **refused and reported**, never merged on the strength of its name.
+babelmap keeps looking until a part is missing, so a title that shipped on three
+disks would work too.
+
+*Zork Zero* is unaffected: its 360K release gave EGA a whole disk, so `zork0.eg1`
+is complete on its own and stays at 396 pictures.
 
 ### Choosing which artwork a game draws
 
@@ -126,7 +159,7 @@ you have before you choose. Select a story in the browser and press **Shift-Ente
 — plain Enter launches as it always has, so you meet this only when you ask for
 it. (`o` does the same thing on terminals that can't tell Shift-Enter from Enter,
 and so does double-right-clicking a row.) It lists the archives detected **for
-that story** — flavour, picture count, part number — and it shows you the
+that story** — flavour, picture count, and a "2 disks" note on a split set — and it shows you the
 interpreter number your choices imply *and where that number came from*, because
 picking prettier art can quietly change the machine you're emulating and that is
 not a thing to discover later.

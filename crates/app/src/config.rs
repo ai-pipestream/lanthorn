@@ -260,9 +260,10 @@ pub struct Cli {
     /// it has no referent when babelmap opens a library. Pick a rendition from
     /// the browser with Shift-Enter instead.
     ///
-    /// NOTE: .EG1/.CG1 archives store 640-wide art with half-width pixels, which
-    /// babelmap does not yet draw at its true aspect — they come out stretched.
-    /// .MG1 (MCGA) is the DOS rendition that is correct today.
+    /// NOTE: Arthur's and Journey's EGA art shipped on two disks (.EG1 + .EG2);
+    /// naming the first loads both. EGA's dithered colours do not yet fuse at
+    /// 1:1, so fine detail reads as speckle; MCGA (.MG1), CGA (.CG1) and the
+    /// Amiga Pic.data have nothing to fuse and are exact today.
     #[arg(long, value_name = "PATH", requires = "story", verbatim_doc_comment)]
     pub pictures: Option<PathBuf>,
 

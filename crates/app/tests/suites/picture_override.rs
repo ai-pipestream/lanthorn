@@ -150,7 +150,7 @@ fn a_relative_name_resolves_beside_the_story() {
     }
     let dir = game_dir_with("rel", Some("pictures = \"zork0.eg1\"\n"));
     let over = PictureOverride::resolve(&z0, &dir);
-    let PictureOverride::Loaded { ref path, ref pics } = over else {
+    let PictureOverride::Loaded { ref path, ref pics, .. } = over else {
         panic!("expected Loaded, got {over:?}")
     };
     assert_eq!(path, &stories_dir().join("zork0.eg1"));
@@ -570,7 +570,7 @@ fn fmvpoker_draws_from_the_archive_its_readme_names() {
     let dir = game_dir_with("fmvpoker", Some("pictures = \"FMVPOKER.EG1\"\n"));
 
     let over = PictureOverride::resolve(&story_path, &dir);
-    let PictureOverride::Loaded { ref path, ref pics } = over else {
+    let PictureOverride::Loaded { ref path, ref pics, .. } = over else {
         panic!("expected Loaded, got {over:?}")
     };
     assert!(path.ends_with("FMVPOKER.EG1"));
@@ -612,4 +612,139 @@ fn fmvpoker_draws_from_the_archive_its_readme_names() {
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&plain);
+}
+
+// ── multi-part sets: naming .EG1 loads the whole archive (SQ-0798) ────────────
+
+/// The defect, pinned by its own numbers: naming `.EG1` used to load part 1 and
+/// stop there, costing Arthur 40 of its 137 pictures and Journey 55 of its 135.
+///
+/// The counts are not arbitrary. `arthur.mg1` is the same artwork shipped
+/// undivided on one MCGA disk, and it holds 171 ids of which **137** carry
+/// pixels — so 137 is not a number typed here, it is what a complete Arthur
+/// looks like. `journey.mg1` holds 134, and the EGA release carries one more
+/// (id 59, a solid-colour blanking plate), hence 135.
+///
+/// FALSIFICATION: `zork0.eg1` is on the same code path and is genuinely a single
+/// part — its 360K release gave EGA a whole disk — so it must stay at 396. If
+/// the sibling walk were inventing pictures rather than finding them, that row
+/// would move too.
+#[test]
+fn naming_part_one_of_a_split_archive_loads_the_whole_set() {
+    for (story_file, archive, want_pictures, want_parts) in [
+        ("arthur-r74-s890714.z6", "arthur.eg1", 137usize, 2u8),
+        ("journey-r83-s890706.z6", "journey.eg1", 135, 2),
+        ("zork0-r393-s890714.z6", "zork0.eg1", 396, 1),
+    ] {
+        let (Some(story_path), Some(_)) = (story(story_file), story(archive)) else {
+            continue;
+        };
+        let dir = game_dir_with(
+            &format!("multipart-{archive}"),
+            Some(&format!("pictures = {archive:?}\n")),
+        );
+        let over = PictureOverride::resolve(&story_path, &dir);
+        let PictureOverride::Loaded { ref pics, .. } = over else {
+            panic!("{archive}: expected Loaded, got {over:?}")
+        };
+        assert_eq!(pics.parts(), want_parts, "{archive}: files merged");
+        assert_eq!(
+            pics.entries().iter().filter(|e| e.has_pixels()).count(),
+            want_pictures,
+            "{archive}: pictures with data after the whole set is loaded",
+        );
+        assert_eq!(over.warning(), None, "{archive}: a set that loaded cleanly says nothing");
+
+        // …and the app's own resolution really draws them. `all_pict_dims` is
+        // what feeds the v6 `picture_data` table at boot, so a picture missing
+        // here is a picture the story is told does not exist.
+        let mut src = PictSource::resolve_with_override(&story_path, over);
+        let ids: Vec<u16> = src.all_pict_dims().into_iter().map(|(id, _, _)| id).collect();
+        let drawable = ids.iter().filter(|&&id| src.image(u32::from(id)).is_some()).count();
+        assert_eq!(drawable, want_pictures, "{archive}: pictures that actually decode");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The pictures that were being lost, named individually.
+///
+/// A count can be right for the wrong reason, so this asks for the two plates
+/// the quest measured as missing from Arthur — 584x196 and 508x164, both large
+/// enough that their absence is a hole on screen — and four Journey scene
+/// plates. Every one of them lives only in part 2.
+#[test]
+fn the_pictures_that_only_part_two_holds_now_decode() {
+    for (story_file, archive, cases) in [
+        ("arthur-r74-s890714.z6", "arthur.eg1", &[(84u32, 584u32, 196u32), (85, 508, 164)][..]),
+        (
+            "journey-r83-s890706.z6",
+            "journey.eg1",
+            &[(78, 222, 130), (110, 224, 127), (159, 222, 127), (164, 222, 127)][..],
+        ),
+    ] {
+        let (Some(story_path), Some(_)) = (story(story_file), story(archive)) else {
+            continue;
+        };
+        let dir =
+            game_dir_with(&format!("part2-{archive}"), Some(&format!("pictures = {archive:?}\n")));
+        let mut src = PictSource::resolve_with_override(
+            &story_path,
+            PictureOverride::resolve(&story_path, &dir),
+        );
+        for &(id, w, h) in cases {
+            assert_eq!(src.dims(id), Some((w, h)), "{archive}: picture {id}'s size");
+            let img = src.image(id).unwrap_or_else(|| panic!("{archive}: picture {id} decodes"));
+            assert_eq!(
+                image::GenericImageView::dimensions(&*img),
+                (w, h),
+                "{archive}: picture {id}'s pixels",
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A file sitting under the next part's name that is not the next part is
+/// refused, and the refusal is LOUD.
+///
+/// SQ-0734's rule is that a named archive which cannot be used never fails in
+/// silence, because a player who believes they are looking at the art they asked
+/// for and is not has nothing on screen to tell them. A half-loaded set is the
+/// same failure with a smaller blast radius: the archive draws, and the pictures
+/// it is missing simply do not appear. So part 1 is kept — it is what was named
+/// and it works — and the continuation is reported rather than dropped.
+#[test]
+fn a_continuation_that_is_not_one_is_refused_out_loud() {
+    let Some(real_eg1) = story("zork0.eg1") else { return };
+    let sandbox = game_dir_with("bogus-part2-files", None);
+    // A single-part archive under a two-part name, so a `.eg2` is looked for.
+    std::fs::copy(&real_eg1, sandbox.join("game.eg1")).unwrap();
+    std::fs::write(sandbox.join("game.eg2"), b"this is not a picture archive at all").unwrap();
+    std::fs::write(sandbox.join("game.z6"), b"x").unwrap();
+
+    let dir = game_dir_with("bogus-part2-cfg", Some("pictures = \"game.eg1\"\n"));
+    let over = PictureOverride::resolve(&sandbox.join("game.z6"), &dir);
+    let PictureOverride::Loaded { ref pics, .. } = over else {
+        panic!("part 1 still loads; got {over:?}")
+    };
+    assert_eq!(pics.parts(), 1, "the bogus part 2 is not merged");
+    assert_eq!(pics.entries().len(), 503, "and part 1 is untouched by the refusal");
+    let w = over.warning().expect("a refused continuation is never silent");
+    assert!(w.contains("game.eg2"), "the warning names the file: {w}");
+
+    // FALSIFICATION: remove the bogus file and the same setup is silent, so the
+    // warning is caused by the file and not by the two-part name.
+    std::fs::remove_file(sandbox.join("game.eg2")).unwrap();
+    let quiet = PictureOverride::resolve(&sandbox.join("game.z6"), &dir);
+    assert_eq!(quiet.warning(), None, "an ABSENT part 2 is the ordinary end of a set");
+
+    // And a real archive under the name is refused just as firmly when it is not
+    // the continuation: `zork0.eg1` says part 1, and part 2 is what is wanted.
+    std::fs::copy(&real_eg1, sandbox.join("game.eg2")).unwrap();
+    let over = PictureOverride::resolve(&sandbox.join("game.z6"), &dir);
+    let w = over.warning().expect("a wrong-part archive is refused, not merged");
+    assert!(w.contains("game.eg2"), "{w}");
+
+    let _ = std::fs::remove_dir_all(&sandbox);
+    let _ = std::fs::remove_dir_all(&dir);
 }

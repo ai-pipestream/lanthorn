@@ -102,6 +102,10 @@ pub enum PicError {
     UnsupportedCompression(u16),
     /// The compressed stream did not expand to `width * height` pixels.
     BadPixelData,
+    /// A file offered as the next part of a multi-part set does not continue it:
+    /// the wrong part number in its header, a different codec, or nothing the
+    /// set does not already hold. Never merged blindly (SQ-0798).
+    NotAContinuation(&'static str),
 }
 
 /// A one-clause reason, for a host that has to tell a user why the archive they
@@ -119,6 +123,9 @@ impl std::fmt::Display for PicError {
                 write!(f, "the picture uses a compression variant this reader does not decode (entry flags {flags:#06x})")
             }
             PicError::BadPixelData => write!(f, "the compressed picture data is corrupt"),
+            PicError::NotAContinuation(why) => {
+                write!(f, "it does not continue this picture set — {why}")
+            }
         }
     }
 }
@@ -418,6 +425,9 @@ pub struct InfocomPics {
     data: Vec<u8>,
     entries: Vec<PicEntry>,
     part: u8,
+    /// How many files have been merged into this archive — 1 until
+    /// [`InfocomPics::append_part`] absorbs a continuation (SQ-0798).
+    parts: u8,
     flavour: Flavour,
 }
 
@@ -575,6 +585,7 @@ impl InfocomPics {
             data,
             entries,
             part,
+            parts: 1,
             flavour: Flavour::AmigaMac,
         })
     }
@@ -645,6 +656,7 @@ impl InfocomPics {
             data,
             entries,
             part,
+            parts: 1,
             flavour: Flavour::Pc,
         })
     }
@@ -655,6 +667,87 @@ impl InfocomPics {
     /// `.EG2` reads 2, and a complete EGA set for either game means both.
     pub fn part(&self) -> u8 {
         self.part
+    }
+
+    /// How many files this archive is made of — 1 for an ordinary one, 2 once a
+    /// continuation has been absorbed by [`append_part`](InfocomPics::append_part).
+    ///
+    /// [`part`](InfocomPics::part) stays the number of the FIRST file, so the two
+    /// together say which parts are in hand: `part()..part() + parts()`.
+    pub fn parts(&self) -> u8 {
+        self.parts
+    }
+
+    /// The part number this archive would accept next.
+    pub fn next_part(&self) -> u8 {
+        self.part.saturating_add(self.parts)
+    }
+
+    /// Absorb the next file of a multi-part set, so the whole set reads as one
+    /// archive (SQ-0798).
+    ///
+    /// # Why multi-part sets exist
+    ///
+    /// EGA art is 640 pixels wide and did not fit on one 360K floppy, so Arthur
+    /// and Journey split theirs across `.EG1` and `.EG2`. The split is not a
+    /// partition: each disk had to be self-sufficient for its stretch of the
+    /// game, so a picture wanted on both sides is stored on **both** — 55 of
+    /// Arthur's 171 ids and 12 of Journey's 135 appear twice. Reading only part 1
+    /// costs Arthur 40 of its 137 pictures and Journey 55 of its 135.
+    ///
+    /// # The merge rule for a repeated id, and how it was settled
+    ///
+    /// **The earlier part wins**, and it costs nothing: measured across both
+    /// games, every id in two parts has the same dimensions and the same entry
+    /// flags, and every one of them that carries pixels decodes to byte-identical
+    /// output from either copy (Arthur 37 identical + 18 that are placeholders in
+    /// both, Journey 12 identical, zero differing, zero where one part has pixels
+    /// and the other does not). So the choice is arbitrary on this corpus, and
+    /// first-wins is the one that is deterministic and needs no second decode.
+    ///
+    /// # What it refuses, loudly
+    ///
+    /// The header's part byte is the format's own statement of which file this is
+    /// (`bcpic.c` builds the very filename from it), so it is checked rather than
+    /// trusted: the continuation must call itself [`next_part`](InfocomPics::next_part),
+    /// must have been written by the same codec, and must actually **extend** the
+    /// set. An archive that repeats what is already held adds nothing and is far
+    /// more likely to be an unrelated file that happens to sit under the next
+    /// name. `self` is left untouched on any error, so a refusal costs the caller
+    /// only part 1 — which is what it already had.
+    pub fn append_part(&mut self, next: InfocomPics) -> Result<(), PicError> {
+        if next.flavour != self.flavour {
+            return Err(PicError::NotAContinuation("a different codec wrote it"));
+        }
+        if next.part != self.next_part() {
+            return Err(PicError::NotAContinuation("its header states a different part number"));
+        }
+        let mut added: Vec<PicEntry> =
+            next.entries.iter().copied().filter(|e| self.entry(e.id).is_none()).collect();
+        if added.is_empty() {
+            return Err(PicError::NotAContinuation(
+                "it holds no picture this set does not already have",
+            ));
+        }
+        // Every offset in a record addresses this archive's own bytes, so the
+        // continuation's bytes are appended and its offsets shifted by where they
+        // landed. Zero keeps its meaning — "no pixels", "no palette of its own",
+        // "no Huffman tree" — and is therefore never shifted.
+        let base = self.data.len();
+        for e in &mut added {
+            for off in [&mut e.data, &mut e.palette, &mut e.huff] {
+                if *off != 0 {
+                    *off += base;
+                }
+            }
+        }
+        self.data.extend_from_slice(&next.data);
+        self.entries.append(&mut added);
+        // `ReadGFXEntry` binary-searches the directory, and `parse` enforces
+        // ascending ids for the same reason; a merged directory keeps that shape.
+        self.entries.sort_unstable_by_key(|e| e.id);
+        self.parts += 1;
+        Ok(())
     }
 
     /// Which platform wrote this archive, and therefore which codec read it.
@@ -1906,6 +1999,167 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// SQ-0798: `.EG1` and `.EG2` are one archive in two files, and merged they
+    /// are exactly the MCGA set.
+    ///
+    /// This is the measurement the whole fix rests on. EGA art is 640 wide and
+    /// would not fit one 360K floppy, so Arthur's and Journey's EGA renditions
+    /// were split — and the split overlaps, because each disk had to stand alone
+    /// for its stretch of the game. Reading part 1 only is not "most of the art";
+    /// it is 97 of Arthur's 137 pictures and 80 of Journey's 135.
+    ///
+    /// The union is checked against the **MCGA** archive of the same game rather
+    /// than against a number typed here, because `arthur.mg1` is the same
+    /// artwork shipped undivided: if the merge were wrong in either direction —
+    /// dropping a picture or inventing one — the two directories would stop
+    /// agreeing. Journey is the one deliberate exception and it is asserted as
+    /// such below.
+    #[test]
+    fn a_two_part_ega_set_merges_into_exactly_the_mcga_set() {
+        for (game, want_ids, want_pixels, extra_ega_ids) in [
+            ("arthur", 171usize, 137usize, &[][..]),
+            // Journey's EGA release carries one picture MCGA does not: id 59, a
+            // 220x126 rectangle of solid colour index 0 — the only single-colour
+            // plate in the archive, and the size of a scene illustration. It is
+            // an EGA-only "blank the picture window" plate; `journey.cg1` and
+            // `journey.mg1` (134 ids each) have no such entry, and it appears in
+            // BOTH EGA parts, as a plate wanted on either disk would.
+            ("journey", 135, 135, &[59u16][..]),
+        ] {
+            let (Some(p1), Some(p2), Some(mg)) = (
+                fixture(&format!("{game}.eg1")),
+                fixture(&format!("{game}.eg2")),
+                fixture(&format!("{game}.mg1")),
+            ) else {
+                continue;
+            };
+            let mut set = InfocomPics::parse(p1).unwrap();
+            assert_eq!((set.part(), set.parts(), set.next_part()), (1, 1, 2));
+            set.append_part(InfocomPics::parse(p2).unwrap()).expect("eg2 continues eg1");
+            assert_eq!((set.part(), set.parts(), set.next_part()), (1, 2, 3));
+
+            assert_eq!(set.entries().len(), want_ids, "{game}: merged directory size");
+            assert_eq!(
+                set.entries().iter().filter(|e| e.has_pixels()).count(),
+                want_pixels,
+                "{game}: merged pictures carrying pixels"
+            );
+            assert!(
+                set.entries().windows(2).all(|w| w[0].id < w[1].id),
+                "{game}: a merged directory is still ascending and duplicate-free"
+            );
+
+            let mg = InfocomPics::parse(mg).unwrap();
+            let mut only_ega: Vec<u16> = set
+                .entries()
+                .iter()
+                .filter(|e| mg.entry(e.id).is_none())
+                .map(|e| e.id)
+                .collect();
+            only_ega.sort_unstable();
+            assert_eq!(only_ega, extra_ega_ids, "{game}: ids EGA has and MCGA does not");
+            assert!(
+                mg.entries().iter().all(|e| set.entry(e.id).is_some()),
+                "{game}: the merged EGA set covers every MCGA id"
+            );
+
+            // Every picture the merge kept must still DECODE — the offsets of
+            // part 2's records are rebased into the appended bytes, and a
+            // rebasing error would land inside part 1's data and expand to
+            // garbage rather than to an error.
+            for e in set.entries().iter().filter(|e| e.has_pixels()) {
+                let pic = set.decode(e.id).unwrap_or_else(|err| panic!("{game} id {}: {err:?}", e.id));
+                assert_eq!((pic.width, pic.height), (e.width, e.height));
+            }
+        }
+    }
+
+    /// SQ-0798: the shared ids really are the same picture, verified rather than
+    /// inferred — which is what licenses "the earlier part wins".
+    ///
+    /// The overlap is large (55 ids in Arthur, 12 in Journey) and the merge rule
+    /// throws one copy of each away. The quest recorded that the two agree on
+    /// dimensions and *assumed* they agree on pixels; this decodes both copies
+    /// and compares them, so the assumption is either a measurement or a failure.
+    #[test]
+    fn a_picture_stored_on_both_disks_is_the_same_picture_on_both() {
+        for (game, want_shared) in [("arthur", 55usize), ("journey", 12usize)] {
+            let (Some(a), Some(b)) =
+                (fixture(&format!("{game}.eg1")), fixture(&format!("{game}.eg2")))
+            else {
+                continue;
+            };
+            let (p1, p2) = (InfocomPics::parse(a).unwrap(), InfocomPics::parse(b).unwrap());
+            let mut shared = 0;
+            for x in p1.entries() {
+                let Some(y) = p2.entry(x.id) else { continue };
+                shared += 1;
+                assert_eq!(
+                    (x.width, x.height, x.flags),
+                    (y.width, y.height, y.flags),
+                    "{game} id {}: the two copies disagree on shape",
+                    x.id
+                );
+                // Including the "neither has pixels" case: a placeholder in one
+                // part and artwork in the other would make first-wins lossy, and
+                // there is none.
+                assert_eq!(
+                    p1.decode(x.id).ok(),
+                    p2.decode(x.id).ok(),
+                    "{game} id {}: the two copies decode differently",
+                    x.id
+                );
+            }
+            assert_eq!(shared, want_shared, "{game}: ids stored on both disks");
+        }
+    }
+
+    /// SQ-0798: a file that does not continue the set is refused, and refusing
+    /// leaves the set exactly as it was.
+    ///
+    /// The part number is in-band, so it is checked rather than trusted — the
+    /// alternative is merging whatever happens to sit under the next filename,
+    /// which is the auto-pairing failure the tier policy exists to prevent,
+    /// reached by a side door.
+    #[test]
+    fn a_file_that_does_not_continue_the_set_is_refused_and_changes_nothing() {
+        let (Some(eg1), Some(eg2), Some(mg1)) =
+            (fixture("arthur.eg1"), fixture("arthur.eg2"), fixture("arthur.mg1"))
+        else {
+            return;
+        };
+        let before = InfocomPics::parse(eg1.clone()).unwrap();
+
+        // Wrong part number: `arthur.mg1` says part 1, and part 2 is what is
+        // wanted. (It is also a whole other rendition, which is exactly the kind
+        // of file that could sit under a mistaken name.)
+        let mut set = InfocomPics::parse(eg1.clone()).unwrap();
+        let err = set.append_part(InfocomPics::parse(mg1).unwrap()).unwrap_err();
+        assert!(matches!(err, PicError::NotAContinuation(_)), "got {err:?}");
+        assert_eq!(set.entries().len(), before.entries().len(), "a refusal changes nothing");
+        assert_eq!(set.parts(), 1);
+
+        // A different codec, even at the right part number, is not a continuation.
+        if let Some(pic) = fixture("arthur.pic") {
+            let mut amiga = InfocomPics::parse(pic).unwrap();
+            assert_eq!(amiga.flavour(), Flavour::AmigaMac);
+            let err = amiga.append_part(InfocomPics::parse(eg2.clone()).unwrap()).unwrap_err();
+            assert!(matches!(err, PicError::NotAContinuation(_)), "got {err:?}");
+        }
+
+        // And a genuine part 2 that adds nothing, because it has already been
+        // absorbed: a second identical append is refused rather than doubling
+        // the directory.
+        let mut set = InfocomPics::parse(eg1).unwrap();
+        set.append_part(InfocomPics::parse(eg2.clone()).unwrap()).unwrap();
+        let merged = set.entries().len();
+        let err = set.append_part(InfocomPics::parse(eg2).unwrap()).unwrap_err();
+        // It fails on the part number first — the set now wants part 3 — which is
+        // the cheaper of the two checks and the more informative message.
+        assert!(matches!(err, PicError::NotAContinuation(_)), "got {err:?}");
+        assert_eq!(set.entries().len(), merged);
     }
 
     /// SQ-0734: which picture space each rendition's coordinates live in.

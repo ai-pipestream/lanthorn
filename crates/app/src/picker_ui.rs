@@ -2353,12 +2353,12 @@ fn draw_info_panel(
         for c in &a.art_candidates {
             let in_use = a.art_in_use.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&c.filename));
             // The dialog's columns, minus what a read-only row cannot use: the
-            // part number appears only when it is not the ordinary 1, because a
-            // panel with other content to show cannot spend a column on a
-            // constant.
+            // multi-part note appears only when there is one, because a panel
+            // with other content to show cannot spend a column on a constant.
             let mut row = format!(" {:<13} {:<8} {} pictures", c.filename, c.rendition, c.pictures);
-            if c.part != 1 {
-                row.push_str(&format!(" · part {}", c.part));
+            let note = app::launch_options::parts_note(c);
+            if !note.is_empty() {
+                row.push_str(&format!(" · {}", note.trim_start()));
             }
             if in_use {
                 row.push_str("  ← in use");
@@ -3816,6 +3816,52 @@ mod tests {
         // And no other game's art, which is the filter the dialog now shares.
         assert!(!text.contains("arthur."), "another game's archives stay out: {text:?}");
         assert!(!text.contains("journey."), "{text:?}");
+    }
+
+    /// SQ-0798: Arthur's split EGA set is one row in the panel, exactly as it is
+    /// one row in the dialog, and the row says it is two disks.
+    ///
+    /// There is one discovery path by design, so this and the dialog cannot show
+    /// different lists — but "cannot" is worth pinning, because the failure it
+    /// prevents is a panel that offers `arthur.eg2` as if picking it were a
+    /// sensible thing to do, when it is 101 of the set's 171 ids.
+    #[test]
+    fn info_panel_shows_a_split_ega_set_as_one_row() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let arthur = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/arthur-r74-s890714.z6");
+        if !arthur.is_file() || !arthur.with_file_name("arthur.eg2").is_file() {
+            return; // gitignored fixtures
+        }
+        let candidates = app::launch_options::discover_art_candidates(&arthur);
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = minimal_story_meta();
+        let aux = app::picker::StoryAux {
+            assoc_blorb: None,
+            saves: vec![],
+            hints_available: false,
+            game_dir: std::path::PathBuf::from("/tmp/arthur"),
+            qzl_saves: vec![],
+            auto_saves: vec![],
+            sidecars: vec![],
+            art_candidates: candidates,
+            art_in_use: Some("arthur.eg1".into()),
+        };
+        let area = Rect::new(0, 0, 62, 40);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        super::draw_info_panel(
+            "Arthur", "arthur-r74-s890714.z6", &meta, Some(&aux), 0, area, None,
+            &mut cover, &arthur, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+        );
+        let text = buffer_to_string(&buf, area);
+        println!("{text}");
+
+        assert!(text.contains("arthur.eg1"), "the head of the set is listed: {text:?}");
+        assert!(!text.contains("arthur.eg2"), "and its back half is not a row: {text:?}");
+        assert!(text.contains("2 disks"), "the row says it carries both files: {text:?}");
+        assert!(text.contains("171 pictures"), "and counts the whole set: {text:?}");
+        assert!(text.contains("← in use"), "the archive in force is marked: {text:?}");
     }
 
     /// A `pictures` key naming something the name filter would never detect —
