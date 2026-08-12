@@ -417,7 +417,7 @@ directions, and breaks ties between equal averages by how many people voted, so
 a 4.6 from two hundred players outranks a 4.6 from three. `i` or
 `Tab` slides in a themeable **info panel** for the highlighted story:
 format/version/release/serial, IFID, author/year/genre, a blurb, feature flags,
-bundled resources, and saves. When the file on disk is a *container* — an Amiga
+bundled resources, detected artwork, and saves. When the file on disk is a *container* — an Amiga
 floppy, a blorb, a zip — the size line names the game's own size beside the
 file's, because the container's length is not the game's: every `.adf` is 880 KB
 whether it holds Zork I or Shogun. Plain story files show one size, as before.
@@ -428,6 +428,15 @@ the list and the panel. When the panel is open and its content overflows
 or `Shift`+`↑`/`↓`/PgUp/PgDn — plain arrows keep navigating the list — and the
 scroll resets whenever the highlighted story changes.
 
+An **Artwork** block lists the native picture archives detected for that story —
+`zork0.mg1  MCGA  503 pictures` — with an arrow against whichever one the game's
+own `config.toml` names. It is inventory, not a control: nothing here is
+selectable, and choosing between them is the launch-options dialog's job. Both
+read the same detector, so the panel can never advertise a rendition the dialog
+won't offer. A game with no detected archives shows no block at all. See
+[choosing which artwork a game draws](v6-graphics.md#three-ways-to-say-it) for
+what "detected" means and how to name an archive the detector can't see.
+
 `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End navigate, `Enter` or a click opens the story,
 `q`/`Esc` quits back to the shell.
 
@@ -436,7 +445,10 @@ the boot-time choices babelmap can only honour *before* a game starts: which
 picture archive to draw its art from, and which machine to present itself as.
 (`o` does the same, for terminals that can't tell Shift-Enter from plain Enter,
 and so does double-right-clicking a row.) Plain Enter is untouched, so you only
-meet the dialog when you ask for it. Inside it, `↑`/`↓` move between choices,
+meet the dialog when you ask for it. It offers the archives detected for *that*
+story — the same list the info panel shows — plus a line reminding you that an
+archive under some other name is still reachable by naming it outright. Inside
+it, `↑`/`↓` move between choices,
 `Space` picks the one under the cursor or flips a checkbox, `Tab`/`Shift-Tab`
 move between the buttons, `Enter` plays and `Esc` backs out. Everything applies
 to that launch alone unless you tick *Save as this game's default*, which writes
@@ -454,7 +466,10 @@ active sort column), `story_author`, `story_year`, `story_rating` (the IFDB
 average and vote count in the RATING column), `story_no_metadata` (the
 "(no metadata yet)" placeholder), `story_tile`/`story_tile:selected` (the
 cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
-`:cover`) style selectors.
+`:cover`) style selectors. The Artwork block has its own pair —
+`story_info_artwork` for the detected archives and `story_info_artwork:active`
+for the one in use — and the launch-options dialog's warnings carry
+`dialog.launch_caveat`.
 
 - **Search & download from IFDB.** Press `/` to open the **IFDB search** modal.
   It opens straight onto a **"Popular on IFDB"** browse list — highly-rated

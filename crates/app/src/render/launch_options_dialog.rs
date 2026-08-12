@@ -56,9 +56,17 @@ pub fn draw_launch_options(
     buf: &mut Buffer,
 ) -> Option<LaunchOptionsRects> {
     // Rows: art choices (+ "inherit"), a blank, the interpreter line, its
-    // provenance line, a blank, the checkbox, and one caveat line if the chosen
-    // rendition has something to warn about. Plus dialog chrome + button row.
-    let body_rows = st.row_count() as u16 + 4;
+    // provenance line, a blank, the checkbox, the escape-hatch note and the key
+    // hints, plus a caveat line for each thing the current choice warrants one
+    // for. Plus dialog chrome + button row.
+    //
+    // Counting the caveats HERE is what keeps a short list from scrolling: the
+    // list is filtered to this story's own archives now — four for Zork Zero,
+    // five for Arthur — so it fits, and a dialog that paged a five-row list
+    // because a warning line took its last row would be paging for nothing.
+    let caveat_lines = u16::from(st.clears_inherited_art())
+        + u16::from(st.chosen_art().is_some_and(|c| c.caveat().is_some()));
+    let body_rows = st.row_count() as u16 + 5 + caveat_lines;
     let w = MAX_W.min(area.width.saturating_sub(4));
     let h = (body_rows + 3).min(MAX_H).min(area.height.saturating_sub(2));
     if w < MIN_W || h < MIN_H {
@@ -119,13 +127,12 @@ pub fn draw_launch_options(
     };
 
     // The tail below the art list is fixed-size and must always be reachable:
-    // the interpreter number and the checkbox are the whole point of the dialog,
-    // and a story library is commonly FLAT — `stories/` holds every game's
-    // archives together, so "the archives beside this story" can be twenty rows.
-    // The list scrolls; nothing else does.
-    let caveat_lines = u16::from(st.clears_inherited_art())
-        + u16::from(st.chosen_art().is_some_and(|c| c.caveat().is_some()));
-    const TAIL: u16 = 5; // blank, interpreter, provenance, checkbox, key hints
+    // the interpreter number and the checkbox are the whole point of the dialog.
+    // The list is short now that it is filtered to this story's own archives —
+    // five at the very most in the real library — but a folder can hold anything,
+    // so it still scrolls; nothing else does.
+    // blank, interpreter, provenance, checkbox, escape hatch, key hints
+    const TAIL: u16 = 6;
     // The "N more above/below" markers cost rows too, and only exist when the
     // list actually scrolls — so budget for them only then, in two passes.
     let fixed = 1 + TAIL + caveat_lines; // + the "Artwork" heading
@@ -134,12 +141,12 @@ pub fn draw_launch_options(
     let marks = if art_total > usize::from(loose) { 2 } else { 0 };
     let art_rows = usize::from(content.height.saturating_sub(fixed + marks).max(1));
 
-    // The heading carries the caveat about the list itself, in the one row it
-    // already costs: a story library is usually one flat folder, so most of what
-    // follows belongs to OTHER games. Names that resemble this story's float to
-    // the top, but that is a sorting hint and the user is the one asserting the
-    // pairing — say so rather than letting the order imply a guarantee.
-    line(buf, "Artwork — every archive in this folder, likely names first", header, &mut y);
+    // The heading says what the list IS, in the one row it already costs: the
+    // archives beside this story that carry its name. It is still a name guess
+    // and the user is still the one asserting the pairing — "detected for" says
+    // that, where "the archives for" would imply a guarantee the file format
+    // cannot give.
+    line(buf, "Artwork — archives detected for this story", header, &mut y);
     // Scroll the art window to keep the cursor visible, exactly as a list does.
     // Indices here are the flat cursor indices: 0 is "inherit", 1.. the
     // candidates in the order `discover_art_candidates` sorted them.
@@ -169,7 +176,7 @@ pub fn draw_launch_options(
         line(buf, &format!("  ↓ {} more below", art_total - last), dim, &mut y);
     }
     if st.candidates.is_empty() {
-        line(buf, "  no native picture archives beside this story", dim, &mut y);
+        line(buf, "  no picture archives detected for this story", dim, &mut y);
     }
     // Selecting "inherit" over a sidecar that names an archive cannot be
     // expressed as a session override — there is no "override with nothing" — so
@@ -206,6 +213,12 @@ pub fn draw_launch_options(
 
     let persist = format!("  {} Save as this game's default", checkbox(st.persist));
     option_row(buf, st.candidates.len() + 2, &persist, &mut rows, &mut y);
+    // The escape hatch, said on screen rather than left to the docs. The list
+    // above is filtered by name, so an archive under an unrelated name — the
+    // renamed `FMVPOKER.EG1` case — will not appear in it, and someone who has
+    // one must not be left thinking it is unreachable. Naming a path outright
+    // has always been the durable form and still wins over everything.
+    line(buf, "  another name? pictures = \"…\" in the game's config, or --pictures", dim, &mut y);
     line(buf, "  ↑/↓ choose   Space select/toggle   Tab buttons   Esc cancel", dim, &mut y);
 
     Some(LaunchOptionsRects {

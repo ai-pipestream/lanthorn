@@ -197,6 +197,20 @@ pub struct StoryAux {
     pub auto_saves: Vec<crate::persist_files::SaveInfo>,
     /// Sidecar filenames present in `game_dir` (`default.aux`/`default.glkvfs`).
     pub sidecars: Vec<&'static str>,
+    /// Native picture archives detected for this story (SQ-0789), from the very
+    /// same [`crate::launch_options::discover_art_candidates`] the launch-options
+    /// dialog lists. **One source, so the two surfaces cannot disagree** — a
+    /// panel that says "four renditions" over a dialog that offers three is worse
+    /// than either alone, and the shared function is what makes that impossible
+    /// rather than merely unlikely.
+    ///
+    /// Still display-only. The panel is read-only, so this is the *safe* half of
+    /// the discovery/pairing split: it ends at a human's eyes, and nothing
+    /// downstream consumes it.
+    pub art_candidates: Vec<crate::launch_options::ArtCandidate>,
+    /// The archive the game's own `config.toml` names, if any — so the panel can
+    /// say which of the detected renditions is actually in force.
+    pub art_in_use: Option<String>,
 }
 
 /// Resolve the lazy aux for one story. `data_base` is the storage base
@@ -222,7 +236,22 @@ pub fn resolve_aux(
     let mut sidecars = Vec::new();
     if game_dir.join("default.aux").exists() { sidecars.push("default.aux"); }
     if game_dir.join("default.glkvfs").exists() { sidecars.push("default.glkvfs"); }
-    StoryAux { assoc_blorb, saves, hints_available, game_dir, qzl_saves, auto_saves, sidecars }
+    // Resolved here rather than in the panel because the panel redraws every
+    // frame and this reads and parses whole archives; the aux cache is already
+    // the per-story "things that touch the disk" tier.
+    let art_candidates = crate::launch_options::discover_art_candidates(&entry.path);
+    let art_in_use = crate::styles::read_per_game_pictures(&game_dir);
+    StoryAux {
+        assoc_blorb,
+        saves,
+        hints_available,
+        game_dir,
+        qzl_saves,
+        auto_saves,
+        sidecars,
+        art_candidates,
+        art_in_use,
+    }
 }
 
 /// Convert a parsed blorb's resource index into displayable `ChunkInfo`.

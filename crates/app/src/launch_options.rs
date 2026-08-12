@@ -29,12 +29,12 @@
 //!
 //! # The one thing this module enumerates, and the line it must not cross
 //!
-//! [`discover_art_candidates`] lists every native archive sitting beside a story.
-//! SQ-0734 rejected exactly that enumeration as an input to *resolution*, and
-//! that rejection stands: the format carries no release number and no serial,
-//! every Infocom Amiga release names its archive `Pic.data`, and a wrong pairing
-//! is invisible — Arthur's plates drawn into Zork Zero look like art, not like an
-//! error.
+//! [`discover_art_candidates`] lists the native archives beside a story that
+//! carry *this story's name*. SQ-0734 rejected exactly that enumeration as an
+//! input to *resolution*, and that rejection stands: the format carries no
+//! release number and no serial, every Infocom Amiga release names its archive
+//! `Pic.data`, and a wrong pairing is invisible — Arthur's plates drawn into Zork
+//! Zero look like art, not like an error.
 //!
 //! **Discovery for DISPLAY is safe; discovery for PAIRING is not.** The list
 //! below is safe for precisely the reason auto-pairing is not: it ends at a
@@ -43,6 +43,13 @@
 //! [`crate::graphics::PictureOverride::resolve`] or into any other automatic
 //! choice. If you are here to "close the gap" by picking the best candidate
 //! programmatically, that is the failure the tier policy exists to prevent.
+//!
+//! The name filter does not weaken that line, because it is not a *pairing* — it
+//! is which rows a person is shown. Every archive it declines to list stays
+//! reachable by naming it outright, through `--pictures` or the game's own
+//! `pictures` key, which is where an oddly-named file (`FMVPOKER.EG1` is Zork
+//! Zero's EGA art under a fan game's name) has always belonged. The dialog says
+//! so on screen; see `docs/features/v6-graphics.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -98,17 +105,6 @@ pub struct ArtCandidate {
     pub part: u8,
     /// The width of the picture space its coordinates use: 320 or 640.
     pub space_width: u16,
-    /// Its name resembles this story's, so it is listed FIRST.
-    ///
-    /// A hint about ORDER and nothing else. It never filters (a story library is
-    /// commonly flat — `stories/` holds Arthur, Journey, Shogun and Zork Zero
-    /// side by side, so "beside the story" means "in with everything else", and
-    /// hiding the non-matching ones would hide the very case tier 3 exists for:
-    /// `FMVPOKER.EG1` is Zork Zero's archive under another name, and no stem rule
-    /// could ever connect them). It never selects, either — that is precisely the
-    /// stem-based auto-discovery SQ-0734 rejected on measured grounds. Sorting a
-    /// list a human then reads is the one thing a guess this weak is good for.
-    pub likely: bool,
 }
 
 impl ArtCandidate {
@@ -137,19 +133,25 @@ impl ArtCandidate {
 /// rule could never pair one automatically.
 const ART_EXTS: &[&str] = &["pic", "mg1", "mg2", "eg1", "eg2", "cg1", "cg2", "data"];
 
-/// Every native picture archive beside `story_path`, in a stable order (by
-/// filename), each one actually parsed so the list can state its flavour,
-/// picture count and part number rather than guess from a name.
+/// The native picture archives beside `story_path` that carry **this story's
+/// name**, in a stable order (by filename), each one actually parsed so the list
+/// can state its flavour, picture count and part number rather than guess.
 ///
 /// **This is display-only.** See the module header: enumerating candidates is
 /// safe because a person picks; nothing may consume this list automatically.
+/// The name filter narrows *what a person is shown*, which is why it is allowed
+/// to be a guess — the alternative is a story library's whole folder in one
+/// dialog, since `stories/` holds Arthur, Journey, Shogun and Zork Zero side by
+/// side and most of what sits "beside" any story belongs to another game.
 ///
 /// A file that does not parse is simply absent from the list — it is not a
 /// candidate, and a name-shaped file that is not an archive (`saved.data`, say)
 /// must not be offered as one. That silence is right *here* and wrong in
 /// [`crate::graphics::PictureOverride::resolve`], where a named-but-unusable
 /// archive is loud on purpose: this function answers "what could you pick?",
-/// that one answers "you asked for this and it did not work".
+/// that one answers "you asked for this and it did not work". An archive whose
+/// name resembles nothing is in the same position: not offered, still reachable
+/// by name through `--pictures` or the `pictures` key.
 pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
     let dir = match story_path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
@@ -158,7 +160,7 @@ pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let story_key = name_key(story_path.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
+    let story_stem = story_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let mut out: Vec<ArtCandidate> = Vec::new();
     for entry in rd.flatten() {
         let path = entry.path();
@@ -171,59 +173,88 @@ pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
         if !looks_like_art_name(&filename) {
             continue;
         }
+        // Name first, bytes second: an archive is megabytes, and a flat library
+        // holds a dozen of them. Deciding on the name before reading keeps this
+        // cheap enough for the browser's info panel to ask per story.
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if !belongs_to_story(story_stem, stem, &filename) {
+            continue;
+        }
         let Ok(raw) = std::fs::read(&path) else { continue };
         let Ok(pics) = InfocomPics::parse(raw) else { continue };
         let space_width = pics.picture_space_width();
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         out.push(ArtCandidate {
             rendition: rendition_label(pics.flavour(), space_width, &filename),
             flavour: pics.flavour(),
             pictures: pics.entries().len(),
             part: pics.part(),
             space_width,
-            likely: names_resemble(&story_key, &name_key(stem)),
             filename,
             path,
         });
     }
-    // Resembling names first, then alphabetical within each group. Order only —
-    // every candidate found is still in the list.
-    out.sort_by(|a, b| {
-        (!a.likely, a.filename.to_lowercase()).cmp(&(!b.likely, b.filename.to_lowercase()))
-    });
+    out.sort_by_key(|c| c.filename.to_lowercase());
     out
 }
 
-/// A filename stem reduced to its comparable head: lowercased, cut at the first
-/// separator, and stripped of anything that is not a letter or digit.
-///
-/// `zork0-r393-s890714` → `zork0`; `Zork Zero - The Revenge…` → `zorkzero`.
-fn name_key(stem: &str) -> String {
-    stem.split(['-', '_', '.'])
-        .next()
-        .unwrap_or("")
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
-}
+/// The shortest normalised stem this rule will match on. Below it a substring
+/// test stops meaning anything — three letters land inside unrelated words, and
+/// a false positive here shows a person another game's artwork as if it were
+/// theirs, which is the one outcome the whole tier policy is arranged around.
+const MIN_STEM: usize = 4;
 
-/// Do a story's name and an archive's resemble each other enough to sort the
-/// archive to the top? A weak prefix test, on purpose: it only reorders a list a
-/// person then reads, so a false positive costs a row's position and a false
-/// negative costs nothing at all.
-fn names_resemble(story: &str, art: &str) -> bool {
-    const MIN: usize = 3;
-    if story.len() < MIN || art.len() < MIN {
+/// Does the archive `art_filename` (stem `art_stem`) carry the same game's name
+/// as the story `story_stem`?
+///
+/// Both names are reduced by [`crate::hints::normalize_ident`] — lowercased,
+/// ASCII alphanumerics only — which is the primitive the hint index already
+/// matches game names with, and it is what makes a spaced disk-image name and a
+/// DOS 8.3 archive comparable at all: `Beyond Zork - The Coconut of Quendor`
+/// becomes `beyondzorkthecoconutofquendor`, and `beyondzo.mg1` becomes
+/// `beyondzo`.
+///
+/// The test then runs in **both directions**, because either name can be the
+/// longer one. Measured against the whole of `stories/`:
+///
+/// | story | archive | direction |
+/// | --- | --- | --- |
+/// | `zork0-r393-s890714.z6` | `zork0.{cg1,eg1,mg1,pic}` | archive inside story |
+/// | `beyondzork-r57-s871221.z5` | `beyondzo.mg1` | archive inside story |
+/// | `James Clavell's Shogun.adf` | `shogun.*` | archive inside story |
+/// | `fmvpoker.z6` | `FMVPOKER.EG1` | equal, case aside |
+///
+/// A pure prefix rule would miss the disk images, whose titles begin with an
+/// author or an article; a one-directional rule would miss whichever of the two
+/// happened to be shorter. Neither costs anything to allow, because the result
+/// is a list a person reads.
+fn belongs_to_story(story_stem: &str, art_stem: &str, art_filename: &str) -> bool {
+    // `Pic.data` and `CPIC.DATA` are the names EVERY Infocom Amiga release uses,
+    // which is the fact SQ-0734 rejected auto-pairing over. A name that carries
+    // no game identity cannot be filtered BY identity, and there can only be one
+    // of each in a folder, so the honest answer is to offer it and let the person
+    // who extracted it say whether it is theirs.
+    if is_generic_archive_name(art_filename) {
+        return true;
+    }
+    let story = crate::hints::normalize_ident(story_stem);
+    let art = crate::hints::normalize_ident(art_stem);
+    if story.len() < MIN_STEM || art.len() < MIN_STEM {
         return false;
     }
-    story.starts_with(art) || art.starts_with(story)
+    story.contains(&art) || art.contains(&story)
+}
+
+/// The two extension-less names every Infocom Amiga release ships its archive
+/// under, which is exactly why they say nothing about *which* release.
+fn is_generic_archive_name(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower == "pic.data" || lower == "cpic.data"
 }
 
 /// Is this filename worth opening as a picture archive?
 fn looks_like_art_name(filename: &str) -> bool {
     let lower = filename.to_lowercase();
-    if lower == "pic.data" || lower == "cpic.data" {
+    if is_generic_archive_name(&lower) {
         return true;
     }
     match lower.rsplit_once('.') {
@@ -641,6 +672,28 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_belongs_to_a_story_when_either_name_contains_the_other() {
+        // The four shapes the real library actually has.
+        assert!(belongs_to_story("zork0-r393-s890714", "zork0", "zork0.mg1"));
+        assert!(belongs_to_story("beyondzork-r57-s871221", "beyondzo", "beyondzo.mg1"));
+        assert!(belongs_to_story("James Clavell's Shogun", "shogun", "shogun.mg1"));
+        assert!(belongs_to_story("fmvpoker", "FMVPOKER", "FMVPOKER.EG1"));
+        assert!(belongs_to_story("Beyond Zork - The Coconut of Quendor", "beyondzo", "beyondzo.mg1"));
+
+        // …and the ones it must decline, which is the whole point of filtering.
+        assert!(!belongs_to_story("zork0-r393-s890714", "arthur", "arthur.mg1"));
+        assert!(!belongs_to_story("zork0-r393-s890714", "journey", "journey.mg1"));
+        assert!(!belongs_to_story("zork0-r393-s890714", "FMVPOKER", "FMVPOKER.EG1"));
+
+        // A stem too short to mean anything matches nothing…
+        assert!(!belongs_to_story("epic-adventure", "pic", "pic.mg1"));
+        // …but the two names an Amiga floppy actually uses carry no identity at
+        // all, so they are offered rather than hidden.
+        assert!(belongs_to_story("epic-adventure", "Pic", "Pic.data"));
+        assert!(belongs_to_story("anything", "CPIC", "CPIC.DATA"));
+    }
+
+    #[test]
     fn a_name_shaped_file_that_is_not_an_archive_is_not_a_candidate() {
         // Display-only discovery must not offer something that cannot be used:
         // the list answers "what could you pick?", and an unparseable file is not
@@ -682,6 +735,9 @@ mod tests {
         }
         // The Blorb beside it is not a native archive and is never a candidate.
         assert!(by_name("Zork0.blb").is_none(), "a Blorb is tier 1, not a pickable archive");
+        // …and neither is another game's art, which is the filter's whole job.
+        assert!(by_name("arthur.mg1").is_none(), "Arthur's plates are not Zork Zero's choice");
+        assert!(by_name("journey.mg1").is_none());
     }
 
     #[test]
@@ -751,7 +807,6 @@ mod tests {
             pictures: 172,
             part: 1,
             space_width: 320,
-            likely: true,
         };
         let pc = ArtCandidate { flavour: Flavour::Pc, rendition: "MCGA", ..amiga.clone() };
         assert_eq!(
