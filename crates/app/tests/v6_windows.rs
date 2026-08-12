@@ -21,6 +21,8 @@ mod v6_shared_screen_erase;
 mod v6_sunburst_char_echo;
 #[path = "suites/v6_split_tiles_window_zero.rs"]
 mod v6_split_tiles_window_zero;
+#[path = "suites/v6_sunburst_window_model.rs"]
+mod v6_sunburst_window_model;
 #[path = "suites/v6_win0_backdrop.rs"]
 mod v6_win0_backdrop;
 
