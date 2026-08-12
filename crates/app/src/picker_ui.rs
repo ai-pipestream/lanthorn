@@ -2010,8 +2010,14 @@ fn draw_info_panel(
 
     // Title.
     lines.push((title.to_string(), story_info_title));
-    // filename · size · modified.
+    // filename · size · [story size] · modified. The second size appears only
+    // when the file on disk is a container, because then the first one measures
+    // the container and not the game (SQ-0771): an Amiga `.adf` is 880 KB
+    // whatever it holds, and a blorb/zip carries resources beside the executable.
     let mut fs_line = format!("{} · {}", filename, human_size(meta.size_bytes));
+    if meta.story_bytes > 0 && meta.story_bytes != meta.size_bytes {
+        fs_line.push_str(&format!(" · story {}", human_size(meta.story_bytes)));
+    }
     if let Some(m) = &meta.modified {
         fs_line.push_str(&format!(" · {m}"));
     }
@@ -2532,7 +2538,7 @@ mod tests {
     fn interp_label_formats_type_version_and_blorb() {
         use app::picker::{Engine, Features, StoryMeta};
         let meta = |engine: Engine, version: Option<&str>| StoryMeta {
-            size_bytes: 0, modified: None, engine, format: String::new(),
+            size_bytes: 0, story_bytes: 0, modified: None, engine, format: String::new(),
             version: version.map(String::from), serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, disk_image: false,
             author: None, year: None,
@@ -2560,7 +2566,7 @@ mod tests {
     fn interp_label_names_the_disk_image_container() {
         use app::picker::{Engine, Features, StoryMeta};
         let meta = |disk_image: bool| StoryMeta {
-            size_bytes: 0, modified: None, engine: Engine::ZCode, format: String::new(),
+            size_bytes: 0, story_bytes: 0, modified: None, engine: Engine::ZCode, format: String::new(),
             version: Some("6".into()), serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, disk_image,
             author: None, year: None,
@@ -2635,7 +2641,7 @@ mod tests {
             title: title.into(),
             filename: format!("{title}.z5"),
             meta: StoryMeta {
-                size_bytes: 1, modified: None, engine, format: "Z-code".into(),
+                size_bytes: 1, story_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None, disk_image: false,
                 author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
@@ -2654,7 +2660,7 @@ mod tests {
             title: title.into(),
             filename: format!("{title}.z5"),
             meta: StoryMeta {
-                size_bytes: 1, modified: None, engine: Engine::ZCode, format: "Z-code".into(),
+                size_bytes: 1, story_bytes: 1, modified: None, engine: Engine::ZCode, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None, disk_image: false,
                 author: author.map(String::from), year: year.map(String::from),
@@ -3162,7 +3168,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let meta = app::picker::StoryMeta {
-            size_bytes: 0, modified: None, engine: app::picker::Engine::ZCode,
+            size_bytes: 0, story_bytes: 0, modified: None, engine: app::picker::Engine::ZCode,
             format: "Z-code".into(), version: Some("3".into()), serial: None, release: None,
             ifid: "ZCODE-88-840726".into(), features: app::picker::Features::default(),
             self_blorb: None, disk_image: false, author: None, year: None, genre: None, language: None,
@@ -3190,7 +3196,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let meta = app::picker::StoryMeta {
-            size_bytes: 92 * 1024,
+            size_bytes: 92 * 1024, story_bytes: 92 * 1024,
             modified: Some("2026-06-30".into()),
             engine: app::picker::Engine::ZCode,
             format: "Z-code".into(),
@@ -3298,7 +3304,7 @@ mod tests {
             })
             .collect();
         let meta = app::picker::StoryMeta {
-            size_bytes: 92 * 1024,
+            size_bytes: 92 * 1024, story_bytes: 92 * 1024,
             modified: None,
             engine: app::picker::Engine::ZCode,
             format: "Z-code".into(),
@@ -3342,12 +3348,49 @@ mod tests {
 
     fn minimal_story_meta() -> app::picker::StoryMeta {
         app::picker::StoryMeta {
-            size_bytes: 1, modified: None, engine: app::picker::Engine::Glulx,
+            size_bytes: 1, story_bytes: 1, modified: None, engine: app::picker::Engine::Glulx,
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None, disk_image: false,
             author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         }
+    }
+
+    /// SQ-0771: the size on the filename line measures the file on disk, which
+    /// for a container is not the game. The panel names the mounted story's own
+    /// size beside it — and only then, so a plain story file's line is unchanged.
+    #[test]
+    fn info_panel_names_the_mounted_storys_size_for_a_container() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let render = |meta: &app::picker::StoryMeta, name: &str| {
+            let area = Rect::new(0, 0, 70, 12);
+            let mut buf = Buffer::empty(area);
+            let mut cover = app::cover::CoverState::default();
+            let entry_path = std::path::Path::new(name);
+            super::draw_info_panel(
+                "Zork I", name, meta, None, 0, area, None, &mut cover, entry_path, false, None,
+                &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+            );
+            buffer_to_string(&buf, area)
+        };
+
+        // An Amiga release floppy: 880 KB of container around a 91 KB game.
+        let mut adf = minimal_story_meta();
+        adf.size_bytes = 901_120;
+        adf.story_bytes = 93_766;
+        adf.disk_image = true;
+        let text = render(&adf, "Zork I - The Great Underground Empire.adf");
+        assert!(text.contains("880 KB"), "the container's own size stays: {text:?}");
+        assert!(text.contains("story 91 KB"), "the mounted story's size is named: {text:?}");
+
+        // A plain story file: one size, no second segment.
+        let mut bare = minimal_story_meta();
+        bare.size_bytes = 93_766;
+        bare.story_bytes = 93_766;
+        let text = render(&bare, "zork1.z3");
+        assert!(text.contains("91 KB"), "the size still renders: {text:?}");
+        assert!(!text.contains("story 91 KB"), "no redundant second size: {text:?}");
     }
 
     // ── SQ-0348: author/year/genre + blurb ──────────────────────────────────────
@@ -4066,7 +4109,7 @@ mod tests {
         let cs = app::colors::ColorScheme::terminal_default();
         // A self-contained blorb story with one image resource.
         let meta = StoryMeta {
-            size_bytes: 1, modified: None, engine: Engine::ZCode, format: "Blorb".into(),
+            size_bytes: 1, story_bytes: 1, modified: None, engine: Engine::ZCode, format: "Blorb".into(),
             version: None, serial: None, release: None, ifid: "X".into(),
             features: Features::default(),
             self_blorb: Some(vec![ChunkInfo {
