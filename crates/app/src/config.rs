@@ -887,6 +887,16 @@ pub struct Config {
     /// window. Set false to use only the configured color scheme.
     #[serde(default = "default_honor_game_colours")]
     pub honor_game_colours: bool,
+    /// Set at boot when the chosen ARTWORK forced `honor_game_colours` off — a
+    /// two-colour rendition, which has no colours to give (SQ-0806).
+    ///
+    /// Same contract as [`Self::interpreter_number_cli`]: it belongs to THIS
+    /// story, so [`write_config_at`] leaves the file's own value alone while it
+    /// holds, and a later settings write cannot bake "never honour game colours"
+    /// into the global config because someone opened *Zork Zero*'s CGA artwork
+    /// once. Never persisted itself.
+    #[serde(skip)]
+    pub honor_game_colours_forced_by_art: bool,
     /// When true (default), honor the Z-machine's timed-input (`read`/`read_char`
     /// `time`+`routine` operands). Set false to treat all reads as untimed.
     #[serde(default = "default_honor_timed_input")]
@@ -1035,6 +1045,7 @@ impl Default for Config {
             text_margin_y: 0,
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
+            honor_game_colours_forced_by_art: false,
             honor_timed_input: default_honor_timed_input(),
             config_file: default_config_file(),
             config_error: None,
@@ -1342,7 +1353,11 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     put(&mut doc, "hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
     put(&mut doc, "watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
     put(&mut doc, "record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
-    put(&mut doc, "honor_game_colours", cfg.honor_game_colours.into(), cfg.honor_game_colours == def.honor_game_colours);
+    // …unless the ARTWORK forced it off for this story (SQ-0806) — see
+    // `honor_game_colours_forced_by_art`.
+    if !cfg.honor_game_colours_forced_by_art {
+        put(&mut doc, "honor_game_colours", cfg.honor_game_colours.into(), cfg.honor_game_colours == def.honor_game_colours);
+    }
     put(&mut doc, "honor_timed_input", cfg.honor_timed_input.into(), cfg.honor_timed_input == def.honor_timed_input);
     put(&mut doc, "enable_sound", cfg.enable_sound.into(), cfg.enable_sound == def.enable_sound);
     put(&mut doc, "volume", (cfg.volume as i64).into(), cfg.volume == def.volume);
@@ -1999,6 +2014,7 @@ use_defaults = false
             show_room_numbers: false,
             show_status_bar: true,
             honor_game_colours: true,
+            honor_game_colours_forced_by_art: false,
             honor_timed_input: true,
             config_file: default_config_file(),
             config_error: None,
@@ -2600,6 +2616,57 @@ use_defaults = false
         assert!(after.contains("# my carefully commented config"), "comments preserved: {after}");
         assert!(after.contains("volume = 33"), "and the new value landed: {after}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Artwork that forces `honor_game_colours` off for ONE story must not be
+    /// written back (SQ-0806): opening *Zork Zero*'s CGA rendition once would
+    /// otherwise bake "never honour game colours" into the global config and
+    /// silently strip every other game's colours from then on.
+    #[test]
+    fn artwork_forcing_game_colours_off_does_not_persist() {
+        let dir = std::env::temp_dir().join(format!("bm-honor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        // The key is PRESENT and true — the case `put` would otherwise rewrite
+        // regardless of whether the value is the default.
+        std::fs::write(&cfg_path, "honor_game_colours = true\n").unwrap();
+
+        let mut cfg = resolve(&Cli {
+            story: Some(PathBuf::from("foo.z6")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(cfg_path.clone()),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            interpreter_number: None,
+            pictures: None,
+            trace: None,
+            debug: false,
+        });
+        assert!(cfg.honor_game_colours, "the file's value loads");
+
+        // Boot against two-colour artwork: off for this story, marked forced.
+        cfg.honor_game_colours = false;
+        cfg.honor_game_colours_forced_by_art = true;
+
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        let reread: Config = toml::from_str(&back).unwrap();
+        assert!(
+            reread.honor_game_colours,
+            "the FILE must still say true — the artwork spoke for one story, not forever"
+        );
+
+        // …and an ordinary off (the user's own choice) still persists.
+        cfg.honor_game_colours_forced_by_art = false;
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        let reread: Config = toml::from_str(&back).unwrap();
+        assert!(!reread.honor_game_colours, "a user's own choice persists as always");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `--interpreter-number N` overrides the config file for ONE run, and must not

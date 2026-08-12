@@ -291,6 +291,14 @@ F2 settings screen to let your theme own every colour instead. `zvm-cli` and
 `gvm-cli` render the same colours as ANSI SGR and both accept `--no-game-colours`
 to opt out, as does setting `NO_COLOR` to a non-empty value.
 
+One thing turns it off for you. A game drawing **two-colour (CGA) artwork** is
+told the interpreter has no colours, because it has none — that artwork is a
+stencil whose own white is paint and whose transparency is meant to show your
+background through, and a story that thinks it is on a colour display paints over
+both. See [The colours come with the card](v6-graphics.md#the-colours-come-with-the-card).
+It applies to that story only and is never written back to your config, so
+choosing a `.cg1` once cannot quietly strip the colours from every other game.
+
 ## Plain text, for screen readers
 
 All three CLIs accept **`--screen-reader`** (alias `--plain`), and select it

@@ -496,6 +496,34 @@ pub(crate) fn boot_story(
             // Blorb (which is not in play at all when an override loaded) and
             // before the machine, because a 320-wide `.MG1` implies the ordinary
             // standard window on a machine, IBM PC, that declares none.
+            // SQ-0806: a TWO-COLOUR rendition has no colours to give, so the
+            // story is told the interpreter has none — `honor_game_colours` off,
+            // which is exactly what that flag already means (§8.3.2, see
+            // `loop_tick::poll_zvm_default_colours`).
+            //
+            // A `.CG1` archive is a STENCIL. On Zork Zero's border: 46,336
+            // opaque white pixels, 17,152 opaque black, and 192,512 TRANSPARENT
+            // — its white is paint, the lit face of the pillars, and its
+            // transparency is drawn so the ground behind reads as a colour the
+            // two-bit artwork never had to store. Zork Zero asks for a white
+            // page anyway, because it issues `set_colour(fg=2, bg=9)` for every
+            // video card alike (measured identical across `.cg1`, `.eg1` and
+            // `.mg1`) and the story file cannot see which archive was loaded.
+            // That page paints out both at once.
+            //
+            // Through the honour flag rather than the interpreter number, which
+            // would look like the tidier fix and is not: header `$1E` steers far
+            // more of a v6 game than colour, and advertising 1 (DECSystem-20)
+            // costs Shogun its entire RIGHT border — measured, ~11,000 opaque
+            // pixels gone on `.cg1` and `.eg1` alike.
+            //
+            // Marked as forced so a later settings write cannot bake "never
+            // honour game colours" into the global config (SQ-0646's hazard, and
+            // the same guard `interpreter_number_cli` gets).
+            if picts.is_monochrome() && cfg.honor_game_colours {
+                cfg.honor_game_colours = false;
+                cfg.honor_game_colours_forced_by_art = true;
+            }
             let v6_screen_px = picts
                 .std_window()
                 .or(named_art_std_window)

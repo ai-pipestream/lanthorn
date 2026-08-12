@@ -222,3 +222,70 @@ fn the_mcga_and_amiga_renditions_are_untouched() {
         );
     }
 }
+
+/// SQ-0806 — a two-colour rendition tells the story the interpreter has no
+/// colours, so it never asks for the white page that would paint out its own art.
+///
+/// REPORTED, on `stories/zork0-r393-s890714.z6` with `pictures = "zork0.cg1"`:
+/// the background comes out white and the black-and-white border art blends into
+/// it.
+///
+/// MEASURED CAUSE. A `.CG1` is a two-colour STENCIL. On Zork Zero's border:
+/// 46,336 opaque white pixels, 17,152 opaque black, and 192,512 transparent —
+/// one row through the pillars runs transparent at the screen edge, opaque white
+/// for the column's lit face, transparent again across the story area. Its white
+/// is PAINT and its transparency reveals a colour the artwork never stored; a
+/// white page destroys both. Zork Zero asks for one regardless of card, because
+/// it issues `set_colour(fg=2, bg=9)` for every video card alike and the story
+/// file cannot see which archive was loaded — pinned below.
+///
+/// The lever is `honor_game_colours`, which already means "declare the
+/// interpreter colourless" (§8.3.2). NOT the interpreter number: header `$1E`
+/// steers far more of a v6 game than colour, and advertising 1 (DECSystem-20)
+/// costs Shogun its whole right border.
+#[test]
+fn a_two_colour_rendition_is_told_the_interpreter_has_no_colours() {
+    use zvm::screen::ZColour;
+
+    // The premise: told it has colours, the game sets the same pair whatever the
+    // card — so nothing about the ARCHIVE is what stops it.
+    for archive in ["zork0.cg1", "zork0.eg1", "zork0.mg1"] {
+        let Some(session) = boot(archive, true) else { return };
+        let v6 = session.machine.screen.v6.as_ref().expect("v6 window table");
+        assert_eq!(
+            (v6.windows[0].fg, v6.windows[0].bg),
+            (ZColour::Standard(2), ZColour::Standard(9)),
+            "{archive}: Zork Zero sets black-on-white whatever the card"
+        );
+    }
+
+    // …and told it has none, it asks for nothing at all — on windows 0 (story),
+    // 1 (status) and 7 (border) alike, which are Zork Zero's three coloured
+    // windows. The host theme then owns the ground the stencil reveals.
+    for archive in ["zork0.cg1", "zork0.mg1"] {
+        let Some(session) = boot(archive, false) else { return };
+        let v6 = session.machine.screen.v6.as_ref().expect("v6 window table");
+        for w in [0usize, 1, 7] {
+            assert_eq!(
+                (v6.windows[w].fg, v6.windows[w].bg),
+                (ZColour::Default, ZColour::Default),
+                "{archive}: a colourless interpreter is never asked for window {w}'s colours"
+            );
+        }
+    }
+}
+
+/// The archive says two-colour from its CONTENT, not from a filename a rename
+/// could make a lie — this is what `startup` reads to force the flag off.
+#[test]
+fn a_cga_archive_reports_itself_monochrome_and_the_others_do_not() {
+    for (archive, want) in
+        [("zork0.cg1", true), ("zork0.eg1", false), ("zork0.mg1", false), ("zork0.pic", false)]
+    {
+        let Some(raw) = read(archive) else { continue };
+        let pics = InfocomPics::parse(raw).expect("parses");
+        assert_eq!(pics.is_monochrome(), want, "{archive}: InfocomPics::is_monochrome");
+        let Some(src) = native(archive) else { continue };
+        assert_eq!(src.is_monochrome(), want, "{archive}: PictSource::is_monochrome");
+    }
+}

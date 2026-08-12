@@ -825,6 +825,19 @@ impl InfocomPics {
     /// round: EGA's table is a superset of the colours CGA art can name, so a
     /// misread CGA plate comes out in the wrong hues, whereas a misread EGA plate
     /// would come out as thirteen shades of black.
+    /// Is this a TWO-COLOUR rendition — a CGA archive?
+    ///
+    /// The same `EF_MONO` test [`Self::hardware_palette`] uses to choose between
+    /// the CGA and EGA tables, asked directly, because the answer decides more
+    /// than which palette to expand through: a two-colour display has no colours
+    /// to give a story at all (SQ-0806).
+    ///
+    /// Content, not extension — a `.cg1` somebody renamed is still a `.cg1`, and
+    /// a `.eg1` somebody renamed is not one.
+    pub fn is_monochrome(&self) -> bool {
+        self.hardware_palette() == Some(CGA_PALETTE)
+    }
+
     pub fn hardware_palette(&self) -> Option<[Rgb; 16]> {
         if self.flavour != Flavour::Pc || self.entries.iter().any(|e| e.has_own_palette()) {
             return None;

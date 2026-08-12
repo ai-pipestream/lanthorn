@@ -310,6 +310,13 @@ impl PictSource {
         self.palette_gen
     }
 
+    /// Is the artwork a TWO-COLOUR rendition? See
+    /// [`blorb::infocom_pics::InfocomPics::is_monochrome`]. `false` for a Blorb,
+    /// which is never one.
+    pub fn is_monochrome(&self) -> bool {
+        self.native.as_ref().is_some_and(blorb::infocom_pics::InfocomPics::is_monochrome)
+    }
+
     /// Is this Pict declared adaptive by the container's `APal` chunk (§11.3)?
     pub fn is_adaptive(&self, resnum: u32) -> bool {
         self.adaptive.contains(&resnum)

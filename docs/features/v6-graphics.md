@@ -271,6 +271,19 @@ archives are stored for — mode 6, the only 640-wide one the card had — is on
 per pixel. So *Zork Zero*'s CGA rendition really is crisp black-and-white line
 art, exactly as it was in 1988, and not a washed-out version of the EGA one.
 
+Two colours also make it a **stencil**, which is the part worth knowing. Count
+the border: 46,336 pixels of opaque white, 17,152 of opaque black — and 192,512
+transparent. The white is paint, the lit face of the pillars; the transparency is
+deliberate, and whatever sits behind it becomes a colour the artwork never had to
+store. Both are lost the moment something paints a page underneath, and *Zork
+Zero* asks for one — it sets black-on-white at boot and does so for every video
+card alike, because the story file cannot see which archive you loaded. So
+babelmap tells a game drawing two-colour artwork that the interpreter has no
+colours to offer, which is true, and the game stops asking. Your theme owns the
+page, the stencil reveals it, and the artwork comes out in your colours. It
+applies to that story only — it never touches your saved settings, so opening a
+`.cg1` once does not quietly strip the colours from everything else you play.
+
 Neither is *adaptive*, which matters more than it sounds. A picture that carries
 no palette normally means "draw me with whatever palette is current" (below), and
 an EGA picture carries none for an entirely different reason — it has no say in
