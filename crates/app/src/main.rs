@@ -1050,6 +1050,14 @@ fn draw_frame(
         );
         app::render::transcript::render_notifications(buf, toast_area, state);
 
+        // Every image this frame abandoned is still sitting in the terminal until we
+        // say otherwise, and the v6 pixel paths have no placement of their own to
+        // carry the escapes (SQ-0753). The whole frame is the widest possible search
+        // for a cell to hang them on, and here is the last moment one exists — a
+        // delete queued during the draw and not flushed simply waits for the next
+        // frame, so nothing is ever lost, only deferred.
+        state.graphics_render.borrow_mut().flush_kitty_deletes(full, buf);
+
         // The frame is finished — every widget and the whole overlay ladder have
         // written. Keep its cells for `/dump-cells` (SQ-0761). This is the only
         // point at which the buffer is the frame the terminal is about to receive,

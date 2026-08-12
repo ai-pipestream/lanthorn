@@ -123,4 +123,125 @@ mod unix {
         eprintln!("emitted-stream report: {}", path.display());
         eprint!("{}", pty_stream::overrun_finding(&term));
     }
+
+    /// One `key=value` out of an APC control block. `ApcCmd`'s own accessor is
+    /// private to the decoder, and `params` is the raw block it parsed.
+    fn param<'a>(params: &'a str, key: &str) -> Option<&'a str> {
+        params.split(',').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+    }
+
+    /// SQ-0753: every image babelmap stops showing must be FREED in the terminal.
+    ///
+    /// Deletes were **zero in every capture ever taken** of this app — the quest's
+    /// headline fact, and the reason it mattered: kitty evicts by LRU and evicts
+    /// images that are CURRENTLY PLACED, so an unbounded pile of orphans can blank a
+    /// live one. Only the graphics WINDOWS, whose ids babelmap allocates itself, were
+    /// ever deleted (SQ-0637); everything drawn through a `ratatui-image` `Protocol`
+    /// — every chrome band, the whole-pane raster composite — was uploaded and
+    /// abandoned. Journey release 30 over five keystrokes: 4.1 MB up, 0 bytes freed.
+    ///
+    /// The invariant asserted is the leak-free one, not a defect's presence: at the
+    /// end of the run every image the app uploaded is either still on the screen or
+    /// has been deleted, and nothing on the screen has been deleted out from under
+    /// its own placeholders. Only the emitted stream can say this — the cell buffer
+    /// cannot see an upload at all.
+    #[test]
+    fn every_abandoned_upload_is_deleted_and_no_live_one_is() {
+        let story = driver::stories_dir().join(STORY);
+        if !story.is_file() {
+            eprintln!("SKIP: gitignored story missing at {}", story.display());
+            return;
+        }
+        let user_dir = out_dir().join("user-dir-deletes");
+        let _ = std::fs::remove_dir_all(&user_dir);
+
+        let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_babelmap"), &story, &user_dir);
+        spec.cols = COLS;
+        spec.rows = ROWS;
+        // Journey boots through the raster path and then hands the screen to the
+        // hybrid ring, so this walk abandons a whole-pane composite AND re-encodes a
+        // band — the two ways a `ratatui-image` upload is orphaned.
+        spec.keys = vec![
+            driver::Key::Wait(Duration::from_millis(1500)),
+            driver::Key::Bytes(b"\r".to_vec()),
+            driver::Key::Wait(Duration::from_millis(800)),
+            driver::Key::Bytes(b"\r".to_vec()),
+            driver::Key::Wait(Duration::from_millis(800)),
+            driver::Key::Bytes(b"\r".to_vec()),
+            driver::Key::Wait(Duration::from_millis(800)),
+            driver::Key::Bytes(b"\r".to_vec()),
+            driver::Key::Wait(Duration::from_millis(1200)),
+        ];
+
+        let cap = driver::run(spec).expect("the pty harness should boot babelmap");
+        let term = pty_stream::decode_capture(&cap);
+        let report = pty_stream::report(&cap, &term);
+        let path = out_dir().join("journey-r30-deletes.txt");
+        let _ = std::fs::write(&path, &report);
+
+        let neg = cap.negotiated();
+        assert!(
+            neg.is_kitty(),
+            "half-blocks uploads nothing, so this measures nothing: {}\n(report at {})",
+            neg.explain(),
+            path.display()
+        );
+
+        // Transmits and deletes carry the FULL 32-bit id; a placeholder cell can only
+        // carry the low 24 bits (the high byte is a diacritic the decoder does not
+        // fold back in), so the comparison happens down there.
+        let low24 = |id: u32| id & 0x00FF_FFFF;
+        let ids = |action: &str| -> std::collections::BTreeSet<u32> {
+            term.apc
+                .iter()
+                .filter(|a| param(&a.params, "a") == Some(action))
+                .filter_map(|a| param(&a.params, "i")?.parse::<u32>().ok())
+                // babelmap's own graphics-window ids are deliberately KEPT uploaded
+                // and re-placed (`KITTY_CACHE`, SQ-0564), so an unplaced one is a
+                // cache entry, not a leak. Only the `ratatui-image` uploads — random
+                // ids, no cache of their own — are in scope here.
+                .filter(|id| id & 0xFFF0_0000 != 0x00B0_0000)
+                .collect()
+        };
+        let uploaded: std::collections::BTreeSet<u32> = ids("T").into_iter().map(low24).collect();
+        let deleted: std::collections::BTreeSet<u32> = ids("d").into_iter().map(low24).collect();
+        let on_screen: std::collections::BTreeSet<u32> =
+            term.placements().iter().map(|p| low24(p.image_id)).collect();
+
+        assert!(!uploaded.is_empty(), "no image was uploaded at all (report at {})", path.display());
+        assert!(
+            !deleted.is_empty(),
+            "the run uploaded {} image(s) and deleted none — this is exactly the state SQ-0753 \
+             measured, where every image babelmap ever sent stays in the terminal for good \
+             (report at {})",
+            uploaded.len(),
+            path.display()
+        );
+
+        let leaked: Vec<u32> = uploaded.difference(&on_screen).filter(|i| !deleted.contains(i)).copied().collect();
+        assert!(
+            leaked.is_empty(),
+            "image(s) {leaked:?} were uploaded, are not on the final screen, and were never \
+             deleted — the terminal is holding pixels nothing can ever show again \
+             (report at {})",
+            path.display()
+        );
+
+        let freed_but_shown: Vec<u32> = on_screen.intersection(&deleted).copied().collect();
+        assert!(
+            freed_but_shown.is_empty(),
+            "image(s) {freed_but_shown:?} are still placed on the final screen and were DELETED \
+             — `d=I` frees the data and its placements, so those cells now draw nothing \
+             (report at {})",
+            path.display()
+        );
+
+        eprintln!(
+            "emitted-stream deletes: {} uploaded, {} still on screen, {} freed — report at {}",
+            uploaded.len(),
+            on_screen.len(),
+            deleted.len(),
+            path.display()
+        );
+    }
 }
