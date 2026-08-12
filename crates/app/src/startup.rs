@@ -203,7 +203,11 @@ fn pre_boot_host_screen(
 /// `cfg` is cloned from `ctx` per story because the per-game overlays (garglk.ini
 /// colours, per-game honor/borderless) mutate it — each story must start from the
 /// pristine launch config. (SQ-0435)
-pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> BootResult {
+pub(crate) fn boot_story(
+    ctx: &LaunchCtx,
+    story_path: std::path::PathBuf,
+    overrides: &app::launch_options::LaunchOverrides,
+) -> BootResult {
     let cli = &ctx.cli;
     let mut cfg = ctx.cfg.clone();
     let data_base = ctx.data_base.clone();
@@ -231,8 +235,18 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // and PARSED here, ahead of everything, because the flavour it turns out to
     // be is an input to the profile immediately below. The archive itself is
     // handed to the `PictSource` further down; nothing reads the file twice.
+    //
+    // SQ-0789/0791: three doors, one mechanism. `--pictures` and an un-persisted
+    // choice from the launch-options dialog arrive as `overrides.pictures` and
+    // outrank the sidecar key; parked on `cfg` so a restart re-resolves the same
+    // archive instead of quietly reverting to the Blorb.
+    cfg.pictures_override = overrides.pictures.clone();
     let picture_override = if cfg.images {
-        app::graphics::PictureOverride::resolve(&story_path, &game_dir)
+        app::graphics::PictureOverride::resolve_with_session(
+            &story_path,
+            &game_dir,
+            cfg.pictures_override.as_deref(),
+        )
     } else {
         app::graphics::PictureOverride::Unset
     };
@@ -259,6 +273,27 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // terminal cells on one machine's colours and the v6 pixel path on another's.
     // Re-asserted on every story so a picker→play loop cannot carry one story's
     // machine into the next.
+    //
+    // SQ-0789: the interpreter number now has two more specific sources than the
+    // global config — a value chosen in the launch-options dialog for THIS launch,
+    // and one the dialog's checkbox wrote to this game's own sidecar. Most
+    // specific first: this launch, then the CLI flag (a deliberate instruction
+    // for the run), then the game's sidecar, then the global config.
+    //
+    // Set through `interpreter_number_cli` as well as `interpreter_number`,
+    // which is what marks a value as belonging to THIS RUN: `write_config_at`
+    // leaves the global config.toml's own key alone while the two agree. Without
+    // that, opening the settings screen during a game whose sidecar pins the
+    // Amiga would quietly bake 4 into the GLOBAL config and hand every other
+    // story the wrong machine.
+    if let Some(n) = overrides
+        .interpreter_number
+        .or(cfg.interpreter_number_cli)
+        .or_else(|| app::styles::read_per_game_interpreter_number(&game_dir))
+    {
+        cfg.interpreter_number = Some(n);
+        cfg.interpreter_number_cli = Some(n);
+    }
     cfg.interpreter_profile = app::interpreter::InterpreterProfile::resolve(
         &story_path,
         cfg.interpreter_number,

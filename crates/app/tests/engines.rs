@@ -30,6 +30,8 @@ mod glulx_room_detection;
 mod headless;
 #[path = "suites/interpreter_profile.rs"]
 mod interpreter_profile;
+#[path = "suites/launch_options.rs"]
+mod launch_options;
 #[path = "suites/picture_override.rs"]
 mod picture_override;
 #[path = "suites/real_media_releases.rs"]

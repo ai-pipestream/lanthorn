@@ -48,8 +48,16 @@ pub(crate) fn reset_game(
             // profile is NOT re-derived from it — `state.config.interpreter_profile`
             // below is the one boot settled, and a restart re-runs the same story
             // on the same machine.
+            // SQ-0789/0791: `pictures_override` carries a choice made for THIS
+            // launch and never written down (`--pictures`, or the launch dialog
+            // with its checkbox left clear). Without it a restart would re-read
+            // only the sidecar and silently swap the art back to the Blorb.
             let over = if state.config.images {
-                app::graphics::PictureOverride::resolve(story_path, &state.game_dir)
+                app::graphics::PictureOverride::resolve_with_session(
+                    story_path,
+                    &state.game_dir,
+                    state.config.pictures_override.as_deref(),
+                )
             } else {
                 app::graphics::PictureOverride::Unset
             };

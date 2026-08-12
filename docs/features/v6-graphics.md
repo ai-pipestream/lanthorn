@@ -100,6 +100,51 @@ genuinely different pictures, not the same art at different sizes. Point the key
 at whichever one you want and restart. *Arthur*, *Journey* and *Shogun* offer the
 same choice.
 
+#### Three ways to say it
+
+The config key is the *durable* form, and editing a file before you can see the
+result is a strange way to choose something you can only judge by looking at it.
+So there are two more doors into the same mechanism, and all three end in the
+same place:
+
+| You are… | Say it with |
+| --- | --- |
+| launching one story from a shell | `--pictures <path>` |
+| browsing the library | **Shift-Enter** (or `o`, or a double right-click) on the story |
+| setting it once and forgetting it | `pictures = "…"` in the game's `config.toml` |
+
+`--pictures` is the try-it-once path — `babelmap zork0.z6 --pictures zork0.mg1` —
+and it composes with your shell, so you can flip between renditions in successive
+launches without touching any config. It **outranks** the config key: the more
+specific and more recent instruction wins. It also *requires* a story on the
+command line, and says so immediately rather than starting the browser and
+quietly discarding the flag — the flag names art for a story, so it has no
+meaning without one.
+
+**The launch-options dialog** is the richest door, because it can show you what
+you have before you choose. Select a story in the browser and press **Shift-Enter**
+— plain Enter launches as it always has, so you meet this only when you ask for
+it. (`o` does the same thing on terminals that can't tell Shift-Enter from Enter,
+and so does double-right-clicking a row.) It lists every native archive in the
+folder — flavour, picture count, part number — with the ones whose names resemble
+this story's floated to the top, and it shows you the interpreter number your
+choices imply *and where that number came from*, because picking prettier art
+can quietly change the machine you're emulating and that is not a thing to
+discover later.
+
+Everything in that dialog applies to **this launch only** — until you tick *Save
+as this game's default*, which writes it to the game's `config.toml`. That is the
+point of the checkbox: try the EGA art, look at it, and only write it down if you
+keep it. It writes only what you actually changed, so a setting you left alone
+stays inherited rather than being pinned at today's value.
+
+Two options are in there and no others, and the rule is not arbitrary: **only
+choices that cannot be changed after boot**. The artwork is opened as the story
+starts; the interpreter number is read out of the story header by the *game*.
+Anything the running app can already change — colours, the v6 render mode,
+map behaviour — belongs in the settings screen, and putting it in both places
+would give you two editors for one value.
+
 It also rescues games nothing could pair automatically. `fmvpoker.z6`, a fan-made
 video-poker cabinet, ships a readme telling you to rename one of *Zork Zero*'s
 graphics files to `FMVPOKER.EG1` and drop it alongside. No rule could ever have

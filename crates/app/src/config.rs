@@ -241,6 +241,31 @@ pub struct Cli {
     #[arg(long, value_name = "N", verbatim_doc_comment)]
     pub interpreter_number: Option<u8>,
 
+    /// Native Infocom picture archive to draw this story's art from.
+    ///
+    /// The path is taken as given if absolute, else resolved beside the STORY —
+    /// which is where these archives sit. Naming one is an instruction, not a
+    /// hint: it beats a Blorb next to the story and the `Pic.data` an Amiga
+    /// `.adf` carries, and it OUTRANKS the `pictures` key in the game's own
+    /// config.toml. A file that is absent or will not decode says so and falls
+    /// back to the Blorb; it never fails quietly.
+    ///
+    /// The archive also picks the machine, unless --interpreter-number says
+    /// otherwise: a DOS .MG1/.EG1/.CG1 asks for the IBM PC, an Amiga Pic.data
+    /// for the Amiga.
+    ///
+    ///   babelmap stories/zork0.z6 --pictures zork0.mg1
+    ///
+    /// Requires a story on the command line: the flag names art FOR a story, so
+    /// it has no referent when babelmap opens a library. Pick a rendition from
+    /// the browser with Shift-Enter instead.
+    ///
+    /// NOTE: .EG1/.CG1 archives store 640-wide art with half-width pixels, which
+    /// babelmap does not yet draw at its true aspect — they come out stretched.
+    /// .MG1 (MCGA) is the DOS rendition that is correct today.
+    #[arg(long, value_name = "PATH", requires = "story", verbatim_doc_comment)]
+    pub pictures: Option<PathBuf>,
+
     /// Debug trace sections to enable from boot: comma list of screen,map,hostio,v6
     /// (or `all`/`none`). Output goes to <user_dir>/trace.log. (trace feature)
     #[arg(long, value_name = "LIST")]
@@ -889,9 +914,14 @@ pub struct Config {
     /// which is why [`write_config_at`] gates on this field rather than on re-parsing.
     #[serde(skip)]
     pub config_error: Option<String>,
-    /// The value `--interpreter-number` supplied THIS run, if any (SQ-0646).
+    /// The interpreter number supplied for THIS RUN only, if any (SQ-0646).
     ///
-    /// A one-run CLI override must not be baked into config.toml by a later settings
+    /// `--interpreter-number` is the original source; since SQ-0789 the
+    /// launch-options dialog and the per-game sidecar's `interpreter_number` key
+    /// set it too, because they are the same shape of thing — a value in force
+    /// for one launch of one story, which the global config must never learn.
+    ///
+    /// A one-run override must not be baked into config.toml by a later settings
     /// write, so [`write_config_at`] leaves the file's own value alone while
     /// `interpreter_number` still holds this. An explicit settings-panel edit is not a
     /// CLI override, though — it changes the value (or calls
@@ -910,6 +940,18 @@ pub struct Config {
     /// profile pins those colours or the terminal supplies them. Never persisted.
     #[serde(skip)]
     pub interpreter_profile: crate::interpreter::InterpreterProfile,
+    /// The picture archive named for THIS launch — `--pictures`, or a choice the
+    /// launch-options dialog made and the user did not persist (SQ-0789/0791).
+    ///
+    /// Parked here for the same reason `interpreter_profile` is: it rides with
+    /// the story for the session. The restart path re-resolves the picture source
+    /// from the sidecar, and without this a session-only choice would silently
+    /// revert to the Blorb the moment the player restarted — which is exactly the
+    /// "plausible but wrong art, with nothing on screen to say so" failure the
+    /// tier policy exists to prevent, caused by us. Never persisted; the dialog's
+    /// checkbox is what writes a choice down.
+    #[serde(skip)]
+    pub pictures_override: Option<String>,
     /// When true (default), play audio for `sound_effect` (bleeps + Blorb samples).
     #[serde(default = "default_enable_sound")]
     pub enable_sound: bool,
@@ -998,6 +1040,7 @@ impl Default for Config {
             interpreter_number: None,
             interpreter_number_cli: None,
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
+            pictures_override: None,
             enable_sound: default_enable_sound(),
             volume: default_volume(),
             acceleration: default_acceleration(),
@@ -1603,6 +1646,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number,
+            pictures: None,
             trace: None,
             debug: false,
         }
@@ -1678,6 +1722,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -1698,6 +1743,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -1719,6 +1765,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -1957,6 +2004,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_number_cli: None,
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
+            pictures_override: None,
             enable_sound: true,
             volume: 100,
             search: SearchConfig::default(),
@@ -2261,6 +2309,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2280,6 +2329,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2309,6 +2359,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2330,6 +2381,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2352,6 +2404,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: true,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2409,6 +2462,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2459,6 +2513,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2497,6 +2552,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
@@ -2567,6 +2623,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             interpreter_number: None,
+            pictures: None,
             trace: None,
             debug: false,
         };
