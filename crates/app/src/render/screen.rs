@@ -2666,6 +2666,12 @@ pub fn build_v6_raster_canvas(
     // the box each game declared. Same lesson as `build_graphics_canvas` on the
     // hybrid side (SQ-0500): "opaque" is not "artwork".
     let mut obstruction = v6::build_graphics_canvas(&layout.chrome, native);
+    // SQ-0793: …and the side border art is extended to the bottom of that native
+    // screen before anything is scaled, exactly as the hybrid ring extends it
+    // (SQ-0698). `obstruction` is still the bare graphics canvas at this point —
+    // the same image hybrid classifies from — so this must run BEFORE `grounds`
+    // gives it the window pages. See `extend_raster_flanks`.
+    extend_raster_flanks(&mut canvas, &obstruction, layout.story, native);
     grounds(&mut obstruction);
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
@@ -4012,6 +4018,60 @@ fn flank_tiled_source(
     }
     let art = crate::render::v6_border::art_extent(gfx, x0, x1);
     crate::render::v6_border::flank_source(canvas, gfx, x0, x1, art, native.1 as u32, top, rows)
+}
+
+/// SQ-0793: extend the side border art down the RASTER composite, in place.
+///
+/// The hybrid ring gained this in SQ-0698 and raster did not, so the two modes
+/// disagreed on the same frame: Shogun's Amiga border ends at native row 336 of
+/// 400 and Arthur's poles at 379, and the raster composite showed those last
+/// rows as an unpainted band inside the frame's own lower edge — measured on
+/// `James Clavell's Shogun.adf` (release 295, serial 890321) as **64 native rows
+/// of one flat colour** in both flanks, and on `Arthur - The Quest for
+/// Excalibur.adf` (release 54, serial 890606) as **21**. Zork Zero's pillars
+/// already reach row 400, which is why nobody saw it there.
+///
+/// **This is a composition change, not a scaling one, and that is the whole
+/// point.** Raster builds the frame once at the 640x400 native screen
+/// (`INFOCOM_V6_STD_WINDOW` doubled — SQ-0479) and hands the finished canvas to a
+/// single resize, the way Bocfel's `flush_bitmap` stretch-blits its pixmap once;
+/// so the flanks must be complete BEFORE that scale, and no band may be scaled on
+/// its own. Doing it here rather than at draw time is what keeps the corners
+/// agreeing for free — the property SQ-0698's suite asserts as a RELATION between
+/// bands on the hybrid side, and which raster gets structurally.
+///
+/// The flank columns are the ones either side of the story window's declared
+/// native rect, which is where the hybrid ring's side bands map back to. The
+/// classification reads `gfx`, the bare graphics canvas — "opaque" is not
+/// "artwork" (SQ-0500) — while the pixels are cut from `canvas`, which already
+/// carries the painted ground and the window pages, exactly as
+/// [`flank_tiled_source`] pairs them. Everything above the art's own extent comes
+/// back byte-for-byte, so a flank with nothing to extend is untouched.
+fn extend_raster_flanks(
+    canvas: &mut image::RgbaImage,
+    gfx: &image::RgbaImage,
+    story: Option<&crate::engine::PositionedWindow>,
+    native: (u16, u16),
+) {
+    let Some(story) = story else { return };
+    let native_h = native.1 as u32;
+    let right = (story.x_px as u32).saturating_add(story.w_px as u32);
+    for (x0, x1) in [(0, (story.x_px as u32).min(native.0 as u32)), (right.min(native.0 as u32), native.0 as u32)] {
+        if x1 <= x0 {
+            continue;
+        }
+        let art = crate::render::v6_border::art_extent(gfx, x0, x1);
+        let Some(src) =
+            crate::render::v6_border::flank_source(canvas, gfx, x0, x1, art, native_h, 0, native_h)
+        else {
+            continue;
+        };
+        for y in 0..src.height().min(canvas.height()) {
+            for x in 0..src.width().min(canvas.width().saturating_sub(x0)) {
+                canvas.put_pixel(x0 + x, y, *src.get_pixel(x, y));
+            }
+        }
+    }
 }
 
 /// A native `(x, y, w, h)` crop of the chrome canvas, as a band draw takes it.

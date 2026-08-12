@@ -384,22 +384,60 @@ fn shogun(dst: &mut RgbaImage, art: &RgbaImage, border_height: u32, desired_heig
 ///
 /// * that span is strictly NARROWER than the flank's widest painted row — there
 ///   is a capital or a base wider than it, which is what makes the shape a
-///   pillar rather than a slab; and
+///   pillar rather than a slab;
 /// * something is painted above it and something below it, so there is a
-///   capital to cut beneath and a base to stamp back on.
+///   capital to cut beneath and a base to stamp back on; and
+/// * it is **most of the flank**. A pillar is mostly shaft — the capital and the
+///   base are the minority — so a run that holds for less than half the art is
+///   not a shaft, it is a coincidence in a textured surface. See below.
 ///
 /// Rows are compared by span rather than by pixel count on purpose: the CGA
 /// rendition dithers its masonry, so the number of opaque pixels in a shaft row
 /// wobbles from row to row while its edges do not move at all.
 ///
-/// Measured over Zork Zero's five renditions, the castle shaft is 280 to 292 of
-/// the flank's 400 rows. Its other two scene borders declare nothing usable —
-/// 14 to 146 rows, or no run at all — which is why [`zork_zero`] still needs the
-/// literal constants (SQ-0792).
+/// ## The majority test is SQ-0792, and it is what keeps a border SYMMETRIC
+///
+/// Zork Zero has three scene borders and the derivation above is right for
+/// exactly one of them. Measured over the four native archives, with each scene's
+/// flanks composed from the archive's own pictures the way `DISPLAY_BORDER` draws
+/// them — top strip (5 castle, 7 underground, 6 jungle) at `(0,0)`, then the left
+/// pillar `0x1f1`/`0x1f3`/`0x1f5` and the right `0x1f2`/`0x1f4`/`0x1f6` at
+/// `y = strip height`, at the flank width one `TEXT_WINDOW_PIC_LOC` picture fixes
+/// for all three (86 px; 88 on `zork0.pic`) — the longest constant-span run is:
+///
+/// | scene       | `zork0.mg1` | `zork0.eg1` | `zork0.cg1` | `zork0.pic` |
+/// |-------------|-------------|-------------|-------------|-------------|
+/// | castle      | 292 / 292   | 292 / 290   | 280 / 280   | 292 / 292   |
+/// | underground | 54 / 146    | 44 / 180    | 54 / 72     | 54 / 76     |
+/// | jungle      | 14 / 30     | 12 / 30     | 16 / 14     | 14 / 30     |
+///
+/// (left flank / right flank, of 400 rows. The composition is trustworthy
+/// because the castle reproduces the IN-GAME shaft to the row — `[82, 374)` on
+/// `zork0.mg1`, `[102, 382)` on `zork0.cg1`.)
+///
+/// The castle holds one span for **70–73%** of the flank on every rendition and
+/// both flanks. The underground is alternating stone blocks and the jungle is
+/// foliage: neither holds one width for long, and the longest run this would
+/// otherwise have ACCEPTED is 146 rows — **36%**. So the two families are
+/// separated by the gap 36%..70%, and the cut is at **half the flank**, which is
+/// in it with margin at both ends and needs no fitting: it is the definition of a
+/// pillar, not a number tuned to this corpus.
+///
+/// **What went wrong without it is worse than a mis-cut, because the two flanks
+/// disagreed with each other.** A border is symmetric by construction — one pair
+/// of pillar pictures drawn at one `y` — but this runs per flank, so on
+/// `zork0.cg1` underground the left flank cut at row 78 and the right at row 296,
+/// and on `zork0.mg1` jungle the left derived a 14-row repeat unit while the
+/// right fell back to the castle's 284. Six of the eight non-castle flank PAIRS
+/// measured got different recipes from each other. With the majority test every
+/// castle flank still derives and every other flank falls back, so the underground
+/// and the jungle get the castle constants uniformly — which is what SQ-0792
+/// predicted in the first place, and which the mirror of SQ-0808 then makes
+/// seamless without knowing which scene is on screen.
 ///
 /// Only rows `[0, art_bottom)` are considered — below that is the caller's
 /// extension, not the game's art.
-fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
+pub fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
     let w = dst.width();
     let span = |y: u32| -> Option<(u32, u32)> {
         let mut first = None;
@@ -428,7 +466,8 @@ fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
     }
     let (top, bottom) = best;
     let (first, last) = rows.get(top as usize).copied().flatten()?;
-    if last - first + 1 >= widest || top == 0 || bottom >= art_bottom {
+    // …and the run must be MOST of the flank (SQ-0792) — see the table above.
+    if last - first + 1 >= widest || top == 0 || bottom >= art_bottom || (bottom - top) * 2 < art_bottom {
         return None;
     }
     Some((top, bottom))
@@ -464,9 +503,11 @@ fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
 /// derivation of them rather than a replacement for them.
 ///
 /// When the flank shows no pillar shape at all, `pillar_shaft` says so and those
-/// constants are used as written. Every *castle* flank measured declares a shaft,
-/// so that arm is Zork Zero's other two scene borders (below), whose stonework
-/// has no plain span to find.
+/// constants are used as written. Every *castle* flank measured declares a shaft
+/// and no other Zork Zero flank does, so that arm is exactly its other two scene
+/// borders (below) — see [`pillar_shaft`] for the measurement that separates
+/// them, and for why letting a scene border derive its own recipe was worse than
+/// this fallback rather than better (SQ-0792).
 ///
 /// ## Alternate tiles are MIRRORED, and that is SQ-0808
 ///
@@ -500,18 +541,35 @@ fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
 /// ## Known limitation, deliberate
 ///
 /// Zork Zero has three scene borders and Bocfel gives each its own routine:
-/// castle (above), `extend_underground_pillars(73, 54, 200, 74, 38, 37)` — which
-/// alternates left/right stone blocks so the masonry stays consistent — and
+/// castle (above), `extend_underground_pillars(73, 54, 200, 74, 38, 37)` and
 /// `extend_jungle_pillars(67, 210, 143, 59)`. Which one is on screen is a
-/// Z-machine global Bocfel reads and we cannot: the canvas is pixels. Composing
-/// the other two borders from the archives' own pictures shows what they do get
-/// (SQ-0792): the underground and jungle art declares no usable shaft — the
-/// longest constant-span run is 14 to 146 rows against the castle's 280 to 292 —
-/// so those flanks fall to the castle constants above, which is what the quest
-/// predicted and what Bocfel's own dispatch exists to avoid. The mirror helps
-/// them as much as it helps CGA, and it is why neither of Bocfel's scene-specific
-/// overlaps (37 rows underground, 59 in the jungle) is reproduced here, but the
-/// repeat unit is still the castle's.
+/// Z-machine global Bocfel reads and we cannot — `WinNode::Graphics` carries a
+/// flattened `RgbaImage`, and picture numbers do not survive the engine boundary.
+/// SQ-0792 settled how much of that dispatch the pixels can replace:
+///
+/// * **Castle against not-castle: derivable, and now derived.** The castle is the
+///   only one of the three that holds one span for most of the flank, so
+///   [`pillar_shaft`]'s majority test tells them apart on every rendition, and the
+///   other two take the constants above — uniformly on BOTH flanks, which is the
+///   part that had regressed.
+/// * **The jungle's own overlap: moot.** `extend_jungle_pillars` is a plain
+///   59-row-overlap repeat with no foot, and the overlap exists to hide the seam
+///   that SQ-0808's mirror removes outright. Its `total_height` of 210 raw rows
+///   is TALLER than the 200-row screen, so the rows it reads below 200 are
+///   clipped from the canvas before we receive it; Bocfel sees them only because
+///   its pixmap is unclipped until `flush_bitmap`.
+/// * **The underground's stone alternation: genuinely blocked.** Bocfel does not
+///   flip that tile, it SWAPS the flanks — on alternate tiles it draws the right
+///   pillar's 37-px-wide stones at `x = 0` and the left pillar's at
+///   `x = width − 37`, so the two columns trade courses and the masonry stays
+///   consistent between them. That is a statement about the pair, applied only to
+///   the underground; a mirror inside one flank cannot express it, and applying
+///   it to the castle would flip a lit column's shading. Nothing in the pixels
+///   says "this is the underground". The shape of an answer exists — the
+///   underground's stone course is periodic (38 raw rows), so autocorrelation
+///   down a flank would yield a scene-agnostic repeat unit — but that would
+///   replace this measured castle derivation wholesale, and is its own piece of
+///   work rather than a refinement of this one.
 fn zork_zero(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
     /// How far Bocfel's repeat unit stays clear of the capital above it and the
     /// base below it: 2 raw rows at each end, doubled into unit space.
@@ -843,6 +901,42 @@ mod tests {
         // constants: cut 86 = 82 + 4, foot 26 = 400 - 374, unit 284 = 292 - 8.
         let (top, bottom) = pillar_shaft(&zork_zero_flank(68), 400).expect("a shaft");
         assert_eq!((top + 4, 400 - bottom, bottom - top - 8), (86, 26, 284));
+    }
+
+    /// SQ-0792 — a run that is not MOST of the flank is a coincidence in a
+    /// texture, not a pillar shaft, and accepting it gave the two sides of one
+    /// symmetric border different repeat units.
+    ///
+    /// The two cases below are `zork0.mg1`'s underground flanks reduced to their
+    /// measured runs: 54 rows on the left and 146 on the right, of 400. Both must
+    /// decline. Falsifiable: drop the majority test and they come back
+    /// `Some((74, 128))` and `Some((220, 366))` — two different recipes for two
+    /// halves of the same border.
+    #[test]
+    fn a_run_shorter_than_half_the_flank_is_not_a_shaft() {
+        /// A flank whose only constant-span run is `[top, top + run)`, narrower
+        /// than the banner above it; every other row wobbles by a pixel, exactly
+        /// as dithered masonry does.
+        fn wobbly(run: u32, top: u32) -> RgbaImage {
+            let mut c = RgbaImage::new(86, 400);
+            for y in 0..400u32 {
+                let n = if (top..top + run).contains(&y) { 60 } else { 40 + (y % 7) };
+                for x in 0..n.min(86) {
+                    c.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+                }
+            }
+            // A banner wider than anything below it, so the narrowness test passes.
+            for y in 0..20 {
+                for x in 0..86 {
+                    c.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+                }
+            }
+            c
+        }
+        assert_eq!(pillar_shaft(&wobbly(54, 74), 400), None, "54 of 400 rows is 13%");
+        assert_eq!(pillar_shaft(&wobbly(146, 220), 400), None, "146 of 400 rows is 36%");
+        // …and the castle's own 292 of 400 (73%) still is one.
+        assert_eq!(pillar_shaft(&wobbly(292, 82), 400), Some((82, 374)));
     }
 
     /// A single-piece border of one constant width — Shogun's DOS renditions,
