@@ -313,6 +313,18 @@ leaves the story window with zero height, which is exactly what Zork Zero's
 full-screen title splash relies on. Nothing is carved over the picture, and the
 game re-places the window itself when the splash goes.
 
+Some games never lay out at all. Inform 6's v6 library leaves *every* window at
+height zero and flows its prose through the transcript, so the screen model would
+otherwise come out completely empty and the composite would ship a blank page. For
+that — and only that — babelmap synthesises a full-screen story window out of the
+header's own character dimensions, so the streamed text still has somewhere to
+live. The question it asks is "did *nothing at all* survive?", which sounds
+obvious and was not: it used to ask whether the surviving windows had a zero
+*character grid*, and a game that never resizes window 0 off its boot rect never
+sets one. `sunburst.z6` is that game — a real 640×400 story window with a 0×0
+char grid — so it got a phantom twin at the same rect, filed away as frame
+furniture. One screen, one story window.
+
 ## The authentic screen: 640×400, an 8×16 cell, art doubled
 
 There's a subtlety in "how big is this thing" that decides whether the whole

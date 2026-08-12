@@ -2866,7 +2866,17 @@ impl GameSession {
         // a blank screen. When nothing survived, synthesise a full-screen
         // primary Buffer so the streamed transcript still renders — Infocom v6
         // titles keep real nonzero windows and never reach this branch.
-        if degenerate {
+        //
+        // "Nothing survived" is the question this branch asks, and it is NOT the
+        // `degenerate` one above (SQ-0805): `degenerate` reads the CELL extent, and
+        // a v6 window's cell size is its char grid, which a game that never resizes
+        // window 0 off its boot rect never sets. sunburst.z6 is that game — window 0
+        // reaches the model as 640x400 PIXELS and 0x0 cells — so the flag fired with
+        // a real primary Buffer standing right there and published a SECOND one at
+        // the same rect, which `classify_windows` then filed under chrome. The
+        // `content_size` fallback above is the consumer that genuinely wants the
+        // zero-extent test, so the two ask their own questions from here on.
+        if text_entries.is_empty() && graphics_entries.is_empty() {
             text_entries.push(PositionedWindow {
                 x: 0,
                 y: 0,
