@@ -615,24 +615,51 @@ impl ColorScheme {
 
     /// Resolve the style for one Story line: first matching user rule wins, else
     /// the built-in location rule (line matches `room_name`), else the built-in
-    /// system rule (whole line bracketed), else the base `transcript` style.
-    /// A match patches its style over `transcript` (overriding only set fields).
-    pub fn resolve_story_style(&self, line: &str, room_name: Option<&str>) -> Style {
+    /// system rule (whole line bracketed), else `base` unpatched. A match patches
+    /// its style over `base` (overriding only set fields).
+    ///
+    /// `base` is normally this scheme's own `transcript` style; under ZMSD §8.3's
+    /// Amiga interpreter it is that style with the MACHINE's ink and page laid
+    /// under it (`render::screen::v6_machine_page`), because there an inherited
+    /// channel belongs to the machine and not to the theme.
+    ///
+    /// `machine_owns_ink` is true on exactly those frames, and it withdraws the
+    /// built-in **system** rule (SQ-0822). That rule is a guess — "a whole line in
+    /// brackets came from the interpreter, not from the game" — and its payload is
+    /// a MUTED colour, chosen to recede against the theme's own page. Both halves
+    /// fail here: Arthur release 54 prints `[You have earned ten chivalry points.]`
+    /// as ordinary prose in the machine's own pens, and muting it against the
+    /// Amiga's dark-grey page leaves dark grey on dark grey, which is what the
+    /// symptom looked like. On a machine with one pair for the whole screen there
+    /// is no third colour to recede into.
+    ///
+    /// The other two rules still fire. A user `transcript_rules` entry is explicit
+    /// configuration and must always win. The built-in LOCATION rule survives
+    /// because it differs in kind: it is a reading aid, it paints an accent rather
+    /// than a mute, and an accent is legible on any page — whereas the system rule
+    /// asserts something about the line's provenance that is simply untrue here.
+    pub fn resolve_story_style(
+        &self,
+        base: Style,
+        line: &str,
+        room_name: Option<&str>,
+        machine_owns_ink: bool,
+    ) -> Style {
         for rule in &self.transcript_rules {
             if rule.regex.is_match(line) {
-                return self.transcript.patch(rule.style);
+                return base.patch(rule.style);
             }
         }
         if let Some(name) = room_name {
             if zvm::location::status_name_matches(line, name) {
-                return self.transcript.patch(self.theme.get("transcript_location").style);
+                return base.patch(self.theme.get("transcript_location").style);
             }
         }
         let t = line.trim();
-        if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
-            return self.transcript.patch(self.theme.get("transcript_system").style);
+        if !machine_owns_ink && t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
+            return base.patch(self.theme.get("transcript_system").style);
         }
-        self.transcript
+        base
     }
 
 }
@@ -951,31 +978,76 @@ mod tests {
             style: Style::new().add_modifier(Modifier::BOLD),
         });
 
+        let base = cs.transcript;
+
         // 1. User rule wins, patch semantics: bold added, base White fg kept.
-        let s = cs.resolve_story_style("> go north", Some("West of House"));
+        let s = cs.resolve_story_style(base, "> go north", Some("West of House"), false);
         assert!(s.add_modifier.contains(Modifier::BOLD));
         assert_eq!(s.fg, Some(Color::White));
 
         // 2. Built-in location: line equals room name → transcript_location's
         // accent colour patched over the base (SQ-0309: accent, not bold).
-        let loc = cs.resolve_story_style("West of House", Some("West of House"));
+        let loc = cs.resolve_story_style(base, "West of House", Some("West of House"), false);
         assert_eq!(loc.fg, Some(Color::Cyan));
         assert!(!loc.add_modifier.contains(Modifier::BOLD));
 
         // 2b. Boundary guard: "Hall" line vs room "Hallway" must NOT match location.
-        let no_loc = cs.resolve_story_style("Hall", Some("Hallway"));
+        let no_loc = cs.resolve_story_style(base, "Hall", Some("Hallway"), false);
         assert_eq!(no_loc.fg, Some(Color::White));
         assert_eq!(no_loc, cs.transcript); // falls through to base
 
         // 3. Built-in system: bracketed line → transcript_system (DarkGray).
-        let sys = cs.resolve_story_style("[Your score just went up by ten points.]", None);
+        let sys =
+            cs.resolve_story_style(base, "[Your score just went up by ten points.]", None, false);
         assert_eq!(sys.fg, Some(Color::DarkGray));
 
         // 4. No match → base transcript.
-        assert_eq!(cs.resolve_story_style("plain prose", None), cs.transcript);
+        assert_eq!(cs.resolve_story_style(base, "plain prose", None, false), cs.transcript);
 
         // 5. None room name → location never matches.
-        assert_eq!(cs.resolve_story_style("West of House", None), cs.transcript);
+        assert_eq!(cs.resolve_story_style(base, "West of House", None, false), cs.transcript);
+    }
+
+    /// SQ-0822: under ZMSD §8.3's Amiga interpreter the machine owns the screen's
+    /// one pair of pens, and the built-in "bracketed line = a message from the
+    /// interpreter" guess is withdrawn — the line is the game's prose, and muting
+    /// it paints dark grey on the Amiga's dark-grey page. The two rules either
+    /// side of it are untouched.
+    #[test]
+    fn the_machine_ink_withdraws_the_built_in_system_rule_and_nothing_else() {
+        use ratatui::style::{Color, Modifier};
+        let mut cs = ColorScheme::terminal_default();
+        cs.transcript_rules.push(CompiledRule {
+            pattern: "^>".into(),
+            regex: regex::Regex::new("^>").unwrap(),
+            style: Style::new().add_modifier(Modifier::BOLD),
+        });
+        // The Amiga's own pair, as `v6_machine_page` would have laid it under the
+        // base style: white ink on the dark grey of colour 12.
+        let base = cs.transcript.fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(66, 66, 66));
+        let notice = "[You have earned ten chivalry points.]";
+
+        let sys = cs.resolve_story_style(base, notice, None, true);
+        assert_eq!(sys, base, "the notice is prose: the machine's ink, the machine's page");
+        assert_ne!(
+            sys.fg,
+            cs.theme.get("transcript_system").style.fg,
+            "…and never the muted colour that made it unreadable",
+        );
+        // Off the Amiga the rule is exactly as it was.
+        assert_eq!(
+            cs.resolve_story_style(base, notice, None, false).fg,
+            cs.theme.get("transcript_system").style.fg,
+        );
+        // A user rule still wins on either machine, and the location aid still fires.
+        assert!(cs
+            .resolve_story_style(base, "> go north", None, true)
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(
+            cs.resolve_story_style(base, "West of House", Some("West of House"), true).fg,
+            cs.theme.get("transcript_location").style.fg,
+        );
     }
 
     #[test]

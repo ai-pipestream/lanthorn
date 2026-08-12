@@ -182,10 +182,10 @@ itself instead of quietly rebasing someone's investigation.
   an `.adf` release floppy came off an Amiga, so babelmap presents one — 
   interpreter number 4, the Amiga's 320×200 standard window (which is what makes
   the artwork in a native `Pic.data` archive scale onto the 640×400 screen, since
-  that format has no `Reso` chunk to declare it), a medium grey page and white ink
+  that format has no `Reso` chunk to declare it), a dark grey page and white ink
   reported as the interpreter's defaults, and the palette Infocom's own Amiga
-  interpreter loaded — a slightly darker green and blue than the standard's, and
-  its own three Version 6 greys.
+  interpreter loaded — a slightly darker green and blue than the standard's, a
+  warmer yellow, and its own three Version 6 greys.
 
   The artwork can select the machine too, and it sits between the two. If you
   name a picture archive for a game — the `pictures` key described under
@@ -256,13 +256,49 @@ itself instead of quietly rebasing someone's investigation.
   own reason for existing — and Infocom's interpreter is the better authority on
   how Infocom's games looked on Infocom's machine. *Journey* settles it: its Amiga
   release (30 / 890322) makes exactly one `set_colour`, asking for white on black,
-  and makes it on window 3. Applied globally that paints the game black;
-  contemporary Amiga walkthrough material shows *Journey* on light grey with white
-  text instead — the Amiga's *default* pair, `DEF_BACK 11` over `DEF_FORE 9` from
-  Infocom's own `amiga/yzip.h`. The real machine dropped the call, and so does
-  babelmap. (If you are ever tempted to "correct" this back to the bare text of the
-  standard: that is the change, and this is the paragraph explaining why it was not
-  made.)
+  and makes it on window 3. Applied globally that paints the game black; real
+  Amiga captures show *Journey* on grey with white text instead — the Amiga's
+  *default* pair, `DEF_BACK` over `DEF_FORE 9`. The real machine dropped the call,
+  and so does babelmap. (If you are ever tempted to "correct" this back to the bare
+  text of the standard: that is the change, and this is the paragraph explaining
+  why it was not made.)
+
+  **And the floppy outranks the leaked source.** babelmap took the Amiga's numbers
+  from `amiga/yzip1.c` and `amiga/yzip.h` in Infocom's leaked interpreter sources,
+  which are a *development* snapshot. In two places they disagree with what
+  Infocom actually pressed onto the disks, and the second of the two is the whole
+  screen:
+
+  | constant | leaked source | on every release floppy |
+  |---|---|---|
+  | `colortable[5]` — standard colour 5, yellow | `$0EE0` | **`$0FD0`** |
+  | `DEF_BACK` — the page every Amiga game is played on | 11, medium grey `$777` | **12, dark grey `$444`** |
+
+  Each Amiga disk in `stories/` carries its own 68000 interpreter beside the
+  story, and those programs are the authority: they are what painted the screens.
+  `set_back()` opens `if (id == 1) id = DEF_BACK;` and compiles to
+  `cmpi.w #1,d7` / `bne.s` / `moveq #12,d7` in all four; `set_color()`'s
+  `return ((DEF_BACK << 8) | DEF_FORE)` assembles to `move.w #$0C09,d0` in all
+  four; `$0B09` occurs in none of them. Real captures agree — a *Journey*
+  release‑30 screen tallies 173,994 pixels of `#444444` under 25,878 of `#FFFFFF`,
+  and an *Arthur* church screen is `#444444` under `#FFFFFF` with the status bar
+  *reversed* to `#444444` on `#FFFFFF`, which is pens 0 and 1 swapped and so proves
+  the page is the text background register rather than artwork.
+  `crates/app/tests/suites/v6_amiga_shipped_interpreter.rs` reads all of this back
+  off the disks on every run, precisely so that a future reader who reaches for
+  `yzip.h` is told by a failing test that the machine disagrees. (SQ-0822.)
+
+  **On this machine, a bracketed line is not a message from the interpreter.**
+  babelmap normally mutes a whole line in `[brackets]` in the transcript, on the
+  reasonable guess that it came from the interpreter rather than the story. Under
+  §8.3's Amiga that guess is wrong twice: *Arthur*'s
+  `[You have earned ten chivalry points.]` is the game's own prose in the game's
+  own pens, and the muted colour was chosen to recede against your *theme's* page,
+  not against the machine's dark grey — where it reads as grey on grey. So the
+  rule stands down while the machine owns the ink. Your own `[transcript.rules]`
+  entries are unaffected (they are explicit, and they always win), and so is the
+  room-heading highlight, which paints an accent rather than a mute and stays
+  legible on any page.
 
   **The machine's default pair is painted, not merely advertised.** §8.3.3 has an
   interpreter write its own default background and foreground into header bytes
@@ -272,8 +308,8 @@ itself instead of quietly rebasing someone's investigation.
   claimed is the background pen. So they are what babelmap paints with too — the
   page under the frame, the ink of any text that named no colour of its own. That
   is what makes an Amiga *look* like an Amiga rather than merely report as one:
-  *Journey* on its release floppy is white text on medium grey, frame and menu and
-  prose alike, instead of your terminal's own colours.
+  *Journey* on its release floppy is white text on the machine's dark grey, frame
+  and menu and prose alike, instead of your terminal's own colours.
 
   Two things the rule deliberately does *not* do. Colour **-1**, "the colour of the
   pixel under the cursor", names no colour, so it loads no pen — it stays a

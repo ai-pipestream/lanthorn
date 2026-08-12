@@ -6,10 +6,13 @@
 //! sharing its binary; here there is nothing else to perturb, and the flip is
 //! confined to one `#[test]` that puts it back.
 //!
-//! The values are transcribed from Infocom's own Amiga Version 6 interpreter
-//! source — `colortable[]`/`colormap[]` in `amiga/yzip1.c` and `DEF_FORE`/
-//! `DEF_BACK` in `amiga/yzip.h` — not from any modern reconstruction. The
-//! interpreter number is ZMSD §11.1.3.
+//! The values are read out of the Amiga Version 6 interpreter binaries on
+//! Infocom's own **release floppies** in `stories/` — not from any modern
+//! reconstruction, and (since SQ-0822) not from the leaked `amiga/yzip1.c`
+//! development source either, which differs from what shipped in one entry.
+//! `crates/app/tests/suites/v6_amiga_shipped_interpreter.rs` reads those bytes
+//! back off the floppies and pins this table against them. The interpreter number
+//! is ZMSD §11.1.3.
 
 use zvm::screen::{
     amiga_true_colour, grey_rgb, palette, rgb15_to_888, set_palette, standard_true_colour,
@@ -32,13 +35,16 @@ fn the_amiga_table_is_infocoms_own_colortable() {
     // Amiga interpreter passed to SetRGB4 for it, read through `colormap[]`.
     //
     //   colormap[] = { -1, -1, 2, 4, 3, 5, 0, 6, 7, 1, 8, 9, 10 }
-    //   colortable[] = { $005A, $0FFF, $0000, $00C0, $0E00, $0EE0,
+    //   colortable[] = { $005A, $0FFF, $0000, $00C0, $0E00, $0FD0,
     //                    $0F0F, $00EE, $0AAA, $x777, $0444 }
+    //
+    // Slot 5 is `$0FD0` on every release floppy and `$0EE0` in the leaked
+    // `amiga/yzip1.c`; the shipped program wins (SQ-0822).
     let expected: [(u8, u16); 11] = [
         (2, 0x000),  // colortable[2]  black
         (3, 0xE00),  // colortable[4]  red
         (4, 0x0C0),  // colortable[3]  green
-        (5, 0xEE0),  // colortable[5]  yellow
+        (5, 0xFD0),  // colortable[5]  yellow
         (6, 0x05A),  // colortable[0]  blue
         (7, 0xF0F),  // colortable[6]  magenta
         (8, 0x0EE),  // colortable[7]  cyan
@@ -62,20 +68,22 @@ fn the_amiga_table_is_infocoms_own_colortable() {
 
 #[test]
 fn the_two_palettes_agree_where_the_standard_was_read_off_an_amiga() {
-    // Six of the eleven entries are bit-for-bit identical, which is the strongest
+    // Five of the eleven entries are bit-for-bit identical, which is the strongest
     // evidence available that ZMSD §8.3.1's "recommended" values were themselves
     // taken from an Amiga — and a useful sanity check on the transcription, since
     // an error in the derivation would be very unlikely to reproduce them.
-    for n in [2u8, 3, 5, 7, 8, 9] {
+    for n in [2u8, 3, 7, 8, 9] {
         assert_eq!(
             amiga_true_colour(n),
             zmsd_true_colour(n),
             "colour {n} is the same on both",
         );
     }
-    // …and genuinely differ exactly where the machines differ: green, blue, and
-    // the three Version 6 greys.
-    for n in [4u8, 6, 10, 11, 12] {
+    // …and genuinely differ exactly where the machines differ: green, blue, the
+    // shipped yellow (§8.3.1 kept the `$EE0` the DEVELOPMENT source had — one more
+    // sign the standard's table was read off a pre-release Amiga), and the three
+    // Version 6 greys.
+    for n in [4u8, 5, 6, 10, 11, 12] {
         assert_ne!(
             amiga_true_colour(n),
             zmsd_true_colour(n),
