@@ -37,11 +37,15 @@
 //!    ring alone, so the two pixel modes drew different screens from one turn.
 //!    Raster composes at the 640x400 native screen and scales ONCE, so the flanks
 //!    must be complete before that scale — a hybrid-only case proves nothing here.
-//! 9. **All three of Zork Zero's SCENE borders** (SQ-0792). Only one of them, the
-//!    castle, is ever reached by a play session this suite can afford, so the
-//!    other two are composed from each archive's own pictures the way
-//!    `DISPLAY_BORDER` draws them — a method the castle validates, because
-//!    composed and in-game agree to the row.
+//! 9. **A picture column over a command MENU is not a border** (SQ-0819). The
+//!    exclusion hybrid makes and raster did not: Journey's illustration sits in
+//!    the flank columns but stops above its menu strip, and extending it tiled
+//!    canyon wall over "The Party".
+//! 10. **All three of Zork Zero's SCENE borders** (SQ-0792). Only one of them,
+//!     the castle, is ever reached by a play session this suite can afford, so
+//!     the other two are composed from each archive's own pictures the way
+//!     `DISPLAY_BORDER` draws them — a method the castle validates, because
+//!     composed and in-game agree to the row.
 //!
 //! Fixtures are named by exact release, per CLAUDE.md: a disk image is a
 //! different build, not the same story on other media. `stories/` is gitignored,
@@ -1428,5 +1432,140 @@ fn autocorrelation_cannot_separate_zork_zeros_scene_borders() {
          threshold between them WOULD tell the scene borders apart — which is exactly what \
          SQ-0813 could not find and exactly what would let the per-scene dispatch go"
     );
+}
+
+// ── 11. A command MENU under the story window is not a border (SQ-0819) ─────
+
+/// Journey's two builds, at the turn each reaches its title frame — the picture
+/// up, the command menu printed, the story window short of the screen bottom.
+///
+/// A disk image is a different release, not the same story on other media: r30
+/// narrates through window 2 and r83 through window 0 (SQ-0755), which is why
+/// they need different turn counts to arrive at the same picture.
+const MENU_STRIP: &[Specimen] = &[
+    Specimen { title: "Journey", file: "Journey - The Quest Begins.adf", release: 30, serial: "890322", turns: 2 },
+    Specimen { title: "Journey", file: "journey-r83-s890706.z6", release: 83, serial: "890706", turns: 4 },
+];
+
+/// The raster composite must NOT extend a picture column down over a command
+/// menu (SQ-0819).
+///
+/// The hybrid ring has always excluded this case — `tiled_flanks` is empty under
+/// the `Menu` bottom plan, because Journey's frame is glyphs and its flank is a
+/// picture seated in a panel, not a border to extend (SQ-0750). SQ-0793 gave
+/// raster the extension without that exclusion, and the two modes drew different
+/// screens from one turn again: measured on `Journey - The Quest Begins.adf`
+/// (release 30, serial 890322) the illustration paints native rows 25..279 of
+/// columns 0..264, the story window is `(264,16) 368x272`, and "The Party" is
+/// printed at native `(152, 288)` — inside the rows the extension claimed. With
+/// no title recognised, `v6_border::recognize` fell through to `ArthurPoles`,
+/// which tiled a 4-row cut of canyon wall from row 269 down to row 400 and
+/// stamped a 28-row "foot" over the menu. The player saw "Individual Commands"
+/// alone, the art column smeared across where "The Party" belongs, and the
+/// illustration itself reading a third taller than it is. The Amiga original
+/// stops the picture above the strip and runs both labels side by side.
+///
+/// Asserted by COLOUR COUNT, the inverse of the "one flat colour" reading case 8
+/// makes: a strip of the game's own glyphs is two-tone — its ink on its page —
+/// and a slice of Journey's canyon is not. Measured on r30 at both honour
+/// settings, the whole flank below the story window went **10** colours to
+/// **2**, and "The Party"'s own glyph box **8** to **2**. The lower bound is
+/// asserted alongside the upper one, so a future extension that paints the menu
+/// FLAT cannot pass by being monochrome.
+#[test]
+fn the_raster_composite_leaves_a_command_menu_alone() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for sp in MENU_STRIP {
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        // Both modes (CLAUDE.md): true is the shipped default, and the page the
+        // label sits on is exactly what a declined game colour changes.
+        for honor in [true, false] {
+            let model = s.screen();
+            let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+            let native = app::render::v6_layout::native_extent(items);
+            let layout = app::render::v6_layout::classify_windows(items);
+            let story = layout.story.expect("a story window");
+            let native_h = native.1 as u32;
+            let story_bottom = story.y_px as u32 + story.h_px as u32;
+            // The case is only worth anything while the frame still HAS a menu
+            // strip below a short story window. Pin that, so a later change to
+            // Journey's boot cannot turn this into a vacuous pass.
+            let label = layout
+                .chrome
+                .iter()
+                .filter_map(|it| match &it.node {
+                    app::engine::WinNode::Grid(g) => Some(g.px_texts.iter()),
+                    _ => None,
+                })
+                .flatten()
+                .find(|t| t.text.contains("The Party"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} [release {}]: no \"The Party\" run on screen after {} turns — this \
+                         case needs the title frame's command menu",
+                        sp.title, sp.release, sp.turns
+                    )
+                });
+            let (lx, ly) = (label.x.max(1) as u32 - 1, label.y.max(1) as u32 - 1);
+            assert!(
+                ly >= story_bottom && story_bottom + 16 < native_h,
+                "{} [release {}]: the menu must sit BELOW a story window short of the screen \
+                 bottom — label row {ly}, story bottom {story_bottom}, native height {native_h}",
+                sp.title,
+                sp.release,
+            );
+
+            let mut state = render_state_with(honor);
+            state.config.v6_render = app::config::V6RenderMode::Raster;
+            let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+            let hues = |x0: u32, x1: u32, y0: u32, y1: u32| {
+                let mut set = std::collections::HashSet::new();
+                for y in y0..y1.min(canvas.height()) {
+                    for x in x0..x1.min(canvas.width()) {
+                        set.insert(canvas.get_pixel(x, y).0);
+                    }
+                }
+                set.len()
+            };
+
+            // (a) The whole strip below the story window, in the flank columns —
+            //     the menu's rules and labels, and nothing else. The flank art
+            //     still OFFERS an extension (`flank_source` recognises the column
+            //     as poles); the composite must simply not have taken it.
+            for (x0, x1) in [(0u32, story.x_px as u32), ((story.x_px + story.w_px) as u32, native.0 as u32)] {
+                if x1 <= x0 {
+                    continue;
+                }
+                let n = hues(x0, x1, story_bottom, native_h);
+                assert!(
+                    (1..=4).contains(&n),
+                    "{} [release {}], honor_game_colours={honor}: cols {x0}..{x1} of the raster \
+                     composite carry {n} colours below the story window (rows \
+                     {story_bottom}..{native_h}) — the menu strip is glyphs on a page, so anything \
+                     richer is border art tiled over it",
+                    sp.title,
+                    sp.release,
+                );
+            }
+
+            // (b) …and the label itself, which is what the player misses.
+            let n = hues(lx, lx + 8 * label.text.chars().count() as u32, ly, ly + 16);
+            assert!(
+                (2..=4).contains(&n),
+                "{} [release {}], honor_game_colours={honor}: \"The Party\" at native ({lx}, {ly}) \
+                 is painted in {n} colours — its own ink on its own page is two, so this label is \
+                 either buried under artwork or gone",
+                sp.title,
+                sp.release,
+            );
+            ran += 1;
+        }
+    }
+    if stories_dir().join(MENU_STRIP[0].file).exists() {
+        assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
+    }
 }
 
