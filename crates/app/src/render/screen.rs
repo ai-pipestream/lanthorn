@@ -1058,8 +1058,9 @@ fn render_node(
                             let x1 = inv_x(r.right()).min(gfx.width()).max(x0);
                             crate::render::v6_layout::region_has_opaque(&gfx, x0, y0, (x1 - x0).max(1), h)
                         };
-                        // SQ-0747: the QUANTIZATION REMAINDER above the story viewport belongs
-                        // to the flanks, not to the full-width band and not to nothing.
+                        // SQ-0747: the QUANTIZATION REMAINDER beside the story viewport belongs
+                        // to the flanks, not to the full-width band and not to nothing —
+                        // ABOVE the viewport and BELOW it alike.
                         //
                         // `story_viewport_box` quantizes the story's top edge OUTWARD to a
                         // whole cell, while the top band runs down to that quantized row. So
@@ -1089,39 +1090,103 @@ fn render_node(
                         // alone would take a row of banner away, which is why this walks
                         // strips rather than rows.
                         //
-                        if strips.iter().any(|s| matches!(s, ChromeStrip::Art(r) if r.width < area.width && r.y == viewport.y)) {
+                        // SQ-0747, second pass: and the story box has TWO quantized edges, so
+                        // there is a remainder under it as well. `story_viewport_box` rounds
+                        // the bottom in too, and the row it rounds away is a full-width band
+                        // exactly like the one above — measured off `Journey - The Quest
+                        // Begins.adf` (release 30 / serial 890322) at a 121x36 terminal: the
+                        // picture ran to row 23, the menu began at row 25, and between them a
+                        // 119-column one-row band painted a squashed slice of the whole canvas
+                        // straight across BOTH of the frame's side rules. At a 236x68 terminal
+                        // the same row has no art behind it, classifies skipped, and reaches
+                        // the screen unwritten — the two halves of the very same defect the
+                        // walk above already knows by name. One rule, expressed once: a
+                        // full-width Art strip that is the remainder of the picture's own box
+                        // belongs to the flanks, whichever side of the viewport it falls.
+                        let flank_at = |strips: &[ChromeStrip], edge: u16, top: bool| {
+                            strips.iter().any(
+                                |s| matches!(s, ChromeStrip::Art(r) if r.width < area.width && (if top { r.y } else { r.bottom() }) == edge),
+                            )
+                        };
+                        {
                             let ch = cell_px.1.max(1) as f32;
                             let sc = scale.s.max(0.001);
                             let inv_y = |row: u16| ((row.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / sc;
+                            let story_bottom = (story.y_px as i32 + story.h_px as i32) as f32;
                             let mut gap_top = viewport.y;
-                            while gap_top > area.y {
-                                let Some(i) = strips.iter().position(|s| {
-                                    matches!(s, ChromeStrip::Art(r) if r.width == area.width && r.bottom() == gap_top)
-                                }) else {
-                                    break;
-                                };
-                                let ChromeStrip::Art(r) = strips[i] else { unreachable!() };
-                                // Either half of the remainder qualifies, and which one it is
-                                // moves with the pane by fractions of a cell: the strip's own
-                                // native span is already inside the story box (so the band
-                                // would paint a squashed slice of the whole canvas over the
-                                // panel), or the band draws nothing there at all (so the rows
-                                // reach the screen unwritten). Anything else is real chrome and
-                                // stops the walk, as does a TEXT strip, whose runs are the
-                                // game's own.
-                                let remainder = (inv_y(r.y) + inv_y(r.y + 1)) / 2.0 >= story.y_px as f32;
-                                if !remainder && strip_has_art(&r) {
-                                    break;
+                            if flank_at(&strips, viewport.y, true) {
+                                while gap_top > area.y {
+                                    let Some(i) = strips.iter().position(|s| {
+                                        matches!(s, ChromeStrip::Art(r) if r.width == area.width && r.bottom() == gap_top)
+                                    }) else {
+                                        break;
+                                    };
+                                    let ChromeStrip::Art(r) = strips[i] else { unreachable!() };
+                                    // Either half of the remainder qualifies, and which one it is
+                                    // moves with the pane by fractions of a cell: the strip's own
+                                    // native span is already inside the story box (so the band
+                                    // would paint a squashed slice of the whole canvas over the
+                                    // panel), or the band draws nothing there at all (so the rows
+                                    // reach the screen unwritten). Anything else is real chrome and
+                                    // stops the walk, as does a TEXT strip, whose runs are the
+                                    // game's own.
+                                    let remainder = (inv_y(r.y) + inv_y(r.y + 1)) / 2.0 >= story.y_px as f32;
+                                    if !remainder && strip_has_art(&r) {
+                                        break;
+                                    }
+                                    strips.remove(i);
+                                    gap_top = r.y;
                                 }
-                                strips.remove(i);
-                                gap_top = r.y;
+                                if gap_top < viewport.y {
+                                    for s in &mut strips {
+                                        if let ChromeStrip::Art(r) = s {
+                                            if r.width < area.width && r.y == viewport.y {
+                                                r.height += viewport.y - gap_top;
+                                                r.y = gap_top;
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            if gap_top < viewport.y {
-                                for s in &mut strips {
-                                    if let ChromeStrip::Art(r) = s {
-                                        if r.width < area.width && r.y == viewport.y {
-                                            r.height += viewport.y - gap_top;
-                                            r.y = gap_top;
+                            // …and downward, by the same test read from the other end. The
+                            // strip's LAST row is what is asked about here, so a tall band
+                            // carrying the game's own chrome (a menu's art, a bottom rule)
+                            // cannot be swallowed by having merely begun inside the box.
+                            let mut gap_bottom = viewport.bottom();
+                            if flank_at(&strips, viewport.bottom(), false) {
+                                while gap_bottom < area.bottom() {
+                                    let Some(i) = strips.iter().position(|s| {
+                                        matches!(s, ChromeStrip::Art(r) if r.width == area.width && r.y == gap_bottom)
+                                    }) else {
+                                        break;
+                                    };
+                                    let ChromeStrip::Art(r) = strips[i] else { unreachable!() };
+                                    let remainder = (inv_y(r.bottom() - 1) + inv_y(r.bottom())) / 2.0 <= story_bottom;
+                                    // Bounded by CONTENT on both counts, and the second one is
+                                    // what keeps the corpus still. Above the story a band that
+                                    // carries the game's chrome is a TALL strip and fails the
+                                    // remainder test on its own; below it, a game whose frame
+                                    // closes along the pane's last row draws that row INSIDE its
+                                    // own story box — Zork Zero's does, at 236x68 and 121x36 —
+                                    // so the remainder test alone would swallow the bottom of its
+                                    // frame into two flanks that only cover the sides. Ask what
+                                    // is BETWEEN the flanks: the columns the band alone would
+                                    // draw. Artwork there is the game's chrome and stops the
+                                    // walk; nothing there means the band is drawing a squashed
+                                    // slice of the story's own ground, or nothing at all.
+                                    let middle = Rect::new(viewport.x, r.y, viewport.width, r.height);
+                                    if !remainder || strip_has_art(&middle) {
+                                        break;
+                                    }
+                                    strips.remove(i);
+                                    gap_bottom = r.bottom();
+                                }
+                                if gap_bottom > viewport.bottom() {
+                                    for s in &mut strips {
+                                        if let ChromeStrip::Art(r) = s {
+                                            if r.width < area.width && r.bottom() == viewport.bottom() {
+                                                r.height += gap_bottom - viewport.bottom();
+                                            }
                                         }
                                     }
                                 }
@@ -1452,15 +1517,38 @@ fn render_node(
                             // scale (leaving gaps the bridge rule absorbs) while the draw
                             // packs them tight, so anything past the last packed row falls
                             // through to the letterbox.
-                            let text_rows = menu_strips.iter().find_map(|s| match s {
-                                ChromeStrip::Text(r, runs) => {
-                                    let rows = runs.iter().map(|t| (t.y.max(1) - 1) / 16);
-                                    let first = rows.clone().min()?;
-                                    let last = rows.max()?;
-                                    Some((r.y, r.height.min(last - first + 1), first))
-                                }
-                                ChromeStrip::Art(_) => None,
-                            });
+                            //
+                            // SQ-0747: and the menu is not always a `menu_strips` strip. Only
+                            // the reclaim plans anchor one to the pane's bottom; under the
+                            // `Letterbox` plan — any pane with no vertical slack, which is
+                            // where this quest's report comes from — the very same command
+                            // menu is an ordinary TEXT strip of the RING, drawn by the very
+                            // same packing function, and `menu_strips` is empty. The map then
+                            // got `None` and inverted the whole pane linearly, which is
+                            // SQ-0550's defect one plan over: measured off `Journey - The
+                            // Quest Begins.adf` (release 30 / serial 890322), clicking `Cast`
+                            // exactly where it is drawn is ACCEPTED at 119x34 (menu plan) and
+                            // MISSED at 115x31, 150x41 and 234x65 (letterbox). So fall back to
+                            // the ring's own bottom-most text strip below the story viewport,
+                            // which is the same strip by another name.
+                            let packed = |r: &Rect, runs: &[&crate::engine::PxText]| {
+                                let rows = runs.iter().map(|t| (t.y.max(1) - 1) / 16);
+                                let first = rows.clone().min()?;
+                                let last = rows.max()?;
+                                Some((r.y, r.height.min(last - first + 1), first))
+                            };
+                            let text_rows = menu_strips
+                                .iter()
+                                .find_map(|s| match s {
+                                    ChromeStrip::Text(r, runs) => packed(r, runs),
+                                    ChromeStrip::Art(_) => None,
+                                })
+                                .or_else(|| {
+                                    strips.iter().rev().find_map(|s| match s {
+                                        ChromeStrip::Text(r, runs) if r.y >= viewport.bottom() => packed(r, runs),
+                                        _ => None,
+                                    })
+                                });
                             gr.record_hybrid_click_map(area, click_scale, native, cell_px, text_rows);
                         }
                         // The story window as real terminal text (primary-Buffer path).

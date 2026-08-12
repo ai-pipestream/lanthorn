@@ -287,20 +287,41 @@ fn journey_amiga_border_reaches_the_pane_at_every_width() {
 /// past 80 the spell list never appears, because the cell path's proportional
 /// click map puts the click three game rows below the row it was drawn on — the
 /// reported "if you click way above the menu you will get a hit".
+///
+/// SQ-0747: swept over BOTH plan regimes, because the menu is not the same strip in
+/// both. Only a reclaim plan anchors one to the pane's bottom; a pane with no vertical
+/// slack (`18·rows <= 5·cols`) puts the very same command menu in an ordinary TEXT
+/// strip of the ring, drawn by the very same consecutive-row packing — and the click
+/// map was handed the packed row mapping only when a bottom-anchored strip produced
+/// it. Everywhere else it inverted the pane linearly, which is SQ-0550's defect one
+/// plan over: the user's *"the mouse is off by one row"*. Measured before the fix off
+/// the release floppy: `Cast` clicked exactly where it is drawn was ACCEPTED at 119x34
+/// (menu plan) and MISSED at 115x31, 150x41 and 234x65 (letterbox).
+///
+/// FALSIFY that half by dropping the `strips` fallback for `text_rows` in `screen.rs`:
+/// every letterbox pane fails with `clicking 'Cast' where it is DRAWN … must open
+/// Praxix's spell list; "Tremor" never appeared`.
 #[test]
 fn journey_menu_click_where_drawn_reaches_the_game() {
     let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     // Spells Praxix can cast — what the game puts on screen when it accepts the
     // click, and nothing it shows on the plain command menu.
     const SPELLS: [&str; 3] = ["Tremor", "Wind", "Elevation"];
+    // The reclaim regime at the original height, then the no-slack one: short, and
+    // deliberately wide, where the scale is largest.
+    let panes: Vec<(u16, u16)> = WIDTHS
+        .iter()
+        .map(|&w| (w, 51u16))
+        .chain([(115, 31), (119, 33), (138, 38), (150, 41), (200, 55), (234, 65)])
+        .collect();
     for profile in [InterpreterProfile::IbmPc, InterpreterProfile::Amiga] {
         for honor in [true, false] {
-            for cols in WIDTHS {
+            for (cols, rows) in panes.iter().copied() {
                 // A fresh game per click: an accepted one takes Journey elsewhere.
                 let Some(mut session) = journey_at_menu(profile) else { return };
                 let model = session.screen();
-                let ctx = format!("{profile:?} honor={honor} w={cols}");
-                let (state, area, buf) = render_hybrid(&model, honor, cols);
+                let ctx = format!("{profile:?} honor={honor} pane {cols}x{rows}");
+                let (state, area, buf) = render_hybrid_at(&model, honor, cols, rows);
                 let map = state
                     .graphics_render
                     .borrow()

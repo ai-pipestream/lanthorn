@@ -309,9 +309,21 @@ session-only switch that never touches your saved config:
   about 192 KB a frame to draw two hundred `│`s, in a different renderer from the
   corners they hang off. Zork Zero's, Shogun's and Arthur's side columns are
   pictures, the runs cannot account for them, and they stay pictures. The half-cell
-  a story window's top edge rounds away goes to the flanks too, so the frame closes
-  at its corner instead of leaving an unwritten row between the top rule and the
-  first line of prose. And this holds at *every* pane shape, reclaimed layout or
+  a story window's edge rounds away goes to the flanks too — **both** edges, since a
+  story box has two of them: the frame closes at its top corner instead of leaving an
+  unwritten row between the top rule and the first line of prose, and its side rules
+  run down to the menu instead of stopping a row short with a pane-wide band painted
+  across them. (A band spans the whole pane by definition, so a leftover one under the
+  story paints over both side rules at once; the flanks own those columns and take the
+  row.) A band that carries the game's own chrome there — a frame closing along the
+  pane's last row, as Zork Zero's does — keeps it: the test is whether there is
+  artwork *between* the flanks, not where the row sits.
+  Clicks follow the same seam. The command menu a game like Journey puts at the foot
+  of the screen is a bottom-anchored strip when the layout has slack to reclaim and an
+  ordinary ring strip when it has none, and both are drawn by packing the game's rows
+  onto consecutive terminal rows — so the click map inverts by row index in both,
+  rather than inverting the pane linearly and landing a row off in the second.
+  And this holds at *every* pane shape, reclaimed layout or
   centred letterbox alike — a short, wide pane leaves no dead space to reclaim and
   used to hand the whole flank, border columns included, to one uploaded band, which
   swallowed the frame's rules into the picture beside them.

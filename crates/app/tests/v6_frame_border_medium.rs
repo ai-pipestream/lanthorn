@@ -688,6 +688,91 @@ fn no_unwritten_row_stands_between_the_frames_top_rule_and_the_story() {
     }
 }
 
+/// SQ-0747, second pass — and no full-width band under the story either.
+///
+/// The story box has TWO quantized edges. The absorption above claims the half-cell
+/// its TOP rounds away; the one its BOTTOM rounds away was left to the full-width band,
+/// and that band spans the pane — so it paints straight across both of the frame's side
+/// rules. Measured off `Journey - The Quest Begins.adf` (release 30 / serial 890322) at
+/// a 121x36 terminal: the picture ran to row 23, the menu began at row 25, and row 24
+/// was `strip:art (1, 24, 119, 1)`, placeholder cells right across, ending `▒▒▒▒▒▒│`
+/// where the rows above it end `█│ │`. At a 236x68 terminal the same row has no art
+/// behind it, classifies skipped, and reaches the screen unwritten instead.
+///
+/// So: no drawn full-width band may share a row with a side rule, and no row between
+/// the frame's top rule and the menu may be written by nothing.
+///
+/// FALSIFY by dropping the downward walk in `screen.rs` (the `gap_bottom` loop): the
+/// short panes fail with `the full-width band (1, 24, 119, 1) shares row 24 with the
+/// frame's rule at (1, 2, 2, 23)`.
+#[test]
+fn no_full_width_band_paints_across_the_frames_side_rules() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for (file, profile) in [
+        ("Journey - The Quest Begins.adf", None),
+        ("journey-r83-s890706.z6", Some(InterpreterProfile::Amiga)),
+        ("journey-r83-s890706.z6", Some(InterpreterProfile::IbmPc)),
+    ] {
+        let Some(mut session) = boot(file, profile, 40) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        for honor in [true, false] {
+            // Short, tall and deliberately wide, in both plan regimes.
+            let panes = SHORT_PANES
+                .iter()
+                .map(|&(w, h)| (w, h))
+                .chain([(115, 62), (138, 68), (150, 71), (234, 65), (234, 80), (200, 55)]);
+            for (w, h) in panes {
+                let (state, _area, _buf) = render_pane(&model, honor, (1, 1, w, h), &transcript);
+                let ctx = format!("{file} {profile:?} honor={honor} pane {w}x{h}");
+                let mut borders = records(&state, "flank-divider");
+                borders.extend(records(&state, "flank-border"));
+                for (label, r) in records(&state, "strip:art") {
+                    if label != "strip:art" || r.2 < w {
+                        continue; // a skipped strip draws nothing; a side strip is not full width
+                    }
+                    for (blabel, b) in &borders {
+                        let clash = r.1 < b.1 + b.3 && b.1 < r.1 + r.3;
+                        assert!(
+                            !clash,
+                            "{ctx}: the full-width band {r:?} shares row {} with the frame's rule \
+                             at {b:?} ({blabel}) — a band spans the pane, so it paints across both \
+                             side rules; the remainder of the picture's own box belongs to the \
+                             flanks, whichever side of the viewport it falls on",
+                            r.1.max(b.1)
+                        );
+                    }
+                }
+                // …and the rules themselves run UNBROKEN from the top rule to the menu,
+                // which is the same statement read the other way: the row the band used
+                // to hold is a row the frame's own sides should be standing in. The menu
+                // is a bottom-anchored strip under a reclaim plan and an ordinary ring
+                // strip under `Letterbox`, so look for both.
+                let vp = viewport_of(&state);
+                let menu_top = records(&state, "strip:text")
+                    .into_iter()
+                    .chain(records(&state, "menu:text"))
+                    .map(|(_, r)| r.1)
+                    .filter(|&y| y >= vp.1 + vp.3)
+                    .min();
+                if let Some(menu_top) = menu_top {
+                    for (label, r) in &borders {
+                        assert!(
+                            r.1 + r.3 >= menu_top,
+                            "{ctx}: {label} at {r:?} stops at row {} while the menu begins at \
+                             {menu_top} — the frame's side rule must reach it, and the rows \
+                             between are exactly what the leftover full-width band used to paint \
+                             across.\nstrips: {:#?}",
+                            r.1 + r.3,
+                            records(&state, "strip")
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── (c) the reserved case: genuine artwork stays a bitmap ──
 
 /// The corpus this rule must NOT reach: a side column that is a picture.
