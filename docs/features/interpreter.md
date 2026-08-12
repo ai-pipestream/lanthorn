@@ -225,6 +225,39 @@ itself instead of quietly rebasing someone's investigation.
   terminal. There is no separate switch for that on purpose: `honor_game_colours`
   already decides whether the game's colour choices are honoured at all, so
   turning it off hands the screen back to your theme, profile or no profile.
+
+  **The Amiga had two pens, and moving one repaints the screen.** This is the one
+  place where claiming to be an Amiga changes not just what a game is *told* but
+  what happens when it acts on it, and the standard is blunt about it. Version 6
+  normally gives every window its own foreground and background — eight windows,
+  eight pairs — but ZMSD §8.3 carves out this machine: a Version 6 interpreter
+  going under the Amiga interpreter number "must use the same pair of colours for
+  all windows when running Infocom's games", and if either colour changes it "must
+  change the colour of all text on the screen to match". The reason is hardware.
+  The Amiga drew text through two colour *registers* and changed a colour by
+  reloading the register, so every glyph already on the display changed with it —
+  there was no way to give one window, or one word, a colour of its own.
+
+  babelmap does exactly that. Under interpreter 4 a `set_colour` from any window
+  loads the machine's two pens, every window adopts them, and every glyph already
+  drawn — status grids, the pixel-positioned labels on *Zork Zero*'s banner
+  ribbons, the prose a window has scrolled, even prose left frozen behind a window
+  that has since moved — is repainted in them. *Journey* is the title that shows
+  it off: its Amiga release colours one window and paints its whole line-drawing
+  frame through another, and only under this rule does the frame come out in the
+  white the game asked for instead of whatever your theme happened to offer.
+
+  Two things it deliberately does *not* do. Colour **-1**, "the colour of the
+  pixel under the cursor", names no colour, so it loads no pen — it stays a
+  request to draw over what is already there, which is how *Zork Zero* prints its
+  banner labels straight onto the ribbon artwork. And a pen carries ink and page
+  both, but a page nobody ever laid down is not a pixel a pen can reach: a window
+  the game never gave a background keeps painting nothing behind its glyphs, or a
+  single black `set_colour` would paint *Journey*'s own illustration out of its
+  frame. Everything else — every non-Amiga profile, and any profile at all with
+  `honor_game_colours` off, where babelmap has told the story it has no colours to
+  offer — keeps one pair per window, exactly as §8.3 describes for every other
+  machine.
 - **v6 graphical stories** — babelmap boots and plays graphical v6 titles,
   verified against *Zork Zero*'s full frame. On an image-capable terminal
   (Kitty / iTerm2 / Sixel) the game's chrome — the decorative frame, status
