@@ -429,7 +429,21 @@ or `Shift`+`↑`/`↓`/PgUp/PgDn — plain arrows keep navigating the list — a
 scroll resets whenever the highlighted story changes.
 
 `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End navigate, `Enter` or a click opens the story,
-`q`/`Esc` quits back to the shell. The badge glyphs are yours to change: set
+`q`/`Esc` quits back to the shell.
+
+**Shift-Enter** opens the story's **launch options** instead of launching it —
+the boot-time choices babelmap can only honour *before* a game starts: which
+picture archive to draw its art from, and which machine to present itself as.
+(`o` does the same, for terminals that can't tell Shift-Enter from plain Enter,
+and so does double-right-clicking a row.) Plain Enter is untouched, so you only
+meet the dialog when you ask for it. Inside it, `↑`/`↓` move between choices,
+`Space` picks the one under the cursor or flips a checkbox, `Tab`/`Shift-Tab`
+move between the buttons, `Enter` plays and `Esc` backs out. Everything applies
+to that launch alone unless you tick *Save as this game's default*, which writes
+your changes — and only your changes — to the game's own `config.toml`. See
+[choosing which artwork a game draws](v6-graphics.md#three-ways-to-say-it).
+
+The badge glyphs are yours to change: set
 `badge_zcode`, `badge_glulx`, `badge_blorb`, `badge_save`, `badge_hint` or
 `badge_hint_available` under `[elements]` in `style.toml` — they default to the
 plain letters `Z`/`G`/`B`/`S`/`H`/`h`, and a patched font can swap in real icons.

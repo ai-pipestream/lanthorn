@@ -404,6 +404,12 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("dialog.hint_suggestion", Section::Dialog, Kind::Style, Some("alert"), Delta { dim: true, ..Delta::EMPTY }),
     // The composed-input preview line shown by list dialogs ("Input: <text>_").
     row("dialog.input_preview", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
+    // SQ-0789: the launch-options dialog's caveat lines — what a chosen art
+    // rendition will and won't do (EGA/CGA not yet at their true aspect), and
+    // when a choice needs the checkbox to take effect. `alert` without `dim`:
+    // these are the lines that stop a user picking a rendition and being puzzled
+    // by the result, so they must not read as decoration.
+    row("dialog.launch_caveat", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
     // ── SQ-0664: the command band (bottom dock). Its rows reuse
     // `dialog.list_selected`. SQ-0667 (2026-08-05) retired the band's own
     // frame (it draws no `panel.border` anymore — see `render/command_band.rs`)
@@ -606,6 +612,8 @@ mod tests {
         "dialog.list_header",
         "dialog.hint_suggestion",
         "dialog.input_preview",
+        // SQ-0789: the launch-options dialog's caveat lines
+        "dialog.launch_caveat",
         // SQ-0664: the command band
         "band.column_header",
         "band.column_header:active",

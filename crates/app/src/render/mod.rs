@@ -18,6 +18,7 @@ pub mod hotkeys;
 pub mod inspector;
 pub mod inventory_dock;
 pub mod launch_dialog;
+pub mod launch_options_dialog;
 pub mod map;
 pub mod matrix;
 pub mod palette;

@@ -1450,23 +1450,43 @@ fn main() {
 
     // ── Picker → play loop ────────────────────────────────────────────────────
     loop {
-        // Obtain the next story to play.
-        let story_path = if let Some(dir) = &ctx.library_dir {
+        // Obtain the next story to play, plus any boot-time overrides chosen on
+        // the way in (SQ-0789/0791): the browser's launch-options dialog for a
+        // library launch, `--pictures` for a single file. Both are empty for an
+        // ordinary launch.
+        let (story_path, overrides) = if let Some(dir) = &ctx.library_dir {
             // Library launch: run the picker on the normal screen (the previous
             // game left its alt-screen). Quitting the picker (None) exits.
             match picker_ui::run_story_picker(dir, &ctx.cfg, &ctx.data_base) {
-                Some(p) => p,
+                Some(p) => (p.path, p.overrides),
                 None => break,
             }
         } else {
             // Single-file launch: play the one file; after it returns we exit.
-            ctx.single_file
+            // `--pictures` has a referent here and only here, which is why clap
+            // refuses it without a story (SQ-0791).
+            let path = ctx
+                .single_file
                 .clone()
-                .expect("resolve_launch sets single_file for a non-library launch")
+                .expect("resolve_launch sets single_file for a non-library launch");
+            // A shell-completed `--pictures stories/zork0.mg1` is relative to the
+            // WORKING DIRECTORY, while `pictures = "…"` in a game's config is
+            // relative to the STORY — the sidecar lives elsewhere, so that is the
+            // only sane rule there. Absolutise a CLI path that resolves from here
+            // so both readings work and neither surprises anyone; a name that
+            // does not exist from the cwd falls through to the story-relative
+            // form, which is what `--pictures zork0.mg1` means.
+            let overrides = app::launch_options::LaunchOverrides {
+                pictures: ctx.cli.pictures.as_ref().map(|p| {
+                    std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).display().to_string()
+                }),
+                interpreter_number: None,
+            };
+            (path, overrides)
         };
 
         // Per-story build (enters the game alt-screen fresh), then run the loop.
-        let boot = startup::boot_story(&ctx, story_path);
+        let boot = startup::boot_story(&ctx, story_path, &overrides);
         match run_event_loop(boot, launched_from_library) {
             RunOutcome::Exit => break,
             // Return-to-library only loops when a library exists; a single-file

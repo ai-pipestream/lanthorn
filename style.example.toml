@@ -213,6 +213,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # list_header = { parent = "text", underline = true }
 # hint_suggestion = { parent = "alert", dim = true }
 # input_preview = { parent = "alert" }
+# launch_caveat = { parent = "alert" }
 
 # ── Tooltip: hover pop-ups — background and an optional border.
 [tooltip]

@@ -635,7 +635,31 @@ impl PictureOverride {
     /// not decode must be reported before the story boots rather than discovered
     /// picture by picture as blanks.
     pub fn resolve(story_path: &std::path::Path, game_dir: &std::path::Path) -> PictureOverride {
-        let Some(name) = crate::styles::read_per_game_pictures(game_dir) else {
+        PictureOverride::resolve_with_session(story_path, game_dir, None)
+    }
+
+    /// [`resolve`](PictureOverride::resolve), with a name supplied for THIS
+    /// launch taking precedence over the sidecar's key.
+    ///
+    /// The session name is the other two doors into this mechanism (SQ-0791 /
+    /// SQ-0789): `--pictures` on the command line, and the launch-options
+    /// dialog's un-persisted choice. Both outrank the config key, matching how an
+    /// explicit interpreter number already outranks the inferred one and the
+    /// general rule that the more specific and more recent instruction wins.
+    ///
+    /// Everything downstream is unchanged: the archive still has to parse, it
+    /// still beats a Blorb and an `.adf`'s own `Pic.data`, its flavour still
+    /// picks the machine, and a name that is absent or will not decode is still
+    /// loud. A door is not a policy.
+    pub fn resolve_with_session(
+        story_path: &std::path::Path,
+        game_dir: &std::path::Path,
+        session: Option<&str>,
+    ) -> PictureOverride {
+        let Some(name) = session
+            .map(str::to_string)
+            .or_else(|| crate::styles::read_per_game_pictures(game_dir))
+        else {
             return PictureOverride::Unset;
         };
         let named = std::path::Path::new(&name);

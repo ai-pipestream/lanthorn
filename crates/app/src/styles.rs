@@ -65,11 +65,23 @@ pub fn read_per_game_show_map(game_dir: &Path) -> Option<bool> {
 /// "beside the story" is where these archives sit. Resolution and validation
 /// live in [`crate::graphics::PictureOverride::resolve`]; this only reads the key.
 ///
-/// There is deliberately no writer: no UI sets this, and the key is
-/// hand-written into the sidecar. The writer below nonetheless carries it, so
-/// toggling a colour or map preference cannot delete it.
+/// Hand-written until SQ-0789; the launch-options dialog now writes it too, via
+/// [`write_per_game_pictures`], but only when the user changed it.
 pub fn read_per_game_pictures(game_dir: &Path) -> Option<String> {
     read_config_str(game_dir, "pictures")
+}
+
+/// Read the per-game `interpreter_number` override — the machine this one story
+/// presents itself as, ZMSD §11.1.3 (SQ-0789). `None` = no override, so the
+/// launch's own precedence decides: a CLI number, else the flavour of a named
+/// picture archive, else the medium, else Frotz's rule.
+///
+/// Written only by the launch-options dialog's "save as default" checkbox, and
+/// only when the user changed it there.
+pub fn read_per_game_interpreter_number(game_dir: &Path) -> Option<u8> {
+    let text = std::fs::read_to_string(per_game_config_path(game_dir)).ok()?;
+    let v = text.parse::<toml::Value>().ok()?;
+    u8::try_from(v.get("interpreter_number")?.as_integer()?).ok()
 }
 
 /// Write the per-game `config.toml` with the given overrides, omitting a `None`
@@ -81,6 +93,8 @@ fn write_per_game_config(
     honor: Option<bool>,
     borderless: Option<bool>,
     show_map: Option<bool>,
+    pictures: Option<String>,
+    interpreter_number: Option<u8>,
 ) -> std::io::Result<()> {
     let path = per_game_config_path(game_dir);
     let mut body = String::new();
@@ -93,12 +107,15 @@ fn write_per_game_config(
     if let Some(v) = show_map {
         body.push_str(&format!("show_map = {v}\n"));
     }
-    // `pictures` (SQ-0734) has no writer of its own — the user hand-writes it —
-    // so it is read back and re-emitted here. Without this, toggling any of the
-    // three keys above through the UI would silently delete the picture archive
-    // the user named, and the game would quietly revert to its Blorb art.
-    if let Some(v) = read_per_game_pictures(game_dir) {
+    // Every writer rewrites the whole sidecar, so each must carry the keys it is
+    // not itself setting — otherwise toggling a colour preference would silently
+    // delete the picture archive the user chose and quietly revert the game to
+    // its Blorb art (SQ-0734).
+    if let Some(v) = pictures {
         body.push_str(&format!("pictures = {}\n", toml::Value::String(v)));
+    }
+    if let Some(v) = interpreter_number {
+        body.push_str(&format!("interpreter_number = {v}\n"));
     }
     if body.is_empty() {
         return match std::fs::remove_file(&path) {
@@ -117,20 +134,72 @@ fn write_per_game_config(
 /// `borderless_windows` / `show_map` override in the same sidecar. `Some(v)`
 /// writes it; `None` clears it (→ fall back to garglk.ini / the global default).
 pub fn write_per_game_honor(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(game_dir, value, read_per_game_borderless(game_dir), read_per_game_show_map(game_dir))
+    write_per_game_config(
+        game_dir,
+        value,
+        read_per_game_borderless(game_dir),
+        read_per_game_show_map(game_dir),
+        read_per_game_pictures(game_dir),
+        read_per_game_interpreter_number(game_dir),
+    )
 }
 
 /// Persist (or clear) the per-game `borderless_windows` override, preserving any
 /// `honor_game_colours` / `show_map` override in the same sidecar (SQ-0341).
 pub fn write_per_game_borderless(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(game_dir, read_per_game_honor(game_dir), value, read_per_game_show_map(game_dir))
+    write_per_game_config(
+        game_dir,
+        read_per_game_honor(game_dir),
+        value,
+        read_per_game_show_map(game_dir),
+        read_per_game_pictures(game_dir),
+        read_per_game_interpreter_number(game_dir),
+    )
 }
 
 /// Persist (or clear) the per-game `show_map` override, preserving any
 /// `honor_game_colours` / `borderless_windows` override in the same sidecar
 /// (SQ-0304).
 pub fn write_per_game_show_map(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(game_dir, read_per_game_honor(game_dir), read_per_game_borderless(game_dir), value)
+    write_per_game_config(
+        game_dir,
+        read_per_game_honor(game_dir),
+        read_per_game_borderless(game_dir),
+        value,
+        read_per_game_pictures(game_dir),
+        read_per_game_interpreter_number(game_dir),
+    )
+}
+
+/// Persist (or clear) the per-game `pictures` override — the launch-options
+/// dialog's "save as this game's default" checkbox (SQ-0789), preserving every
+/// sibling key.
+///
+/// `Some(name)` names an archive beside the story; `None` clears the key, which
+/// is what "inherit" means and is NOT the same as writing the global default.
+pub fn write_per_game_pictures(game_dir: &Path, value: Option<String>) -> std::io::Result<()> {
+    write_per_game_config(
+        game_dir,
+        read_per_game_honor(game_dir),
+        read_per_game_borderless(game_dir),
+        read_per_game_show_map(game_dir),
+        value,
+        read_per_game_interpreter_number(game_dir),
+    )
+}
+
+/// Persist (or clear) the per-game `interpreter_number` override (SQ-0789),
+/// preserving every sibling key. `None` clears it back to inheriting the
+/// launch's own precedence.
+pub fn write_per_game_interpreter_number(game_dir: &Path, value: Option<u8>) -> std::io::Result<()> {
+    write_per_game_config(
+        game_dir,
+        read_per_game_honor(game_dir),
+        read_per_game_borderless(game_dir),
+        read_per_game_show_map(game_dir),
+        read_per_game_pictures(game_dir),
+        value,
+    )
 }
 
 #[cfg(test)]
@@ -224,6 +293,40 @@ mod tests {
         // A blank value is not a choice.
         std::fs::write(per_game_config_path(&dir), "pictures = \"  \"\n").unwrap();
         assert_eq!(read_per_game_pictures(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0789: the two keys the launch-options dialog writes round-trip, clear
+    /// back to absent (which is what "inherit" means — not "written at the
+    /// default"), and survive every sibling's whole-file rewrite.
+    #[test]
+    fn the_launch_option_keys_roundtrip_and_coexist() {
+        let dir = tmp("launchopts");
+        assert_eq!(read_per_game_pictures(&dir), None);
+        assert_eq!(read_per_game_interpreter_number(&dir), None);
+
+        write_per_game_pictures(&dir, Some("zork0.mg1".into())).unwrap();
+        assert_eq!(read_per_game_pictures(&dir), Some("zork0.mg1".to_string()));
+        write_per_game_interpreter_number(&dir, Some(4)).unwrap();
+        assert_eq!(read_per_game_interpreter_number(&dir), Some(4));
+        assert_eq!(read_per_game_pictures(&dir), Some("zork0.mg1".to_string()), "sibling preserved");
+
+        // Every other writer carries both through.
+        write_per_game_honor(&dir, Some(false)).unwrap();
+        write_per_game_borderless(&dir, Some(true)).unwrap();
+        write_per_game_show_map(&dir, Some(false)).unwrap();
+        assert_eq!(read_per_game_pictures(&dir), Some("zork0.mg1".to_string()));
+        assert_eq!(read_per_game_interpreter_number(&dir), Some(4));
+
+        // Clearing one leaves the other; clearing the last removes the file.
+        write_per_game_pictures(&dir, None).unwrap();
+        assert_eq!(read_per_game_pictures(&dir), None);
+        assert_eq!(read_per_game_interpreter_number(&dir), Some(4));
+        write_per_game_interpreter_number(&dir, None).unwrap();
+        write_per_game_honor(&dir, None).unwrap();
+        write_per_game_borderless(&dir, None).unwrap();
+        write_per_game_show_map(&dir, None).unwrap();
+        assert!(!per_game_config_path(&dir).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

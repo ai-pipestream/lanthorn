@@ -326,11 +326,13 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
 
 /// Optional footer hint segments, most-important (least-guessable) first.
 /// Included left-to-right while they still fit next to the always-shown
-/// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
-/// standard convention nobody needs told, `f`/`r` survive narrowest since
-/// they name behavior no key convention predicts.
-const FOOTER_OPTIONAL: [&str; 9] =
-    ["/: IFDB search", "g: covers", "f: fetch", "r: refresh", "u: IFDB url", "H: get hints", "s: sort", "d: reverse", "PgUp/PgDn"];
+/// core hints; the rest are dropped — `PgUp/PgDn` goes last since it's a
+/// standard convention nobody needs told, and the launch-options gestures go
+/// first because a gesture nobody knows about is a feature nobody uses: nothing
+/// on screen would otherwise hint that a story can be started any way but the
+/// default one (SQ-0789).
+const FOOTER_OPTIONAL: [&str; 10] =
+    ["Shift-Enter / o / 2×right-click: options", "/: IFDB search","g: covers", "f: fetch", "r: refresh", "u: IFDB url", "H: get hints", "s: sort", "d: reverse", "PgUp/PgDn"];
 
 fn build_footer(width: u16) -> String {
     const CORE_LEFT: &str = " ↑/↓ or j/k: move";
@@ -455,14 +457,64 @@ pub(crate) fn build_cover_picker(mode: app::config::ImageProtocol) -> Option<rat
     }
 }
 
+/// What the browser hands back: the story to play, and the boot-time overrides
+/// the user asked for on the way out (SQ-0789). `overrides` is empty for every
+/// ordinary launch — Enter and a double left-click never touch it — so the
+/// common path is byte-for-byte what it was.
+pub(crate) struct PickedStory {
+    pub path: std::path::PathBuf,
+    pub overrides: app::launch_options::LaunchOverrides,
+}
+
+impl PickedStory {
+    /// Play this story with no launch-time overrides at all.
+    fn plain(path: std::path::PathBuf) -> PickedStory {
+        PickedStory { path, overrides: app::launch_options::LaunchOverrides::default() }
+    }
+}
+
+/// Open the launch-options dialog for one browser row.
+///
+/// **The single seam both gestures go through.** Shift-Enter and the double
+/// right-click both call exactly this, so the keyboard and the mouse cannot grow
+/// separate ideas of what the dialog is seeded with — the drift this function
+/// exists to prevent.
+fn open_launch_options(
+    entry: &app::picker::StoryEntry,
+    cfg: &app::config::Config,
+    data_base: &std::path::Path,
+) -> app::launch_options::LaunchOptionsState {
+    let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&entry.path));
+    // What this story already inherits, which is what every "did the user change
+    // it?" comparison is against.
+    let inherited_pictures = app::styles::read_per_game_pictures(&game_dir);
+    let inherited_interpreter =
+        app::styles::read_per_game_interpreter_number(&game_dir).or(cfg.interpreter_number);
+    // The Z-machine version, for the default half of the derived interpreter
+    // number (6 for Version 6, else 1). A Glulx or Scott story has no header
+    // 0x1E at all and the dialog says so rather than inventing a number.
+    let z_version = matches!(entry.meta.engine, app::picker::Engine::ZCode)
+        .then(|| entry.meta.version.as_deref().and_then(|v| v.parse::<u8>().ok()))
+        .flatten();
+    app::launch_options::LaunchOptionsState::new(
+        &entry.title,
+        &entry.path,
+        inherited_pictures.as_deref(),
+        inherited_interpreter,
+        z_version,
+        entry.meta.disk_image,
+    )
+}
+
 /// Run the pre-game story picker for a directory passed at launch. Returns the
-/// chosen story path, or `None` if the user quit. Exits the process with a
-/// message when the directory contains no launchable stories.
+/// chosen story (with any launch-time overrides), or `None` if the user quit.
+/// Exits the process with a message when the directory contains no launchable
+/// stories.
 pub(crate) fn run_story_picker(
     dir: &std::path::Path,
     cfg: &app::config::Config,
     data_base: &std::path::Path,
-) -> Option<std::path::PathBuf> {
+) -> Option<PickedStory> {
     let mut stories = app::picker::scan_stories(dir, data_base);
     if stories.is_empty() {
         eprintln!("babelmap: no Z-machine story files found in '{}'", dir.display());
@@ -487,11 +539,11 @@ pub(crate) fn run_story_picker(
     // Terminal setup mirrors the game loop. If any step fails we can't be
     // interactive — fall back to the first story rather than abort.
     if enable_raw_mode().is_err() {
-        return Some(stories[0].path.clone());
+        return Some(PickedStory::plain(stories[0].path.clone()));
     }
     if execute!(stdout(), EnterAlternateScreen).is_err() {
         let _ = disable_raw_mode();
-        return Some(stories[0].path.clone());
+        return Some(PickedStory::plain(stories[0].path.clone()));
     }
     // Mouse capture is opt-in (config `mouse = true`): its any-motion reporting
     // floods this loop with redraws on every mouse move. Off by default keeps the
@@ -503,7 +555,7 @@ pub(crate) fn run_story_picker(
         Ok(t) => t,
         Err(_) => {
             restore_terminal();
-            return Some(stories[0].path.clone());
+            return Some(PickedStory::plain(stories[0].path.clone()));
         }
     };
 
@@ -615,14 +667,30 @@ pub(crate) fn run_story_picker(
     // Story-list clicks: first click selects, a second on the same row within
     // this window launches it (SQ-0366).
     let mut last_click: Option<(usize, Instant)> = None;
+    // The same recogniser for the RIGHT button (SQ-0789): first click selects, a
+    // second on the same row opens the launch-options dialog. Deliberately a
+    // parallel tracker rather than a new gesture engine — double-click already
+    // exists here for the left button and right-click already exists in the map
+    // (`input.rs`), so this is a composition of two precedents, not a third idiom.
+    let mut last_right_click: Option<(usize, Instant)> = None;
     const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+    // Launch-options dialog (SQ-0789): `Some` while open, over the browser.
+    // Opened only on an explicit gesture, so a plain launch never meets it.
+    let mut launch_opts: Option<app::launch_options::LaunchOptionsState> = None;
+    let mut launch_area = Rect::new(0, 0, 0, 0);
+    let mut launch_close_rect: Option<Rect> = None;
+    let mut launch_button_rects: Vec<(app::render::dialog::ButtonId, Rect)> = Vec::new();
+    let mut launch_row_rects: Vec<(usize, Rect)> = Vec::new();
+    // A failed sidecar write, reported once the alternate screen is gone.
+    let mut persist_error: Option<String> = None;
     // A physical wheel notch emits several events, all delivered to the input
     // buffer together. Record the direction here and apply exactly one selection
     // step once the buffer drains (at the loop top), so one notch = one story
     // regardless of how the terminal spaces the events within a notch.
     let mut pending_wheel: Option<isize> = None;
 
-    let chosen: Option<std::path::PathBuf> = loop {
+    let chosen: Option<PickedStory> = loop {
         // Restore the terminal + exit if an external termination signal arrived.
         exit_if_terminated();
 
@@ -737,6 +805,19 @@ pub(crate) fn run_story_picker(
                 let rects = app::ifdb_search_modal::draw_search_modal(sm, area, &cs, buf);
                 search_area = rects.area;
                 search_close_rect = rects.close;
+            }
+
+            // Launch-options dialog (SQ-0789): topmost of all, since it is the
+            // last thing between the user and a booting story.
+            if let Some(lo) = &launch_opts {
+                if let Some(rects) =
+                    app::render::launch_options_dialog::draw_launch_options(lo, area, &cs, buf)
+                {
+                    launch_area = rects.area;
+                    launch_close_rect = rects.close;
+                    launch_button_rects = rects.buttons;
+                    launch_row_rects = rects.rows;
+                }
             }
         });
 
@@ -975,10 +1056,44 @@ pub(crate) fn run_story_picker(
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
                 let shift = k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+                // The launch-options dialog (SQ-0789) captures all keys while
+                // open; `LaunchOptionsState::on_key` owns the model (the
+                // settings screen's: ↑/↓ rows, Space acts on the row under the
+                // cursor, Tab/Shift-Tab buttons, Enter activates, Esc cancels).
+                if let Some(lo) = launch_opts.as_mut() {
+                    match lo.on_key(k) {
+                        app::launch_options::LaunchOptionsAction::Play => {
+                            let lo = launch_opts.take().expect("open");
+                            // The checkbox is the whole "try before you commit"
+                            // idea: the options apply to this launch either way,
+                            // and only a ticked box writes them down.
+                            if lo.persist {
+                                let game_dir = app::storage::game_dir(
+                                    data_base,
+                                    &app::storage::story_key(&lo.story_path),
+                                );
+                                if let Err(e) = lo.persist_to(&game_dir) {
+                                    // Said after the alternate screen is torn
+                                    // down (below), so it survives in scrollback
+                                    // rather than being wiped by the game the
+                                    // very next instant — the same reasoning
+                                    // SQ-0734 applied to its own warning.
+                                    persist_error =
+                                        Some(format!("could not save launch options: {e}"));
+                                }
+                            }
+                            break Some(PickedStory {
+                                path: lo.story_path.clone(),
+                                overrides: lo.overrides(),
+                            });
+                        }
+                        app::launch_options::LaunchOptionsAction::Cancel => launch_opts = None,
+                        app::launch_options::LaunchOptionsAction::None => {}
+                    }
                 // The IFDB search modal (SQ-0413) captures all keys while open;
                 // its state machine decides what each does (Esc backs out a
                 // level, Enter activates, ↑/↓/j/k navigate).
-                if search_modal.is_some() {
+                } else if search_modal.is_some() {
                     let action = search_modal.as_mut().unwrap().on_key(k.code, anim);
                     dispatch_search_action(action, &search_worker, dir, &mut search_modal);
                 // The resource-preview modal (SQ-0347) captures all keys while
@@ -1137,9 +1252,29 @@ pub(crate) fn run_story_picker(
                         // `.get`, not indexing (SQ-0659): Enter on an empty
                         // list (all stories vanished externally) is a no-op,
                         // not a panic.
+                        //
+                        // SQ-0789: Shift modifies the default action rather than
+                        // introducing a mode — Shift-Enter is "launch, but let me
+                        // choose first", the same shape as Shift-Tab reversing a
+                        // Tab-cycler. Plain Enter is untouched.
                         Enter => {
                             if let Some(entry) = stories.get(list.selected) {
-                                break Some(entry.path.clone());
+                                if shift {
+                                    launch_opts = Some(open_launch_options(entry, cfg, data_base));
+                                } else {
+                                    break Some(PickedStory::plain(entry.path.clone()));
+                                }
+                            }
+                        }
+                        // `o`: the same dialog, on a key every terminal can
+                        // deliver. Shift-Enter needs the kitty keyboard protocol
+                        // to be distinguishable from Enter at all — Ghostty sends
+                        // it, a plain xterm cannot — so without this alias the
+                        // feature would simply be missing on some terminals, and
+                        // would launch the story instead of explaining itself.
+                        Char('o') => {
+                            if let Some(entry) = stories.get(list.selected) {
+                                launch_opts = Some(open_launch_options(entry, cfg, data_base));
                             }
                         }
                         Char('q') => break None,
@@ -1296,9 +1431,78 @@ pub(crate) fn run_story_picker(
                 // otherwise hand this loop pixel coordinates. The launcher has no
                 // use for sub-cell precision, so take the cells and drop the rest.
                 let (m, _) = app::pixel_mouse::normalise(m);
-                if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                if let MouseEventKind::Down(MouseButton::Right) = m.kind {
+                    // SQ-0789: the mouse half of the same gesture. Mirrors the
+                    // left button exactly — first click selects the row, a second
+                    // within the double-click window acts — so the two buttons
+                    // differ only in what the second click does: launch, or ask
+                    // how to launch. Both reach `open_launch_options`, the one
+                    // seam, so keyboard and mouse cannot drift apart.
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if search_modal.is_some() {
+                    if launch_opts.is_none() && search_modal.is_none() && preview.is_none() {
+                        if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
+                            let idx = *idx;
+                            let now = Instant::now();
+                            let double = last_right_click
+                                .is_some_and(|(li, lt)| li == idx && now.duration_since(lt) < DOUBLE_CLICK);
+                            if double {
+                                if let Some(entry) = stories.get(idx) {
+                                    launch_opts = Some(open_launch_options(entry, cfg, data_base));
+                                }
+                                last_right_click = None;
+                            } else {
+                                panel_scroll = 0;
+                                list.select(idx, viewport, anim);
+                                last_right_click = Some((idx, now));
+                            }
+                        }
+                    }
+                } else if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                    let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                    if let Some(lo) = launch_opts.as_mut() {
+                        // Topmost modal: ✕ / Cancel / outside dismiss, a row moves
+                        // the cursor and acts on it (one click = point and choose),
+                        // Play launches with whatever is selected.
+                        let on_close = launch_close_rect.is_some_and(|r| r.contains(pt));
+                        let button = launch_button_rects
+                            .iter()
+                            .find(|(_, r)| r.contains(pt))
+                            .map(|(id, _)| *id);
+                        let row = launch_row_rects.iter().find(|(_, r)| r.contains(pt)).map(|(i, _)| *i);
+                        if let Some(i) = row {
+                            lo.set_cursor_index(i);
+                            lo.on_key(crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::Char(' '),
+                                crossterm::event::KeyModifiers::NONE,
+                            ));
+                        } else if button == Some(app::render::dialog::ButtonId::PlayAgain) {
+                            let lo = launch_opts.take().expect("open");
+                            if lo.persist {
+                                let game_dir = app::storage::game_dir(
+                                    data_base,
+                                    &app::storage::story_key(&lo.story_path),
+                                );
+                                if let Err(e) = lo.persist_to(&game_dir) {
+                                    // Said after the alternate screen is torn
+                                    // down (below), so it survives in scrollback
+                                    // rather than being wiped by the game the
+                                    // very next instant — the same reasoning
+                                    // SQ-0734 applied to its own warning.
+                                    persist_error =
+                                        Some(format!("could not save launch options: {e}"));
+                                }
+                            }
+                            break Some(PickedStory {
+                                path: lo.story_path.clone(),
+                                overrides: lo.overrides(),
+                            });
+                        } else if on_close
+                            || button == Some(app::render::dialog::ButtonId::Cancel)
+                            || !launch_area.contains(pt)
+                        {
+                            launch_opts = None;
+                        }
+                    } else if search_modal.is_some() {
                         // IFDB search modal (SQ-0413): the ✕ or a click outside the
                         // dialog closes it; a click inside is swallowed (its lists
                         // are keyboard-driven).
@@ -1335,7 +1539,7 @@ pub(crate) fn run_story_picker(
                         let double = last_click
                             .is_some_and(|(li, lt)| li == idx && now.duration_since(lt) < DOUBLE_CLICK);
                         if double {
-                            break Some(stories[idx].path.clone());
+                            break Some(PickedStory::plain(stories[idx].path.clone()));
                         }
                         panel_scroll = 0;
                         list.select(idx, viewport, anim);
@@ -1392,6 +1596,9 @@ pub(crate) fn run_story_picker(
     };
 
     restore_terminal();
+    if let Some(msg) = persist_error {
+        eprintln!("babelmap: {msg}");
+    }
     chosen
 }
 
@@ -3135,7 +3342,11 @@ mod tests {
         // f: fetch (first, least guessable) appears well before PgUp/PgDn (last).
         assert!(widths[0] < *widths.last().unwrap(), "{widths:?}");
         // At a wide-enough terminal, every optional hint (incl. the new u) shows.
-        let wide = super::build_footer(200);
+        // 240 rather than 200 since SQ-0789: the launch-options segment names
+        // three gestures, and the full set no longer fits an old 200-column
+        // assumption. The drop-right-to-left behaviour under 240 is what the rest
+        // of this test pins, and it is unchanged.
+        let wide = super::build_footer(240);
         for seg in super::FOOTER_OPTIONAL {
             assert!(wide.contains(seg), "wide footer shows {seg:?}: {wide:?}");
         }

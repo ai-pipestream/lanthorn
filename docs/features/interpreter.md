@@ -195,6 +195,18 @@ itself instead of quietly rebasing someone's investigation.
   changed what games did without changing the machine it implied was never a
   useful thing to be able to set.
 
+  You can set it per game as well as globally. The
+  [launch-options dialog](v6-graphics.md#three-ways-to-say-it) — **Shift-Enter**
+  on a story in the browser — shows the number your art choice implies *and where
+  it came from*, lets you pin a different one for that launch, and will write
+  `interpreter_number` into the game's own `config.toml` if you tick the box.
+  Most specific first: the dialog's choice for this launch, then
+  `--interpreter-number`, then the game's sidecar, then the global config, then
+  the inference above. It belongs in a *launch* dialog rather than the settings
+  screen because header byte `$1E` is read by the story itself at boot — a game
+  that has already started has already made decisions from it, so offering to
+  change it mid-session would be offering something babelmap cannot deliver.
+
   Authenticity can cost readability — *Zork Zero* under an Amiga picks a colour
   scheme that was easy on a 1989 monitor and is merely adequate in a modern
   terminal. There is no separate switch for that on purpose: `honor_game_colours`
