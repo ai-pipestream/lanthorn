@@ -57,6 +57,25 @@ the floppy byte-for-byte identical; two of the rest differ only in how the Blorb
 rounded the Amiga's 4-bit colours, and the others are places the Blorb kept a
 band, or a retouched version, of art the floppy still has whole.
 
+The PC releases shipped the *same* pictures in a different wrapper, and babelmap
+reads that too. `.MG1` (MCGA), `.EG1`/`.EG2` (EGA) and `.CG1` (CGA) are the same
+sixteen-byte header and the same directory written the other way round —
+little-endian, x86-style — but the pixels inside are GIF's LZW rather than
+Infocom's Huffman, with no run-length pass and no XOR. One picture, two codecs
+that share nothing: decode *Zork Zero*'s MCGA archive and its Amiga floppy side
+by side and all 383 pictures whose directories agree on size come out
+byte-for-byte identical, which is a nicer proof than any spec. Arthur and Journey
+split their EGA art across two files (`.EG1` and `.EG2`, and the header's first
+byte says which part you have); CGA keeps its big pictures as one bit per pixel,
+so *Arthur*, *Journey* and *Shogun* have 228 pictures between them that are
+literally black-and-white. Only MCGA stores palettes — EGA and CGA had theirs
+soldered in, so their directory records are two bytes shorter with nowhere to put
+one.
+
+This is the reader, not yet the plumbing: babelmap picks native artwork up from a
+mounted `.adf`, and pointing it at a loose `.MG1` sitting next to a story file is
+a separate piece of resource-resolution work still to come.
+
 Native archives carry no `Reso` chunk, so a story loaded this way falls back to
 the standard 320×200 art resolution — which is precisely what every Infocom v6
 Blorb's `Reso` chunk declares anyway, so the geometry below is unchanged either
