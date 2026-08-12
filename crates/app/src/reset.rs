@@ -69,6 +69,10 @@ pub(crate) fn reset_game(
             let picture_dims = picts.all_pict_dims();
             let v6_screen_px =
                 picts.std_window().or(named_art_std_window).or_else(|| profile.std_window());
+            // SQ-0790: and the density the art arrives at, so a restart of a
+            // story playing its EGA rendition comes back with the same geometry
+            // it booted with. `None` for every Blorb-sourced story.
+            let v6_art_scale = picts.art_scale();
             let host_default_colours = if state.config.honor_game_colours {
                 profile.default_colours().or_else(|| {
                     app::colors::host_default_colour_pair(
@@ -80,7 +84,7 @@ pub(crate) fn reset_game(
             } else {
                 None
             };
-            GameSession::new_with_trace(
+            GameSession::new_with_art_scale(
                 bytes,
                 state.config.honor_game_colours,
                 state.config.enable_sound,
@@ -90,6 +94,7 @@ pub(crate) fn reset_game(
                 state.persist_debug_trace,
                 picture_dims,
                 v6_screen_px,
+                v6_art_scale,
                 host_default_colours, None
             )
             .map_err(|e| format!("{e:?}"))

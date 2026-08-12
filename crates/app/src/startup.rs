@@ -465,6 +465,12 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                 .std_window()
                 .or(named_art_std_window)
                 .or_else(|| cfg.interpreter_profile.std_window());
+            // SQ-0790: how DENSE that art is, which only a native archive knows.
+            // A 320-wide rendition doubles onto the unit screen exactly as a
+            // Blorb's does; an EGA/CGA one is 640 wide with half-width pixels and
+            // arrives at (1, 2). `None` for every Blorb-sourced story, which is
+            // the uniform rule untouched.
+            let v6_art_scale = picts.art_scale();
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
@@ -473,7 +479,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // rule (Frotz's: 6 for v6, 1 otherwise) stays in force untouched.
             let interpreter_number =
                 cfg.interpreter_number.or_else(|| cfg.interpreter_profile.interpreter_number());
-            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, host_default_colours, host_screen) {
+            let mut s = match GameSession::new_with_art_scale(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, v6_art_scale, host_default_colours, host_screen) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;

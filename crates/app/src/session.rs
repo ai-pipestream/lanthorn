@@ -175,18 +175,20 @@ pub(crate) const V6_ART_SCALE: u32 = 2;
 /// through here exactly once, so window canvases, inline floats and the
 /// `is_content_art` classification all see one consistent unit-space size.
 ///
-/// `scale` is the session's [`GameSession::art_scale`]: [`V6_ART_SCALE`] for art
-/// with a Blorb standard window to be scaled against, 1 for non-scalable art.
-fn v6_scaled_art(img: &image::DynamicImage, scale: u32) -> image::DynamicImage {
+/// `scale` is the session's [`GameSession::art_scale`], PER AXIS: `(2, 2)` for
+/// art with a standard window to be scaled against, `(1, 1)` for non-scalable
+/// art, and `(1, 2)` for an EGA/CGA rendition whose pixels are half as wide
+/// (SQ-0790).
+fn v6_scaled_art(img: &image::DynamicImage, scale: (u32, u32)) -> image::DynamicImage {
     use image::GenericImageView;
-    if scale == 1 {
+    if scale == (1, 1) {
         return img.clone();
     }
     let (w, h) = img.dimensions();
     image::DynamicImage::ImageRgba8(image::imageops::resize(
         img,
-        w * scale,
-        h * scale,
+        w * scale.0,
+        h * scale.1,
         image::imageops::FilterType::Nearest,
     ))
 }
@@ -607,9 +609,10 @@ pub struct GameSession {
     /// onto the screen's [`paint`](GameSession::paint) ground where they were
     /// drawn, which is exactly where they stayed on the hardware.
     canvas_anchor: std::collections::HashMap<u8, CanvasAnchor>,
-    /// The factor this story's Blorb pictures are scaled by on their way to the
-    /// screen — [`V6_ART_SCALE`] for art authored against a standard window, 1 for
-    /// art that declares none (SQ-0715).
+    /// The per-axis factor this story's pictures are scaled by on their way to
+    /// the screen — `(2, 2)` for art authored against a standard window, `(1, 1)`
+    /// for art that declares none (SQ-0715), `(1, 2)` for an EGA/CGA rendition
+    /// (SQ-0790).
     ///
     /// Blorb §11 (Resolution chunk): "This chunk is optional; if it is not
     /// present, then all of the images in this file are non-scalable", and
@@ -621,7 +624,13 @@ pub struct GameSession {
     /// hardwired vector deck is the same 52×84), and doubling them made the
     /// Neapolitan and Sicilian decks twice the size the game had laid out for,
     /// overlapping each other and hanging off the bottom of the screen.
-    art_scale: u32,
+    ///
+    /// SQ-0790 made it a PAIR. A native EGA/CGA archive stores the same artwork
+    /// in a 640-wide picture space with pixels half as wide, so it reaches the
+    /// same 640×400 unit screen at (1, 2) — see
+    /// [`crate::graphics::PictSource::art_scale`], which is where the factor
+    /// comes from.
+    art_scale: (u32, u32),
     /// The v6 screen's PAINTED ground: filled rectangles an `erase_window` left
     /// behind, accumulated in native pixels (SQ-0706).
     ///
@@ -777,7 +786,26 @@ impl GameSession {
     /// in place, matching prior behaviour exactly. Ignored for v6, whose screen
     /// is the native pixel frame seeded from `v6_screen_px` above, never the host
     /// cell pane.
+    ///
+    /// The art reaches that unit screen at the uniform [`V6_ART_SCALE`]. A
+    /// launch that resolved a native picture archive may know better — see
+    /// [`Self::new_with_art_scale`] — but every caller of *this* function gets
+    /// the rule exactly as it has always been.
     pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>) -> Result<GameSession, ZError> {
+        Self::new_with_art_scale(story, honor_game_colours, sound_available, interpreter_number, trace_from_boot, picture_dims, v6_screen_px, None, default_colours, host_screen)
+    }
+
+    /// [`Self::new_with_trace`] with the art scale supplied rather than assumed
+    /// (SQ-0790).
+    ///
+    /// `v6_art_scale` is [`crate::graphics::PictSource::art_scale`]: the per-axis
+    /// factor the art is blown up by on its way onto the 640×400 unit screen,
+    /// when the source has an opinion. `None` — every Blorb-sourced story, and
+    /// every non-v6 one — keeps the uniform [`V6_ART_SCALE`] rule. Only a NATIVE
+    /// archive answers, and only an EGA/CGA one answers with anything other than
+    /// `(2, 2)`, so the two entry points are the same function for the whole
+    /// corpus.
+    pub fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
@@ -797,15 +825,19 @@ impl GameSession {
         // scalable images at all, and non-scalable images are shown at their
         // actual size, one image pixel per screen pixel. `v6_screen_px` IS that
         // chunk's standard window, so its absence is the spec's own signal.
+        //
+        // SQ-0790: per axis, because an EGA/CGA archive's pixels are half as
+        // wide. The source supplies the pair when it knows one; absent that the
+        // uniform rule stands, which is every path that existed before.
         let art_scale = if machine.mem.version() == 6 && v6_screen_px.is_some() {
-            V6_ART_SCALE
+            v6_art_scale.unwrap_or((V6_ART_SCALE, V6_ART_SCALE))
         } else {
-            1
+            (1, 1)
         };
         let picture_dims = if machine.mem.version() == 6 {
             picture_dims
                 .into_iter()
-                .map(|(n, w, h)| (n, w * art_scale as u16, h * art_scale as u16))
+                .map(|(n, w, h)| (n, w * art_scale.0 as u16, h * art_scale.1 as u16))
                 .collect()
         } else {
             picture_dims
@@ -1608,7 +1640,7 @@ impl GameSession {
                 continue;
             };
             let (x0, y0) = (u32::from(ev.x.max(1)) - 1, u32::from(ev.y.max(1)) - 1);
-            let (w, h) = (w * self.art_scale, h * self.art_scale);
+            let (w, h) = (w * self.art_scale.0, h * self.art_scale.1);
             let (x1, y1) = (x0 + w, y0 + h);
             covers[i] = painted.iter().any(|&(win, px0, py0, px1, py1)| {
                 win == ev.window && x0 < px1 && px0 < x1 && y0 < py1 && py0 < y1
@@ -1636,7 +1668,7 @@ impl GameSession {
             return None;
         }
         let (w, h) = self.pict_source.as_mut()?.dims(ev.number as u32)?;
-        let area = (w as u64 * self.art_scale as u64) * (h as u64 * self.art_scale as u64);
+        let area = (w as u64 * self.art_scale.0 as u64) * (h as u64 * self.art_scale.1 as u64);
         let ms = (area / PACE_PX_PER_MS).clamp(PACE_MIN_MS, PACE_MAX_MS);
         Some(std::time::Duration::from_millis(ms))
     }
@@ -1719,7 +1751,7 @@ impl GameSession {
         };
         // Spans the window: starts at (or left of) its left edge and reaches the
         // right one. Window coords are 1-based (ZMSD §8.8.1).
-        let spans_window = ev.x <= 1 && pic_w * self.art_scale >= win_w.max(1);
+        let spans_window = ev.x <= 1 && pic_w * self.art_scale.0 >= win_w.max(1);
         !spans_window
     }
 
@@ -2194,7 +2226,7 @@ impl GameSession {
                 .pict_source
                 .as_mut()
                 .and_then(|s| s.dims(ev.number as u32))
-                .map(|(w, h)| (w * self.art_scale, h * self.art_scale));
+                .map(|(w, h)| (w * self.art_scale.0, h * self.art_scale.1));
             let (ew, eh) = dims.unwrap_or((pw, ph));
             // Clip the erase to the window box.
             let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
@@ -6097,7 +6129,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6157,7 +6189,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6217,7 +6249,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6277,7 +6309,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6347,7 +6379,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6388,7 +6420,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6442,7 +6474,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6538,7 +6570,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),
@@ -6589,7 +6621,7 @@ mod tests {
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
             canvas_anchor: std::collections::HashMap::new(),
-            art_scale: V6_ART_SCALE,
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
             paint: None,
             paced_frames: std::collections::VecDeque::new(),
             window_fills: std::collections::HashMap::new(),

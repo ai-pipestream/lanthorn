@@ -219,6 +219,19 @@ impl InterpreterProfile {
     /// here so the bundle is complete rather than partial, and pinned by a test
     /// against `zvm::screen::V6_FONT_WIDTH`/`V6_FONT_HEIGHT` so the two cannot
     /// drift apart unnoticed.
+    ///
+    /// **It survived the case that was expected to move it** (SQ-0790). EGA ran
+    /// 640×200 on an 8×8 cell, which reads like a display mode this knob would
+    /// have to express — but 640/8 by 200/8 is 80×25, the *same character grid*
+    /// the 640×400 unit screen already lays out on its 8×16 cell. Halving both
+    /// axes would buy an identical grid with half the vertical precision for
+    /// window and cursor coordinates, at the cost of making
+    /// `V6_FONT_WIDTH`/`V6_FONT_HEIGHT` runtime state throughout `zvm`'s screen
+    /// model, its location heuristics and the app's render path. What genuinely
+    /// differs about an EGA or CGA rendition is that its ART is stored at twice
+    /// the horizontal density, and that belongs to the archive rather than to
+    /// the machine — three video cards, one IBM PC, one cell. See
+    /// [`crate::graphics::PictSource::art_scale`].
     pub fn v6_font_cell(self) -> (u16, u16) {
         (8, 16)
     }
