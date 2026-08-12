@@ -27,7 +27,9 @@
 //! (SQ-0368 reserved that for the multi-second full-game walkthroughs), and the
 //! gitignored fixture makes the capture half skip vacuously rather than fail.
 
-mod pty_stream;
+// Declared once by the group binary (`tests/pty.rs`) and shared by every pty
+// suite in it; see `pty_emitted_stream.rs`.
+use super::pty_stream;
 
 /// The kitty row/column diacritics, by the value they encode. Index in kitty's
 /// `rowcolumn-diacritics.txt` IS the value; these four were read out of

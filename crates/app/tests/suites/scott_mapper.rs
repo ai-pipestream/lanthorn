@@ -12,7 +12,7 @@ use mapper::direction::Direction;
 use mapper::mapper::Mapper;
 
 fn tiny_cave() -> Vec<u8> {
-    include_bytes!("../../scott/tests/tiny_cave.dat").to_vec()
+    include_bytes!("../../../scott/tests/tiny_cave.dat").to_vec()
 }
 
 #[test]
