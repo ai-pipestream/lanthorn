@@ -64,12 +64,14 @@ Cargo has no garbage collection for `target/`: every hash change writes a new ar
 - **`target/debug/incremental`** is a pure cache — delete it freely; the only cost is a slower next build.
 - **Merged worktrees** — see the hard rule above.
 
-For the orphaned artifacts themselves, `cargo sweep` removes exactly what a build did not touch rather than guessing by age:
+For the orphaned artifacts themselves there is `cargo sweep`, but **do not run it routinely here** — build speed beats disk, and an occasional manual `cargo clean` is the preferred trade. Measured on this workspace: `cargo sweep --dry-run --time 7` would have removed 28 GiB from a 22 GB `target/`, i.e. effectively everything. That is not orphan sediment; almost all of it is third-party dependency rlibs compiled weeks ago and still very much in use, because the workspace's own artifacts are always freshly rebuilt. Age is a poor proxy for obsolete when your own crates churn daily and your dependencies never do.
 
 ```sh
-cargo sweep --stamp && cargo nextest run … && cargo sweep --file
-cargo sweep --time 30        # blunter: untouched in 30 days
+cargo sweep --dry-run --time 7    # ALWAYS dry-run first; see above
+cargo sweep --stamp && cargo build --tests && cargo sweep --file
 ```
+
+The `--file` form claims to remove exactly what a build did not touch, but note it compares mtimes against the stamp, and an incremental build does not rewrite artifacts it did not rebuild — so it is only precise after a clean build, which defeats the purpose.
 
 ## Test fixtures
 
