@@ -13,8 +13,9 @@ pub fn per_game_style_path(game_dir: &Path) -> PathBuf {
 
 /// The per-game NON-style config sidecar: `<game_dir>/config.toml`. Holds
 /// per-game overrides that are not part of the style schema
-/// (`honor_game_colours`, `borderless_windows`, `show_map`), kept separate from
-/// `style.toml` so the style parser/writer stays a pure style document.
+/// (`honor_game_colours`, `borderless_windows`, `show_map`, `pictures`), kept
+/// separate from `style.toml` so the style parser/writer stays a pure style
+/// document.
 pub fn per_game_config_path(game_dir: &Path) -> PathBuf {
     game_dir.join("config.toml")
 }
@@ -24,6 +25,15 @@ pub fn per_game_config_path(game_dir: &Path) -> PathBuf {
 fn read_config_bool(game_dir: &Path, key: &str) -> Option<bool> {
     let text = std::fs::read_to_string(per_game_config_path(game_dir)).ok()?;
     text.parse::<toml::Value>().ok()?.get(key).and_then(|v| v.as_bool())
+}
+
+/// Read one string key from the per-game `config.toml`, trimmed. `None` if the
+/// file is absent/unparseable, the key is missing, or its value is blank.
+fn read_config_str(game_dir: &Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(per_game_config_path(game_dir)).ok()?;
+    let v = text.parse::<toml::Value>().ok()?;
+    let s = v.get(key)?.as_str()?.trim();
+    if s.is_empty() { None } else { Some(s.to_string()) }
 }
 
 /// Read the per-game `honor_game_colours` override, if the user set one.
@@ -46,6 +56,22 @@ pub fn read_per_game_show_map(game_dir: &Path) -> Option<bool> {
     read_config_bool(game_dir, "show_map")
 }
 
+/// Read the per-game `pictures` override — SQ-0734 tier 3, the user naming a
+/// native Infocom picture archive (`Pic.data`, `.MG1`/`.EG1`/`.CG1`) and thereby
+/// ASSERTING that it belongs to this story. `None` = no override, so the Blorb
+/// (tier 1) or the disk image the story was mounted from (tier 2) decides.
+///
+/// The value is a path: absolute, or relative to the STORY's own directory —
+/// "beside the story" is where these archives sit. Resolution and validation
+/// live in [`crate::graphics::PictureOverride::resolve`]; this only reads the key.
+///
+/// There is deliberately no writer: no UI sets this, and the key is
+/// hand-written into the sidecar. The writer below nonetheless carries it, so
+/// toggling a colour or map preference cannot delete it.
+pub fn read_per_game_pictures(game_dir: &Path) -> Option<String> {
+    read_config_str(game_dir, "pictures")
+}
+
 /// Write the per-game `config.toml` with the given overrides, omitting a `None`
 /// key and deleting the file entirely when all are `None`. Centralised so each
 /// key's writer preserves the others' values (SQ-0341). Creates `game_dir` if
@@ -66,6 +92,13 @@ fn write_per_game_config(
     }
     if let Some(v) = show_map {
         body.push_str(&format!("show_map = {v}\n"));
+    }
+    // `pictures` (SQ-0734) has no writer of its own — the user hand-writes it —
+    // so it is read back and re-emitted here. Without this, toggling any of the
+    // three keys above through the UI would silently delete the picture archive
+    // the user named, and the game would quietly revert to its Blorb art.
+    if let Some(v) = read_per_game_pictures(game_dir) {
+        body.push_str(&format!("pictures = {}\n", toml::Value::String(v)));
     }
     if body.is_empty() {
         return match std::fs::remove_file(&path) {
@@ -157,6 +190,40 @@ mod tests {
         // Clearing the last key removes the sidecar.
         write_per_game_honor(&dir, None).unwrap();
         assert!(!per_game_config_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0734: `pictures` is hand-written and has no writer of its own, so the
+    /// three keys that DO have writers must carry it through. Without that,
+    /// toggling game colours from the UI would silently delete the picture
+    /// archive the user chose and quietly revert the game to its Blorb art —
+    /// the exact "plausible but wrong" failure the tier policy exists to avoid,
+    /// caused by us rather than by a bad guess.
+    #[test]
+    fn a_hand_written_pictures_key_survives_every_sibling_write() {
+        let dir = tmp("pictures");
+        assert_eq!(read_per_game_pictures(&dir), None);
+        std::fs::write(per_game_config_path(&dir), "pictures = \"FMVPOKER.EG1\"\n").unwrap();
+        assert_eq!(read_per_game_pictures(&dir), Some("FMVPOKER.EG1".to_string()));
+
+        // Each writer rewrites the whole sidecar; each must preserve `pictures`.
+        write_per_game_honor(&dir, Some(false)).unwrap();
+        assert_eq!(read_per_game_pictures(&dir), Some("FMVPOKER.EG1".to_string()), "honor write");
+        write_per_game_borderless(&dir, Some(true)).unwrap();
+        assert_eq!(read_per_game_pictures(&dir), Some("FMVPOKER.EG1".to_string()), "borderless write");
+        write_per_game_show_map(&dir, Some(false)).unwrap();
+        assert_eq!(read_per_game_pictures(&dir), Some("FMVPOKER.EG1".to_string()), "show_map write");
+
+        // Clearing every OTHER key must not delete the file out from under it.
+        write_per_game_honor(&dir, None).unwrap();
+        write_per_game_borderless(&dir, None).unwrap();
+        write_per_game_show_map(&dir, None).unwrap();
+        assert!(per_game_config_path(&dir).is_file(), "pictures alone keeps the sidecar alive");
+        assert_eq!(read_per_game_pictures(&dir), Some("FMVPOKER.EG1".to_string()));
+
+        // A blank value is not a choice.
+        std::fs::write(per_game_config_path(&dir), "pictures = \"  \"\n").unwrap();
+        assert_eq!(read_per_game_pictures(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

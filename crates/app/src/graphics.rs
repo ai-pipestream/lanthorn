@@ -257,6 +257,32 @@ impl PictSource {
         PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b))
     }
 
+    /// Resolve the picture source across all three tiers (SQ-0734).
+    ///
+    /// `over` is the already-resolved tier-3 override, taken here by value
+    /// because a loaded archive moves straight into the source. It is resolved
+    /// separately and earlier by [`PictureOverride::resolve`] because its
+    /// FLAVOUR also picks the interpreter profile, which has to be settled
+    /// before the engine is built.
+    ///
+    /// A loaded override wins outright — over a resource Blorb beside the story
+    /// and over an `.adf`'s own `Pic.data` alike. Everything else, including a
+    /// named file that is missing or will not decode, falls through to
+    /// [`PictSource::resolve`]; the caller is responsible for surfacing
+    /// [`PictureOverride::warning`] in those cases rather than letting the
+    /// player believe they are looking at native art.
+    pub fn resolve_with_override(
+        story_path: &std::path::Path,
+        over: PictureOverride,
+    ) -> PictSource {
+        match over {
+            PictureOverride::Loaded { pics, .. } => PictSource::from_native(pics),
+            PictureOverride::Unset
+            | PictureOverride::Missing { .. }
+            | PictureOverride::Unusable { .. } => PictSource::resolve(story_path),
+        }
+    }
+
     /// Generation counter of the Current Palette — bumped whenever a non-adaptive
     /// draw establishes a DIFFERENT palette (§11.3). A caller that has already
     /// plotted adaptive pictures watches this: when it moves, everything drawn
@@ -485,6 +511,168 @@ impl PictSource {
             .into_iter()
             .filter_map(|n| self.dims(n).map(|(w, h)| (n as u16, w as u16, h as u16)))
             .collect()
+    }
+}
+
+/// Tier 3 of the picture-resource policy (SQ-0734): the user names a native
+/// Infocom archive in the per-game sidecar `<game_dir>/config.toml` and thereby
+/// ASSERTS that it belongs to this story.
+///
+/// ```toml
+/// pictures = "FMVPOKER.EG1"
+/// ```
+///
+/// # Why the user has to say it
+///
+/// The three tiers are ordered by confidence in the PAIRING, and nothing below
+/// tier 3 can be guessed. A Blorb validates its own contents. A disk image ties
+/// story and archive together by the medium they shipped on. A loose archive
+/// beside a story ties them together by *nothing*: the format carries no release
+/// number and no serial, every Infocom Amiga release names its archive
+/// `Pic.data`, and the PC names are a DOS 8.3 convention that survives neither a
+/// renamed story nor a renamed archive. A stem rule would therefore have to be
+/// wrong sometimes, and being wrong here is INVISIBLE — Arthur's plates drawn
+/// into Zork Zero look like art, not like an error. So there is no
+/// auto-discovery, and this is deliberate rather than unfinished.
+///
+/// **Discovery for DISPLAY is safe; discovery for PAIRING is not.** Those look
+/// contradictory and are not, and the difference is the whole policy. Listing
+/// the archives that happen to sit beside a story, and showing that list to a
+/// person, is fine — better than fine, because the person knows which game they
+/// own and can supply the assertion the file format cannot make. Taking the same
+/// list and *picking from it* is what has no evidence behind it. If a future
+/// feature enumerates candidates (SQ-0789 proposes exactly that, for a picker),
+/// it must hand them to a human and end there; wiring an enumerator into this
+/// function would reintroduce precisely the failure the tiers exist to prevent.
+/// Nothing here enumerates anything today, on purpose.
+///
+/// # What naming one buys
+///
+/// It wins outright. A named archive that loads beats a resource Blorb beside
+/// the story and beats the `Pic.data` an `.adf` carries: naming it is an
+/// instruction, not a hint. It also picks the machine — see
+/// [`crate::interpreter::InterpreterProfile::resolve`], which takes
+/// [`PictureOverride::flavour`] as its second-most-specific input.
+///
+/// # What a bad name costs
+///
+/// Nothing silently. A file that is absent, or present and undecodable, leaves
+/// the Blorb in charge but produces a [`PictureOverride::warning`] the host must
+/// show. Falling back quietly would recreate the exact failure the policy exists
+/// to prevent, inverted: the player believing they are seeing native art when
+/// they are not, with nothing on screen to say otherwise.
+#[derive(Debug)]
+pub enum PictureOverride {
+    /// No `pictures` key. Tiers 1 and 2 decide, exactly as before.
+    Unset,
+    /// The key names a file that is not there. "If the file exists" was the
+    /// user's condition for the override winning, so it does not apply — but the
+    /// user asked for something they did not get, and hears about it.
+    Missing { path: std::path::PathBuf },
+    /// The named file exists and cannot be used: unreadable, the wrong container
+    /// flavour, corrupt, or truncated. Loud on purpose.
+    Unusable { path: std::path::PathBuf, reason: String },
+    /// The named file is a native archive, and it wins.
+    Loaded { path: std::path::PathBuf, pics: blorb::infocom_pics::InfocomPics },
+}
+
+impl PictureOverride {
+    /// Read and validate the `pictures` key of `<game_dir>/config.toml`.
+    ///
+    /// A relative value resolves against the STORY's own directory — "beside the
+    /// story" is where these archives sit, and the sidecar lives elsewhere, in
+    /// the per-game save directory. An absolute value is used as given.
+    ///
+    /// The file is parsed here, not merely stat'ed, for two reasons: the flavour
+    /// it turns out to be selects the interpreter profile, and a file that will
+    /// not decode must be reported before the story boots rather than discovered
+    /// picture by picture as blanks.
+    pub fn resolve(story_path: &std::path::Path, game_dir: &std::path::Path) -> PictureOverride {
+        let Some(name) = crate::styles::read_per_game_pictures(game_dir) else {
+            return PictureOverride::Unset;
+        };
+        let named = std::path::Path::new(&name);
+        let path = if named.is_absolute() {
+            named.to_path_buf()
+        } else {
+            story_path.parent().unwrap_or(std::path::Path::new(".")).join(named)
+        };
+        let raw = match std::fs::read(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return PictureOverride::Missing { path };
+            }
+            Err(e) => return PictureOverride::Unusable { path, reason: e.to_string() },
+        };
+        match blorb::infocom_pics::InfocomPics::parse(raw) {
+            Ok(pics) => PictureOverride::Loaded { path, pics },
+            Err(e) => PictureOverride::Unusable { path, reason: e.to_string() },
+        }
+    }
+
+    /// The flavour of the archive the user named, for interpreter-profile
+    /// selection. `None` whenever no usable archive was named, which leaves the
+    /// medium and then the default to decide.
+    pub fn flavour(&self) -> Option<blorb::infocom_pics::Flavour> {
+        match self {
+            PictureOverride::Loaded { pics, .. } => Some(pics.flavour()),
+            PictureOverride::Unset
+            | PictureOverride::Missing { .. }
+            | PictureOverride::Unusable { .. } => None,
+        }
+    }
+
+    /// The standard window — the machine's native ART resolution — that the
+    /// named archive implies, for the `v6_screen_px` chain at boot.
+    ///
+    /// A native archive has no `Reso` chunk, because **the format has no such
+    /// concept** (SQ-0736). Blorb §11 makes the ABSENCE of `Reso` meaningful —
+    /// non-scalable art, drawn one image pixel per screen pixel — so reading a
+    /// native archive's silence as that declaration is what left Zork Zero's
+    /// 320×200 art at half size on a 640×400 screen. The archive is not silent;
+    /// it just says it somewhere else, in the picture space its coordinates use.
+    ///
+    /// - A **320-wide** archive (Amiga/Mac `Pic.data`, MCGA `.MG1`) is the
+    ///   ordinary Infocom v6 standard window, doubled onto the 640×400 unit
+    ///   screen — identical to what every Infocom Blorb's `Reso` declares, which
+    ///   is why a named `.MG1` lands pixel-for-pixel where the Blorb's art did.
+    /// - A **640-wide** archive (EGA `.EG1`/`.EG2`, CGA `.CG1`) answers `None`,
+    ///   and that is a DEFERRAL rather than a rule. Its pixels are half as wide,
+    ///   so its true presentation is a 640×200 screen on an 8×8 cell — a whole
+    ///   display mode, not a scale factor, and `V6_ART_SCALE` is one uniform
+    ///   integer applied to both axes. Until an EGA/CGA profile exists, such an
+    ///   archive falls through to Blorb §11's own answer for art with no
+    ///   declared resolution: drawn at its actual size, 1:1.
+    pub fn std_window(&self) -> Option<(u16, u16)> {
+        match self {
+            // Spelled out rather than borrowing `interpreter::AMIGA_STD_WINDOW`:
+            // the two are the same numbers for the same reason (this is the
+            // Infocom v6 standard window, which the Amiga also happens to use),
+            // but naming the Amiga's constant here would read as a claim that an
+            // MCGA archive is Amiga media, and it is not.
+            PictureOverride::Loaded { pics, .. } if pics.picture_space_width() == 320 => {
+                Some((320, 200))
+            }
+            _ => None,
+        }
+    }
+
+    /// The complaint to show the user, naming the file and the reason. `None`
+    /// when there is nothing to complain about — no key, or a key that worked.
+    pub fn warning(&self) -> Option<String> {
+        match self {
+            PictureOverride::Unset | PictureOverride::Loaded { .. } => None,
+            PictureOverride::Missing { path } => Some(format!(
+                "pictures = \"{}\" names a picture archive that is not there — \
+                 falling back to this story's Blorb art",
+                path.display(),
+            )),
+            PictureOverride::Unusable { path, reason } => Some(format!(
+                "pictures = \"{}\" cannot be used: {reason} — \
+                 falling back to this story's Blorb art",
+                path.display(),
+            )),
+        }
     }
 }
 

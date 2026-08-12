@@ -37,9 +37,15 @@
 //! output *is* the picture. See [`InfocomPics::parse`] for how the two are told
 //! apart, and [`Flavour`] for what the published sources do and do not settle.
 //!
-//! There is no magic number, so a caller must decide by other means that a
-//! given file belongs to the story it is about to draw — see the
-//! `<story-stem>.pic` naming convention.
+//! There is no magic number, and the header carries no release number and no
+//! serial — nothing that could tie an archive to a story. So a caller must
+//! decide by other means that a given file belongs to the story it is about to
+//! draw, and babelmap deliberately does NOT decide it from the filename: every
+//! Infocom Amiga release names its archive `Pic.data`, and the PC names are a
+//! DOS 8.3 convention that a renamed story file no longer matches. The pairing
+//! comes from the medium (both files off one disk image) or from the user
+//! naming the archive outright. See `app::graphics::PictureOverride` and
+//! SQ-0734.
 
 /// An 8-bit RGB triple.
 pub type Rgb = [u8; 3];
@@ -96,6 +102,25 @@ pub enum PicError {
     UnsupportedCompression(u16),
     /// The compressed stream did not expand to `width * height` pixels.
     BadPixelData,
+}
+
+/// A one-clause reason, for a host that has to tell a user why the archive they
+/// named cannot be drawn (SQ-0734). Phrased to complete "…: {reason}".
+impl std::fmt::Display for PicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PicError::Truncated => write!(f, "the file is truncated"),
+            PicError::UnsupportedContainer => {
+                write!(f, "it is not an Infocom picture archive this reader understands")
+            }
+            PicError::NoSuchPicture => write!(f, "no picture with that number is in the archive"),
+            PicError::NoPixelData => write!(f, "the entry is a size-only placeholder"),
+            PicError::UnsupportedCompression(flags) => {
+                write!(f, "the picture uses a compression variant this reader does not decode (entry flags {flags:#06x})")
+            }
+            PicError::BadPixelData => write!(f, "the compressed picture data is corrupt"),
+        }
+    }
 }
 
 /// Entry flag bits, from `amiga/gfx.c`.
@@ -511,6 +536,37 @@ impl InfocomPics {
     /// Which platform wrote this archive, and therefore which codec read it.
     pub fn flavour(&self) -> Flavour {
         self.flavour
+    }
+
+    /// The width of the picture space this archive's coordinates are expressed
+    /// in: 640 for EGA and CGA, 320 for MCGA and for the Amiga/Mac.
+    ///
+    /// This is a real property of the archive, not a rendering preference — the
+    /// same Zork Zero plate is stored 320 wide in `zork0.mg1` and 640 wide in
+    /// `zork0.eg1`, because EGA and CGA addressed a 640-column screen with
+    /// pixels half as wide. A host that plots one of these one pixel per pixel
+    /// without knowing which it holds gets the aspect ratio wrong by two.
+    ///
+    /// Source: header byte 1 (`gh.flags`), bit 3. Two independent
+    /// implementations read it the same way — Frotz's `src/curses/ux_pic.c`
+    /// (`x_scale = (flags & 0x08) ? 640 : 320`) and, through its
+    /// `hw_screenwidth`/`pixelwidth` table, Spatterlight's bocfel. Agreement is
+    /// measured on this corpus too: every authentic `.MG1` reads `0x30` and
+    /// every `.EG1`/`.EG2`/`.CG1` reads `0x38` or `0x39`, while `zork0.pic`
+    /// reads `0x06`.
+    ///
+    /// One caveat, deliberately not acted on: bocfel reclassifies an Amiga/Mac
+    /// archive whose whole flags byte is `0x0e` as monochrome Macintosh and
+    /// plots it 480 wide. Bit 3 is set in `0x0e`, so the bit alone would
+    /// mis-measure such a file — which is why it is read only on
+    /// [`Flavour::Pc`], and the whole Amiga/Mac side answers 320, where every
+    /// archive in hand is 320-wide Amiga media.
+    pub fn picture_space_width(&self) -> u16 {
+        match self.flavour {
+            Flavour::AmigaMac => 320,
+            Flavour::Pc if self.data[1] & 0x08 != 0 => 640,
+            Flavour::Pc => 320,
+        }
     }
 
     /// Every directory record, in file order.
@@ -1556,6 +1612,45 @@ mod tests {
                     e.id
                 );
             }
+        }
+    }
+
+    /// SQ-0734: which picture space each rendition's coordinates live in.
+    ///
+    /// This is not cosmetic. `zork0.mg1` and `zork0.eg1` hold the SAME artwork
+    /// and disagree on its dimensions by a factor of two on the horizontal axis
+    /// alone — EGA and CGA addressed 640 columns with half-width pixels. A host
+    /// that plots either 1:1 without asking gets one of them wrong.
+    ///
+    /// The measured split, which is what [`InfocomPics::picture_space_width`]
+    /// reads from header byte 1 bit 3: every authentic `.MG1` reads flags
+    /// `0x30`, every `.EG1`/`.EG2`/`.CG1` reads `0x38` or `0x39`, and
+    /// `zork0.pic` reads `0x06`.
+    #[test]
+    fn each_rendition_declares_its_picture_space() {
+        #[rustfmt::skip]
+        let corpus: [(&str, u16, u16); 9] = [
+            // file            space  widest picture in it
+            ("zork0.pic",        320,   320),
+            ("zork0.mg1",        320,   320),
+            ("zork0.eg1",        640,   640),
+            ("zork0.cg1",        640,   640),
+            ("arthur.mg1",       320,   320),
+            ("arthur.eg1",       640,   640),
+            ("journey.mg1",      320,   320),
+            ("journey.cg1",      640,   640),
+            ("shogun.mg1",       320,   320),
+        ];
+        for (name, space, widest) in corpus {
+            let Some(bytes) = fixture(name) else { continue };
+            let pics = InfocomPics::parse(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(pics.picture_space_width(), space, "{name} picture space");
+            // Cross-check the declaration against the directory it describes: no
+            // picture may be wider than the space its coordinates are in, and the
+            // widest one reaches the full width in each of these archives.
+            let max = pics.entries().iter().map(|e| e.width).max().unwrap();
+            assert_eq!(max, widest, "{name} widest record");
+            assert!(max <= space, "{name} declares {space} but stores a {max}-wide picture");
         }
     }
 
