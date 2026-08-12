@@ -160,14 +160,14 @@ fn the_medium_picks_the_machine_and_an_explicit_number_overrules_it() {
     let plain = write_image("plain", &v6_boot_stub_story());
 
     // 2. The medium: a story off an Amiga floppy is an Amiga. No configuration.
-    assert_eq!(InterpreterProfile::resolve(&disk, None), InterpreterProfile::Amiga);
+    assert_eq!(InterpreterProfile::resolve(&disk, None, None), InterpreterProfile::Amiga);
     // 3. Everything else is an IBM PC — today's behaviour, named.
-    assert_eq!(InterpreterProfile::resolve(&plain, None), InterpreterProfile::IbmPc);
+    assert_eq!(InterpreterProfile::resolve(&plain, None, None), InterpreterProfile::IbmPc);
     // 1. An explicit interpreter number always wins, in both directions: it names
     //    the machine, not merely the byte, which is what makes asking for one
     //    coherent instead of half-applied.
-    assert_eq!(InterpreterProfile::resolve(&disk, Some(6)), InterpreterProfile::IbmPc);
-    assert_eq!(InterpreterProfile::resolve(&plain, Some(4)), InterpreterProfile::Amiga);
+    assert_eq!(InterpreterProfile::resolve(&disk, Some(6), None), InterpreterProfile::IbmPc);
+    assert_eq!(InterpreterProfile::resolve(&plain, Some(4), None), InterpreterProfile::Amiga);
 
     let _ = std::fs::remove_file(&disk);
     let _ = std::fs::remove_file(&plain);
@@ -192,7 +192,7 @@ fn a_story_off_a_disk_image_draws_its_art_at_the_screens_scale() {
         app::hints::LoadedStory::ZCode(b) => b,
         other => panic!("expected Z-code, got {other:?}"),
     };
-    let profile = InterpreterProfile::resolve(&disk, None);
+    let profile = InterpreterProfile::resolve(&disk, None, None);
     let mut picts = PictSource::resolve(&disk);
     let dims = picts.all_pict_dims();
     assert_eq!(dims, vec![(7, 4, 2)], "the archive's own, art-native dimensions");
@@ -236,7 +236,7 @@ fn a_story_off_a_disk_image_draws_its_art_at_the_screens_scale() {
 #[test]
 fn a_blorbless_story_that_is_not_a_disk_image_still_draws_at_actual_size() {
     let plain = write_image("noreso", &v6_boot_stub_story());
-    let profile = InterpreterProfile::resolve(&plain, None);
+    let profile = InterpreterProfile::resolve(&plain, None, None);
     assert_eq!(profile, InterpreterProfile::IbmPc);
 
     let dims = vec![(7u16, 4u16, 2u16)];
@@ -271,7 +271,7 @@ fn the_amiga_profile_reports_an_amiga_to_the_game() {
         "header",
         &build_adf(&[("Story.data", &v6_boot_stub_story()), ("Pic.data", &fake_pic_data())]),
     );
-    let profile = InterpreterProfile::resolve(&disk, None);
+    let profile = InterpreterProfile::resolve(&disk, None, None);
 
     let session = GameSession::new_with_trace(
         v6_boot_stub_story(),
@@ -301,7 +301,7 @@ fn the_amiga_profile_reports_an_amiga_to_the_game() {
 #[test]
 fn the_ibm_pc_profile_changes_nothing_it_touches() {
     let plain = write_image("ibmpc", &v6_boot_stub_story());
-    let profile = InterpreterProfile::resolve(&plain, None);
+    let profile = InterpreterProfile::resolve(&plain, None, None);
     assert_eq!(profile.interpreter_number(), None);
     assert_eq!(profile.std_window(), None);
     assert_eq!(profile.default_colours(), None);

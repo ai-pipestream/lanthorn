@@ -57,7 +57,9 @@ floppy that ships as Disk 0 — says so instead of booting a system library.
 
 The artwork comes along for free: a native Infocom picture archive on the *same*
 image is that story's art, because a shared floppy is as strong a guarantee of
-pairing as a Blorb is. See [Graphical v6](v6-graphics.md#where-the-pictures-come-from).
+pairing as a Blorb is. Loose archives are a different matter — babelmap will use
+one, but only if you name it, and it never guesses from a filename. See
+[Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws).
 
 Disk images are first-class in the library too: point babelmap at a directory of
 them and the picker's TYPE column names the container alongside the format —
@@ -170,8 +172,19 @@ itself instead of quietly rebasing someone's investigation.
   that format has no `Reso` chunk to declare it), a medium grey page and white ink
   reported as the interpreter's defaults, and the palette Infocom's own Amiga
   interpreter loaded — a slightly darker green and blue than the standard's, and
-  its own three Version 6 greys. Setting `interpreter_number` yourself names the
-  machine outright and outranks the medium, so `interpreter_number = 4` gets you
+  its own three Version 6 greys.
+
+  The artwork can select the machine too, and it sits between the two. If you
+  name a picture archive for a game — the `pictures` key described under
+  [Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws) —
+  then you have said which machine's rendition you want to look at, and babelmap
+  presents that machine: a `Pic.data` is an Amiga, an `.MG1`/`.EG1`/`.CG1` is an
+  IBM PC. It reads that from the file's *contents*, never its extension, since
+  the two containers are structurally different and a renamed file would
+  otherwise lie about which machine you asked for. (The Macintosh wrote the same
+  container as the Amiga and cannot be told apart from it in general, so it is
+  not claimed to be.) Setting `interpreter_number` yourself names the
+  machine outright and outranks both, so `interpreter_number = 4` gets you
   the whole Amiga rather than just the byte — which is the point: a number that
   changed what games did without changing the machine it implied was never a
   useful thing to be able to set.

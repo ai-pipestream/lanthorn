@@ -221,16 +221,49 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // title table applies is an engine question (SQ-0766).
     let is_scott = matches!(loaded, hints::LoadedStory::Scott(_));
 
+    // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>.save/`,
+    // keyed by the story filename. The PATH is needed this early because the
+    // per-game sidecar inside it carries the `pictures` key, and that key decides
+    // the machine below; the directory itself is created (and read from) further
+    // down, where it always was.
+    let game_dir = story_game_dir(&data_base, &story_key(&story_path));
+    // SQ-0734 tier 3: has the user named a picture archive for this story? Read
+    // and PARSED here, ahead of everything, because the flavour it turns out to
+    // be is an input to the profile immediately below. The archive itself is
+    // handed to the `PictSource` further down; nothing reads the file twice.
+    let picture_override = if cfg.images {
+        app::graphics::PictureOverride::resolve(&story_path, &game_dir)
+    } else {
+        app::graphics::PictureOverride::Unset
+    };
+    // A named archive that is absent or will not decode must never pass in
+    // silence — the player would believe they were looking at native art and
+    // would be looking at the Blorb's. Said here, before the alternate screen is
+    // entered, so it survives in the terminal's scrollback; also pushed into the
+    // transcript as a warning line further down, where `state` exists.
+    let picture_warning = picture_override.warning();
+    if let Some(msg) = &picture_warning {
+        eprintln!("babelmap: warning: {msg}");
+    }
+    // Read off before the archive itself moves into the `PictSource` below: a
+    // native archive has no `Reso` chunk, so the standard window its coordinates
+    // imply is the only thing standing in for one (SQ-0736).
+    let named_art_std_window = picture_override.std_window();
+
     // SQ-0719: which machine are we presenting ourselves as? Resolved from the
-    // launch (an explicit interpreter number, else the medium the story came out
-    // of, else IBM PC — today's behaviour, named) and settled HERE, before the
-    // colour scheme resolves below: the profile's palette is what
-    // `ColorScheme::terminal_default`'s Standard 2..=9 seed reads, so selecting
-    // it after that point would leave the terminal cells on one machine's
-    // colours and the v6 pixel path on another's. Re-asserted on every story so
-    // a picker→play loop cannot carry one story's machine into the next.
-    cfg.interpreter_profile =
-        app::interpreter::InterpreterProfile::resolve(&story_path, cfg.interpreter_number);
+    // launch (an explicit interpreter number, else the flavour of an archive the
+    // user named, else the medium the story came out of, else IBM PC — today's
+    // behaviour, named) and settled HERE, before the colour scheme resolves
+    // below: the profile's palette is what `ColorScheme::terminal_default`'s
+    // Standard 2..=9 seed reads, so selecting it after that point would leave the
+    // terminal cells on one machine's colours and the v6 pixel path on another's.
+    // Re-asserted on every story so a picker→play loop cannot carry one story's
+    // machine into the next.
+    cfg.interpreter_profile = app::interpreter::InterpreterProfile::resolve(
+        &story_path,
+        cfg.interpreter_number,
+        picture_override.flavour(),
+    );
     zvm::screen::set_palette(cfg.interpreter_profile.palette());
 
     // Booting a large story to its first prompt can take several seconds, and this
@@ -303,11 +336,10 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // matters: a terminal left in PixelMode would report pixels that nothing
     // divides. See `pixel_mouse` for the plumbing, which is otherwise complete.
 
-    // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>/`,
-    // keyed by the story filename. Compute the per-game dir and read the Glk
-    // file VFS sidecar BEFORE building the engine, so a Glulx boot that reads or
-    // writes a Glk file (e.g. CM's init cache) sees the sidecar in place (SQ-0290).
-    let game_dir = story_game_dir(&data_base, &story_key(&story_path));
+    // Create the per-game dir (its path was resolved at the top of this function)
+    // and read the Glk file VFS sidecar BEFORE building the engine, so a Glulx
+    // boot that reads or writes a Glk file (e.g. CM's init cache) sees the
+    // sidecar in place (SQ-0290).
     let _ = std::fs::create_dir_all(&game_dir);
     let vfs_sidecar = app::vfs_store::read_vfs(&game_dir);
     app::trace::hostio(&cfg.user_dir, cfg.trace.hostio,
@@ -405,8 +437,11 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // which happens inside `new_with_trace` itself (Phase 0 lesson).
             // SQ-0719: `PictSource::resolve` also covers an Amiga `.adf` the
             // story was mounted out of, whose own `Pic.data` is its artwork.
+            // SQ-0734: and the archive named in the per-game sidecar outranks
+            // both, which is how a user picks the MCGA, EGA, CGA or Amiga
+            // rendition of a game whose Blorb art is already perfectly fine.
             let mut picts = if cfg.images {
-                app::graphics::PictSource::resolve(&story_path)
+                app::graphics::PictSource::resolve_with_override(&story_path, picture_override)
             } else {
                 app::graphics::PictSource::new(None)
             };
@@ -422,7 +457,14 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // fires unchanged rather than being special-cased for `.adf`. IBM PC
             // supplies nothing here, so a Blorb (or a Blorb-less scopa) decides
             // exactly as before.
-            let v6_screen_px = picts.std_window().or_else(|| cfg.interpreter_profile.std_window());
+            // SQ-0734: and a named archive answers between the two — after the
+            // Blorb (which is not in play at all when an override loaded) and
+            // before the machine, because a 320-wide `.MG1` implies the ordinary
+            // standard window on a machine, IBM PC, that declares none.
+            let v6_screen_px = picts
+                .std_window()
+                .or(named_art_std_window)
+                .or_else(|| cfg.interpreter_profile.std_window());
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
@@ -779,6 +821,15 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
              not be saved until it is fixed",
             state.config.config_file.display(),
         );
+        state.push_transcript_internal(&msg, app::state::TranscriptKind::Warning);
+    }
+
+    // SQ-0734: the per-game `pictures` key named an archive that is missing or
+    // will not decode. Surfaced the same way a broken config.toml is — a warning
+    // line in the transcript, which stays put instead of expiring like a toast —
+    // because the alternative is a player who thinks they are seeing the native
+    // art they asked for and is quietly seeing the Blorb's instead.
+    if let Some(msg) = picture_warning {
         state.push_transcript_internal(&msg, app::state::TranscriptKind::Warning);
     }
 

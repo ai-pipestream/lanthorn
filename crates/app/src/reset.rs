@@ -43,8 +43,19 @@ pub(crate) fn reset_game(
             // source and a boot-picture flush to drain the art the boot drew
             // before that source existed. Restarting without them left Shogun
             // with a mis-sized status band and no inline graphics at all.
+            // SQ-0734: a restart re-resolves all three tiers, so the archive the
+            // per-game sidecar names is still the one in force afterwards. The
+            // profile is NOT re-derived from it — `state.config.interpreter_profile`
+            // below is the one boot settled, and a restart re-runs the same story
+            // on the same machine.
+            let over = if state.config.images {
+                app::graphics::PictureOverride::resolve(story_path, &state.game_dir)
+            } else {
+                app::graphics::PictureOverride::Unset
+            };
+            let named_art_std_window = over.std_window();
             let mut picts = if state.config.images {
-                app::graphics::PictSource::resolve(story_path)
+                app::graphics::PictSource::resolve_with_override(story_path, over)
             } else {
                 app::graphics::PictSource::new(None)
             };
@@ -56,7 +67,8 @@ pub(crate) fn reset_game(
             // none of them and this is the prior code exactly.
             let profile = state.config.interpreter_profile;
             let picture_dims = picts.all_pict_dims();
-            let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
+            let v6_screen_px =
+                picts.std_window().or(named_art_std_window).or_else(|| profile.std_window());
             let host_default_colours = if state.config.honor_game_colours {
                 profile.default_colours().or_else(|| {
                     app::colors::host_default_colour_pair(

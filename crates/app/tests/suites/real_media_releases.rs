@@ -264,7 +264,7 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
     let bytes = story_bytes(m)?;
     assert_is_the_pinned_release(m, &bytes);
     let path = stories_dir().join(m.file);
-    let profile = InterpreterProfile::resolve(&path, None);
+    let profile = InterpreterProfile::resolve(&path, None, None);
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path);
     let picture_dims = picts.all_pict_dims();
@@ -436,7 +436,7 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
         let expected =
             if m.floppy { InterpreterProfile::Amiga } else { InterpreterProfile::IbmPc };
         assert_eq!(
-            InterpreterProfile::resolve(&path, None),
+            InterpreterProfile::resolve(&path, None, None),
             expected,
             "{}: the medium decides the profile",
             ctx(m)

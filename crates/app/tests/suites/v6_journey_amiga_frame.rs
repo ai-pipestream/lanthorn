@@ -1086,7 +1086,7 @@ fn journey_floppy(steps: usize) -> Option<GameSession> {
             return None;
         }
     };
-    let profile = InterpreterProfile::resolve(&path, None);
+    let profile = InterpreterProfile::resolve(&path, None, None);
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path);
     let picture_dims = picts.all_pict_dims();

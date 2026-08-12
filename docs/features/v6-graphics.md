@@ -72,14 +72,72 @@ literally black-and-white. Only MCGA stores palettes — EGA and CGA had theirs
 soldered in, so their directory records are two bytes shorter with nowhere to put
 one.
 
-This is the reader, not yet the plumbing: babelmap picks native artwork up from a
-mounted `.adf`, and pointing it at a loose `.MG1` sitting next to a story file is
-a separate piece of resource-resolution work still to come.
+### Choosing which artwork a game draws
 
-Native archives carry no `Reso` chunk, so a story loaded this way falls back to
-the standard 320×200 art resolution — which is precisely what every Infocom v6
-Blorb's `Reso` chunk declares anyway, so the geometry below is unchanged either
-way.
+Three sources, in decreasing order of how sure babelmap can be that the art and
+the story belong together:
+
+1. **A Blorb.** The container validates its own contents. Nothing to configure.
+2. **A disk image.** Story and archive came off one floppy, so the medium
+   guarantees the pairing. Nothing to configure.
+3. **You say so.** Put a `pictures` line in the game's own `config.toml` — the
+   small per-game sidecar in `<save-dir>/<story>.save/`, alongside the per-game
+   `style.toml`:
+
+   ```toml
+   pictures = "zork0.mg1"
+   ```
+
+   The name is relative to the story file (an absolute path works too), and a
+   named archive **wins outright** — over a Blorb sitting right beside the story,
+   over a floppy's own `Pic.data`, over everything. Naming it is an instruction,
+   not a hint.
+
+Tier 3 is how you *pick a rendition*, not just how you rescue a game. *Zork Zero*
+alone can be played four ways from the files that survive — the Amiga `zork0.pic`,
+the MCGA `zork0.mg1`, the EGA `zork0.eg1`, the CGA `zork0.cg1` — and they are
+genuinely different pictures, not the same art at different sizes. Point the key
+at whichever one you want and restart. *Arthur*, *Journey* and *Shogun* offer the
+same choice.
+
+It also rescues games nothing could pair automatically. `fmvpoker.z6`, a fan-made
+video-poker cabinet, ships a readme telling you to rename one of *Zork Zero*'s
+graphics files to `FMVPOKER.EG1` and drop it alongside. No rule could ever have
+guessed that; one line of config says it outright.
+
+What babelmap deliberately will **not** do is find an archive by name. It sounds
+harmless and it is not. These files carry no release number and no serial —
+nothing that ties one to a story — and every Infocom Amiga release names its
+archive the identical `Pic.data`, so a name-based rule needs you to rename things
+anyway. Get it wrong and there is no error: *Arthur*'s illuminated plates simply
+appear in *Zork Zero*, looking exactly like artwork. Better to be asked than to
+guess wrong silently. (Listing what it *finds*, so you can pick, is a different
+and perfectly safe thing — that just hands the choice back to the person who
+knows which game they own.)
+
+And when the key names a file babelmap can't use — missing, truncated, or not a
+picture archive at all — it says so, out loud, naming the file and the reason,
+before falling back to the Blorb. The one outcome worth ruling out is a player
+who believes they're looking at original artwork and isn't.
+
+Naming an archive also picks the machine. Ask for a game's EGA rendition and you
+are asking for the IBM PC that drew it; ask for its `Pic.data` and you are asking
+for the Amiga, colours and all — see
+[the interpreter profile](interpreter.md#the-interpreter-profile). babelmap works
+out which from the file's *contents*, never its extension, because the two codecs
+are structurally different and a filename can lie. An explicit
+`interpreter_number` still overrules it.
+
+Native archives carry no `Reso` chunk — the format has no such concept — so the
+art resolution comes from the archive itself: 320×200 for an Amiga `Pic.data` or
+an MCGA `.MG1`, which is precisely what every Infocom v6 Blorb's `Reso` declares
+anyway, leaving the geometry below unchanged. EGA and CGA are the exception, and
+an honest one: they addressed a 640-column screen with pixels half as wide, so
+their art is stored 640 across and wants a 640×200 screen on an 8×8 character
+cell — a whole display mode rather than a scale factor. Until babelmap has one,
+a named `.EG1`/`.EG2`/`.CG1` draws at its true size, one image pixel per screen
+pixel, which is what the Blorb spec prescribes for art that declares no
+resolution.
 
 ## Splitting the screen TILES it
 

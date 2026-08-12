@@ -28,9 +28,27 @@
 //! 1. An explicit `interpreter_number` (config or `--interpreter-number`) — the
 //!    number you name is the machine you are asking for, and it brings its whole
 //!    profile with it.
-//! 2. The medium: a story mounted out of an Amiga `.adf` release floppy is an
+//! 2. The ART: a picture archive named outright in the per-game sidecar
+//!    (`pictures = "…"`, tier 3 of the resource policy — see
+//!    [`crate::graphics::PictureOverride`]). Asking for a game's EGA rendition is
+//!    asking for the IBM PC that drew it; asking for its `Pic.data` is asking for
+//!    the Amiga. The flavour comes from the archive's CONTENT — the two codecs
+//!    are structurally distinguishable — not from its extension, which a rename
+//!    can make a lie.
+//! 3. The medium: a story mounted out of an Amiga `.adf` release floppy is an
 //!    Amiga.
-//! 3. [`InterpreterProfile::IbmPc`], for everything else.
+//! 4. [`InterpreterProfile::IbmPc`], for everything else.
+//!
+//! Step 2 cannot move the existing corpus, and that is worth stating because
+//! header byte `$1E` is not inert — `zvm`'s `exec.rs` branches on
+//! `read_byte(0x1E) == 6`, so a v6 story that stopped being an IBM PC would
+//! start *doing* something different. Two things pin it. The key that triggers
+//! the inference is new, so no story in `stories/` has one; and the only
+//! non-Amiga flavour, [`Flavour::Pc`], maps to `IbmPc`, whose
+//! [`interpreter_number`](InterpreterProfile::interpreter_number) is `None` and
+//! therefore leaves zvm's own rule (6 for v6) exactly where it was. Nothing
+//! moves unless a user writes a `pictures` key naming an Amiga archive, which is
+//! precisely the request being honoured.
 //!
 //! Authenticity can cost readability — the Amiga's own default page is a medium
 //! grey, and a game that picks white text against it was legible on a 1989
@@ -40,6 +58,8 @@
 //! theme, profile or no profile.
 
 use std::path::Path;
+
+use blorb::infocom_pics::Flavour;
 
 /// The machine babelmap presents itself to the story as. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,19 +77,59 @@ pub enum InterpreterProfile {
 
 impl InterpreterProfile {
     /// Resolve the profile for a launch: an explicit interpreter number wins,
-    /// else the medium the story came out of, else [`Self::IbmPc`].
+    /// else the flavour of a picture archive the user named outright, else the
+    /// medium the story came out of, else [`Self::IbmPc`]. See the module docs
+    /// for why step two cannot disturb the existing corpus.
     ///
     /// `story_path` is the path the user opened, which for a disk image is the
     /// image itself rather than the story inside it — that is the whole point,
     /// since the medium is what identifies the machine.
-    pub fn resolve(story_path: &Path, configured_interpreter_number: Option<u8>) -> Self {
+    ///
+    /// `named_art` is [`crate::graphics::PictureOverride::flavour`]: `None`
+    /// whenever no usable archive was named, which is every launch that does not
+    /// use tier 3.
+    pub fn resolve(
+        story_path: &Path,
+        configured_interpreter_number: Option<u8>,
+        named_art: Option<Flavour>,
+    ) -> Self {
         if let Some(n) = configured_interpreter_number {
             return Self::for_interpreter_number(n);
+        }
+        if let Some(flavour) = named_art {
+            return Self::for_art_flavour(flavour);
         }
         if Self::is_adf(story_path) {
             return Self::Amiga;
         }
         Self::IbmPc
+    }
+
+    /// The machine implied by the flavour of a picture archive.
+    ///
+    /// [`Flavour::Pc`] covers `.MG1` (MCGA), `.EG1`/`.EG2` (EGA) and `.CG1`
+    /// (CGA) — three video cards, one machine, and that machine is the IBM PC.
+    /// The card is a display choice, not a Z-machine one: Frotz's DOS port picks
+    /// the extension from its display mode and never consults byte `$1E` to do
+    /// it, so there is nothing finer than "IBM PC" for the header to say.
+    ///
+    /// [`Flavour::AmigaMac`] is named for a real limit rather than a shortcut:
+    /// the Amiga and the Macintosh wrote the *same* big-endian Huffman container,
+    /// and nothing in it distinguishes them in general. (ZMSD §11.1.3 numbers
+    /// them separately — 3 Macintosh, 4 Amiga — so the distinction would matter
+    /// if it could be made.) The one lead is Spatterlight's bocfel, which
+    /// reclassifies a `Pic.data` as monochrome Macintosh when the file's flags
+    /// byte reads `0x0e`, with the honest comment that the flags "always *seem*
+    /// to equal 0xe if the graphics are monochrome" — a heuristic, and one that
+    /// separates only the B&W Mac. babelmap has no Macintosh profile to select
+    /// anyway, and every colour `Pic.data` in hand is Amiga media, so the whole
+    /// flavour resolves to [`Self::Amiga`]. Give this a real discriminator before
+    /// a Macintosh bundle is added, not after.
+    pub fn for_art_flavour(flavour: Flavour) -> Self {
+        match flavour {
+            Flavour::Pc => Self::IbmPc,
+            Flavour::AmigaMac => Self::Amiga,
+        }
     }
 
     /// The profile a story header byte `$1E` value implies. Only the Amiga has a
@@ -243,8 +303,45 @@ mod tests {
     #[test]
     fn a_missing_file_is_not_a_disk_image() {
         let missing = std::path::Path::new("/nonexistent/babelmap/no-such-story.z6");
-        assert_eq!(InterpreterProfile::resolve(missing, None), InterpreterProfile::IbmPc);
+        assert_eq!(InterpreterProfile::resolve(missing, None, None), InterpreterProfile::IbmPc);
         // …and an explicit number still decides without ever touching the disk.
-        assert_eq!(InterpreterProfile::resolve(missing, Some(4)), InterpreterProfile::Amiga);
+        assert_eq!(InterpreterProfile::resolve(missing, Some(4), None), InterpreterProfile::Amiga);
+    }
+
+    #[test]
+    fn a_named_archives_flavour_names_the_machine() {
+        // SQ-0734 precedence 2. MCGA/EGA/CGA are three cards on ONE machine.
+        assert_eq!(InterpreterProfile::for_art_flavour(Flavour::Pc), InterpreterProfile::IbmPc);
+        assert_eq!(
+            InterpreterProfile::for_art_flavour(Flavour::AmigaMac),
+            InterpreterProfile::Amiga,
+        );
+    }
+
+    #[test]
+    fn the_named_archive_outranks_the_medium_and_yields_to_an_explicit_number() {
+        let plain = std::path::Path::new("/nonexistent/babelmap/no-such-story.z6");
+        // Naming an Amiga archive beside an ordinary file makes it an Amiga…
+        assert_eq!(
+            InterpreterProfile::resolve(plain, None, Some(Flavour::AmigaMac)),
+            InterpreterProfile::Amiga,
+        );
+        // …and an explicit number still outranks it (precedence 1 over 2).
+        assert_eq!(
+            InterpreterProfile::resolve(plain, Some(6), Some(Flavour::AmigaMac)),
+            InterpreterProfile::IbmPc,
+        );
+    }
+
+    #[test]
+    fn naming_a_pc_archive_cannot_move_header_byte_1e() {
+        // The blast-radius pin. `zvm`'s `exec.rs` branches on `$1E == 6`, and
+        // every v6 story gets that today from zvm's own Frotz rule. Naming a
+        // `.MG1`/`.EG1`/`.CG1` selects IBM PC, which has NO opinion on the
+        // number — so the byte the story reads is the byte it read before, and
+        // the whole v6 corpus is untouched by this feature by construction.
+        let profile = InterpreterProfile::for_art_flavour(Flavour::Pc);
+        assert_eq!(profile, InterpreterProfile::IbmPc);
+        assert_eq!(profile.interpreter_number(), None, "zvm's rule stays in force");
     }
 }

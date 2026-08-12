@@ -96,7 +96,7 @@ fn boot(file: &str, profile: Option<InterpreterProfile>, turns: usize) -> Option
             return None;
         }
     };
-    let profile = profile.unwrap_or_else(|| InterpreterProfile::resolve(&path, None));
+    let profile = profile.unwrap_or_else(|| InterpreterProfile::resolve(&path, None, None));
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path);
     let picture_dims = picts.all_pict_dims();
