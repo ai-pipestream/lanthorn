@@ -15,5 +15,7 @@ mod v6_journey_amiga_frame;
 mod v6_journey_boot_text;
 #[path = "suites/v6_journey_menu.rs"]
 mod v6_journey_menu;
+#[path = "suites/v6_journey_menu_band.rs"]
+mod v6_journey_menu_band;
 #[path = "suites/v6_journey_prose_containment.rs"]
 mod v6_journey_prose_containment;

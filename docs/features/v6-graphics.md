@@ -526,6 +526,24 @@ session-only switch that never touches your saved config:
   A game whose frame *encloses* the story to the screen bottom (Zork Zero's full
   frame) keeps the centred letterbox untouched, and a pane at or below the scaled
   native height (no dead space) degrades to that same centred layout.
+  **One window is fixed-height and the rest take what remains — and in Journey it
+  is the one at the bottom.** Nearly every v6 title puts its fixed window on top
+  (Arthur's status bar, Zork Zero's banner) and lets the story grow downward;
+  Journey inverts it. Its artwork sits left, its story right, and its command menu
+  runs along the foot of the screen, and it is the *menu* whose height is a property
+  of itself: fixed in y, dynamic in x, with the art and the story taking the width
+  and whatever height is left above it. Since hybrid draws chrome text as text —
+  one game row to one terminal row — that fixed height is simply the span of the
+  game rows the menu carries, which is how "native pixels → terminal rows" cashes
+  out for a strip made of characters. The planner used to compute it the other way
+  round, deriving the story viewport from the letterbox and handing the menu the
+  remainder, so the band's height wandered with the pane (nine rows at one scale,
+  eleven at another) while its content stayed a constant seven game rows. The rows
+  the menu never reached were painted by nothing, which stranded Journey's own
+  `└────┘` three rows above the pane's last row and trailed an empty upload after
+  the band; at a short pane the same arithmetic ran the other way and clipped the
+  menu's last line off the screen entirely. The menu now ends exactly where the
+  screen does, at every pane shape and on both releases.
   **Side border art is TILED down the flank, never stretched into it.** Three
   titles frame their story window with artwork drawn for a 320×200 screen —
   Arthur's poles, Shogun's single-piece border, Zork Zero's pillars — and a modern

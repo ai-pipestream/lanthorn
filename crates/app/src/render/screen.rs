@@ -813,39 +813,35 @@ fn render_node(
                                 let menu_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
                                 let vp = v6::story_viewport_box(Some(story), &top_scale, (area.width, area.height), cell_px);
                                 let (x, y) = (area.x + vp.x, area.y + vp.y);
-                                // The menu strip's top cell: the first terminal row that
-                                // actually CARRIES a menu run, mapped through the
-                                // bottom-anchored menu scale.
+                                // SQ-0765: the MENU is the fixed-height window here, and the
+                                // art and the story take what is left above it — the
+                                // inverse of every other v6 title, where the fixed window is
+                                // the status band at the top. So the band's height is the
+                                // menu's OWN height and nothing else's leftover:
+                                // [`menu_band_rows`] counts the game text rows it carries,
+                                // because hybrid draws chrome text one game row per terminal
+                                // row (SQ-0543), and the band is bottom-anchored to that.
                                 //
-                                // SQ-0548: it used to be the story's native bottom through
-                                // that scale, rounded DOWN. The story scale and the menu
-                                // scale round independently, so at some pane widths that
-                                // floor landed one row ABOVE the first menu row, and the
-                                // leftover row entered the menu band carrying no runs.
-                                // `decompose_chrome_strips` classes a run-less row `Empty`
-                                // and coalesces it into an ART strip, so that row redrew a
-                                // squashed slice of the frame's bottom edge full-width
-                                // across the pane — on top of the flank panel fill and its
-                                // divider. That is the width-dependent dark bar under the
-                                // left picture column: at widths where the floor happened
-                                // to land on the first menu row there was no leftover row
-                                // and no bar, which is why it came and went with the pane.
-                                // Anchoring on the runs keeps the story viewport — and with
-                                // it the flank fill and divider — reaching the menu at every
-                                // width. A run below the story bottom can only map at or
-                                // below the old floor, so the viewport never shrinks.
-                                let story_bottom = story.y_px as u32 + story.h_px as u32;
-                                let menu_top = chrome_runs
-                                    .iter()
-                                    .filter(|t| !t.text.trim().is_empty() && (t.y.max(1) as u32 - 1) >= story_bottom)
-                                    .map(|t| run_cell(t, &menu_scale, cell_px, area).1)
-                                    .min()
-                                    .map(|r| r.clamp(0, u16::MAX as i32) as u16)
-                                    .unwrap_or_else(|| {
-                                        let dev = slack as f32 + story_bottom as f32 * scale_center.s;
-                                        (dev / cell_px.1.max(1) as f32).floor() as u16
-                                    });
-                                let menu_top = menu_top.clamp(y + 1, area.bottom());
+                                // It used to be the other way round. `menu_top` was the
+                                // first terminal row carrying a menu run through the
+                                // bottom-anchored menu SCALE, so the story viewport was the
+                                // scale-derived quantity and the band was the remainder —
+                                // measured off the user's own dumps, 9 rows at pane height
+                                // 61/scale 1.43 and 11 at 61/1.96, for a menu whose content
+                                // stayed a constant 7 game rows. The rows the content never
+                                // reached were painted by nothing, which put the frame's own
+                                // bottom border three rows above the pane's last row
+                                // (SQ-0754), and at a short pane the reverse: the band came
+                                // out SHORTER than its content and clipped the last menu
+                                // line off the screen entirely.
+                                //
+                                // SQ-0548 (a run-less leftover row inside the band redrawing
+                                // a squashed slice of the frame's bottom edge) cannot recur
+                                // here by construction: the band is exactly the menu's own
+                                // rows, and `menu_band_strips` gives it to the cell path
+                                // whole, so there is no leftover row to misclassify.
+                                let menu_rows = menu_band_rows(&menu_band_runs(&chrome_runs, story));
+                                let menu_top = area.bottom().saturating_sub(menu_rows).clamp(y + 1, area.bottom());
                                 (top_scale, Rect::new(x, y, vp.width, menu_top.saturating_sub(y)), Some(menu_scale))
                             }
                         };
@@ -1206,7 +1202,7 @@ fn render_node(
                             }
                         }
                         let menu_strips = match &menu {
-                            Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs),
+                            Some(_) => menu_band_strips(&menu_bands, story, &chrome_runs),
                             None => Vec::new(),
                         };
                         // SQ-0504: rows drawn as terminal CELLS (pure-text strips)
@@ -4478,6 +4474,62 @@ fn edge_glyph_col(
     } else {
         None
     }
+}
+
+/// Every paint run the game put BELOW its story window — the content of the
+/// bottom-anchored command strip, and the whole of it (SQ-0765).
+///
+/// Blank runs count: a reverse-video SPACE is how Journey draws the column dividers
+/// down its menu, so a row of nothing but dividers is a menu row like any other.
+fn menu_band_runs<'a>(
+    runs: &[&'a crate::engine::PxText],
+    story: &crate::engine::PositionedWindow,
+) -> Vec<&'a crate::engine::PxText> {
+    let story_bottom = story.y_px as i32 + story.h_px as i32;
+    runs.iter()
+        .copied()
+        .filter(|t| {
+            let py = t.y.max(1) as i32 - 1;
+            py >= story_bottom
+        })
+        .collect()
+}
+
+/// How many terminal rows that strip needs: the span of its own GAME text rows.
+///
+/// This is the whole of SQ-0765's principle. Hybrid draws chrome text as text, one
+/// game row per terminal row ([`draw_chrome_text_strip`] packs them that way,
+/// SQ-0543), so the menu's height in rows is a property of the MENU — fixed, and
+/// derived from its native pixel height — not of whatever the letterbox happened to
+/// leave under the story.
+fn menu_band_rows(menu: &[&crate::engine::PxText]) -> u16 {
+    /// The v6 text cell is 8x16 (SQ-0479).
+    const FONT_H: i32 = 16;
+    let rows: Vec<i32> = menu.iter().map(|t| (t.y.max(1) as i32 - 1) / FONT_H).collect();
+    match (rows.iter().min(), rows.iter().max()) {
+        (Some(&a), Some(&b)) => (b - a + 1).clamp(0, u16::MAX as i32) as u16,
+        _ => 0,
+    }
+}
+
+/// The bottom-anchored command strip's own strips (SQ-0765). It is a TEXT band by
+/// construction — [`hybrid_bottom_plan`] picks `Menu` precisely when what lies below
+/// the story window is runs and no art band — so it is one `Text` strip carrying
+/// every one of those runs, and the cell path lays them out from the band's top.
+///
+/// Deliberately NOT [`decompose_chrome_strips`]: that classifier places a run through
+/// the letterbox scale, which spreads N game rows over more than N terminal rows and
+/// so cannot agree with a band sized by the rows themselves. Asking it here would
+/// leave run-less gaps inside the band (Art strips redrawing squashed slices of the
+/// frame's edge, SQ-0548) and, where the spread runs past the band's last row, drop
+/// the runs that landed outside it — the menu's own last line.
+fn menu_band_strips<'a>(
+    bands: &[Rect],
+    story: &crate::engine::PositionedWindow,
+    runs: &[&'a crate::engine::PxText],
+) -> Vec<ChromeStrip<'a>> {
+    let menu = menu_band_runs(runs, story);
+    bands.iter().map(|b| ChromeStrip::Text(*b, menu.clone())).collect()
 }
 
 /// Carve the hybrid chrome `bands` into drawable strips (SQ-0500). Narrow side
