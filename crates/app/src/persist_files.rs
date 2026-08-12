@@ -897,15 +897,19 @@ mod tests {
         m.state.pc = 0x40;
         assert_eq!(m.step(), StepResult::SaveRequest);
 
-        let dir = std::env::temp_dir();
+        // Own directory, not the bare temp root: the slug fixes the FILE name, so
+        // writing it beside every other run's copy is a race (SQ-0812).
+        let dir = std::env::temp_dir().join(format!("bm-named-qzl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let path = super::save_game_named(&dir, "slot one", &m).unwrap();
         assert!(path.to_string_lossy().ends_with("slot-one.qzl"));
         assert_eq!(std::fs::read(&path).unwrap(), m.save_quetzal(), "bare Quetzal bytes");
-        let _ = std::fs::remove_file(&path);
 
         // The reserved `default` slug is rejected for game saves too.
         let err = super::save_game_named(&dir, "default", &m).expect_err("reserved slug rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

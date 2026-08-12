@@ -4247,7 +4247,9 @@ mod tests {
         // And they carry a save timestamp read from the file's mtime.
         assert!(!infos[0].saved_at.is_empty(), "game saves are timestamped from file mtime");
 
-        let _ = fs::remove_dir_all(&dir);
+        // Remove the per-run parent, not just the game dir inside it — clearing only
+        // `…/Zork1.z5` left one empty `bm-listqzl-<pid>` behind per run for ever.
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
 
     #[test]
