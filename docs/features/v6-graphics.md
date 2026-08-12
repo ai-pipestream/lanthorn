@@ -1218,6 +1218,43 @@ the story's own native pixels, so it stays as backend- and terminal-neutral as t
 of the archive — a save taken on kitty at 117×64 restores unchanged onto half-blocks at
 80×24.
 
+### …and so do the ground's two siblings
+
+The ground was not travelling alone in that gap; it was simply the one anybody
+noticed. Two more layers ride beside the window tree, and neither was archived nor
+reset either.
+
+The **erase fills** are the first. The standard makes erasing a window a fill of its
+rect with the window's background colour, and on a v6 screen that is opaque paint —
+it is what makes advent's help panel a solid panel rather than text hovering over the
+story. Journey two steps into its boot is covering three windows that way; one step
+later it is covering none. Restore the later save onto the earlier screen and all
+three bands used to stay, three opaque slabs over a game that had moved on; restore
+it the other way and the three the save *did* carry never arrived at all.
+
+The **canvas anchors** are the second. An anchor is what remembers where a window's
+art was painted, so that when the window moves the pixels stay behind (the standard is
+explicit: "subsequent movements of the window do not move what was printed"). A
+restored session used to inherit the *previous* game's anchors, so the first window
+move after a restore stranded the restored art at coordinates belonging to a screen
+that no longer existed. Journey, Zork Zero, Shogun and fmvpoker all hold live anchors
+within three steps of boot, so this was not a corner case.
+
+Both now travel inside `display.json` — and as a **recipe**, not as pixels, because
+unlike the ground they are bounded: one small struct per window however long the
+session runs. Two session-local numbers are deliberately left behind, since neither
+means anything in the session that reads them back. A fill's draw stamp comes from a
+process-global counter, so only the *order* of the fills travels and the restore
+re-stamps them from the live counter, exactly as it does for restored canvases. And a
+fill's character stamp decides exactly one thing — whether any prose has printed since,
+which is what stops it covering — so only the fills that still cover travel at all; the
+counter never runs backwards, so a fill the story has printed past can never cover
+again.
+
+`@restart` gets the same treatment, for the same reason and by the same argument the
+reboot path already makes about the canvases and the display list. A rebooted story
+inherits neither the dead screen's anchors nor its ground.
+
 ## Margin pictures — text that flows past the art
 
 Some v6 scenes put the picture on one side and let the prose flow past it.

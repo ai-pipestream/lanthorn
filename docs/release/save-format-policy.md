@@ -46,7 +46,7 @@ Pre-beta there is still **no obligation to read old files** (see the standing
 | Glulx-Quetzal (`@save`) | `game.glksave` inside `<slug>.babelmap` (app); bare `<slug>.qzl` (`gvm-cli`) | `gvm/src/exec.rs` `save_quetzal` | none — spec-defined `FORM IFZS` | Public spec (Glulx §1.8) | `exec::tests::save_quetzal_is_a_wellformed_ifzs_container`, `…omits_greg_and_glk_chunks` |
 | Host Save State — Z-machine | inside `.babelmap` `game.qzl` | `zvm/src/quetzal.rs` (+ archive) | via archive `format_version` | Frozen (0.x) | archive round-trip tests |
 | Host Save State — Glulx | inside `.babelmap` `game.glksave` | `gvm/src/exec.rs` `save_state` (adds `GReg` + `Glk `) | `Glk ` chunk: `GLK_SNAPSHOT_VERSION = 6` | Frozen (0.x) | `glk::tests::snapshot_version_constant_is_frozen`, `…serialize_stamps_current_snapshot_version`, `…deserialize_rejects_future_snapshot_version`, `exec::tests::save_state_is_the_same_container_plus_our_own_chunks` |
-| `.babelmap` archive (map + save + transcript + screen + history + pictures + painted ground) | `<ifid>.babelmap` (ZIP) | `app/src/archive.rs` | `Meta.format_version = 6` | Frozen (0.x) | `archive::tests::format_version_constant_is_frozen`, `…unknown_format_version_returns_err`, `…save_trigger_wire_names_are_pinned_and_round_trip`, archive round-trip tests |
+| `.babelmap` archive (map + save + transcript + screen + history + pictures + painted ground) | `<ifid>.babelmap` (ZIP) | `app/src/archive.rs` | `Meta.format_version = 7` | Frozen (0.x) | `archive::tests::format_version_constant_is_frozen`, `…unknown_format_version_returns_err`, `…save_trigger_wire_names_are_pinned_and_round_trip`, archive round-trip tests |
 | Z-machine aux data (v5 `@save`/`@restore` table) | `default.aux` | `app/src/aux_store.rs` + `zvm-cli/src/auxiliary.rs` | `ZAUX` magic + `VERSION = 1` | Frozen (0.x), cross-host | `aux_store::tests::version_constant_is_frozen`, `…decode_rejects_bumped_version`, `…encodes_canonical_zaux_bytes` |
 | Glk file VFS sidecar | `default.glkvfs` | `gvm/src/glk.rs` `encode_files`/`decode_files` (path: `app/src/vfs_store.rs`) | `GVFS` magic + `u32` version `1` | Frozen (0.x) | `glk::tests::encode_files_roundtrips_and_skips_temp`, `…decode_files_rejects_bumped_gvfs_version` |
 | Debug-coverage PC set | `default.pcs` | `app/src/pcset_store.rs` | `ZPCS` magic + `VERSION = 1` | Frozen (0.x) | `pcset_store::tests::version_constant_is_frozen`, `…decode_rejects_bumped_version`, `…codec_round_trips` |
@@ -97,6 +97,21 @@ Pre-beta there is still **no obligation to read old files** (see the standing
   Stored as pixels rather than as a recipe: the ground's inputs are an unbounded
   stream of fills, so there is no bounded recipe to store — the justification the
   "persist the recipe" rule requires for a derived artifact.
+
+- **`.babelmap` archive 6 → 7 (SQ-0814).** `display.json` now also carries the two v6
+  screen layers that ride beside the window canvases: the surviving `erase_window`
+  FILLS (what each window's last erase painted, and in what order) and the canvas
+  ANCHORS (where each window's art was painted, so a later window move strands it
+  where the hardware left it). They are the ground's siblings — the same per-session
+  fields no restore path touched — and the same defect: a resumed Journey wore three
+  opaque bands from the screen it replaced, or lost the three the save carried.
+  A RECIPE, not pixels, because unlike the ground they are bounded at one small struct
+  per window however long the session runs.
+  *Accepted break, no migration:* a pre-7 archive still loads and simply carries no
+  layers, which restores them EMPTY — the correct answer, and the same reset every
+  non-v6 archive gets. The bump is because the break runs the other way: an older
+  build reading a version-7 archive would drop the layers silently and restore a
+  screen still wearing the previous session's fills, which is precisely the bug.
 
 ## Notes on identity vs. version
 

@@ -1119,7 +1119,101 @@ impl GameSession {
                 ));
             }
         }
-        (crate::archive::DisplayListDto { palette, windows }, fallback, diags)
+        let layers = self.v6_screen_layers();
+        (crate::archive::DisplayListDto { palette, windows, layers }, fallback, diags)
+    }
+
+    /// The v6 screen layers that ride BESIDE the window canvases (SQ-0814), as the
+    /// recipe an archive carries: the surviving `erase_window` fills
+    /// ([`window_fills`](Self::window_fills)) and the canvas anchors
+    /// (`canvas_anchor`, SQ-0715).
+    ///
+    /// A RECIPE, not pixels — the exception the ground takes
+    /// ([`paint_ground_png`](Self::paint_ground_png)) does not apply here, because
+    /// both of these are bounded at one small struct per window however long the
+    /// session runs. Everything in them is in the game's own native pixels or a
+    /// packed RGB colour, so the archive stays backend- and terminal-neutral.
+    ///
+    /// Two per-session numbers are dropped on the way in, because neither survives
+    /// into the restoring session with its meaning intact — both are stamps from
+    /// counters the Quetzal save knows nothing about, and only what they DECIDE is
+    /// worth carrying:
+    ///
+    /// - a fill's draw stamp comes from a process-global counter, so only the ORDER
+    ///   of the fills travels (as this vector's order) and the restore re-stamps them
+    ///   from the live counter, exactly as restored canvases are re-stamped;
+    /// - a fill's `out_chars` decides one thing, whether the fill is still the newest
+    ///   paint on the screen, so only the fills that still COVER travel. See
+    ///   [`crate::archive::V6LayersDto::fills`].
+    pub fn v6_screen_layers(&self) -> crate::archive::V6LayersDto {
+        let now = self.machine.v6_win0_out_chars;
+        let mut fills: Vec<(u64, crate::archive::V6FillDto)> = self
+            .window_fills
+            .iter()
+            .filter(|(_, f)| f.out_chars == now)
+            .map(|(&win, f)| {
+                (f.seq, crate::archive::V6FillDto { win, x: f.x, y: f.y, w: f.w, h: f.h, bg: f.bg })
+            })
+            .collect();
+        fills.sort_by_key(|(seq, f)| (*seq, f.win));
+        let mut anchors: Vec<crate::archive::V6AnchorDto> = self
+            .canvas_anchor
+            .iter()
+            .map(|(&win, a)| crate::archive::V6AnchorDto {
+                win,
+                origin_x: a.origin.0,
+                origin_y: a.origin.1,
+                x: a.rect.0,
+                y: a.rect.1,
+                w: a.rect.2,
+                h: a.rect.3,
+            })
+            .collect();
+        anchors.sort_by_key(|a| a.win);
+        crate::archive::V6LayersDto {
+            fills: fills.into_iter().map(|(_, f)| f).collect(),
+            anchors,
+        }
+    }
+
+    /// Install the v6 screen layers a restore is bringing back (SQ-0814), REPLACING
+    /// whatever the pre-restore screen left standing. `None` — a non-v6 archive, or
+    /// one written before these travelled — resets both to empty.
+    ///
+    /// The reset is the load-bearing half, exactly as it is for the painted ground
+    /// ([`load_paint_ground`](Self::load_paint_ground)). `auto_load` restores after
+    /// the story has already booted and painted its opening screen, and a host Save
+    /// State swaps VM memory under a game that never learns it happened, so no
+    /// repaint is ever issued: a fill left standing keeps hiding what the restored
+    /// game drew under it, and an anchor left standing tells the next `move_window`
+    /// to strand the restored canvas at coordinates belonging to a screen that no
+    /// longer exists.
+    pub fn load_v6_screen_layers(&mut self, dto: Option<&crate::archive::V6LayersDto>) {
+        self.window_fills.clear();
+        self.canvas_anchor.clear();
+        let Some(d) = dto else { return };
+        let now = self.machine.v6_win0_out_chars;
+        for f in &d.fills {
+            self.window_fills.insert(f.win, WindowFill {
+                x: f.x,
+                y: f.y,
+                w: f.w,
+                h: f.h,
+                bg: f.bg,
+                // Fresh stamps in the archived order: the saved numbers belong to the
+                // process that wrote them, only their sequence is meaningful here.
+                seq: crate::graphics::next_draw_seq(),
+                // Every archived fill is one that still covers, which is what this
+                // count says when it equals the live one.
+                out_chars: now,
+            });
+        }
+        for a in &d.anchors {
+            self.canvas_anchor.insert(a.win, CanvasAnchor {
+                origin: (a.origin_x, a.origin_y),
+                rect: (a.x, a.y, a.w, a.h),
+            });
+        }
     }
 
     /// The longest display list any v6 window is currently holding, and how many
@@ -1473,6 +1567,16 @@ impl GameSession {
             self.display_ops.clear();
             self.unreplayable.clear();
             self.window_fills.clear();
+            // The same argument reaches the other two layers beside the window tree
+            // (SQ-0814). A canvas ANCHOR describes where a canvas that no longer
+            // exists was painted, and the canvas above was just dropped — left
+            // behind, it unions the reboot's first draw into a pre-restart footprint
+            // and strands it at a pre-restart origin. And the painted GROUND is the
+            // dead screen's own pixels: the reboot inherits them wholesale unless it
+            // happens to clear the full screen with an explicitly coloured erase,
+            // which is the only thing that drops the ground on its own.
+            self.canvas_anchor.clear();
+            self.paint = None;
             self.v6_win0_chars_seen = 0;
         }
         // Did this turn's first printed glyph land exactly where the previous
@@ -6545,6 +6649,86 @@ mod tests {
         assert_eq!(
             canvas.img.get_pixel(0, 0).0, [0, 0, 0, 0],
             "the PRE-restart draw must not replay into the rebooted canvas",
+        );
+    }
+
+    /// SQ-0814. `@restart` reboots the story in place, and the drain already drops the
+    /// app-side v6 chrome the VM's own screen reset cannot reach — the canvases, the
+    /// display list, the replay vetoes and the erase fills. Two layers were left out
+    /// of that list and belong in it by exactly the same argument:
+    ///
+    /// * the CANVAS ANCHORS (SQ-0715), which say where a canvas that has just been
+    ///   dropped was painted. Kept, they union the reboot's first draw into a
+    ///   pre-restart footprint and strand it at a pre-restart origin;
+    /// * the painted GROUND (SQ-0706), which is the dead screen's own pixels. Nothing
+    ///   else drops it: `apply_erase_fill` only clears it on a full-screen erase
+    ///   naming a colour outright, so a reboot whose boot erases inherit — Zork Zero,
+    ///   Arthur, Journey, advent, the mysterious set: every v6 story measured except
+    ///   scopa, Shogun and fmvpoker — keeps the old game's ground under the new one.
+    ///
+    /// A synthetic v6 screen rather than a real story, because the real ones make the
+    /// bug unfalsifiable rather than absent: the three that paint a ground also clear
+    /// the full screen on the way back up, and the ones that reboot without clearing
+    /// have no ground to lose. The two mechanisms are independent, and this pins the
+    /// one that is ours.
+    #[test]
+    fn restart_drops_the_pre_restart_ground_and_canvas_anchors() {
+        use zvm::screen::{V6Windows, ZColour, ZWindow};
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[0] = ZWindow { x_size: 640, y_size: 400, ..Default::default() };
+        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+
+        let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
+            disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
+            paint: None,
+            paced_frames: std::collections::VecDeque::new(),
+            window_fills: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+        };
+        sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
+
+        // The pre-restart game paints a ground (a PART-screen erase naming a colour —
+        // a full-screen one would be a screen clear and drop the ground by itself)…
+        sess.apply_erase_fill(&zvm::cpu::exec::EraseFill {
+            window: 7, x: 1, y: 1, w: 64, h: 48, bg: ZColour::True24(0x00FF00), pics_before: 0,
+        });
+        // …and draws into window 7, anchoring its canvas where the window sits now.
+        sess.apply_picture_event(&PictureEvent {
+            number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
+            win_box: (1, 1, 64, 48),
+        });
+        assert!(sess.paint.is_some(), "premise: the pre-restart screen has a painted ground");
+        assert!(sess.canvas_anchor.contains_key(&7), "premise: and window 7's canvas is anchored");
+
+        // @restart: the VM re-boots in place and the session drains the turn.
+        sess.machine.just_restarted = true;
+        let _ = sess.drain_turn(false, None, false);
+
+        assert!(
+            sess.paint.is_none(),
+            "the painted ground belongs to the screen the reboot replaced — a rebooted game \
+             inherits none of it (SQ-0814)"
+        );
+        assert!(
+            sess.canvas_anchor.is_empty(),
+            "nor the anchors of canvases the same drain has just dropped: an anchor left \
+             standing strands the reboot's own first draw at a pre-restart origin (SQ-0814)"
         );
     }
 

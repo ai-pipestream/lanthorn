@@ -32,5 +32,7 @@ mod v6_restore_input_window_echo;
 mod v6_restore_paint_ground;
 #[path = "suites/v6_restore_palette_replay.rs"]
 mod v6_restore_palette_replay;
+#[path = "suites/v6_restore_screen_layers.rs"]
+mod v6_restore_screen_layers;
 #[path = "suites/v6_resume_colours.rs"]
 mod v6_resume_colours;
