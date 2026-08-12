@@ -271,16 +271,40 @@ fn arthur(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
 /// `common_extend_border()`, which repeats everything drawn so far downward
 /// until the pane is filled — that is the third step here.
 ///
+/// **Both repeats are cut from `art`, never from `dst`.** This is the ORDER
+/// Bocfel works in and it is load-bearing. Its covering rectangle over the
+/// status bar — *"the raw border graphics have a decorative top bar that doesn't
+/// fit the header text, so the original interpreters cover it with a solid color
+/// rectangle"* — is step 4 of `draw_border_common`, drawn AFTER the extension,
+/// so the copies it stamps are of the unmasked picture. babelmap's chrome canvas
+/// is the same art with that band already gone: Shogun's status line is two
+/// 16px rows the renderer draws as crisp terminal cells (SQ-0500), so the top
+/// **32 native rows** of the flank are transparent there while the
+/// graphics-only canvas still carries them. Cutting the repeat from the chrome
+/// canvas therefore copies a 32-row hole twice — once at the flipped copy's
+/// FOOT (its source rows 32..0) and once at the tiled block's HEAD — and the two
+/// meet at the join, which is the 64-native-row (94px at a 120x90 terminal) black
+/// band between the panels the user reported. Reading `border_height` off the
+/// art while reading the PIXELS off the chrome canvas was the mismatch; the
+/// gap's size is twice the cleared status band, not the art's unpainted tail,
+/// and it sits centred on the join at `2·border_height − overlap` rather than
+/// at the art's own bottom. SQ-0698.
+///
+/// `dst`'s own first copy keeps the chrome canvas's clearing, because that band
+/// is where the status CELLS go; the flank crop starts below it in every pane we
+/// have measured, so it is only ever the rows the extension adds that need the
+/// art.
+///
 /// Measured on `James Clavell's Shogun.adf` (release 295, serial 890321): the
 /// border art is native rows 0..336 across flank columns 0..46 and 594..640, so
 /// `border_height` = 336 = the 168-row raw image doubled.
-fn shogun(dst: &mut RgbaImage, border_height: u32, desired_height: u32) {
+fn shogun(dst: &mut RgbaImage, art: &RgbaImage, border_height: u32, desired_height: u32) {
     /// Bocfel's Amiga offset for `P_BORDER` is 2 raw lines; unit space doubles it.
     const OVERLAP: u32 = 4;
     if border_height == 0 || desired_height <= border_height {
         return;
     }
-    let whole = snapshot(dst, 0, border_height);
+    let whole = snapshot(art, 0, border_height);
     let second_top = border_height - OVERLAP;
     stamp(dst, &whole, second_top, true);
     let lowest = second_top + border_height;
@@ -288,9 +312,13 @@ fn shogun(dst: &mut RgbaImage, border_height: u32, desired_height: u32) {
         return;
     }
     // `common_extend_border(desired_height, lowest_drawn_pixel, start_copy_from)`
-    // — repeat everything from row 0 down to the lowest drawn line, truncating
-    // the last copy at the bottom.
-    let block = snapshot(dst, 0, lowest);
+    // — repeat everything from `pillar_top` (0, for Shogun) down to the lowest
+    // drawn line, truncating the last copy at the bottom. Composed here from the
+    // art rather than snapshotted out of `dst`, for the reason above; the two
+    // stamps reproduce rows `[0, lowest)` exactly as the steps above laid them.
+    let mut block = RgbaImage::new(dst.width(), lowest);
+    stamp(&mut block, &whole, 0, false);
+    stamp(&mut block, &whole, second_top, true);
     tile_down(dst, &block, lowest, desired_height, 0, false, false);
 }
 
@@ -351,13 +379,24 @@ pub fn art_extent(canvas: &RgbaImage, x0: u32, x1: u32) -> (u32, u32) {
 /// border art extended downward so the whole band is painted.
 ///
 /// `art` is the flank's opaque extent as [`art_extent`] reports it over the
-/// SAME columns — measured on the graphics-only canvas, so a status run
+/// SAME columns — measured on the graphics-only canvas `gfx`, so a status run
 /// rasterised into `canvas` cannot be mistaken for border art.
+///
+/// `gfx` is that graphics-only canvas itself, and it is not merely the
+/// classifier's input: `canvas` is the artwork MINUS whatever the renderer draws
+/// as terminal cells instead, so a handler that repeats a unit cut from
+/// `canvas` repeats the holes those cells left. Only [`shogun`] needs it today
+/// (see there) and only [`shogun`] is given it, so the other two are byte-for-byte
+/// what they were. That is not luck, and the suite measures it rather than
+/// assuming it: Zork Zero's status sits ON its banner art so nothing is cleared
+/// from its flank at all, and Arthur's repeat unit is cut at 90% of his poles'
+/// own height, far below the status row between his banner and the story.
 ///
 /// `None` when the flank shows no recognised border art, or when the art
 /// already covers the band — the caller then keeps whatever it did before.
 pub fn flank_source(
     canvas: &RgbaImage,
+    gfx: &RgbaImage,
     x0: u32,
     x1: u32,
     art: (u32, u32),
@@ -386,7 +425,15 @@ pub fn flank_source(
     }
     match kind {
         BorderArt::ArthurPoles => arthur(&mut strip, art.1, desired),
-        BorderArt::ShogunSinglePiece => shogun(&mut strip, art.1, desired),
+        BorderArt::ShogunSinglePiece => {
+            let mut art_strip = RgbaImage::new(w, art.1);
+            for y in 0..art.1.min(gfx.height()) {
+                for x in 0..w.min(gfx.width().saturating_sub(x0)) {
+                    art_strip.put_pixel(x, y, *gfx.get_pixel(x0 + x, y));
+                }
+            }
+            shogun(&mut strip, &art_strip, art.1, desired);
+        }
         BorderArt::ZorkZeroPillars => zork_zero(&mut strip, art.1, desired),
     }
     Some(snapshot(&strip, crop_top, rows))
@@ -471,7 +518,7 @@ mod tests {
     fn nothing_is_extended_when_the_art_already_covers_the_band() {
         let canvas = solid(64, 400, [9, 9, 9, 255]);
         assert!(
-            flank_source(&canvas, 0, 32, (0, 400), 400, 0, 400).is_none(),
+            flank_source(&canvas, &canvas, 0, 32, (0, 400), 400, 0, 400).is_none(),
             "a band no taller than the art needs no extension"
         );
     }
@@ -485,11 +532,59 @@ mod tests {
                 canvas.put_pixel(x, y, Rgba([(y % 251) as u8, 4, 5, 255]));
             }
         }
-        let out = flank_source(&canvas, 0, 32, (0, 336), 400, 30, 670).expect("extended");
+        let out = flank_source(&canvas, &canvas, 0, 32, (0, 336), 400, 30, 670).expect("extended");
         assert_eq!((out.width(), out.height()), (32, 670));
         for y in 0..out.height() {
             assert!(out.get_pixel(0, y)[3] == 255, "row {y} of the band is painted");
         }
+    }
+
+    /// SQ-0698 — **the gap between Shogun's tiled panels**, reported as *"there
+    /// is a gap between the tiled shogun side-art pieces"*.
+    ///
+    /// The chrome canvas is the artwork MINUS whatever the renderer draws as
+    /// terminal cells: Shogun's two-row status line is 32 native pixels the top
+    /// of its border sits behind, so those rows are cleared there while the
+    /// graphics canvas still carries them. Repeating a unit cut from the chrome
+    /// canvas copies that hole twice — the flipped copy's foot and the tiled
+    /// block's head are both the missing rows — and they meet at the join.
+    ///
+    /// Measured on `James Clavell's Shogun.adf` (release 295, serial 890321) at
+    /// a 120x90 terminal: 64 transparent native rows centred on native row 668
+    /// (`2·336 − 4`), which the uniform scale of 1.475 put on screen as a 94px
+    /// black band. Falsifiable: cut the two repeats from `dst` again and this
+    /// fails with exactly 64 blank rows in the same place.
+    #[test]
+    fn shoguns_repeats_come_from_the_art_not_the_status_cleared_canvas() {
+        const H: u32 = 336;
+        const CLEARED: u32 = 32;
+        let mut gfx = RgbaImage::new(64, 400);
+        for y in 0..H {
+            for x in 0..64 {
+                gfx.put_pixel(x, y, Rgba([(y % 251) as u8, 4, 5, 255]));
+            }
+        }
+        // …and the chrome canvas the band actually ships, with the status band
+        // gone from the top of the flank.
+        let mut canvas = gfx.clone();
+        for y in 0..CLEARED {
+            for x in 0..64 {
+                canvas.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+            }
+        }
+        // A crop that starts below the cleared band, as every measured pane does.
+        let out = flank_source(&canvas, &gfx, 0, 32, (0, H), 400, 37, 1025).expect("extended");
+        let blank: Vec<u32> =
+            (0..out.height()).filter(|&y| (0..out.width()).all(|x| out.get_pixel(x, y)[3] == 0)).collect();
+        assert!(
+            blank.is_empty(),
+            "the extended flank has {} transparent row(s) — first at {:?}, native {:?}; \
+             the join sits at native {}",
+            blank.len(),
+            blank.first(),
+            blank.first().map(|y| y + 37),
+            2 * H - 4
+        );
     }
 
     #[test]
@@ -502,7 +597,7 @@ mod tests {
                 canvas.put_pixel(x, y, Rgba([v, 0, 0, 255]));
             }
         }
-        let out = flank_source(&canvas, 0, 8, (11, 379), 400, 0, 600).expect("extended");
+        let out = flank_source(&canvas, &canvas, 0, 8, (11, 379), 400, 0, 600).expect("extended");
         assert_eq!(out.height(), 600);
         assert!(out.get_pixel(0, 599)[3] == 255, "the band's last row is painted");
         assert_eq!(out.get_pixel(0, 599)[0], 200, "and it is the foot, not the shaft");

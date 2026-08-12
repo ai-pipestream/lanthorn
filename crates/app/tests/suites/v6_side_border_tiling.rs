@@ -160,6 +160,9 @@ struct Band {
     tiled: bool,
     stretched: bool,
     src: (u32, u32),
+    /// The longest contiguous run of source rows with no opaque pixel at all,
+    /// and the row it starts at — a hole in a tiled flank (SQ-0698).
+    blank: (u32, u32),
 }
 
 /// Parse `band WxH@(x,y) [Slot, how]: … · source WxH native px` (tiled) and
@@ -185,7 +188,12 @@ fn parse_bands(log: &[String]) -> Vec<Band> {
                 let s = rest.rsplit_once("· native ")?.1;
                 pair(s.split('@').next()?, 'x')?
             };
-            Some(Band { cells: (w as u16, h as u16), at: (x as u16, y as u16), tiled, stretched, src })
+            let blank = rest
+                .rsplit_once("longest run ")
+                .and_then(|(_, t)| t.split_once(" at "))
+                .and_then(|(n, a)| Some((n.trim().parse().ok()?, a.trim().parse().ok()?)))
+                .unwrap_or((0, 0));
+            Some(Band { cells: (w as u16, h as u16), at: (x as u16, y as u16), tiled, stretched, src, blank })
         })
         .collect()
 }
@@ -287,6 +295,59 @@ fn a_flank_reaches_the_story_viewports_bottom() {
                     sp.title,
                     sp.release,
                     b.at.0
+                );
+            }
+        }
+    }
+}
+
+/// SQ-0698 — **the gap between the tiled pieces**, reported on Shogun:
+/// *"there is a gap between the tiled shogun side-art pieces"*.
+///
+/// Case 2 above only asks that the band REACH the bottom, which a flank with a
+/// hole punched through its middle does — the placement rect is the full height
+/// either way, and that is precisely why this defect survived the first suite.
+/// The source image is the only place it shows, so the render reports the
+/// longest run of rows in it that carry no opaque pixel, and where that run
+/// starts; this reads those two numbers.
+///
+/// A run at row 0 is legitimate and is measured, not tolerated: the renderer
+/// clears the rows a chrome TEXT strip covers so they draw as crisp cells
+/// (SQ-0500), and a flank whose crop begins inside that band starts blank —
+/// 3 rows on Shogun at 100x40, 4 and 6 on Arthur. A run starting anywhere BELOW
+/// row 0 is a hole.
+///
+/// Measured on `James Clavell's Shogun.adf` (release 295, serial 890321) at
+/// 120x90: an interior run of 64 blank native rows starting at band row 599 —
+/// native 636, centred on the join at native 668 (`2·border_height − overlap`) —
+/// which the uniform 1.475 scale put on the user's screen as a 94px black band
+/// between the two ornate gold panels.
+///
+/// The cause is worth naming here because any future handler can fall into it:
+/// the chrome canvas a band ships is the artwork MINUS whatever the renderer
+/// draws as cells instead, and Shogun's status line is two 16px rows that the
+/// top of its border sits behind. A repeat cut from that canvas carries the hole
+/// twice — once at the flipped copy's foot, once at the tiled block's head — and
+/// the two meet at the join. A repeat cut from the graphics-only canvas does not.
+#[test]
+fn a_flank_has_no_gap_between_its_tiled_pieces() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for sp in SPECIMENS {
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        for &(w, h) in PANES {
+            let (_, bands, _) = frame(&s, (w, h));
+            for b in flanks(&bands, w) {
+                let (run, at) = b.blank;
+                assert_eq!(
+                    (run > 0).then_some(at),
+                    (run > 0).then_some(0),
+                    "{} [release {}] at {w}x{h}: the flank source {b:?} has an INTERIOR hole — \
+                     {run} row(s) with no art in them starting at row {at} of the band. A blank \
+                     run at row 0 is the chrome text strip's own rows, cleared so they draw as \
+                     cells; one below that is a gap between the tiled pieces",
+                    sp.title,
+                    sp.release
                 );
             }
         }
@@ -434,3 +495,5 @@ fn each_specimen_is_recognised_as_its_own_layout() {
         );
     }
 }
+
+

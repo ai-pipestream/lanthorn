@@ -332,8 +332,18 @@ session-only switch that never touches your saved config:
   which on a 64-row pane left the frame standing open down its lower half). The
   three recipes are per title, because the artwork is: the mechanism is a port of
   Bocfel's `draw_border.cpp`, which Spatterlight ships, and which hard-codes per
-  game *and* per platform for the same reason. `/dump-windows` labels a band
-  `[Art, tiled]` and reports the native size of the source it was composed from.
+  game *and* per platform for the same reason. One trap that recipe has to dodge:
+  the canvas a band ships is the artwork *minus* whatever the renderer draws as
+  terminal cells instead, so a repeat cut from it copies the holes those cells
+  left. Shogun's status line is two 16-pixel rows the top of its border sits
+  behind, and cutting the repeat there put a 64-row hole at the join between the
+  tiled pieces — 94 screen pixels of black between two ornate gold panels at
+  120×90. Its repeats come off the graphics-only canvas instead, which is the
+  order Spatterlight works in too: it covers the status bar *after* extending, not
+  before. `/dump-windows` labels a band `[Art, tiled]`, reports the native size of
+  the source it was composed from, and counts the rows in it that carry no art at
+  all — the longest run and where it starts, since a hole is invisible in the
+  band's rectangle and shows up only on screen.
   This is a hybrid-mode improvement only; raster mode still shows each title's art
   at its own native extent.
   In hybrid, **nothing the game printed as a character is ever rasterised**. A strip

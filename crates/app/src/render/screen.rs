@@ -3965,7 +3965,7 @@ fn flank_tiled_source(
         return None;
     }
     let art = crate::render::v6_border::art_extent(gfx, x0, x1);
-    crate::render::v6_border::flank_source(canvas, x0, x1, art, native.1 as u32, top, rows)
+    crate::render::v6_border::flank_source(canvas, gfx, x0, x1, art, native.1 as u32, top, rows)
 }
 
 /// A native `(x, y, w, h)` crop of the chrome canvas, as a band draw takes it.

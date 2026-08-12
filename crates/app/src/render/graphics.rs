@@ -1347,12 +1347,14 @@ impl GraphicsRender {
         if let Some((_, proto)) = self.chrome_bands.get(&key) {
             let sz = proto.size();
             let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
+            let (blank, run, run_at) = blank_rows(src);
             self.band_log.push(format!(
-                "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px",
+                "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · blank rows {}, longest run {} at {}",
                 band.width, band.height, band.x, band.y,
                 if fresh { "cache HIT" } else { "encoded" },
                 sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
                 src.width(), src.height(),
+                blank, run, run_at,
             ));
             place_protocol(proto, dest, buf);
             self.note_op(GraphicsOp::Place {
@@ -1366,6 +1368,33 @@ impl GraphicsRender {
             ));
         }
     }
+}
+
+/// Rows of `src` with no opaque pixel anywhere across them: how many, the
+/// longest contiguous run of them, and where that run starts (SQ-0698).
+///
+/// Reported on every tiled band's log line, because a hole in a tiled flank is
+/// invisible in the band's RECT — the placement is the full height either way —
+/// and shows up only as a black stripe on the user's screen. The RUN and WHERE
+/// are the numbers that matter. A run at row 0 is the band's own top edge, where
+/// the renderer clears the rows a chrome text strip draws as crisp cells (a v6
+/// text row is 16 native px, so the leading run is small); an INTERIOR run is a
+/// hole, and Shogun's tiled pieces were separated by one of 64 native rows.
+fn blank_rows(src: &image::RgbaImage) -> (u32, u32, u32) {
+    let (mut total, mut run, mut longest, mut at) = (0, 0, 0, 0);
+    for y in 0..src.height() {
+        if (0..src.width()).all(|x| src.get_pixel(x, y)[3] == 0) {
+            total += 1;
+            run += 1;
+            if run > longest {
+                longest = run;
+                at = y + 1 - run;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    (total, longest, at)
 }
 
 // ── Kitty virtual-placement emission (SQ-0520) ────────────────────────────────
