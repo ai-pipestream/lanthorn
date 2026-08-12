@@ -43,7 +43,15 @@ pub struct Features {
 /// Eager per-story metadata, derived from bytes `scan_stories` already reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoryMeta {
+    /// The size of the file on disk — the container, when the story lives in one.
     pub size_bytes: u64,
+    /// The size of the story image babelmap actually runs, after mounting the
+    /// container (SQ-0771). Equal to `size_bytes` for a plain `.z*`/`.ulx`/`.dat`;
+    /// smaller for every container, and *unrelated* to it for an Amiga floppy —
+    /// a `.adf` is 880 KB whatever it holds, so the container's length says
+    /// nothing about the game. Reported for every container kind (`.adf`, blorb,
+    /// zip), not just the disk image.
+    pub story_bytes: u64,
     pub modified: Option<String>, // "YYYY-MM-DD"
     pub engine: Engine,
     pub format: String,           // "Z-code" | "Glulx" | "Blorb (Z-code)" | "Blorb (Glulx)"
@@ -691,8 +699,13 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
             .unwrap_or("")
             .to_string();
         let title = out[g].title.clone();
+        let ifid = out[g].meta.ifid.clone();
         let chosen = sidecar_idxs.iter().copied().find(|&s| {
-            hints::hint_matches_story(&out[s].filename, &stem)
+            // Identity first (SQ-0767): a story mounted out of a disk image is
+            // named for the box, so neither its stem nor its title can say
+            // which clues file is its own.
+            hints::hint_matches_identity(&out[s].filename, &ifid)
+                || hints::hint_matches_story(&out[s].filename, &stem)
                 || hints::hint_matches_story(&out[s].filename, &title)
         });
         if let Some(s) = chosen {
@@ -733,9 +746,11 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         .to_string();
     let ifid = crate::ifid::compute_ifid(&bytes);
 
-    // fs metadata: size + mtime → "YYYY-MM-DD".
+    // fs metadata: size + mtime → "YYYY-MM-DD". `size_bytes` measures the file
+    // on disk; `story_bytes` measures what was mounted out of it (SQ-0771).
     let fs_meta = std::fs::metadata(path).ok();
     let size_bytes = fs_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let story_bytes = bytes.len() as u64;
     let modified = fs_meta
         .as_ref()
         .and_then(|m| m.modified().ok())
@@ -821,6 +836,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
 
     let meta = StoryMeta {
         size_bytes,
+        story_bytes,
         modified,
         engine,
         format,
@@ -1058,7 +1074,7 @@ pub fn compute_row_badges(
     } else {
         // No local hint — light the lowercase glyph if one is downloadable.
         let stem = entry.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if hints::hint_download_for(stem, &entry.title).is_some() {
+        if hints::hint_download_for(&entry.meta.ifid, stem, &entry.title).is_some() {
             HintBadge::Available
         } else {
             HintBadge::None
@@ -1198,7 +1214,7 @@ mod tests {
             title: title.to_string(),
             filename: filename.to_string(),
             meta: StoryMeta {
-                size_bytes: 0,
+                size_bytes: 0, story_bytes: 0,
                 modified: None,
                 engine: Engine::ZCode,
                 format: "Z-code".to_string(),
@@ -1585,7 +1601,167 @@ mod tests {
         assert_eq!(m.serial.as_deref(), Some("840726"));
         assert_eq!(m.features.colour, Some(true));
         assert!(m.size_bytes > 0);
+        assert_eq!(m.story_bytes, m.size_bytes, "a bare story file IS its story");
         assert!(m.self_blorb.is_none());
+    }
+
+    /// A self-contained blorb around a story: `Blorb` FORM wrapper + resource
+    /// index + one `ZCOD` Exec chunk. Deliberately larger than the story it
+    /// holds, so `story_bytes` and `size_bytes` cannot coincide.
+    fn blorb_with_exec(story: &[u8]) -> Vec<u8> {
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        let ridx_data_len = 4 + 12;
+        let exec_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes());
+        ridx.extend_from_slice(b"Exec");
+        ridx.extend_from_slice(&0u32.to_be_bytes());
+        ridx.extend_from_slice(&(exec_off as u32).to_be_bytes());
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&chunk(b"ZCOD", story));
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
+    /// SQ-0771: a container's byte length is the container's, never the game's.
+    /// `size_bytes` measures the file on disk and `story_bytes` measures what
+    /// was mounted out of it — for a blorb (and for a zip, and for the `.adf`
+    /// the bug was reported on) those are different numbers.
+    #[test]
+    fn a_container_reports_the_mounted_storys_size_beside_its_own() {
+        let dir = temp_dir("story-bytes");
+        let story = minimal_v3_story();
+        std::fs::write(dir.join("bare.z3"), &story).unwrap();
+        std::fs::write(dir.join("wrapped.zblorb"), blorb_with_exec(&story)).unwrap();
+
+        let bare = resolve_entry(&dir.join("bare.z3"), &dir).expect("bare story resolves");
+        let blorb = resolve_entry(&dir.join("wrapped.zblorb"), &dir).expect("blorb resolves");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(bare.meta.story_bytes, story.len() as u64);
+        assert_eq!(bare.meta.size_bytes, story.len() as u64);
+        // The container is bigger than the game, and it is the game the field
+        // has to report.
+        assert_eq!(blorb.meta.story_bytes, story.len() as u64, "the mounted story's size");
+        assert!(
+            blorb.meta.size_bytes > blorb.meta.story_bytes,
+            "the blorb file is larger than its Exec chunk: {} vs {}",
+            blorb.meta.size_bytes,
+            blorb.meta.story_bytes
+        );
+    }
+
+    /// SQ-0767: a `zork1inv.z5` sitting beside a story whose *file* is named for
+    /// the box is that story's InvisiClues, and only the mounted story's release
+    /// and serial can say so. Fixture-free — the header carries Zork I release
+    /// 88 / serial 840726, which is the whole of the identity.
+    #[test]
+    fn a_sidecar_is_associated_with_a_box_named_story_by_identity() {
+        let dir = temp_dir("sidecar-identity");
+        let mut zork1 = minimal_v3_story();
+        zork1[0x02] = 0x00;
+        zork1[0x03] = 88; // release 88
+        zork1[0x12..0x18].copy_from_slice(b"840726");
+        std::fs::write(dir.join("Zork I - The Great Underground Empire.z3"), &zork1).unwrap();
+        std::fs::write(dir.join("zork1inv.z5"), minimal_v3_story()).unwrap();
+
+        let stories = scan_stories(&dir, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1, "the sidecar is hidden once associated: {stories:?}");
+        let game = &stories[0];
+        assert!(
+            !crate::hints::normalize_ident(&game.filename).contains("zork1"),
+            "the premise: the name says nothing"
+        );
+        let sidecar = game.hint_sidecar.as_ref().expect("the clues file is associated by identity");
+        assert!(sidecar.ends_with("zork1inv.z5"));
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// the Zork floppies' hint badge lights, which is the surface the defect was
+    /// reported on (SQ-0767). Their containers are named for the box, so the
+    /// badge can only come from the mounted story's identity.
+    #[test]
+    fn a_real_disk_image_lights_the_downloadable_hint_badge() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let base = std::env::temp_dir().join(format!("babelmap-adf-hint-{}", std::process::id()));
+        let index = hints::load_hint_index(&base);
+        for name in [
+            "Zork I - The Great Underground Empire.adf",
+            "Zork II - The Wizard of Frobozz.adf",
+            "Zork III - The Dungeon Master.adf",
+            "Zork - The Undiscovered Underground.adf",
+            "Zork Zero - The Revenge of Megaboz.adf",
+        ] {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue; // no story media here — skip
+            }
+            let entry = resolve_entry(&path, &base).expect("the floppy mounts and is launchable");
+            assert_eq!(
+                compute_row_badges(&entry, &base, &index).hint,
+                HintBadge::Available,
+                "{name} (IFID {}): pre-fix the container's name matched no catalog key",
+                entry.meta.ifid
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// every Amiga floppy in the story directory is the same 880 KB whatever it
+    /// holds, so its container length says nothing about the game; `story_bytes`
+    /// must be the mounted image's own length (SQ-0771).
+    #[test]
+    fn a_real_disk_image_reports_the_mounted_storys_size() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return; // no story media here — skip
+        };
+        let data_base =
+            std::env::temp_dir().join(format!("babelmap-adf-size-{}", std::process::id()));
+        let mut saw_adf = false;
+        for e in entries.flatten() {
+            let path = e.path();
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+            if ext != "adf" {
+                continue;
+            }
+            let Some(entry) = resolve_entry(&path, &data_base) else {
+                continue; // not launchable — the picker wouldn't list it either
+            };
+            saw_adf = true;
+            let mounted = crate::hints::load_story(&path).expect("the floppy mounts").into_bytes();
+            assert_eq!(
+                entry.meta.story_bytes,
+                mounted.len() as u64,
+                "{}: story_bytes is the mounted image's length",
+                path.display()
+            );
+            assert!(
+                entry.meta.story_bytes < entry.meta.size_bytes,
+                "{}: pre-fix this reported the {}-byte floppy as the story's size",
+                path.display(),
+                entry.meta.size_bytes
+            );
+        }
+        let _ = std::fs::remove_dir_all(&data_base);
+        let _ = saw_adf; // no `.adf` present is a vacuous skip, not a failure
     }
 
     // ── `resolve` precedence (pure, no filesystem) ─────────────────────────
@@ -1747,7 +1923,7 @@ mod tests {
             title: "T".into(),
             filename: "t.z5".into(),
             meta: StoryMeta {
-                size_bytes: 1, modified: None, engine: Engine::ZCode,
+                size_bytes: 1, story_bytes: 1, modified: None, engine: Engine::ZCode,
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
                 features: Features::default(), self_blorb, disk_image: false,

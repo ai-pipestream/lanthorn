@@ -90,9 +90,13 @@ fn path_rect(cells: &[app::state::V6CellRect]) -> (u16, u16, u16, u16) {
 /// A dump that reports either frame's numbers therefore cannot pass as the other,
 /// which is the whole point — the old behaviour reported the modal's.
 ///
-/// FALSIFY by reading `state.v6_cell_map` in `slash_dispatch` again (the pre-fix
-/// source): the reported path becomes `cell — modal overlay open: hotkey_dialog`
-/// and the pane becomes 30x20.
+/// This case drives the SUPPLIER, `AppState::v6_dump_frame`, and reverting it to
+/// read `state.v6_cell_map` makes the reported path `cell — modal overlay open:
+/// hotkey_dialog` and the pane 30x20. It does NOT reach the dispatch arm that
+/// calls it — that guard lives with the arm, in `slash_dispatch.rs`'s
+/// `dump_windows_reports_the_game_frame_and_names_its_log`, because a
+/// `pub(crate)` binary function is not callable from an integration test
+/// (SQ-0777: this comment used to claim a falsification nobody could run here).
 #[test]
 fn the_dump_describes_the_last_game_frame_not_the_modals() {
     let model = v6_model();

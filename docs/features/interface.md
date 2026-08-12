@@ -417,7 +417,11 @@ directions, and breaks ties between equal averages by how many people voted, so
 a 4.6 from two hundred players outranks a 4.6 from three. `i` or
 `Tab` slides in a themeable **info panel** for the highlighted story:
 format/version/release/serial, IFID, author/year/genre, a blurb, feature flags,
-bundled resources, and saves. It animates per the `animation` config, starts
+bundled resources, and saves. When the file on disk is a *container* — an Amiga
+floppy, a blorb, a zip — the size line names the game's own size beside the
+file's, because the container's length is not the game's: every `.adf` is 880 KB
+whether it holds Zork I or Shogun. Plain story files show one size, as before.
+It animates per the `animation` config, starts
 closed each launch, and refuses to open on terminals too narrow to hold both
 the list and the panel. When the panel is open and its content overflows
 (including a long, word-wrapped blurb), scroll it with the wheel over the panel
@@ -490,7 +494,13 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   the waitingforgo set as a fallback for games SLAG doesn't cover (together
   ~50 Infocom and other titles). The download runs in the background, the file
   is validated as a real Z-machine story before it lands, and the **Hint** badge
-  lights the moment it finishes.
+  lights the moment it finishes. Which clues belong to which game is decided by
+  the *story's* identity — the release and serial the mounted image carries —
+  not by what the file on disk is called, so an Amiga floppy named for its box
+  (`Zork I - The Great Underground Empire.adf`, which spells `zork1` nowhere)
+  finds its InvisiClues just as the bare story file does, and so does a clues
+  file already sitting beside it. Filenames are consulted only for games the
+  identity table doesn't name.
 - **Cover art in the picker.** A blorb game with a frontispiece shows its cover
   right in the info panel, drawn with the terminal's best graphics protocol
   (Kitty / iTerm2 / Sixel) and a universal half-block fallback everywhere else.

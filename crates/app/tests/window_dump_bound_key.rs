@@ -228,8 +228,12 @@ fn the_binding_also_fires_with_the_map_focused() {
 /// the dump the way a bound key takes it, and take them again: identical.
 ///
 /// "The way a bound key takes it" is precisely *nothing extra* — no overlay is set,
-/// so the pane keeps drawing the same hybrid-ring frame it drew before, and the
-/// dispatch that follows only reads. That is the property under test.
+/// so the pane keeps drawing the same hybrid-ring frame it drew before. What this
+/// case measures is that the ROUTE is quiet: the key resolves and the pane draws
+/// on, unlike the palette route below. It stops at the resolver and never enters
+/// the dispatch arm, so the arm's own quietness is guarded beside it, in
+/// `slash_dispatch.rs`'s `dump_windows_moves_neither_the_band_count_nor_the_path_history`
+/// (SQ-0777).
 #[test]
 fn a_bound_key_capture_leaves_the_render_path_and_upload_count_untouched() {
     let model = v6_model();
