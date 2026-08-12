@@ -2715,8 +2715,19 @@ pub fn build_v6_raster_canvas(
     // screen before anything is scaled, exactly as the hybrid ring extends it
     // (SQ-0698). `obstruction` is still the bare graphics canvas at this point —
     // the same image hybrid classifies from — so this must run BEFORE `grounds`
-    // gives it the window pages. See `extend_raster_flanks`.
-    extend_raster_flanks(&mut canvas, &obstruction, layout.story, native);
+    // gives it the window pages. The chrome runs come along because a game with a
+    // command menu under its story window has no border to extend (SQ-0819). See
+    // `extend_raster_flanks`.
+    let chrome_runs: Vec<&crate::engine::PxText> = layout
+        .chrome
+        .iter()
+        .filter_map(|it| match &it.node {
+            WinNode::Grid(g) => Some(g.px_texts.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, native);
     grounds(&mut obstruction);
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
@@ -3947,6 +3958,35 @@ fn hybrid_bottom_plan(
         // full-height side art takes the `Frame` arm above.
         return BottomPlan::Extend;
     }
+    if menu_strip_below_story(story, gfx, chrome_runs, native) {
+        BottomPlan::Menu
+    } else {
+        BottomPlan::Extend
+    }
+}
+
+/// Does a TEXT-ONLY strip of the game's own chrome sit below the story window?
+///
+/// This is the whole of [`BottomPlan::Menu`] — Journey's command menu, the one
+/// arm of [`hybrid_bottom_plan`] that owes nothing to the pane. It is factored
+/// out because RASTER needs the same answer and has no pane to ask about
+/// (SQ-0819): the raster composite is built in native pixels, so `slack` and the
+/// letterbox arms above are meaningless to it, but "what lives under the story
+/// window" is a property of the FRAME and both modes must read it the same way.
+///
+/// False as soon as the story reaches (within one native text row of) the screen
+/// bottom — there is no strip below it to find — which is the guard
+/// [`hybrid_bottom_plan`] applies by returning before it gets here.
+fn menu_strip_below_story(
+    story: &crate::engine::PositionedWindow,
+    gfx: &image::RgbaImage,
+    chrome_runs: &[&crate::engine::PxText],
+    native: (u16, u16),
+) -> bool {
+    let story_bottom = story.y_px as u32 + story.h_px as u32;
+    if native.1 as u32 <= story_bottom + 16 {
+        return false;
+    }
     let sx0 = story.x_px as u32;
     let sx1 = (story.x_px as u32 + story.w_px as u32).min(gfx.width());
     let colw = sx1.saturating_sub(sx0);
@@ -3957,16 +3997,11 @@ fn hybrid_bottom_plan(
             cnt * 2 >= colw
         });
     if art_band {
-        return BottomPlan::Letterbox;
+        return false;
     }
-    let text_below = chrome_runs
+    chrome_runs
         .iter()
-        .any(|t| !t.text.trim().is_empty() && (t.y.max(1) as u32 - 1) >= story_bottom);
-    if text_below {
-        BottomPlan::Menu
-    } else {
-        BottomPlan::Extend
-    }
+        .any(|t| !t.text.trim().is_empty() && (t.y.max(1) as u32 - 1) >= story_bottom)
 }
 
 /// SQ-0511: the native crop a stretched side flank `band` samples. Its columns are
@@ -4092,13 +4127,31 @@ fn flank_tiled_source(
 /// carries the painted ground and the window pages, exactly as
 /// [`flank_tiled_source`] pairs them. Everything above the art's own extent comes
 /// back byte-for-byte, so a flank with nothing to extend is untouched.
+///
+/// **A game with a command menu under its story window is excluded** — the same
+/// exclusion the hybrid ring makes when it builds `tiled_flanks`, and SQ-0819 is
+/// what it costs to omit it. Journey's left column is a PICTURE seated in a
+/// panel, not a border to extend: measured on `Journey - The Quest Begins.adf`
+/// (release 30, serial 890322) its illustration paints native rows 25..279 in
+/// columns 0..264, its picture window is `(8,16) 248x272`, and the menu strip's
+/// rule and "The Party" label sit at rows 288 and 296. Unrecognised as any of
+/// the three border titles, that column fell through [`v6_border::recognize`] to
+/// `ArthurPoles`, which cut a 4-row strip at 90% of 279 and tiled it — canyon
+/// wall and all — down to native row 400, straight over the menu strip. The
+/// player saw "Individual Commands" alone with the art column smeared across
+/// where "The Party" belongs. Release 83 (`journey-r83-s890706.z6`, story window
+/// bottom 304) has the identical shape, so this was never medium-specific.
 fn extend_raster_flanks(
     canvas: &mut image::RgbaImage,
     gfx: &image::RgbaImage,
     story: Option<&crate::engine::PositionedWindow>,
+    chrome_runs: &[&crate::engine::PxText],
     native: (u16, u16),
 ) {
     let Some(story) = story else { return };
+    if menu_strip_below_story(story, gfx, chrome_runs, native) {
+        return;
+    }
     let native_h = native.1 as u32;
     let right = (story.x_px as u32).saturating_add(story.w_px as u32);
     for (x0, x1) in [(0, (story.x_px as u32).min(native.0 as u32)), (right.min(native.0 as u32), native.0 as u32)] {

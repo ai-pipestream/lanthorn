@@ -731,6 +731,21 @@ session-only switch that never touches your saved config:
   raster showed those last rows as one flat colour inside the frame's own lower edge
   — 64 native rows on Shogun, 21 on Arthur. Zork Zero was unaffected either way; its
   pillars already reach the bottom.
+  **A picture column over a command menu is not a border, and raster leaves it
+  alone.** The hybrid ring had always known this — it builds no tiled flank at all
+  for a game with a text strip under its story window, because that flank is a
+  picture seated in a panel rather than a frame to extend — and the raster
+  extension arrived without the exclusion. Journey paid for it. On the Amiga disk
+  (release 30, serial 890322) its illustration paints native rows 25–279 of columns
+  0–264, its story window ends at row 288, and "The Party" is printed at row 289;
+  recognised as nobody's border in particular, the column fell through to Arthur's
+  pole handler, which cut four rows of canyon wall at 90% of the art's height and
+  tiled them to row 400 with a 28-row "foot" stamped on the end. The player got
+  "Individual Commands" alone on a menu strip half-buried in scenery, and an
+  illustration reading a third taller than the artist drew it. Release 83 has the
+  same shape and was showing the same thing, so it was never a quirk of one medium.
+  Now the two modes agree with the machine again: the art stops where the picture
+  stops, and both labels sit side by side on the strip below it.
   In hybrid, **nothing the game printed as a character is ever rasterised**. A strip
   is classified by what is *in* it, never by where it sits: a side column whose
   pixels the game's own paint runs fully account for is drawn with those characters,
