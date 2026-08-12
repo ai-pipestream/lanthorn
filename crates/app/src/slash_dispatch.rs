@@ -715,6 +715,12 @@ mod debug_dispatch_tests {
         fn debugger(&self) -> Option<&dyn Debugger> {
             if self.has_debugger { Some(&MockDebugger) } else { None }
         }
+        /// The engine's half of `/dump-windows`. Overridden because the trait's
+        /// default derives it from `screen()`, which this double does not model —
+        /// what the SQ-0777 cases are about is the frame half, which the app owns.
+        fn window_dump(&self) -> Vec<String> {
+            vec!["Window layout: mock engine".to_string()]
+        }
     }
 
     #[test]
@@ -936,6 +942,140 @@ mod debug_dispatch_tests {
         );
         let after = std::fs::read(&arc_file).expect("archive still there");
         assert_ne!(after, before, "it wrote silently, straight over the existing slot");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-0777: the `DumpWindows` arm itself ────────────────────────────────
+    //
+    // Everything else about `/dump-windows` is covered from the supplier side —
+    // `tests/window_dump_last_game_frame.rs` drives real frames through
+    // `AppState::v6_dump_frame`, `tests/window_dump_bound_key.rs` drives the key
+    // resolver — and both stop one call short of the consumer. Nothing reached
+    // this arm, so SQ-0756's one-line change could be reverted without breaking
+    // a test. These two go through the arm.
+
+    use app::state::{V6CellRect, V6GameFrame};
+
+    /// A state in exactly the situation the command runs in: the game's frame is
+    /// on record, and the frame standing in `v6_cell_map` is the modal one the
+    /// palette drew over it. The two share no number.
+    fn dump_windows_state(dir: &std::path::Path) -> AppState {
+        let mut state = AppState::default();
+        state.config.user_dir = dir.to_path_buf();
+        *state.v6_last_game_frame.borrow_mut() = Some(V6GameFrame {
+            cells: vec![
+                V6CellRect { label: "path:hybrid-ring".into(), native: (0, 0, 0, 0), cells: (0, 0, 40, 25) },
+                V6CellRect { label: "pane".into(), native: (0, 0, 0, 0), cells: (0, 0, 40, 25) },
+                V6CellRect { label: "viewport".into(), native: (43, 39, 234, 160), cells: (5, 4, 29, 20) },
+            ],
+            ring_plan: "tall",
+            ring_clip: Some((120, 15)),
+            modal_frames_since: 2,
+        });
+        *state.v6_cell_map.borrow_mut() = vec![
+            V6CellRect {
+                label: "path:cell — modal overlay open: palette".into(),
+                native: (0, 0, 0, 0),
+                cells: (0, 0, 30, 20),
+            },
+            V6CellRect { label: "pane".into(), native: (0, 0, 0, 0), cells: (0, 0, 30, 20) },
+        ];
+        state
+    }
+
+    fn dispatch_dump_windows(state: &mut AppState, dir: &std::path::Path) {
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let should_break = dispatch_slash_outcome(
+            SlashOutcome::DumpWindows,
+            state, &mut mapper, &mut engine, &mut style_watcher,
+            dir, "IFIDTEST", dir, &[], dir,
+            Rect::default(), Rect::default(), true,
+        );
+        assert!(!should_break, "a diagnostic dump never breaks the run loop");
+    }
+
+    /// SQ-0756, through the arm: the lines the command emits describe the GAME's
+    /// frame — the snapshot's ring plan and clip, under a header saying which
+    /// frame it is and how stale — and they name the log file, because the
+    /// on-screen copy is the one thing a v6 pane cannot hand back.
+    ///
+    /// FALSIFY by restoring the pre-fix source in the `DumpWindows` arm —
+    /// `let cells = state.v6_cell_map.borrow().clone();` with the ring read from
+    /// the live `state.v6_ring_plan`/`v6_ring_clip` and no `frame_line` pushed.
+    /// The `frame described:` line disappears entirely and the ring line reports
+    /// the live cells' default plan instead of the recorded frame's.
+    #[test]
+    fn dump_windows_reports_the_game_frame_and_names_its_log() {
+        let dir = temp_dir("dumpwin-arm");
+        let mut state = dump_windows_state(&dir);
+        dispatch_dump_windows(&mut state, &dir);
+
+        let text = state.transcript.join("\n");
+        assert!(
+            text.contains("frame described: the last frame the game drew"),
+            "the dump says which frame it describes: {text}"
+        );
+        assert!(
+            text.contains("2 modal frame(s) ago"),
+            "…and how stale it is, so the modal frames are disclaimed: {text}"
+        );
+        assert!(
+            text.contains("ring: plan tall, ring clipped at row 15 (art opaque down to native y=120)"),
+            "the ring plan and clip are the recorded GAME frame's: {text}"
+        );
+        assert!(
+            !text.contains("modal overlay open"),
+            "nothing from the modal frame standing in v6_cell_map may reach the dump: {text}"
+        );
+
+        // The log path is surfaced, and the file it names really holds the dump.
+        let log = app::export::window_dump_path(&dir);
+        assert!(
+            text.contains(&format!("dump appended to {}", crate::abbreviate_home(&log))),
+            "the transcript names the copyable log: {text}"
+        );
+        let written = std::fs::read_to_string(&log).expect("the log the transcript names exists");
+        assert!(written.contains("ring: plan tall"), "and carries the same dump: {written}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0759, through the arm: taking the dump must not churn the very state
+    /// it is diagnosing. The band-upload count and the render-path history are
+    /// snapshotted either side of the dispatch and must be untouched — a dump
+    /// that invalidated the band cache or filed a render path would be
+    /// measuring its own footprint.
+    ///
+    /// FALSIFY by making the arm touch either: a `state.note_v6_path("dump")`
+    /// or a `state.graphics_render.borrow_mut().band_encodes += 1` anywhere in
+    /// it fails one of these two assertions.
+    #[test]
+    fn dump_windows_moves_neither_the_band_count_nor_the_path_history() {
+        let dir = temp_dir("dumpwin-quiet");
+        let mut state = dump_windows_state(&dir);
+        // Seed both counters so "unchanged" is a real value, not zero-vs-zero.
+        state.graphics_render.borrow_mut().band_encodes = 7;
+        state.note_v6_path("hybrid-ring");
+        state.note_v6_path("hybrid-ring");
+
+        let encodes_before = state.graphics_render.borrow().band_encodes;
+        let paths_before = state.v6_path_log.borrow().clone();
+        assert_eq!(encodes_before, 7, "precondition: some bands have been uploaded");
+        assert_eq!(paths_before, vec![("hybrid-ring".to_string(), 2)], "precondition: a history exists");
+
+        dispatch_dump_windows(&mut state, &dir);
+
+        assert_eq!(
+            state.graphics_render.borrow().band_encodes, encodes_before,
+            "taking a dump must upload no bands"
+        );
+        assert_eq!(
+            *state.v6_path_log.borrow(), paths_before,
+            "taking a dump must add no render path to the history"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
