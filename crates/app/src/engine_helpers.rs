@@ -43,14 +43,14 @@ pub(crate) fn zvm_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GameSe
 }
 
 /// What [`v6_save_payload`] hands a save site: the fallback canvas PNGs
-/// `(window, png_bytes)`, the display list + palette, and the self-check's
-/// diagnostics.
+/// `(window, png_bytes)`, the display list + palette, the painted ground PNG, and
+/// the self-check's diagnostics.
 pub(crate) type V6SavePayload =
-    (Vec<(u8, Vec<u8>)>, Option<app::archive::DisplayListDto>, Vec<String>);
+    (Vec<(u8, Vec<u8>)>, Option<app::archive::DisplayListDto>, Option<Vec<u8>>, Vec<String>);
 
 /// Everything a host Save State needs to reproduce a v6 screen (SQ-0588): the
-/// display list + Current Palette, the fallback canvas PNGs, and any diagnostics
-/// the save-time self-check raised.
+/// display list + Current Palette, the fallback canvas PNGs, the painted ground
+/// (SQ-0787), and any diagnostics the save-time self-check raised.
 ///
 /// The list is authoritative and the PNGs are the exception — `display_list`
 /// replays each window and only asks for a PNG where the replay does not reproduce
@@ -60,14 +60,15 @@ pub(crate) type V6SavePayload =
 /// `&mut` because the self-check replays, and replaying decodes pictures.
 pub(crate) fn v6_save_payload(session: &mut dyn Engine) -> V6SavePayload {
     let Some(z) = zvm_session_opt_mut(session) else {
-        return (Vec::new(), None, Vec::new());
+        return (Vec::new(), None, None, Vec::new());
     };
     if z.machine.screen.v6.is_none() {
-        return (Vec::new(), None, Vec::new());
+        return (Vec::new(), None, None, Vec::new());
     }
     let (dto, fallback, diags) = z.display_list();
     let pics = z.pictures_png_for(&fallback);
-    (pics, Some(dto), diags)
+    let ground = z.paint_ground_png();
+    (pics, Some(dto), ground, diags)
 }
 
 /// Reinstate a restored v6 screen: rebuild from the display list when the archive
@@ -80,6 +81,13 @@ pub(crate) fn apply_v6_pictures(session: &mut dyn Engine, ac: &app::archive::Arc
         Some(d) => z.load_display_list(d, &ac.pictures),
         None => z.load_pictures_png(&ac.pictures),
     }
+    // The painted ground under all of them (SQ-0787). UNCONDITIONAL, including
+    // when the archive carries none: `auto_load` restores after the story has
+    // booted and painted its own opening screen, and a Save State swaps VM memory
+    // under a game that never learns it happened — so nothing repaints and the
+    // pre-restore ground would otherwise survive into the restored frame. scopa
+    // resumed a dealt hand with its main menu still underneath.
+    z.load_paint_ground(ac.ground.as_deref());
 }
 
 /// The `(location, score)` save summary captured into a save's `Meta` at save time
@@ -380,6 +388,58 @@ mod tests {
             "an archive restore never takes the bare-Quetzal guess — SQ-0680's narrow seed stands"
         );
         let _ = std::fs::remove_file(&babelmap_path);
+    }
+
+    /// SQ-0787. Every restore site funnels through [`super::apply_v6_pictures`], and
+    /// the painted ground (SQ-0706) is the layer that used to ride straight past it:
+    /// `auto_load` restores after the story has painted its own opening screen, so a
+    /// resumed scopa came back with its MAIN MENU under the restored hand.
+    ///
+    /// The funnel must reset the ground even when the archive carries none, which is
+    /// what makes the fix reach every v6 story rather than only the ones that paint.
+    /// The real-story end of this — the ground actually surviving a round trip and a
+    /// move after it — is `crates/app/tests/suites/v6_restore_paint_ground.rs`.
+    ///
+    /// Falsified by deleting the `load_paint_ground` call from `apply_v6_pictures`:
+    ///
+    /// ```text
+    /// the restore funnel replaces the painted ground from the archive — an archive
+    /// with none leaves an EMPTY ground, not the pre-restore screen's
+    /// ```
+    #[test]
+    fn a_restore_resets_the_painted_ground_it_found_sq0787() {
+        use app::engine::Engine;
+        use app::session::GameSession;
+
+        let mut sess =
+            GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+
+        // Stand a painted ground up the only way a test can — the same setter the
+        // restore path uses — so "the funnel cleared it" is a real observation.
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            4, 4, image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encode");
+        sess.load_paint_ground(Some(&png));
+        assert!(Engine::paint_surface(&sess).is_some(), "premise: a ground is on screen");
+
+        let path =
+            std::env::temp_dir().join(format!("bm-sq0787-{}.babelmap", std::process::id()));
+        let save = Engine::save_state(&sess);
+        app::archive::save_archive(&path, &mapper::mapper::Mapper::default(), &save, None,
+            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write");
+        let ac = app::archive::load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert!(ac.ground.is_none(), "a non-v6 archive carries no painted ground");
+
+        super::apply_v6_pictures(&mut sess, &ac);
+        assert!(
+            Engine::paint_surface(&sess).is_none(),
+            "the restore funnel replaces the painted ground from the archive — an \
+             archive with none leaves an EMPTY ground, not the pre-restore screen's"
+        );
     }
 
     #[test]

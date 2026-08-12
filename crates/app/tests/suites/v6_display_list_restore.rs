@@ -83,6 +83,7 @@ fn round_trip(session: &mut GameSession, tag: &str, with_display: bool) -> app::
         &[], &[], &[], &[], &[], &[], &[],
         &pics,
         display.as_ref(),
+        None,
     )
     .expect("save archive");
     let ac = app::archive::load_archive(&path).expect("load archive");

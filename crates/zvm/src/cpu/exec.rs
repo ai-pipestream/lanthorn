@@ -2287,6 +2287,16 @@ impl Machine {
                         }
                         _ => {}
                     }
+                    // SQ-0751: WHERE in this turn's output the erase fell. The flag
+                    // set above says only that it happened, so a host reading it
+                    // after the turn must assume it came first — and a turn that
+                    // prints and then erases would keep its pre-erase text on the
+                    // cleared screen. Only the sink knows how much it has taken, so
+                    // tell it now; every sink that does not model a boundary
+                    // no-ops (`Output::screen_cleared`).
+                    if self.screen.erase_lower_requested {
+                        self.out.screen_cleared();
+                    }
                 }
                 if clears_host_prose {
                     self.v6_screen_cleared = Some(self.v6_win0_out_chars);

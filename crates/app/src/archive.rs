@@ -108,6 +108,17 @@ const HISTORY_INDEX: &str = "history/index.json";
 /// frame/graphics windows redraw identically after a host Save State restore
 /// (Lane P) — without them a fresh session shows blank graphics windows.
 const ENTRY_PICTURES_PREFIX: &str = "pictures/win-";
+/// The v6 screen's PAINTED GROUND (SQ-0706): the surface `erase_window` fills and
+/// stranded canvases accumulate on, UNDER every window (`GameSession::paint`).
+///
+/// The last v6 screen layer that a restore did not touch (SQ-0787), which is why a
+/// resumed scopa came back showing its main-menu cards beneath the restored game's
+/// text: `auto_load` restores after the story has booted and painted its opening
+/// screen, and nothing told the ground that screen was gone. Stored as pixels
+/// rather than as a recipe on purpose — see `GameSession::paint_ground_png`.
+///
+/// Not under [`ENTRY_PICTURES_PREFIX`], so the per-window scan never sees it.
+const ENTRY_GROUND: &str = "pictures/ground.png";
 /// Prefix for the transcript-embedded inline-image PNG blobs
 /// (`transcript-img/NNNN.png`, `NNNN` = the filtered transcript-line index). These
 /// carry the resolved RGBA pixels of pictures that flow inline with the prose
@@ -539,6 +550,11 @@ pub struct ArchiveContents {
     /// Feed to `GameSession::load_pictures_png` so a restored v6 story redraws
     /// its frame/graphics windows identically (Lane P).
     pub pictures: Vec<(u8, Vec<u8>)>,
+    /// The v6 painted ground as a PNG (`pictures/ground.png`, SQ-0787), `None` for
+    /// non-v6 stories and for a game that never painted one. Feed to
+    /// `GameSession::load_paint_ground`, which RESETS the ground when this is
+    /// `None` — a restore must not leave the pre-restore surface standing.
+    pub ground: Option<Vec<u8>>,
     /// Auxiliary key/value data from the machine (empty for archives without `aux.dat`).
     pub aux: std::collections::BTreeMap<String, Vec<u8>>,
     /// Shell-style command history (empty for archives without `command_history.json`).
@@ -604,9 +620,9 @@ pub fn save_archive_meta(
     history: &[crate::history::TurnRecord],
     command_history: &[String],
 ) -> io::Result<()> {
-    // No pictures and no display list: this is the non-v6 entry point.
+    // No pictures, no display list and no painted ground: the non-v6 entry point.
     save_archive_meta_pics(path, mapper, save, screen, aux, meta, transcript,
-        transcript_kinds, transcript_runs, transcript_para, &[], history, command_history, &[], None)
+        transcript_kinds, transcript_runs, transcript_para, &[], history, command_history, &[], None, None)
 }
 
 /// Write a `.babelmap` archive including per-window v6 graphics-canvas PNG
@@ -636,6 +652,11 @@ pub fn save_archive_meta(
 /// does not reproduce the live canvas. A recording gap then costs one window's
 /// worth of stale colours and names itself in a diagnostic, instead of silently
 /// restoring a screen we cannot rebuild.
+///
+/// `ground` is the v6 PAINTED GROUND under all of them
+/// ([`crate::session::GameSession::paint_ground_png`], SQ-0787) — pixels, because
+/// its inputs are an unbounded stream of `erase_window` fills and there is no
+/// bounded recipe to store. `None` when the game has never painted one.
 #[allow(clippy::too_many_arguments)]
 pub fn save_archive_meta_pics(
     path: &Path,
@@ -653,6 +674,7 @@ pub fn save_archive_meta_pics(
     command_history: &[String],
     pictures: &[(u8, Vec<u8>)],
     display: Option<&DisplayListDto>,
+    ground: Option<&[u8]>,
 ) -> io::Result<()> {
     // Build the whole ZIP in memory, then land it with ONE atomic write
     // (SQ-0644). `File::create(path)` truncated the player's archive before a
@@ -814,6 +836,15 @@ pub fn save_archive_meta_pics(
             zip.start_file(format!("{ENTRY_PICTURES_PREFIX}{win}.png"), stored)?;
             zip.write_all(png)?;
         }
+    }
+
+    // pictures/ground.png — the v6 painted ground (SQ-0787), absent when the game
+    // has never painted one. Also PNG, so store rather than Deflate.
+    if let Some(png) = ground {
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file(ENTRY_GROUND, stored)?;
+        zip.write_all(png)?;
     }
 
     let bytes = zip.finish()?.into_inner();
@@ -1077,7 +1108,16 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         }
     }
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, transcript_images, history, screen, aux, command_history, engine, display, pictures })
+    // pictures/ground.png — the v6 painted ground (SQ-0787). Absent for non-v6
+    // stories, for games that never paint one, and for archives written before it
+    // was carried; all three restore to an EMPTY ground rather than to whatever
+    // the pre-restore screen happened to be holding.
+    let ground: Option<Vec<u8>> = zip.by_name(ENTRY_GROUND).ok().and_then(|mut e| {
+        let mut buf = Vec::new();
+        e.read_to_end(&mut buf).ok().map(|_| buf)
+    });
+
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, transcript_images, history, screen, aux, command_history, engine, display, pictures, ground })
 }
 
 /// Read ONLY the `meta.json` entry from a save archive — avoids `load_archive`
@@ -1274,6 +1314,7 @@ mod tests {
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &transcript, &kinds, &[], &[], &images, &[], &[], &[],
             None,
+            None,
         )
         .expect("save with inline image");
         let ac = load_archive(&path).expect("load");
@@ -1305,6 +1346,7 @@ mod tests {
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &transcript, &kinds, &[], &[], &[], &[], &[], &[],
+            None,
             None,
         )
         .expect("save without inline images");
@@ -2068,6 +2110,7 @@ mod tests {
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &[], &[], &[], &[], &[], &[], &[],
             &[(7, png_a.clone()), (1, png_b.clone())],
+            None,
             None,
         ).expect("save with pictures");
         let ac = load_archive(&path).expect("load");

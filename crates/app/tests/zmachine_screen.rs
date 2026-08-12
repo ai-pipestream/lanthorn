@@ -18,6 +18,8 @@ mod input_suggestion_border_style;
 mod more_pager_arming;
 #[path = "suites/pane_title_sources.rs"]
 mod pane_title_sources;
+#[path = "suites/print_then_erase_boundary.rs"]
+mod print_then_erase_boundary;
 #[path = "suites/transparent_backdrop_audit.rs"]
 mod transparent_backdrop_audit;
 #[path = "suites/upper_grid_resize.rs"]

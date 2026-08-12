@@ -100,6 +100,7 @@ fn story_ink_survives_a_save_state_resume() {
         &[], &[], &[], &[], &[], &[], &[],
         &pics,
         None,
+        None,
     )
     .expect("save_archive_meta_pics");
     let ac = app::archive::load_archive(&path).expect("load_archive");
@@ -206,6 +207,7 @@ fn story_ink_survives_a_resume_without_a_v6_window_table() {
         },
         &[], &[], &[], &[], &[], &[], &[],
         &[],
+        None,
         None,
     )
     .expect("save_archive_meta_pics");

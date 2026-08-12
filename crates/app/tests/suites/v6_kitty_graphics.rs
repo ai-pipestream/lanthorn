@@ -236,6 +236,7 @@ fn the_ring_is_still_placed_after_a_restore_and_a_move() {
         &[], &[], &[], &[], &[], &[], &[],
         &session.pictures_png(),
         None,
+        None,
     )
     .expect("save archive");
     let ac = app::archive::load_archive(&path).expect("load archive");
