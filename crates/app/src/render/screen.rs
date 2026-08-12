@@ -1428,6 +1428,36 @@ fn render_node(
                                 })
                                 .collect()
                         };
+                        // SQ-0818: how finely a FULL-WIDTH art strip's upload is cut.
+                        //
+                        // Granularity is backend-conditional, and only this side of the
+                        // renderer knows the picker. Kitty and iterm2 tile: the extra cost
+                        // is one control block and a rounded-up last chunk per tile, and
+                        // the payload is byte for byte the same pixels. SIXEL DOES NOT —
+                        // every sixel image carries its own palette definition, so N tiles
+                        // would mean N palettes where the strip had one, a real first-frame
+                        // regression for no gain. Halfblocks does not care either way:
+                        // ratatui's own cell diff already sends it only the dirty cells.
+                        let tile_cols = match picker.protocol_type() {
+                            ratatui_image::picker::ProtocolType::Kitty
+                            | ratatui_image::picker::ProtocolType::Iterm2 => BAND_TILE_COLS,
+                            ratatui_image::picker::ProtocolType::Sixel
+                            | ratatui_image::picker::ProtocolType::Halfblocks => 0,
+                        };
+                        // …and only a FULL-WIDTH strip, which is provably the one drawn by
+                        // the plain `draw_chrome_band` crop: every other arm of the draw
+                        // below (`flank_panels`, `tiled_flanks`, the Frame-plan
+                        // `flank_crop`) is reserved to `r.width < area.width`, and each of
+                        // those composes its own source image from geometry that is not a
+                        // straight sub-rect of the scaled canvas. A side flank is tall and
+                        // thin anyway — column tiles would buy it nothing.
+                        let art_tiles = |r: Rect| -> Vec<Rect> {
+                            if r.width < area.width {
+                                vec![r]
+                            } else {
+                                band_tiles(r, tile_cols)
+                            }
+                        };
                         {
                             let mut gr = state.graphics_render.borrow_mut();
                             // An Art strip with no art behind it is skipped below and never
@@ -1436,14 +1466,24 @@ fn render_node(
                             // pointed at, which is the stale-placement shape SQ-0587 records
                             // (SQ-0747). Only `strips` is filtered — the menu strips below
                             // draw unconditionally.
+                            // SQ-0818: a tiled strip claims its TILES' keys, never the whole
+                            // strip's — a live key nothing re-places is a stale placement
+                            // (SQ-0587), and a key the draw claims that the live set does
+                            // not is evicted every frame, which clears the WHOLE cache.
                             let live: std::collections::HashSet<_> = strips
                                 .iter()
                                 .filter(|s| !matches!(s, ChromeStrip::Art(r) if !strip_has_art(r)))
-                                .chain(menu_strips.iter())
                                 .filter_map(|s| match s {
-                                    ChromeStrip::Art(r) => Some((crate::render::graphics::BandSlot::Art as u8, r.x, r.y, r.width, r.height)),
+                                    ChromeStrip::Art(r) => Some(*r),
                                     ChromeStrip::Text(..) => None,
                                 })
+                                .flat_map(art_tiles)
+                                // The menu's own strips are drawn whole, below.
+                                .chain(menu_strips.iter().filter_map(|s| match s {
+                                    ChromeStrip::Art(r) => Some(*r),
+                                    ChromeStrip::Text(..) => None,
+                                }))
+                                .map(|r| (crate::render::graphics::BandSlot::Art as u8, r.x, r.y, r.width, r.height))
                                 // A GLYPH border (SQ-0750) uploads nothing, so it claims no
                                 // cache key: a live key nothing re-places is the stale
                                 // placement SQ-0587 records.
@@ -1500,7 +1540,12 @@ fn render_node(
                                         {
                                             gr.draw_chrome_band_stretched(picker, &canvas, *r, crop, crate::render::graphics::BandSlot::Art, buf);
                                         } else {
-                                            gr.draw_chrome_band(picker, &canvas, &scale, area, *r, buf);
+                                            // SQ-0818: the plain crop, one image per TILE.
+                                            // `art_tiles` is the identity on a side flank,
+                                            // and on every backend that does not tile.
+                                            for t in art_tiles(*r) {
+                                                gr.draw_chrome_band(picker, &canvas, &scale, area, t, buf);
+                                            }
                                         }
                                     }
                                     ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
@@ -4934,6 +4979,83 @@ fn decompose_chrome_strips<'a>(
     out
 }
 
+/// How many terminal columns one uploaded chrome-band image covers (SQ-0818).
+///
+/// A full-width ring band used to be ONE image, so any change inside it re-encoded and
+/// re-transmitted the whole thing: Zork Zero's banner is 920x126 device pixels — 618 KB
+/// of base64 in 151 kitty chunks — and it went down the wire in full eight times
+/// during boot, ~4.9 MB, because one 45x40 compass tile changed each time. Neither
+/// kitty nor iterm2 has an op to patch pixels into a resident image, so the portable
+/// way to send only the dirty region is to make the images smaller.
+///
+/// Eight columns, from the arithmetic rather than from taste. At the captured 8x18
+/// cell that banner is 115 cells wide; a tile is `T*8*126*4` bytes of RGBA, i.e.
+/// `T*5376` base64 characters, and kitty takes 4096 of those per chunk — so each tile
+/// wastes half a chunk (~2 KB) on its rounded-up last one, and each costs one extra
+/// control block. Against that, the compass spans about 8 cells, so it dirties
+/// `ceil(8/T)+1` tiles at worst:
+///
+/// | T  | tiles | first frame | compass re-send |
+/// |----|-------|-------------|-----------------|
+/// | 1  |  115  | +230 KB     |  ~48 KB         |
+/// | 4  |   29  |  +58 KB     |  ~65 KB         |
+/// | 8  |   15  |  +30 KB     |  ~86 KB         |
+/// | 16 |    8  |  +16 KB     |  ~172 KB        |
+///
+/// Below 8 the fixed cost stops buying anything — T=4 saves 21 KB on a redraw and
+/// pays 28 KB more on every first frame — and above it the re-send climbs fast. Eight
+/// also keeps the resident image count per band in the teens rather than the hundreds,
+/// which matters because a terminal evicts images by LRU (SQ-0753).
+///
+/// Columns only, not a grid: the ring's full-width bands are wide and shallow by
+/// construction (115 x 7 cells here), so splitting the short axis at most doubles the
+/// tile count for a change that, like the compass, usually spans the band's full
+/// height anyway.
+///
+/// MEASURED, not modelled — `cargo run -p app --example pty_capture -- --story
+/// stories/zork0-r393-s890714.z6 --size 117x64 --keys wait:400,wait:400,wait:400`, the
+/// same three frames on either side of this constant:
+///
+/// |                   | one strip | 15 tiles | ratio |
+/// |-------------------|-----------|----------|-------|
+/// | first frame       | 2,089,630 | 2,093,195| +0.17% |
+/// | compass, 1 tile   |   629,280 |   43,947 | 14.3x |
+/// | compass, 1 tile   |   628,475 |   43,947 | 14.3x |
+/// | compass, 2 tiles  |   628,566 |   88,349 | 7.1x  |
+/// | compass, 2 tiles  |   628,473 |   88,252 | 7.1x  |
+/// | whole capture     | 4,604,778 | 2,358,042| 1.95x |
+///
+/// The transmitted PAYLOAD on the first frame is byte for byte the same 618,240 —
+/// 14 tiles of 43,008 plus one of 16,128 — because the tiles crop from the same scaled
+/// canvas. The 3,565-byte difference is entirely per-image framing.
+const BAND_TILE_COLS: u16 = 8;
+
+/// Partition `band` into at most `tile_cols`-wide column tiles (SQ-0818), left to
+/// right. `tile_cols == 0` disables tiling — see the caller for which backends ask
+/// for that.
+///
+/// The partition is EXACT: the tiles' x-spans tile `[band.x, band.right())` with no
+/// gap and no overlap, every tile is at least one cell wide, and every tile keeps the
+/// band's own `y`/`height`. That is what makes the tiles pixel-identical to the strip
+/// they replace: [`crate::render::graphics::GraphicsRender::draw_chrome_band`] crops
+/// each band out of the ONE frame-shared scaled canvas (`chrome_scaled`, SQ-0514) at
+/// whole device pixels — column `c` reads scaled pixels `[c*cw, (c+1)*cw)` however the
+/// band around it is cut — so there is no resampling boundary at a tile seam and no
+/// ceil-vs-round trap.
+fn band_tiles(band: Rect, tile_cols: u16) -> Vec<Rect> {
+    if tile_cols == 0 || band.width <= tile_cols {
+        return vec![band];
+    }
+    let mut out = Vec::new();
+    let mut x = band.x;
+    while x < band.right() {
+        let w = tile_cols.min(band.right() - x);
+        out.push(Rect::new(x, band.y, w, band.height));
+        x += w;
+    }
+    out
+}
+
 /// Paint a TEXT chrome strip (SQ-0500) as terminal cells: each run stamped at its
 /// scale-mapped cell with [`v6_run_style`], clipped to `rect`. The strip and each
 /// run row are flooded (colour-aware, SQ-0512) before the runs stamp, so the panel
@@ -5730,6 +5852,37 @@ mod tests {
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;
     use ratatui::layout::Rect;
+
+    /// SQ-0818's whole safety argument, as a property: the tiles of a band PARTITION
+    /// it. Every column of the strip is covered by exactly one tile — a gap would
+    /// leave a column of the ring unwritten, an overlap would put two images on one
+    /// cell — every tile is at least one cell wide and no wider than the unit, and
+    /// every tile keeps the band's own rows. Story-free, so it holds in CI where the
+    /// gitignored fixtures are absent and the real-game smoke skips.
+    #[test]
+    fn band_tiles_partition_the_band_exactly() {
+        for width in 1u16..=200 {
+            for unit in [0u16, 1, 3, 8, 16] {
+                let band = Rect::new(7, 3, width, 5);
+                let tiles = band_tiles(band, unit);
+                assert!(!tiles.is_empty(), "w={width} unit={unit}: a band is always drawn");
+                let mut x = band.x;
+                for t in &tiles {
+                    assert_eq!(t.x, x, "w={width} unit={unit}: no gap, no overlap: {tiles:?}");
+                    assert!(t.width >= 1, "w={width} unit={unit}: every tile is at least a cell: {tiles:?}");
+                    assert_eq!((t.y, t.height), (band.y, band.height), "w={width} unit={unit}: rows preserved");
+                    assert!(unit == 0 || t.width <= unit, "w={width} unit={unit}: no tile exceeds the unit: {tiles:?}");
+                    x += t.width;
+                }
+                assert_eq!(x, band.right(), "w={width} unit={unit}: the tiles reach the right edge: {tiles:?}");
+                if unit == 0 {
+                    assert_eq!(tiles, vec![band], "unit 0 disables tiling — the backends that must not tile");
+                } else {
+                    assert_eq!(tiles.len(), (width.div_ceil(unit)) as usize, "w={width} unit={unit}: tile count");
+                }
+            }
+        }
+    }
 
     /// Real-Zork0 raster acceptance (SQ-0510): compose the raster canvas exactly
     /// as the raster branch does, then prove the finished image is fully opaque,
