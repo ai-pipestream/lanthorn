@@ -480,9 +480,9 @@ fn a_per_launch_interpreter_number_never_leaks_into_the_global_config() {
     let mut cfg = app::config::Config {
         config_file: cfg_path.clone(),
         interpreter_number: Some(4),
-        interpreter_number_cli: Some(4),
         ..Default::default()
     };
+    cfg.one_run.pin(app::config::keys::INTERPRETER_NUMBER, 4u8);
     assert!(cfg.interpreter_number_from_cli(), "the value is marked one-run");
     app::config::write_config_file(&cfg).unwrap();
     let after = std::fs::read_to_string(&cfg_path).unwrap();
