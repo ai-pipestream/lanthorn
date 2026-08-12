@@ -1202,6 +1202,25 @@ echo as the turn's movement command. A compass-clicked move draws the same
 directional edge on the map, and records the direction as tried, as if you had
 typed it.
 
+## Artwork you stop looking at is handed back
+
+An image sent to a kitty terminal stays there until something says otherwise.
+Placing a new one over it does not free it; closing the window it belonged to does
+not free it; clearing the screen does not free it. Only an explicit delete does,
+and babelmap now sends one for every picture it walks away from — a chrome band
+whose art changed, a band the ring no longer draws, and the full-pane raster
+composite, which is the largest single thing the app ever uploads (2.8 MB of
+Journey's opening screen, at a 117×64 terminal).
+
+This is not tidiness. Kitty terminals evict by least-recently-used when their image
+memory fills, and they will happily evict a picture that is *currently on screen* —
+so a long session that keeps sending art and never takes any back can blank the very
+frame you are looking at. Journey's first five keypresses used to upload 4.1 MB and
+free none of it; a game like scopa, whose whole screen is one image, stranded a
+fresh copy of it on every move. Now each one is handed back in the same breath as
+its replacement goes out, and `band uploads since launch` counts against a terminal
+that is no longer quietly accumulating everything it was ever shown.
+
 ## `/dump-windows` reports the last frame the *game* drew
 
 When a v6 layout looks wrong, `/dump-windows` is how you say what you saw: one

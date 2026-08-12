@@ -257,6 +257,12 @@ struct V6Ready {
     proto: Protocol,
     native_w: u16,
     native_h: u16,
+    /// The kitty image id this composite was last PLACED as, read back off the
+    /// placement (SQ-0753). `None` under a non-kitty protocol, and until the first
+    /// [`GraphicsRender::redraw_v6`]. Without it the full-frame composite — the
+    /// single largest upload babelmap makes, 2.8 MB on Journey — can only be
+    /// forgotten, never freed.
+    placed_id: Option<u32>,
 }
 
 /// The worker-thread handle for an in-flight v6 raster encode (SQ-0469). The
@@ -308,7 +314,12 @@ pub struct GraphicsRender {
     /// two different images on one frame — a flank's own art and the divider extension
     /// replicated over it — and keying on the rect alone made each overwrite the
     /// other's cache entry, so both re-encoded on every frame forever (SQ-0755).
-    chrome_bands: std::collections::HashMap<BandKey, (u64, Protocol)>,
+    /// The third element is the kitty image id the band was last PLACED as, read
+    /// back off the placement (SQ-0753) — `None` under any non-kitty protocol, and
+    /// until the band's first place. It is the only handle we have on a
+    /// `ratatui-image` upload, and it is what lets an abandoned band be freed in the
+    /// terminal instead of merely forgotten here.
+    chrome_bands: std::collections::HashMap<BandKey, (u64, Protocol, Option<u32>)>,
     /// What happened to each chrome band on the last v6 frame, for `/dump-windows`
     /// (SQ-0587). Whether a band was a cache hit, whether it encoded, and what size
     /// the protocol reported — the questions that decide whether a missing image is a
@@ -538,6 +549,29 @@ impl GraphicsRender {
         }
     }
 
+    /// Queue an `a=d,d=I` delete for ONE abandoned `ratatui-image` upload (SQ-0753).
+    ///
+    /// Everything drawn through a [`Protocol`] — every chrome-ring band, the v6
+    /// raster composite — was uploaded by `ratatui-image`, which never deletes:
+    /// dropping the struct forgets the id on our side and leaves the pixels in the
+    /// terminal for ever. Only the graphics WINDOWS, whose ids this file allocates
+    /// itself, were ever freed (SQ-0637). Measured on Journey release 30 over five
+    /// keystrokes: 4.1 MB uploaded, 0 bytes freed, because a band that re-encodes
+    /// strands its predecessor and the boot raster frame is abandoned wholesale when
+    /// the ring takes over. Kitty evicts by LRU and evicts images that are CURRENTLY
+    /// PLACED, so an unbounded pile of orphans can blank a live one.
+    ///
+    /// `None` (a non-kitty protocol, or a cache entry never placed) is a no-op: there
+    /// is nothing the terminal is holding that we could name. `d=I` frees the data
+    /// and its placements together, which is right — the entry that knew this id is
+    /// gone, so nothing can re-place it.
+    fn queue_protocol_delete(&mut self, id: Option<u32>) {
+        use std::fmt::Write as _;
+        if let Some(id) = id {
+            write!(self.pending_deletes, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\").expect("write to String");
+        }
+    }
+
     /// Flush any queued kitty deletes into `buf` when no graphics window will place
     /// this frame (SQ-0637) — closing the LAST graphics window is exactly the case
     /// that leaks, and it leaves no placement to piggyback on.
@@ -714,6 +748,7 @@ impl GraphicsRender {
                 proto,
                 native_w: canvas.width() as u16,
                 native_h: canvas.height() as u16,
+                placed_id: None,
             }),
             Err(_) => None,
         }
@@ -769,10 +804,13 @@ impl GraphicsRender {
         // The composite the terminal was last pointed at is being abandoned; record
         // it, so "placed on the previous frame, neither re-placed nor dropped on this
         // one" is answerable for the raster→ring transition too (SQ-0747).
-        if self.v6.is_some() {
+        if let Some(old) = self.v6.take() {
+            // …and free it in the terminal, which forgetting it here does not do
+            // (SQ-0753). This is the transition Journey makes two frames into its
+            // boot, and the abandoned composite is 2.8 MB.
+            self.queue_protocol_delete(old.placed_id);
             self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Raster });
         }
-        self.v6 = None;
         self.v6_job = None;
     }
 
@@ -789,7 +827,12 @@ impl GraphicsRender {
         }
         let job = self.v6_job.take().expect("checked above");
         if let Ok(Some(ready)) = job.join() {
-            self.v6 = Some(ready);
+            // The composite being replaced is a whole-pane upload; free it in the
+            // terminal rather than letting the assignment orphan it (SQ-0753). A
+            // raster-mode game re-encodes on every visible change, so this is the
+            // heaviest leak in the app — scopa strands one full frame per move.
+            let stale = self.v6.replace(ready);
+            self.queue_protocol_delete(stale.and_then(|r| r.placed_id));
         }
         true
     }
@@ -810,14 +853,25 @@ impl GraphicsRender {
         let w = sz.width.min(area.width);
         let ht = sz.height.min(area.height);
         let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
-        place_protocol(proto, dest, buf);
+        let (native_w, native_h) = (ready.native_w, ready.native_h);
+        // Queued deletes ride out on this placement, in the same batch (SQ-0637's
+        // rule); deferred back to the queue if this backend has no row to carry them.
+        let pending = std::mem::take(&mut self.pending_deletes);
+        let placed_id = place_protocol_with(proto, dest, buf, &pending);
+        if placed_id.is_none() {
+            self.pending_deletes = pending;
+        }
+        // Learn the id this composite lives under in the terminal, so whoever
+        // abandons it can free it (SQ-0753).
+        if let Some(r) = &mut self.v6 {
+            r.placed_id = placed_id;
+        }
         // Record the letterbox geometry so a click in the pane can be mapped
         // back to a game pixel (Lane M). The image fills `dest`'s cells
         // aspect-preserved, so the click map's image rect is `dest` in device
         // pixels and its native extent is the canvas dimensions.
         let fs = picker.font_size();
         let (cw, ch) = (fs.width.max(1), fs.height.max(1));
-        let (native_w, native_h) = (ready.native_w, ready.native_h);
         self.note_op(GraphicsOp::Place {
             target: GraphicsTarget::Raster,
             at: (dest.x, dest.y, dest.width, dest.height),
@@ -945,15 +999,16 @@ impl GraphicsRender {
     }
 
     pub fn invalidate_chrome_bands(&mut self) {
-        let dropped: Vec<_> = self.chrome_bands.keys().copied().collect();
-        self.chrome_bands.clear();
-        for (_, x, y, w, h) in dropped {
+        let dropped: Vec<_> = self.chrome_bands.drain().map(|(k, (_, _, id))| (k, id)).collect();
+        for ((_, x, y, w, h), id) in dropped {
+            // Free the upload in the terminal, not merely the struct here (SQ-0753).
+            self.queue_protocol_delete(id);
             self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Band(x, y, w, h) });
         }
     }
 
     pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<BandKey>) {
-        let before: Vec<_> = self.chrome_bands.keys().copied().collect();
+        let before: Vec<_> = self.chrome_bands.iter().map(|(k, (_, _, id))| (*k, *id)).collect();
         self.chrome_bands.retain(|k, _| live.contains(k));
         // SQ-0587: dropping a cached band drops its image PROTOCOL, and a graphics
         // protocol releases its placement when it goes (kitty deletes the image).
@@ -968,11 +1023,20 @@ impl GraphicsRender {
             self.chrome_bands.clear();
             // Everything that was cached is gone — the ones `retain` evicted and
             // the survivors cleared with them — so every one of them must
-            // re-upload before it can be seen again.
-            for (_, x, y, w, h) in before {
+            // re-upload before it can be seen again, and every one of them must be
+            // freed in the terminal first (SQ-0753).
+            for ((_, x, y, w, h), id) in before {
+                self.queue_protocol_delete(id);
                 self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Band(x, y, w, h) });
             }
         }
+    }
+
+    /// The kitty image id a cached chrome band is currently placed as, if any
+    /// (observability hook, SQ-0753).
+    #[cfg(test)]
+    fn chrome_band_id(&self, key: BandKey) -> Option<u32> {
+        self.chrome_bands.get(&key).and_then(|(_, _, id)| *id)
     }
 
     /// Snapshot the current chrome-band freshness hashes, keyed by band cell rect
@@ -980,7 +1044,7 @@ impl GraphicsRender {
     /// frames did NOT re-encode — used to confirm that a change confined to one
     /// band leaves the other bands' uploads fresh.
     pub fn chrome_band_hashes(&self) -> std::collections::HashMap<BandKey, u64> {
-        self.chrome_bands.iter().map(|(k, (h, _))| (*k, *h)).collect()
+        self.chrome_bands.iter().map(|(k, (h, _, _))| (*k, *h)).collect()
     }
 
     /// The whole native `chrome_canvas` scaled to `sw × sh` device pixels
@@ -1079,7 +1143,7 @@ impl GraphicsRender {
         (rel_x0, rel_y0, bw, bh).hash(&mut h);
         let hash = h.finish();
         let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
-        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
+        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
         if !fresh {
             // Copy the sub-rect under this band out of the frame-shared scaled
             // chrome into a band-sized image (letterbox area outside the scaled
@@ -1107,7 +1171,11 @@ impl GraphicsRender {
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
                     self.band_encodes += 1;
-                    self.chrome_bands.insert(key, (hash, p));
+                    // Whatever this key held is being replaced: free it in the
+                    // terminal before the only record of its id is overwritten
+                    // (SQ-0753).
+                    let stale = self.chrome_bands.insert(key, (hash, p, None));
+                    self.queue_protocol_delete(stale.and_then(|(_, _, id)| id));
                     self.note_op(GraphicsOp::Upload {
                         target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
@@ -1122,34 +1190,53 @@ impl GraphicsRender {
                 id: None,
             });
         }
-        if let Some((_, proto)) = self.chrome_bands.get(&key) {
+        // The band image is exactly band-sized, so it places at the band's
+        // top-left (no centering — the crop is already positioned).
+        //
+        // Any deletes queued above (this band's own predecessor, or another band's)
+        // ride out on this placement, in the same batch (SQ-0637's rule). Restored
+        // to the queue when nothing was placed, or when the backend has no
+        // placeholder row to carry them — a delete is deferred, never dropped.
+        let pending = std::mem::take(&mut self.pending_deletes);
+        let placed = self.chrome_bands.get(&key).map(|(_, proto, _)| {
             let sz = proto.size();
-            let w = sz.width.min(band.width);
-            let ht = sz.height.min(band.height);
-            // The band image is exactly band-sized, so it places at the band's
-            // top-left (no centering — the crop is already positioned).
-            let dest = Rect::new(band.x, band.y, w, ht);
-            let note = format!(
-                "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{} at ({},{}) · native {}",
-                band.width, band.height, band.x, band.y,
-                if fresh { "cache HIT" } else { "encoded" },
-                sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
-                match footprint {
-                    Some((x, y, w, h)) => format!("{w}x{h}@({x},{y})"),
-                    None => "— (entirely in the letterbox margin)".to_string(),
-                },
-            );
-            self.band_log.push(note);
-            place_protocol(proto, dest, buf);
-            self.note_op(GraphicsOp::Place {
-                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                at: (dest.x, dest.y, dest.width, dest.height),
-            });
-        } else {
-            self.band_log.push(format!(
+            let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
+            (dest, sz, place_protocol_with(proto, dest, buf, &pending))
+        });
+        if !matches!(placed, Some((_, _, Some(_)))) {
+            self.pending_deletes = pending;
+        }
+        match placed {
+            Some((dest, sz, id)) => {
+                self.band_log.push(format!(
+                    "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{} at ({},{}) · native {}",
+                    band.width, band.height, band.x, band.y,
+                    if fresh { "cache HIT" } else { "encoded" },
+                    sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+                    match footprint {
+                        Some((x, y, w, h)) => format!("{w}x{h}@({x},{y})"),
+                        None => "— (entirely in the letterbox margin)".to_string(),
+                    },
+                ));
+                self.remember_band_id(key, id);
+                self.note_op(GraphicsOp::Place {
+                    target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                    at: (dest.x, dest.y, dest.width, dest.height),
+                });
+            }
+            None => self.band_log.push(format!(
                 "band {}x{}@({},{}): NO PROTOCOL (encode failed)",
                 band.width, band.height, band.x, band.y
-            ));
+            )),
+        }
+    }
+
+    /// Record the kitty image id a band was just placed as, so the upload can be
+    /// freed when the entry is abandoned (SQ-0753). A no-op under a protocol with
+    /// no addressable id (half-blocks, sixel).
+    fn remember_band_id(&mut self, key: BandKey, id: Option<u32>) {
+        if let Some((_, _, slot)) = self.chrome_bands.get_mut(&key) {
+            *slot = id;
         }
     }
 
@@ -1210,7 +1297,7 @@ impl GraphicsRender {
         (bw, bh).hash(&mut h);
         let hash = h.finish();
         let key = (slot as u8, band.x, band.y, band.width, band.height);
-        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
+        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
         if !fresh {
             // Copy the native crop (clamped to the canvas) into its own image, then
             // resize it to the band's device box. Transparent native pixels stay
@@ -1234,7 +1321,8 @@ impl GraphicsRender {
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
                     self.band_encodes += 1;
-                    self.chrome_bands.insert(key, (hash, p));
+                    let stale = self.chrome_bands.insert(key, (hash, p, None));
+                    self.queue_protocol_delete(stale.and_then(|(_, _, id)| id));
                     self.note_op(GraphicsOp::Upload {
                         target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
@@ -1257,28 +1345,37 @@ impl GraphicsRender {
         // one band the dump could not name. Two passes were spent inferring it from
         // the strip rect beside it. The crop rides along for the same reason it does
         // above: it says which rows of the game's screen this image is showing.
-        if let Some((_, proto)) = self.chrome_bands.get(&key) {
+        // Any deletes queued above (this band's own predecessor, or another band's)
+        // ride out on this placement, in the same batch (SQ-0637's rule). Restored
+        // to the queue when nothing was placed, or when the backend has no
+        // placeholder row to carry them — a delete is deferred, never dropped.
+        let pending = std::mem::take(&mut self.pending_deletes);
+        let placed = self.chrome_bands.get(&key).map(|(_, proto, _)| {
             let sz = proto.size();
-            let w = sz.width.min(band.width);
-            let ht = sz.height.min(band.height);
-            let dest = Rect::new(band.x, band.y, w, ht);
-            let note = format!(
-                "band {}x{}@({},{}) [{slot:?}, stretched]: {} · proto {}x{} · placed {}x{} at ({},{}) · native {cw_n}x{ch_n}@({cx},{cy})",
-                band.width, band.height, band.x, band.y,
-                if fresh { "cache HIT" } else { "encoded" },
-                sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
-            );
-            self.band_log.push(note);
-            place_protocol(proto, dest, buf);
-            self.note_op(GraphicsOp::Place {
-                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                at: (dest.x, dest.y, dest.width, dest.height),
-            });
-        } else {
-            self.band_log.push(format!(
+            let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
+            (dest, sz, place_protocol_with(proto, dest, buf, &pending))
+        });
+        if !matches!(placed, Some((_, _, Some(_)))) {
+            self.pending_deletes = pending;
+        }
+        match placed {
+            Some((dest, sz, id)) => {
+                self.band_log.push(format!(
+                    "band {}x{}@({},{}) [{slot:?}, stretched]: {} · proto {}x{} · placed {}x{} at ({},{}) · native {cw_n}x{ch_n}@({cx},{cy})",
+                    band.width, band.height, band.x, band.y,
+                    if fresh { "cache HIT" } else { "encoded" },
+                    sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+                ));
+                self.remember_band_id(key, id);
+                self.note_op(GraphicsOp::Place {
+                    target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                    at: (dest.x, dest.y, dest.width, dest.height),
+                });
+            }
+            None => self.band_log.push(format!(
                 "band {}x{}@({},{}) [{slot:?}, stretched]: NO PROTOCOL (encode failed)",
                 band.width, band.height, band.x, band.y
-            ));
+            )),
         }
     }
 
@@ -1322,14 +1419,15 @@ impl GraphicsRender {
         (bw, bh).hash(&mut h);
         let hash = h.finish();
         let key = (slot as u8, band.x, band.y, band.width, band.height);
-        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
+        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
         if !fresh {
             let scaled = image::imageops::resize(src, bw, bh, image::imageops::FilterType::Nearest);
             let img = image::DynamicImage::ImageRgba8(scaled);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
                     self.band_encodes += 1;
-                    self.chrome_bands.insert(key, (hash, p));
+                    let stale = self.chrome_bands.insert(key, (hash, p, None));
+                    self.queue_protocol_delete(stale.and_then(|(_, _, id)| id));
                     self.note_op(GraphicsOp::Upload {
                         target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                         id: None,
@@ -1344,28 +1442,40 @@ impl GraphicsRender {
                 id: None,
             });
         }
-        if let Some((_, proto)) = self.chrome_bands.get(&key) {
+        // Any deletes queued above (this band's own predecessor, or another band's)
+        // ride out on this placement, in the same batch (SQ-0637's rule). Restored
+        // to the queue when nothing was placed, or when the backend has no
+        // placeholder row to carry them — a delete is deferred, never dropped.
+        let pending = std::mem::take(&mut self.pending_deletes);
+        let placed = self.chrome_bands.get(&key).map(|(_, proto, _)| {
             let sz = proto.size();
             let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
-            let (blank, run, run_at) = blank_rows(src);
-            self.band_log.push(format!(
-                "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · blank rows {}, longest run {} at {}",
-                band.width, band.height, band.x, band.y,
-                if fresh { "cache HIT" } else { "encoded" },
-                sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
-                src.width(), src.height(),
-                blank, run, run_at,
-            ));
-            place_protocol(proto, dest, buf);
-            self.note_op(GraphicsOp::Place {
-                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                at: (dest.x, dest.y, dest.width, dest.height),
-            });
-        } else {
-            self.band_log.push(format!(
+            (dest, sz, place_protocol_with(proto, dest, buf, &pending))
+        });
+        if !matches!(placed, Some((_, _, Some(_)))) {
+            self.pending_deletes = pending;
+        }
+        match placed {
+            Some((dest, sz, id)) => {
+                let (blank, run, run_at) = blank_rows(src);
+                self.band_log.push(format!(
+                    "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · blank rows {}, longest run {} at {}",
+                    band.width, band.height, band.x, band.y,
+                    if fresh { "cache HIT" } else { "encoded" },
+                    sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+                    src.width(), src.height(),
+                    blank, run, run_at,
+                ));
+                self.remember_band_id(key, id);
+                self.note_op(GraphicsOp::Place {
+                    target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                    at: (dest.x, dest.y, dest.width, dest.height),
+                });
+            }
+            None => self.band_log.push(format!(
                 "band {}x{}@({},{}) [{slot:?}, tiled]: NO PROTOCOL (encode failed)",
                 band.width, band.height, band.x, band.y
-            ));
+            )),
         }
     }
 }
@@ -1616,19 +1726,50 @@ fn kitty_place_rows(id: u32, transmit: Option<&str>, area: Rect, buf: &mut Buffe
 /// wrote it, so a half-block or sixel protocol (no placeholders at all) and any
 /// future change to the crate's row format degrade to today's behaviour rather
 /// than to garbage.
-pub fn place_protocol(proto: &Protocol, dest: Rect, buf: &mut Buffer) {
-    Image::new(proto).render(dest, buf);
-    reseat_kitty_placement(dest, buf);
+/// Returns the kitty image id it just placed, when the protocol was a kitty one —
+/// `None` for half-blocks, sixel, iterm2 or a failed parse. That id is the only
+/// handle we ever get on a `ratatui-image` upload, and without it the image can
+/// never be freed in the terminal (SQ-0753): the crate keeps the id private, so
+/// reading it back off the placement it just wrote is how we learn to name it.
+pub fn place_protocol(proto: &Protocol, dest: Rect, buf: &mut Buffer) -> Option<u32> {
+    place_protocol_with(proto, dest, buf, "")
 }
 
-/// Rewrite each row of a `ratatui-image` kitty placement at `area` in place. See
-/// [`place_protocol`]; a no-op for anything that is not one.
-fn reseat_kitty_placement(area: Rect, buf: &mut Buffer) {
+/// [`place_protocol`], with `prefix` (queued `a=d` deletes) riding on the very first
+/// placeholder cell — ahead of the protocol's own upload, in the SAME output batch.
+///
+/// That is the rule SQ-0637 set for graphics windows and the reason `pending_deletes`
+/// is a queue rather than a direct write: escapes handed straight to stdout interleave
+/// unpredictably with ratatui's diff, while a cell's symbol is emitted exactly where
+/// the frame puts it. Bands and the raster composite are placed by `ratatui-image`
+/// rather than by our own emitter, so they had no way to carry anything until the
+/// re-seat gave them one (SQ-0753). Returns `None` — and carries nothing — for a
+/// protocol with no placeholder rows, which is every non-kitty backend.
+fn place_protocol_with(proto: &Protocol, dest: Rect, buf: &mut Buffer, prefix: &str) -> Option<u32> {
+    Image::new(proto).render(dest, buf);
+    reseat_kitty_placement(dest, buf, prefix)
+}
+
+/// Rewrite each row of a `ratatui-image` kitty placement at `area` in place, and
+/// return the image id the rows name. See [`place_protocol`]; a no-op returning
+/// `None` for anything that is not a kitty placement.
+fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str) -> Option<u32> {
+    let mut id = None;
+    let mut prefix = (!prefix.is_empty()).then_some(prefix);
     for y in area.top()..area.bottom() {
         let Some(symbol) = buf.cell((area.left(), y)).map(|c| c.symbol().to_string()) else { continue };
         let Some(row) = parse_placement_row(&symbol) else { continue };
+        // The prefix is only ever consumed on a row we could also NAME, so the
+        // caller's "did this carry my deletes?" question is answered by the id
+        // coming back — never half-answered.
+        let this_id = placement_id(row.fg, row.extra_d);
+        id = id.or(this_id);
         let width = row.cells.min(area.width);
-        kitty_place_row(buf, (area.left(), y), width, row.fg, (row.row_d, row.extra_d), Some(row.prefix));
+        let head = match this_id.and(prefix.take()) {
+            Some(p) => format!("{p}{}", row.prefix),
+            None => row.prefix.to_string(),
+        };
+        kitty_place_row(buf, (area.left(), y), width, row.fg, (row.row_d, row.extra_d), Some(&head));
         // Anything the protocol marked `Skip` past the run we just rewrote (a
         // shorter row than the rect, which `full_width` clamping can produce)
         // would otherwise stay invisible to the diff for ever.
@@ -1640,6 +1781,18 @@ fn reseat_kitty_placement(area: Rect, buf: &mut Buffer) {
             }
         }
     }
+    id
+}
+
+/// Reassemble a kitty image id from the two halves a placeholder row carries: the
+/// low 24 bits ride as the cell foreground, the high byte as the third diacritic
+/// (SQ-0753). The inverse of what [`kitty_place_rows`] writes, and of what
+/// `ratatui-image` writes — both split the id exactly this way, because the kitty
+/// protocol says to.
+fn placement_id(fg: Color, extra_d: char) -> Option<u32> {
+    let Color::Rgb(r, g, b) = fg else { return None };
+    let hi = KITTY_DIACRITICS.iter().position(|&c| c == extra_d)?;
+    Some(u32::from_be_bytes([u8::try_from(hi).ok()?, r, g, b]))
 }
 
 /// One `ratatui-image` placeholder row, read back off the cell it was written to.
@@ -2425,5 +2578,167 @@ mod tests {
         let high = KITTY_DIACRITICS.iter().position(|&c| c == extra_d).expect("a table entry");
         let recovered = ((high as u32) << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
         assert_eq!(recovered, id_of(&sym), "the id the upload declared, read back off the screen");
+    }
+
+    /// A kitty chrome ring at a fixed 1:1 scale: a native canvas exactly the pane's
+    /// device size, so a band's crop is its own device rows and a pixel edit inside
+    /// one band re-encodes only that band.
+    fn band_fixture() -> (Picker, image::RgbaImage, crate::render::v6_layout::Scale, Rect, Rect, Buffer) {
+        use crate::render::v6_layout::uniform_scale;
+        let picker = kitty_picker(8, 18);
+        let (cols, rows) = (4u16, 3u16);
+        let (nw, nh) = (u32::from(cols) * 8, u32::from(rows) * 18);
+        let mut chrome = image::RgbaImage::new(nw, nh);
+        for (x, y, p) in chrome.enumerate_pixels_mut() {
+            *p = image::Rgba([(x % 256) as u8, (y % 256) as u8, 40, 255]);
+        }
+        let pane = Rect::new(0, 0, cols, rows);
+        let scale = uniform_scale((nw as u16, nh as u16), (nw, nh));
+        let band = Rect::new(0, 0, cols, 1);
+        let buf = Buffer::empty(pane);
+        (picker, chrome, scale, pane, band, buf)
+    }
+
+    /// Every `a=d,d=I,i=` id in some emitted text, in order.
+    fn delete_ids(text: &str) -> Vec<u32> {
+        text.split("\x1b_Gq=2,a=d,d=I,i=")
+            .skip(1)
+            .filter_map(|s| s.split('\x1b').next()?.parse().ok())
+            .collect()
+    }
+
+    /// Every `a=d,d=I,i=` id currently queued, in order.
+    fn queued_delete_ids(gr: &GraphicsRender) -> Vec<u32> {
+        delete_ids(gr.queued_deletes())
+    }
+
+    /// Every id this frame actually frees: the deletes riding out on a placement in
+    /// `buf`, then anything still queued for a later frame. A delete lives in one
+    /// place or the other and never in neither — which is the property worth
+    /// asserting, since "queued" and "written" are both correct outcomes.
+    fn freed_ids(gr: &GraphicsRender, buf: &Buffer) -> Vec<u32> {
+        let cells: String = buf.content().iter().map(|c| c.symbol()).collect();
+        let mut ids = delete_ids(&cells);
+        ids.extend(queued_delete_ids(gr));
+        ids
+    }
+
+    /// SQ-0753: a chrome band that goes away must be FREED in the terminal, not
+    /// merely forgotten here.
+    ///
+    /// `retain_chrome_bands`/`invalidate_chrome_bands` recorded a `Drop` and dropped
+    /// the `Protocol`, which releases nothing — `ratatui-image` has no output channel
+    /// and never deletes. The terminal kept every band babelmap ever encoded, and
+    /// kitty evicts by LRU including images that are CURRENTLY PLACED, so a big
+    /// enough pile can blank a live one. Naming the abandoned upload was the blocker
+    /// the quest recorded ("the image id lives inside ratatui-image's `Kitty` struct
+    /// with no accessor"); [`place_protocol`] now reads it back off the placement.
+    #[test]
+    fn abandoning_a_chrome_band_deletes_its_upload() {
+        let (picker, chrome, scale, pane, band, mut buf) = band_fixture();
+        let mut gr = GraphicsRender::default();
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+        let id = gr.chrome_band_id(key).expect("a placed kitty band knows the id it lives under");
+        assert!(gr.queued_deletes().is_empty(), "a band still on screen is not freed");
+
+        gr.retain_chrome_bands(&std::collections::HashSet::new());
+        assert!(gr.chrome_bands.is_empty(), "the band left the live set");
+        assert_eq!(queued_delete_ids(&gr), vec![id], "the abandoned upload is freed by id");
+
+        // …and the wholesale invalidation (a terminal clear, SQ-0587) does the same.
+        let mut gr = GraphicsRender::default();
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let id = gr.chrome_band_id(key).expect("placed");
+        gr.invalidate_chrome_bands();
+        assert_eq!(queued_delete_ids(&gr), vec![id], "invalidate frees what it drops");
+    }
+
+    /// SQ-0753, the leak that runs on EVERY frame rather than at a transition: a
+    /// band whose pixels changed re-encodes into the same cache slot, and the
+    /// `insert` used to be the last anyone ever heard of its predecessor's id.
+    /// Journey's picture column re-encodes on each menu step, so this is where the
+    /// megabytes went.
+    #[test]
+    fn re_encoding_a_chrome_band_deletes_the_upload_it_replaces() {
+        let (picker, mut chrome, scale, pane, band, mut buf) = band_fixture();
+        let mut gr = GraphicsRender::default();
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let first = gr.chrome_band_id(key).expect("placed");
+
+        // A cache HIT sends nothing and frees nothing — the upload is still live.
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert!(freed_ids(&gr, &buf).is_empty(), "a cache hit must not free the image it is re-placing");
+        assert_eq!(gr.chrome_band_id(key), Some(first), "and it stays the same image");
+
+        // Change a pixel inside this band's native footprint → re-encode.
+        chrome.put_pixel(1, 2, image::Rgba([255, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let second = gr.chrome_band_id(key).expect("placed again");
+        assert_ne!(second, first, "a re-encode is a new upload with a new id");
+        // The delete rides out on the replacement's own placement, in one batch.
+        assert_eq!(freed_ids(&gr, &buf), vec![first], "the replaced upload is freed, not orphaned");
+        assert!(gr.queued_deletes().is_empty(), "and it went with the frame rather than waiting");
+    }
+
+    /// SQ-0753 for the biggest upload babelmap makes: the v6 raster composite is the
+    /// whole pane in one image (2.8 MB on Journey at 117x64). It is abandoned twice
+    /// over — wholesale when the hybrid ring takes the screen (`invalidate_v6`), and
+    /// once per visible change in a raster-mode game, where `poll_v6_job` installs
+    /// the new encode over the old.
+    #[test]
+    fn abandoning_the_v6_raster_composite_deletes_its_upload() {
+        let picker = kitty_picker(8, 18);
+        let area = Rect::new(0, 0, 4, 3);
+        let mut buf = Buffer::empty(area);
+        let mut gr = GraphicsRender::default();
+        let canvas = image::RgbaImage::from_pixel(32, 54, image::Rgba([9, 8, 7, 255]));
+
+        gr.spawn_v6_encode(&picker, canvas.clone(), 1, area);
+        gr.redraw_v6(&picker, area, &mut buf);
+        let first = gr.v6.as_ref().and_then(|r| r.placed_id).expect("the composite knows its id");
+
+        // A second generation replaces it on the worker thread.
+        gr.spawn_v6_encode(&picker, canvas.clone(), 2, area);
+        drain_v6_job(&mut gr);
+        assert_eq!(queued_delete_ids(&gr), vec![first], "the superseded composite is freed");
+        gr.redraw_v6(&picker, area, &mut buf);
+        let second = gr.v6.as_ref().and_then(|r| r.placed_id).expect("placed");
+        assert_ne!(second, first, "the new generation is a different upload");
+
+        // …and the raster→ring transition frees whatever was up. Nothing places
+        // after it — that is what the transition IS — so it waits for the frame's
+        // closing flush.
+        gr.invalidate_v6();
+        assert_eq!(queued_delete_ids(&gr), vec![second], "invalidation frees the live composite too");
+        assert_eq!(freed_ids(&gr, &buf), vec![first, second], "both generations end up freed");
+    }
+
+    /// The deletes above are worthless unless they reach the terminal, and the v6
+    /// pixel paths have no placement of their own to piggyback on — the frame's
+    /// closing flush is what carries them (SQ-0753). Pinned here as the property
+    /// `main`'s end-of-frame flush relies on: a queued delete lands in the buffer
+    /// as a real, diffable change.
+    #[test]
+    fn a_queued_protocol_delete_rides_out_on_the_frame() {
+        let (picker, chrome, scale, pane, band, mut buf) = band_fixture();
+        let mut gr = GraphicsRender::default();
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+        let id = gr.chrome_band_id(key).expect("placed");
+        gr.retain_chrome_bands(&std::collections::HashSet::new());
+
+        // The next frame draws no band at all — ordinary cells everywhere.
+        let mut next = Buffer::empty(pane);
+        gr.flush_kitty_deletes(pane, &mut next);
+        assert!(gr.queued_deletes().is_empty(), "the frame carried them");
+        let carried: String = next.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            carried.contains(&format!("a=d,d=I,i={id}")),
+            "the delete must be IN the frame's cells, or it is never written: {carried:?}"
+        );
     }
 }
