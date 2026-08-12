@@ -381,9 +381,11 @@ pub(crate) fn boot_story(
 
     // Resolve the look from style.toml (the single styling source) BEFORE the
     // engine builds: a Glulx game may probe glk_style_measure for the host's
-    // rendered colours during boot (Kerkerkruip's dark-background detection,
-    // SQ-0315), so the theme pairs must be in the backend first. `state.colors`
-    // is assigned from these below.
+    // rendered colours during boot (SQ-0315; Kerkerkruip measures its style_User2
+    // slot there and branches its whole presentation on the answer, SQ-0803), so
+    // the theme pairs must be in the backend first — and the garglk.ini overlay
+    // below must land in `cs` before they are derived. `state.colors` is assigned
+    // from these below.
     let (style_doc, style_w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
     let (mut cs, set, style_w2) = app::style::resolve(&style_doc, &cfg.user_dir);
     // SQ-0319: discover a per-game garglk.ini beside the story and overlay its

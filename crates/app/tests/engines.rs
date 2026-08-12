@@ -16,6 +16,8 @@ mod glulx_banner_rooms;
 mod glulx_boot_room_id;
 #[path = "suites/glulx_game_colours.rs"]
 mod glulx_game_colours;
+#[path = "suites/glulx_garglk_style_sentinel.rs"]
+mod glulx_garglk_style_sentinel;
 #[path = "suites/glulx_ingame_save_host_restore.rs"]
 mod glulx_ingame_save_host_restore;
 #[path = "suites/glulx_maze_identity.rs"]

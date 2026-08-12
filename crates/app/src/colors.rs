@@ -366,7 +366,8 @@ pub struct ColorScheme {
     /// `theme.get("<selector>").style`), this one still has a live production
     /// reader with a real ordering hazard: `glk_backend::theme_style_colours`
     /// is called in `startup.rs` to seed the engine's boot-time
-    /// `glk_style_measure` answer (Kerkerkruip's dark-background detection)
+    /// `glk_style_measure` answer (SQ-0803: the per-Glk-style slots resolved over
+    /// this base — Kerkerkruip probes its style_User2 slot there)
     /// BEFORE `state.colors.theme` is rebuilt with the layered
     /// global/garglk/per-game decls (that rebuild happens later, in
     /// `reload_style`). A discovered `garglk.ini` overlay patches this field

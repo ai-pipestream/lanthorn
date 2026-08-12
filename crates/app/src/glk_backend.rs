@@ -98,11 +98,30 @@ fn resolve_glk_para(attrs: StyleAttrs) -> crate::state::ParaFmt {
 /// (SQ-0315): each channel `Some(0x00RRGGBB)` or `None` for terminal-default.
 pub type ThemePair = (Option<u32>, Option<u32>);
 
+/// The theme's rendered default colours for every Glk style class, by window
+/// type (SQ-0803): row 0 = text-buffer windows, row 1 = text-grid windows;
+/// the index is the Glk style class (0=Normal .. 10=User2, `style_NUMSTYLES`
+/// = 11 per glk.h). Slot 0 (Normal) IS the window's element base — per SQ-0331
+/// the Normal slot is definitionally the element — so a theme with no per-style
+/// colours reports the same pair in all eleven entries of a row.
+pub type GlkStylePairs = [[ThemePair; 11]; 2];
+
 /// The theme's rendered default colours for Glk windows, derived from the
-/// active [`ColorScheme`](crate::colors::ColorScheme): `(buffer, grid)` pairs
-/// from the `transcript` (story pane) and `status_bar` styles. Only concrete
-/// RGB colours are reported; a named/indexed ANSI colour or an unset channel
-/// renders however the terminal decides, so it is honestly `None` (no guess).
+/// active [`ColorScheme`](crate::colors::ColorScheme): a per-style-class pair
+/// for text-buffer (row 0, base `transcript` — the story pane) and text-grid
+/// (row 1, base `status_bar`) windows. Only concrete RGB colours are reported;
+/// a named/indexed ANSI colour or an unset channel renders however the terminal
+/// decides, so it is honestly `None` (no guess).
+///
+/// Each style resolves exactly the way the renderer resolves it (SQ-0331,
+/// `render::resolve_glk_channel` with no game-set colour): the theme's
+/// `glk_styles[row][style]` slot, else the element base. The slot applies in
+/// BOTH `honor_game_colours` modes, so this needs no gate. A discovered
+/// `garglk.ini` populates those slots (`GarglkOverlay::apply`), which is how
+/// Kerkerkruip's `style_User2` = `0xF400A1` sentinel gets a truthful answer
+/// (SQ-0803): **shipping the ini beside the story IS the opt-in** — we honour
+/// what the author's config says we paint, and a player who does not want the
+/// game's Gargoyle-flavoured presentation simply does not keep the ini there.
 ///
 /// `transcript` reads the legacy field (SQ-0309: kept — see its doc comment on
 /// `ColorScheme`), not `colors.theme`: this is called from `startup.rs` before
@@ -110,17 +129,33 @@ pub type ThemePair = (Option<u32>, Option<u32>);
 /// only the legacy field (which a discovered `garglk.ini` overlay patches
 /// directly) is current at that point. `status_bar` has no such hazard — it is
 /// read through the theme.
-pub fn theme_style_colours(colors: &crate::colors::ColorScheme) -> (ThemePair, ThemePair) {
+pub fn theme_style_colours(colors: &crate::colors::ColorScheme) -> GlkStylePairs {
     let rgb = |c: Option<ratatui::style::Color>| match c {
         Some(ratatui::style::Color::Rgb(r, g, b)) => {
             Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
         }
         _ => None,
     };
-    (
+    let base: [ThemePair; 2] = [
         (rgb(colors.transcript.fg), rgb(colors.transcript.bg)),
         (rgb(colors.theme.get("status_bar").style.fg), rgb(colors.theme.get("status_bar").style.bg)),
-    )
+    ];
+    // A slot channel the theme sets is what gets painted, so it is the answer —
+    // but only when it is a concrete RGB; a named ANSI slot colour IS rendered
+    // and is still unknowable, so it reports `None` rather than falling through
+    // to a base colour the player never sees.
+    let channel = |slot: Option<ratatui::style::Color>, base: Option<u32>| match slot {
+        None => base,
+        some => rgb(some),
+    };
+    let mut out: GlkStylePairs = [[(None, None); 11]; 2];
+    for (row, pairs) in out.iter_mut().enumerate() {
+        for (style, pair) in pairs.iter_mut().enumerate() {
+            let slot = colors.glk_styles[row][style];
+            *pair = (channel(slot.fg, base[row].0), channel(slot.bg, base[row].1));
+        }
+    }
+    out
 }
 
 // ── Per-window record ──────────────────────────────────────────────────────────
@@ -237,15 +272,14 @@ pub struct AppGlk {
     next_schannel: u32,
     /// Buffered per-turn sound operations, drained by `take_sound_ops`.
     sound_ops: Vec<crate::session::SchannelOp>,
-    /// The theme's rendered default `(fg, bg)` for text-buffer windows (from the
-    /// story-pane `transcript` style) as `0x00RRGGBB`; `None` per channel =
-    /// terminal default (unknowable — no guess). Reported to the game through
+    /// The theme's rendered default `(fg, bg)` per Glk style class, by window
+    /// type, as `0x00RRGGBB`; `None` per channel = terminal default (unknowable
+    /// — no guess). See [`GlkStylePairs`]. Reported to the game through
     /// `glk_style_measure` via `GlkBackend::default_style_colours` so it can
-    /// detect a dark background (SQ-0315). Pushed by the app on boot and kept
-    /// fresh each loop pass (live style reload).
-    theme_buffer: (Option<u32>, Option<u32>),
-    /// Same, for text-grid windows (from the `status_bar` style).
-    theme_grid: (Option<u32>, Option<u32>),
+    /// detect a dark background (SQ-0315) or probe what we paint for one style
+    /// class (SQ-0803). Pushed by the app on boot and kept fresh each loop pass
+    /// (live style reload).
+    theme_styles: GlkStylePairs,
 }
 
 impl Default for AppGlk {
@@ -326,23 +360,17 @@ impl AppGlk {
             schannels: BTreeMap::new(),
             next_schannel: 0,
             sound_ops: Vec::new(),
-            theme_buffer: (None, None),
-            theme_grid: (None, None),
+            theme_styles: [[(None, None); 11]; 2],
         }
     }
 
     /// Update the theme's rendered default colours reported through
-    /// `glk_style_measure` (SQ-0315): `buffer` for text-buffer windows (the
-    /// story-pane `transcript` style), `grid` for text-grid windows (the
-    /// `status_bar` style). Each channel is `Some(0x00RRGGBB)` or `None` for a
-    /// terminal-default (no explicit colour — honestly unknown).
-    pub fn set_theme_colours(
-        &mut self,
-        buffer: (Option<u32>, Option<u32>),
-        grid: (Option<u32>, Option<u32>),
-    ) {
-        self.theme_buffer = buffer;
-        self.theme_grid = grid;
+    /// `glk_style_measure` (SQ-0315/SQ-0803): one `(fg, bg)` pair per Glk style
+    /// class for text-buffer windows (row 0) and text-grid windows (row 1), as
+    /// built by [`theme_style_colours`]. Each channel is `Some(0x00RRGGBB)` or
+    /// `None` for a terminal-default (no explicit colour — honestly unknown).
+    pub fn set_theme_colours(&mut self, styles: GlkStylePairs) {
+        self.theme_styles = styles;
     }
 
     /// The pixel size of a graphics window `win` as laid out, from `layout` ×
@@ -1086,14 +1114,18 @@ impl GlkBackend for AppGlk {
         self.picts.data_resource(num)
     }
 
-    fn default_style_colours(&self, wintype: WinType, _style: u32) -> Option<(Option<u32>, Option<u32>)> {
-        // The theme paints one base colour pair per pane, not per style class,
-        // so every style reports the same pair for its window type.
-        match wintype {
-            WinType::TextBuffer => Some(self.theme_buffer),
-            WinType::TextGrid => Some(self.theme_grid),
-            WinType::Pair | WinType::Graphics => None,
-        }
+    fn default_style_colours(&self, wintype: WinType, style: u32) -> Option<(Option<u32>, Option<u32>)> {
+        // SQ-0803: the theme paints a colour per Glk STYLE CLASS (the SQ-0331
+        // slots, which a discovered garglk.ini populates), falling back to the
+        // pane's base for a style it leaves alone — so report the slot the
+        // renderer would actually use, not just the pane base. A style class
+        // outside 0..style_NUMSTYLES has no rendered colour to report.
+        let row = match wintype {
+            WinType::TextBuffer => 0,
+            WinType::TextGrid => 1,
+            WinType::Pair | WinType::Graphics => return None,
+        };
+        self.theme_styles[row].get(style as usize).copied()
     }
 
     fn graphics_fill_rect(&mut self, win: u32, color: u32, left: i32, top: i32, w: u32, h: u32) {
@@ -1294,12 +1326,16 @@ mod tests {
         // outer: the host knows its answer is "terminal default").
         let mut glk = AppGlk::new(80, 24);
         assert_eq!(glk.default_style_colours(WinType::TextBuffer, 0), Some((None, None)));
-        glk.set_theme_colours((Some(0x00C5C8C6), Some(0x001D1F21)), (None, Some(0x00303030)));
+        let mut pairs: GlkStylePairs = [[(None, None); 11]; 2];
+        pairs[0] = [(Some(0x00C5C8C6), Some(0x001D1F21)); 11];
+        pairs[1] = [(None, Some(0x00303030)); 11];
+        glk.set_theme_colours(pairs);
         assert_eq!(
             glk.default_style_colours(WinType::TextBuffer, 0),
             Some((Some(0x00C5C8C6), Some(0x001D1F21)))
         );
-        // Every style class reports the same pane pair.
+        // A theme with no per-style colours reports the same pane pair for every
+        // style class.
         assert_eq!(
             glk.default_style_colours(WinType::TextBuffer, 5),
             Some((Some(0x00C5C8C6), Some(0x001D1F21)))
@@ -1311,6 +1347,35 @@ mod tests {
         );
         assert_eq!(glk.default_style_colours(WinType::Graphics, 0), None);
         assert_eq!(glk.default_style_colours(WinType::Pair, 0), None);
+    }
+
+    #[test]
+    fn default_style_colours_reports_the_per_style_slot() {
+        // SQ-0803: a theme that paints one Glk style class differently (here
+        // style_User2 = 10, glk.h) must be reported for THAT style, with every
+        // other style still answering with the pane base. This is the half of
+        // SQ-0319 that Kerkerkruip's 0xF400A1 sentinel probes.
+        let mut glk = AppGlk::new(80, 24);
+        let mut pairs: GlkStylePairs = [[(Some(0x00C5C8C6), Some(0x001D1F21)); 11]; 2];
+        pairs[0][10] = (Some(0x00F400A1), Some(0x00FFFFFF));
+        glk.set_theme_colours(pairs);
+        assert_eq!(
+            glk.default_style_colours(WinType::TextBuffer, 10),
+            Some((Some(0x00F400A1), Some(0x00FFFFFF))),
+            "style_User2 reports its own slot, not the pane base"
+        );
+        assert_eq!(
+            glk.default_style_colours(WinType::TextBuffer, 0),
+            Some((Some(0x00C5C8C6), Some(0x001D1F21))),
+            "an unslotted style still reports the pane base"
+        );
+        assert_eq!(
+            glk.default_style_colours(WinType::TextGrid, 10),
+            Some((Some(0x00C5C8C6), Some(0x001D1F21))),
+            "the buffer slot does not leak into the grid row"
+        );
+        // glk.h: style_NUMSTYLES = 11, so 11 is out of range and has no colour.
+        assert_eq!(glk.default_style_colours(WinType::TextBuffer, 11), None);
     }
 
     #[test]
@@ -1327,9 +1392,35 @@ mod tests {
         let sb = cs.theme.get("status_bar").style;
         assert!(!matches!(sb.fg, Some(Color::Rgb(..))), "precondition: status_bar fg isn't concrete Rgb");
         assert!(!matches!(sb.bg, Some(Color::Rgb(..))), "precondition: status_bar bg isn't concrete Rgb");
-        let (buffer, grid) = theme_style_colours(&cs);
-        assert_eq!(buffer, (Some(0x00C5C8C6), Some(0x001D1F21)));
-        assert_eq!(grid, (None, None));
+        let pairs = theme_style_colours(&cs);
+        assert_eq!(pairs[0][0], (Some(0x00C5C8C6), Some(0x001D1F21)));
+        assert_eq!(pairs[1][0], (None, None));
+    }
+
+    #[test]
+    fn theme_style_colours_resolves_each_glk_style_slot_over_the_base() {
+        // SQ-0803: a per-Glk-style slot (what a garglk.ini `tcolor N` / `gcolor N`
+        // populates) is what the renderer paints for that style, so it is what we
+        // report; a style with no slot inherits the element base, exactly as
+        // `render::resolve_glk_channel` resolves it with no game-set colour. A
+        // named ANSI slot colour IS painted but has no knowable RGB, so it stays
+        // honestly unknown rather than falling back to the base.
+        use ratatui::style::{Color, Style};
+        let mut cs = crate::colors::ColorScheme::default();
+        cs.transcript = Style::new().fg(Color::Rgb(0xC5, 0xC8, 0xC6)).bg(Color::Rgb(0x1D, 0x1F, 0x21));
+        cs.glk_styles[0][10] = Style::new().fg(Color::Rgb(0xF4, 0x00, 0xA1)).bg(Color::Rgb(0xFF, 0xFF, 0xFF));
+        cs.glk_styles[0][9] = Style::new().fg(Color::Cyan);
+        cs.glk_styles[1][3] = Style::new().fg(Color::Rgb(0x01, 0x02, 0x03));
+        let pairs = theme_style_colours(&cs);
+        assert_eq!(pairs[0][10], (Some(0x00F400A1), Some(0x00FFFFFF)), "User2 slot reported");
+        assert_eq!(
+            pairs[0][9],
+            (None, Some(0x001D1F21)),
+            "a named ANSI slot fg is unknowable; the unslotted bg inherits the base"
+        );
+        assert_eq!(pairs[0][0], (Some(0x00C5C8C6), Some(0x001D1F21)), "Normal is the base");
+        assert_eq!(pairs[0][5], (Some(0x00C5C8C6), Some(0x001D1F21)), "unslotted style is the base");
+        assert_eq!(pairs[1][3], (Some(0x00010203), None), "the grid row resolves independently");
     }
 
     #[test]
