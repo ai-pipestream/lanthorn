@@ -3943,7 +3943,8 @@ fn flank_border_art(
     if x1 <= x0 {
         return None;
     }
-    crate::render::v6_border::recognize(crate::render::v6_border::art_extent(gfx, x0, x1), native.1 as u32)
+    let art = crate::render::v6_border::art_extent(gfx, x0, x1);
+    crate::render::v6_border::recognize(gfx, x0, x1, art, native.1 as u32)
 }
 
 /// SQ-0698: the tiled native source for one side flank band, or `None` when its

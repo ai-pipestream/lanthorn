@@ -27,6 +27,12 @@
 //!    picks the picture archive, and Zork Zero's MCGA, EGA and CGA plates do not
 //!    agree on where its pillars begin — so a repeat unit pinned to one of them
 //!    seams on the other two.
+//! 6. **Every rendition is recognised as its own TITLE** (SQ-0802). Shogun's DOS
+//!    art reaches the native screen bottom where its Amiga art stops short, so a
+//!    recogniser that decides on that alone hands it Zork Zero's masonry.
+//! 7. **No tile join steps harder than the art does by itself** (SQ-0808). The
+//!    cut landing in the plain shaft is not sufficient: Zork Zero's CGA pillar is
+//!    a *lit* column, and a repeat that only translates it resets the shading.
 //!
 //! Fixtures are named by exact release, per CLAUDE.md: a disk image is a
 //! different build, not the same story on other media. `stories/` is gitignored,
@@ -197,12 +203,18 @@ fn drive(s: &mut GameSession, turns: usize) {
 /// (no terminal to query), which is what lets a case assert on the pane's own
 /// CELLS: the image lands in them.
 #[allow(deprecated)] // `from_fontsize`: a headless test has no terminal to query.
-fn render_state() -> app::state::AppState {
+fn render_state_with(honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
     state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.honor_game_colours = honor;
     state
+}
+
+/// The shipped default, and this suite's primary baseline.
+fn render_state() -> app::state::AppState {
+    render_state_with(true)
 }
 
 /// One line of the render's band log, parsed: the band's device cell rect, how
@@ -588,7 +600,7 @@ fn every_zork_zero_rendition_tiles_only_its_pillar_shaft() {
             let native_span = |y: u32| opaque_span(&gfx, y, x0, x1);
             let art = app::render::v6_border::art_extent(&gfx, x0, x1);
             assert_eq!(
-                app::render::v6_border::recognize(art, native.1 as u32),
+                app::render::v6_border::recognize(&gfx, x0, x1, art, native.1 as u32),
                 Some(BorderArt::ZorkZeroPillars),
                 "{name} cols {x0}..{x1}: Zork Zero's flank is pillars in every rendition"
             );
@@ -614,6 +626,117 @@ fn every_zork_zero_rendition_tiles_only_its_pillar_shaft() {
                 sp.release,
                 wrong.len(),
                 wrong.first(),
+            );
+        }
+    }
+}
+
+// ── 7. No tile join steps harder than the art itself (SQ-0808) ───────────────
+
+/// Mean luminance of row `y` over the whole of `img`; a transparent pixel
+/// contributes nothing. This is the flank reduced to one number per row, which
+/// is what lets a SHADING discontinuity be seen through a dither that changes
+/// every pixel from row to row.
+fn row_luma(img: &image::RgbaImage, y: u32) -> f64 {
+    let mut s = 0.0;
+    for x in 0..img.width() {
+        let p = img.get_pixel(x, y);
+        if p[3] >= 128 {
+            s += (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0;
+        }
+    }
+    s / img.width() as f64
+}
+
+/// `|mean(y-k..y) - mean(y..y+k)|` — a low-pass step detector. Zork Zero's CGA
+/// masonry differs wildly between ADJACENT rows (its 1-bit line work is a dither,
+/// and consecutive raw rows are essentially uncorrelated: a mean absolute row
+/// difference of 7486 against 16065 at the worst), so a per-pixel comparison
+/// cannot tell a seam from the texture. A 16-row average can: it sees the
+/// pillar's shading and nothing else.
+fn luma_step(prof: &[f64], y: usize, k: usize) -> f64 {
+    let a: f64 = prof[y - k..y].iter().sum::<f64>() / k as f64;
+    let b: f64 = prof[y..y + k].iter().sum::<f64>() / k as f64;
+    (a - b).abs()
+}
+
+/// SQ-0808, as reported: *"the tiling seam on zork0.cg1 is plainly visible, and
+/// Spatterlight's CGA flank does not show it"* — with the page no longer painted
+/// white after SQ-0806, there was nothing left to hide it.
+///
+/// **The cause is not the dither and not the repeat unit.** SQ-0797's blend was
+/// ruled out of CGA by its own note; SQ-0799 already derives the cut from the art,
+/// and `every_zork_zero_rendition_tiles_only_its_pillar_shaft` proves the cut
+/// lands in the plain shaft on all five renditions. The seam survived both
+/// because **Zork Zero's CGA pillar is a lit column**: mean row luminance down
+/// its shaft runs 97 → 82 top to bottom, where `zork0.mg1` holds a flat 54 and
+/// `zork0.eg1` a flat 51. A translation repeat butts the strip's darkest row
+/// against its brightest and resets the shading at every join. Measured on
+/// `zork0-r393-s890714.z6` + `zork0.cg1` at an 800-row band: a step of **29.3**
+/// at band row 654 — the second tile boundary — against the art's own steepest
+/// internal step of 16.8.
+///
+/// The oracle is the art's own behaviour, so it needs no per-rendition constant:
+/// nothing this code composes below the artwork may step harder than the pillar
+/// shaft steps by itself. Falsifiable: pass `flip = false` to `extend_pillars`
+/// in `v6_border::zork_zero` and `zork0.cg1` fails on both flanks with that
+/// 29.3-against-16.8 step at row 654, while the other four renditions still pass
+/// — which is why no earlier lane could have caught this on MCGA alone.
+#[test]
+fn no_tile_join_steps_harder_than_the_pillar_shaft_itself() {
+    /// Tall enough for two tile boundaries to land below the artwork.
+    const BAND: u32 = 800;
+    /// The low-pass window, in unit rows — 8 raw rows of a doubled archive.
+    const K: usize = 16;
+    const RENDITIONS: &[Option<&str>] =
+        &[Some("zork0.mg1"), Some("zork0.eg1"), Some("zork0.cg1"), Some("zork0.pic"), None];
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let sp = &SPECIMENS[2];
+    assert_eq!(sp.title, "Zork Zero");
+    for rendition in RENDITIONS {
+        let booted = match rendition {
+            Some(a) => boot_named(sp.file, a, (sp.release, sp.serial)),
+            None => boot(sp.file, Some((sp.release, sp.serial))),
+        };
+        let Some(mut s) = booted else { continue };
+        drive(&mut s, sp.turns);
+        let name = rendition.unwrap_or("Zork0.blb");
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+        let story = layout.story.expect("a story window");
+        for (x0, x1) in [(0u32, story.x_px as u32), ((story.x_px + story.w_px) as u32, gfx.width())] {
+            let art = app::render::v6_border::art_extent(&gfx, x0, x1);
+            // The shaft, as the modal opaque span — the same oracle case 5 uses.
+            let mut tally: std::collections::HashMap<Option<(u32, u32)>, u32> = Default::default();
+            for y in 0..art.1 {
+                *tally.entry(opaque_span(&gfx, y, x0, x1)).or_default() += 1;
+            }
+            let shaft = tally.iter().max_by_key(|(_, n)| **n).map(|(s, _)| *s).expect("rows");
+            let rows: Vec<u32> = (0..art.1).filter(|&y| opaque_span(&gfx, y, x0, x1) == shaft).collect();
+            let (top, bottom) = (*rows.first().expect("a shaft row"), rows.last().expect("a shaft row") + 1);
+            let base = art.1 - bottom;
+            let out = app::render::v6_border::flank_source(&gfx, &gfx, x0, x1, art, native.1 as u32, 0, BAND)
+                .unwrap_or_else(|| panic!("{name} cols {x0}..{x1}: the flank should be extended"));
+            let prof: Vec<f64> = (0..out.height()).map(|y| row_luma(&out, y)).collect();
+            // What the pillar does to itself, inside its own shaft…
+            let natural = (top as usize + K..bottom as usize - K)
+                .map(|y| luma_step(&prof, y, K))
+                .fold(0.0f64, f64::max);
+            // …against every row this code composed below the artwork.
+            let (at, worst) = (art.1 as usize + K..(BAND - base) as usize - K)
+                .map(|y| (y, luma_step(&prof, y, K)))
+                .fold((0usize, 0.0f64), |a, b| if b.1 > a.1 { b } else { a });
+            assert!(
+                worst <= natural,
+                "{name} [release {}] cols {x0}..{x1}: the extension steps {worst:.2} at band row \
+                 {at}, harder than the {:.2} the pillar shaft ({top}..{bottom}) ever steps by \
+                 itself. That is a tile join resetting the pillar's shading — the CGA column is \
+                 lit, so a repeat that merely translates it cannot be seamless",
+                sp.release,
+                natural,
             );
         }
     }
@@ -649,12 +772,144 @@ fn each_specimen_is_recognised_as_its_own_layout() {
             sp.title, sp.release
         );
         assert_eq!(
-            recognize(rows, native.1 as u32),
+            recognize(&gfx, 0, story.x_px as u32, rows, native.1 as u32),
             Some(want),
             "{} [release {}]: recognised layout",
             sp.title,
             sp.release
         );
+    }
+}
+
+// ── 6. Every rendition is recognised as its own title (SQ-0802) ──────────────
+
+/// SQ-0802 — **Shogun's DOS renditions were classified as Zork Zero pillars.**
+///
+/// `recognize` used to decide on one measurement, and reaching the native screen
+/// bottom won outright. Shogun's Amiga border stops at native row 336 of 400, but
+/// its DOS art is authored for the full 200-row screen: `shogun.mg1` (23x200),
+/// `shogun.eg1` (46x200), `shogun.cg1` (58x195) and `Shogun.blb` all paint to row
+/// 400 in unit space and therefore satisfied it, so every one of them was handed
+/// Zork Zero's masonry recipe — cut at unit row 86, a 284-row repeat, the bottom
+/// 26 rows stamped back as a foot — applied to a Japanese lacquer frame. Worse,
+/// `shogun.cg1`'s two flanks DISAGREED: the left stops at row 390 and was
+/// correctly a single piece while the right reached 400 and was pillars.
+///
+/// The second measurement is the flank's SHAPE. Both ends of the cut are pinned
+/// here from the corpus, at a gameplay frame, both flanks:
+///
+/// | flank                                       | narrowest ÷ widest painted row |
+/// |---------------------------------------------|--------------------------------|
+/// | Shogun `.mg1` / `.eg1` / `Shogun.blb`       | 1.00                           |
+/// | Shogun `.cg1`                               | 1.00 (L), 0.96 (R)             |
+/// | `James Clavell's Shogun.adf` (release 295)  | 1.00                           |
+/// | Zork Zero castle, all five renditions       | 0.02 – 0.56                    |
+/// | Zork Zero underground / jungle (composed)   | 0.37 – 0.81                    |
+///
+/// Falsifiable: drop the width test and the four DOS Shogun rows below come back
+/// `ZorkZeroPillars` while the Amiga row still passes — which is exactly why the
+/// original suite, which only ever booted the `.adf`, could not see it.
+#[test]
+fn every_rendition_is_recognised_as_its_own_titles_layout() {
+    use app::render::v6_border::{art_extent, recognize};
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    /// One rendition and the layout its flanks must be recognised as. `archive`
+    /// is `None` for whatever `PictSource::resolve` picks off the medium.
+    struct Rendition {
+        name: &'static str,
+        story: &'static str,
+        archive: Option<&'static str>,
+        release: u16,
+        serial: &'static str,
+        want: BorderArt,
+    }
+    const SHOGUN: &str = "shogun-r322-s890706.z6";
+    const ZORK0: &str = "zork0-r393-s890714.z6";
+    let cases = [
+        Rendition { name: "Shogun Amiga", story: SPECIMENS[1].file, archive: None, release: 295, serial: "890321", want: BorderArt::ShogunSinglePiece },
+        Rendition { name: "Shogun Blorb", story: SHOGUN, archive: None, release: 322, serial: "890706", want: BorderArt::ShogunSinglePiece },
+        Rendition { name: "Shogun MCGA", story: SHOGUN, archive: Some("shogun.mg1"), release: 322, serial: "890706", want: BorderArt::ShogunSinglePiece },
+        Rendition { name: "Shogun EGA", story: SHOGUN, archive: Some("shogun.eg1"), release: 322, serial: "890706", want: BorderArt::ShogunSinglePiece },
+        Rendition { name: "Shogun CGA", story: SHOGUN, archive: Some("shogun.cg1"), release: 322, serial: "890706", want: BorderArt::ShogunSinglePiece },
+        Rendition { name: "Zork Zero MCGA", story: ZORK0, archive: Some("zork0.mg1"), release: 393, serial: "890714", want: BorderArt::ZorkZeroPillars },
+        Rendition { name: "Zork Zero EGA", story: ZORK0, archive: Some("zork0.eg1"), release: 393, serial: "890714", want: BorderArt::ZorkZeroPillars },
+        Rendition { name: "Zork Zero CGA", story: ZORK0, archive: Some("zork0.cg1"), release: 393, serial: "890714", want: BorderArt::ZorkZeroPillars },
+        Rendition { name: "Zork Zero Amiga", story: ZORK0, archive: Some("zork0.pic"), release: 393, serial: "890714", want: BorderArt::ZorkZeroPillars },
+        Rendition { name: "Zork Zero Blorb", story: ZORK0, archive: None, release: 393, serial: "890714", want: BorderArt::ZorkZeroPillars },
+        Rendition { name: "Arthur Amiga", story: SPECIMENS[0].file, archive: None, release: 54, serial: "890606", want: BorderArt::ArthurPoles },
+    ];
+    for Rendition { name, story, archive, release, serial, want } in &cases {
+        let booted = match archive {
+            Some(a) => boot_named(story, a, (*release, serial)),
+            None => boot(story, Some((*release, serial))),
+        };
+        let Some(mut s) = booted else { continue };
+        drive(&mut s, 12);
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+        let story_win = layout.story.expect("a story window");
+        // BOTH flanks: `shogun.cg1`'s disagreed, and one of them was right.
+        for (x0, x1, side) in [
+            (0u32, story_win.x_px as u32, "left"),
+            ((story_win.x_px + story_win.w_px) as u32, gfx.width(), "right"),
+        ] {
+            let art = art_extent(&gfx, x0, x1);
+            assert_eq!(
+                recognize(&gfx, x0, x1, art, native.1 as u32),
+                Some(*want),
+                "{name} [release {release}] {side} flank, native art rows {art:?} of {}: this \
+                 title's border is {want:?}. Reaching the screen bottom is not what makes a flank \
+                 Zork Zero's pillars — narrowing below its banner is",
+                native.1,
+            );
+        }
+    }
+}
+
+/// …and the same fix seen through the real render, in both `honor_game_colours`
+/// modes: Shogun's DOS flanks draw one tiled band per side with no hole in it,
+/// exactly as its Amiga art does. The colour mode cannot reach the flank SOURCE
+/// (it is composed from the graphics canvas before any theme decision), but it
+/// can reach what the pane does with it, and single-mode suites have masked
+/// regressions here before.
+#[test]
+fn shoguns_dos_flanks_tile_cleanly_in_both_colour_modes() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    for archive in ["shogun.mg1", "shogun.eg1", "shogun.cg1"] {
+        let Some(mut s) = boot_named("shogun-r322-s890706.z6", archive, (322, "890706")) else { continue };
+        drive(&mut s, 12);
+        for honor in [true, false] {
+            for &(w, h) in PANES {
+                let model = s.screen();
+                let state = render_state_with(honor);
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+                let bands = parse_bands(&state.graphics_render.borrow().band_log);
+                let fl = flanks(&bands, w);
+                assert_eq!(
+                    fl.len(),
+                    2,
+                    "{archive} [release 322] at {w}x{h}, honor_game_colours={honor}: expected a \
+                     left and a right flank band, got {fl:?}"
+                );
+                for b in &fl {
+                    assert!(
+                        b.tiled && !b.stretched,
+                        "{archive} at {w}x{h}, honor_game_colours={honor}: flank {b:?} must be TILED"
+                    );
+                    let (run, at) = b.blank;
+                    assert!(
+                        run == 0 || at == 0,
+                        "{archive} at {w}x{h}, honor_game_colours={honor}: the flank source {b:?} \
+                         has an INTERIOR hole — {run} row(s) with no art starting at row {at}"
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -62,29 +62,76 @@ pub enum BorderArt {
     ZorkZeroPillars,
 }
 
-/// Classify a flank from the opaque row extent of its own native columns.
+/// The narrowest and widest painted row of a flank — `(min, max)` opaque column
+/// span width over native columns `[x0, x1)`, rows `art.0..art.1`. `None` when
+/// nothing there is painted.
 ///
-/// `art` is `(first, last_exclusive)` opaque native row within the flank's
-/// columns; `native_h` is the native screen height (400 for every v6 title we
-/// carry). `None` when the flank has no art, or when its art already reaches
-/// the screen bottom without starting at the top and the shape is not one of
-/// the three below — in which case the caller keeps its existing behaviour.
+/// This is the *shape* of a flank reduced to two numbers, and it is what tells a
+/// pillar from a slab: a pillar has a banner or a capital wider than the column
+/// hanging below it, a slab holds one width from top to bottom.
+fn painted_widths(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32)) -> Option<(u32, u32)> {
+    let x1 = x1.min(canvas.width());
+    let (mut lo, mut hi) = (u32::MAX, 0u32);
+    for y in art.0..art.1.min(canvas.height()) {
+        let (mut first, mut last) = (None, 0);
+        for x in x0..x1 {
+            if canvas.get_pixel(x, y)[3] >= 128 {
+                first.get_or_insert(x);
+                last = x;
+            }
+        }
+        if let Some(f) = first {
+            lo = lo.min(last - f + 1);
+            hi = hi.max(last - f + 1);
+        }
+    }
+    (hi > 0).then_some((lo, hi))
+}
+
+/// Classify a flank from the shape of its own native columns.
+///
+/// `art` is `(first, last_exclusive)` opaque native row within columns
+/// `[x0, x1)` of `canvas`; `native_h` is the native screen height (400 for every
+/// v6 title we carry). `None` when the flank has no art at all — the caller then
+/// keeps its existing behaviour.
 ///
 /// Two measurements separate the three, and the ORDER matters because Zork
 /// Zero's banner covers its flank columns from row 0 just as Shogun's border
 /// does:
 ///
-/// | title            | art rows (measured) | reaches bottom | starts at 0 |
-/// |------------------|---------------------|----------------|-------------|
-/// | Arthur (r54 adf) | 11..379             | no             | no          |
-/// | Shogun (r295 adf)| 0..336              | no             | yes         |
-/// | Zork Zero (r393) | 0..400              | **yes**        | yes         |
-pub fn recognize(art: (u32, u32), native_h: u32) -> Option<BorderArt> {
+/// | title            | art rows (measured) | reaches bottom | narrows | starts at 0 |
+/// |------------------|---------------------|----------------|---------|-------------|
+/// | Arthur (r54 adf) | 11..379             | no             | –       | no          |
+/// | Shogun (r295 adf)| 0..336              | no             | –       | yes         |
+/// | Shogun (DOS)     | 0..400              | **yes**        | **no**  | yes         |
+/// | Zork Zero (r393) | 0..400              | **yes**        | **yes** | yes         |
+///
+/// **Reaching the bottom is not enough on its own, and that was SQ-0802.**
+/// Shogun's DOS art is authored for the full 200-row screen where its Amiga art
+/// stops at 168, so `.MG1`, `.EG1`, `.CG1` and the Blorb all satisfy the bottom
+/// test and took Zork Zero's masonry recipe — cut at the shaft, a repeat, a foot
+/// — applied to a Japanese lacquer frame. The second measurement is [`painted_widths`]:
+///
+/// * **Shogun's border is a slab.** Measured on `shogun-r322-s890706.z6` at a
+///   gameplay frame, both flanks, every rendition: narrowest ÷ widest painted row
+///   is **1.00** on `.mg1`, `.eg1` and `Shogun.blb`, 1.00 and **0.96** on the two
+///   `.cg1` flanks, and 1.00 on `James Clavell's Shogun.adf` (release 295).
+/// * **Zork Zero's is a pillar under a banner.** Same measurement across all five
+///   renditions and all three of its scene borders (castle in-game; underground
+///   and jungle composed from the archives' own pictures 7/6 and 0x1f3–0x1f6 at
+///   the flank width one `TEXT_WINDOW_PIC_LOC` fixes for all three): **0.02–0.56**
+///   castle, **0.77–0.81** underground, **0.37–0.80** jungle.
+///
+/// So every Zork Zero flank we can measure is at or below 0.81 and every Shogun
+/// flank at or above 0.96. The cut is at **9/10**, in the gap, and both ends of
+/// it are pinned by `v6_side_border_tiling.rs`.
+pub fn recognize(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), native_h: u32) -> Option<BorderArt> {
     let (top, bottom) = art;
     if bottom <= top {
         return None;
     }
-    if bottom >= native_h {
+    let (lo, hi) = painted_widths(canvas, x0, x1, art)?;
+    if bottom >= native_h && lo * 10 < hi * 9 {
         return Some(BorderArt::ZorkZeroPillars);
     }
     if top == 0 {
@@ -345,6 +392,11 @@ fn shogun(dst: &mut RgbaImage, art: &RgbaImage, border_height: u32, desired_heig
 /// rendition dithers its masonry, so the number of opaque pixels in a shaft row
 /// wobbles from row to row while its edges do not move at all.
 ///
+/// Measured over Zork Zero's five renditions, the castle shaft is 280 to 292 of
+/// the flank's 400 rows. Its other two scene borders declare nothing usable —
+/// 14 to 146 rows, or no run at all — which is why [`zork_zero`] still needs the
+/// literal constants (SQ-0792).
+///
 /// Only rows `[0, art_bottom)` are considered — below that is the caller's
 /// extension, not the game's art.
 fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
@@ -412,22 +464,54 @@ fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
 /// derivation of them rather than a replacement for them.
 ///
 /// When the flank shows no pillar shape at all, `pillar_shaft` says so and those
-/// constants are used as written. That is not a fallback for Zork Zero — every
-/// Zork Zero rendition measured declares a shaft — but for the DOS renditions of
-/// **Shogun**, whose single-piece border is a constant-width slab that happens to
-/// reach the native screen bottom and is therefore classified here as
-/// [`BorderArt::ZorkZeroPillars`]. Its flanks are drawn exactly as they were
-/// before this measurement existed; the misclassification is SQ-0802, not this.
+/// constants are used as written. Every *castle* flank measured declares a shaft,
+/// so that arm is Zork Zero's other two scene borders (below), whose stonework
+/// has no plain span to find.
 ///
-/// **Known limitation, deliberate.** Zork Zero has three scene borders and
-/// Bocfel gives each its own routine: castle (above), `extend_underground_pillars(73,
-/// 54, 200, 74, 38, 37)` — which alternates left/right stone blocks so the
-/// masonry stays consistent — and `extend_jungle_pillars(67, 210, 143, 59)`.
-/// Which one is on screen is a Z-machine global Bocfel reads and we cannot: the
-/// canvas is pixels. Measuring the shaft rather than pinning it helps here too —
-/// a jungle or underground flank is cut beneath its own capital rather than
-/// beneath the castle's — but a jungle screen still loses its 59-row overlap and
-/// may show a seam. SQ-0792.
+/// ## Alternate tiles are MIRRORED, and that is SQ-0808
+///
+/// `flip` is on, which makes every internal join an exact duplicated row: tile
+/// *n* ends on strip row 0 and tile *n+1* — drawn the other way up — begins on
+/// strip row 0. A translation repeat instead butts the strip's LAST row against
+/// its FIRST, and that only disappears when the shaft is uniform down its length.
+///
+/// Two of Zork Zero's three renditions are uniform and one is not. Mean row
+/// luminance down the castle shaft, measured on `zork0-r393-s890714.z6` at a
+/// gameplay frame: `zork0.mg1` and `zork0.eg1` hold **54** and **51** from top to
+/// bottom, while `zork0.cg1` runs **97 → 82** — its pillar is a *lit* column,
+/// shaded darker toward its base, and repeating it reset the shading at every
+/// join. Against the art's own steepest internal step of 16.8 (a 16-row
+/// low-pass), the extension's join measured **29.3** at band row 654, the second
+/// tile boundary. That is the seam the user reported, and it is neither the EGA
+/// dither of SQ-0797 nor the mis-cut repeat unit of SQ-0799 — the cut is in the
+/// plain shaft on all three renditions and CGA still seams, because the shaft
+/// itself is not translation-invariant.
+///
+/// Bocfel reached the same conclusion per platform and hard-codes it:
+/// `extend_pillars(52, 25, 205, 133, 11, /*flip=*/true, false)` for CGA against
+/// `(43, 13, 200, 142, 0, false, false)` for VGA/Amiga/Blorb, and it forces the
+/// first EGA tile flipped too (`if (is_spatterlight_zork0 && graphics_type ==
+/// kGraphicsTypeEGA) initial_parity = true;`). Mirroring unconditionally is the
+/// same answer without the dispatch: on a uniform shaft a mirror is
+/// indistinguishable from a translation, so the two flat renditions are
+/// unaffected, and it needs none of Bocfel's per-platform overlap (11 raw rows on
+/// CGA, 9 on EGA) because a duplicated row has nothing left to hide.
+///
+/// ## Known limitation, deliberate
+///
+/// Zork Zero has three scene borders and Bocfel gives each its own routine:
+/// castle (above), `extend_underground_pillars(73, 54, 200, 74, 38, 37)` — which
+/// alternates left/right stone blocks so the masonry stays consistent — and
+/// `extend_jungle_pillars(67, 210, 143, 59)`. Which one is on screen is a
+/// Z-machine global Bocfel reads and we cannot: the canvas is pixels. Composing
+/// the other two borders from the archives' own pictures shows what they do get
+/// (SQ-0792): the underground and jungle art declares no usable shaft — the
+/// longest constant-span run is 14 to 146 rows against the castle's 280 to 292 —
+/// so those flanks fall to the castle constants above, which is what the quest
+/// predicted and what Bocfel's own dispatch exists to avoid. The mirror helps
+/// them as much as it helps CGA, and it is why neither of Bocfel's scene-specific
+/// overlaps (37 rows underground, 59 in the jungle) is reproduced here, but the
+/// repeat unit is still the castle's.
 fn zork_zero(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
     /// How far Bocfel's repeat unit stays clear of the capital above it and the
     /// base below it: 2 raw rows at each end, doubled into unit space.
@@ -446,7 +530,7 @@ fn zork_zero(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
         return;
     }
     let unit = unit.min(art_bottom - foot - top_cut);
-    extend_pillars(dst, top_cut, foot, art_bottom, unit, 0, false, desired_height);
+    extend_pillars(dst, top_cut, foot, art_bottom, unit, 0, true, desired_height);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -499,7 +583,7 @@ pub fn flank_source(
     crop_top: u32,
     rows: u32,
 ) -> Option<RgbaImage> {
-    let kind = recognize(art, native_h)?;
+    let kind = recognize(canvas, x0, x1, art, native_h)?;
     let desired = crop_top + rows;
     // Bocfel guards every one of these routines the same way: extend only when
     // the pane is taller than the art (`if (desired_height <= total_height) return;`).
@@ -543,16 +627,54 @@ mod tests {
         RgbaImage::from_pixel(w, h, Rgba(c))
     }
 
+    /// A flank `w` wide whose rows `[top, bottom)` are painted, `narrow` columns
+    /// wide below `waist` and the full width above it — the banner-over-pillar
+    /// shape, or a constant-width slab when `narrow == w`.
+    fn flank(w: u32, top: u32, bottom: u32, waist: u32, narrow: u32) -> RgbaImage {
+        let mut c = RgbaImage::new(w, 400);
+        for y in top..bottom {
+            let n = if y < waist { w } else { narrow };
+            for x in 0..n {
+                c.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+            }
+        }
+        c
+    }
+
     #[test]
-    fn recognize_separates_the_three_measured_shapes() {
+    fn recognize_separates_the_measured_shapes() {
         // Arthur adf r54: poles native 11..379 of 400.
-        assert_eq!(recognize((11, 379), 400), Some(BorderArt::ArthurPoles));
+        let a = flank(28, 11, 379, 11, 22);
+        assert_eq!(recognize(&a, 0, 28, (11, 379), 400), Some(BorderArt::ArthurPoles));
         // Shogun adf r295: single-piece border native 0..336 of 400.
-        assert_eq!(recognize((0, 336), 400), Some(BorderArt::ShogunSinglePiece));
-        // Zork Zero r393: pillars painted to the native bottom.
-        assert_eq!(recognize((0, 400), 400), Some(BorderArt::ZorkZeroPillars));
+        let s = flank(46, 0, 336, 0, 46);
+        assert_eq!(recognize(&s, 0, 46, (0, 336), 400), Some(BorderArt::ShogunSinglePiece));
+        // Zork Zero r393: pillars painted to the native bottom, narrowing from an
+        // 86-wide banner to a 48-wide shaft (ratio 0.56).
+        let z = flank(86, 0, 400, 68, 48);
+        assert_eq!(recognize(&z, 0, 86, (0, 400), 400), Some(BorderArt::ZorkZeroPillars));
         // An unpainted flank is nobody's border.
-        assert_eq!(recognize((0, 0), 400), None);
+        assert_eq!(recognize(&z, 0, 86, (0, 0), 400), None);
+    }
+
+    /// SQ-0802 — Shogun's DOS art reaches the native screen bottom, so "reaches
+    /// the bottom" alone handed it Zork Zero's masonry recipe.
+    ///
+    /// Falsifiable: drop the width test from [`recognize`] and every case here
+    /// comes back `ZorkZeroPillars`.
+    #[test]
+    fn a_slab_that_reaches_the_bottom_is_not_a_pillar() {
+        // shogun.mg1 / .eg1 / Shogun.blb: 46-wide, ratio 1.00.
+        let s = flank(46, 0, 400, 0, 46);
+        assert_eq!(recognize(&s, 0, 46, (0, 400), 400), Some(BorderArt::ShogunSinglePiece));
+        // shogun.cg1's right flank: 57 wide, narrowest painted row 55 — ratio
+        // 0.96, the tightest slab measured, and still not a pillar.
+        let c = flank(57, 0, 400, 200, 55);
+        assert_eq!(recognize(&c, 0, 57, (0, 400), 400), Some(BorderArt::ShogunSinglePiece));
+        // …while Zork Zero's widest-waisted flank — the underground border at
+        // 70/86, ratio 0.81 — is still pillars. The cut is at 9/10, in the gap.
+        let u = flank(86, 0, 400, 78, 70);
+        assert_eq!(recognize(&u, 0, 86, (0, 400), 400), Some(BorderArt::ZorkZeroPillars));
     }
 
     #[test]
