@@ -565,11 +565,34 @@ pub fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
 ///   consistent between them. That is a statement about the pair, applied only to
 ///   the underground; a mirror inside one flank cannot express it, and applying
 ///   it to the castle would flip a lit column's shading. Nothing in the pixels
-///   says "this is the underground". The shape of an answer exists — the
-///   underground's stone course is periodic (38 raw rows), so autocorrelation
-///   down a flank would yield a scene-agnostic repeat unit — but that would
-///   replace this measured castle derivation wholesale, and is its own piece of
-///   work rather than a refinement of this one.
+///   says "this is the underground".
+///
+/// ## Autocorrelation was tried, and the castle is why it cannot replace this
+///
+/// SQ-0813 asked whether the repeat unit could come from the art alone —
+/// autocorrelate a flank down y, take the strongest period as the tile height —
+/// which would retire the dispatch above and subsume the constant-span case,
+/// since a constant shaft autocorrelates at every lag. Measured over every
+/// rendition and all three scene borders it reproduces the castle's derivation on
+/// none of them, and the reason is structural: **a pillar shaft has no period.**
+/// `zork0.mg1`'s is uniform — its rows are pixel-identical, mean mismatch 0.30 of
+/// 255 at every lag from 4 to 20 alike — so the search is maximally confident and
+/// maximally uninformative and returns the smallest lag it is offered, 4 against
+/// the 284 [`pillar_shaft`] gives. `zork0.cg1`'s is a graded lit column (97 → 82,
+/// above) and a gradient is not periodic either, so its best lag scores *worse*
+/// than the average lag. Driven through this handler the per-pixel form returns 4
+/// on MCGA, Amiga and the Blorb and nothing at all on EGA and CGA.
+///
+/// The two scenes it was meant to rescue score no better: the underground's course
+/// is found at 74 rows at a confidence of 0.75–0.97 where 1.0 is a coin toss, and
+/// on `zork0.cg1` the two flanks disagree (76 left, 74 right) — the asymmetry
+/// SQ-0792 removed. Accepts and rejects interleave with no gap between them, where
+/// SQ-0792's cut had 36%..70%. The statistic measures self-similarity and a plain
+/// shaft is more self-similar than patterned masonry, so it is anti-correlated
+/// with what it was asked to detect. It also yields only the unit, never the
+/// `top_cut` and `foot` that [`extend_pillars`] needs and the shape measurement
+/// supplies. `v6_side_border_tiling.rs` pins the corpus numbers so a future
+/// statistic that does separate them says so.
 fn zork_zero(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
     /// How far Bocfel's repeat unit stays clear of the capital above it and the
     /// base below it: 2 raw rows at each end, doubled into unit space.

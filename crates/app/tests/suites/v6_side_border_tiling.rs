@@ -1232,3 +1232,201 @@ fn zork_zeros_other_two_scene_borders_declare_no_shaft_and_agree_across_flanks()
     }
 }
 
+// ── 10. Autocorrelation cannot replace the scene dispatch (SQ-0813) ──────────
+
+/// One flank reduced to a row of luma per pixel, transparent marked `-1`. The
+/// autocorrelation below runs over this rather than over the image, because a
+/// bounds-checked `get_pixel` per comparison costs ~40x in a debug test binary.
+fn luma_rows(img: &image::RgbaImage, rows: (u32, u32)) -> Vec<Vec<f32>> {
+    (rows.0..rows.1)
+        .map(|y| {
+            (0..img.width())
+                .map(|x| {
+                    let p = img.get_pixel(x, y);
+                    if p[3] >= 128 {
+                        (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0
+                    } else {
+                        -1.0
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The strongest repeat period in a flank and how confident it is:
+/// `(lag, d')`, where `d'` is YIN's cumulative-mean-normalised difference of
+/// `mean |row(y) − row(y+p)|` over every column. **Lower `d'` is more confident**
+/// — it is the best lag's mismatch divided by the average lag's, so `d' ≈ 1`
+/// means the winner is no better than a coin toss and `d' < 0.15` is the
+/// threshold YIN itself calls a detection.
+///
+/// This is the quest's own proposal, implemented as written and run over the
+/// corpus. Nothing in `v6_border` calls it: it is the evidence for a decision,
+/// which is why it lives here and not there.
+fn best_period(img: &image::RgbaImage, rows: (u32, u32)) -> (u32, f64) {
+    let r = luma_rows(img, rows);
+    let (h, w) = (r.len(), img.width() as usize);
+    let diff = |a: usize, b: usize| -> f64 {
+        let mut s = 0.0;
+        for (p, q) in r[a].iter().zip(&r[b]) {
+            s += match (*p >= 0.0, *q >= 0.0) {
+                (true, true) => (p - q).abs() as f64,
+                (false, false) => 0.0,
+                _ => 255.0,
+            };
+        }
+        s / w as f64
+    };
+    let (mut best, mut score, mut run) = (0u32, f64::MAX, 0.0);
+    for p in 1..h / 2 {
+        let d: f64 = (0..h - p).map(|y| diff(y, y + p)).sum::<f64>() / (h - p) as f64;
+        run += d;
+        let dp = if run > 0.0 { d * p as f64 / run } else { 1.0 };
+        if dp < score {
+            score = dp;
+            best = p as u32;
+        }
+    }
+    (best, score)
+}
+
+/// SQ-0813 — **the pixels cannot tell Zork Zero's three scene borders apart by
+/// their period, and the castle is the reason.**
+///
+/// The proposal was to retire the per-scene dispatch: autocorrelate a flank down
+/// y, take the strongest period as the tile height, and fall back to a stretch
+/// when nothing scores clearly. It subsumes the constant-span case, the argument
+/// went, because a constant shaft autocorrelates at every lag. The bar SQ-0813
+/// set for itself was that it must first reproduce the castle's shipped
+/// derivation — Bocfel's 86 / 26 / 400 / 284 in unit space — on the MCGA art.
+///
+/// **It reproduces it on nothing.** Measured on the flanks each archive's own
+/// pictures compose (the method case 9 validates against the in-game castle), in
+/// the window below the top strip, `(best lag, d')`:
+///
+/// | rendition   | castle          | underground     | jungle          |
+/// |-------------|-----------------|-----------------|-----------------|
+/// | `zork0.mg1` | **4** (0.730 / 0.739) | 74 (0.909 / 0.925) | 84 (0.469 / 0.502) |
+/// | `zork0.eg1` | **4** (1.009 / 1.004) | 74 (0.813 / 0.745) | 84 (0.381 / 0.384) |
+/// | `zork0.cg1` | **44** (1.056 / 1.056) | 76 / 74 (0.956 / 0.972) | 84 (0.881 / 0.855) |
+///
+/// against a shipped repeat unit of 284, 284 / 282 and 272 rows. Driven through
+/// the real `zork_zero` handler on the in-game castle it is worse still: the
+/// per-pixel form returns **4** on `zork0.mg1`, `zork0.pic` and `Zork0.blb` and
+/// **nothing at all** on `zork0.eg1` and `zork0.cg1`, and the low-passed-luma form
+/// the quest specified returns nothing on nine of those ten flanks.
+///
+/// **Why, and it is structural rather than a matter of tuning.** A pillar shaft
+/// has no period. `zork0.mg1`'s is uniform — its rows are pixel-identical, mean
+/// mismatch 0.30 of 255 at every lag from 4 to 20 alike — so autocorrelation is
+/// maximally confident and maximally uninformative, and answers with the smallest
+/// lag it is offered. `zork0.cg1`'s is a graded lit column (mean row luma 97 → 82,
+/// SQ-0808) — a gradient is not periodic, so its best lag scores `d'` = 1.045,
+/// *worse* than the average lag. The statistic measures self-similarity, and a
+/// plain shaft is more self-similar than patterned masonry: it is anti-correlated
+/// with the thing it was asked to detect.
+///
+/// Hence the two assertions below. The first is the quest's own bar. The second
+/// is that no confidence threshold can admit the two scenes autocorrelation was
+/// meant to rescue without also admitting the one it must not touch — the most
+/// confident castle flank (0.730) beats the least confident underground flank
+/// (0.972) outright, so the accepts and the rejects interleave. SQ-0792's cut sat
+/// in a 36%..70% gap and needed no fitting; this one has **no gap at all**, and
+/// the corroboration from outside Zork Zero is the same: Arthur's poles, whose
+/// repeat unit is 4 rows cut at 90% of their height, score a spurious 64-row
+/// period at `d'` = 0.451 — more confident than ten of these twelve flanks — and
+/// Shogun's slab a spurious 114-row one at 0.90.
+///
+/// Two further things the measurement settles, recorded because they are not
+/// assertable here: autocorrelation yields only the UNIT, never the `top_cut` or
+/// the `foot` that [`app::render::v6_border::extend_pillars`] also needs and that
+/// the shape measurement it would replace does supply; and where it does fire on
+/// a target scene the two flanks of one symmetric border disagree (`zork0.cg1`
+/// underground: 76 left against 74 right), which is precisely the asymmetry
+/// SQ-0792 removed.
+///
+/// `honor_game_colours` is not swept: this composes flanks from the archives'
+/// own pictures and never renders, so the colour mode cannot reach it — the same
+/// reason case 9 does not sweep it either.
+///
+/// Falsifiable in both directions. Invert the second assertion — claim the castle
+/// is *less* confident than every other scene, which is what a working
+/// discriminator would mean — and it fails at 0.730 against 0.972 on the real
+/// archives. Should a future statistic ever separate the corpus, this test says
+/// so and SQ-0813 can be reopened.
+#[test]
+fn autocorrelation_cannot_separate_zork_zeros_scene_borders() {
+    /// `(name, top strip, left pillar, right pillar)` — Bocfel's `zorkzero.hpp`.
+    const SCENES: &[(&str, u32, u32, u32)] =
+        &[("castle", 5, 0x1f1, 0x1f2), ("underground", 7, 0x1f3, 0x1f4), ("jungle", 6, 0x1f5, 0x1f6)];
+    /// The three DOS plates. `zork0.pic`'s picture 5 is a full 320x200 screen
+    /// rather than a top strip, so it composes with no banner to trim below and
+    /// its window is not comparable with these; case 9 covers it where the whole
+    /// flank is the window.
+    const RENDITIONS: &[&str] = &["zork0.mg1", "zork0.eg1", "zork0.cg1"];
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let sp = &SPECIMENS[2];
+    assert_eq!(sp.title, "Zork Zero");
+    let (mut castle_best, mut other_worst) = (f64::MAX, 0.0f64);
+    let mut ran = 0;
+    for r in RENDITIONS {
+        let Some(mut s) = boot_named(sp.file, r, (sp.release, sp.serial)) else { continue };
+        drive(&mut s, sp.turns);
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let story = layout.story.expect("a story window");
+        let fw = story.x_px as u32;
+        let flanks = [(0u32, fw), (native.0 as u32 - fw, native.0 as u32)];
+        let mut picts = PictSource::from_native(
+            blorb::infocom_pics::InfocomPics::parse(std::fs::read(stories_dir().join(r)).expect("archive"))
+                .expect("a native Infocom archive parses"),
+        );
+        let scale = picts.art_scale().expect("a native archive implies an art scale");
+        for scene in SCENES {
+            let banner = picts.image(scene.1).expect("the scene's top strip").height() * scale.1;
+            let Some(c) = compose_scene_border(&mut picts, *scene, scale, native) else {
+                panic!("{r}: picture {} ({}) is missing", scene.1, scene.0)
+            };
+            for (i, &(x0, x1)) in flanks.iter().enumerate() {
+                let art = app::render::v6_border::art_extent(&c, x0, x1);
+                let f = crop(&c, x0, x1);
+                let window = (art.0.max(banner), art.1);
+                let (lag, conf) = best_period(&f, window);
+                if scene.0 == "castle" {
+                    // The quest's own bar: reproduce the shipped repeat unit.
+                    let (top, bottom) =
+                        app::render::v6_border::pillar_shaft(&f, art.1).expect("the castle is a pillar");
+                    let unit = bottom - top - 8; // `zork_zero`'s 2·INSET
+                    assert!(
+                        lag * 4 < unit,
+                        "{r} [release {}] castle flank {i}: the strongest period in the art is \
+                         {lag} row(s) at d'={conf:.3}, while the shipped repeat unit measured from \
+                         the pillar's shape is {unit}. SQ-0813's bar was that autocorrelation \
+                         reproduce that unit before replacing it; if this now fails because the \
+                         two AGREE, the derivation has become viable and the quest can be reopened",
+                        sp.release,
+                    );
+                    castle_best = castle_best.min(conf);
+                } else {
+                    other_worst = other_worst.max(conf);
+                }
+                ran += 1;
+            }
+        }
+    }
+    if !stories_dir().join(RENDITIONS[0]).exists() {
+        return;
+    }
+    assert!(ran > 0, "the archives are present but nothing ran — check the filenames");
+    assert!(
+        castle_best < other_worst,
+        "the castle's most confident flank scores d'={castle_best:.3} while the least confident \
+         underground/jungle flank scores d'={other_worst:.3}. They no longer interleave, so a \
+         threshold between them WOULD tell the scene borders apart — which is exactly what \
+         SQ-0813 could not find and exactly what would let the per-scene dispatch go"
+    );
+}
+
