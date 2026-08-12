@@ -992,6 +992,32 @@ pub fn amiga_global_colour_pair(mem: &Memory) -> bool {
 /// one is what the screen model tests the header against.)
 pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
 
+/// The pair of pens the whole screen is painted with under
+/// [`amiga_global_colour_pair`], as `(foreground, background)`; `None` when the
+/// rule is not in force. (SQ-0740)
+///
+/// This is the pair the machine BOOTS with, and — because Infocom's window-0 gate
+/// means Journey's only `set_colour` never lands — the pair Journey is played on:
+/// header bytes `$2D`/`$2C`, which under [`InterpreterProfile::Amiga`] carry
+/// `DEF_FORE 9` (white) over `DEF_BACK 11` (medium grey) from `amiga/yzip.h`.
+///
+/// **Why the host needs it, and why §8.3.3 alone was not enough.** Those two
+/// bytes are what §8.3.3 tells the *story* about the interpreter's defaults, and
+/// babelmap wrote them faithfully — but nothing ever PAINTED them, so a v6 window
+/// left at [`ZColour::Default`] rendered in the host terminal's theme and an Amiga
+/// looked exactly like an IBM PC on screen. On the real machine the two registers
+/// are not advice, they are the screen: every pixel no picture and no `set_colour`
+/// claimed is the background pen. Returning the pair here lets the host paint the
+/// page it has been advertising all along.
+///
+/// A window-0 `set_colour` still wins over this wherever the game made one — it
+/// moves the pens, and the model carries the moved pair on the window itself
+/// (Zork Zero's black-on-light-grey page). This is the ground beneath that.
+pub fn amiga_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
+    amiga_global_colour_pair(mem)
+        .then(|| (ZColour::Standard(mem.read_byte(0x2D)), ZColour::Standard(mem.read_byte(0x2C))))
+}
+
 impl ScreenState {
     /// Apply a `set_colour` under [`amiga_global_colour_pair`]: move the
     /// machine's two text "pens" and repaint the screen through them. (SQ-0740)
@@ -1000,13 +1026,34 @@ impl ScreenState {
     /// alone", the opcode's 0 sentinel). `fg_under_cursor`/`bg_under_cursor` flag
     /// the §8.3.1 colour **-1**, "the colour of the pixel under the cursor".
     ///
-    /// **Why -1 is not a pen move.** Infocom's own Amiga interpreter
-    /// (`amiga/yzip3.c`) says the two text colours "are now 'global', meaning
-    /// they *can't* be changed for a single word on the screen, or for a certain
-    /// window", and then carves out exactly one case: "we allow text colors to be
-    /// changed only in window 0, and ignore requests in other windows (except for
-    /// the special case of bg = -1)". That carve-out is not an exception to the
-    /// sharing rule, it is a different request altogether — "-1" names no colour,
+    /// **The window-0 gate, and why it beats the letter of §8.3.** Infocom's own
+    /// Amiga interpreter (`amiga/yzip3.c`) says the two text colours "are now
+    /// 'global', meaning they *can't* be changed for a single word on the screen,
+    /// or for a certain window", and then states the rule outright: "we allow text
+    /// colors to be changed only in window 0, and ignore requests in other windows
+    /// (except for the special case of bg = -1)". §8.3 does not mention that gate.
+    /// It is nonetheless what this implements, for two reasons that point the same
+    /// way:
+    ///
+    /// - §8.3's stated purpose is to *"simulate the Amiga hardware"*. A reading of
+    ///   it that makes babelmap diverge from that hardware defeats the rule's own
+    ///   reason for existing, and Infocom's shipped interpreter is the better
+    ///   authority on how Infocom's own games looked on it.
+    /// - It is what the machine actually did. `Journey - The Quest Begins.adf`
+    ///   (release 30, serial 890322) makes exactly one `set_colour(9, 2)` — white
+    ///   ink, black page — and makes it on **window 3**. Applying it globally
+    ///   paints Journey black; contemporary Amiga walkthrough material shows the
+    ///   game on its *default* pair instead, light grey page with white text,
+    ///   which is `DEF_BACK 11` / `DEF_FORE 9` from Infocom's released
+    ///   `amiga/yzip.h`. The real machine ignored the call, exactly as yzip3.c
+    ///   says it would.
+    ///
+    /// If a later reader is tempted to "fix" this back to the letter of the
+    /// standard: that is the change, and this is why it was not made.
+    ///
+    /// **Why -1 is not a pen move.** Infocom's carve-out for `bg = -1` is not an
+    /// exception to the sharing rule, it is a different request altogether —
+    /// "-1" names no colour,
     /// so there is nothing to load into a register; it asks for the glyph to be
     /// drawn *over what is already there*. Zork Zero prints its banner labels
     /// under `COLOR 2 -1` precisely so the ribbon art shows through them, and
@@ -1051,6 +1098,15 @@ impl ScreenState {
         if self.v6.is_none() {
             return;
         }
+        // 0. **Infocom's window-0 gate.** `amiga/yzip3.c`, above `set_color`:
+        //    "We allow text colors to be changed only in window 0, and ignore
+        //    requests in other windows (except for the special case of bg = -1)."
+        //    A request from any other window is dropped whole — it moves no pen and
+        //    does not reach the window that made it. See the doc comment for why
+        //    Infocom's interpreter outranks the letter of §8.3 here.
+        if win != 0 && !bg_under_cursor {
+            return;
+        }
         // 1. The window that asked takes the request whole, exactly as it would on
         //    any other machine — including a -1 channel, which is how it says
         //    "draw over what is already here" and is the one thing the sharing
@@ -1073,9 +1129,12 @@ impl ScreenState {
         }
         // 2. §8.3: whatever the request moved the PENS to is shared by every
         //    window, and the text already on the screen changes with it. A -1
-        //    channel names no colour, so it moves no pen (see the doc comment).
-        let pen_fg = if fg_under_cursor { None } else { fg };
-        let pen_bg = if bg_under_cursor { None } else { bg };
+        //    channel names no colour, so it moves no pen (see the doc comment) —
+        //    and neither does a request from a window other than 0, which reaches
+        //    here only through Infocom's `bg = -1` exception and is that window's
+        //    own transparency, not a register move.
+        let pen_fg = if fg_under_cursor || win != 0 { None } else { fg };
+        let pen_bg = if bg_under_cursor || win != 0 { None } else { bg };
         if pen_fg.is_some() || pen_bg.is_some() {
             self.repaint_amiga_pens(pen_fg, pen_bg);
         }
@@ -2712,6 +2771,31 @@ mod tests {
         );
     }
 
+    /// The pair the host PAINTS with, as opposed to the pair §8.3.3 advertises to
+    /// the story: on the Amiga they are the same two bytes, and before SQ-0740
+    /// babelmap wrote them and then painted the terminal's colours instead.
+    #[test]
+    fn the_amiga_screen_pair_is_the_headers_own_default_colours() {
+        let mut mem = header_for(6, 4, true);
+        // What `InterpreterProfile::Amiga` publishes: `DEF_BACK 11` (medium grey)
+        // and `DEF_FORE 9` (white), from Infocom's released `amiga/yzip.h`.
+        write_default_colours(&mut mem, 11, 9);
+        assert_eq!(
+            amiga_screen_pair(&mem),
+            Some((ZColour::Standard(9), ZColour::Standard(11))),
+            "(foreground, background), straight off $2D/$2C",
+        );
+        // Every machine that is not an Amiga has no such thing — each window
+        // carries its own pair and the host theme owns everything else.
+        let mut ibm = header_for(6, 6, true);
+        write_default_colours(&mut ibm, 11, 9);
+        assert_eq!(amiga_screen_pair(&ibm), None, "interpreter 6 publishes no screen pair");
+        // …and neither does a colourless interpreter, Amiga or not.
+        let mut off = header_for(6, 4, false);
+        write_default_colours(&mut off, 11, 9);
+        assert_eq!(amiga_screen_pair(&off), None, "colours withdrawn: nothing to paint with");
+    }
+
     /// A v6 screen with something already drawn on it: window 1 holds a grid cell
     /// and a painted run in an explicit pair, window 2 holds a run drawn over
     /// whatever was underneath it (a `-1`/inherited background), and window 3 is a
@@ -2825,9 +2909,12 @@ mod tests {
 
     /// Colour **-1** is "the colour of the pixel under the cursor" (§8.3.1): it
     /// names no colour, so there is nothing to load into a pen. Infocom's own
-    /// Amiga interpreter carves it out of the sharing rule for exactly that reason
+    /// Amiga interpreter carves it out of the window-0 gate for exactly that reason
     /// (`amiga/yzip3.c`), and Zork Zero depends on it — it prints its banner
     /// labels over the ribbon artwork under `COLOR 2 -1`.
+    ///
+    /// So the request reaches the window that made it, and stops there: a window
+    /// other than 0 moves no pen, whatever channels it names.
     #[test]
     fn the_pixel_under_the_cursor_is_a_paint_request_not_a_pen() {
         let mut s = screen_with_text_on_it();
@@ -2841,15 +2928,54 @@ mod tests {
         );
         let v6 = s.v6.as_ref().unwrap();
         assert_eq!(v6.windows[1].bg, ZColour::Default, "the asking window draws over the art");
-        // The background pen never moved, so nothing already on the screen lost
-        // its page — and no other window was made transparent behind the game's
-        // back.
+        assert_eq!(v6.windows[1].fg, ZColour::Standard(2), "…in the ink it asked for");
+        // No pen moved, so nothing already on the screen changed — not its page,
+        // and not its ink either.
         assert_eq!(
             v6.windows[1].texts[0].bg,
             ZColour::Standard(2),
             "a -1 request repaints no existing background",
         );
-        assert_eq!(v6.windows[1].texts[0].fg, ZColour::Standard(2), "the foreground pen did move");
+        assert_eq!(
+            v6.windows[1].texts[0].fg,
+            ZColour::Standard(9),
+            "…and a window that is not window 0 moves no ink pen either",
+        );
+        assert_eq!(v6.windows[0].fg, ZColour::Default, "no other window hears about it at all");
+    }
+
+    /// Infocom's window-0 gate: "We allow text colors to be changed only in window
+    /// 0, and ignore requests in other windows (except for the special case of
+    /// bg = -1)" (`amiga/yzip3.c`). A plain request from any other window is
+    /// dropped whole — it does not move the pens AND it does not reach the window
+    /// that made it.
+    ///
+    /// This is what makes `Journey - The Quest Begins.adf` (release 30, serial
+    /// 890322) play on the Amiga's own light-grey default rather than the black
+    /// page its single `set_colour(9, 2)` — issued on window 3 — asks for.
+    ///
+    /// FALSIFY by deleting the `win != 0` early return: window 3 takes the pair and
+    /// every other window follows it.
+    #[test]
+    fn a_request_from_a_window_other_than_0_is_dropped_whole() {
+        let mut s = screen_with_text_on_it();
+        s.set_amiga_colour_pair(
+            3,
+            Some(ZColour::Standard(9)),
+            Some(ZColour::Standard(2)),
+            false,
+            false,
+        );
+        let v6 = s.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[3].fg, ZColour::Default, "the asking window is not coloured");
+        assert_eq!(v6.windows[3].bg, ZColour::Default, "…on either channel");
+        assert_eq!(v6.windows[0].fg, ZColour::Default, "no pen moved");
+        assert_eq!(
+            v6.windows[1].texts[0].fg,
+            ZColour::Standard(9),
+            "nothing already on the screen was repainted",
+        );
+        assert_eq!(s.current_fg, ZColour::Default, "and the prose stream's pair is untouched");
     }
 
     /// Nothing here may touch a machine that is not an Amiga: the entry point is

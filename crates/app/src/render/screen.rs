@@ -208,6 +208,18 @@ fn render_story_pane_frame(
     // (SQ-0704). Cleared first so a non-v6 frame — or a v6 game that declares
     // nothing — can never inherit the last frame's page.
     state.v6_story_page.set(None);
+    // SQ-0740: the MACHINE's own screen pair, for the v6 surfaces that resolve a
+    // default ink and page (`v6_host_pair`, the chrome ring's run style). Only
+    // §8.3's Amiga interpreter publishes one — `session::v6_screen_model` reads it
+    // back out of the header — and only while colours are honoured, since a pair
+    // the interpreter paints with is still a game colour. Cleared first, so a frame
+    // that declares none can never inherit the last one's.
+    state.v6_page_pair.set(
+        (state.config.honor_game_colours
+            && matches!(model.root, WinNode::Layered(_))
+            && !matches!(crate::state::unpack_zcolour(model.bg), zvm::screen::ZColour::Default))
+        .then_some((model.fg, model.bg)),
+    );
     // Paint the story-pane background with the game's current background
     // (theme-safe: only the story pane, never the map/chrome; only a concrete,
     // honoured background — Default keeps the theme).
@@ -1224,7 +1236,7 @@ fn render_node(
                             })
                             .collect();
                         v6::clear_text_rows(&mut canvas, &text_run_tops);
-                        let base = state.colors.theme.get("upper_window").style;
+                        let base = v6_machine_page(state, state.colors.theme.get("upper_window").style);
                         // SQ-0511 fix: in the Menu plan the side flanks are drawn at the
                         // UNIFORM scale (aspect preserved — Journey's left picture column
                         // is NOT vertically stretched); only each flank's full-height
@@ -2577,12 +2589,45 @@ fn v6_default_pair(
 /// transcript theme layered over the OSC probe over the fallback, via
 /// [`v6_default_pair`]. One function so the hybrid ring, the raster canvas and
 /// the tests can never resolve it differently.
+///
+/// SQ-0740 adds a layer ABOVE all three: the machine's own screen pair, when the
+/// interpreter babelmap is presenting as has one. Under ZMSD §8.3's Amiga number
+/// there is a single pair for the whole screen and it is the machine's, not the
+/// terminal's — describing the player's terminal there is precisely what made an
+/// Amiga and an IBM PC render identically. `v6_page_pair` is `None` for every
+/// other profile and whenever colours are declined, so the three layers below are
+/// unchanged for everything else.
 pub fn v6_host_pair(state: &AppState) -> (image::Rgba<u8>, image::Rgba<u8>) {
+    if let Some((fg, bg)) = state.v6_page_pair.get() {
+        return (
+            crate::render::v6_layout::packed_to_rgba(fg, RASTER_FALLBACK_INK, &state.colors),
+            crate::render::v6_layout::packed_to_rgba(bg, RASTER_FALLBACK_PAGE, &state.colors),
+        );
+    }
     v6_default_pair(
         state.colors.theme.get("transcript").style,
         state.term_default_colors.fg,
         state.term_default_colors.bg,
     )
+}
+
+/// `base`, with the MACHINE's own ink and page laid under it when this frame has
+/// one (SQ-0740) — the terminal-cell counterpart of [`v6_host_pair`], and the same
+/// pair.
+///
+/// This decides only what an INHERITED channel resolves to: text that names its
+/// own colours still wins, because [`v6_run_style`] and `draw_str_runs` override
+/// each channel a run carries. For Journey under the Amiga profile nothing names
+/// any, so this is the whole screen — the frame, the menu and the prose, white on
+/// medium grey. Outside that one machine `v6_page_pair` is `None` and `base` is
+/// returned untouched, so the host theme owns every other frame exactly as before.
+pub(crate) fn v6_machine_page(state: &AppState, base: ratatui::style::Style) -> ratatui::style::Style {
+    match state.v6_page_pair.get() {
+        Some((fg, bg)) => base
+            .fg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(fg), &state.colors))
+            .bg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(bg), &state.colors)),
+        None => base,
+    }
 }
 
 /// Build the v6 RASTER composite for one frame, in the game's native pixel space:

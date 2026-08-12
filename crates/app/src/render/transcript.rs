@@ -1512,7 +1512,13 @@ pub fn render_transcript(
         return (false, 0, 0, Vec::new());
     }
 
-    let normal_style = state.colors.theme.get("transcript").style;
+    // SQ-0740: under ZMSD §8.3's Amiga interpreter the machine itself has one ink
+    // and one page for the whole screen, and the story's prose sits on it — the
+    // same pair `render::screen::v6_host_pair` gives the pixel ring around this
+    // viewport, so the reading surface matches the frame drawn about it instead of
+    // punching a themed hole through it. A no-op on every other frame.
+    let normal_style =
+        crate::render::screen::v6_machine_page(state, state.colors.theme.get("transcript").style);
 
     // ── Determine status and input heights based on border style ─────────────
 
