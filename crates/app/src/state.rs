@@ -2161,6 +2161,12 @@ pub struct AppState {
     /// In-flight smooth transcript-scroll animation, if any. `transcript_scroll`
     /// holds the target; this eases the displayed offset toward it.
     pub scroll_anim: Option<ScrollAnim>,
+    /// When the story pane's scrollbar was last summoned by an actual scroll
+    /// (SQ-0782). It holds for `animation.scrollbar_hide_ms`, then fades over
+    /// `animation.scrollbar_fade_ms`. `None` = never scrolled this session, so
+    /// the bar has never been shown. New game text deliberately does NOT set
+    /// this: the bar would flash on every turn.
+    pub scrollbar_shown_at: Option<Instant>,
     /// Monotonically increasing generation counter. Bumped each time the real graph is mutated
     /// by an applied turn. Used to detect stale tidy results (job's gen vs current gen).
     pub graph_gen: u64,
@@ -2621,6 +2627,7 @@ impl Default for AppState {
             pending_vm_sound: None,
             pending_watch_style: None,
             scroll_anim: None,
+            scrollbar_shown_at: None,
             graph_gen: 0,
             viewed_layer: None,
             room_dock_view: RoomDockView::Info,
@@ -2720,6 +2727,7 @@ impl AppState {
             || self.anim_build_job.is_some()
             || self.sound_pulse.is_some()
             || self.scroll_anim.is_some()
+            || self.transcript_scrollbar_animating()
             || self.overlays.saves.as_ref().is_some_and(|s| s.scroll.has_active_animation())
             || self.overlays.file_browser.as_ref().is_some_and(|fb| fb.scroll.has_active_animation())
             || self.overlays.config_screen.as_ref().is_some_and(|cs| cs.scroll.has_active_animation())
@@ -2996,6 +3004,67 @@ impl AppState {
         let from = self.effective_transcript_scroll() as usize;
         self.transcript_scroll = target;
         self.scroll_anim = ScrollAnim::to(from, target as usize, &self.config.animation);
+        // Every story-pane scroll comes through here — wheel, PgUp/PgDn and the
+        // other scroll keys, the [more] pager, a selection drag at an edge — and
+        // nothing else does, which is exactly the auto-hide trigger set the bar
+        // wants (SQ-0782). New game text sets `transcript_scroll` directly.
+        self.scrollbar_shown_at = Some(Instant::now());
+    }
+
+    /// How opaque the story pane's scrollbar is this frame, in `[0,1]`
+    /// (SQ-0782). `1.0` while the reveal window is open, easing to `0.0` across
+    /// the fade, then staying hidden until the next scroll.
+    ///
+    /// `scrollbar_hide_ms == 0` disables the auto-hide entirely (always `1.0`);
+    /// `scrollbar_fade_ms == 0`, or animation turned off, pops instead of fading.
+    /// Before the first scroll of a session the bar has never been summoned, so
+    /// it is hidden.
+    pub fn transcript_scrollbar_opacity(&self) -> f64 {
+        let anim = &self.config.animation;
+        if anim.scrollbar_hide_ms == 0 {
+            return 1.0;
+        }
+        let Some(shown) = self.scrollbar_shown_at else { return 0.0 };
+        let fade_ms = if anim.enabled { anim.scrollbar_fade_ms } else { 0 };
+        let elapsed = shown.elapsed().as_millis() as u64;
+        if elapsed < anim.scrollbar_hide_ms {
+            return 1.0;
+        }
+        if fade_ms == 0 {
+            return 0.0;
+        }
+        let t = (elapsed - anim.scrollbar_hide_ms) as f64 / fade_ms as f64;
+        1.0 - crate::anim::ease(anim.easing, t)
+    }
+
+    /// Drop a fully-elapsed reveal (called from the run loop). Returns `true`
+    /// iff this call cleared one, so the loop forces the single redraw that
+    /// paints the bar AWAY: the last frame the fade itself asks for is the one
+    /// at the dregs of its opacity, which still puts a (near-backdrop) colour
+    /// in the gutter. The same settle-frame problem, and the same fix, as
+    /// `finalize_scroll_if_done`. (SQ-0782)
+    pub fn finalize_scrollbar_if_done(&mut self) -> bool {
+        if self.config.animation.scrollbar_hide_ms == 0 {
+            return false; // pinned on: there is nothing to settle
+        }
+        if self.scrollbar_shown_at.is_some() && !self.transcript_scrollbar_animating() {
+            self.scrollbar_shown_at = None;
+            return true;
+        }
+        false
+    }
+
+    /// True while the story pane's scrollbar still has a change coming — it is
+    /// holding before its fade, or fading — so the run loop keeps drawing frames
+    /// without input. False once it has settled (visible forever, or gone).
+    pub fn transcript_scrollbar_animating(&self) -> bool {
+        let anim = &self.config.animation;
+        if anim.scrollbar_hide_ms == 0 {
+            return false;
+        }
+        let fade_ms = if anim.enabled { anim.scrollbar_fade_ms } else { 0 };
+        self.scrollbar_shown_at
+            .is_some_and(|t| (t.elapsed().as_millis() as u64) < anim.scrollbar_hide_ms + fade_ms)
     }
 
     /// The transcript offset to render this frame: the animated displayed offset
@@ -5139,6 +5208,7 @@ mod tests {
             enabled: true,
             easing: crate::anim::Easing::Linear,
             scroll_ms: 80,
+            ..Default::default()
         };
         let mut cs = ConfigScreenState {
             working: crate::config::Config::default(),
@@ -5161,6 +5231,7 @@ mod tests {
             enabled: true,
             easing: crate::anim::Easing::Linear,
             scroll_ms: 100,
+            ..Default::default()
         };
         s.inv_dock.toggle_to(true, false);
         s.inv_dock.arm(&cfg);
@@ -5176,6 +5247,81 @@ mod tests {
         let a = s.scroll_anim.as_ref().expect("animation armed when enabled");
         assert_eq!(a.from, 3, "from = previous displayed offset");
         assert_eq!(a.target(), 8, "to = new target");
+    }
+
+    // ── Story-pane scrollbar auto-hide (SQ-0782) ─────────────────────────────
+
+    #[test]
+    fn scrollbar_is_hidden_until_a_scroll_then_fades_out() {
+        let mut s = AppState::default();
+        s.config.animation.scrollbar_hide_ms = 1000;
+        s.config.animation.scrollbar_fade_ms = 200;
+        s.config.animation.easing = crate::anim::Easing::Linear;
+        assert_eq!(s.transcript_scrollbar_opacity(), 0.0, "never scrolled = never shown");
+        assert!(!s.transcript_scrollbar_animating());
+
+        s.scroll_transcript_to(4);
+        assert_eq!(s.transcript_scrollbar_opacity(), 1.0, "a scroll summons it, fully opaque");
+        assert!(s.transcript_scrollbar_animating(), "a hide is still to come");
+
+        // Half way through the fade.
+        let now = Instant::now();
+        s.scrollbar_shown_at = Some(now - Duration::from_millis(1100));
+        let mid = s.transcript_scrollbar_opacity();
+        assert!((0.1..0.9).contains(&mid), "mid-fade opacity should be partial, got {mid}");
+
+        s.scrollbar_shown_at = Some(now - Duration::from_millis(2000));
+        assert_eq!(s.transcript_scrollbar_opacity(), 0.0, "gone after delay + fade");
+        assert!(!s.transcript_scrollbar_animating(), "settled: no more frames needed");
+    }
+
+    /// The fade's own last frame still paints the bar at the dregs of its
+    /// opacity, so the run loop needs one settle frame to take it off screen.
+    #[test]
+    fn finalize_scrollbar_forces_exactly_one_settle_frame() {
+        let mut s = AppState::default();
+        s.config.animation.scrollbar_hide_ms = 100;
+        s.config.animation.scrollbar_fade_ms = 100;
+        s.scroll_transcript_to(4);
+        assert!(!s.finalize_scrollbar_if_done(), "nothing to settle while it is still up");
+
+        s.scrollbar_shown_at = Some(Instant::now() - Duration::from_millis(500));
+        assert!(s.finalize_scrollbar_if_done(), "a finished fade asks for the settle frame");
+        assert!(s.scrollbar_shown_at.is_none(), "the reveal is cleared");
+        assert!(!s.finalize_scrollbar_if_done(), "and only ever asks once");
+
+        // A bar pinned on by config never settles (there is nothing to take away).
+        s.config.animation.scrollbar_hide_ms = 0;
+        s.scrollbar_shown_at = Some(Instant::now() - Duration::from_secs(60));
+        assert!(!s.finalize_scrollbar_if_done());
+    }
+
+    #[test]
+    fn scrollbar_hide_ms_zero_pins_it_on_and_fade_ms_zero_pops_it() {
+        let mut s = AppState::default();
+        s.config.animation.scrollbar_hide_ms = 0;
+        assert_eq!(s.transcript_scrollbar_opacity(), 1.0, "0 = never auto-hide, even unscrolled");
+        assert!(!s.transcript_scrollbar_animating(), "a permanent bar needs no frames");
+
+        s.config.animation.scrollbar_hide_ms = 100;
+        s.config.animation.scrollbar_fade_ms = 0;
+        s.scrollbar_shown_at = Some(Instant::now() - Duration::from_millis(101));
+        assert_eq!(s.transcript_scrollbar_opacity(), 0.0, "no fade = it pops");
+
+        // Animation off pops it too, whatever the fade is set to.
+        s.config.animation.scrollbar_fade_ms = 5_000;
+        s.config.animation.enabled = false;
+        assert_eq!(s.transcript_scrollbar_opacity(), 0.0);
+    }
+
+    #[test]
+    fn scrollbar_reveal_survives_new_output_without_being_retriggered() {
+        let mut s = AppState::default();
+        s.scroll_transcript_to(2);
+        let shown = s.scrollbar_shown_at.expect("a scroll records the reveal");
+        s.push_transcript("The troll shrugs and ambles away.");
+        s.mark_screen_clear();
+        assert_eq!(s.scrollbar_shown_at, Some(shown), "game output must not re-summon the bar");
     }
 
     #[test]
@@ -5242,16 +5388,16 @@ mod tests {
     #[test]
     fn scroll_anim_instant_when_disabled() {
         use crate::anim::Easing;
-        let cfg = crate::config::AnimationConfig { enabled: false, easing: Easing::EaseOut, scroll_ms: 120 };
+        let cfg = crate::config::AnimationConfig { enabled: false, easing: Easing::EaseOut, scroll_ms: 120, ..Default::default() };
         assert!(ScrollAnim::to(0, 10, &cfg).is_none(), "disabled animation arms nothing");
-        let cfg0 = crate::config::AnimationConfig { enabled: true, easing: Easing::EaseOut, scroll_ms: 0 };
+        let cfg0 = crate::config::AnimationConfig { enabled: true, easing: Easing::EaseOut, scroll_ms: 0, ..Default::default() };
         assert!(ScrollAnim::to(0, 10, &cfg0).is_none(), "scroll_ms = 0 arms nothing");
     }
 
     #[test]
     fn scroll_anim_interpolates_then_settles() {
         use crate::anim::Easing;
-        let cfg = crate::config::AnimationConfig { enabled: true, easing: Easing::Linear, scroll_ms: 40 };
+        let cfg = crate::config::AnimationConfig { enabled: true, easing: Easing::Linear, scroll_ms: 40, ..Default::default() };
         let a = ScrollAnim::to(0, 10, &cfg).expect("armed");
         assert_eq!(a.target(), 10);
         let c = a.current();
@@ -6076,7 +6222,7 @@ mod tests {
             builtin_hint: false,
         };
         // Instant (animation disabled) so the logical offset settles immediately.
-        let anim = crate::config::AnimationConfig { enabled: false, easing: crate::anim::Easing::EaseOut, scroll_ms: 0 };
+        let anim = crate::config::AnimationConfig { enabled: false, easing: crate::anim::Easing::EaseOut, scroll_ms: 0, ..Default::default() };
         // Scrolling down (negative) at the top is clamped to 0.
         hs.scroll_by(-1, 5, &anim);
         assert_eq!(hs.scroll, 0, "scroll cannot go below 0");

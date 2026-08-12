@@ -19,6 +19,18 @@ inspecting the machine, and firing commands — without ever leaving the story.
 - **Mouse wheel** pans the map (hold Shift for horizontal, Ctrl to zoom) and
   scrolls every other scrollable surface too — the transcript and the lists
   inside modals (saves, file browser, gallery, hotkey dialog, …).
+- **A scrollbar that gets out of the way** — every scrollable surface draws the
+  same bar, and it is drawn as *colour*, not as a glyph: thumb and track are
+  background fills, so a line of prose ending one column short of it has a clean
+  gutter instead of a full block leaning on it. In the **story pane** the bar
+  also auto-hides. It appears when you actually scroll — wheel, `PageUp`/
+  `PageDown` and the other scroll keys — holds for a moment, then fades out. New
+  game text never summons it (that would flash a bar at you every turn), and
+  nothing reflows when it goes: the story bar lives in the pane's margin band,
+  outside the text. Modals keep theirs permanently, because a modal's gutter is
+  taken out of its list width and hiding it there *would* reflow the list. Tune
+  it with `scrollbar_hide_ms` / `scrollbar_fade_ms` under `[animation]`, or set
+  `scrollbar_hide_ms = 0` to keep the story bar up for good.
 - **Select & copy text** — left-drag across the story pane to select transcript
   text, highlighted live as you drag; let go and it lands on your system
   clipboard via the OSC 52 terminal escape — so a selection copies cleanly even

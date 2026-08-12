@@ -158,7 +158,7 @@ pub fn draw_config_screen(
             total,
             viewport,
             cs.scroll.target_offset(),
-            state.colors.theme.get("scrollbar").style,
+            crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme),
         );
     }
 
@@ -367,8 +367,9 @@ mod tests {
             draw_config_screen(&state, f.area(), f.buffer_mut(), &mut vp);
         }).unwrap();
         assert!(vp > 0 && vp < CONFIG_ROWS.len(), "rows should overflow a short modal (vp={vp})");
-        // A scrollbar thumb (full block) is drawn when the list overflows.
-        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        // A scrollbar thumb (a background fill, SQ-0782) is drawn when the list overflows.
+        let thumb = crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme).thumb;
+        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.bg == thumb);
         assert!(has_thumb, "a scrollbar thumb should be drawn when rows overflow");
 
         // Sync the captured viewport (run loop does this) then PageDown.

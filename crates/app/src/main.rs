@@ -1830,6 +1830,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             needs_redraw |= state.inv_dock.finalize_if_done();
             needs_redraw |= state.band_dock.finalize_if_done();
             needs_redraw |= state.room_dock.finalize_if_done();
+            // The story pane's scrollbar fade needs the same settle frame: the
+            // last frame the fade itself asks for still paints the bar (at the
+            // dregs of its opacity), so without this it never actually leaves
+            // the screen. (SQ-0782)
+            needs_redraw |= state.finalize_scrollbar_if_done();
             continue;
         }
 

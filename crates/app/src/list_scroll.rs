@@ -181,7 +181,7 @@ mod tests {
     use super::*;
     use crate::anim::Easing;
     fn anim_off() -> AnimationConfig {
-        AnimationConfig { enabled: false, easing: Easing::EaseOut, scroll_ms: 0 }
+        AnimationConfig { enabled: false, easing: Easing::EaseOut, scroll_ms: 0, ..Default::default() }
     }
 
     #[test]
@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn anim_on() -> AnimationConfig {
-        AnimationConfig { enabled: true, easing: Easing::EaseOut, scroll_ms: 40 }
+        AnimationConfig { enabled: true, easing: Easing::EaseOut, scroll_ms: 40, ..Default::default() }
     }
 
     #[test]

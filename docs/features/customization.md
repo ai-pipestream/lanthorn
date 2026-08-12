@@ -144,7 +144,13 @@ switches that make babelmap feel like yours without opening the whole registry.
 - **Animations** — the transcript glides to its new position on an easing curve
   instead of snapping there. Tune it under `[animation]` in `config.toml`
   (`enabled`, `easing`, `scroll_ms`), or set `enabled = false` (or `scroll_ms =
-  0`) to have every scroll land instantly.
+  0`) to have every scroll land instantly. The same section holds the story
+  pane's auto-hiding scrollbar: `scrollbar_hide_ms` (default 1500) is how long
+  the bar stays up after you scroll — `0` keeps it up permanently — and
+  `scrollbar_fade_ms` (default 300) how long it takes to fade away, `0` for a
+  clean pop. Its two colours are yours as well: `scrollbar` paints the thumb and
+  `scrollbar_track` the channel it runs in, both as background fills rather than
+  glyphs, so nothing crowds the prose beside them.
 - **Transcript text styling** — color each transcript category independently via
   bare selectors — `transcript`, `transcript_input`, `transcript_meta`,
   `transcript_warning`, `transcript_system`, `transcript_crash` (`fg`/`bg`/

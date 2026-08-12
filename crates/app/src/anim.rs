@@ -274,6 +274,7 @@ mod tests {
             enabled: true,
             easing: Easing::Linear,
             scroll_ms: 100,
+            ..Default::default()
         };
         let mut s = PanelSlide::closed();
         s.toggle_to(true, false);
@@ -289,6 +290,7 @@ mod tests {
             enabled: true,
             easing: Easing::Linear,
             scroll_ms: 0,
+            ..Default::default()
         };
         let mut s = PanelSlide::closed();
         s.toggle_to(true, false);

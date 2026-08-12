@@ -287,6 +287,21 @@ const ANIMATION: &[Row] = &[
         &["Easing curve: \"linear\", \"ease-in\", \"ease-out\", \"ease-in-out\"."],
     ),
     d("scroll_ms", "120", &["Smooth-scroll duration in milliseconds. 0 is instant."]),
+    d(
+        "scrollbar_hide_ms",
+        "1500",
+        &[
+            "How long the STORY PANE's scrollbar stays up after you scroll it,",
+            "in milliseconds. 0 keeps it up permanently. Only the story pane",
+            "auto-hides - a modal's bar is reserved out of its content width, so",
+            "hiding it there would reflow the list.",
+        ],
+    ),
+    d(
+        "scrollbar_fade_ms",
+        "300",
+        &["Fade-out time for that bar once the delay expires. 0 pops it."],
+    ),
 ];
 
 const COMMAND_BAND: &[Row] = &[

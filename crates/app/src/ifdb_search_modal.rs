@@ -870,7 +870,7 @@ mod tests {
     /// Scroll animation off: these tests assert on settled offsets, and an
     /// eased `display_offset()` would be mid-tween when they look.
     fn anim() -> AnimationConfig {
-        AnimationConfig { enabled: false, easing: crate::anim::Easing::EaseOut, scroll_ms: 0 }
+        AnimationConfig { enabled: false, easing: crate::anim::Easing::EaseOut, scroll_ms: 0, ..Default::default() }
     }
 
     /// A resolved game with no iFiction record — the shape most existing

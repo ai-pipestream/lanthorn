@@ -157,7 +157,7 @@ pub fn draw_palette(
                 total,
                 viewport,
                 palette.scroll.target_offset(),
-                theme.get("scrollbar").style,
+                crate::render::scroll::ScrollbarLook::from_theme(theme),
             );
         }
     }
