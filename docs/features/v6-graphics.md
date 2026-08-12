@@ -343,7 +343,11 @@ session-only switch that never touches your saved config:
   from the canvas the bands are built from — the column-wise twin of the row-wise
   carve that has always kept a text strip out of the bands. The character itself
   still stands in exactly one column; stamping it across the span would be the
-  doubled rule this whole rule exists to avoid.
+  doubled rule this whole rule exists to avoid — and *which* column is decided by
+  the game's own screen: a glyph in the screen's edge cell aligns outward, so the
+  frame's `┐`, its `┘` and the rule down that side all reach the pane's last column
+  instead of leaving a blank one beside it. Everything inside the screen, every
+  interior divider included, keeps the column its own run maps to.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively. Its default ink/page follow the theme; where the

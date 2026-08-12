@@ -1444,7 +1444,7 @@ fn render_node(
                                         }
                                     }
                                     ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
-                                        runs, *r, &scale, cell_px, area, base, state.config.honor_game_colours, &state.colors, buf,
+                                        runs, *r, &scale, cell_px, area, native, base, state.config.honor_game_colours, &state.colors, buf,
                                     ),
                                 }
                             }
@@ -1490,7 +1490,7 @@ fn render_node(
                                     match strip {
                                         ChromeStrip::Art(r) => gr.draw_chrome_band(picker, &canvas, ms, area, *r, buf),
                                         ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
-                                            runs, *r, ms, cell_px, area, base, state.config.honor_game_colours, &state.colors, buf,
+                                            runs, *r, ms, cell_px, area, native, base, state.config.honor_game_colours, &state.colors, buf,
                                         ),
                                     }
                                 }
@@ -4200,7 +4200,11 @@ fn flank_border_extension(
         if ch == ' ' && t.style & 1 == 0 {
             return None;
         }
-        let col = run_cell(t, scale, cell_px, pane).0 + idx as i32;
+        let gnx0 = (t.x.max(1) as u32 - 1) + idx * 8;
+        // SQ-0783: …aligned outward when it is the SCREEN's own edge cell, so the
+        // frame reaches the pane instead of leaving the column beside it blank.
+        let col = edge_glyph_col(gnx0, native.0 as u32, scale, cell_px, pane)
+            .unwrap_or_else(|| run_cell(t, scale, cell_px, pane).0 + idx as i32);
         let col = u16::try_from(col).ok()?;
         if col < band.x || col >= band.right() {
             return None;
@@ -4217,7 +4221,6 @@ fn flank_border_extension(
         // over is one whose device span still reaches into the cell — so the crop starts
         // a native pixel or two inside it, and at a large enough scale that is where the
         // stroke lives. Widened, never narrowed: the cell's pixels are the border's.
-        let gnx0 = (t.x.max(1) as u32 - 1) + idx * 8;
         let gnx1 = gnx0 + 8;
         let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * s) / cw;
         let x0 = (pane.x as i32 + dev(gnx0).floor() as i32).clamp(band.x as i32, col as i32) as u16;
@@ -4295,6 +4298,49 @@ fn run_cell(t: &crate::engine::PxText, scale: &crate::render::v6_layout::Scale, 
     let col = pane.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
     let row = pane.y as i32 + ((scale.off_y as f32 + py * scale.s) / ch).round() as i32;
     (col, row)
+}
+
+/// A glyph from the frame-drawing blocks: box drawing (U+2500..) and block elements
+/// (U+2580..). What a game builds chrome geometry out of, and nothing any game's
+/// prose contains. (SQ-0742's predicate, shared with SQ-0783.)
+fn is_box_glyph(c: char) -> bool {
+    ('\u{2500}'..='\u{259F}').contains(&c)
+}
+
+/// SQ-0783: which column a LONE frame glyph belongs in when it stands at the game
+/// SCREEN's own edge and its native 8-pixel text cell covers more than one.
+///
+/// A glyph is stamped in exactly one column — SQ-0750 chose that deliberately, since
+/// repeating it across the cell's span draws a doubled rule — and [`run_cell`] rounds
+/// the cell's LEFT edge, so the leftover columns fall to its right. Everywhere inside
+/// the screen that is invisible and correct. At the screen's own right edge it is what
+/// the user reported: *"starting at 159 width a blank space is added after"* the frame,
+/// and the blank column 119 at 121x36. The frame's `┐`, its `┘` and the rule down that
+/// side all stopped one column short of the pane while the game's screen ran to it —
+/// at 157 pane columns the last native cell (632..640) spans 1.96 of them.
+///
+/// So an EDGE cell aligns outward: the first column its cell covers on the left, the
+/// last on the right. Nothing else moves — an interior divider is a position of its
+/// own (SQ-0742) and keeps [`run_cell`]'s answer — and where a terminal column is
+/// about one native cell the span is one column and this returns that same column.
+fn edge_glyph_col(
+    nx0: u32,
+    native_w: u32,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+) -> Option<i32> {
+    /// The v6 text cell is 8x16 (SQ-0479).
+    const FONT_W: u32 = 8;
+    let cw = cell_px.0.max(1) as f32;
+    let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * scale.s) / cw;
+    if nx0 == 0 {
+        Some(pane.x as i32 + dev(0).floor() as i32)
+    } else if nx0 + FONT_W >= native_w {
+        Some(pane.x as i32 + dev(native_w).ceil() as i32 - 1)
+    } else {
+        None
+    }
 }
 
 /// Carve the hybrid chrome `bands` into drawable strips (SQ-0500). Narrow side
@@ -4449,6 +4495,7 @@ fn draw_chrome_text_strip(
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     pane: Rect,
+    native: (u16, u16),
     base: ratatui::style::Style,
     honor: bool,
     colors: &ColorScheme,
@@ -4615,6 +4662,20 @@ fn draw_chrome_text_strip(
         // characters occupy.
         let base_span = |t: &PxText| {
             let (c, _) = run_cell(t, scale, cell_px, pane);
+            // SQ-0783: a LONE frame glyph standing at the game screen's own edge — the
+            // `┐` that ends the top rule, the `┘` that ends the bottom one, the `│` that
+            // closes the menu header — aligns to the far end of its own native cell, so
+            // the frame reaches the pane's last column instead of leaving the one beside
+            // it blank. Everything else, including every interior divider, keeps
+            // `run_cell`'s answer exactly. The rule in front of it runs to whatever
+            // column this returns (its right edge IS this span's start), so the line
+            // stays unbroken through the corner.
+            let c = match t.text.chars().next() {
+                Some(g) if t.text.chars().count() == 1 && is_box_glyph(g) => {
+                    edge_glyph_col(t.x.max(1) as u32 - 1, native.0 as u32, scale, cell_px, pane).unwrap_or(c)
+                }
+                _ => c,
+            };
             (c, c + t.text.chars().count() as i32)
         };
         let mut spans: Vec<(i32, i32)> = Vec::with_capacity(row_runs.len());

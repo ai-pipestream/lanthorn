@@ -773,6 +773,103 @@ fn no_full_width_band_paints_across_the_frames_side_rules() {
     }
 }
 
+/// SQ-0783 — the frame reaches the pane's last column, at every width across the
+/// transition where a native text cell stops fitting one terminal column.
+///
+/// A lone frame glyph is stamped in exactly ONE column by construction (SQ-0750 chose
+/// that so a rule whose cell spans two columns is not drawn twice), and it was placed
+/// by the column its cell's LEFT edge rounds to. Inside the screen that is invisible;
+/// at the screen's own right edge it is a blank column between the frame and the pane
+/// border, on every row. The user: *"starting at 159 width a blank space is added
+/// after"* the frame — and the same gap is column 119 at 121x36. At 157 pane columns
+/// the last native cell (632..640) covers 1.96 terminal columns, so one is always left
+/// over; which one showed depended on where the two roundings fell, which is why a
+/// single width proves nothing and this sweeps the whole transition.
+///
+/// The invariant is the game's own geometry: the frame's right-hand rule, its `┐` and
+/// its `┘` all stand in the LAST column the screen's own last text cell covers. Both
+/// mediums have to agree — the corner is a chrome TEXT strip and the rule below it a
+/// stamped border extension — because a corner one column off its own shaft is the
+/// other half of this defect.
+///
+/// FALSIFY by returning `None` unconditionally from `edge_glyph_col`: the widths past
+/// the transition fail with `the frame's `┐` stands in column 156, but the game's last
+/// text cell (native 632..640) covers columns 155..157 and the frame must reach the
+/// last of them`.
+#[test]
+fn the_frames_edge_reaches_the_panes_last_column() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut session) = boot("Journey - The Quest Begins.adf", None, 40) else { return };
+    let transcript = session.take_transcript();
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let mut spans_two = 0usize;
+    for honor in [true, false] {
+        // The whole transition (SQ-0780's sweep found its own defect appearing at 155,
+        // vanishing at 156 and returning from 157), plus the tall and short regimes and
+        // a deliberately wide pane where the cell covers nearly three columns.
+        let panes = (148u16..=168).map(|w| (w, 62u16)).chain([(119, 33), (115, 31), (150, 41), (234, 65), (234, 80)]);
+        for (w, h) in panes {
+            let (state, area, buf) = render_pane(&model, honor, (1, 1, w, h), &transcript);
+            let ctx = format!("honor={honor} pane {w}x{h}");
+            let scale = app::render::v6_layout::uniform_scale(native, (w as u32 * 8, h as u32 * 18));
+            // The terminal columns the screen's LAST native text cell covers.
+            let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * scale.s) / 8.0;
+            let first = area.x + dev(native.0 as u32 - 8).floor() as u16;
+            let last = area.x + dev(native.0 as u32).ceil() as u16 - 1;
+            if last > first {
+                spans_two += 1;
+            }
+            // (1) the stamped rule down that side.
+            let right = glyph_borders(&state)
+                .into_iter()
+                .find(|(_, n)| n.1 as u16 >= native.0)
+                .map(|(ext, _)| ext);
+            if let Some(ext) = right {
+                let row = ext.1 + ext.3 / 2;
+                let stood = (ext.0..ext.0 + ext.2).find(|&x| {
+                    buf.cell((x, row)).is_some_and(|c| c.symbol() == "│" || c.style().add_modifier.contains(Modifier::REVERSED))
+                });
+                assert_eq!(
+                    stood,
+                    Some(last),
+                    "{ctx}: the frame's side rule stands in column {stood:?} of its span {ext:?}, \
+                     but the game's last text cell (native {}..{}) covers columns {first}..{last} \
+                     and the frame must reach the last of them",
+                    native.0 - 8,
+                    native.0
+                );
+            }
+            // (2) …and the corners above and below it, which are chrome TEXT.
+            for corner in ['┐', '┘'] {
+                let Some(y) = (area.y..area.bottom())
+                    .find(|&y| (area.x..area.right()).any(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == corner.to_string())))
+                else {
+                    continue; // this frame does not draw that corner at this pane
+                };
+                let col = (area.x..area.right())
+                    .rev()
+                    .find(|&x| buf.cell((x, y)).is_some_and(|c| c.symbol() == corner.to_string()))
+                    .expect("just found on this row");
+                assert_eq!(
+                    col, last,
+                    "{ctx}: the frame's {corner:?} stands in column {col}, but the game's last text \
+                     cell (native {}..{}) covers columns {first}..{last} and the frame must reach \
+                     the last of them",
+                    native.0 - 8,
+                    native.0
+                );
+            }
+        }
+    }
+    assert!(
+        spans_two > 0,
+        "this case exists for the scale where the screen's last text cell covers more than one \
+         terminal column, and no pane in the sweep reached it"
+    );
+}
+
 // ── (c) the reserved case: genuine artwork stays a bitmap ──
 
 /// The corpus this rule must NOT reach: a side column that is a picture.
