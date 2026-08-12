@@ -33,6 +33,15 @@
 //! 7. **No tile join steps harder than the art does by itself** (SQ-0808). The
 //!    cut landing in the plain shaft is not sufficient: Zork Zero's CGA pillar is
 //!    a *lit* column, and a repeat that only translates it resets the shading.
+//! 8. **RASTER mode ships the same frame** (SQ-0793). Tiling landed on the hybrid
+//!    ring alone, so the two pixel modes drew different screens from one turn.
+//!    Raster composes at the 640x400 native screen and scales ONCE, so the flanks
+//!    must be complete before that scale — a hybrid-only case proves nothing here.
+//! 9. **All three of Zork Zero's SCENE borders** (SQ-0792). Only one of them, the
+//!    castle, is ever reached by a play session this suite can afford, so the
+//!    other two are composed from each archive's own pictures the way
+//!    `DISPLAY_BORDER` draws them — a method the castle validates, because
+//!    composed and in-game agree to the row.
 //!
 //! Fixtures are named by exact release, per CLAUDE.md: a disk image is a
 //! different build, not the same story on other media. `stories/` is gitignored,
@@ -914,4 +923,312 @@ fn shoguns_dos_flanks_tile_cleanly_in_both_colour_modes() {
     }
 }
 
+// ── 8. RASTER mode composes the same frame (SQ-0793) ─────────────────────────
+
+/// SQ-0793 — the two v6 pixel modes must ship the same frame.
+///
+/// SQ-0698 taught the HYBRID ring to tile side border art and left raster alone,
+/// so the same turn drew two different screens. Raster builds the whole frame in
+/// the fixed **640x400** native screen (`INFOCOM_V6_STD_WINDOW` doubled —
+/// SQ-0479; every rendition maps onto it, MCGA and Amiga doubling on both axes
+/// and EGA and CGA vertically only, SQ-0790) and hands the finished canvas to
+/// ONE resize, the way Bocfel's `flush_bitmap` stretch-blits its pixmap once.
+/// That geometry was already right; what was missing is that the flanks were
+/// never completed before the scale.
+///
+/// **Measured before the fix**, by building the composite each specimen's own
+/// gameplay frame produces:
+///
+/// | fixture (release / serial)                          | flank cols          | art rows | flat band |
+/// |-----------------------------------------------------|---------------------|----------|-----------|
+/// | `Arthur - The Quest for Excalibur.adf` (54, 890606)  | 0..28, 612..640     | 11..379  | **21 rows, 1 colour** |
+/// | `James Clavell's Shogun.adf` (295, 890321)           | 0..46, 594..640     | 0..336   | **64 rows, 1 colour** |
+/// | `zork0-r393-s890714.z6` (393, 890714)                | 0..86, 554..640     | 0..400   | none — its pillars already reach the bottom |
+///
+/// Two statements, both of which fail with that symptom when
+/// `extend_raster_flanks` is dropped from `build_v6_raster_canvas`:
+///
+/// 1. **The composition is native, and it is 640x400.** The canvas the resize is
+///    handed is exactly the native screen, so there is one scale for the whole
+///    frame and the corners agree structurally rather than by assertion.
+/// 2. **The flank carries the ART below the art's own extent**, pixel for pixel,
+///    wherever the extension composed from the game's own pictures is opaque —
+///    not a flat fill, which is what those 21 and 64 rows were.
+#[test]
+fn the_raster_composite_extends_its_side_art_to_the_native_bottom() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for sp in SPECIMENS {
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        // Both modes (CLAUDE.md): true is the shipped default, and a game-set
+        // page is exactly what floods the band a short flank leaves behind.
+        for honor in [true, false] {
+            let model = s.screen();
+            let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+            let native = app::render::v6_layout::native_extent(items);
+            let layout = app::render::v6_layout::classify_windows(items);
+            let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+            let story = layout.story.expect("a story window");
+            let mut state = render_state_with(honor);
+            state.config.v6_render = app::config::V6RenderMode::Raster;
+            let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+            assert_eq!(
+                native,
+                (640, 400),
+                "{} [release {}]: the v6 native screen is the 320x200 standard window doubled",
+                sp.title,
+                sp.release
+            );
+            assert_eq!(
+                (canvas.width(), canvas.height()),
+                (native.0 as u32, native.1 as u32),
+                "{} [release {}], honor_game_colours={honor}: the raster composite must BE the \
+                 native screen, so the whole frame takes one scale",
+                sp.title,
+                sp.release
+            );
+            let native_h = native.1 as u32;
+            for (x0, x1) in [(0u32, story.x_px as u32), ((story.x_px + story.w_px) as u32, gfx.width())] {
+                let art = app::render::v6_border::art_extent(&gfx, x0, x1);
+                // The extension the art itself dictates, composed from the
+                // graphics-only canvas — so every pixel it claims is ARTWORK, and
+                // the flank's ground (which `gfx` does not carry) is skipped.
+                let Some(want) =
+                    app::render::v6_border::flank_source(&gfx, &gfx, x0, x1, art, native_h, 0, native_h)
+                else {
+                    assert_eq!(
+                        art.1, native_h,
+                        "{} [release {}] cols {x0}..{x1}: a flank with no extension must be one \
+                         whose art already reaches the native bottom",
+                        sp.title, sp.release
+                    );
+                    continue;
+                };
+                let mut flat = std::collections::HashSet::new();
+                let mut wrong: Option<(u32, u32, [u8; 4], [u8; 4])> = None;
+                for y in art.1..native_h {
+                    for x in 0..want.width().min(canvas.width().saturating_sub(x0)) {
+                        let got = canvas.get_pixel(x0 + x, y).0;
+                        flat.insert(got);
+                        let w = want.get_pixel(x, y).0;
+                        if w[3] >= 128 && got != w && wrong.is_none() {
+                            wrong = Some((x0 + x, y, got, w));
+                        }
+                    }
+                }
+                assert!(
+                    flat.len() > 1,
+                    "{} [release {}], honor_game_colours={honor}: cols {x0}..{x1} of the raster \
+                     composite are ONE flat colour {:?} for all {} native rows below the art \
+                     (rows {}..{native_h}) — the unpainted band inside the frame's own lower edge",
+                    sp.title,
+                    sp.release,
+                    flat.iter().next(),
+                    native_h - art.1,
+                    art.1,
+                );
+                assert_eq!(
+                    wrong, None,
+                    "{} [release {}], honor_game_colours={honor}: cols {x0}..{x1} of the raster \
+                     composite disagree with the extension the art dictates — at (x, y, got, want) \
+                     above. Hybrid has tiled this flank since SQ-0698; raster must ship the same \
+                     frame",
+                    sp.title, sp.release,
+                );
+                ran += 1;
+            }
+        }
+    }
+    if stories_dir().join(SPECIMENS[0].file).exists() {
+        assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
+    }
+}
+
+// ── 9. All THREE of Zork Zero's scene borders (SQ-0792) ──────────────────────
+
+/// Blit `src` into `dst` at `(x, y)`, integer-scaled by `(sx, sy)` — the
+/// per-axis art scale a native archive implies (SQ-0790).
+fn blit_scaled(dst: &mut image::RgbaImage, src: &image::DynamicImage, x: u32, y: u32, s: (u32, u32)) {
+    use image::GenericImageView;
+    let (w, h) = src.dimensions();
+    for sy in 0..h {
+        for k in 0..s.1 {
+            let dy = y + sy * s.1 + k;
+            if dy >= dst.height() {
+                return;
+            }
+            for sx in 0..w {
+                let p = src.get_pixel(sx, sy);
+                for j in 0..s.0 {
+                    let dx = x + sx * s.0 + j;
+                    if dx < dst.width() {
+                        dst.put_pixel(dx, dy, image::Rgba(p.0));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Columns `[x0, x1)` of `img` as an image of its own — the flank strip
+/// `v6_border`'s per-flank routines work in.
+fn crop(img: &image::RgbaImage, x0: u32, x1: u32) -> image::RgbaImage {
+    let w = x1.min(img.width()).saturating_sub(x0);
+    let mut out = image::RgbaImage::new(w.max(1), img.height());
+    for y in 0..img.height() {
+        for x in 0..w {
+            out.put_pixel(x, y, *img.get_pixel(x0 + x, y));
+        }
+    }
+    out
+}
+
+/// One of Zork Zero's three scene borders, composed into a native 640x400 canvas
+/// exactly as `DISPLAY_BORDER` draws it: the top strip at `(0, 0)`, then the left
+/// pillar flush left and the right pillar flush right, both at `y = strip
+/// height`. Picture numbers from Bocfel's `zorkzero.hpp`.
+fn compose_scene_border(
+    picts: &mut PictSource,
+    scene: (&str, u32, u32, u32),
+    scale: (u32, u32),
+    native: (u16, u16),
+) -> Option<image::RgbaImage> {
+    let (_, strip, left, right) = scene;
+    let mut c = image::RgbaImage::new(native.0 as u32, native.1 as u32);
+    let top = picts.image(strip)?;
+    let (sw, sh) = (top.width() * scale.0, top.height() * scale.1);
+    blit_scaled(&mut c, &top, 0, 0, scale);
+    if let Some(l) = picts.image(left) {
+        blit_scaled(&mut c, &l, 0, sh, scale);
+    }
+    if let Some(r) = picts.image(right) {
+        blit_scaled(&mut c, &r, sw.saturating_sub(r.width() * scale.0), sh, scale);
+    }
+    Some(c)
+}
+
+/// SQ-0792 — Zork Zero's UNDERGROUND and JUNGLE borders, which no play session
+/// this suite can afford ever reaches.
+///
+/// Bocfel dispatches on the game's own border global and gives each scene its own
+/// routine. babelmap cannot read that global — `WinNode::Graphics` carries a
+/// flattened `RgbaImage` and picture numbers do not survive the engine boundary —
+/// so the question this case settles is how much of the dispatch the PIXELS can
+/// replace. It composes each scene's flanks from the archive's own pictures the
+/// way `DISPLAY_BORDER` draws them, which is trustworthy because the castle
+/// composed this way reproduces the in-game shaft to the row (asserted below).
+///
+/// **The defect, measured before the fix.** SQ-0799 derives the repeat unit from
+/// the art instead of pinning it, which is right for the castle and wrong here:
+/// the underground is alternating stone blocks and the jungle is foliage, so the
+/// longest constant-span run in them is a coincidence, and it is a DIFFERENT
+/// coincidence in each flank. On `zork0.cg1` underground the left flank cut at
+/// row 78 and the right at row 296; on `zork0.mg1` jungle the left derived a
+/// 14-row repeat unit while the right fell back to the castle's 284. Six of the
+/// eight non-castle flank PAIRS got different recipes from each other — a border
+/// is symmetric by construction, and this made it asymmetric.
+///
+/// Two statements:
+///
+/// 1. **The castle, and only the castle, declares a pillar shaft** — 280 to 292
+///    rows of 400 (70–73%) on every rendition and both flanks, against 12 to 180
+///    (3–45%) for the other two.
+/// 2. **Both flanks of a border therefore get the same recipe**, which is the
+///    property that had broken.
+///
+/// Falsifiable: drop the majority test from `v6_border::pillar_shaft` and
+/// `zork0.mg1` underground comes back `Some((74, 128))` on the left and
+/// `Some((220, 366))` on the right — two spurious shafts, disagreeing.
+#[test]
+fn zork_zeros_other_two_scene_borders_declare_no_shaft_and_agree_across_flanks() {
+    /// `(name, top strip, left pillar, right pillar)` — Bocfel's `zorkzero.hpp`:
+    /// `CASTLE_BORDER` 5 / `OUTSIDE_BORDER` 6 / `UNDERGROUND_BORDER` 7, and
+    /// `*_BORDER_L`/`_R` 0x1f1..0x1f6.
+    const SCENES: &[(&str, u32, u32, u32)] =
+        &[("castle", 5, 0x1f1, 0x1f2), ("underground", 7, 0x1f3, 0x1f4), ("jungle", 6, 0x1f5, 0x1f6)];
+    /// Every NATIVE archive shipped for Zork Zero. The Blorb is absent on
+    /// purpose: it carries the MCGA plates `zork0.mg1` already covers.
+    const RENDITIONS: &[&str] = &["zork0.mg1", "zork0.eg1", "zork0.cg1", "zork0.pic"];
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let sp = &SPECIMENS[2];
+    assert_eq!(sp.title, "Zork Zero");
+    let mut ran = 0;
+    for r in RENDITIONS {
+        let Some(mut s) = boot_named(sp.file, r, (sp.release, sp.serial)) else { continue };
+        drive(&mut s, sp.turns);
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+        let story = layout.story.expect("a story window");
+        // One `TEXT_WINDOW_PIC_LOC` picture fixes the flank width for all three
+        // scenes, so the castle's in-game width is the right one to read them at.
+        let fw = story.x_px as u32;
+        let flanks = [(0u32, fw), (native.0 as u32 - fw, native.0 as u32)];
+        // What the CASTLE declares in play — the ground truth the composition is
+        // checked against below.
+        let in_game: Vec<Option<(u32, u32)>> = flanks
+            .iter()
+            .map(|&(x0, x1)| {
+                let art = app::render::v6_border::art_extent(&gfx, x0, x1);
+                app::render::v6_border::pillar_shaft(&crop(&gfx, x0, x1), art.1)
+            })
+            .collect();
+        let mut picts = PictSource::from_native(
+            blorb::infocom_pics::InfocomPics::parse(std::fs::read(stories_dir().join(r)).expect("archive"))
+                .expect("a native Infocom archive parses"),
+        );
+        let scale = picts.art_scale().expect("a native archive implies an art scale");
+        for scene in SCENES {
+            let Some(c) = compose_scene_border(&mut picts, *scene, scale, native) else {
+                panic!("{r}: picture {} ({}) is missing", scene.1, scene.0)
+            };
+            let shafts: Vec<Option<(u32, u32)>> = flanks
+                .iter()
+                .map(|&(x0, x1)| {
+                    let art = app::render::v6_border::art_extent(&c, x0, x1);
+                    app::render::v6_border::pillar_shaft(&crop(&c, x0, x1), art.1)
+                })
+                .collect();
+            if scene.0 == "castle" {
+                assert_eq!(
+                    shafts, in_game,
+                    "{r} [release {}]: the castle border COMPOSED from pictures {}/{:#x}/{:#x} \
+                     must reproduce the shaft the game itself draws — that agreement is the whole \
+                     reason the other two scenes below can be trusted",
+                    sp.release, scene.1, scene.2, scene.3
+                );
+                for (i, sh) in shafts.iter().enumerate() {
+                    let (top, bottom) =
+                        sh.unwrap_or_else(|| panic!("{r} flank {i}: the castle is a pillar"));
+                    assert!(
+                        (bottom - top) * 2 >= native.1 as u32,
+                        "{r} [release {}] flank {i}: the castle shaft {top}..{bottom} is only \
+                         {} of {} rows — a pillar is mostly shaft",
+                        sp.release,
+                        bottom - top,
+                        native.1
+                    );
+                }
+            } else {
+                assert_eq!(
+                    shafts,
+                    vec![None, None],
+                    "{r} [release {}]: the {} border declares a pillar shaft. Its stonework holds \
+                     no span for long, so any run found in it is a coincidence — and a DIFFERENT \
+                     one per flank, which hands the two sides of one symmetric border different \
+                     repeat units. Both must fall back to the castle constants",
+                    sp.release,
+                    scene.0
+                );
+            }
+            ran += 1;
+        }
+    }
+    if stories_dir().join(RENDITIONS[0]).exists() {
+        assert!(ran > 0, "the archives are present but nothing ran — check the filenames");
+    }
+}
 

@@ -612,7 +612,32 @@ session-only switch that never touches your saved config:
   slab holds one width top to bottom. Narrowest ÷ widest painted row is 0.96–1.00
   across every Shogun rendition and both flanks, and 0.02–0.81 across every Zork Zero
   rendition and all three of its scene borders, so the cut sits at 9/10 in the gap
-  between them. One trap the recipe has to dodge:
+  between them.
+  **A shaft has to be most of the flank, or it isn't one.** Zork Zero has three
+  scene borders — the castle, the underground and the jungle — and Spatterlight
+  picks between them by reading the game's own border global, which babelmap has no
+  path to: picture numbers do not survive the engine boundary, and the renderer is
+  handed a flattened canvas. Measuring the repeat unit rather than pinning it was
+  right for the castle and wrong for the other two, and wrong in an unusually
+  visible way: the underground is alternating stone blocks and the jungle is
+  foliage, so the longest run of rows holding one width in them is a coincidence —
+  and a *different* coincidence in each flank. Composed from each archive's own
+  pictures the way the game draws them, `.CG1`'s underground cut its left flank at
+  row 78 and its right at row 296, and `.MG1`'s jungle derived a 14-row repeat unit
+  on the left while the right fell back to the castle's 284. Six of the eight
+  non-castle flank pairs got different recipes from the two halves of one symmetric
+  border. The castle holds one span for 70–73% of the flank on every rendition and
+  both flanks; nothing else measured manages more than 45%. So a run has to be at
+  least half the flank to count — the definition of a pillar rather than a number
+  fitted to the corpus — and the underground and the jungle now take the castle's
+  constants uniformly, which is what they were getting before the measurement
+  existed and is still the right answer for them. The mirrored repeat covers the
+  rest: Spatterlight's per-scene overlaps (37 rows underground, 59 in the jungle)
+  exist to hide the seam a duplicated row already has nothing to show. What is
+  genuinely out of reach is the underground's *stone alternation* — Spatterlight
+  swaps the two flanks' 37-pixel stone blocks on alternate tiles so the courses
+  trade sides, and that is a statement about the pair which only the scene identity
+  justifies. One trap the recipe has to dodge:
   the canvas a band ships is the artwork *minus* whatever the renderer draws as
   terminal cells instead, so a repeat cut from it copies the holes those cells
   left. Shogun's status line is two 16-pixel rows the top of its border sits
@@ -624,8 +649,16 @@ session-only switch that never touches your saved config:
   the source it was composed from, and counts the rows in it that carry no art at
   all — the longest run and where it starts, since a hole is invisible in the
   band's rectangle and shows up only on screen.
-  This is a hybrid-mode improvement only; raster mode still shows each title's art
-  at its own native extent.
+  **Raster mode gets the same frame**, because it builds the whole thing at the
+  640×400 native screen and hands the finished canvas to a single scale — the same
+  way Spatterlight composes at native resolution and stretch-blits once. The flanks
+  are extended before that scale rather than at draw time, so raster's corners
+  agree structurally instead of by arrangement. It had been left behind when tiling
+  landed, and the two pixel modes were drawing different screens from the same turn:
+  Shogun's Amiga border ends at native row 336 of 400 and Arthur's poles at 379, and
+  raster showed those last rows as one flat colour inside the frame's own lower edge
+  — 64 native rows on Shogun, 21 on Arthur. Zork Zero was unaffected either way; its
+  pillars already reach the bottom.
   In hybrid, **nothing the game printed as a character is ever rasterised**. A strip
   is classified by what is *in* it, never by where it sits: a side column whose
   pixels the game's own paint runs fully account for is drawn with those characters,
