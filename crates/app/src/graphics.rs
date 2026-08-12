@@ -217,6 +217,14 @@ pub struct PictSource {
     /// for a Blorb, an Amiga/Mac `Pic.data` and an MCGA `.MG1` alike, all of
     /// which carry their colours per picture.
     hw_palette: Option<[blorb::infocom_pics::Rgb; 16]>,
+    /// Does this source's art need [`blend_half_width_columns`] on the way out —
+    /// i.e. is it a SIXTEEN-colour 640-wide rendition, whose pixels are half as
+    /// wide as the unit screen's and whose dithers the card fused (SQ-0797)?
+    ///
+    /// Set once from [`PictSource::art_scale`] and
+    /// [`PictSource::is_monochrome`], because both answers come off the archive's
+    /// own contents and neither ever changes for a loaded source.
+    blend_columns: bool,
 }
 
 impl PictSource {
@@ -234,6 +242,7 @@ impl PictSource {
             palette_gen: 0,
             adaptive_cache: HashMap::new(),
             hw_palette: None,
+            blend_columns: false,
         }
     }
 
@@ -255,7 +264,12 @@ impl PictSource {
             Some(_) => HashSet::new(),
             None => pics.adaptive_pictures().iter().map(|&id| u32::from(id)).collect(),
         };
-        PictSource { native: Some(pics), adaptive, hw_palette, ..PictSource::new(None) }
+        let mut src =
+            PictSource { native: Some(pics), adaptive, hw_palette, ..PictSource::new(None) };
+        // A 640-wide SIXTEEN-colour rendition dithers, and its dither is the
+        // card's business, not the terminal's — see `blend_half_width_columns`.
+        src.blend_columns = src.art_scale().is_some_and(|(sx, _)| sx == 1) && !src.is_monochrome();
+        src
     }
 
     /// Resolve the picture source for `story_path` (SQ-0734's tiers 1 and 2).
@@ -415,7 +429,9 @@ impl PictSource {
                 (Some(b), _) => b
                     .resource(b"Pict", resnum)
                     .and_then(|(_ty, bytes)| crate::cover::decode(bytes)),
-                (None, Some(pics)) => native_image(pics, resnum, self.hw_palette.as_ref()),
+                (None, Some(pics)) => {
+                    native_image(pics, resnum, self.hw_palette.as_ref(), self.blend_columns)
+                }
                 (None, None) => None,
             };
             self.cache.insert(resnum, decoded.map(Arc::new));
@@ -516,7 +532,7 @@ impl PictSource {
                     let pal = self
                         .hw_palette
                         .or_else(|| self.current_plte.as_deref().map(colour_table));
-                    native_image(pics, resnum, pal.as_ref())
+                    native_image(pics, resnum, pal.as_ref(), self.blend_columns)
                 }
                 (None, None) => None,
             };
@@ -906,14 +922,104 @@ fn native_image(
     pics: &blorb::infocom_pics::InfocomPics,
     resnum: u32,
     palette: Option<&[blorb::infocom_pics::Rgb; 16]>,
+    blend_columns: bool,
 ) -> Option<DynamicImage> {
     let pic = pics.decode(u16::try_from(resnum).ok()?).ok()?;
     let rgba = match palette {
         Some(pal) => pic.rgba_with(pal),
         None => pic.rgba(),
     };
-    let buf = image::RgbaImage::from_raw(u32::from(pic.width), u32::from(pic.height), rgba)?;
+    let mut buf = image::RgbaImage::from_raw(u32::from(pic.width), u32::from(pic.height), rgba)?;
+    if blend_columns {
+        blend_half_width_columns(&mut buf);
+    }
     Some(DynamicImage::ImageRgba8(buf))
+}
+
+/// Fuse a 640-wide rendition's column dither, because its pixels are half as wide
+/// as the unit screen's (SQ-0797).
+///
+/// # Why there is anything to fuse
+///
+/// EGA has no bronze, so Zork Zero's artist made one. The proscenium arch is a
+/// column-by-column dither — bright red (index 12) against brown (index 6) for
+/// the lit stone, light grey against bright red for the highlights, brown against
+/// black for the shadow — and on a 640×200 EGA screen those columns are half as
+/// wide as an MCGA pixel, so the card and the eye fused each pair into a colour
+/// the palette does not contain. Bocfel says the same of Zork Zero's EGA hint
+/// background (`z6/draw_border.cpp:745`): "no single pixel of the artwork is the
+/// colour the eye actually sees". babelmap keeps all 640 columns — geometrically
+/// right, [`PictSource::art_scale`] maps them onto exactly the rectangle a
+/// 320-wide plate covers — so without this the dither arrives at full contrast
+/// and the arch reads as salmon-and-olive speckle.
+///
+/// # Why here and not in the renderer
+///
+/// Because every unit-space→pane scale in the v6 path is
+/// `FilterType::Nearest`, deliberately: crisp DOS pixels are the house style. A
+/// nearest resample never blends. Below 640 px it drops columns (which *aliases*
+/// the dither — sometimes to solid red, sometimes to solid brown, banding either
+/// way) and above 640 it replicates them, so what the player saw was a function
+/// of how wide their terminal happened to be: measured horizontal speckle on
+/// Zork Zero's EGA border ran 22.3 / 40.3 / 49.1 / 39.2 / 24.4 at pane widths of
+/// 320 / 480 / 640 / 800 / 1280, against 4.3 for the same frame in MCGA. Fusing
+/// at the archive boundary instead makes the answer a property of the artwork.
+///
+/// # The filter
+///
+/// A three-tap tent, `[1, 2, 1] / 4`, across columns only. It is chosen over the
+/// obvious two-tap box on fixed column pairs because it is PHASE-INDEPENDENT: for
+/// any period-2 alternation `…a b a b…` the tent yields `(a + b) / 2` at *both*
+/// phases and so collapses the dither exactly, wherever it starts, while a fixed
+/// pairing only collapses the half of it that happens to be aligned. It is also
+/// symmetric (no half-pixel shift) and leaves flat colour untouched. Measured on
+/// Zork Zero's EGA border, mean per-channel distance to the MCGA frame: 44.5 raw,
+/// 29.2 with the box, **27.8** with the tent.
+///
+/// Alpha is never touched and never blended. A transparent pixel is left exactly
+/// as it is, and an opaque one at a transparency edge folds the missing tap's
+/// weight back onto itself — a native archive's art is a stencil (fmvpoker's
+/// cards are cut out on colour 1, SQ-0801), and a fringe of half-transparent
+/// pixels around every cut-out is not what the card did.
+///
+/// # What is deliberately NOT fused
+///
+/// CGA. A `.CG1`'s 640-wide art is genuine one-bit line work — Zork Zero's CGA
+/// pillar is a lit column of mirrored tiles (SQ-0808), and SQ-0806 hands its two
+/// colours to the terminal — and blending one-bit line work only makes it grey.
+/// [`PictSource::is_monochrome`] is the test, read off the archive's own
+/// `EF_MONO` flags rather than off a filename. MCGA and the Amiga are 320-wide,
+/// have no dither at this frequency, and never reach here.
+fn blend_half_width_columns(img: &mut image::RgbaImage) {
+    let (w, h) = img.dimensions();
+    if w < 2 {
+        return;
+    }
+    let w = w as usize;
+    let stride = w * 4;
+    let mut row = vec![0u8; stride];
+    let buf: &mut [u8] = img;
+    for y in 0..h as usize {
+        let base = y * stride;
+        row.copy_from_slice(&buf[base..base + stride]);
+        for x in 0..w {
+            let c: [u8; 4] = row[x * 4..x * 4 + 4].try_into().expect("4 bytes per pixel");
+            if c[3] != 255 {
+                continue; // a cut-out stays cut out, at its own colour
+            }
+
+            let tap = |i: usize| -> [u8; 4] {
+                let p: [u8; 4] = row[i * 4..i * 4 + 4].try_into().expect("4 bytes per pixel");
+                if p[3] == 255 { p } else { c }
+            };
+            let l = if x > 0 { tap(x - 1) } else { c };
+            let r = if x + 1 < w { tap(x + 1) } else { c };
+            for k in 0..3 {
+                let sum = u32::from(l[k]) + 2 * u32::from(c[k]) + u32::from(r[k]);
+                buf[base + x * 4 + k] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
 }
 
 /// The Current Palette's raw RGB triples as a native 16-entry colour table.
@@ -1060,6 +1166,45 @@ pub(crate) fn test_blorb_with_pict(resnum: u32, data: &[u8]) -> blorb::Blorb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The property that chose the tent over a two-tap box on fixed column pairs
+    /// (SQ-0797): a period-2 dither collapses to its exact mean at BOTH phases, so
+    /// a run of `a b a b` and a run of `b a b a` come out as the same flat colour.
+    /// A fixed pairing only collapses the half of the artwork that happens to be
+    /// aligned with it, and nothing in the format aligns a dither to anything.
+    #[test]
+    fn the_column_tent_collapses_a_dither_at_either_phase() {
+        let (a, b) = ([255u8, 85, 85, 255], [170u8, 85, 0, 255]); // EGA 12 and 6
+        let mut even = image::RgbaImage::from_fn(8, 1, |x, _| {
+            image::Rgba(if x % 2 == 0 { a } else { b })
+        });
+        let mut odd = image::RgbaImage::from_fn(8, 1, |x, _| {
+            image::Rgba(if x % 2 == 0 { b } else { a })
+        });
+        blend_half_width_columns(&mut even);
+        blend_half_width_columns(&mut odd);
+        // Bronze: the mean of bright red and brown, which EGA does not hold.
+        let bronze = image::Rgba([213u8, 85, 43, 255]);
+        for x in 1..7 {
+            assert_eq!(*even.get_pixel(x, 0), bronze, "even phase, column {x}");
+            assert_eq!(*odd.get_pixel(x, 0), bronze, "odd phase, column {x}");
+        }
+    }
+
+    /// Flat colour survives untouched, and so does a transparent pixel and the
+    /// opaque pixel beside it — the tap that would have reached across a cut-out
+    /// folds back onto the centre instead of averaging a fringe into it.
+    #[test]
+    fn the_column_tent_leaves_flat_colour_and_stencil_edges_alone() {
+        let solid = image::Rgba([170u8, 85, 0, 255]);
+        let hole = image::Rgba([0u8, 0, 0, 0]);
+        let mut img = image::RgbaImage::from_fn(5, 1, |x, _| if x == 2 { hole } else { solid });
+        blend_half_width_columns(&mut img);
+        for x in [0u32, 1, 3, 4] {
+            assert_eq!(*img.get_pixel(x, 0), solid, "column {x} keeps its own colour");
+        }
+        assert_eq!(*img.get_pixel(2, 0), hole, "a cut-out is never painted in");
+    }
 
     #[test]
     fn arc_shares_while_unchanged_and_copies_on_write() {

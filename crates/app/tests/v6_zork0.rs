@@ -8,6 +8,8 @@
 
 #![allow(dead_code, unused_imports)]
 
+#[path = "suites/v6_ega_dither_blend.rs"]
+mod v6_ega_dither_blend;
 #[path = "suites/v6_hybrid_zork0.rs"]
 mod v6_hybrid_zork0;
 #[path = "suites/v6_mouse_zork0.rs"]
