@@ -1291,6 +1291,31 @@ again.
 reboot path already makes about the canvases and the display list. A rebooted story
 inherits neither the dead screen's anchors nor its ground.
 
+### …and so does the prose that is sitting on the glass
+
+Three more runs were missing, and this time from *inside* the window tree. A v6
+window keeps its text as three layers in the same pixel space: what it has painted,
+what it has **streamed** — where the prose it sent to the transcript is currently
+sitting — and what a move or resize has **retired**, frozen at coordinates the window
+has since walked away from ([above](#prose-freezes-where-it-was-printed-when-its-window-moves)).
+Only the first of the three was in the save.
+
+The one game that renders from the streamed layer is the one game that keeps its text
+inside its own picture frame: fmvpoker's "Current Bet: 10" and "Total Winnings: 990"
+live nowhere else a save was carrying, so a resumed hand came back with its legends
+gone from the table. It hid for a long time because the *character* grid was archived
+all along — the bet was there in cell mode and missing from the pixel composite, which
+is the mode almost everybody plays in. Shogun lost the other layer: one keypress into
+its boot it is holding all nine frozen title lines, and a restore used to hand them
+back blank or leave the previous screen's standing over the new one.
+
+All three layers now travel together in `screen.json`, as the game's own runs in its
+own native pixels — a recipe like `texts` beside them, with no cell coordinate, font
+metric or picker state anywhere in it, so one archive restores identically into an
+80×24 terminal and a 200×80 one and draws the same on either graphics backend. The one
+thing deliberately left behind is the per-burst *stream origin*, which only means
+anything between one keypress and the next and nothing at all across a save.
+
 ## Margin pictures — text that flows past the art
 
 Some v6 scenes put the picture on one side and let the prose flow past it.
