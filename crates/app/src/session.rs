@@ -3026,24 +3026,34 @@ impl GameSession {
         }
 
         graphics_entries.extend(text_entries);
+        // `ScreenModel.bg`/`fg` is the PANE PAGE: `render_story_pane` floods the
+        // whole story pane with it before anything is drawn. A Version 6 story
+        // normally has no such thing — ZMSD §8.3 gives every window its own pair,
+        // and each is published on its own node (`GridWindow.bg`,
+        // `BufferWindow.bg`) while the region around the scaled 640x400 frame
+        // belongs to the host theme. `screen.current_fg/current_bg` hold the
+        // CURRENT WINDOW's pair (mirrored there so v6 prose runs carry the right
+        // `TextAttrs`, §8.3) — publishing THAT as the page repainted the entire
+        // pane in whatever window happened to be selected, e.g. flooding Zork
+        // Zero's pane with its white window-0 background and burying the artwork.
+        //
+        // §8.3's Amiga machine is the one exception, and it is an exception in
+        // exactly the way that comment describes: under the Amiga interpreter
+        // number there is one pair for the whole screen, it is not the current
+        // window's, and it does not move — so it is a page in the full sense the
+        // field means. `zvm::screen::amiga_screen_pair` reads it back out of the
+        // header ($2D/$2C), which is where §8.3.3 already had babelmap publishing
+        // it to the story; before SQ-0740 nothing painted it, so an Amiga and an
+        // IBM PC rendered identically and the profile was invisible on screen.
+        // The windows' own pairs still ride on their own nodes and still win —
+        // this is the ground under them, not a replacement for them.
+        let (fg, bg) = zvm::screen::amiga_screen_pair(&self.machine.mem)
+            .unwrap_or((zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
         ScreenModel {
             root: WinNode::Layered(graphics_entries),
             status: status_model_from_machine(&self.machine),
-            // `ScreenModel.bg`/`fg` is the PANE PAGE: `render_story_pane` floods
-            // the whole story pane with it before anything is drawn. A Version 6
-            // story has no such thing — ZMSD §8.3 gives every window its own
-            // pair, and each is published on its own node (`GridWindow.bg`,
-            // `BufferWindow.bg`) while the region around the scaled 640x400
-            // frame belongs to the host theme. `screen.current_fg/current_bg`
-            // hold the CURRENT WINDOW's pair (mirrored there so v6 prose runs
-            // carry the right `TextAttrs`, §8.3) — publishing that as the page
-            // repainted the entire pane in whatever window happened to be
-            // selected, e.g. flooding Zork Zero's pane with its white window-0
-            // background and burying the artwork. So v6 leaves the page unset
-            // and the host supplies it, exactly as the three v6 render modes
-            // already resolve their own page.
-            bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
-            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+            bg: crate::state::pack_zcolour(bg),
+            fg: crate::state::pack_zcolour(fg),
             content_size,
         }
     }

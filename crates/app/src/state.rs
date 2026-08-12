@@ -2205,6 +2205,18 @@ pub struct AppState {
     /// hold what the PREVIOUS frame drew there, so sampling them would feed the
     /// picture its own colours.
     pub v6_story_page: std::cell::Cell<Option<(u8, u8, u8)>>,
+    /// The MACHINE's own screen pair — packed `(foreground, background)` — for the
+    /// current frame, when the interpreter it presents as has one. Published by
+    /// `render_story_pane` from `ScreenModel.fg`/`bg` and read by
+    /// `render::screen::v6_host_pair`, so every v6 surface resolves its default ink
+    /// and page from one place. (SQ-0740)
+    ///
+    /// Only ZMSD §8.3's Amiga machine sets it: there one pair paints the whole
+    /// screen and the story's own windows sit on it (see
+    /// `zvm::screen::amiga_screen_pair`). `None` — every other profile, every
+    /// non-v6 frame, and any frame with `honor_game_colours` off — leaves the host
+    /// theme owning the page exactly as before.
+    pub v6_page_pair: std::cell::Cell<Option<(u32, u32)>>,
     /// The v6 painted ground for the CURRENT frame, republished by `draw_frame`
     /// from [`crate::engine::Engine::paint_surface`] (SQ-0706). `None` whenever the
     /// game has painted none, which is every game that does not draw with
@@ -2637,6 +2649,7 @@ impl Default for AppState {
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
             v6_story_page: std::cell::Cell::new(None),
+            v6_page_pair: std::cell::Cell::new(None),
             v6_paint: std::cell::RefCell::new(None),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
             v6_last_game_frame: std::cell::RefCell::new(None),
