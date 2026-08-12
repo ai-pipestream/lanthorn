@@ -41,7 +41,16 @@ still reach in and override any single selector by name.
   with the story's filename appended in parentheses when it differs from the
   title (e.g. `Journey: The Quest Begins (journey-r83-s890706.z6)`) — a bare
   filename with no known title (or a file already named after it) shows with
-  no parenthetical. The strip's bracket caps and divider track the pane's border
+  no parenthetical. The title is the *same* one the story browser lists, drawn
+  from the same metadata in the same order — a blorb's own iFiction record, then
+  the fetched IFDB details cached beside your saves, then babelmap's bundled
+  title tables — so a game can't be *Anchorhead* in the library and `anchor` in
+  the pane. The game's opening banner is consulted only after all of those, and
+  the filename is the last resort it was always meant to be. A story mounted off
+  a **disk image** always names its `.adf` there, however neatly the box-spelled
+  filename matches the title: a floppy carries a different *release* of the game,
+  and which one you're playing is exactly what the border should tell you.
+  The strip's bracket caps and divider track the pane's border
   style by default (`┤ … ├` on single, `┫ … ┣` on thick, `╡ … ╞` on double);
   set `panel.terminator_left` / `panel.terminator_right` / `panel.tab_divider`
   to a `glyph` to override any of them. The map additionally sets

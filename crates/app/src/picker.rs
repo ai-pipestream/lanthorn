@@ -589,6 +589,68 @@ pub fn scott_story_title(path: &Path) -> Option<String> {
     scott_title(stem).map(str::to_string)
 }
 
+/// The bundled-table title for a story: the Scott filename table
+/// (`scott_titles.tsv`, keyed by the stem) when the story is a Scott database,
+/// else the IFID-keyed known-title table. Neither table needs the file — this is
+/// the offline tier, below any real metadata.
+pub fn bundled_title(stem: &str, ifid: &str, is_scott: bool) -> Option<&'static str> {
+    is_scott
+        .then(|| scott_title(stem))
+        .flatten()
+        .or_else(|| crate::session::known_title(ifid))
+}
+
+/// A blorb container's own `IFmd` (Treaty of Babel iFiction) chunk, parsed.
+/// `None` for a non-blorb, an unreadable file, or a blorb carrying no such
+/// chunk — which is the common case (`photo201.blb` has only an `RIdx`).
+///
+/// [`resolve_entry`] reads the same chunk out of the parse it already does for
+/// the resource index; this is the standalone reader for callers that want only
+/// the title.
+fn container_ifmd(path: &Path) -> Option<crate::ifiction::IFiction> {
+    if !is_blorb_ext(path) {
+        return None;
+    }
+    let raw = std::fs::read(path).ok()?;
+    if !blorb::Blorb::is_blorb(&raw) {
+        return None;
+    }
+    let b = blorb::Blorb::parse(raw).ok()?;
+    crate::ifiction::parse(b.metadata()?).ok()
+}
+
+/// The title the story browser resolves for `path` from **real metadata**, with
+/// no filename fallback: the container's own `IFmd` chunk, then the fetched IFDB
+/// sidecar under `data_base`, then the bundled tables. `None` when no source
+/// knows this story.
+///
+/// This is the browser's own answer, exported so the in-game story pane can ask
+/// for it instead of guessing from the boot banner (SQ-0766). The precedence is
+/// literally [`resolved_title`], shared with [`resolve`], so the list and the
+/// pane cannot name the same game differently.
+pub fn metadata_title(path: &Path, data_base: &Path, ifid: &str, is_scott: bool) -> Option<String> {
+    let ifmd = container_ifmd(path);
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(path));
+    let fetched = crate::story_info::load(&game_dir, ifid).and_then(|i| i.fetched);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    resolved_title(ifmd.as_ref(), fetched.as_ref(), bundled_title(stem, ifid, is_scott))
+}
+
+/// The title tiers of SPEC "Precedence", stopping short of the filename stem:
+/// the file's own `IFmd` chunk, then a fetched IFDB sidecar, then the bundled
+/// table. `None` means no source knows this story, and the caller decides what
+/// the last resort is — the stem for the browser list ([`resolve`]), the boot
+/// banner and then the stem for the story pane ([`metadata_title`], SQ-0766).
+fn resolved_title(
+    ifmd: Option<&crate::ifiction::IFiction>,
+    fetched: Option<&crate::story_info::FetchedMeta>,
+    tsv_title: Option<&str>,
+) -> Option<String> {
+    ifmd.and_then(|i| i.title.clone())
+        .or_else(|| fetched.and_then(|f| f.title.clone()))
+        .or_else(|| tsv_title.map(str::to_string))
+}
+
 /// SPEC "Precedence": per field, independently, first non-empty wins —
 /// `ifmd` (the file's own `IFmd` chunk) > `fetched` (an IFDB sidecar) > the
 /// bundled `scott_titles.tsv` (`tsv_title`/`tsv_author`/`tsv_description`, only
@@ -605,11 +667,7 @@ fn resolve(
     tsv_description: Option<&str>,
     stem: &str,
 ) -> Resolved {
-    let title = ifmd
-        .and_then(|i| i.title.clone())
-        .or_else(|| fetched.and_then(|f| f.title.clone()))
-        .or_else(|| tsv_title.map(str::to_string))
-        .unwrap_or_else(|| stem.to_string());
+    let title = resolved_title(ifmd, fetched, tsv_title).unwrap_or_else(|| stem.to_string());
     let author = ifmd
         .and_then(|i| i.author.clone())
         .or_else(|| fetched.and_then(|f| f.author.clone()))
@@ -790,8 +848,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         .and_then(|s| s.to_str())
         .unwrap_or(&filename);
     let is_scott = matches!(loaded, crate::hints::LoadedStory::Scott(_));
-    let scott_tsv_title = is_scott.then(|| scott_title(stem)).flatten();
-    let tsv_title = scott_tsv_title.or_else(|| crate::session::known_title(&ifid));
+    let tsv_title = bundled_title(stem, &ifid, is_scott);
     let tsv_author = is_scott.then(|| scott_author(stem)).flatten();
     let tsv_description = is_scott.then(|| scott_description(stem)).flatten();
     let resolved = resolve(
