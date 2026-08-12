@@ -3440,23 +3440,32 @@ pub fn title_from_banner(intro_text: &str) -> Option<String> {
     Some(lines[anchor - 1].chars().take(40).collect())
 }
 
-/// Resolve the adventure title using a three-tier priority:
+/// Resolve the adventure title using a four-tier priority:
 /// 1. `override_name` if provided.
-/// 2. `banner` (a captured first-banner-line) if provided.
-/// 3. The story file's stem (filename without extension).
+/// 2. `metadata` — what the story browser resolved for this file from real
+///    metadata ([`crate::picker::metadata_title`]: a container's own `IFmd`
+///    chunk, a fetched IFDB sidecar, then the bundled title tables).
+/// 3. `banner` (a title extracted from the boot banner) if provided.
+/// 4. The story file's stem (filename without extension).
+///
+/// Metadata sits ABOVE the banner heuristic deliberately (SQ-0766). The
+/// heuristic only fires on Infocom-style boilerplate, so a game that boots into
+/// a title plate (`anchor.z8` prints `A N C H O R H E A D` and a keypress
+/// prompt), a version notice (`photopia.z5`), or a resume question
+/// (`mysterious03.z6`) yields nothing and used to land on the filename stem —
+/// while the browser, reading the same story's metadata, listed it correctly.
+/// One source, asked by both, is what keeps the list and the pane agreeing.
 pub fn resolve_title(
     override_name: Option<&str>,
-    ifid: &str,
+    metadata: Option<&str>,
     banner: Option<&str>,
     story_path: &std::path::Path,
 ) -> String {
     if let Some(name) = override_name {
         return name.to_owned();
     }
-    // Known-game lookup table wins over the banner heuristic (it is exact, and
-    // covers games whose banner doesn't yield the title).
-    if let Some(t) = known_title(ifid) {
-        return t.to_owned();
+    if let Some(m) = metadata {
+        return m.to_owned();
     }
     if let Some(b) = banner {
         return b.to_owned();
@@ -3478,10 +3487,22 @@ pub fn resolve_title(
 /// named after its title reads as the same. `name` empty (title genuinely
 /// unknown) falls back to today's behavior: the bare filename, no parenthetical.
 ///
-/// For a story mounted from a disk image (`.adf`), `filename` is the
-/// container's name, not the game's — the parenthetical is more useful there,
-/// not less, since the container name rarely matches the title.
-pub fn format_pane_title(name: &str, filename: &str) -> String {
+/// `disk_image` forces the parenthetical on regardless of how well the name
+/// matches (SQ-0766). A disk image is a **different release**, not the same
+/// story on other media — `stories/journey.z6` is release 83 while
+/// `Journey - The Quest Begins.adf` is release 30, and the two behave
+/// differently (SQ-0760) — so which medium is mounted is exactly what the pane
+/// has to disclose, and it cannot be inferred from the game's name. Without
+/// this the box-spelled filenames normalize onto their own titles
+/// (`Arthur - The Quest for Excalibur` and "Arthur: The Quest for Excalibur"
+/// both reduce to `arthurthequestforexcalibur`) and the medium disappears.
+///
+/// A blorb or a zip is deliberately NOT forced: a container of that kind ships
+/// the very build its title names — it is the publication, not a medium
+/// carrying some other release — so the normalized comparison is the right test
+/// there, and it already discloses the ones that don't match
+/// (`Photopia (photo201.blb)`).
+pub fn format_pane_title(name: &str, filename: &str, disk_image: bool) -> String {
     if name.is_empty() {
         return filename.to_owned();
     }
@@ -3489,7 +3510,7 @@ pub fn format_pane_title(name: &str, filename: &str) -> String {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(filename);
-    if crate::hints::normalize_ident(name) == crate::hints::normalize_ident(stem) {
+    if !disk_image && crate::hints::normalize_ident(name) == crate::hints::normalize_ident(stem) {
         name.to_owned()
     } else {
         format!("{name} ({filename})")
@@ -6833,42 +6854,93 @@ mod tests {
         assert_eq!(lines, table.len(), "no duplicate IFID prefixes in known_titles.tsv");
     }
 
+    /// SQ-0766 moved the IFID known-title lookup OUT of `resolve_title` and into
+    /// the shared browser resolver (`picker::metadata_title`), which is what the
+    /// `metadata` argument now carries — the pane and the story list must consult
+    /// one source or they name the same game differently. The tier below it is
+    /// unchanged: banner, then the filename stem.
     #[test]
-    fn resolve_title_override_then_table_then_banner_then_filename() {
+    fn resolve_title_override_then_metadata_then_banner_then_filename() {
         use std::path::Path;
         // override wins over everything.
-        assert_eq!(resolve_title(Some("My Game"), "ZCODE-116-870602-FC65", Some("X"), Path::new("/x/zork1.z3")), "My Game");
-        // table wins over the banner heuristic (e.g. Bureaucracy, whose banner is just copyright).
-        assert_eq!(resolve_title(None, "ZCODE-116-870602-FC65", None, Path::new("/x/bureaucr.z4")), "Bureaucracy");
-        // unknown IFID → banner heuristic.
-        assert_eq!(resolve_title(None, "UNKNOWN", Some("ZORK I"), Path::new("/x/zork1.z3")), "ZORK I");
-        // unknown IFID + no banner title → filename.
-        assert_eq!(resolve_title(None, "UNKNOWN", None, Path::new("/x/zork1.z3")), "zork1");
+        assert_eq!(resolve_title(Some("My Game"), Some("Bureaucracy"), Some("X"), Path::new("/x/zork1.z3")), "My Game");
+        // metadata wins over the banner heuristic (e.g. Bureaucracy, whose banner is just copyright).
+        assert_eq!(resolve_title(None, Some("Bureaucracy"), None, Path::new("/x/bureaucr.z4")), "Bureaucracy");
+        // no metadata → banner heuristic.
+        assert_eq!(resolve_title(None, None, Some("ZORK I"), Path::new("/x/zork1.z3")), "ZORK I");
+        // no metadata + no banner title → filename.
+        assert_eq!(resolve_title(None, None, None, Path::new("/x/zork1.z3")), "zork1");
+    }
+
+    /// SQ-0766, part C/D: the banner heuristic is genuinely blind to a game that
+    /// boots into a title plate or a version notice, so metadata has to outrank
+    /// it. Both banners are the real, dumped ones.
+    #[test]
+    fn resolve_title_prefers_metadata_over_an_unparseable_banner() {
+        use std::path::Path;
+        // anchor.z8's boot banner: a letter-spaced title plate and a keypress prompt.
+        let anchor = "\n\n\n                             A N C H O R H E A D\n\n\n               [Press 'R' to restore; any other key to begin]\n";
+        assert_eq!(title_from_banner(anchor), None, "no boilerplate to anchor on");
+        assert_eq!(
+            resolve_title(None, Some("Anchorhead"), title_from_banner(anchor).as_deref(), Path::new("/x/anchor.z8")),
+            "Anchorhead"
+        );
+        // Without any metadata source it still lands on the stem — the reported bug.
+        assert_eq!(resolve_title(None, None, None, Path::new("/x/anchor.z8")), "anchor");
+        // photo201.blb has no IFmd chunk; its fetched sidecar is what knows the name.
+        assert_eq!(
+            resolve_title(None, Some("Photopia"), None, Path::new("/x/photo201.blb")),
+            "Photopia"
+        );
     }
 
     #[test]
     fn format_pane_title_same_name_omits_parenthetical() {
         // Normalized name equals normalized stem (extension excluded) → bare name.
-        assert_eq!(format_pane_title("Bureaucracy", "bureaucracy.z4"), "Bureaucracy");
+        assert_eq!(format_pane_title("Bureaucracy", "bureaucracy.z4", false), "Bureaucracy");
         // Case/punctuation-insensitive: still "the same" after normalizing.
-        assert_eq!(format_pane_title("Zork I", "zork-i.z3"), "Zork I");
+        assert_eq!(format_pane_title("Zork I", "zork-i.z3", false), "Zork I");
     }
 
     #[test]
     fn format_pane_title_differing_name_appends_filename() {
         // Release/serial-suffixed filename reads as different from the title.
         assert_eq!(
-            format_pane_title("Journey: The Quest Begins", "journey-r83-s890706.z6"),
+            format_pane_title("Journey: The Quest Begins", "journey-r83-s890706.z6", false),
             "Journey: The Quest Begins (journey-r83-s890706.z6)"
         );
         // A single-character difference (I vs 1) still counts as differing.
-        assert_eq!(format_pane_title("Zork I", "zork1.z3"), "Zork I (zork1.z3)");
+        assert_eq!(format_pane_title("Zork I", "zork1.z3", false), "Zork I (zork1.z3)");
+        // A blorb whose stem is nothing like its title needs no special case.
+        assert_eq!(format_pane_title("Photopia", "photo201.blb", false), "Photopia (photo201.blb)");
+    }
+
+    /// SQ-0766 part A: a disk image is a different RELEASE, so the pane always
+    /// names it — even when the box-spelled filename normalizes onto the title.
+    #[test]
+    fn format_pane_title_always_names_a_disk_image() {
+        for (name, file) in [
+            ("Arthur: The Quest for Excalibur", "Arthur - The Quest for Excalibur.adf"),
+            ("Journey: The Quest Begins", "Journey - The Quest Begins.adf"),
+        ] {
+            // The premise: without the disk-image rule these normalize to the same thing.
+            assert_eq!(
+                crate::hints::normalize_ident(name),
+                crate::hints::normalize_ident(file.trim_end_matches(".adf")),
+                "{file}: premise — name and stem normalize alike"
+            );
+            assert_eq!(format_pane_title(name, file, true), format!("{name} ({file})"));
+        }
+        // A bare story file with the same name keeps the bare title.
+        assert_eq!(format_pane_title("Journey", "journey.z6", false), "Journey");
     }
 
     #[test]
     fn format_pane_title_unknown_name_falls_back_to_filename() {
         // No title resolved at all: today's behavior, no empty parenthetical.
-        assert_eq!(format_pane_title("", "mystery.z5"), "mystery.z5");
+        assert_eq!(format_pane_title("", "mystery.z5", false), "mystery.z5");
+        // …including on a disk image, where an empty parenthetical would be worse.
+        assert_eq!(format_pane_title("", "Shogun.adf", true), "Shogun.adf");
     }
 
     // ── strip_read_prompt unit tests ──────────────────────────────────────────

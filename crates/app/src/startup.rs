@@ -208,7 +208,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     let mut cfg = ctx.cfg.clone();
     let data_base = ctx.data_base.clone();
 
-    let loaded = match hints::load_story(&story_path) {
+    let (loaded, disk_image) = match hints::load_mounted_story(&story_path) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("babelmap: cannot read '{}': {}", story_path.display(), e);
@@ -217,6 +217,9 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     };
     // Raw executable bytes (for the IFID / map-dir key), independent of engine.
     let story_bytes = loaded.bytes().to_vec();
+    // Read off `loaded` before it is consumed into a session below: which bundled
+    // title table applies is an engine question (SQ-0766).
+    let is_scott = matches!(loaded, hints::LoadedStory::Scott(_));
 
     // SQ-0719: which machine are we presenting ourselves as? Resolved from the
     // launch (an explicit interpreter number, else the medium the story came out
@@ -738,9 +741,15 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             .collect()
     };
     let banner_title = app::session::title_from_banner(&banner);
-    state.title = app::session::resolve_title(None, &ifid, banner_title.as_deref(), &story_path);
+    // SQ-0766: ask the story browser's own metadata resolver first — the `IFmd`
+    // chunk, the fetched IFDB sidecar, then the bundled tables — so the pane
+    // names the game the way the list does. The banner heuristic is the tier
+    // below it, and the filename stem is the last resort it was meant to be.
+    let meta_title = app::picker::metadata_title(&story_path, &data_base, &ifid, is_scott);
+    state.title =
+        app::session::resolve_title(None, meta_title.as_deref(), banner_title.as_deref(), &story_path);
     let story_filename = story_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    state.pane_title = app::session::format_pane_title(&state.title, story_filename);
+    state.pane_title = app::session::format_pane_title(&state.title, story_filename, disk_image);
     state.ifid = ifid.clone();
     state.game_dir = game_dir.clone();
     // Restore the per-game map-panel visibility (SQ-0304): if the user last hid

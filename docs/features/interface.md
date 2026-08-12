@@ -487,7 +487,9 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   cancels a running sweep. For a story whose IFID IFDB doesn't index, `u` lets
   you point it at an IFDB page by hand. Results are cached in a per-game sidecar,
   so a repeat `r` makes no network requests, and a blorb's own `IFmd`/`Fspc`
-  metadata always wins over anything fetched.
+  metadata always wins over anything fetched. What you fetch here follows you
+  into the game: the story pane's border title is resolved from exactly this
+  chain, so once a title is known the library and the pane always agree on it.
 - **Download hints.** For a highlighted game with no local hint file but a known
   *InvisiClues* release, press `H` to download one beside the story — the live
   IF Archive SLAG collection is preferred, with the Internet Archive's copy of
