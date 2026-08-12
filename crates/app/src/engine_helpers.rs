@@ -88,6 +88,11 @@ pub(crate) fn apply_v6_pictures(session: &mut dyn Engine, ac: &app::archive::Arc
     // pre-restore ground would otherwise survive into the restored frame. scopa
     // resumed a dealt hand with its main menu still underneath.
     z.load_paint_ground(ac.ground.as_deref());
+    // …and the last two layers beside the window tree (SQ-0814): the `erase_window`
+    // fills and the canvas anchors. Unconditional for the same reason as the ground,
+    // and it reaches the `ac.display == None` branch above too, where there is no
+    // recipe to install and the reset is the whole of the fix.
+    z.load_v6_screen_layers(ac.display.as_ref().map(|d| &d.layers));
 }
 
 /// The `(location, score)` save summary captured into a save's `Meta` at save time
@@ -439,6 +444,62 @@ mod tests {
             Engine::paint_surface(&sess).is_none(),
             "the restore funnel replaces the painted ground from the archive — an \
              archive with none leaves an EMPTY ground, not the pre-restore screen's"
+        );
+    }
+
+    /// SQ-0814, the same shape as SQ-0787's test above and for the same reason: the
+    /// `erase_window` fills and the canvas anchors rode past every restore site too.
+    ///
+    /// The half that reaches every v6 story is the RESET, so that is what this pins —
+    /// an archive carrying no layers (a non-v6 game, or the `ac.display == None`
+    /// branch of the funnel) must leave the screen wearing NONE, not the ones the
+    /// pre-restore session left. The real-story end — the layers surviving a round
+    /// trip and a move after it, on four stories and both colour modes — is
+    /// `crates/app/tests/suites/v6_restore_screen_layers.rs`.
+    ///
+    /// Falsified by deleting the `load_v6_screen_layers` call from `apply_v6_pictures`:
+    ///
+    /// ```text
+    /// the restore funnel replaces the screen layers from the archive — an archive
+    /// with none leaves NO fills and NO anchors, not the pre-restore screen's
+    /// ```
+    #[test]
+    fn a_restore_resets_the_screen_layers_it_found_sq0814() {
+        use app::engine::Engine;
+        use app::session::GameSession;
+
+        let mut sess =
+            GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+
+        // Stand a fill and an anchor up the only way a test outside the crate can — the
+        // same setter the restore path uses — so "the funnel cleared them" is a real
+        // observation.
+        sess.load_v6_screen_layers(Some(&app::archive::V6LayersDto {
+            fills: vec![app::archive::V6FillDto { win: 3, x: 0, y: 0, w: 64, h: 48, bg: 0x00FF_00FF }],
+            anchors: vec![app::archive::V6AnchorDto {
+                win: 3, origin_x: 1, origin_y: 1, x: 0, y: 0, w: 64, h: 48,
+            }],
+        }));
+        assert_eq!(
+            sess.v6_screen_layers().fills.len(), 1,
+            "premise: a fill and an anchor are on the screen"
+        );
+
+        let path =
+            std::env::temp_dir().join(format!("bm-sq0814-{}.babelmap", std::process::id()));
+        let save = Engine::save_state(&sess);
+        app::archive::save_archive(&path, &mapper::mapper::Mapper::default(), &save, None,
+            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write");
+        let ac = app::archive::load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert!(ac.display.is_none(), "a non-v6 archive carries no display list to hold them");
+
+        super::apply_v6_pictures(&mut sess, &ac);
+        assert_eq!(
+            sess.v6_screen_layers(),
+            app::archive::V6LayersDto::default(),
+            "the restore funnel replaces the screen layers from the archive — an archive \
+             with none leaves NO fills and NO anchors, not the pre-restore screen's"
         );
     }
 

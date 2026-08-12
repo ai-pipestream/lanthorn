@@ -57,6 +57,70 @@ pub struct DisplayListDto {
     /// storing the raw stamps. A window missing from here is one whose replay did
     /// not reproduce its canvas at save time; it is carried as a PNG instead.
     pub windows: Vec<V6WindowOpsDto>,
+    /// The two v6 screen layers that ride BESIDE the window canvases (SQ-0814):
+    /// the `erase_window` fills and the canvas anchors. Both are bounded, so both
+    /// travel as a recipe rather than as pixels — unlike the painted ground, whose
+    /// inputs are unbounded (`pictures/ground.png`).
+    #[serde(default)]
+    pub layers: V6LayersDto,
+}
+
+/// The v6 screen layers that live outside the window tree and outside the canvas
+/// (SQ-0814): what the last `erase_window` on each window filled, and where each
+/// window's canvas was painted.
+///
+/// Both were per-session before this — neither archived nor reset — so a host Save
+/// State left the PRE-RESTORE screen's fills and anchors standing under the restored
+/// window table. Nothing repaints them away: Quetzal saves no screen state by design
+/// because the standard assumes the STORY repaints, and a Save State swaps memory
+/// under a game that never learns it happened.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct V6LayersDto {
+    /// The `erase_window` fills that are STILL COVERING, in PAINT ORDER (ascending
+    /// draw stamp) — the order is the recipe, the stamp itself is not. Draw stamps
+    /// come from a process-global counter, so a restore re-stamps these from the
+    /// live counter exactly as the canvases are re-stamped, and only their relative
+    /// order has to survive.
+    ///
+    /// Covering is the whole of a fill's remaining state. `session::WindowFill` also
+    /// carries the window-0 character count at the moment it was painted, and
+    /// `GameSession::screen` covers with a fill only while that count still EQUALS
+    /// the live one — one character of prose since, and the fill is no longer the
+    /// newest thing on the screen. That count only ever grows (its one reset,
+    /// `@restart`, clears every fill in the same breath), so a fill the story has
+    /// printed past can never cover again and carrying it would restore a record
+    /// nothing can read. What travels is what still paints.
+    pub fills: Vec<V6FillDto>,
+    /// Where each window's canvas content was painted, ascending by window.
+    pub anchors: Vec<V6AnchorDto>,
+}
+
+/// One window's surviving `erase_window` fill (`session::WindowFill`, SQ-0584), in
+/// the game's own native pixels and a packed RGB colour — no cell geometry, so it
+/// restores onto any terminal and any graphics backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct V6FillDto {
+    pub win: u8,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    /// Packed RGB (`0x00RRGGBB`) the erase painted; 0 is the page default.
+    pub bg: u32,
+}
+
+/// Where one window's canvas was painted (`session::CanvasAnchor`, SQ-0715): the
+/// window's 1-based screen origin at draw time, and the footprint the draws covered
+/// in canvas coords. Native pixels throughout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct V6AnchorDto {
+    pub win: u8,
+    pub origin_x: u16,
+    pub origin_y: u16,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
 }
 
 /// One v6 window's display list, with the canvas size to replay it into.
@@ -126,13 +190,15 @@ const ENTRY_GROUND: &str = "pictures/ground.png";
 /// its art, not just its text (SQ-0518). Sibling metadata is `TranscriptData.images`.
 const ENTRY_TRANSCRIPT_IMG_PREFIX: &str = "transcript-img/";
 
-/// Bumped to 6 for SQ-0588: a v6 archive now carries its display list, and omits
-/// the canvas PNG for every window whose replay reproduced the live canvas at save
-/// time. Older archives (≤5) still load — they take the PNG path, which is what
-/// this build falls back to anyway — but an older BUILD reading a version-6 archive
-/// would find neither a PNG nor a list it understands and restore those windows
-/// blank, so the version check must reject it (see `load_archive`).
-pub const CURRENT_FORMAT_VERSION: u32 = 6;
+/// Bumped to 7 for SQ-0814: `display.json` now also carries the v6 screen layers
+/// that ride beside the window canvases — the `erase_window` fills and the canvas
+/// anchors ([`V6LayersDto`]). An older BUILD reading a version-7 archive would drop
+/// them and restore a screen wearing the previous session's fills, so the version
+/// check must reject it (see `load_archive`).
+///
+/// Version 6 was SQ-0588: a v6 archive carries its display list, and omits the
+/// canvas PNG for every window whose replay reproduced the live canvas at save time.
+pub const CURRENT_FORMAT_VERSION: u32 = 7;
 
 /// What asked for this archive to be written (SQ-0531). Both triggers produce the
 /// SAME `.babelmap` container — map, transcript, screen, aux and all — so an
@@ -1847,7 +1913,7 @@ mod tests {
     // bump (update this pin + a migration/release note), never accidental drift.
     #[test]
     fn format_version_constant_is_frozen() {
-        assert_eq!(CURRENT_FORMAT_VERSION, 6, "archive format_version changed — see docs/release/save-format-policy.md");
+        assert_eq!(CURRENT_FORMAT_VERSION, 7, "archive format_version changed — see docs/release/save-format-policy.md");
     }
 
     // SQ-0531: `trigger` is persisted metadata, so its wire spelling is pinned —
