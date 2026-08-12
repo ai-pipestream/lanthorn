@@ -28,6 +28,17 @@ identifies which beta it is without reading its git hash.
 
 ### Fixed
 
+- **A content warning is not somewhere you can stand.** Cragne Manor opens on two
+  full-page warnings, each with its title set in the same bold the game uses for a
+  room, and both were minting nodes on the automap before play began. Front matter
+  that ends by asking for a keypress was already rejected; these pages ask you to
+  *type* yes or no, which looked exactly like a turn ending at the command prompt.
+  It isn't one: only the parser prints a `>`, and a page that reads its own answer
+  never does. babelmap now asks whether the prompt is actually there rather than
+  whether the game wants typing, which throws out the whole family — warnings,
+  gates, credits pages and title plates that read a line — while every real room
+  in the Glulx library, including Adventure's terse `superbrief` rooms, still
+  lands on the map.
 - **The terminal's answers stop being typed into your story.** Launching a game
   could skip the intro and leave `0;rgb:ffff/ffff/ffff11;rgb:2828/2c2c/3434` on
   the first input line, with a beep and a stack of "restore a saved position?"

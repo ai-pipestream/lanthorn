@@ -87,6 +87,56 @@ fn the_bats_title_page_and_prologue_are_not_rooms() {
 }
 
 #[test]
+fn cragnes_warning_pages_are_not_rooms() {
+    // cragne Manor opens on two front-matter pages -- CONTENT WARNING and CONCEPT
+    // WARNING -- each an own-line `Subheader` above a blank line, and each ending by
+    // reading a LINE ("Please type yes or no."), not a keypress. So the shape test and
+    // the keypress test both pass them, and both became rooms. Neither page ever prints
+    // the parser's command prompt, because the game reads the answer itself: only a
+    // completed turn hands back a ">". (SQ-0733)
+    let Some(mut s) = boot("cragne.gblorb") else { return };
+
+    let mut seen: Vec<String> = Vec::new();
+    let note = |loc: Option<app::engine::LocationInfo>, seen: &mut Vec<String>| {
+        if let Some(r) = loc {
+            if !seen.contains(&r.name) {
+                seen.push(r.name);
+            }
+        }
+    };
+    note(s.current_location(), &mut seen);
+
+    // Boot ends on a keypress; then "yes" to each warning page, then a "press any key
+    // to begin" page, and only then the first real room.
+    for _ in 0..6 {
+        let t = match s.pending_input() {
+            InputKind::Char => match s.submit_key(KeyInput::Enter) {
+                Some(t) => t,
+                None => break,
+            },
+            InputKind::Line => Engine::submit(&mut s, "yes"),
+            _ => break,
+        };
+        note(t.location, &mut seen);
+        if !seen.is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        s.pending_input(),
+        InputKind::Line,
+        "precondition: the warning pages are answered and the game wants a command"
+    );
+    assert_eq!(
+        seen,
+        vec!["Railway Platform (Naomi Hinchen)".to_string()],
+        "cragne's first room is the Railway Platform; CONTENT WARNING and CONCEPT \
+         WARNING are pages the game reads an answer from, not places on the map"
+    );
+}
+
+#[test]
 fn a_superbrief_room_with_only_an_object_list_is_still_a_room() {
     // Adventure in `superbrief` prints "Inside Building", a blank line, and then only the
     // things lying about — the same detached shape as a banner. It is a room because the

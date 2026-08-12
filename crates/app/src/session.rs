@@ -3247,6 +3247,16 @@ pub(crate) fn strip_read_prompt(s: &str) -> &str {
     trimmed
 }
 
+/// Whether `s` ends with the read prompt [`strip_read_prompt`] would remove —
+/// i.e. whether the game just handed the player its command prompt.
+///
+/// Defined in terms of `strip_read_prompt` rather than beside it so the two can
+/// never drift: babelmap has exactly one notion of "the game's read prompt", and
+/// a game whose prompt this misses already shows the player a doubled prompt.
+pub(crate) fn ends_with_read_prompt(s: &str) -> bool {
+    strip_read_prompt(s).len() < s.trim_end_matches([' ', '\t']).len()
+}
+
 /// Downcast `machine.out` to `&mut CaptureSink`.
 ///
 /// Panics if the machine was not built with a `CaptureSink` (should never

@@ -220,6 +220,10 @@ pub struct AppGlk {
     /// Set once `heading_tail_text` hit the cap: whatever follows the blank line
     /// is far too long to be a bare read prompt, so it is prose.
     heading_tail_prose: bool,
+    /// The last [`PROMPT_TAIL_CAP`] chars written to the primary buffer window,
+    /// kept only to answer "does the stream end at the game's read prompt?" —
+    /// the test for a parser command prompt rather than a bare line read.
+    prompt_tail: String,
     /// Graphics-window pixel canvases, keyed by window id.
     graphics: std::collections::BTreeMap<u32, crate::graphics::Canvas>,
     /// The `(width, height)` of one text-grid cell in pixels, for pixel↔cell
@@ -253,6 +257,11 @@ impl Default for AppGlk {
 /// How much output after the blank line following a heading candidate is kept.
 /// Only enough to recognise a bare read prompt; anything longer is prose.
 const HEADING_TAIL_CAP: usize = 32;
+
+/// How much of the primary window's trailing output is kept in
+/// `AppGlk::prompt_tail`. Only enough to see a read prompt and the newline that
+/// puts it at line start.
+const PROMPT_TAIL_CAP: usize = 32;
 
 /// Where the primary window's output stream sits relative to the heading
 /// candidate held in `AppGlk::heading_pending` — the states of the "is this
@@ -310,6 +319,7 @@ impl AppGlk {
             heading_tail: HeadingTail::Idle,
             heading_tail_text: String::new(),
             heading_tail_prose: false,
+            prompt_tail: String::new(),
             graphics: BTreeMap::new(),
             char_px,
             picts,
@@ -630,6 +640,26 @@ impl AppGlk {
         }
     }
 
+    /// Keep the last [`PROMPT_TAIL_CAP`] chars of the primary window's output.
+    fn note_prompt_tail(&mut self, s: &str) {
+        self.prompt_tail.push_str(s);
+        let n = self.prompt_tail.chars().count();
+        if n > PROMPT_TAIL_CAP {
+            let cut = self
+                .prompt_tail
+                .char_indices()
+                .nth(n - PROMPT_TAIL_CAP)
+                .map_or(self.prompt_tail.len(), |(i, _)| i);
+            self.prompt_tail.drain(..cut);
+        }
+    }
+
+    /// Whether the primary window's output currently ends at the game's read
+    /// prompt — the last thing an Inform parser prints before reading a command.
+    fn ends_at_read_prompt(&self) -> bool {
+        crate::session::ends_with_read_prompt(&self.prompt_tail)
+    }
+
     /// Accept the pending candidate as this turn's room heading.
     fn confirm_heading(&mut self) {
         if let Some(name) = self.heading_pending.take() {
@@ -656,20 +686,28 @@ impl AppGlk {
     /// Return and clear the last `Subheader` room heading captured since the
     /// previous call. Drained once per turn, alongside `take_transcript`.
     ///
-    /// `awaiting_command` says whether the turn ended with the game asking for a
-    /// typed command (Glk line input) rather than a keypress. It is the second
-    /// half of the banner test: a heading that a blank line has already detached
-    /// from the prose below it is a room only if the player is being handed the
-    /// command prompt. A game that instead says "press any key to continue" was
-    /// showing a page — THE BAT's title, its act list and its prologue's
-    /// newspaper strapline are all own-line `Subheader` lines on such pages, and
-    /// each used to mint a room before play began (SQ-0732).
+    /// `awaiting_line_input` says whether the turn ended with the game reading a
+    /// line rather than a keypress. Together with the read prompt this backend
+    /// saw last, it forms the second half of the banner test: a heading that a
+    /// blank line has already detached from the prose below it is a room only if
+    /// the player is being handed the parser's **command prompt**.
     ///
-    /// The two halves are deliberately an AND. Either alone loses real rooms:
+    /// Line input alone is not that prompt, and the difference is the whole of
+    /// SQ-0733. A page that says "press any key to continue" is obviously not a
+    /// turn — THE BAT's title, its act list and its prologue's newspaper
+    /// strapline are all own-line `Subheader` lines on such pages, and each used
+    /// to mint a room before play began (SQ-0732). But a front-matter page can
+    /// just as well read a *line*: cragne Manor's CONTENT WARNING and CONCEPT
+    /// WARNING pages each end "Would you still like to continue? (Please type yes
+    /// or no.)" and read the answer directly. What no such page does is print the
+    /// prompt: only a completed turn hands back "\n>", because only the parser
+    /// prints it. So the test is the prompt, not the input kind.
+    ///
+    /// The halves are deliberately an AND. Either alone loses real rooms:
     /// Adventure in `superbrief` prints "Inside Building", a blank line and then
     /// only its object list, while a room heading can perfectly well be followed
     /// by a cutscene that ends on a keypress.
-    pub fn take_room_heading(&mut self, awaiting_command: bool) -> Option<String> {
+    pub fn take_room_heading(&mut self, awaiting_line_input: bool) -> Option<String> {
         if self.in_heading {
             self.finalize_heading(); // flush a heading with no trailing separator yet
             self.in_heading = false;
@@ -679,7 +717,8 @@ impl AppGlk {
         let detached = self.heading_tail == HeadingTail::Detached
             && (self.heading_tail_prose
                 || !crate::session::strip_read_prompt(&self.heading_tail_text).trim().is_empty());
-        if detached && !awaiting_command {
+        let at_command_prompt = awaiting_line_input && self.ends_at_read_prompt();
+        if detached && !at_command_prompt {
             self.heading_pending = None;
             self.heading_tail = HeadingTail::Idle;
             self.heading_tail_text.clear();
@@ -965,6 +1004,7 @@ impl GlkBackend for AppGlk {
     fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, link: u32, s: &str) {
         if Some(win) == self.primary {
             self.capture_heading(style, s);
+            self.note_prompt_tail(s);
         }
         let (bits, fg, bg) = resolve_glk_colour(style, colour, attrs);
         let para = resolve_glk_para(attrs);
@@ -1008,6 +1048,9 @@ impl GlkBackend for AppGlk {
             self.at_line_start = true;
             self.in_heading = false;
             self.heading_acc.clear();
+            // The wiped window took its read prompt with it: the stream no longer
+            // ends at one, whatever stood there before the clear.
+            self.prompt_tail.clear();
             // The wiped window carries away the blank line that would have judged
             // a pending candidate, so settle it now: a heading already printed
             // stands, exactly as it did before the candidate slot existed.
@@ -2125,6 +2168,44 @@ mod heading_tests {
         put(&mut b, GlkStyle::Subheader, "At End Of Road\n");
         put(&mut b, GlkStyle::Normal, "\n>");
         assert_eq!(b.take_room_heading(false).as_deref(), Some("At End Of Road"));
+    }
+
+    #[test]
+    fn a_detached_heading_on_a_page_that_reads_a_line_without_prompting_is_not_a_room() {
+        // cragne Manor's opening page. It is textually the same shape as a superbrief
+        // room -- own-line heading, blank line, more text -- and it ends at Glk LINE
+        // input, so "the turn ended at a keypress" never fires. What it never does is
+        // print the parser's command prompt: the game reads the answer itself. (SQ-0733)
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "CONTENT WARNING");
+        put(&mut b, GlkStyle::Normal, "\n\nPlease be warned that this game contains:\n\n");
+        put(&mut b, GlkStyle::Normal, "cosmic horror, body horror, gore, violence.\n\n");
+        put(&mut b, GlkStyle::Normal, "Would you still like to continue? (Please type yes or no.)\n");
+        assert_eq!(b.take_room_heading(true), None);
+    }
+
+    #[test]
+    fn a_detached_heading_followed_by_prose_is_a_room_when_the_prompt_follows() {
+        // The same page shape, ended by the command prompt, is a room -- what rejects
+        // cragne's warning is the missing prompt, not the length of what follows the
+        // blank line. A room walked into mid-cutscene looks exactly like this.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Railway Platform");
+        put(&mut b, GlkStyle::Normal, "\n\nYou stand on a platform. There is a wooden bench, ");
+        put(&mut b, GlkStyle::Normal, "a storage locker, and a vending machine.\n\n>");
+        assert_eq!(b.take_room_heading(true).as_deref(), Some("Railway Platform"));
+    }
+
+    #[test]
+    fn a_cleared_window_carries_its_read_prompt_away() {
+        // A prompt printed before a `glk_window_clear` is no longer on screen, so it
+        // cannot vouch for a heading printed into the fresh window.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Normal, "Anything at all.\n\n>");
+        b.window_clear(1);
+        put(&mut b, GlkStyle::Subheader, "CONTENT WARNING");
+        put(&mut b, GlkStyle::Normal, "\n\nType yes or no.\n");
+        assert_eq!(b.take_room_heading(true), None);
     }
 
     #[test]
