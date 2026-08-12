@@ -313,6 +313,24 @@ leaves the story window with zero height, which is exactly what Zork Zero's
 full-screen title splash relies on. Nothing is carved over the picture, and the
 game re-places the window itself when the splash goes.
 
+## A window keeps its own text style
+
+Bold, italic and reverse video are *per window* in Version 6. The standard lists
+the style as window property 10 (§8.8.3.2) and says it "is set just as in Version
+4, using `set_text_style` (which sets that for the current window)" — so selecting
+a window makes that window's style live, exactly as it makes that window's colour
+pair live. A game can leave the status bar reversed indefinitely and go on printing
+plain prose below it, and on a conforming interpreter it never has to say so.
+
+Shogun does precisely that, but only when it thinks it is on an Amiga: it selects
+window 1, turns reverse video on, paints the status line, and returns to window 0
+without turning it off. Reading the style as one global setting therefore left the
+Amiga release printing everything in inverse from its second turn onwards — the `>`
+prompt, the room headings, the death notice. It is the kind of bug that only one
+build shows, so it is worth saying which: `James Clavell's Shogun.adf`, release 295
+/ serial 890321, which is a different build from the `shogun-r322-s890706.z6`
+sitting beside it and the only title in the corpus the fix moves at all.
+
 ## The authentic screen: 640×400, an 8×16 cell, art doubled
 
 There's a subtlety in "how big is this thing" that decides whether the whole

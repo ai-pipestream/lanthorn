@@ -1954,15 +1954,28 @@ impl Machine {
             // window" — selecting a window must NOT disturb the cursor it
             // remembers. It does become the window whose colour pair the prose
             // stream prints in (§8.3), so mirror that pair.
+            //
+            // …and its TEXT STYLE with it (SQ-0778). §8.8.3.2 makes the style
+            // window property 10, and §8.8.3.2.3 says it "is set just as in
+            // Version 4, using set_text_style (which sets that for the current
+            // window)" — so in v6 the style belongs to a window exactly as the
+            // colour pair does, and selecting a window makes that window's style
+            // the live one. Only the colours were mirrored, so a game that
+            // reverse-videos its status line in window 1 and switches back to
+            // window 0 without a `set_text_style 0` went on printing reversed:
+            // Amiga Shogun's `>` prompt (and its room headings, and its death
+            // notice) came out inverted from the second turn onwards.
             0x0B => {
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as u8;
                 if self.trace_screen { self.screen_trace.push(format!("@set_window({})", zscreen_window_name(win as u16))); }
                 let mut mirror = None;
+                let mut style = None;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     let w = win as usize;
                     if w < v6.windows.len() {
                         v6.current = win;
                         mirror = Some((v6.windows[w].fg, v6.windows[w].bg));
+                        style = Some(v6.windows[w].text_style as u8);
                     }
                 } else {
                     self.screen.current_window = win;
@@ -1972,6 +1985,9 @@ impl Machine {
                     }
                 }
                 self.mirror_v6_colours(mirror);
+                if let Some(s) = style {
+                    self.screen.text_style = s;
+                }
                 StepResult::Continue
             }
             // 0x0D erase_window — clear window (state-tracking only; no render).
