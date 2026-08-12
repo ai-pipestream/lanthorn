@@ -4190,6 +4190,53 @@ impl AppState {
         }
     }
 
+    /// [`push_transcript_runs`](Self::push_transcript_runs) for a `read_char` turn,
+    /// folding a bare KEYSTROKE ECHO onto the line the player is typing on instead
+    /// of opening a new one (SQ-0726).
+    ///
+    /// Every push starts a new transcript line, which is how the host supplies the
+    /// newline an interpreter echoes after a `read` (ZMSD §7.1.1.1): the typed
+    /// command is appended to the game's `>` prompt and the reply opens the line
+    /// below. `read_char` echoes nothing at all (§10.7), so a keypress turn inherits
+    /// no newline and that implicit one is a fabrication. sunburst.z6 is the report:
+    /// it has no line reader of its own — it runs `read_char` in a loop and
+    /// `print_char`s each keystroke straight back — so the player's word arrived one
+    /// character per transcript line, the first of them a line below the prompt.
+    ///
+    /// Only the echo folds. Dropping the fabricated newline for EVERY keypress turn
+    /// is the same statement and reads better on paper, but it was measured across
+    /// the v6 corpus and it moves six other titles: it joins Arthur's, Shogun's,
+    /// Journey's, advent's and fmvpoker's menu repaints to the line above and
+    /// concatenates four of mysterious01's re-asked prompts into one. Those games
+    /// reposition between reprints in ways the host transcript does not model, so
+    /// "continues the line" is not decidable from the turn's text alone — except in
+    /// the one case where the text IS the keystroke, which nothing else in the
+    /// corpus produces. The general form wants the game's own cursor and is a
+    /// separate piece of work (SQ-0804, which carries the measurements).
+    ///
+    /// The fold is [`merge_line_into_previous`](Self::merge_line_into_previous) —
+    /// the same call the game-self-echo path uses — so the echoed character's style
+    /// runs shift onto the line they join rather than being dropped. A last line
+    /// that is not game output (a `/help` dump, the host's own command echo) is left
+    /// alone, on the same rule as
+    /// [`last_transcript_line_is_story`](Self::last_transcript_line_is_story).
+    pub fn push_transcript_runs_char_echo(
+        &mut self,
+        text: &str,
+        kind: TranscriptKind,
+        chunks: &[crate::session::CaptureRun],
+    ) {
+        // One character and no line break of its own: the game handed back what the
+        // player pressed, and an echo belongs where the player is typing.
+        let echo = text.chars().count() == 1 && !text.starts_with('\n');
+        let fold = echo && self.last_transcript_line_is_story();
+        let before = self.transcript.len();
+        self.push_transcript_runs(text, kind, chunks);
+        if fold && self.transcript.len() > before {
+            self.merge_line_into_previous(before);
+        }
+    }
+
     /// Append a logical image unit: an empty placeholder line tagged `Story`
     /// carrying an inline image, keeping the parallel Vecs length-synced.
     pub fn push_transcript_image(&mut self, img: crate::inline_image::InlineImage) {
