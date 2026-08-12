@@ -709,7 +709,28 @@ session-only switch that never touches your saved config:
   genuinely out of reach is the underground's *stone alternation* — Spatterlight
   swaps the two flanks' 37-pixel stone blocks on alternate tiles so the courses
   trade sides, and that is a statement about the pair which only the scene identity
-  justifies. One trap the recipe has to dodge:
+  justifies.
+  The obvious escape from all of this — autocorrelate the flank down its own y
+  axis, take the strongest period as the tile height, and never ask which scene is
+  on screen — was measured across the corpus and **does not work**, for a reason
+  that is structural rather than a matter of tuning: *a pillar shaft has no
+  period*. `.MG1`'s is uniform, its rows pixel-identical, so every lag scores
+  exactly alike and the search answers with the smallest one it is offered — a
+  4-row repeat unit against the 284 the shape measurement gives. `.CG1`'s is a lit
+  column shading 97 down to 82, and a gradient is no more periodic than a flat
+  wall, so its best lag scores *worse* than an average one. Meanwhile the two
+  scenes the idea was meant to rescue fare worse still: the underground's stone
+  course does turn up at 74 rows, but with no more confidence than a coin toss, and
+  on `.CG1` the two flanks disagree about it — 76 left against 74 right, the very
+  asymmetry the majority test had just finished removing. The statistic rewards
+  self-similarity, and a plain shaft is more self-similar than patterned masonry,
+  which makes it anti-correlated with the thing it was asked to detect. No
+  threshold anywhere in the corpus admits the underground and the jungle without
+  also admitting the castle, Arthur's poles and Shogun's slab, whose repeat units
+  are not periods in the art at all but choices about how much of it to reuse. The
+  per-scene dispatch stays, and the corpus measurement is pinned so that a future
+  statistic which *does* separate it will say so out loud.
+  One trap the recipe has to dodge:
   the canvas a band ships is the artwork *minus* whatever the renderer draws as
   terminal cells instead, so a repeat cut from it copies the holes those cells
   left. Shogun's status line is two 16-pixel rows the top of its border sits
