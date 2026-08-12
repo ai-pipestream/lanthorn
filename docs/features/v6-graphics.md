@@ -528,7 +528,18 @@ session-only switch that never touches your saved config:
   which on a 64-row pane left the frame standing open down its lower half). The
   three recipes are per title, because the artwork is: the mechanism is a port of
   Bocfel's `draw_border.cpp`, which Spatterlight ships, and which hard-codes per
-  game *and* per platform for the same reason. One trap that recipe has to dodge:
+  game *and* per platform for the same reason. It can afford to, because it draws
+  one rendition per run; babelmap lets you switch archives mid-library, and Zork
+  Zero's renditions **disagree about where its pillars start** — the banner above
+  them is 34 raw rows on MCGA, 37 on EGA and 39 on CGA, while the pillars are 166
+  rows in all three. A repeat unit pinned to one of those layouts lands inside the
+  ring beneath the capital on the other two and tiles that ring down the whole
+  column as a horizontal seam. So Zork Zero's pillars are **measured, not pinned**:
+  the shaft is the longest run of rows holding one opaque width, the capital and
+  base are what flare out above and below it, and the cut, the repeat and the foot
+  all come off that. On the MCGA and Amiga art the measurement returns Bocfel's own
+  four constants to the row, which is what makes it a derivation of them rather
+  than a replacement. One trap that recipe has to dodge:
   the canvas a band ships is the artwork *minus* whatever the renderer draws as
   terminal cells instead, so a repeat cut from it copies the holes those cells
   left. Shogun's status line is two 16-pixel rows the top of its border sits

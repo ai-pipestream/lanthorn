@@ -24,14 +24,17 @@
 //! handler per title. The "derive a general tile-vs-stretch discriminator"
 //! requirement was dropped deliberately (SQ-0698, 2026-08-11): the reference
 //! could not do it either, hard-coding per game *and* per platform. What is
-//! derived here is only WHICH of the three known layouts a flank is showing
-//! ([`recognize`]), from the art's own native extent; the constants are per
-//! title, named, and sourced.
+//! derived here is WHICH of the three known layouts a flank is showing
+//! ([`recognize`]), from the art's own native extent — and, for Zork Zero, WHERE
+//! its pillars are ([`pillar_shaft`]), because babelmap lets the player choose
+//! the rendition and Bocfel does not. Everything else is per title, named, and
+//! sourced.
 //!
 //! Every row coordinate in this file is in babelmap's v6 **unit space**, which
-//! is the art's own pixels doubled (`session::V6_ART_SCALE` = 2). Bocfel's
-//! constants are in raw art rows, so each one appears here doubled, and the
-//! doubling is called out at every constant.
+//! is the art's own pixels doubled *vertically* (`session::V6_ART_SCALE` = 2;
+//! the horizontal factor is 1 for a 640-wide EGA or CGA archive, whose pixels
+//! are half as wide — SQ-0790). Bocfel's constants are in raw art rows, so each
+//! one appears here doubled, and the doubling is called out at every constant.
 
 use image::{Rgba, RgbaImage};
 
@@ -322,36 +325,128 @@ fn shogun(dst: &mut RgbaImage, art: &RgbaImage, border_height: u32, desired_heig
     tile_down(dst, &block, lowest, desired_height, 0, false, false);
 }
 
-/// **Zork Zero** — `extend_pillars(43, 13, 200, 142, 0, false, false)`, the
-/// CASTLE border on the VGA / Amiga / Blorb artwork (`zorkzero.cpp`).
+/// The plain **shaft** of a pillar — `(top, bottom_exclusive)` — as the art
+/// itself declares it, or `None` when this flank shows no pillar shape.
 ///
-/// Doubled into unit space: cut at row **86**, repeat a **284**-row unit, keep
-/// the bottom **26** rows as the foot, no overlap, no flip. (Bocfel's other
-/// platforms differ — EGA `(45, 13, 203, 144, 9, …)`, CGA `(52, 25, 205, 133,
-/// 11, flip=true)` — and its EGA/CGA art is not what a Blorb or an Amiga floppy
-/// ships us.)
+/// A pillar is a capital, a shaft and a base, and the shaft is the only part of
+/// it that repeats. What separates the three in the pixels is WIDTH: the capital
+/// and the base flare out, and the shaft between them holds one span for
+/// hundreds of rows. So the shaft is the longest run of consecutive rows whose
+/// opaque column span (first and last painted column) is identical, and it
+/// counts as a pillar only when
+///
+/// * that span is strictly NARROWER than the flank's widest painted row — there
+///   is a capital or a base wider than it, which is what makes the shape a
+///   pillar rather than a slab; and
+/// * something is painted above it and something below it, so there is a
+///   capital to cut beneath and a base to stamp back on.
+///
+/// Rows are compared by span rather than by pixel count on purpose: the CGA
+/// rendition dithers its masonry, so the number of opaque pixels in a shaft row
+/// wobbles from row to row while its edges do not move at all.
+///
+/// Only rows `[0, art_bottom)` are considered — below that is the caller's
+/// extension, not the game's art.
+fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
+    let w = dst.width();
+    let span = |y: u32| -> Option<(u32, u32)> {
+        let mut first = None;
+        let mut last = 0;
+        for x in 0..w {
+            if dst.get_pixel(x, y)[3] >= 128 {
+                first.get_or_insert(x);
+                last = x;
+            }
+        }
+        first.map(|f| (f, last))
+    };
+    let rows: Vec<Option<(u32, u32)>> = (0..art_bottom.min(dst.height())).map(span).collect();
+    let widest = rows.iter().flatten().map(|(f, l)| l - f + 1).max()?;
+    let (mut best, mut cur) = ((0u32, 0u32), (0u32, 0u32));
+    for (y, s) in rows.iter().enumerate() {
+        let y = y as u32;
+        if y > 0 && *s == rows[y as usize - 1] {
+            cur.1 = y + 1;
+        } else {
+            cur = (y, y + 1);
+        }
+        if s.is_some() && cur.1 - cur.0 > best.1 - best.0 {
+            best = cur;
+        }
+    }
+    let (top, bottom) = best;
+    let (first, last) = rows.get(top as usize).copied().flatten()?;
+    if last - first + 1 >= widest || top == 0 || bottom >= art_bottom {
+        return None;
+    }
+    Some((top, bottom))
+}
+
+/// **Zork Zero** — `extend_pillars(43, 13, 200, 142, 0, false, false)`, the
+/// CASTLE border on the VGA / Amiga / Blorb artwork (`zorkzero.cpp`), with
+/// every one of those four numbers **measured off the art** instead.
+///
+/// Bocfel can hard-code them because it only ever draws one rendition per run,
+/// chosen by display mode; babelmap lets the player switch archives, and Zork
+/// Zero's renditions do not agree on where the pillars begin. The banner above
+/// them is 34 raw rows on MCGA, **37 on EGA and 39 on CGA**, while the pillars
+/// are 166 rows in all three — so a cut pinned to 86 in unit space lands 6 rows
+/// high under EGA and 10 under CGA, inside the ring beneath the capital, and
+/// every tile boundary then repeats that ring as a horizontal seam. SQ-0799.
+///
+/// What is measured is [`pillar_shaft`], and the four constants fall out of it:
+///
+/// | Bocfel (raw)            | derived from the shaft `[top, bottom)`      |
+/// |-------------------------|---------------------------------------------|
+/// | `place_to_cut` = 43     | `top + INSET`                               |
+/// | `foot_height` = 13      | `art_bottom - bottom`                       |
+/// | `total_height` = 200    | `art_bottom` (the caller already measured)  |
+/// | `pillar_height` = 142   | `bottom - top - 2·INSET`                    |
+///
+/// **`INSET` is the one number that cannot be derived**, and it is 2 raw rows —
+/// Bocfel keeps its repeat unit that far clear of the capital above and the base
+/// below, which is the whole of the difference between its constants and the
+/// shaft this measures. On the MCGA/Amiga/Blorb art the shaft is unit rows
+/// `[82, 374)` of a 400-row flank, and the table above returns **86 / 26 / 400 /
+/// 284** — Bocfel's four constants exactly, which is what makes this a
+/// derivation of them rather than a replacement for them.
+///
+/// When the flank shows no pillar shape at all, `pillar_shaft` says so and those
+/// constants are used as written. That is not a fallback for Zork Zero — every
+/// Zork Zero rendition measured declares a shaft — but for the DOS renditions of
+/// **Shogun**, whose single-piece border is a constant-width slab that happens to
+/// reach the native screen bottom and is therefore classified here as
+/// [`BorderArt::ZorkZeroPillars`]. Its flanks are drawn exactly as they were
+/// before this measurement existed; the misclassification is SQ-0802, not this.
 ///
 /// **Known limitation, deliberate.** Zork Zero has three scene borders and
 /// Bocfel gives each its own routine: castle (above), `extend_underground_pillars(73,
 /// 54, 200, 74, 38, 37)` — which alternates left/right stone blocks so the
 /// masonry stays consistent — and `extend_jungle_pillars(67, 210, 143, 59)`.
 /// Which one is on screen is a Z-machine global Bocfel reads and we cannot: the
-/// canvas is pixels. The castle constants are used for all three. They degrade
-/// gracefully — the cut at row 86 is below the capital in every one of the
-/// three, and the bottom 26 rows are the base in every one of the three — but a
-/// jungle screen loses its 59-row overlap and may show a seam. SQ-0792.
+/// canvas is pixels. Measuring the shaft rather than pinning it helps here too —
+/// a jungle or underground flank is cut beneath its own capital rather than
+/// beneath the castle's — but a jungle screen still loses its 59-row overlap and
+/// may show a seam. SQ-0792.
 fn zork_zero(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
+    /// How far Bocfel's repeat unit stays clear of the capital above it and the
+    /// base below it: 2 raw rows at each end, doubled into unit space.
+    const INSET: u32 = 4;
     /// `extend_pillars(top_cut=43, …)` doubled.
     const TOP_CUT: u32 = 86;
     /// `foot_height=13` doubled.
     const FOOT: u32 = 26;
     /// `pillar_height=142` doubled.
     const UNIT: u32 = 284;
-    if art_bottom <= TOP_CUT + FOOT {
+    let (top_cut, foot, unit) = match pillar_shaft(dst, art_bottom) {
+        Some((top, bottom)) => (top + INSET, art_bottom - bottom, (bottom - top).saturating_sub(2 * INSET)),
+        None => (TOP_CUT, FOOT, UNIT),
+    };
+    if unit == 0 || foot == 0 || art_bottom <= top_cut + foot {
         return;
     }
-    let unit = UNIT.min(art_bottom - FOOT - TOP_CUT);
-    extend_pillars(dst, TOP_CUT, FOOT, art_bottom, unit, 0, false, desired_height);
+    let unit = unit.min(art_bottom - foot - top_cut);
+    extend_pillars(dst, top_cut, foot, art_bottom, unit, 0, false, desired_height);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -585,6 +680,100 @@ mod tests {
             blank.first().map(|y| y + 37),
             2 * H - 4
         );
+    }
+
+    /// A synthetic Zork Zero flank: a full-width banner, then a pillar whose
+    /// capital ends in a **ring wider than the shaft** — the feature that gives
+    /// a mis-placed cut away, because a tile that starts inside it repeats it
+    /// down the whole column. Everything below the shaft is the base, and the
+    /// pillar is clipped at row 400 exactly as a taller banner clips it on screen.
+    fn zork_zero_flank(banner: u32) -> RgbaImage {
+        const W: u32 = 86;
+        let mut c = RgbaImage::new(W, 400);
+        let mut band = |y0: u32, y1: u32, x0: u32, x1: u32, v: u8| {
+            for y in y0..y1.min(400) {
+                for x in x0..x1 {
+                    c.put_pixel(x, y, Rgba([v, v / 2, 9, 255]));
+                }
+            }
+        };
+        band(0, banner, 0, W, 200); // banner, full flank width
+        band(banner, banner + 10, 4, 78, 150); // capital
+        band(banner + 10, banner + 14, 2, 80, 250); // the ring under it
+        band(banner + 14, banner + 306, 14, 62, 100); // the plain shaft
+        band(banner + 306, banner + 332, 2, 80, 180); // the base
+        c
+    }
+
+    /// SQ-0799 — the shaft is found from the art, at whatever row the banner
+    /// above it happens to end.
+    #[test]
+    fn the_pillar_shaft_is_measured_from_the_art_not_pinned_to_one_banner_height() {
+        // MCGA's 34-row banner doubled, EGA's 37, CGA's 39.
+        for (banner, want) in [(68u32, (82u32, 374u32)), (74, (88, 380)), (78, (92, 384))] {
+            assert_eq!(
+                pillar_shaft(&zork_zero_flank(banner), 400),
+                Some(want),
+                "a {banner}-row banner puts the shaft at {want:?}"
+            );
+        }
+        // And on the MCGA layout the measurement reproduces Bocfel's own castle
+        // constants: cut 86 = 82 + 4, foot 26 = 400 - 374, unit 284 = 292 - 8.
+        let (top, bottom) = pillar_shaft(&zork_zero_flank(68), 400).expect("a shaft");
+        assert_eq!((top + 4, 400 - bottom, bottom - top - 8), (86, 26, 284));
+    }
+
+    /// A single-piece border of one constant width — Shogun's DOS renditions,
+    /// which reach the native screen bottom and are therefore handed to the Zork
+    /// Zero handler (SQ-0802). It declares no shaft, so Bocfel's constants stand.
+    #[test]
+    fn a_constant_width_slab_declares_no_shaft() {
+        let slab = solid(46, 400, [9, 9, 9, 255]);
+        assert_eq!(pillar_shaft(&slab, 400), None);
+    }
+
+    /// SQ-0799, the defect as reported: *"for cg1 and eg1 we get a horizontal
+    /// line on zork0 where we are tiling"*.
+    ///
+    /// Zork Zero's banner is 34 raw rows on MCGA but 37 on EGA and 39 on CGA,
+    /// while its pillars are 166 rows in all three — so a cut pinned to unit row
+    /// 86 sits in the plain shaft under MCGA and inside the ring beneath the
+    /// capital under the other two, and every tile boundary repeats that ring.
+    ///
+    /// Falsifiable: put `TOP_CUT`/`FOOT`/`UNIT` back in place of the measurement
+    /// and the 74- and 78-row cases fail with wide rows at the tile boundaries,
+    /// while the 68-row case still passes — which is exactly why neither SQ-0698
+    /// nor SQ-0790 could have seen this.
+    #[test]
+    fn no_tile_boundary_repeats_the_ring_under_the_capital() {
+        const BAND: u32 = 800;
+        for banner in [68u32, 74, 78] {
+            let canvas = zork_zero_flank(banner);
+            let (shaft_top, shaft_bottom) = pillar_shaft(&canvas, 400).expect("a shaft");
+            let base = 400 - shaft_bottom;
+            let out = flank_source(&canvas, &canvas, 0, 86, (0, 400), 400, 0, BAND).expect("extended");
+            // The shaft's own span, read off the art rather than assumed.
+            let span = |img: &RgbaImage, y: u32| {
+                let (mut f, mut l) = (None, 0);
+                for x in 0..img.width() {
+                    if img.get_pixel(x, y)[3] >= 128 {
+                        f.get_or_insert(x);
+                        l = x;
+                    }
+                }
+                f.map(|f| (f, l))
+            };
+            let want = span(&canvas, shaft_top);
+            let wrong: Vec<u32> = (shaft_top..BAND - base).filter(|&y| span(&out, y) != want).collect();
+            assert!(
+                wrong.is_empty(),
+                "a {banner}-row banner leaves {} row(s) of the extended shaft that are not the \
+                 shaft's own span {want:?} — first at {:?}, which is the ring under the capital \
+                 tiled down the column",
+                wrong.len(),
+                wrong.first()
+            );
+        }
     }
 
     #[test]
