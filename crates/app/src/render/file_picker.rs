@@ -109,7 +109,7 @@ pub fn draw_file_picker(
             total,
             viewport,
             picker.scroll.target_offset(),
-            state.colors.theme.get("scrollbar").style,
+            crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme),
         );
     }
 

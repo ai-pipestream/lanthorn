@@ -58,6 +58,7 @@ declared once (no `[elements]`/`[map]` overlap).
 | status_bar, help_bar, upper_window, story_info | chrome | — |
 | status_header, story_title | heading | on chrome |
 | input_line, suggestion_line, scrollbar | line | (role/side deltas) |
+| scrollbar_track | muted | — (the dim channel the thumb runs in; SQ-0782) |
 | transcript_location | accent | — |
 | story_badge | accent | reverse |
 | hyperlink | accent | underline |
@@ -485,7 +486,8 @@ status_header        = { parent = "heading", bg = "black" }
 story_title          = { parent = "heading" }
 input_line           = { parent = "line" }          # add style = "single" to box it
 suggestion_line      = { parent = "line" }          # add style = "single" to box the popup
-scrollbar            = { parent = "line" }
+scrollbar            = { parent = "line" }          # the thumb — drawn as a background fill, not a glyph
+scrollbar_track      = { parent = "muted" }         # the channel behind it, likewise a fill
 transcript_location  = { parent = "accent" }
 story_badge          = { parent = "accent", reversed = true }
 hyperlink            = { parent = "accent", underline = true }

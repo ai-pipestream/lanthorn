@@ -5654,6 +5654,7 @@ mod tests {
         state.config.text_margin_x = mx;
         // Far more lines than the viewport → scrollbar must appear.
         for k in 0..80 { state.push_transcript(&format!("line {k}")); }
+        state.scroll_transcript_to(1); // SQ-0782: the story bar shows because you scrolled
         let model = ScreenModel {
             root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
             status: StatusModel::HostManaged,
@@ -5665,15 +5666,47 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_story_pane(&model, false, None, &state, area, &mut buf);
 
-        let column: String = (0..area.height)
-            .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
-            .collect();
-        assert!(column.contains('█'), "scrollbar thumb should render in the border column, not inset by the margin: {column:?}");
+        // SQ-0782: the bar is a background fill, so look for its colour, not a glyph.
+        let thumb = crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme).thumb;
+        let painted = |x: u16| (0..area.height).any(|y| buf.cell((x, y)).unwrap().bg == thumb);
+        assert!(painted(area.width - 1), "the bar should paint the border column, not one inset by the margin");
         // And the inset column (where the scrollbar used to sit) must be clear of it.
-        let inset_col: String = (0..area.height)
-            .map(|y| buf.cell((area.width - 1 - mx, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
-            .collect();
-        assert!(!inset_col.contains('█'), "no scrollbar inside the margin band: {inset_col:?}");
+        assert!(!painted(area.width - 1 - mx), "no scrollbar inside the margin band");
+    }
+
+    /// SQ-0782: the bar is app chrome, so it keeps its theme colours whatever
+    /// the story painted the page — pinned in BOTH `honor_game_colours` modes
+    /// (true is the shipped default), because a game page colour flooding the
+    /// pane must not repaint the gutter with it.
+    #[test]
+    fn scrollbar_keeps_its_theme_colours_in_both_honor_game_colours_modes() {
+        let mut colours = Vec::new();
+        for honor in [true, false] {
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            state.config.honor_game_colours = honor;
+            for k in 0..80 { state.push_transcript(&format!("line {k}")); }
+            state.scroll_transcript_to(1);
+            // The story has set a page scheme (white on blue).
+            let model = ScreenModel {
+                root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+                status: StatusModel::HostManaged,
+                bg: crate::state::pack_zcolour(zvm::screen::ZColour::Standard(6)),
+                fg: crate::state::pack_zcolour(zvm::screen::ZColour::Standard(9)),
+                content_size: (0, 0),
+            };
+            let area = Rect::new(0, 0, 40, 12);
+            let mut buf = Buffer::empty(area);
+            render_story_pane(&model, false, None, &state, area, &mut buf);
+            let look = crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme);
+            let bgs: Vec<_> = (0..area.height)
+                .map(|y| buf.cell((area.width - 1, y)).unwrap().bg)
+                .filter(|c| *c == look.thumb || *c == look.track)
+                .collect();
+            assert!(!bgs.is_empty(), "honor={honor}: the bar draws in its theme colours");
+            colours.push(bgs);
+        }
+        assert_eq!(colours[0], colours[1], "the bar looks the same in both modes");
     }
 
     #[test]

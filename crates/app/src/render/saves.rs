@@ -150,7 +150,7 @@ pub fn draw_saves(
             total,
             viewport,
             saves.scroll.target_offset(),
-            state.colors.theme.get("scrollbar").style,
+            crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme),
         );
     }
 
@@ -343,7 +343,9 @@ mod tests {
             draw_saves(&state, f.area(), f.buffer_mut(), &mut vp);
         }).unwrap();
         assert!(vp > 0 && vp < 40, "entries should overflow the modal (vp={vp})");
-        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        // SQ-0782: the thumb is a background fill, not a glyph.
+        let thumb = crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme).thumb;
+        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.bg == thumb);
         assert!(has_thumb, "a scrollbar thumb should be drawn when entries overflow");
 
         // PageDown advances the selection by ~one viewport (clamped/wrapped via nav).

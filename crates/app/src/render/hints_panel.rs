@@ -203,7 +203,8 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     if scrollbar_visible {
         let sb_area = Rect::new(body_area.right().saturating_sub(1), body_area.y, 1, body_area.height);
         // `start` is the index of the first visible row (0 = oldest/top).
-        crate::render::scroll::draw_scrollbar(buf, sb_area, n, rows, start, state.colors.theme.get("scrollbar").style);
+        let look = crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme);
+        crate::render::scroll::draw_scrollbar(buf, sb_area, n, rows, start, look);
     }
 
     Some(HintsPanelRects { area: rects.area, close: rects.close, close_button, input: input_rect, max_scroll })

@@ -94,7 +94,7 @@ pub fn draw_history(
             total,
             visible,
             replay.scroll.target_offset(),
-            state.colors.theme.get("scrollbar").style,
+            crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme),
         );
     }
 
@@ -188,7 +188,9 @@ mod tests {
             r.scroll.select(r.idx, vp, &anim);
         }
         term.draw(|f| { let a = f.area(); draw_history(&state, a, f.buffer_mut(), &mut vp); }).unwrap();
-        let has_thumb = term.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        // SQ-0782: the thumb is a background fill, not a glyph.
+        let thumb = crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme).thumb;
+        let has_thumb = term.backend().buffer().content().iter().any(|c| c.bg == thumb);
         assert!(has_thumb, "a scrollbar thumb should be drawn when turns overflow");
     }
 }

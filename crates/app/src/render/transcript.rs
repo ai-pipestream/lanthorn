@@ -2383,8 +2383,18 @@ fn render_middle(
     }
 
     // ── Scrollbar (only when the content overflows the viewport) ──────────────
+    // SQ-0782: the story pane's bar auto-hides. It can, because it is drawn in
+    // the MARGIN BAND (see below) rather than in a gutter taken out of the text
+    // width — showing or hiding it cannot reflow a character, unlike the modals,
+    // whose bars are reserved from `content.width - 1` and so stay up always.
+    //
+    // The reported flag still tracks "this pane's gutter column IS a scrollbar
+    // gutter", not "a bar is on screen right now" — the gutter is reserved out
+    // of `body_area` whether or not the bar is currently faded out, and callers
+    // use the flag to keep that column out of text selection.
+    let sb_opacity = state.transcript_scrollbar_opacity();
     let drew_scrollbar = total_rows > transcript_rows && area.width >= 2 && transcript_bottom > transcript_top;
-    if drew_scrollbar {
+    if drew_scrollbar && sb_opacity > 0.0 {
         let start = total_rows
             .saturating_sub(effective_scroll as usize)
             .saturating_sub(transcript_rows);
@@ -2398,14 +2408,25 @@ fn render_middle(
             width: 1,
             height: transcript_bottom - transcript_top,
         };
-        crate::render::scroll::draw_scrollbar(
-            buf,
-            sb_area,
-            total_rows,
-            transcript_rows,
-            start,
-            state.colors.theme.get("scrollbar").style,
-        );
+        // Fade toward whatever the bar sits on: the transcript's own background
+        // when the theme sets one, else the terminal's probed default page. With
+        // neither (a terminal that declined OSC 11 and a transparent theme) there
+        // is no RGB to mix, and `faded` leaves the colours alone — the bar pops.
+        let backdrop = state
+            .colors
+            .transcript
+            .bg
+            .filter(|c| *c != ratatui::style::Color::Reset)
+            .or_else(|| {
+                state
+                    .term_default_colors
+                    .bg
+                    .map(|p| ratatui::style::Color::Rgb(p[0], p[1], p[2]))
+            })
+            .unwrap_or(ratatui::style::Color::Reset);
+        let look = crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme)
+            .faded(sb_opacity, backdrop);
+        crate::render::scroll::draw_scrollbar(buf, sb_area, total_rows, transcript_rows, start, look);
     }
     // [more] pager prompt (SQ-0404): a reverse-video bar on the reserved row.
     if let Some(row) = more_row {
@@ -4860,25 +4881,59 @@ mod tests {
         let mut state = AppState::default();
         // Far more lines than the viewport → scrollbar must appear.
         state.transcript = (0..50).map(|i| format!("L{}", i)).collect();
-        state.colors.theme = theme_with_overrides(&[("scrollbar", Color::Magenta)]);
+        state.colors.theme =
+            theme_with_overrides(&[("scrollbar", Color::Magenta), ("scrollbar_track", Color::Blue)]);
+        state.scroll_transcript_to(1); // SQ-0782: the bar shows because you scrolled
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
         render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
-        // The scrollbar gutter is the rightmost column; its thumb glyph is '█'.
-        let mut thumb_fg = None;
-        let gutter: String = (0..area.height)
-            .map(|y| {
-                let c = buf.cell((area.width - 1, y));
-                if let Some(cell) = c {
-                    if cell.symbol().starts_with('█') { thumb_fg = Some(cell.fg); }
-                }
-                c.map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')
-            })
-            .collect();
-        assert!(gutter.contains('█'), "scrollbar thumb should render in the rightmost column: {:?}", gutter);
-        assert_eq!(thumb_fg, Some(Color::Magenta), "scrollbar is styleable via the `scrollbar` selector");
+        // SQ-0782: the gutter is the rightmost column, and the bar in it is two
+        // BACKGROUND fills with no glyph of their own — that is what gives the
+        // text one column over a visual gutter.
+        let mut thumb_rows = 0;
+        let mut track_rows = 0;
+        for y in 0..area.height {
+            let cell = buf.cell((area.width - 1, y)).unwrap();
+            match cell.bg {
+                Color::Magenta => thumb_rows += 1,
+                Color::Blue => track_rows += 1,
+                _ => continue, // a row outside the transcript (status/input)
+            }
+            assert_eq!(cell.symbol(), " ", "the bar draws no glyph (row {y})");
+        }
+        assert!(thumb_rows > 0, "thumb is styleable via the `scrollbar` selector");
+        assert!(track_rows > 0, "track is styleable via the `scrollbar_track` selector");
+    }
+
+    /// SQ-0782: the story pane's bar auto-hides. It is up right after a scroll,
+    /// gone once the reveal window and its fade have passed, and a fresh state
+    /// (nobody has scrolled yet) has never shown it at all.
+    #[test]
+    fn render_transcript_scrollbar_auto_hides_after_the_reveal_window() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.transcript = (0..50).map(|i| format!("L{}", i)).collect();
+        state.colors.theme = theme_with_overrides(&[("scrollbar", Color::Magenta)]);
+        state.config.animation.scrollbar_hide_ms = 50;
+        state.config.animation.scrollbar_fade_ms = 0; // pop, so the test needn't sleep a fade
+        let area = Rect::new(0, 0, 40, 12);
+
+        let painted = |state: &AppState| {
+            let mut buf = Buffer::empty(area);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, state, area, &mut buf, None);
+            (0..area.height).any(|y| buf.cell((area.width - 1, y)).unwrap().bg == Color::Magenta)
+        };
+
+        assert!(!painted(&state), "no bar before the first scroll of a session");
+        state.scroll_transcript_to(3);
+        assert!(painted(&state), "a scroll summons the bar");
+        state.scrollbar_shown_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(500));
+        assert!(!painted(&state), "it hides once the reveal window has passed");
+        // Game text arriving does NOT bring it back — that would flash it every turn.
+        state.push_transcript("You are in a maze of twisty little passages.");
+        assert!(!painted(&state), "new output leaves the bar hidden");
     }
 
     #[test]
@@ -4886,15 +4941,16 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.transcript = vec!["only one line".to_string()];
+        state.colors.theme = theme_with_overrides(&[("scrollbar", Color::Magenta)]);
+        state.scroll_transcript_to(1); // even a scroll can't summon a bar with nothing to scroll
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
         render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
-        let gutter: String = (0..area.height)
-            .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
-            .collect();
-        assert!(!gutter.contains('█'), "no scrollbar when content fits: {:?}", gutter);
+        let painted = (0..area.height)
+            .any(|y| buf.cell((area.width - 1, y)).unwrap().bg == Color::Magenta);
+        assert!(!painted, "no scrollbar when content fits");
     }
 
     #[test]

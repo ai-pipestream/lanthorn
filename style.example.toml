@@ -38,6 +38,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # input_line = { parent = "line" }
 # suggestion_line = { parent = "line" }
 # scrollbar = { parent = "line" }
+# scrollbar_track = { parent = "muted" }
 # transcript_location = { parent = "accent" }
 # story_badge = { parent = "text" }
 # badge_zcode = "Z"   # story-list badge: a Z-machine story

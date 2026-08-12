@@ -627,6 +627,8 @@ pub enum V6RenderMode {
 // ── Animation config ──────────────────────────────────────────────────────────
 
 fn default_scroll_ms() -> u64 { 120 }
+fn default_scrollbar_hide_ms() -> u64 { 1500 }
+fn default_scrollbar_fade_ms() -> u64 { 300 }
 fn default_easing() -> Easing { Easing::EaseOut }
 
 /// Deserialize an easing token string (e.g. "ease-out") into an [`Easing`].
@@ -653,6 +655,17 @@ pub struct AnimationConfig {
     /// Smooth-scroll duration in milliseconds (default 120). Zero = instant.
     #[serde(default = "default_scroll_ms")]
     pub scroll_ms: u64,
+    /// SQ-0782: how long the STORY PANE's scrollbar stays up after a scroll,
+    /// in milliseconds (default 1500). Zero keeps it up permanently — the
+    /// pre-auto-hide behaviour. Only the story pane auto-hides: a modal's bar
+    /// is reserved out of its content width, so hiding one there would reflow
+    /// the list, while the story pane's sits in the margin band beside the text.
+    #[serde(default = "default_scrollbar_hide_ms")]
+    pub scrollbar_hide_ms: u64,
+    /// How long that bar takes to fade out once the delay expires, in
+    /// milliseconds (default 300). Zero — or `enabled = false` — pops it.
+    #[serde(default = "default_scrollbar_fade_ms")]
+    pub scrollbar_fade_ms: u64,
 }
 
 impl Default for AnimationConfig {
@@ -661,6 +674,8 @@ impl Default for AnimationConfig {
             enabled: true,
             easing: Easing::EaseOut,
             scroll_ms: 120,
+            scrollbar_hide_ms: default_scrollbar_hide_ms(),
+            scrollbar_fade_ms: default_scrollbar_fade_ms(),
         }
     }
 }
@@ -1349,11 +1364,15 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         || cfg.animation.enabled != def.animation.enabled
         || cfg.animation.easing != def.animation.easing
         || cfg.animation.scroll_ms != def.animation.scroll_ms
+        || cfg.animation.scrollbar_hide_ms != def.animation.scrollbar_hide_ms
+        || cfg.animation.scrollbar_fade_ms != def.animation.scrollbar_fade_ms
     {
         let tbl = doc["animation"].or_insert(toml_edit::table());
         put_in(tbl, "enabled", cfg.animation.enabled.into(), cfg.animation.enabled == def.animation.enabled);
         put_in(tbl, "easing", crate::anim::easing_token(cfg.animation.easing).into(), cfg.animation.easing == def.animation.easing);
         put_in(tbl, "scroll_ms", (cfg.animation.scroll_ms as i64).into(), cfg.animation.scroll_ms == def.animation.scroll_ms);
+        put_in(tbl, "scrollbar_hide_ms", (cfg.animation.scrollbar_hide_ms as i64).into(), cfg.animation.scrollbar_hide_ms == def.animation.scrollbar_hide_ms);
+        put_in(tbl, "scrollbar_fade_ms", (cfg.animation.scrollbar_fade_ms as i64).into(), cfg.animation.scrollbar_fade_ms == def.animation.scrollbar_fade_ms);
     }
 
     // [command_band] table — same rule as [search]. The verb/quick LISTS are
@@ -2147,6 +2166,33 @@ use_defaults = false
         assert!(cfg.animation.enabled);
         assert_eq!(cfg.animation.easing, Easing::EaseOut);
         assert_eq!(cfg.animation.scroll_ms, 120);
+        assert_eq!(cfg.animation.scrollbar_hide_ms, 1500);
+        assert_eq!(cfg.animation.scrollbar_fade_ms, 300);
+    }
+
+    /// SQ-0782: the story-pane scrollbar's hide delay and fade are config keys,
+    /// not constants — they must parse and round-trip like every other one.
+    #[test]
+    fn scrollbar_auto_hide_keys_parse_and_round_trip() {
+        let cfg: Config = toml::from_str(
+            "[animation]\nscrollbar_hide_ms = 400\nscrollbar_fade_ms = 0\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.animation.scrollbar_hide_ms, 400);
+        assert_eq!(cfg.animation.scrollbar_fade_ms, 0);
+
+        let dir = std::env::temp_dir().join(format!("bm_sbcfg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut written = Config::default();
+        written.animation.scrollbar_hide_ms = 400;
+        written.animation.scrollbar_fade_ms = 0;
+        write_config(&dir, &written).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["animation"]["scrollbar_hide_ms"].as_integer(), Some(400));
+        assert_eq!(doc["animation"]["scrollbar_fade_ms"].as_integer(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2178,6 +2224,7 @@ use_defaults = false
             enabled: false,
             easing: Easing::EaseInOut,
             scroll_ms: 250,
+            ..Default::default()
         };
         write_config(&dir, &cfg).unwrap();
         let content = std::fs::read_to_string(dir.join("config.toml")).unwrap();

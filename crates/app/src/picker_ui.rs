@@ -1426,7 +1426,7 @@ fn draw_story_picker(
     let story_year = cs.theme.get("story_year").style;
     let story_rating = cs.theme.get("story_rating").style;
     let story_badge = cs.theme.get("story_badge").style;
-    let scrollbar = cs.theme.get("scrollbar").style;
+    let scrollbar = app::render::scroll::ScrollbarLook::from_theme(&cs.theme);
 
     // Background fill.
     for y in area.top()..area.bottom() {
@@ -1658,7 +1658,7 @@ fn draw_story_gallery(
     let story_tile_selected = cs.theme.get("story_tile_selected").style;
     let story_info_cover = cs.theme.get("story_info_cover").style;
     let story_tile = cs.theme.get("story_tile").style;
-    let scrollbar = cs.theme.get("scrollbar").style;
+    let scrollbar = app::render::scroll::ScrollbarLook::from_theme(&cs.theme);
 
     // Background fill.
     for y in area.top()..area.bottom() {
@@ -1925,7 +1925,7 @@ fn draw_info_panel(
     let story_info_blurb = cs.theme.get("story_info_blurb").style;
     let story_info_link = cs.theme.get("story_info_link").style;
     let story_info_cover = cs.theme.get("story_info_cover").style;
-    let scrollbar = cs.theme.get("scrollbar").style;
+    let scrollbar = app::render::scroll::ScrollbarLook::from_theme(&cs.theme);
     // Background fill.
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
