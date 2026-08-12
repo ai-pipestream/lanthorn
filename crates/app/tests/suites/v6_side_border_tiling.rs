@@ -23,6 +23,10 @@
 //!    an implementation detail, the agreement is the requirement.
 //! 4. **Nothing else moved.** No other v6 title in the corpus draws a tiled
 //!    band at all.
+//! 5. **Every RENDITION tiles cleanly** (SQ-0799). Since SQ-0790 the player
+//!    picks the picture archive, and Zork Zero's MCGA, EGA and CGA plates do not
+//!    agree on where its pillars begin — so a repeat unit pinned to one of them
+//!    seams on the other two.
 //!
 //! Fixtures are named by exact release, per CLAUDE.md: a disk image is a
 //! different build, not the same story on other media. `stories/` is gitignored,
@@ -33,6 +37,7 @@ use std::path::PathBuf;
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::interpreter::InterpreterProfile;
+use app::render::v6_border::BorderArt;
 use app::session::{GameSession, InputKind};
 
 use ratatui::buffer::Buffer;
@@ -118,6 +123,53 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
     )
     .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
     assert!(!s.quit, "{file}: quit during boot");
+    s.set_pict_source(Some(picts));
+    s.flush_boot_pictures();
+    Some(s)
+}
+
+/// Boot a story against a NAMED picture archive — SQ-0734 tier 3, the door the
+/// player uses to pick a rendition. The archive's own flavour selects the
+/// machine (`for_art_flavour`), it supplies the standard window, and it supplies
+/// the per-axis art scale, which is `(1, 2)` for a 640-wide EGA or CGA plate and
+/// `(2, 2)` for a 320-wide MCGA or Amiga one (SQ-0790). Exactly what
+/// `startup.rs` does. `None` when either file is absent.
+fn boot_named(story: &str, archive: &str, release: (u16, &str)) -> Option<GameSession> {
+    let path = stories_dir().join(story);
+    let apath = stories_dir().join(archive);
+    let raw = std::fs::read(&apath)
+        .map_err(|_| eprintln!("SKIP: gitignored archive missing at {}", apath.display()))
+        .ok()?;
+    let pics = blorb::infocom_pics::InfocomPics::parse(raw).expect("a native Infocom archive parses");
+    let (loaded, _) = app::hints::load_mounted_story(&path).ok().or_else(|| {
+        eprintln!("SKIP: gitignored story missing at {}", path.display());
+        None
+    })?;
+    let bytes = loaded.bytes().to_vec();
+    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), release.0, "{story}: release");
+    assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), release.1, "{story}: serial");
+    let profile = InterpreterProfile::for_art_flavour(pics.flavour());
+    zvm::screen::set_palette(profile.palette());
+    let mut picts = PictSource::from_native(pics);
+    let picture_dims = picts.all_pict_dims();
+    // `PictSource::std_window` answers from a Blorb's `Reso` chunk only; the
+    // standard window a NAMED archive implies is `PictureOverride::std_window`,
+    // and it is the same for every rendition (SQ-0790).
+    let v6_screen_px = picts.std_window().or(Some(app::graphics::INFOCOM_V6_STD_WINDOW));
+    let v6_art_scale = picts.art_scale();
+    let mut s = GameSession::new_with_art_scale(
+        bytes,
+        true,
+        false,
+        profile.interpreter_number(),
+        false,
+        picture_dims,
+        v6_screen_px,
+        v6_art_scale,
+        profile.default_colours(),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{story} + {archive}: should boot without a ZError: {e:?}"));
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();
     Some(s)
@@ -459,6 +511,114 @@ fn no_other_v6_title_grows_a_tiled_band() {
     }
 }
 
+// ── 5. Every rendition tiles cleanly ─────────────────────────────────────────
+
+/// The opaque column span of row `y` over columns `[x0, x1)`, as an offset from
+/// `x0` so a native flank and the band cropped out of it are comparable.
+/// `None` when nothing in that row is painted.
+fn opaque_span(img: &image::RgbaImage, y: u32, x0: u32, x1: u32) -> Option<(u32, u32)> {
+    let (mut first, mut last) = (None, 0);
+    for x in x0..x1.min(img.width()) {
+        if img.get_pixel(x, y)[3] >= 128 {
+            first.get_or_insert(x - x0);
+            last = x - x0;
+        }
+    }
+    first.map(|f| (f, last))
+}
+
+/// SQ-0799, as the user reported it: *"for cg1 and eg1 we get a horizontal line
+/// on zork0 where we are tiling"*.
+///
+/// Zork Zero's banner is **34 raw rows on MCGA, 37 on EGA and 39 on CGA** while
+/// its pillars are 166 rows in all three (`zork0.mg1` id 5 is 320x34 and id 497
+/// 36x166; `zork0.eg1` 640x37 and 74x166; `zork0.cg1` 640x39 and 70x166) — so
+/// the pillars begin 6 unit rows lower under EGA and 10 lower under CGA, and a
+/// repeat unit cut at a pinned row lands inside the ring beneath the capital
+/// instead of in the plain shaft. Every tile boundary then repeats that ring.
+///
+/// Neither lane that built this could have seen it: SQ-0698's constants were
+/// measured and verified when there was exactly ONE Zork Zero geometry, and
+/// SQ-0790 made the renditions selectable afterwards.
+///
+/// **The oracle is independent of the fix.** The shaft's span is taken as the
+/// MODAL opaque column span of the flank's own native rows — the one span that
+/// holds for hundreds of rows, against a capital, a banner and a base that each
+/// hold theirs for a few dozen. Below the art's own bottom every band row is
+/// something this code composed, so every one of them, down to where the base is
+/// stamped, must carry that span and nothing else. A ring tiled into the shaft
+/// is a wider span and shows here; so would a base, or a slice of banner.
+///
+/// Falsifiable: pin the cut back to unit row 86 and `zork0.eg1` and `zork0.cg1`
+/// fail while `zork0.mg1`, `zork0.pic` and the Blorb still pass.
+#[test]
+fn every_zork_zero_rendition_tiles_only_its_pillar_shaft() {
+    /// Tall enough for a SECOND tile to land below the art's own bottom, which
+    /// is what makes a repeated ring visible in the extension itself.
+    const BAND: u32 = 800;
+    /// Every picture archive shipped for Zork Zero, plus its Blorb (`None`).
+    const RENDITIONS: &[Option<&str>] = &[
+        Some("zork0.mg1"), // MCGA — the layout SQ-0698's constants were tuned to
+        Some("zork0.eg1"), // EGA  — banner 3 raw rows taller
+        Some("zork0.cg1"), // CGA  — banner 5 raw rows taller
+        Some("zork0.pic"), // Amiga/Mac
+        None,              // Zork0.blb
+    ];
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let sp = &SPECIMENS[2];
+    assert_eq!(sp.title, "Zork Zero");
+    for rendition in RENDITIONS {
+        let booted = match rendition {
+            Some(a) => boot_named(sp.file, a, (sp.release, sp.serial)),
+            None => boot(sp.file, Some((sp.release, sp.serial))),
+        };
+        let Some(mut s) = booted else { continue };
+        drive(&mut s, sp.turns);
+        let name = rendition.unwrap_or("Zork0.blb");
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+        let story = layout.story.expect("a story window");
+        let flank_x = [(0u32, story.x_px as u32), ((story.x_px + story.w_px) as u32, gfx.width())];
+        for (x0, x1) in flank_x {
+            // The flank's own columns of the native canvas; the extended band is
+            // already cropped to them, so it is read from column 0.
+            let native_span = |y: u32| opaque_span(&gfx, y, x0, x1);
+            let art = app::render::v6_border::art_extent(&gfx, x0, x1);
+            assert_eq!(
+                app::render::v6_border::recognize(art, native.1 as u32),
+                Some(BorderArt::ZorkZeroPillars),
+                "{name} cols {x0}..{x1}: Zork Zero's flank is pillars in every rendition"
+            );
+            // The modal native span — the shaft's, by a margin of hundreds of rows.
+            let mut tally: std::collections::HashMap<Option<(u32, u32)>, u32> = Default::default();
+            for y in 0..art.1 {
+                *tally.entry(native_span(y)).or_default() += 1;
+            }
+            let (shaft, held) = tally.iter().max_by_key(|(_, n)| **n).map(|(s, n)| (*s, *n)).expect("rows");
+            assert!(held > art.1 / 2, "{name} cols {x0}..{x1}: no span holds for most of the flank");
+            // …and the base is whatever sits below the last row that carries it.
+            let base = art.1 - (0..art.1).filter(|&y| native_span(y) == shaft).max().expect("a shaft row") - 1;
+            let out = app::render::v6_border::flank_source(&gfx, &gfx, x0, x1, art, native.1 as u32, 0, BAND)
+                .unwrap_or_else(|| panic!("{name} cols {x0}..{x1}: the flank should be extended"));
+            let w = out.width();
+            let wrong: Vec<u32> = (art.1..BAND - base).filter(|&y| opaque_span(&out, y, 0, w) != shaft).collect();
+            assert!(
+                wrong.is_empty(),
+                "{name} [release {}] cols {x0}..{x1}: {} row(s) of the EXTENSION are not the \
+                 pillar's own shaft span {shaft:?} — first at band row {:?}. The banner above \
+                 these pillars is a different height in this rendition, so a repeat unit cut at a \
+                 pinned row carries the ring under the capital and tiles it down the column",
+                sp.release,
+                wrong.len(),
+                wrong.first(),
+            );
+        }
+    }
+}
+
 // ── The recogniser, pinned per specimen ──────────────────────────────────────
 
 /// What each title's flank art measures, and therefore which handler runs. These
@@ -466,7 +626,7 @@ fn no_other_v6_title_grows_a_tiled_band() {
 /// release ever lays its border out differently, this is where it shows.
 #[test]
 fn each_specimen_is_recognised_as_its_own_layout() {
-    use app::render::v6_border::{art_extent, recognize, BorderArt};
+    use app::render::v6_border::{art_extent, recognize};
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     let expected = [
         ("Arthur", BorderArt::ArthurPoles, (11u32, 379u32)),
