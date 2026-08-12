@@ -958,6 +958,22 @@ put them clear of the band the game's own mouse handler accepts for them. The
 labels were visible and dead: clicking one did nothing, while clicking the blank
 row beneath it played the hand.
 
+**A keypress turn's output does not automatically open a line, either.** The
+transcript puts each turn's output on a fresh line, and for a typed command that is
+right: an interpreter echoes a `read` together with its terminating newline
+(§7.1.1.1), so babelmap appends what you typed to the game's `>` and lets the reply
+start below. `read_char` echoes nothing at all (§10.7), so for a keypress turn that
+line break is babelmap's own invention — and whether it belongs cannot be read off
+the text, because a game redrawing a menu moves its cursor and prints no newline
+either way. The game's cursor is asked instead: output whose first character lands
+exactly where the last output left the cursor continues that line, and everything
+else opens a new one. `sunburst.z6` is what it buys — a game with no line reader
+that runs `read_char` in a loop and echoes each key back, so typing `look` and
+pressing Enter used to arrive as `>look` and then a lone `.` a line lower, where the
+game's own screen has `>look.` on one row. Games that reposition between reprints —
+the Mysterious Adventures re-asking `Resume play on a game ?`, Journey's and
+fmvpoker's menu repaints — keep their line breaks, because their cursor says so.
+
 ## A window the game drew a frame around is a canvas, not a page
 
 The story window is a transcript in every Infocom v6 title: text streams into it,

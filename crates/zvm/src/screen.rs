@@ -340,6 +340,23 @@ pub struct ZWindow {
     /// LEFT BEHIND, at coordinates it no longer covers. An erase trims and clears
     /// the two together — the pixels are shared, so their fates are.
     pub retired: Vec<V6Text>,
+    /// Screen-absolute `(y, x)` in pixels where the FIRST glyph streamed since
+    /// this was last cleared landed (SQ-0804). Set by
+    /// [`ZWindow::record_streamed`] and cleared by
+    /// [`ZWindow::clear_stream_origin`]; nothing in the VM reads it.
+    ///
+    /// It answers one question the printed TEXT cannot: did this burst of output
+    /// continue the line the last one left the pen on, or did the game reposition
+    /// first? A `read_char` echoes nothing (ZMSD §10.7), so a keypress turn
+    /// inherits no newline and the host must decide for itself whether to open a
+    /// transcript line for the turn's output — and games that redraw a menu
+    /// `set_cursor` back to the top with no newline in sight, so the text alone is
+    /// not decidable. Compare this against the cursor the window HAD before the
+    /// turn and the answer is exact.
+    ///
+    /// Live per-burst state, not history: transient, not archived, and
+    /// meaningless outside the window between a clear and the read that follows.
+    pub stream_origin: Option<(u16, u16)>,
 }
 
 /// One pixel-positioned text run in a v6 grid window: `(y, x)` are the 1-based
@@ -531,6 +548,21 @@ impl ZWindow {
         }
     }
 
+    /// The screen-absolute `(y, x)` the window's cursor is at right now, in the
+    /// same space [`ZWindow::stream_origin`] records — so the two compare directly.
+    pub fn pen(&self) -> (u16, u16) {
+        (
+            self.y_coord.saturating_add(self.y_cursor).saturating_sub(1),
+            self.x_coord.saturating_add(self.x_cursor).saturating_sub(1),
+        )
+    }
+
+    /// Forget where the last burst of prose started (SQ-0804), so the next glyph
+    /// this window streams records a fresh [`ZWindow::stream_origin`].
+    pub fn clear_stream_origin(&mut self) {
+        self.stream_origin = None;
+    }
+
     /// Shadow one streamed glyph at the window cursor's current screen position
     /// (SQ-0697) — see [`ZWindow::streamed`]. Extends the run in progress when the
     /// glyph continues it in the same style at the next cell; starts a new one
@@ -540,6 +572,8 @@ impl ZWindow {
         // origin + cursor - 1 (ZMSD §8.8.1/§8.8.3.2).
         let x = self.x_coord.saturating_add(self.x_cursor).saturating_sub(1);
         let y = self.y_coord.saturating_add(self.y_cursor).saturating_sub(1);
+        // Where this burst of prose STARTED (SQ-0804) — see `stream_origin`.
+        self.stream_origin.get_or_insert((y, x));
         if let Some(last) = self.streamed.last_mut() {
             let end = last.x as u32 + last.px_w();
             if last.y == y
@@ -1625,6 +1659,31 @@ mod tests {
     use crate::header::tests_support::sample_story;
     use crate::memory::Memory;
     use crate::text::encode::encode_word;
+
+    /// SQ-0804: `stream_origin` is where the FIRST glyph of a burst landed — set
+    /// once and then left alone until it is cleared, so the host can compare it
+    /// against the cursor the window had before the burst.
+    #[test]
+    fn stream_origin_records_the_first_glyph_of_a_burst_only() {
+        let mut w = ZWindow { x_coord: 5, y_coord: 9, x_cursor: 3, y_cursor: 1, ..Default::default() };
+        assert_eq!(w.stream_origin, None, "a window that has printed nothing has no origin");
+        assert_eq!(w.pen(), (9, 7), "the pen is origin + cursor - 1, screen-absolute (§8.8.1)");
+
+        w.record_streamed('a', 0, ZColour::Default, ZColour::Default);
+        assert_eq!(w.stream_origin, Some((9, 7)), "the first glyph lands at the pen");
+
+        // A second glyph, wherever it goes, must not move the origin.
+        w.x_cursor += V6_FONT_WIDTH;
+        w.record_streamed('b', 0, ZColour::Default, ZColour::Default);
+        w.y_cursor += V6_FONT_HEIGHT;
+        w.record_streamed('c', 0, ZColour::Default, ZColour::Default);
+        assert_eq!(w.stream_origin, Some((9, 7)), "…and only the first");
+
+        w.clear_stream_origin();
+        assert_eq!(w.stream_origin, None, "cleared, ready for the next burst");
+        w.record_streamed('d', 0, ZColour::Default, ZColour::Default);
+        assert_eq!(w.stream_origin, Some(w.pen()), "the next burst records its own start");
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 

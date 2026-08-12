@@ -1,5 +1,5 @@
-//! SQ-0726: a keystroke the game echoes back belongs on the line the player is
-//! typing on, not on a line of its own.
+//! SQ-0726 / SQ-0804: output the game printed where the cursor already was belongs
+//! on the line the cursor was already on, not on a line of its own.
 //!
 //! sunburst.z6 has no line reader. Past its boot menu it runs `read_char` in a
 //! loop and `print_char`s every key straight back — its own line editor, built out
@@ -21,13 +21,19 @@
 //! own. `read_char` supplies no such newline, so for a keypress turn the host was
 //! inventing one.
 //!
-//! Only the ECHO folds, and the narrowness is measured rather than timid. Dropping
-//! the invented newline for every keypress turn moves six other titles — it joins
-//! Arthur's, Shogun's, Journey's, advent's and fmvpoker's menu repaints to the line
-//! above and concatenates four of mysterious01's re-asked prompts into one, because
-//! those games reposition between reprints in ways the host transcript does not
-//! model. Nothing else in the corpus answers a keypress with a single character.
-//! SQ-0804 carries that sweep and the general case.
+//! What decides it is the GAME'S OWN CURSOR — `Engine::output_continued_line`, true
+//! when the turn's first printed glyph landed exactly where the previous output left
+//! the cursor. The text alone cannot: dropping the invented newline for every
+//! keypress turn moves six other titles, joining Arthur's, Shogun's, Journey's,
+//! advent's and fmvpoker's menu repaints to the line above and concatenating four of
+//! mysterious01's re-asked prompts into one, because those games REPOSITION between
+//! reprints and print no newline while doing it. SQ-0726 shipped a stand-in for the
+//! cursor — "the whole output is one character, so it must be an echo" — which was
+//! enough for the four keystrokes of `look` and not for the Enter that submits them,
+//! since that one arrives with the game's entire reply behind it. Swept across the
+//! v6 corpus (both Shogun builds, both Journey builds, both Zork Zero builds, both
+//! Arthur builds, advent, fmvpoker, mysterious01, scopa, sunburst) the cursor rule
+//! leaves every other title byte-identical and moves sunburst alone.
 //!
 //! The fixture earns its keep twice over: 65 KB, no resource blorb, zero pictures
 //! declared — the only story in the corpus that drives the v6 path with no graphics
@@ -68,15 +74,22 @@ fn open(name: &str) -> Option<GameSession> {
 /// which lives in the binary and so cannot be called from here. Kept to the two
 /// lines that matter: an `erase_lower` turn opens a new line, everything else goes
 /// through the char-echo push.
-fn apply_keypress(state: &mut AppState, r: &TurnResult) {
-    if r.erase_lower {
+fn apply_keypress(state: &mut AppState, r: &TurnResult, continues: bool) {
+    if !r.transcript_elems.is_empty() {
+        app::state::apply_transcript_elems(state, &r.transcript_elems);
+    } else if r.erase_lower {
         if let Some(anchor) = state.clear_anchor {
             state.truncate_transcript(anchor);
         }
         state.mark_screen_clear();
         state.push_transcript_runs(&r.transcript, TranscriptKind::Story, &r.transcript_runs);
     } else {
-        state.push_transcript_runs_char_echo(&r.transcript, TranscriptKind::Story, &r.transcript_runs);
+        state.push_transcript_runs_char_echo(
+            &r.transcript,
+            TranscriptKind::Story,
+            &r.transcript_runs,
+            continues,
+        );
     }
 }
 
@@ -84,13 +97,22 @@ fn apply_keypress(state: &mut AppState, r: &TurnResult) {
 /// game is reading keys one at a time. Returns the session and a transcript that
 /// has been fed the boot output and that turn, the way the run loop feeds it.
 fn started() -> Option<(GameSession, AppState)> {
+    started_with(true)
+}
+
+/// [`started`] with the game's own `>` read prompt kept in the transcript —
+/// inline mode, which is the shipped default (`command_bar` is off, and
+/// `startup.rs` hands that straight to `set_strip_prompt`).
+fn started_with(strip_prompt: bool) -> Option<(GameSession, AppState)> {
     let mut s = open("sunburst.z6")?;
+    s.set_strip_prompt(strip_prompt);
     let mut state = AppState::default();
     state.push_transcript_runs(&s.take_transcript(), TranscriptKind::Story, &[]);
     // The boot menu is keyed by each item's lowercase initial and nothing else
     // (SQ-0706): `s` is "Start game."
     let r = s.submit_char(b's');
-    apply_keypress(&mut state, &r);
+    let c = s.output_continued_line();
+    apply_keypress(&mut state, &r, c);
     Some((s, state))
 }
 
@@ -160,7 +182,8 @@ fn a_typed_word_stays_on_the_line_the_player_is_typing_on() {
 
     for ch in b"look" {
         let r = session.submit_char(*ch);
-        apply_keypress(&mut state, &r);
+        let c = session.output_continued_line();
+        apply_keypress(&mut state, &r, c);
     }
 
     let added: Vec<String> = state.transcript[before.saturating_sub(1)..].to_vec();
@@ -213,20 +236,85 @@ fn a_typed_word_stays_on_the_line_the_player_is_typing_on() {
     }
 }
 
-/// The corpus guard. mysterious01 answers an unrecognised key by re-asking
-/// "Resume play on a game ?" with no newline either side; folding THAT onto the
-/// line above runs four copies of the question together. Only a one-character
-/// answer folds, so this title's transcript is byte-identical to what it was.
+/// SQ-0804, and the reason the rule is the game's cursor rather than "the output
+/// is one character": the ENTER that submits the word is echoed as `.` and then
+/// the game's whole reply follows in the same burst, so the turn's output is 60
+/// characters long and still continues the line. SQ-0726's stand-in could not
+/// see that and broke after `>look`.
+///
+/// The assertion is not a taste call. sunburst's own screen — zvm's shadow of
+/// where each glyph was painted, `ZWindow::streamed` — puts `>look.` in ONE run
+/// on ONE row, and the transcript must say what the screen says.
+///
+/// Falsified by passing `false` for `continues` in `apply_keypress`:
+///
+/// ```text
+/// the game painted ">look." as one run on one row, so the transcript must carry
+/// it as one line — got [">look", "."]
+/// ```
+#[test]
+fn the_enter_that_submits_the_word_continues_the_line_too() {
+    let Some((mut session, mut state)) = started_with(false) else { return };
+    for ch in b"look\r" {
+        let r = session.submit_char(*ch);
+        let c = session.output_continued_line();
+        apply_keypress(&mut state, &r, c);
+    }
+
+    // What the GAME painted: the run holding the echoed command, and its row.
+    let v6 = session.machine.screen.v6.as_ref().expect("a v6 story has the window model");
+    let win = &v6.windows[session.machine.screen.v6_input_window as usize];
+    let painted = win
+        .streamed
+        .iter()
+        .find(|run| run.text.contains(">look"))
+        .unwrap_or_else(|| panic!("the game painted no `>look` run at all: {:?}", win.streamed));
+    assert_eq!(
+        painted.text, ">look.",
+        "the premise: sunburst echoes Enter as `.` and paints the whole command as one run"
+    );
+    assert!(
+        !win.streamed.iter().any(|r| r.y == painted.y && !std::ptr::eq(r, painted)),
+        "…on a row of its own, so one transcript line is the whole of that row"
+    );
+
+    // What the TRANSCRIPT says. Same thing, or the host is lying about the screen.
+    let idx = state
+        .transcript
+        .iter()
+        .rposition(|l| l.contains(">look"))
+        .expect("the echoed command reached the transcript");
+    assert_eq!(
+        state.transcript[idx], ">look.",
+        "the game painted {:?} as one run on one row, so the transcript must carry it as one \
+         line — got {:?}",
+        painted.text,
+        &state.transcript[idx..(idx + 2).min(state.transcript.len())]
+    );
+}
+
+/// The corpus guard, and the case that decides the whole rule (SQ-0804).
+///
+/// mysterious01 answers an unrecognised key by re-asking "Resume play on a game ?"
+/// with no newline on either side of it, so nothing in the TEXT distinguishes that
+/// reprint from prose continuing a line — fold on the text alone and four copies of
+/// the question run together. The game repositions between reprints, which its
+/// cursor shows and its output does not, so [`Engine::output_continued_line`] says
+/// no and the transcript is byte-identical to the one built with no fold at all.
+///
+/// The control walks the SAME `apply_keypress` with `continues` forced false, so
+/// the only variable between the two transcripts is the fold.
 #[test]
 fn a_keypress_turn_that_reprints_a_prompt_still_opens_its_own_line() {
     let Some(mut session) = open("mysterious01.z6") else { return };
     let mut plain = AppState::default();
-    let mut echoed = AppState::default();
+    let mut folded = AppState::default();
     let boot = session.take_transcript();
     plain.push_transcript_runs(&boot, TranscriptKind::Story, &[]);
-    echoed.push_transcript_runs(&boot, TranscriptKind::Story, &[]);
+    folded.push_transcript_runs(&boot, TranscriptKind::Story, &[]);
 
     let mut reprints = 0usize;
+    let mut asked = 0usize;
     for k in *b" \r\r\r" {
         if session.pending_input() != InputKind::Char {
             break;
@@ -235,15 +323,24 @@ fn a_keypress_turn_that_reprints_a_prompt_still_opens_its_own_line() {
         if r.transcript.chars().count() > 1 {
             reprints += 1;
         }
-        plain.push_transcript_runs(&r.transcript, TranscriptKind::Story, &r.transcript_runs);
-        apply_keypress(&mut echoed, &r);
+        assert!(
+            !session.output_continued_line(),
+            "the game `set_cursor`s back before each reprint, so its own cursor says this \
+             output does NOT continue the line above: {:?}",
+            r.transcript
+        );
+        apply_keypress(&mut plain, &r, false);
+        apply_keypress(&mut folded, &r, session.output_continued_line());
+        asked += 1;
     }
     assert!(
-        reprints > 0,
-        "the premise: mysterious01 answers a key with a whole reprinted prompt, not one character"
+        reprints > 0 && asked > 1,
+        "the premise: mysterious01 answers several keys with a whole reprinted prompt each, \
+         not one character ({reprints} reprints over {asked} turns)"
     );
     assert_eq!(
-        echoed.transcript, plain.transcript,
-        "a multi-character keypress turn is left exactly where it was — folding it is SQ-0804"
+        folded.transcript, plain.transcript,
+        "a repositioned reprint is left exactly where it was — the cursor, not the text, is \
+         what keeps these four questions on four lines"
     );
 }

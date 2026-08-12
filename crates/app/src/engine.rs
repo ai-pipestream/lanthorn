@@ -638,6 +638,25 @@ pub trait Engine {
     fn take_transcript_elems(&mut self) -> Vec<crate::session::TranscriptElem> {
         Vec::new()
     }
+    /// Did the last KEYPRESS turn's output start printing exactly where the
+    /// previous output left the game's cursor — i.e. does it continue that line
+    /// rather than open a new one (SQ-0804)?
+    ///
+    /// The host puts every turn's output on a fresh transcript line, which is
+    /// how it supplies the newline an interpreter echoes after a `read` (ZMSD
+    /// §7.1.1.1). `read_char` echoes nothing at all (§10.7), so for a keypress
+    /// turn that newline is the host's own invention, and whether it belongs
+    /// cannot be read off the printed text: a game redrawing a menu `set_cursor`s
+    /// back to the top and prints no newline either way. The game's cursor
+    /// answers it exactly, so this is where the answer comes from.
+    ///
+    /// DEFAULT `false` — "assume a new line", which is what every engine did
+    /// before and what any engine without a screen model must keep doing. Only
+    /// the Z-machine's v6 path can answer, because only it models a cursor;
+    /// v1–v5 stories, Glulx and Scott all keep the default.
+    fn output_continued_line(&self) -> bool {
+        false
+    }
     /// When false, the game's own trailing `>` read prompt is preserved in the
     /// transcript (inline-prompt mode) instead of being stripped for the app's
     /// dedicated input bar. Default true.
