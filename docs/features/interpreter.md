@@ -94,7 +94,7 @@ decided entirely by the file you open.
 
 The practical rule, and the one the interpreter's own tests follow: a report made
 on a disk image is reproduced on that disk image, and a finding names the release
-it was measured on. `crates/app/tests/real_media_releases.rs` pins this whole
+it was measured on. `crates/app/tests/suites/real_media_releases.rs` pins this whole
 table, plus the frame each build lays out, so an upgraded fixture announces
 itself instead of quietly rebasing someone's investigation.
 

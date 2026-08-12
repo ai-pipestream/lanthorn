@@ -33,12 +33,11 @@ fn the_late_reply_test_is_unix_only() {
 }
 
 // Only the driving half of the SQ-0762 harness is wanted here; the decoder is
-// another test binary's business, and the parts of the driver this file does not
-// call are not dead code, just unused by this caller.
+// another suite's business, and the parts of the driver this file does not call
+// are not dead code, just unused by this caller. The harness itself is declared
+// once by the group binary (`tests/pty.rs`) and shared.
 #[cfg(unix)]
-#[allow(dead_code)]
-#[path = "pty_stream/driver.rs"]
-mod driver;
+use super::pty_stream::driver;
 
 #[cfg(unix)]
 mod unix {

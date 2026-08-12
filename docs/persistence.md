@@ -133,7 +133,7 @@ restored PC, and your next command gets swallowed answering it. So the host
 retires it (`Machine::abandon_pending_input`) and runs the save-verb tail out to
 the next prompt, discarding that tail's output the way the Z-machine path does —
 the archive's own transcript is about to be laid down over it. Verified against
-real Adventure (Glulx) in `crates/app/tests/glulx_ingame_save_host_restore.rs`:
+real Adventure (Glulx) in `crates/app/tests/suites/glulx_ingame_save_host_restore.rs`:
 save, play on, host-restore, and the game replays the reference run move for move
 with an inventory that has forgotten everything picked up afterwards.
 

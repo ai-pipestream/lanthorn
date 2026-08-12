@@ -20,7 +20,11 @@
 
 // Not gated: the decoder half is portable and its unit tests are worth having on
 // every platform. Only the pty half inside it is `#[cfg(unix)]`.
-mod pty_stream;
+//
+// The harness module is declared ONCE by this suite's group binary (`tests/pty.rs`)
+// and shared by every pty suite in it; declaring it here as well would compile a
+// second copy of ~2900 lines into the same binary.
+use super::pty_stream;
 
 #[cfg(not(unix))]
 #[test]
