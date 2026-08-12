@@ -46,7 +46,7 @@ Pre-beta there is still **no obligation to read old files** (see the standing
 | Glulx-Quetzal (`@save`) | `game.glksave` inside `<slug>.babelmap` (app); bare `<slug>.qzl` (`gvm-cli`) | `gvm/src/exec.rs` `save_quetzal` | none — spec-defined `FORM IFZS` | Public spec (Glulx §1.8) | `exec::tests::save_quetzal_is_a_wellformed_ifzs_container`, `…omits_greg_and_glk_chunks` |
 | Host Save State — Z-machine | inside `.babelmap` `game.qzl` | `zvm/src/quetzal.rs` (+ archive) | via archive `format_version` | Frozen (0.x) | archive round-trip tests |
 | Host Save State — Glulx | inside `.babelmap` `game.glksave` | `gvm/src/exec.rs` `save_state` (adds `GReg` + `Glk `) | `Glk ` chunk: `GLK_SNAPSHOT_VERSION = 6` | Frozen (0.x) | `glk::tests::snapshot_version_constant_is_frozen`, `…serialize_stamps_current_snapshot_version`, `…deserialize_rejects_future_snapshot_version`, `exec::tests::save_state_is_the_same_container_plus_our_own_chunks` |
-| `.babelmap` archive (map + save + transcript + screen + history + pictures + painted ground) | `<ifid>.babelmap` (ZIP) | `app/src/archive.rs` | `Meta.format_version = 7` | Frozen (0.x) | `archive::tests::format_version_constant_is_frozen`, `…unknown_format_version_returns_err`, `…save_trigger_wire_names_are_pinned_and_round_trip`, archive round-trip tests |
+| `.babelmap` archive (map + save + transcript + screen + history + pictures + painted ground) | `<ifid>.babelmap` (ZIP) | `app/src/archive.rs` | `Meta.format_version = 8` | Frozen (0.x) | `archive::tests::format_version_constant_is_frozen`, `…unknown_format_version_returns_err`, `…save_trigger_wire_names_are_pinned_and_round_trip`, archive round-trip tests |
 | Z-machine aux data (v5 `@save`/`@restore` table) | `default.aux` | `app/src/aux_store.rs` + `zvm-cli/src/auxiliary.rs` | `ZAUX` magic + `VERSION = 1` | Frozen (0.x), cross-host | `aux_store::tests::version_constant_is_frozen`, `…decode_rejects_bumped_version`, `…encodes_canonical_zaux_bytes` |
 | Glk file VFS sidecar | `default.glkvfs` | `gvm/src/glk.rs` `encode_files`/`decode_files` (path: `app/src/vfs_store.rs`) | `GVFS` magic + `u32` version `1` | Frozen (0.x) | `glk::tests::encode_files_roundtrips_and_skips_temp`, `…decode_files_rejects_bumped_gvfs_version` |
 | Debug-coverage PC set | `default.pcs` | `app/src/pcset_store.rs` | `ZPCS` magic + `VERSION = 1` | Frozen (0.x) | `pcset_store::tests::version_constant_is_frozen`, `…decode_rejects_bumped_version`, `…codec_round_trips` |
@@ -112,6 +112,26 @@ Pre-beta there is still **no obligation to read old files** (see the standing
   non-v6 archive gets. The bump is because the break runs the other way: an older
   build reading a version-7 archive would drop the layers silently and restore a
   screen still wearing the previous session's fills, which is precisely the bug.
+
+- **`.babelmap` archive 7 → 8 (SQ-0820).** `screen.json` now carries all three of a v6
+  window's pixel-run layers instead of one. Beside `texts` (the window's own paint) go
+  `streamed` — where the prose the window sent to the host transcript is currently
+  SITTING on the glass (SQ-0697/SQ-0729) — and `retired`, the prose a `move_window` or
+  `window_size` froze at coordinates the window no longer covers. Both are live screen
+  state that only the story repaints, and a host Save State swaps memory under a story
+  that never learns it happened: fmvpoker's "Current Bet:"/"10" legends live only in
+  `streamed`, so a resumed hand came back with them missing from the pixel raster
+  (invisible in cell mode, because the `cells` grid was archived all along), and Shogun
+  one keypress in holds its whole nine-line title header in `retired` and lost it.
+  A RECIPE, not pixels: the game's own runs in zvm's native pixel space, exactly as
+  `texts` travels, so the archive stays terminal- and backend-neutral. The per-burst
+  `stream_origin` is deliberately NOT carried — it is only meaningful between a clear
+  and the read that follows it.
+  *Accepted break, no migration:* a pre-8 archive still loads and simply restores the
+  two layers EMPTY, which is what every archive written before the bump actually meant.
+  The bump is for the other direction, as in 6 → 7: an older build reading a version-8
+  archive would drop them silently and resume the game with prose missing from its
+  screen, which is precisely the bug.
 
 ## Notes on identity vs. version
 

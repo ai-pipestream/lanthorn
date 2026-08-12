@@ -306,12 +306,13 @@ fn render(session: &GameSession, honor: bool, kitty: bool, w: u16, h: u16) -> Bu
 /// a kitty-sized picker.
 ///
 /// Two restored sessions are compared against each other rather than against a
-/// separately-played oracle, because a same-state oracle is what makes this claim
-/// falsifiable: the pane a restore reproduces is not the whole game (v6 window text
-/// runs do not survive `restore_screen` today, measured on fmvpoker), so a whole-pane
-/// comparison against a natively-played session would be measuring that instead of
-/// this. Two restores of the SAME archive can differ only in what the terminal
-/// contributed — which is exactly the property under test, and must be nothing.
+/// separately-played oracle, because a same-state oracle is what makes THIS claim
+/// falsifiable: two restores of the same archive can differ only in what the terminal
+/// contributed, which is exactly the property under test and must be nothing. A
+/// whole-pane comparison against a natively-played session is a different and stronger
+/// claim, and it lives in `v6_restore_streamed_prose.rs` — it was unavailable when
+/// this suite landed, because the window's streamed text runs did not survive
+/// `restore_screen` at all (measured on fmvpoker; SQ-0820 carried them).
 ///
 /// Falsified with the same no-op `load_v6_screen_layers` as the test above:
 ///

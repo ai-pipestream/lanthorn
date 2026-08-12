@@ -190,15 +190,20 @@ const ENTRY_GROUND: &str = "pictures/ground.png";
 /// its art, not just its text (SQ-0518). Sibling metadata is `TranscriptData.images`.
 const ENTRY_TRANSCRIPT_IMG_PREFIX: &str = "transcript-img/";
 
-/// Bumped to 7 for SQ-0814: `display.json` now also carries the v6 screen layers
-/// that ride beside the window canvases — the `erase_window` fills and the canvas
-/// anchors ([`V6LayersDto`]). An older BUILD reading a version-7 archive would drop
-/// them and restore a screen wearing the previous session's fills, so the version
-/// check must reject it (see `load_archive`).
+/// Bumped to 8 for SQ-0820: `screen.json` now also carries the other two pixel-run
+/// layers of a v6 window — the prose it has STREAMED and the prose a move or resize
+/// left RETIRED behind it ([`ZWindowDto::streamed`]/[`ZWindowDto::retired`]). Same
+/// break direction as version 7: an older BUILD reading a version-8 archive would
+/// drop them and resume fmvpoker with its bet legends missing from the raster, so
+/// the version check must reject it (see `load_archive`).
+///
+/// Version 7 was SQ-0814: `display.json` also carries the v6 screen layers that ride
+/// beside the window canvases — the `erase_window` fills and the canvas anchors
+/// ([`V6LayersDto`]).
 ///
 /// Version 6 was SQ-0588: a v6 archive carries its display list, and omits the
 /// canvas PNG for every window whose replay reproduced the live canvas at save time.
-pub const CURRENT_FORMAT_VERSION: u32 = 7;
+pub const CURRENT_FORMAT_VERSION: u32 = 8;
 
 /// What asked for this archive to be written (SQ-0531). Both triggers produce the
 /// SAME `.babelmap` container — map, transcript, screen, aux and all — so an
@@ -498,6 +503,53 @@ struct ZWindowDto {
     /// blank and stay blank. `#[serde(default)]` keeps older archives loading.
     #[serde(default)]
     prose: Vec<String>,
+    /// Where the prose this window has STREAMED to the host transcript is currently
+    /// sitting on the screen (SQ-0697/SQ-0729), and…
+    #[serde(default)]
+    streamed: Vec<V6TextDto>,
+    /// …the prose it streamed that a later move or resize FROZE in place (SQ-0697),
+    /// at coordinates the window no longer covers.
+    ///
+    /// Persisted for the same reason as `texts` and `prose` (SQ-0585/SQ-0820): they
+    /// are live screen state that only the game repaints, and a host Save State swaps
+    /// memory under a game that never learns it happened. Measured on fmvpoker.z6 —
+    /// its "Current Bet:"/"10" legends live only here, so an unpersisted `streamed`
+    /// brought the game back with them missing from the pixel raster (the cell grid,
+    /// which `cells` carries, is why cell mode hid it).
+    ///
+    /// The RECIPE, not a result: these are the game's own runs in zvm's native pixel
+    /// space, exactly as `texts` travels, so the archive stays terminal- and
+    /// backend-neutral.
+    #[serde(default)]
+    retired: Vec<V6TextDto>,
+}
+
+/// `Vec<V6Text>` ⇄ `Vec<V6TextDto>`, shared by the three pixel-run layers a v6
+/// window carries (`texts`, `streamed`, `retired`).
+fn v6_texts_to_dto(runs: &[zvm::screen::V6Text]) -> Vec<V6TextDto> {
+    runs.iter()
+        .map(|t| V6TextDto {
+            y: t.y,
+            x: t.x,
+            text: t.text.clone(),
+            style: t.style,
+            fg: ZColourDto::from_z(t.fg),
+            bg: ZColourDto::from_z(t.bg),
+        })
+        .collect()
+}
+
+fn v6_texts_from_dto(runs: &[V6TextDto]) -> Vec<zvm::screen::V6Text> {
+    runs.iter()
+        .map(|t| zvm::screen::V6Text {
+            y: t.y,
+            x: t.x,
+            text: t.text.clone(),
+            style: t.style,
+            fg: t.fg.to_z(),
+            bg: t.bg.to_z(),
+        })
+        .collect()
 }
 
 impl ZWindowDto {
@@ -515,11 +567,10 @@ impl ZWindowDto {
             }).collect(),
             fg: ZColourDto::from_z(w.fg),
             bg: ZColourDto::from_z(w.bg),
-            texts: w.texts.iter().map(|t| V6TextDto {
-                y: t.y, x: t.x, text: t.text.clone(), style: t.style,
-                fg: ZColourDto::from_z(t.fg), bg: ZColourDto::from_z(t.bg),
-            }).collect(),
+            texts: v6_texts_to_dto(&w.texts),
             prose: w.prose.clone(),
+            streamed: v6_texts_to_dto(&w.streamed),
+            retired: v6_texts_to_dto(&w.retired),
         }
     }
     fn to_window(&self) -> zvm::screen::ZWindow {
@@ -538,10 +589,12 @@ impl ZWindowDto {
         );
         w.fg = self.fg.to_z();
         w.bg = self.bg.to_z();
-        w.texts = self.texts.iter().map(|t| zvm::screen::V6Text {
-            y: t.y, x: t.x, text: t.text.clone(), style: t.style, fg: t.fg.to_z(), bg: t.bg.to_z(),
-        }).collect();
+        w.texts = v6_texts_from_dto(&self.texts);
         w.prose = self.prose.clone();
+        w.streamed = v6_texts_from_dto(&self.streamed);
+        w.retired = v6_texts_from_dto(&self.retired);
+        // `stream_origin` is deliberately absent: per-burst state that only lives
+        // between a clear and the read that follows it, meaningless across a save.
         w
     }
 }
@@ -1913,7 +1966,7 @@ mod tests {
     // bump (update this pin + a migration/release note), never accidental drift.
     #[test]
     fn format_version_constant_is_frozen() {
-        assert_eq!(CURRENT_FORMAT_VERSION, 7, "archive format_version changed — see docs/release/save-format-policy.md");
+        assert_eq!(CURRENT_FORMAT_VERSION, 8, "archive format_version changed — see docs/release/save-format-policy.md");
     }
 
     // SQ-0531: `trigger` is persisted metadata, so its wire spelling is pinned —
@@ -2133,6 +2186,11 @@ mod tests {
         w1.grid.resize(1, 4);
         w1.grid.put(1, 2, 'Z', 0x01, ZColour::Standard(3), ZColour::Standard(9));
         w1.texts.push(V6Text { y: 6, x: 139, text: "SCORE".into(), style: 2, fg: ZColour::True24(0xABCDEF), bg: ZColour::Default });
+        // …and the OTHER two pixel-run layers of the same window (SQ-0820): prose
+        // the window has streamed, and prose a move left frozen behind it. Both are
+        // live screen state nothing repaints after a restore.
+        w1.streamed.push(V6Text { y: 247, x: 76, text: "Current Bet:".into(), style: 0, fg: ZColour::Standard(4), bg: ZColour::True(0x0421) });
+        w1.retired.push(V6Text { y: 49, x: 297, text: "SHOGUN".into(), style: 4, fg: ZColour::Default, bg: ZColour::Standard(9) });
 
         let src = ScreenState { v6: Some(v6), ..Default::default() };
         let dto = ScreenDto::from_screen(&src);
@@ -2151,6 +2209,16 @@ mod tests {
         assert_eq!((c.ch, c.style, c.fg, c.bg), ('Z', 0x01, ZColour::Standard(3), ZColour::Standard(9)));
         assert_eq!(rv.windows[1].texts.len(), 1);
         assert_eq!(rv.windows[1].texts[0], V6Text { y: 6, x: 139, text: "SCORE".into(), style: 2, fg: ZColour::True24(0xABCDEF), bg: ZColour::Default });
+        assert_eq!(
+            rv.windows[1].streamed,
+            vec![V6Text { y: 247, x: 76, text: "Current Bet:".into(), style: 0, fg: ZColour::Standard(4), bg: ZColour::True(0x0421) }],
+            "SQ-0820: a prose window's streamed runs are live screen state, so they ride in the archive beside `texts`"
+        );
+        assert_eq!(
+            rv.windows[1].retired,
+            vec![V6Text { y: 49, x: 297, text: "SHOGUN".into(), style: 4, fg: ZColour::Default, bg: ZColour::Standard(9) }],
+            "SQ-0820: and so does the prose a move or resize froze in place"
+        );
     }
 
     #[test]
