@@ -61,10 +61,22 @@ pub struct TermDefaultColors {
 /// that finishes the job: it holds the tty if the terminal has not answered yet,
 /// and carries any type-ahead the drain picked up (SQ-0769).
 pub fn query_terminal_default_colors() -> (TermDefaultColors, crate::query_sweep::QuerySweep) {
-    // OSC 10 (fg) + OSC 11 (bg), each `?`-queried and BEL-terminated, then a DSR
-    // that responding terminals answer last — its reply (`ESC[0n`) marks the end
-    // of the drain.
-    let reply = query_with(b"\x1b]10;?\x07\x1b]11;?\x07\x1b[5n");
+    colors_and_sweep(query_with(COLOUR_QUERY))
+}
+
+/// OSC 10 (fg) + OSC 11 (bg), each `?`-queried and BEL-terminated, then a DSR
+/// that responding terminals answer last — its reply (`ESC[0n`) marks the end of
+/// the drain.
+const COLOUR_QUERY: &[u8] = b"\x1b]10;?\x07\x1b]11;?\x07\x1b[5n";
+
+/// Turn what the probe read into the colours and the sweep that finishes the
+/// job. Split out of [`query_terminal_default_colors`] so a test can hand it the
+/// reply a given platform's drain would have produced — the platform becomes a
+/// parameter instead of a `cfg`, which is the only way the Windows chain is
+/// exercisable from anywhere else (SQ-0770).
+fn colors_and_sweep(
+    reply: Option<QueryReply>,
+) -> (TermDefaultColors, crate::query_sweep::QuerySweep) {
     let colors = reply.as_ref().map(|r| parse_osc_colors(&r.text)).unwrap_or_default();
     let sweep = match reply {
         // The terminal answered our DSR, so every reply in the batch is behind us
@@ -376,6 +388,121 @@ mod tests {
         });
         assert!(out.is_none());
         assert!(!sent.get(), "the query must not be sent when the drain is unavailable");
+    }
+
+    // ── SQ-0770: the whole leak chain, with the platform as a parameter ───────
+    //
+    // The two tests above pin the MECHANISM (was the query sent?). These pin the
+    // SYMPTOM the user reported: bytes of a terminal's answer reaching the game's
+    // input. The defect is a compile-time `cfg` — Windows has no non-blocking
+    // console read — so no pty harness running this platform's binary can reach
+    // it. Modelling the terminal and the platform's drain as data does, on every
+    // platform, which is what makes this runnable in the gate at all.
+
+    /// A stand-in terminal: it answers what it is asked, and whatever it answered
+    /// that nobody drained is still queued when the game starts reading. That
+    /// queue IS the leak — on the user's screen it read
+    /// `0;rgb:ffff/ffff/ffff11;rgb:2828/2c2c/3434`, typed into the story.
+    #[derive(Default)]
+    struct FakeTerminal {
+        queued: Vec<u8>,
+    }
+
+    impl FakeTerminal {
+        /// Answer a probe's batch the way a real terminal does: an OSC reply per
+        /// colour asked, then the DSR answer that ends the batch.
+        fn asked(&mut self, query: &[u8]) {
+            let q = String::from_utf8_lossy(query).into_owned();
+            if q.contains("]10;?") {
+                self.queued.extend_from_slice(b"\x1b]10;rgb:ffff/ffff/ffff\x07");
+            }
+            if q.contains("]11;?") {
+                self.queued.extend_from_slice(b"\x1b]11;rgb:2828/2c2c/3434\x07");
+            }
+            if q.contains("[5n") {
+                self.queued.extend_from_slice(b"\x1b[0n");
+            }
+        }
+
+        /// What the next reader of the terminal — the game — would be handed.
+        fn left_for_the_game(&self) -> String {
+            String::from_utf8_lossy(&self.queued).into_owned()
+        }
+    }
+
+    /// The drain a platform WITH a non-blocking read performs: it takes
+    /// everything the terminal has queued. (Unix; mirrors `send_and_drain`.)
+    fn drain_everything(term: &mut FakeTerminal) -> Option<QueryReply> {
+        let text = String::from_utf8_lossy(&std::mem::take(&mut term.queued)).into_owned();
+        let answered = text.contains("\x1b[0n");
+        let typed = crate::query_sweep::typed_bytes(text.as_bytes());
+        Some(QueryReply { text, answered, typed })
+    }
+
+    /// The drain Windows performs: `drain_stdin_nonblocking` is the no-op body
+    /// there, so the probe reads nothing and every answer stays queued.
+    fn drain_nothing(_term: &mut FakeTerminal) -> Option<QueryReply> {
+        Some(QueryReply { text: String::new(), answered: false, typed: Vec::new() })
+    }
+
+    #[test]
+    fn a_platform_that_cannot_drain_leaves_no_answer_for_the_game_to_read() {
+        let mut term = FakeTerminal::default();
+        let (colors, sweep) = colors_and_sweep(query_with_gated(COLOUR_QUERY, false, |q| {
+            term.asked(q);
+            drain_nothing(&mut term)
+        }));
+
+        assert_eq!(
+            term.left_for_the_game(),
+            "",
+            "the terminal's answer is queued for the game to read as keystrokes — the SQ-0769 \
+             payload verbatim, which on Windows happens on every launch because nothing ever \
+             drains it (SQ-0770)"
+        );
+        assert!(
+            !sweep.owns_input(),
+            "the sweep must never be left owing an answer it has no way to read: on a platform \
+             without a non-blocking read it gives up at once, so an owed sweep is a leak, not a \
+             defence"
+        );
+        // Nothing was asked, so nothing is known — the caller keeps its fallbacks.
+        assert_eq!(colors, TermDefaultColors::default());
+    }
+
+    #[test]
+    fn a_platform_that_can_drain_still_reads_the_answers_and_settles() {
+        // The other half: the gate must be invisible where the drain works, or it
+        // would have taken SQ-0769's fix down with it.
+        let mut term = FakeTerminal::default();
+        let (colors, sweep) = colors_and_sweep(query_with_gated(COLOUR_QUERY, true, |q| {
+            term.asked(q);
+            drain_everything(&mut term)
+        }));
+
+        assert_eq!(colors.fg, Some(Rgba([0xff, 0xff, 0xff, 255])));
+        assert_eq!(colors.bg, Some(Rgba([0x28, 0x2c, 0x34, 255])));
+        assert_eq!(term.left_for_the_game(), "", "the drain took the whole batch");
+        assert!(!sweep.owns_input(), "the DSR answer was read, so nothing can arrive late");
+    }
+
+    #[test]
+    fn a_drain_that_asked_and_heard_nothing_yet_still_holds_the_tty() {
+        // SQ-0769's case, and the reason "never asked" and "asked, no answer yet"
+        // must stay different things: a terminal too busy to answer in time is
+        // answered by the sweep, not by the story.
+        let mut term = FakeTerminal::default();
+        let (_colors, sweep) = colors_and_sweep(query_with_gated(COLOUR_QUERY, true, |q| {
+            term.asked(q);
+            // The drain runs before the answers land — nothing to read yet.
+            Some(QueryReply { text: String::new(), answered: false, typed: Vec::new() })
+        }));
+
+        assert!(
+            sweep.owns_input(),
+            "the answers are still in flight, so the sweep — not the story — must read them"
+        );
+        assert!(!term.left_for_the_game().is_empty(), "the answers really are still outstanding");
     }
 
     #[test]

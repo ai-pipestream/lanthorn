@@ -140,7 +140,10 @@ switches that make babelmap feel like yours without opening the whole registry.
   the answer to the `chrome` role, so the status bar, upper window and dialog
   surfaces sit on your terminal's page rather than a black one. A terminal that
   declines to answer, or answers only half, falls back to the built-in dark
-  palette rather than mixing a real ink into a guessed page. `print-colors` prints
+  palette rather than mixing a real ink into a guessed page. On Windows the
+  question is not asked at all — there is no non-blocking console read to hear
+  the answer with, and an answer nobody reads is one the terminal types into
+  your game instead — so Windows takes that same fallback. `print-colors` prints
   the active, resolved scheme to the transcript (`print-colors color` also renders
   each entry in its own color).
 - **Configurable status bar** — the `[statusbar]` section builds the status line
