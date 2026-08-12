@@ -169,6 +169,29 @@ fn records(state: &app::state::AppState, prefix: &str) -> Vec<(String, Quad)> {
         .collect()
 }
 
+/// The same, keeping each record's NATIVE quad — for a stamped border that is the
+/// character cell the extension stands for (SQ-0779).
+fn records_native(state: &app::state::AppState, prefix: &str) -> Vec<(String, Quad, Quad)> {
+    state
+        .v6_cell_map
+        .borrow()
+        .iter()
+        .filter(|e| e.label.starts_with(prefix))
+        .map(|e| (e.label.clone(), e.cells, e.native))
+        .collect()
+}
+
+/// Every stamped border on this frame: `(extension rect, native `[x0, x1)` of the
+/// character cell it draws)`.
+fn glyph_borders(state: &app::state::AppState) -> Vec<(Quad, (u32, u32))> {
+    let mut v = records_native(state, "flank-divider");
+    v.extend(records_native(state, "flank-border"));
+    v.into_iter()
+        .filter(|(label, _, _)| label.contains("glyph"))
+        .map(|(_, cells, native)| (cells, (native.0 as u32, native.0 as u32 + native.2 as u32)))
+        .collect()
+}
+
 fn viewport_of(state: &app::state::AppState) -> Quad {
     state
         .v6_cell_map
@@ -239,6 +262,43 @@ fn holds(buf: &Buffer, x: u16, y: u16, t: &PxText) -> bool {
     c.symbol().chars().next().unwrap_or(' ') == want && reversed == (t.style & 1 != 0)
 }
 
+/// SQ-0779: a stamped border's extension is the character's whole native text CELL,
+/// which is more than one terminal column wherever the letterbox scale is more than one
+/// column per native cell. What must be true of one of its rows:
+///
+///   * every cell of the span carries the run's own reverse state — the cell's ground,
+///     which is what the picture beside it must not be standing on; and
+///   * the character stands in exactly ONE of those columns. Stamping it across the
+///     span would be SQ-0750's doubled rule, which is the regression this guards.
+///
+/// A border the game drew as a reverse-video SPACE has no visible glyph at all, so its
+/// whole span is that solid ground and every column of it counts.
+fn stamped_once(buf: &Buffer, ext: Quad, y: u16, t: &PxText) -> Result<(), String> {
+    let want = t.text.chars().next().unwrap_or(' ');
+    let cells: Vec<String> =
+        (ext.0..ext.0 + ext.2).map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default()).collect();
+    let hits = (ext.0..ext.0 + ext.2).filter(|&x| holds(buf, x, y, t)).count();
+    let want_hits = if want.is_whitespace() { ext.2 as usize } else { 1 };
+    if hits != want_hits {
+        return Err(format!(
+            "row {y} of the rule's span {ext:?} holds {want:?} in {hits} column(s), not {want_hits} \
+             — the span is the character's own native cell, and the character stands in one column \
+             of it. Cells: {cells:?}"
+        ));
+    }
+    let rev = t.style & 1 != 0;
+    for (i, x) in (ext.0..ext.0 + ext.2).enumerate() {
+        let Some(c) = buf.cell((x, y)) else { return Err(format!("row {y} column {x} is off the buffer")) };
+        if c.style().add_modifier.contains(Modifier::REVERSED) != rev {
+            return Err(format!(
+                "row {y} column {x} of the rule's span {ext:?} is not the run's own ground (reverse \
+                 should be {rev}). Cells: {cells:?} (index {i})"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── (a) + (b): the frame is one medium, all the way round, with no hole at its corner ──
 
 /// SQ-0750 / SQ-0747 — Journey, on the release the report was captured off and on the
@@ -287,9 +347,13 @@ fn journeys_frame_side_rules_are_the_characters_the_game_printed() {
                 let mut glyphs = 0usize;
                 for (label, r) in &borders {
                     // Which of the game's own side rules, if any, lands in this column?
-                    // One column of slack: the ring places the rule by its run and the
+                    // One column of slack past the SPAN, which is the character's whole
+                    // native cell (SQ-0779): the ring places the rule by its run and the
                     // band by the cells its ink covers, and those can round apart.
-                    let run = rules.iter().find(|t| run_col(t, &model, area).abs_diff(r.0) <= 1);
+                    let run = rules
+                        .iter()
+                        .find(|t| (r.0..r.0 + r.2).contains(&run_col(t, &model, area)))
+                        .or_else(|| rules.iter().find(|t| run_col(t, &model, area).abs_diff(r.0) <= 1));
                     match run {
                         Some(t) => {
                             assert!(
@@ -303,14 +367,9 @@ fn journeys_frame_side_rules_are_the_characters_the_game_printed() {
                             );
                             glyphs += 1;
                             for y in r.1..r.1 + r.3 {
-                                assert!(
-                                    holds(&buf, r.0, y, t),
-                                    "{ctx}: the frame's side rule {:?} is missing from column {} \
-                                     on row {y} — the cell holds {:?}",
-                                    t.text,
-                                    r.0,
-                                    buf.cell((r.0, y)).map(|c| c.symbol().to_string()).unwrap_or_default()
-                                );
+                                if let Err(e) = stamped_once(&buf, *r, y, t) {
+                                    panic!("{ctx}: the frame's side rule {:?}: {e}", t.text);
+                                }
                             }
                         }
                         None => assert!(
@@ -408,7 +467,11 @@ fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
                 let mut glyphs = 0usize;
                 for t in &rules {
                     let col = run_col(t, &model, area);
-                    let Some((label, r)) = borders.iter().find(|(_, r)| r.0.abs_diff(col) <= 1) else {
+                    let Some((label, r)) = borders
+                        .iter()
+                        .find(|(_, r)| (r.0..r.0 + r.2).contains(&col))
+                        .or_else(|| borders.iter().find(|(_, r)| r.0.abs_diff(col) <= 1))
+                    else {
                         panic!(
                             "{ctx}: the frame's side rule {:?} (native x {}, column {col}) reaches \
                              the screen through nothing at all — no border column was resolved for \
@@ -426,14 +489,9 @@ fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
                     );
                     glyphs += 1;
                     for y in top..vp.1 + vp.3 {
-                        assert!(
-                            holds(&buf, r.0, y, t),
-                            "{ctx}: the frame's side rule {:?} is missing from column {} on row \
-                             {y} — the cell holds {:?}",
-                            t.text,
-                            r.0,
-                            buf.cell((r.0, y)).map(|c| c.symbol().to_string()).unwrap_or_default()
-                        );
+                        if let Err(e) = stamped_once(&buf, *r, y, t) {
+                            panic!("{ctx}: the frame's side rule {:?}: {e}", t.text);
+                        }
                     }
                 }
                 assert_eq!(
@@ -443,6 +501,121 @@ fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
                 );
             }
         }
+    }
+}
+
+/// SQ-0779, second pass — a stamped border must be out of the artwork's SOURCE CROP,
+/// not merely out of its destination rect.
+///
+/// The first pass trimmed the picture band's destination to stop at the border's
+/// column, and the user swept wider: *"there is an extra border on the left hand side
+/// of the art … but not for all widths … recreate with 236x68. We end up with 3 border
+/// lines on the left … the innermost (the one that shouldn't be there) is slightly
+/// thicker than our standard border."*
+///
+/// [`app::render::graphics::GraphicsRender::draw_chrome_band`] derives a band's crop
+/// from WHERE IT IS PLACED — the destination rect, mapped back through the letterbox
+/// scale — so trimming the destination by whole terminal columns lands the crop's edge
+/// somewhere INSIDE the border's own 8-pixel text cell. Journey release 30 inks its
+/// `│` at native x 3 of the cell at x 0..8; at a 234-column pane (scale 2.925) the
+/// trimmed band began at native x 2 and carried that stroke, so the game's own rule was
+/// rasterised beside the font glyph we stamped for it — "slightly thicker" because a
+/// native pixel column blown up 2.9x is fatter than a one-cell font stroke. At a
+/// 119-column pane (scale 1.485) the band's first native column is 5, past the stroke,
+/// and nothing shows: "not for all widths", exactly.
+///
+/// So the invariant is about NATIVE columns, and the sweep has to reach a scale where
+/// one native text cell is more than two terminal columns wide.
+///
+/// FALSIFY by deleting the `clear_text_columns` call in `screen.rs` and restoring the
+/// one-column extension rect (`Rect::new(col, ext.y, 1, ext.height)`): the wide panes
+/// fail with `the picture's band (2, 2, 93, 45) samples native columns 2..257, which
+/// runs into the frame's own rule at native 0..8`.
+#[test]
+fn journeys_picture_band_carries_no_pixel_of_the_frames_own_rules() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    // Wide panes, where a native text cell covers more than one terminal column, in
+    // both regimes: the first four are `letterbox` (18·rows <= 5·cols) and the rest
+    // reclaim. 234x65 is the user's own 236x68 terminal.
+    const WIDE: [(u16, u16); 8] =
+        [(234, 65), (200, 55), (180, 50), (166, 46), (234, 80), (200, 70), (180, 62), (166, 58)];
+    for (file, profile) in [
+        ("Journey - The Quest Begins.adf", None),
+        ("journey-r83-s890706.z6", Some(InterpreterProfile::Amiga)),
+        ("journey-r83-s890706.z6", Some(InterpreterProfile::IbmPc)),
+    ] {
+        let Some(mut session) = boot(file, profile, 40) else { return };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let mut wide_seen = 0usize;
+        for honor in [true, false] {
+            for (w, h) in WIDE {
+                let (state, area, _buf) = render_pane(&model, honor, (1, 1, w, h), &transcript);
+                let ctx = format!("{file} {profile:?} honor={honor} pane {w}x{h}");
+                let mut borders = glyph_borders(&state);
+                borders.sort_by_key(|(_, n)| n.0); // report the left-hand rule first
+                let scale = app::render::v6_layout::uniform_scale(native, (w as u32 * 8, h as u32 * 18));
+                if scale.s >= 2.0 {
+                    wide_seen += 1;
+                }
+                // A side band that is DRAWN and is its own placement — under a reclaim
+                // plan the flank's art goes to `menu_flank_panel`'s dest with an explicit
+                // native crop taken off the graphics-only canvas, which cannot contain a
+                // border the game printed as text in the first place.
+                let banded = state.v6_ring_plan.get() != "menu";
+                for (label, r) in records(&state, "strip:art") {
+                    if label != "strip:art" || r.2 >= w || !banded {
+                        continue;
+                    }
+                    // Exactly the crop `draw_chrome_band` takes: the band's device span,
+                    // less the letterbox offset, mapped back through the Nearest resize.
+                    let sw = ((native.0 as f32 * scale.s).round() as u32).max(1);
+                    let rel_x0 = (r.0 - area.x) as u32 * 8;
+                    let sx_lo = (rel_x0 as i64 - scale.off_x as i64).clamp(0, sw as i64) as u32;
+                    let sx_hi = (rel_x0 as i64 + r.2 as i64 * 8 - scale.off_x as i64).clamp(sx_lo as i64, sw as i64) as u32;
+                    if sx_hi <= sx_lo {
+                        continue;
+                    }
+                    let to_native =
+                        |sp: u32| (((sp as f32 + 0.5) * native.0 as f32 / sw as f32).floor() as u32).min(native.0 as u32 - 1);
+                    let (nx0, nx1) = (to_native(sx_lo), to_native(sx_hi - 1) + 1);
+                    for (ext, (gx0, gx1)) in &borders {
+                        assert!(
+                            nx1 <= *gx0 || nx0 >= *gx1,
+                            "{ctx}: the picture's band {r:?} samples native columns {nx0}..{nx1}, \
+                             which runs into the frame's own rule at native {gx0}..{gx1} (stamped \
+                             at {ext:?}) — a border is not the artwork's ground to stand on, and \
+                             trimming the DESTINATION alone only moves the overlap one column in"
+                        );
+                    }
+                }
+                // …and the destination side of the same ruling: no drawn art may cover a
+                // cell the stamped rule stands in. Under a reclaim plan that is the panel's
+                // own art rect; under a letterbox plan it is the strip.
+                let drawn: Vec<Quad> = records(&state, "strip:art")
+                    .into_iter()
+                    .filter(|(label, r)| label == "strip:art" && r.2 < w && banded)
+                    .map(|(_, r)| r)
+                    .chain(records(&state, "flank-art").into_iter().map(|(_, r)| r))
+                    .collect();
+                for (ext, _) in &borders {
+                    for r in &drawn {
+                        let clash = ext.0 < r.0 + r.2 && r.0 < ext.0 + ext.2;
+                        assert!(
+                            !clash,
+                            "{ctx}: art at {r:?} stands in the columns of the frame's rule at {ext:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            wide_seen > 0,
+            "{file} {profile:?}: this case exists for the scale where a native text cell covers \
+             more than two terminal columns, and no pane in the sweep reached it"
+        );
     }
 }
 

@@ -319,6 +319,19 @@ session-only switch that never touches your saved config:
   allocated span stops where the rule's column begins, and the rule is stamped as
   the character the game printed. Nothing is lost in the trade — the column was
   already established to hold no artwork before the rule can claim it.
+  The border's unit is the game's own **text cell**, not one terminal column, and
+  that matters as soon as the scale exceeds a column per native cell (2.93 at a
+  236-column pane). A band's crop is *where it is placed* mapped back through the
+  letterbox scale, so a destination trimmed by whole columns still starts a native
+  pixel or two inside the rule's cell — and Journey inks its `│` three pixels in,
+  which is how the game's own rule ended up rasterised *beside* the glyph stamped
+  for it: three lines down the left edge, the innermost visibly fatter, and only at
+  the wider panes. So the rule's extension spans every column its native cell falls
+  in, those columns carry the cell's own ground, and the cell's pixels are erased
+  from the canvas the bands are built from — the column-wise twin of the row-wise
+  carve that has always kept a text strip out of the bands. The character itself
+  still stands in exactly one column; stamping it across the span would be the
+  doubled rule this whole rule exists to avoid.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively. Its default ink/page follow the theme; where the

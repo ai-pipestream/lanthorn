@@ -590,10 +590,11 @@ fn flank_records(state: &app::state::AppState, label: &str) -> Vec<(Quad, Quad)>
 }
 
 /// Was this border STAMPED as the game's own character (SQ-0750) rather than
-/// uploaded as a bitmap of it? A glyph carries no native crop — there is nothing to
-/// crop, and nothing to magnify.
+/// uploaded as a bitmap of it? A glyph is not resampled, so there is nothing to
+/// magnify — its record carries the character's native text CELL rather than a crop,
+/// and a crop is always one native ROW deep (SQ-0779).
 fn is_glyph(crop: Quad) -> bool {
-    crop == (0, 0, 0, 0)
+    crop.3 == 0
 }
 
 /// The story viewport this frame resolved, in pane-absolute cells.
@@ -651,10 +652,20 @@ fn journey_flank_border_is_drawn_at_the_letterbox_scale() {
                     // cell span can be two (it is, at the user's 163-column pane) and
                     // stamping the glyph across both would draw a double rule.
                     if is_glyph(*crop) {
-                        assert_eq!(
-                            ext.2, 1,
-                            "{ctx}: the {side} flank border is stamped as a character, so it \
-                             stands in ONE column — got {ext:?}"
+                        // SQ-0779: …and the extension is that character's own native text
+                        // CELL, which is one terminal column only where a column is about
+                        // one native cell. At a wide pane it is two or three, and those
+                        // columns belong to the border rather than to the picture beside
+                        // it — the whole of the user's ruling. The glyph still stands in
+                        // exactly ONE of them, which is what keeps the double rule away;
+                        // that half is pinned in `v6_frame_border_medium.rs`.
+                        let cell = (crop.2.max(1) as f32 * s / cell_w as f32).ceil() as u16 + 1;
+                        assert!(
+                            ext.2 >= 1 && ext.2 <= cell,
+                            "{ctx}: the {side} flank border is stamped as a character, so its \
+                             span is that character's native cell ({} native px → at most \
+                             {cell} columns at scale {s:.2}) — got {ext:?}",
+                            crop.2
                         );
                         continue;
                     }

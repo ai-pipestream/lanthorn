@@ -1088,6 +1088,7 @@ fn render_node(
                         // untouched. Trimming a row off such a strip instead of leaving it
                         // alone would take a row of banner away, which is why this walks
                         // strips rather than rows.
+                        //
                         if strips.iter().any(|s| matches!(s, ChromeStrip::Art(r) if r.width < area.width && r.y == viewport.y)) {
                             let ch = cell_px.1.max(1) as f32;
                             let sc = scale.s.max(0.001);
@@ -1191,7 +1192,7 @@ fn render_node(
                                             *r, area, viewport, &scale, cell_px, story, native, &canvas, &gfx,
                                             &chrome_runs, bottom, which,
                                         )
-                                        .filter(|(_, ink)| !glyph_borders_only || matches!(ink, BorderInk::Glyph(..)))
+                                        .filter(|(_, ink)| !glyph_borders_only || matches!(ink, BorderInk::Glyph { .. }))
                                     };
                                     let inner = ext(FlankBorder::Inner);
                                     // A flank only one border wide — Journey's
@@ -1205,6 +1206,28 @@ fn render_node(
                                 _ => None,
                             })
                             .collect();
+                        // SQ-0779, second pass: and it must not overlap it in the SOURCE
+                        // either. A band's crop is its destination rect mapped back through
+                        // the letterbox scale, so trimming the destination by whole terminal
+                        // columns lands the crop's edge inside the border's own 8-pixel text
+                        // cell — the game's rule was still in the picture, moved one column
+                        // in rather than removed. `clear_text_rows` has always carved a text
+                        // strip's native ROWS out of this canvas for exactly this reason; a
+                        // stamped border COLUMN needs the same carve, and gets it here. Only
+                        // over the story's own native rows, which is the span the glyph
+                        // path's content test proved carries no artwork.
+                        {
+                            let cols: Vec<(u32, u32)> = flank_borders
+                                .iter()
+                                .flat_map(|(_, i, o)| i.iter().chain(o.iter()))
+                                .filter_map(|(_, ink)| match ink {
+                                    BorderInk::Glyph { native, .. } => Some(*native),
+                                    BorderInk::Band(_) => None,
+                                })
+                                .collect();
+                            let rows = (story.y_px as u32, story.y_px as u32 + story.h_px as u32);
+                            v6::clear_text_columns(&mut canvas, &cols, rows);
+                        }
                         // SQ-0779, the user's ruling: **if a game draws a border, the
                         // artwork should not overlap it.** A flank strip runs the whole
                         // width of the flank, borders included, and outside the Menu plan
@@ -1377,12 +1400,21 @@ fn render_node(
                                     BorderInk::Band(crop) => gr.draw_chrome_band_stretched(
                                         picker, &canvas, *ext, *crop, crate::render::graphics::BandSlot::DividerExtension, buf,
                                     ),
-                                    BorderInk::Glyph(ch, style, fg, bg) => {
+                                    // SQ-0779: the character stands in ONE column — its own,
+                                    // `col` — and the rest of the extension is the native text
+                                    // cell's own blank padding, drawn in the same style. Where a
+                                    // terminal column is about one native cell those are the same
+                                    // rect and nothing changes; where the scale is larger (2.93 at
+                                    // the reported 236x68 terminal) the padding columns are the
+                                    // ones the picture's band used to stand in, carrying a
+                                    // rasterised copy of this very rule. Stamping the glyph across
+                                    // all of them instead would be SQ-0750's doubled rule.
+                                    BorderInk::Glyph { ch, style, fg, bg, col, .. } => {
                                         let st = v6_run_style(base, *fg, *bg, *style, state.config.honor_game_colours, &state.colors);
                                         let g = ch.to_string();
                                         for y in ext.y..ext.bottom() {
                                             for x in ext.x..ext.right() {
-                                                buf.set_stringn(x, y, &g, 1, st);
+                                                buf.set_stringn(x, y, if x == *col { &g } else { " " }, 1, st);
                                             }
                                         }
                                     }
@@ -1537,9 +1569,14 @@ fn render_node(
                                             let c = (crop.0 as u16, crop.1 as u16, crop.2 as u16, crop.3 as u16);
                                             map.push(rec(label, c, *ext));
                                         }
-                                        Some((ext, BorderInk::Glyph(ch, style, ..))) => map.push(rec(
-                                            &format!("{label} (glyph {ch:?} style={style:02b})"),
-                                            (0, 0, 0, 0),
+                                        Some((ext, BorderInk::Glyph { ch, style, col, native, .. })) => map.push(rec(
+                                            // …and WHICH column of the extension the character
+                                            // itself stands in, with the native text cell the
+                                            // extension covers (SQ-0779). "The rule is one glyph
+                                            // in a three-column cell" is the sentence that tells
+                                            // a stamped border apart from a doubled one.
+                                            &format!("{label} (glyph {ch:?} style={style:02b} at col {col})"),
+                                            (native.0 as u16, 0, (native.1 - native.0) as u16, 0),
                                             *ext,
                                         )),
                                         None => {}
@@ -3719,7 +3756,16 @@ enum BorderInk {
     /// Artwork: a one-native-row crop of the chrome canvas, replicated down the band.
     Band(BandCrop),
     /// The game's own character, with its Z-machine style bits and packed colours.
-    Glyph(char, u8, u32, u32),
+    ///
+    /// SQ-0779: `col` is the one column the character is STAMPED in and `native` is
+    /// the `[x0, x1)` of its own 8-pixel text cell — which is wider than one terminal
+    /// column wherever the letterbox scale exceeds one column per native cell (2.93
+    /// at the 236x68 terminal this was reported from). The extension's rect covers
+    /// the whole cell so the artwork beside it stops at a native cell boundary and
+    /// the cell's own ground is drawn rather than left to the backdrop; the glyph
+    /// still stands in exactly ONE of those columns, which is what keeps SQ-0750's
+    /// doubled rule from coming back.
+    Glyph { ch: char, style: u8, fg: u32, bg: u32, col: u16, native: (u32, u32) },
 }
 
 /// One of a flank's border columns carried down the reclaimed gap: where it is
@@ -4061,14 +4107,37 @@ fn flank_border_extension(
             let w = t.text.chars().count().max(1) as u32 * 8;
             (py..py + 16).contains(&mid) && (px0..px0 + w).contains(&dnx0)
         })?;
-        let ch = t.text.chars().nth(((dnx0 - (t.x.max(1) as u32 - 1)) / 8) as usize)?;
+        let idx = (dnx0 - (t.x.max(1) as u32 - 1)) / 8;
+        let ch = t.text.chars().nth(idx as usize)?;
         if ch == ' ' && t.style & 1 == 0 {
             return None;
         }
-        let col = run_cell(t, scale, cell_px, pane).0 + ((dnx0 - (t.x.max(1) as u32 - 1)) / 8) as i32;
+        let col = run_cell(t, scale, cell_px, pane).0 + idx as i32;
         let col = u16::try_from(col).ok()?;
-        (col >= band.x && col < band.right())
-            .then_some((Rect::new(col, ext.y, 1, ext.height), BorderInk::Glyph(ch, t.style, t.fg, t.bg)))
+        if col < band.x || col >= band.right() {
+            return None;
+        }
+        // SQ-0779: the character's own native text CELL, and EVERY terminal column any
+        // part of it falls in — floor on the near edge, ceil on the far one. The glyph
+        // stands in one of them (`col`, exactly as before); the rest are the cell's own
+        // blank padding, and they belong to the border rather than to the picture beside
+        // it, which is the whole of the user's ruling.
+        //
+        // The full overlap set, not the rounded one, because this rect is what the
+        // artwork's span is trimmed against and a band's source crop is its DESTINATION
+        // mapped back through the same scale. Round the far edge and the column left
+        // over is one whose device span still reaches into the cell — so the crop starts
+        // a native pixel or two inside it, and at a large enough scale that is where the
+        // stroke lives. Widened, never narrowed: the cell's pixels are the border's.
+        let gnx0 = (t.x.max(1) as u32 - 1) + idx * 8;
+        let gnx1 = gnx0 + 8;
+        let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * s) / cw;
+        let x0 = (pane.x as i32 + dev(gnx0).floor() as i32).clamp(band.x as i32, col as i32) as u16;
+        let x1 = (pane.x as i32 + dev(gnx1).ceil() as i32).clamp(col as i32 + 1, band.right() as i32) as u16;
+        Some((
+            Rect::new(x0, ext.y, x1 - x0, ext.height),
+            BorderInk::Glyph { ch, style: t.style, fg: t.fg, bg: t.bg, col, native: (gnx0, gnx1) },
+        ))
     })();
     if let Some(g) = text_border {
         return Some(g);

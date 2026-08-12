@@ -1012,6 +1012,36 @@ fn fill_explicit_bg_rows(
 /// native top-y (`y - 1`); every run spans `FONT_H`. On-art status (Zork0's banner
 /// ribbon) is an art strip, never a text run, so it is never passed here and stays
 /// imaged.
+/// SQ-0779: the COLUMN analogue of [`clear_text_rows`] — erase the native columns of
+/// a border the ring stamps as a CHARACTER, over `rows` (`[y0, y1)`).
+///
+/// `clear_text_rows` has always carved a text strip's native rows out of this canvas
+/// so a band cannot rasterise a glyph the cells already draw. A border COLUMN the
+/// hybrid ring stamps (SQ-0750) had no such carve, and one is exactly as necessary:
+/// a flank band's source crop is its DESTINATION rect mapped back through the
+/// letterbox scale, so trimming the destination by whole terminal columns moves the
+/// crop's left edge to a native column that is still inside the border's own 8-pixel
+/// text cell. Journey's `│` inks native x 3 of the cell at x 0..8; at a 234-column
+/// pane the trimmed band began at native x 2 and carried that stroke into the
+/// picture — the game's own rule, rasterised, standing beside the font glyph we
+/// stamped for it. Scale-dependent, because at a smaller scale the band's first
+/// native column lands past the stroke and it vanishes: native 5 at a 119-column
+/// pane, native 2 at 234.
+///
+/// `cols` are native `[x0, x1)` spans — the character CELL, not the inked stroke,
+/// since the whole cell is what the stamped glyph stands for.
+pub fn clear_text_columns(canvas: &mut RgbaImage, cols: &[(u32, u32)], rows: (u32, u32)) {
+    let (w, h) = (canvas.width(), canvas.height());
+    let (y0, y1) = (rows.0.min(h), rows.1.min(h));
+    for &(x0, x1) in cols {
+        for y in y0..y1 {
+            for x in x0.min(w)..x1.min(w) {
+                canvas.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+            }
+        }
+    }
+}
+
 pub fn clear_text_rows(canvas: &mut RgbaImage, run_tops: &[u16]) {
     let (w, h) = (canvas.width(), canvas.height());
     for &top in run_tops {
