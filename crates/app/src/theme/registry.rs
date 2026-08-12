@@ -412,7 +412,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // The composed-input preview line shown by list dialogs ("Input: <text>_").
     row("dialog.input_preview", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
     // SQ-0789: the launch-options dialog's caveat lines — what a chosen art
-    // rendition will and won't do (EGA/CGA not yet at their true aspect), and
+    // rendition will and won't do (EGA's dither not yet fusing at 1:1), and
     // when a choice needs the checkbox to take effect. `alert` without `dim`:
     // these are the lines that stop a user picking a rendition and being puzzled
     // by the result, so they must not read as decoration.

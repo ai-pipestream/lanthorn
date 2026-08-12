@@ -649,7 +649,16 @@ pub enum PictureOverride {
     /// flavour, corrupt, or truncated. Loud on purpose.
     Unusable { path: std::path::PathBuf, reason: String },
     /// The named file is a native archive, and it wins.
-    Loaded { path: std::path::PathBuf, pics: blorb::infocom_pics::InfocomPics },
+    ///
+    /// `refused` carries the complaint when a file sat under the next part's
+    /// name and turned out not to be one (SQ-0798). The archive still loads —
+    /// part 1 is exactly what the user named — but the continuation is never
+    /// dropped in silence.
+    Loaded {
+        path: std::path::PathBuf,
+        pics: blorb::infocom_pics::InfocomPics,
+        refused: Option<String>,
+    },
 }
 
 impl PictureOverride {
@@ -705,7 +714,10 @@ impl PictureOverride {
             Err(e) => return PictureOverride::Unusable { path, reason: e.to_string() },
         };
         match blorb::infocom_pics::InfocomPics::parse(raw) {
-            Ok(pics) => PictureOverride::Loaded { path, pics },
+            Ok(mut pics) => {
+                let refused = absorb_continuations(&mut pics, &path);
+                PictureOverride::Loaded { path, pics, refused }
+            }
             Err(e) => PictureOverride::Unusable { path, reason: e.to_string() },
         }
     }
@@ -764,9 +776,14 @@ impl PictureOverride {
 
     /// The complaint to show the user, naming the file and the reason. `None`
     /// when there is nothing to complain about — no key, or a key that worked.
+    ///
+    /// A key that worked can still have one thing to say: an archive loaded
+    /// whose *continuation* was refused draws with fewer pictures than the set it
+    /// claims to be, which is the SQ-0798 defect wearing a different hat.
     pub fn warning(&self) -> Option<String> {
         match self {
-            PictureOverride::Unset | PictureOverride::Loaded { .. } => None,
+            PictureOverride::Unset => None,
+            PictureOverride::Loaded { refused, .. } => refused.clone(),
             PictureOverride::Missing { path } => Some(format!(
                 "pictures = \"{}\" names a picture archive that is not there — \
                  falling back to this story's Blorb art",
@@ -779,6 +796,93 @@ impl PictureOverride {
             )),
         }
     }
+}
+
+/// The path of part `part` of the multi-part set `path` belongs to, or `None`
+/// when the name cannot express one (SQ-0798).
+///
+/// **The format states the part number, and the filename carries it.** Header
+/// byte 0 is the part; Frotz's DOS port turns that number straight back into a
+/// filename — `extension[3] = '0' + number`, under the comment *"EGA pictures
+/// may be stored in two separate graphics files"* (`src/dos/bcpic.c`) — and its
+/// `open_graphics_file(int number)` takes the part as a parameter for exactly
+/// this reason. So the rule here is Infocom's own: replace the final character
+/// of the extension with the part's digit, leaving everything else, case
+/// included, untouched. `Pic.data` has no trailing digit and therefore no
+/// continuation, which is correct — the Amiga releases ship one file.
+///
+/// # This is NOT the stem-based discovery SQ-0734 rejected
+///
+/// Those look alike and are opposites, and the difference is the whole of the
+/// tier policy. What SQ-0734 forbids is pairing an archive to a **story** on the
+/// evidence of a name: `arthur.z6` sitting beside `arthur.mg1` proves nothing,
+/// every Amiga release calls its archive `Pic.data`, and a wrong pairing draws
+/// Arthur's plates into Zork Zero with nothing on screen to say so.
+///
+/// Nothing of that kind happens here. The pairing has **already been asserted**
+/// — by a user naming the archive outright, which is tier 3 — and this only
+/// follows that one archive's own in-band part number to the rest of itself. The
+/// story is not consulted and could not be. What is guessed is a filename; what
+/// is then *verified* is the header, by
+/// [`blorb::infocom_pics::InfocomPics::append_part`], which refuses a file whose
+/// part byte, codec or picture ids say it is not the continuation. A stem rule
+/// has nothing to verify against; this one does.
+pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf> {
+    // One digit is all a DOS 8.3 extension can hold, and it is all `bcpic.c`
+    // writes; 0 is not a part number.
+    if !(1..=9).contains(&part) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    let (stem, ext) = name.rsplit_once('.')?;
+    let mut ext: Vec<u8> = ext.as_bytes().to_vec();
+    if !ext.last()?.is_ascii_digit() {
+        return None;
+    }
+    *ext.last_mut()? = b'0' + part;
+    let ext = String::from_utf8(ext).ok()?;
+    Some(path.with_file_name(format!("{stem}.{ext}")))
+}
+
+/// Merge every continuation of `path` into `pics`, and return the complaint if
+/// one was found and refused (SQ-0798).
+///
+/// # How far it looks
+///
+/// **Until a part is missing.** Arthur and Journey stop at two, but the format
+/// does not: the part byte is a whole byte and `open_graphics_file(int number)`
+/// takes any number, so a title we do not have could ship three. Stopping at 2
+/// would be a corpus fact hardcoded as a rule, and it would fail silently — the
+/// symptom is missing pictures, which is precisely the defect this fixes.
+/// Scanning instead costs one `open` of a file that is not there per set, once
+/// at boot, and the naming bounds the walk on its own: a DOS extension holds one
+/// digit, so [`part_path`] answers `None` past part 9 and the loop cannot run
+/// away.
+///
+/// An absent next part is the ordinary end of the walk and says nothing. A part
+/// that is *present* and does not check out is refused and reported: SQ-0734's
+/// rule that an unusable named archive must be loud applies to its continuation,
+/// because a half-loaded set looks exactly like a complete one until the game
+/// draws the picture that is not there.
+pub fn absorb_continuations(
+    pics: &mut blorb::infocom_pics::InfocomPics,
+    path: &std::path::Path,
+) -> Option<String> {
+    while let Some(next) = part_path(path, pics.next_part()) {
+        let Ok(raw) = std::fs::read(&next) else {
+            return None; // no such part: the set ends here, as most do.
+        };
+        let outcome = blorb::infocom_pics::InfocomPics::parse(raw)
+            .and_then(|part| pics.append_part(part));
+        if let Err(e) = outcome {
+            return Some(format!(
+                "{} sits under this archive's next part name but {e} — \
+                 using only the parts that check out",
+                next.display(),
+            ));
+        }
+    }
+    None
 }
 
 /// Decode one picture out of a native Infocom archive into the same

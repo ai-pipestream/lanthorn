@@ -72,11 +72,17 @@ fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
             c.rendition
         );
         assert!(c.space_width == 320 || c.space_width == 640);
-        // The caveat tracks the picture space, not the name: 640-wide art has
-        // half-width pixels and babelmap does not yet draw it at true aspect
-        // (SQ-0790). Promising otherwise would leave a user puzzled by a
-        // stretched plate and unsure whether they picked the wrong file.
-        assert_eq!(c.caveat().is_some(), c.space_width == 640, "{}", c.filename);
+        // The caveat is EGA's dithering, not anyone's geometry. SQ-0790 landed
+        // the per-axis art scale, so 640-wide art IS drawn at true aspect now;
+        // what is left is that EGA's column-by-column dither does not fuse at
+        // 1:1 (SQ-0797). CGA is 640-wide too and carries no caveat, because
+        // two-colour line art has no dither to fuse (SQ-0794).
+        assert_eq!(
+            c.caveat().is_some(),
+            c.space_width == 640 && c.rendition != "CGA",
+            "{}",
+            c.filename
+        );
     }
 
     // The Blorb beside it is tier 1 and is never a pickable native archive; the
@@ -106,15 +112,19 @@ fn each_game_in_the_library_detects_its_own_archives_and_no_others() {
             &["zork0.cg1", "zork0.eg1", "zork0.mg1", "zork0.pic"],
             &["arthur.mg1", "journey.mg1", "shogun.mg1", "FMVPOKER.EG1", "beyondzo.mg1"],
         ),
+        // `.eg2` is deliberately in the "must NOT" column for both multi-part
+        // games: it is the back half of `.eg1`, which now loads it, and offering
+        // it alone would be offering 101 of Arthur's 171 ids as if it were the
+        // set (SQ-0798).
         (
             "arthur-r74-s890714.z6",
-            &["arthur.cg1", "arthur.eg1", "arthur.eg2", "arthur.mg1", "arthur.pic"],
-            &["zork0.mg1", "journey.mg1", "shogun.mg1"],
+            &["arthur.cg1", "arthur.eg1", "arthur.mg1", "arthur.pic"],
+            &["zork0.mg1", "journey.mg1", "shogun.mg1", "arthur.eg2"],
         ),
         (
             "journey-r83-s890706.z6",
-            &["journey.cg1", "journey.eg1", "journey.eg2", "journey.mg1"],
-            &["zork0.mg1", "arthur.mg1", "shogun.mg1"],
+            &["journey.cg1", "journey.eg1", "journey.mg1"],
+            &["zork0.mg1", "arthur.mg1", "shogun.mg1", "journey.eg2"],
         ),
         (
             "shogun-r322-s890706.z6",
@@ -161,6 +171,92 @@ fn each_game_in_the_library_detects_its_own_archives_and_no_others() {
             );
         }
     }
+}
+
+/// A multi-part EGA set is ONE row, and it advertises the whole set (SQ-0798).
+///
+/// Before this, Arthur offered `arthur.eg1` and `arthur.eg2` as two choices, and
+/// both were wrong: the first loaded 97 of 137 pictures and the second is not an
+/// archive at all, just the back half of one. Now the first carries the second
+/// and the second is not offered.
+///
+/// The row's picture count is the merged directory — 171 for Arthur, which is
+/// exactly what `arthur.mg1` holds, the same artwork shipped undivided. The
+/// panel and the dialog both render from this list, so pinning it here pins both.
+#[test]
+fn a_split_ega_archive_is_offered_as_one_entry_carrying_both_files() {
+    for (story_file, head, tail, want_entries, want_mcga) in [
+        ("arthur-r74-s890714.z6", "arthur.eg1", "arthur.eg2", 171usize, "arthur.mg1"),
+        ("journey-r83-s890706.z6", "journey.eg1", "journey.eg2", 135, "journey.mg1"),
+    ] {
+        let path = stories_dir().join(story_file);
+        if !path.is_file() || !stories_dir().join(tail).is_file() {
+            continue; // gitignored fixtures
+        }
+        let found = discover_art_candidates(&path);
+        let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
+
+        let c = found
+            .iter()
+            .find(|c| c.filename.eq_ignore_ascii_case(head))
+            .unwrap_or_else(|| panic!("{head} must be listed; got {names:?}"));
+        assert_eq!(c.parts, 2, "{head} is two files");
+        assert_eq!(c.part, 1, "and the row names the first of them");
+        assert_eq!(c.pictures, want_entries, "{head} advertises the WHOLE set");
+        assert!(
+            !found.iter().any(|x| x.filename.eq_ignore_ascii_case(tail)),
+            "{tail} is half an archive and must not be a separate choice; got {names:?}",
+        );
+
+        // The undivided MCGA release of the same artwork is the oracle: if the
+        // merged count were wrong, the two renditions would stop agreeing on how
+        // many pictures this game has. (Journey's EGA set carries one extra —
+        // id 59, a solid-colour blanking plate no other rendition has.)
+        if let Some(m) = found.iter().find(|x| x.filename.eq_ignore_ascii_case(want_mcga)) {
+            assert_eq!(m.parts, 1, "{want_mcga} is a single disk");
+            let slack = usize::from(story_file.starts_with("journey"));
+            assert_eq!(
+                c.pictures,
+                m.pictures + slack,
+                "{head} and {want_mcga} are the same game's art",
+            );
+        }
+    }
+}
+
+/// A continuation whose part 1 is NOT on disk is still listed — it is all there
+/// is, and it says so.
+///
+/// The collapse rule is "hide a part whose predecessor is present", not "hide
+/// anything numbered above 1". Someone with only disk two should see disk two,
+/// flagged, rather than an empty dialog.
+#[test]
+fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
+    let eg2 = stories_dir().join("arthur.eg2");
+    if !eg2.is_file() {
+        return; // gitignored fixture
+    }
+    let dir = tmp("lone-part2");
+    std::fs::copy(&eg2, dir.join("arthur.eg2")).unwrap();
+    std::fs::write(dir.join("arthur.z6"), b"x").unwrap();
+
+    let found = discover_art_candidates(&dir.join("arthur.z6"));
+    let c = found
+        .iter()
+        .find(|c| c.filename.eq_ignore_ascii_case("arthur.eg2"))
+        .expect("with no part 1 beside it, part 2 is the only choice there is");
+    assert_eq!((c.part, c.parts), (2, 1));
+    assert_eq!(c.pictures, 101, "and it advertises only what it actually holds");
+
+    // Put part 1 back and the row disappears into it.
+    std::fs::copy(stories_dir().join("arthur.eg1"), dir.join("arthur.eg1")).unwrap();
+    let found = discover_art_candidates(&dir.join("arthur.z6"));
+    assert!(!found.iter().any(|c| c.filename.eq_ignore_ascii_case("arthur.eg2")));
+    assert_eq!(
+        found.iter().find(|c| c.filename.eq_ignore_ascii_case("arthur.eg1")).map(|c| c.pictures),
+        Some(171),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The list is sorted and stable, and it never carries the story itself or a
@@ -472,9 +568,16 @@ fn the_dialog_renders_its_list_its_derived_number_and_its_checkbox() {
     assert!(frame.contains("Artwork"));
     assert!(frame.contains("zork0.eg1"), "every candidate is listed by name");
     assert!(frame.contains("pictures"), "with its picture count");
-    assert!(frame.contains("part"), "and its part number");
+    // Zork Zero's renditions are all single-disk, so no row carries a
+    // multi-part note — the column that used to say "part 1" on every line is
+    // gone, because a constant is not information (SQ-0798).
+    assert!(!frame.contains("part 1"), "a single-part archive says nothing about parts: {frame}");
+    assert!(!frame.contains("disks"), "and claims no second disk: {frame}");
     assert!(frame.contains("header 0x1E"), "the derived interpreter number");
     assert!(frame.contains("from the artwork"), "and where it came from");
-    assert!(frame.contains("not yet drawn at its true aspect"), "the EGA caveat (SQ-0790)");
+    assert!(
+        frame.contains("dithered colours do not fuse"),
+        "the EGA caveat, which is SQ-0797's dithering and no longer SQ-0790's geometry",
+    );
     assert!(frame.contains("[x] Save as this game's default"), "the checkbox, ticked");
 }

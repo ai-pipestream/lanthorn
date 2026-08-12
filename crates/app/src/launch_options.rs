@@ -99,10 +99,14 @@ pub struct ArtCandidate {
     pub flavour: Flavour,
     /// The rendition label a human recognises: `Amiga`, `MCGA`, `EGA`, `CGA`.
     pub rendition: &'static str,
-    /// Directory entries — pictures plus size-only placeholders.
+    /// Directory entries — pictures plus size-only placeholders — across the
+    /// **whole set**, continuation parts included (SQ-0798).
     pub pictures: usize,
-    /// Part number; multi-part sets number their files 1, 2, …
+    /// Part number of the file named; multi-part sets number their files 1, 2, …
     pub part: u8,
+    /// How many files this candidate is: 2 for `arthur.eg1`, which carries
+    /// `arthur.eg2` with it, and 1 for everything else (SQ-0798).
+    pub parts: u8,
     /// The width of the picture space its coordinates use: 320 or 640.
     pub space_width: u16,
 }
@@ -115,14 +119,32 @@ impl ArtCandidate {
 
     /// An honest one-line caveat, or `None` when the rendition draws correctly.
     ///
-    /// EGA and CGA store 640-wide art whose pixels are half as wide, and babelmap
-    /// has no display mode for that yet (SQ-0790) — so it plots them one pixel
-    /// per pixel and they come out twice as wide as they should. Saying so in the
-    /// dialog is cheaper than letting someone pick `.eg1`, see a stretched plate,
-    /// and wonder whether they chose the wrong file.
+    /// **Geometry is no longer the problem.** SQ-0790 landed the per-axis art
+    /// scale, so a 640-wide archive is drawn `(1, 2)` against MCGA's `(2, 2)` and
+    /// an EGA banner, pillar and compass now sit exactly where the MCGA ones do.
+    /// The caveat that used to say otherwise outlived its defect.
+    ///
+    /// What remains is a **colour** gap, and it belongs to EGA alone (SQ-0797).
+    /// EGA's sixteen colours were fixed in the card, so its artists dithered for
+    /// the ones they did not have — Zork Zero's bronze arch is a column-by-column
+    /// alternation of brown and bright red. On the card those columns were half a
+    /// pixel wide and fused in the eye; babelmap keeps all 640 distinct, so the
+    /// arch reads as speckle rather than as solid metal.
+    ///
+    /// CGA is 640-wide too and gets no caveat, because there is nothing there to
+    /// fuse: a `.CG1` is two-colour line art (SQ-0794 — every pixel-bearing
+    /// picture sets `EF_MONO`), and black-against-white at 1:1 is exactly what
+    /// the artist drew. MCGA and Amiga art is 320-wide and doubles cleanly.
+    ///
+    /// The test is "640-wide and not known to be CGA", so a 640-wide archive
+    /// whose name does not say which card it came from still warns — a caveat is
+    /// a sentence a person reads next to the very [`rendition`](ArtCandidate)
+    /// label it is reasoning from, and warning about art that turns out to be
+    /// line-art costs a line, where staying quiet about dithered art costs the
+    /// explanation of what they are looking at.
     pub fn caveat(&self) -> Option<&'static str> {
-        (self.space_width == 640)
-            .then_some("640-wide art with half-width pixels — not yet drawn at its true aspect")
+        (self.space_width == 640 && self.rendition != "CGA")
+            .then_some("dithered colours do not fuse at 1:1 yet — fine detail reads as speckle")
     }
 }
 
@@ -152,6 +174,17 @@ const ART_EXTS: &[&str] = &["pic", "mg1", "mg2", "eg1", "eg2", "cg1", "cg2", "da
 /// that one answers "you asked for this and it did not work". An archive whose
 /// name resembles nothing is in the same position: not offered, still reachable
 /// by name through `--pictures` or the `pictures` key.
+///
+/// # A multi-part set is ONE row (SQ-0798)
+///
+/// Arthur's EGA art is `arthur.eg1` **and** `arthur.eg2`, and naming the first
+/// now loads both. Offering the second as a separate choice would be offering
+/// half an archive: on its own `arthur.eg2` is 101 of the set's 171 ids, so
+/// picking it means silently losing the rest. So a file whose earlier part sits
+/// beside it is not listed at all, and the row that IS listed reports the whole
+/// set's picture count. The bare continuation stays reachable by name, like every
+/// other file this list declines to show, for anyone who genuinely wants only
+/// disk two.
 pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
     let dir = match story_path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
@@ -181,13 +214,26 @@ pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
             continue;
         }
         let Ok(raw) = std::fs::read(&path) else { continue };
-        let Ok(pics) = InfocomPics::parse(raw) else { continue };
+        let Ok(mut pics) = InfocomPics::parse(raw) else { continue };
+        // A continuation whose earlier part is here is not a choice — it is the
+        // back half of the row above it, and that row already carries it.
+        if crate::graphics::part_path(&path, pics.part().saturating_sub(1))
+            .is_some_and(|prev| prev.is_file())
+        {
+            continue;
+        }
+        // Whatever this file continues into is part of what picking it gets you,
+        // so the count has to say so. A refused continuation is not reported here
+        // (this list is display-only and silent by design — see above); the loud
+        // version is `PictureOverride::warning`, on the archive actually chosen.
+        crate::graphics::absorb_continuations(&mut pics, &path);
         let space_width = pics.picture_space_width();
         out.push(ArtCandidate {
             rendition: rendition_label(pics.flavour(), space_width, &filename),
             flavour: pics.flavour(),
             pictures: pics.entries().len(),
             part: pics.part(),
+            parts: pics.parts(),
             space_width,
             filename,
             path,
@@ -263,6 +309,24 @@ fn looks_like_art_name(filename: &str) -> bool {
         Some((_, "data")) => false,
         Some((_, ext)) => ART_EXTS.contains(&ext),
         None => false,
+    }
+}
+
+/// The trailing "…and it is more than one file" phrase both surfaces append to a
+/// candidate row, or `""` for the ordinary single-file archive (SQ-0798).
+///
+/// Two different facts, and only one of them is ever true at a time. `2 disks`
+/// is the multi-part set collapsed into one row — the count beside it is already
+/// the whole set's, and this says why it is larger than the file looks. `part 2`
+/// is the opposite case: a lone continuation whose part 1 is not on disk, listed
+/// because it is all there is, and flagged because it is not a whole archive.
+pub fn parts_note(c: &ArtCandidate) -> String {
+    if c.parts > 1 {
+        format!("  {} disks", c.parts)
+    } else if c.part != 1 {
+        format!("  part {}", c.part)
+    } else {
+        String::new()
     }
 }
 
@@ -726,7 +790,19 @@ mod tests {
         if let Some(c) = by_name("zork0.eg1") {
             assert_eq!(c.rendition, "EGA");
             assert_eq!(c.space_width, 640);
-            assert!(c.caveat().is_some(), "EGA must carry the SQ-0790 caveat");
+            assert!(c.caveat().is_some(), "EGA must carry the SQ-0797 dithering caveat");
+            // Zork Zero's 360K release gave EGA a whole disk, so this one really
+            // is complete on its own — the multi-part path must not invent a
+            // second file for it (SQ-0798).
+            assert_eq!(c.parts, 1, "zork0.eg1 is a single-part archive");
+            assert_eq!(c.pictures, 503, "the whole zork0.eg1 directory");
+        }
+        if let Some(c) = by_name("zork0.cg1") {
+            // 640-wide like EGA, and no caveat: CGA is two-colour line art, so
+            // there is no dithered colour to fuse (SQ-0794 / SQ-0797).
+            assert_eq!(c.rendition, "CGA");
+            assert_eq!(c.space_width, 640);
+            assert!(c.caveat().is_none(), "CGA line art draws correctly at 1:1");
         }
         if let Some(c) = by_name("zork0.pic") {
             assert_eq!(c.rendition, "Amiga");
@@ -806,6 +882,7 @@ mod tests {
             rendition: "Amiga",
             pictures: 172,
             part: 1,
+            parts: 1,
             space_width: 320,
         };
         let pc = ArtCandidate { flavour: Flavour::Pc, rendition: "MCGA", ..amiga.clone() };
