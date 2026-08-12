@@ -1296,7 +1296,30 @@ impl Machine {
             // set_colour decodes as OperandCount::Two and lands HERE in
             // exec_2op with `ops.len() == 3`, never in exec_var.
             0x1B => {
-                if let Some(v6) = self.screen.v6.as_mut() {
+                // ZMSD §8.3's Amiga rule (SQ-0740): a Version 6 interpreter going
+                // under interpreter number 4 has ONE pair of colours for all
+                // windows, and a change to either repaints the text already on the
+                // screen. The whole of it lives in `screen.rs` — see
+                // `amiga_global_colour_pair` and `set_amiga_colour_pair`; the
+                // per-window model below is every other machine, unchanged.
+                if crate::screen::amiga_global_colour_pair(&self.mem) && self.screen.v6.is_some() {
+                    let win = {
+                        let v6 = self.screen.v6.as_ref().expect("checked above");
+                        ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current)
+                    };
+                    if self.trace_screen {
+                        let fg = decode_set_colour_v6(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
+                        let bg = decode_set_colour_v6(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
+                        self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg}, window={win}) [amiga global pair]"));
+                    }
+                    self.screen.set_amiga_colour_pair(
+                        win,
+                        decode_set_colour_v6(a),
+                        decode_set_colour_v6(b),
+                        a as i16 == -1,
+                        b as i16 == -1,
+                    );
+                } else if let Some(v6) = self.screen.v6.as_mut() {
                     let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
                     if self.trace_screen {
                         let fg = decode_set_colour_v6(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
@@ -4755,7 +4778,7 @@ fn decode_true_colour(v: u16) -> Option<crate::screen::ZColour> {
 /// ZMSD §8.4.3): high byte = background colour number, low byte = foreground
 /// colour number. `True`/`True24` colours have no discrete colour number and
 /// pack as 0 in that channel.
-fn pack_colour_data(fg: crate::screen::ZColour, bg: crate::screen::ZColour) -> u16 {
+pub(crate) fn pack_colour_data(fg: crate::screen::ZColour, bg: crate::screen::ZColour) -> u16 {
     fn byte(c: crate::screen::ZColour) -> u8 {
         use crate::screen::ZColour::*;
         match c {

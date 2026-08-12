@@ -907,6 +907,191 @@ impl Default for ScreenState {
     }
 }
 
+/// Is ZMSD §8.3's **Amiga rule** in force for this story? (SQ-0740)
+///
+/// §8.3 gives each Version 6 window its own foreground/background pair, and then
+/// carves out one machine:
+///
+/// > "Note that a Version 6 interpreter going under the Amiga interpreter number
+/// > must use the same pair of colours for all windows when running Infocom's
+/// > games. If either is changed, then the interpreter must change the colour of
+/// > all text on the screen to match. This simulates the Amiga hardware, which
+/// > used two logical colours for text and switched palette to change their
+/// > physical colour. This behaviour should not occur when running non-Infocom
+/// > games, and modern games should never expect it. An interpreter that does
+/// > not wish to handle this behaviour at all should avoid using the Amiga
+/// > interpreter number when running Infocom's Version 6 games."
+///
+/// Every term of the test is read back out of the HEADER rather than held as a
+/// field, which is what makes it survive a `@restart`, a Quetzal `@restore` and
+/// a host Save State without anybody carrying it:
+///
+/// - **Version 6** — the rule is scoped to a "Version 6 interpreter", and below
+///   v6 there is one screen pair anyway.
+/// - **Interpreter number 4** ($1E) — ZMSD §11.1.3's Amiga. This is the byte the
+///   story reads to decide it is on an Amiga, so it is exactly the condition the
+///   standard names.
+/// - **Colours available** (Flags 1 bit 0, §8.3.2/§8.3.3) — with
+///   `honor_game_colours` off babelmap declares itself colourless, the host theme
+///   owns the screen, and there is no pair for the windows to share.
+///
+/// **"When running Infocom's games."** §8.3.1.1 asks the same question of the
+/// palette knob — an interpreter may substitute its own colour values "if and
+/// only if they can detect they are running an original Infocom story file" —
+/// and gives no mechanism. babelmap answers both the same way, because the same
+/// thing answers them: interpreter 4 is only ever advertised by
+/// [`InterpreterProfile::Amiga`](../../app/interpreter/enum.InterpreterProfile.html),
+/// which is selected by an Amiga release floppy, by a native Amiga `Pic.data`
+/// archive, or by the player naming the number outright — and Infocom is the only
+/// publisher who ever shipped a Version 6 story on Amiga media. The third route
+/// is the player asking for an Amiga, which is the standard's own framing: the
+/// escape hatch it offers is to "avoid using the Amiga interpreter number", so
+/// choosing it *is* the opt-in.
+pub fn amiga_global_colour_pair(mem: &Memory) -> bool {
+    mem.version() == 6
+        && mem.read_byte(0x1E) == AMIGA_INTERPRETER_NUMBER
+        && mem.read_byte(0x01) & 0x01 != 0
+}
+
+/// ZMSD §11.1.3's interpreter number for the Amiga. (The app's
+/// `InterpreterProfile` names the same constant for the header it writes; this
+/// one is what the screen model tests the header against.)
+pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
+
+impl ScreenState {
+    /// Apply a `set_colour` under [`amiga_global_colour_pair`]: move the
+    /// machine's two text "pens" and repaint the screen through them. (SQ-0740)
+    ///
+    /// `fg`/`bg` are the decoded channel requests (`None` = "leave this channel
+    /// alone", the opcode's 0 sentinel). `fg_under_cursor`/`bg_under_cursor` flag
+    /// the §8.3.1 colour **-1**, "the colour of the pixel under the cursor".
+    ///
+    /// **Why -1 is not a pen move.** Infocom's own Amiga interpreter
+    /// (`amiga/yzip3.c`) says the two text colours "are now 'global', meaning
+    /// they *can't* be changed for a single word on the screen, or for a certain
+    /// window", and then carves out exactly one case: "we allow text colors to be
+    /// changed only in window 0, and ignore requests in other windows (except for
+    /// the special case of bg = -1)". That carve-out is not an exception to the
+    /// sharing rule, it is a different request altogether — "-1" names no colour,
+    /// so there is nothing to load into a register; it asks for the glyph to be
+    /// drawn *over what is already there*. Zork Zero prints its banner labels
+    /// under `COLOR 2 -1` precisely so the ribbon art shows through them, and
+    /// loading a real background there would paint opaque boxes over the art. So
+    /// a -1 channel stays a per-window paint request, exactly as it is on every
+    /// other machine, and leaves the pens where they were.
+    ///
+    /// **What "change the colour of all text on the screen" rewrites.** Every
+    /// glyph the v6 screen model holds — the character grids, the pixel-positioned
+    /// runs (`texts`), the prose a window has streamed (`streamed`) and the prose
+    /// it has left frozen behind it (`retired`) — takes the new pens, along with
+    /// every window's own pair and the current pair the prose stream tags its runs
+    /// from. The colours are REWRITTEN rather than resolved late on purpose: on
+    /// the Amiga this is a hardware repaint with no Z-machine event behind it, so
+    /// after it happens the model must simply *be* the new screen. Every consumer
+    /// — the render path, `/dump-windows`, a host Save State — then sees one
+    /// truth without knowing this rule exists.
+    ///
+    /// **Except a transparent background**, which is not repainted because it was
+    /// never painted: a glyph whose stored background is [`ZColour::Default`] put
+    /// nothing behind itself (that is how -1 and an inherited channel render), so
+    /// there is no pen-0 pixel on the screen for a register move to reach. Its
+    /// foreground still follows, which is the whole of the reported symptom — the
+    /// prose that stayed white while the game had asked for black.
+    ///
+    /// The same rule governs a WINDOW's own background, and it has to: a window's
+    /// `bg` is the page the renderer fills its box with, and Journey never gives
+    /// windows 0–2 one — they are transparent over the illustration behind them.
+    /// Loading black into all four anyway paints the frame's own picture out of
+    /// existence (measured on `Journey - The Quest Begins.adf`, release 30, serial
+    /// 890322: a 115×61 hybrid frame collapsed from 730 distinct cell styles to 8).
+    /// Nothing was ever drawn in pen 0 there, so there is nothing for the pen to
+    /// change — one rule, applied to glyphs and to the pages under them alike.
+    pub fn set_amiga_colour_pair(
+        &mut self,
+        win: u8,
+        fg: Option<ZColour>,
+        bg: Option<ZColour>,
+        fg_under_cursor: bool,
+        bg_under_cursor: bool,
+    ) {
+        if self.v6.is_none() {
+            return;
+        }
+        // 1. The window that asked takes the request whole, exactly as it would on
+        //    any other machine — including a -1 channel, which is how it says
+        //    "draw over what is already here" and is the one thing the sharing
+        //    rule must not take away from it.
+        let mut mirror = None;
+        if let Some(v6) = self.v6.as_mut() {
+            let current = v6.current;
+            if let Some(w) = v6.windows.get_mut(win as usize) {
+                if let Some(c) = fg {
+                    w.fg = c;
+                }
+                if let Some(c) = bg {
+                    w.bg = c;
+                }
+                w.colour_data = crate::cpu::exec::pack_colour_data(w.fg, w.bg);
+                if win == current {
+                    mirror = Some((w.fg, w.bg));
+                }
+            }
+        }
+        // 2. §8.3: whatever the request moved the PENS to is shared by every
+        //    window, and the text already on the screen changes with it. A -1
+        //    channel names no colour, so it moves no pen (see the doc comment).
+        let pen_fg = if fg_under_cursor { None } else { fg };
+        let pen_bg = if bg_under_cursor { None } else { bg };
+        if pen_fg.is_some() || pen_bg.is_some() {
+            self.repaint_amiga_pens(pen_fg, pen_bg);
+        }
+        // 3. The prose stream tags its runs from the current pair, which follows
+        //    the current window exactly as it does on every other machine.
+        if let Some((fg, bg)) = mirror {
+            self.current_fg = fg;
+            self.current_bg = bg;
+        }
+    }
+
+    /// The repaint half of [`Self::set_amiga_colour_pair`]: load the pens that
+    /// MOVED and change every glyph already on the screen to match.
+    ///
+    /// Per channel, because a `set_colour` moves one, the other or both: the
+    /// opcode's 0 sentinel means "leave this channel alone", and a channel left
+    /// alone is a pen that has not moved and so has nothing to repaint. Reading a
+    /// stationary channel back off the current pair instead is what silently
+    /// dragged Zork Zero's light-grey page to transparent — the pair follows the
+    /// current WINDOW, which is not where the pens live.
+    fn repaint_amiga_pens(&mut self, fg: Option<ZColour>, bg: Option<ZColour>) {
+        let Some(v6) = self.v6.as_mut() else { return };
+        for w in v6.windows.iter_mut() {
+            if let Some(fg) = fg {
+                w.fg = fg;
+            }
+            if let (Some(bg), false) = (bg, matches!(w.bg, ZColour::Default)) {
+                w.bg = bg;
+            }
+            w.colour_data = crate::cpu::exec::pack_colour_data(w.fg, w.bg);
+            for c in w.grid.cells.iter_mut() {
+                if let Some(fg) = fg {
+                    c.fg = fg;
+                }
+                if let (Some(bg), false) = (bg, matches!(c.bg, ZColour::Default)) {
+                    c.bg = bg;
+                }
+            }
+            for t in w.texts.iter_mut().chain(w.streamed.iter_mut()).chain(w.retired.iter_mut()) {
+                if let Some(fg) = fg {
+                    t.fg = fg;
+                }
+                if let (Some(bg), false) = (bg, matches!(t.bg, ZColour::Default)) {
+                    t.bg = bg;
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Output stream state
 // ---------------------------------------------------------------------------
@@ -2428,5 +2613,194 @@ mod tests {
         u.resize_continuing_row_style(2, 2);
         assert_eq!(u.cols, 2);
         assert_eq!((1..=2).map(|c| u.cell(1, c).ch).collect::<String>(), " H");
+    }
+
+    // ── ZMSD §8.3, the Amiga rule (SQ-0740) ──────────────────────────────────
+
+    /// A story header describing `version` on interpreter `interp`, with colour
+    /// either advertised or withdrawn (Flags 1 bit 0, §8.3.2/§8.3.3).
+    fn header_for(version: u8, interp: u8, colour: bool) -> Memory {
+        let mut mem = Memory::new(sample_story(version)).unwrap();
+        mem.write_byte(0x1E, interp);
+        advertise_colour(&mut mem, colour);
+        mem
+    }
+
+    #[test]
+    fn the_amiga_rule_is_read_out_of_the_header_and_nothing_else() {
+        // §8.3 scopes it to "a Version 6 interpreter going under the Amiga
+        // interpreter number", and §11.1.3 numbers the Amiga 4.
+        assert!(amiga_global_colour_pair(&header_for(6, 4, true)), "v6 on interpreter 4");
+        // Every other machine keeps the per-window model §8.3 gives it. 6 is the
+        // IBM PC — the number the whole existing v6 corpus runs under, so this
+        // row is the pin that says the corpus cannot move.
+        for interp in [1u8, 2, 3, 5, 6, 7, 8, 9, 10, 11] {
+            assert!(
+                !amiga_global_colour_pair(&header_for(6, interp, true)),
+                "v6 on interpreter {interp} keeps one pair per window",
+            );
+        }
+        // Below Version 6 there is one screen pair anyway; the rule names v6.
+        for v in [3u8, 4, 5, 7, 8] {
+            assert!(!amiga_global_colour_pair(&header_for(v, 4, true)), "version {v}");
+        }
+        // …and with `honor_game_colours` off babelmap declares itself colourless
+        // (§8.3.2), so the host theme owns the screen and there is no pair to
+        // share. The Amiga rule must not reach past that switch.
+        assert!(
+            !amiga_global_colour_pair(&header_for(6, 4, false)),
+            "colours withdrawn: the theme owns the screen, Amiga or not",
+        );
+    }
+
+    /// A v6 screen with something already drawn on it: window 1 holds a grid cell
+    /// and a painted run in an explicit pair, window 2 holds a run drawn over
+    /// whatever was underneath it (a `-1`/inherited background), and window 3 is a
+    /// window the game has never coloured.
+    fn screen_with_text_on_it() -> ScreenState {
+        let mut s = ScreenState { v6: Some(V6Windows::default()), ..Default::default() };
+        let v6 = s.v6.as_mut().unwrap();
+        let w1 = &mut v6.windows[1];
+        w1.fg = ZColour::Standard(9);
+        w1.bg = ZColour::Standard(2);
+        w1.grid.resize(1, 1);
+        w1.grid.cells[0] = Cell {
+            ch: 'A',
+            style: 0,
+            fg: ZColour::Standard(9),
+            bg: ZColour::Standard(2),
+        };
+        w1.texts.push(V6Text {
+            y: 1,
+            x: 1,
+            text: "banner".into(),
+            style: 0,
+            fg: ZColour::Standard(9),
+            bg: ZColour::Standard(2),
+        });
+        w1.streamed.push(V6Text {
+            y: 9,
+            x: 1,
+            text: "prose".into(),
+            style: 0,
+            fg: ZColour::Standard(9),
+            bg: ZColour::Standard(2),
+        });
+        w1.retired.push(V6Text {
+            y: 17,
+            x: 1,
+            text: "frozen".into(),
+            style: 0,
+            fg: ZColour::Standard(9),
+            bg: ZColour::Standard(2),
+        });
+        v6.windows[2].texts.push(V6Text {
+            y: 1,
+            x: 1,
+            text: "over the art".into(),
+            style: 0,
+            fg: ZColour::Standard(9),
+            bg: ZColour::Default,
+        });
+        s
+    }
+
+    /// The heart of §8.3: "If either is changed, then the interpreter must change
+    /// the colour of ALL TEXT ON THE SCREEN to match."
+    ///
+    /// So this prints first and changes the colour second, and asserts the text
+    /// that was already there moved. A test that only checked newly printed text
+    /// would pass without the rule implemented at all.
+    ///
+    /// FALSIFY by deleting the `w.texts`/`streamed`/`retired`/`grid` loops from
+    /// `repaint_amiga_pens`: every "already on the screen" assertion below fails
+    /// with the reported symptom — glyphs still white (standard 9) after the game
+    /// asked for black (standard 2).
+    #[test]
+    fn changing_either_colour_repaints_the_text_already_on_the_screen() {
+        let mut s = screen_with_text_on_it();
+        // …and the change is made from window 0, which owns none of that text.
+        s.set_amiga_colour_pair(
+            0,
+            Some(ZColour::Standard(2)),
+            Some(ZColour::Standard(10)),
+            false,
+            false,
+        );
+
+        let v6 = s.v6.as_ref().unwrap();
+        let w1 = &v6.windows[1];
+        assert_eq!(w1.grid.cells[0].fg, ZColour::Standard(2), "the grid cell's ink follows the pen");
+        assert_eq!(w1.grid.cells[0].bg, ZColour::Standard(10), "…and its page");
+        for (what, run) in
+            [("texts", &w1.texts[0]), ("streamed", &w1.streamed[0]), ("retired", &w1.retired[0])]
+        {
+            assert_eq!(run.fg, ZColour::Standard(2), "{what}: already-painted ink follows the pen");
+            assert_eq!(run.bg, ZColour::Standard(10), "{what}: and its page");
+        }
+        // "The same pair of colours for all windows" — including windows that did
+        // not ask and windows that hold nothing.
+        for (i, w) in v6.windows.iter().enumerate() {
+            assert_eq!(w.fg, ZColour::Standard(2), "window {i} shares the foreground");
+        }
+        // A run drawn over what was underneath it painted no background at all, so
+        // a pen carrying a new background has nothing there to change. Its INK
+        // still follows — that is the reported symptom, prose left white while the
+        // game had asked for black.
+        let over_art = &v6.windows[2].texts[0];
+        assert_eq!(over_art.fg, ZColour::Standard(2), "ink follows even over artwork");
+        assert_eq!(over_art.bg, ZColour::Default, "…but a transparent background stays transparent");
+        assert_eq!(v6.windows[3].bg, ZColour::Default, "an uncoloured window gains no opaque page");
+    }
+
+    /// The `0` sentinel means "leave this channel alone" (§8.3), and a channel
+    /// left alone is a pen that has not moved — so it repaints nothing.
+    #[test]
+    fn a_channel_the_game_left_alone_moves_no_pen() {
+        let mut s = screen_with_text_on_it();
+        s.set_amiga_colour_pair(0, Some(ZColour::Standard(2)), None, false, false);
+        let w1 = &s.v6.as_ref().unwrap().windows[1];
+        assert_eq!(w1.texts[0].fg, ZColour::Standard(2), "the channel that moved repaints");
+        assert_eq!(w1.texts[0].bg, ZColour::Standard(2), "the one that did not is untouched");
+    }
+
+    /// Colour **-1** is "the colour of the pixel under the cursor" (§8.3.1): it
+    /// names no colour, so there is nothing to load into a pen. Infocom's own
+    /// Amiga interpreter carves it out of the sharing rule for exactly that reason
+    /// (`amiga/yzip3.c`), and Zork Zero depends on it — it prints its banner
+    /// labels over the ribbon artwork under `COLOR 2 -1`.
+    #[test]
+    fn the_pixel_under_the_cursor_is_a_paint_request_not_a_pen() {
+        let mut s = screen_with_text_on_it();
+        // Window 1 asks for black on whatever is beneath it.
+        s.set_amiga_colour_pair(
+            1,
+            Some(ZColour::Standard(2)),
+            Some(ZColour::Default),
+            false,
+            true,
+        );
+        let v6 = s.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[1].bg, ZColour::Default, "the asking window draws over the art");
+        // The background pen never moved, so nothing already on the screen lost
+        // its page — and no other window was made transparent behind the game's
+        // back.
+        assert_eq!(
+            v6.windows[1].texts[0].bg,
+            ZColour::Standard(2),
+            "a -1 request repaints no existing background",
+        );
+        assert_eq!(v6.windows[1].texts[0].fg, ZColour::Standard(2), "the foreground pen did move");
+    }
+
+    /// Nothing here may touch a machine that is not an Amiga: the entry point is
+    /// only ever reached through [`amiga_global_colour_pair`], and a v6 screen
+    /// with no window table is left entirely alone.
+    #[test]
+    fn a_screen_with_no_v6_window_table_is_untouched() {
+        let mut s = ScreenState::default();
+        s.set_amiga_colour_pair(0, Some(ZColour::Standard(2)), Some(ZColour::Standard(10)), false, false);
+        assert_eq!(s.current_fg, ZColour::Default);
+        assert_eq!(s.current_bg, ZColour::Default);
     }
 }
