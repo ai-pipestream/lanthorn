@@ -46,6 +46,20 @@ pub trait Output: Any {
     /// stops soft-wrapping, and the `app` crate's `CaptureSink` flags the runs it
     /// captures so the transcript char-breaks them.
     fn set_buffer_mode(&mut self, _on: bool) {}
+    /// Notify the sink that `erase_window` just cleared the scrolling window it is
+    /// capturing (ZMSD §8.7.3.3), AT THIS POINT in the character stream.
+    ///
+    /// The flag alone (`ScreenState::erase_lower_requested`) says only that an erase
+    /// happened somewhere in the turn, so a host that reads it after the turn has to
+    /// assume the erase came first. A turn that PRINTS and then erases would keep its
+    /// pre-erase text on the cleared screen (SQ-0751). The erase's position in the
+    /// stream is knowable only while it executes, and only the sink knows how many
+    /// characters it has taken, so the VM tells it rather than counting for it.
+    ///
+    /// The default is a no-op, right for every sink that does not model a screen
+    /// boundary (`BufferOutput`, `zvm-cli`'s `StdoutOutput`, which prints straight
+    /// through). The `app` crate's `CaptureSink` overrides it.
+    fn screen_cleared(&mut self) {}
     fn as_any(&self) -> &dyn Any;
     /// Mutable downcast support — required to drain sink state (e.g. `CaptureSink::take_text`).
     fn as_any_mut(&mut self) -> &mut dyn Any;

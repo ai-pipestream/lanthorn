@@ -108,6 +108,7 @@ fn a_restored_canvas_survives_the_next_palette_change() {
         // No display list: this test pins the LEGACY (pixels-only) restore path.
         &session.pictures_png(),
         None,
+        None,
     )
     .expect("save archive");
     let ac = app::archive::load_archive(&path).expect("load archive");

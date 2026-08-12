@@ -182,6 +182,7 @@ fn a_restore_mid_bet_still_echoes_typed_digits(honor: bool, resize: bool) {
         &[], &[], &[], &[], &[], &[], &[],
         &session.pictures_png(),
         None,
+        None,
     )
     .expect("save_archive_meta_pics");
     let ac = app::archive::load_archive(&path).expect("load_archive");

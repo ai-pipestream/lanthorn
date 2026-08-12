@@ -118,6 +118,7 @@ fn v6_host_save_state_restore_is_byte_identical() {
         &[], &[], &[], &[], &[], &[], &[],
         &pics,
         None,
+        None,
     )
     .expect("save_archive_meta_pics");
 
@@ -233,6 +234,7 @@ fn inline_transcript_images_survive_archive_roundtrip_sq0518() {
         &[],
         &[],
         &session.pictures_png(),
+        None,
         None,
     )
     .expect("save_archive_meta_pics with inline transcript images");

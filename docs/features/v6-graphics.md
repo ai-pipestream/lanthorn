@@ -1062,6 +1062,29 @@ other: scopa's boot fills its green table, draws two card pictures and *then* fi
 the menu buttons over the top, and replaying the fills last let the opening
 full-screen clear wipe cards that had already been painted.
 
+### The ground has to survive a restore too
+
+The painted ground rides *beside* the window tree rather than inside it, and for a
+while that meant it was the one v6 screen layer no restore touched. A Save State
+swaps VM memory under a game that never learns it happened, so the story issues no
+repaint — and `auto_load` fires only after the story has already booted and painted
+its opening screen. Resuming scopa therefore came back with the main menu's cards and
+buttons still on the ground, the restored hand's own text drawn over the top of them;
+the model was perfectly correct underneath, so clicking where the *real* cards should
+be played the right card. Shogun showed the mirror image of the same hole: it lays its
+backdrop down one keypress into the boot, so a resumed Shogun arrived with no ground at
+all and lost the backdrop.
+
+The archive now carries the ground as `pictures/ground.png`, and every restore path
+replaces it — including with *nothing*, when the archive has none. Pixels rather than a
+recipe, which is the exception the "persist the recipe" rule allows for a derived
+artifact that is genuinely authoritative: the ground's inputs are an unbounded stream
+of `erase_window` fills (scopa repaints its table hundreds of times per card), which is
+why it is a surface and not a list of rectangles in the first place. It is stored in
+the story's own native pixels, so it stays as backend- and terminal-neutral as the rest
+of the archive — a save taken on kitty at 117×64 restores unchanged onto half-blocks at
+80×24.
+
 ## Margin pictures — text that flows past the art
 
 Some v6 scenes put the picture on one side and let the prose flow past it.

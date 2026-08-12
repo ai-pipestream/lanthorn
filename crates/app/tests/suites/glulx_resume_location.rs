@@ -82,6 +82,7 @@ fn a_resumed_glulx_game_reports_the_room_it_was_saved_in() {
         &[], &[], &[], &[], &[], &[], &[],
         &[],
         None,
+        None,
     )
     .expect("save_archive_meta_pics");
     let ac = app::archive::load_archive(&path).expect("load_archive");

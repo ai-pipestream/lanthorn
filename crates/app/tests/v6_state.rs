@@ -28,6 +28,8 @@ mod v6_native_archive_inline;
 mod v6_paced_pictures;
 #[path = "suites/v6_restore_input_window_echo.rs"]
 mod v6_restore_input_window_echo;
+#[path = "suites/v6_restore_paint_ground.rs"]
+mod v6_restore_paint_ground;
 #[path = "suites/v6_restore_palette_replay.rs"]
 mod v6_restore_palette_replay;
 #[path = "suites/v6_resume_colours.rs"]

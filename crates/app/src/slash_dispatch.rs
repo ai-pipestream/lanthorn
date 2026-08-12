@@ -280,7 +280,7 @@ pub(crate) fn dispatch_slash_outcome(
                 // SQ-0588: the display list travels with this save too — this is
                 // the interactive Save State path, and an archive written
                 // without it restores art that can never be recoloured.
-                let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
+                let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
                 for d in &v6_diags { state.note_v6_save(d); }
                 let (location, score) = crate::engine_helpers::save_summary(&*session, state);
                 let meta = app::archive::Meta {
@@ -298,7 +298,7 @@ pub(crate) fn dispatch_slash_outcome(
                     score,
                     trigger: app::archive::SaveTrigger::HostState,
                 };
-                let result = save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref())
+                let result = save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref(), v6_ground.as_deref())
                     .map(|()| "saved".to_string())
                     .map_err(|e| format!("save failed: {}", e));
                 apply_slash_save_result(result, session, state);
@@ -595,13 +595,13 @@ pub(crate) fn write_named_save(
 ) -> Result<String, String> {
     // SQ-0588: the display list travels with every host save — an archive
     // written without it restores art that can never be recoloured.
-    let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(session);
+    let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(session);
     for d in &v6_diags { state.note_v6_save(d); }
     let (location, score) = crate::engine_helpers::save_summary(&*session, state);
     save_named(
         game_dir, ifid, name, app::archive::SaveTrigger::HostState, mapper, &session.save_state(),
         zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(),
-        session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds,
+        v6_ground.as_deref(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds,
         &state.transcript_runs, &state.transcript_para, &state.transcript_images,
     )
         .map(|()| format!("saved as \"{}\"", name))

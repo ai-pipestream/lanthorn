@@ -81,16 +81,33 @@ pub struct CaptureSink {
     /// Every captured run records `!buffering` so the transcript can honour the
     /// game's choice when it wraps.
     buffering: bool,
+    /// How many characters this sink had taken when the game last cleared the
+    /// scrolling window, since the last drain — the screen-clear boundary's
+    /// position WITHIN the turn (SQ-0751).
+    ///
+    /// `erase_window` sets a flag the host reads after the turn is over, which
+    /// cannot say where in the turn the erase fell; a turn that prints and then
+    /// erases would keep its pre-erase text on the cleared screen. `Machine`
+    /// announces the erase as it executes ([`Output::screen_cleared`]) and this is
+    /// where it lands. The LAST erase of a turn wins: it is the one whose screen
+    /// the player is left looking at.
+    cleared_at: Option<usize>,
 }
 
 impl CaptureSink {
     fn new() -> Self {
-        CaptureSink { text: String::new(), runs: Vec::new(), buffering: true }
+        CaptureSink { text: String::new(), runs: Vec::new(), buffering: true, cleared_at: None }
     }
 
     /// Drain accumulated text and style runs together, leaving both empty.
     pub fn take_styled(&mut self) -> (String, Vec<CaptureRun>) {
         (std::mem::take(&mut self.text), std::mem::take(&mut self.runs))
+    }
+
+    /// Take the screen-clear position recorded since the last call, in characters
+    /// from the start of the drained text (SQ-0751). See [`Self::cleared_at`].
+    pub fn take_cleared_at(&mut self) -> Option<usize> {
+        self.cleared_at.take()
     }
 
     /// Drain all accumulated text, leaving the buffer empty.
@@ -120,6 +137,13 @@ impl Output for CaptureSink {
     /// character that fits (no word-wrap) — see [`ParaFmt::nowrap_from`].
     fn set_buffer_mode(&mut self, on: bool) {
         self.buffering = on;
+    }
+    /// SQ-0751: the game cleared the scrolling window HERE, this many characters
+    /// into what this turn has printed so far. A second erase in the same turn
+    /// overwrites the first — the screen the player ends the turn looking at is the
+    /// one the last erase opened.
+    fn screen_cleared(&mut self) {
+        self.cleared_at = Some(self.text.chars().count());
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -280,15 +304,27 @@ fn interleave_story_elems(
 ) -> Vec<TranscriptElem> {
     let chars: Vec<char> = text.chars().collect();
     let total = chars.len();
-    // Clamp into this turn's text, then snap to the owning line's start.
+    // Clamp into this turn's text, then snap to the owning line's start — for a
+    // PICTURE, which anchors to the paragraph it was drawn beside, so a drop-cap
+    // stamped mid-word still leads its paragraph.
+    //
+    // A `ScreenClear` splits EXACTLY where it was stamped instead (SQ-0751). The
+    // boundary is not a position within a line, it is a line break: `erase_window`
+    // homes the cursor to the top-left (ZMSD §8.7.3.2.1), so whatever the game prints
+    // next begins a new line by definition. Snapping it back would put the text that
+    // preceded the erase BELOW the boundary — which is the whole defect, seen from
+    // one line's distance. Every clear in the corpus falls on a line start anyway,
+    // where the two rules agree.
     let mut inserts: Vec<(usize, TranscriptElem)> = marks
         .into_iter()
-        .map(|(abs, img)| {
+        .map(|(abs, elem)| {
             let mut off = (abs.saturating_sub(base) as usize).min(total);
-            while off > 0 && chars[off - 1] != '\n' {
-                off -= 1;
+            if !matches!(elem, TranscriptElem::ScreenClear) {
+                while off > 0 && chars[off - 1] != '\n' {
+                    off -= 1;
+                }
             }
-            (off, img)
+            (off, elem)
         })
         .collect();
     inserts.sort_by_key(|(o, _)| *o); // stable: equal offsets keep draw order
@@ -957,6 +993,46 @@ impl GameSession {
         out
     }
 
+    /// Encode the v6 screen's PAINTED GROUND ([`paint`](Self::paint), SQ-0706) to
+    /// PNG bytes for a host Save State, or `None` when the game has never painted
+    /// one. Feed the result to [`archive::save_archive_meta_pics`]'s `ground`
+    /// parameter and hand it back through [`load_paint_ground`](Self::load_paint_ground).
+    ///
+    /// PIXELS, not a recipe, and deliberately so — the exception CLAUDE.md's
+    /// "persist the recipe" rule allows for a derived artifact that is itself
+    /// authoritative. The ground's inputs are an UNBOUNDED stream of `erase_window`
+    /// fills (scopa repaints its table hundreds of times per card), which is exactly
+    /// why the ground is a surface rather than a list of rects in the first place;
+    /// there is no bounded recipe to store. The surface is in the game's own native
+    /// pixels, so it stays backend- and terminal-neutral like the rest of the
+    /// archive, and PNG is lossless for RGBA so a round-trip is byte-for-byte.
+    ///
+    /// [`archive::save_archive_meta_pics`]: crate::archive::save_archive_meta_pics
+    pub fn paint_ground_png(&self) -> Option<Vec<u8>> {
+        let img = self.paint.as_deref()?;
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img.clone())
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .ok()?;
+        Some(bytes)
+    }
+
+    /// Install the painted ground a restore is bringing back (SQ-0787), REPLACING
+    /// whatever the pre-restore screen left standing. `None` — an archive from a
+    /// game that never painted one, or a decode failure — resets it to empty.
+    ///
+    /// The reset is the load-bearing half. A host Save State swaps VM memory under
+    /// a game that never learns it happened, so the story issues no repaint; and
+    /// `auto_load` restores AFTER the story has already booted and painted its
+    /// opening screen. scopa is where that shows: it resumes a dealt hand with its
+    /// MAIN MENU's cards and buttons still on the ground under the restored game's
+    /// text, because the ground was the one v6 screen layer no restore touched.
+    pub fn load_paint_ground(&mut self, png: Option<&[u8]>) {
+        self.paint = png
+            .and_then(|b| image::load_from_memory(b).ok())
+            .map(|img| std::sync::Arc::new(img.to_rgba8()));
+    }
+
     /// The v6 display list + Current Palette for a host Save State (SQ-0588),
     /// together with the windows whose PNG must still be stored as a fallback.
     ///
@@ -1362,6 +1438,7 @@ impl GameSession {
             self.v6_win0_chars_seen = 0;
         }
         let win0_base = self.v6_win0_chars_seen;
+        let cleared_at = sink_mut(&mut self.machine).take_cleared_at();
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
         let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
@@ -1396,6 +1473,21 @@ impl GameSession {
         // TRUNCATES the transcript on a game-driven `erase_lower` (SQ-0407's
         // menu-redraw collapse) and Journey's every move is a keystroke.
         let screen_cleared_at = std::mem::take(&mut self.machine.v6_screen_cleared);
+        // SQ-0751: the same boundary for v1–5/7/8, where the erase is announced by
+        // `erase_lower` — a per-TURN flag, which cannot say where inside the turn the
+        // erase fell. `finish_command_turn` marks the boundary at the turn's start, so
+        // a turn that PRINTS and then erases kept its pre-erase text on the cleared
+        // screen. `CaptureSink::screen_cleared` stamps the position as the opcode runs;
+        // it becomes a `ScreenClear` element on the same interleave channel the v6
+        // boundaries ride, which splits the turn's output around it.
+        //
+        // ONLY for a genuine mid-turn split. An erase at offset 0 — every game in
+        // SQ-0748's sweep, which all erase before they print — is exactly what marking
+        // at the turn's start already describes, and is left on the flat path so
+        // nothing about those turns changes.
+        let cleared_mid_turn = cleared_at
+            .filter(|&at| at > 0)
+            .map(|at| win0_base + at.min(transcript.chars().count()) as u64);
         let pictures = self.drain_pictures();
         // Window-0 inline pictures interleave into this turn's text as ordered
         // elements; empty for turns without them (the app then uses the flat
@@ -1403,6 +1495,7 @@ impl GameSession {
         let transcript_elems = if self.story_pics.is_empty()
             && prose_retired_at.is_none()
             && screen_cleared_at.is_none()
+            && cleared_mid_turn.is_none()
         {
             Vec::new()
         } else {
@@ -1410,7 +1503,7 @@ impl GameSession {
                 .into_iter()
                 .map(|(at, img)| (at, TranscriptElem::Image(img)))
                 .collect();
-            for at in [prose_retired_at, screen_cleared_at].into_iter().flatten() {
+            for at in [prose_retired_at, screen_cleared_at, cleared_mid_turn].into_iter().flatten() {
                 // One boundary per offset: a turn that both retires and erases at the
                 // same point in its output has cleared the screen once.
                 if !marks.iter().any(|(m, e)| *m == at && matches!(e, TranscriptElem::ScreenClear)) {
