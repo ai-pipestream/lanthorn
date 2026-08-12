@@ -185,7 +185,8 @@ fn arthur_hybrid_status_churchyard_is_one_word_date_right() {
 /// chrome: header art + status bar on top, side borders, nothing below the story.
 /// The ring is top-anchored (no vertical centering) and the story text viewport
 /// extends all the way to the pane BOTTOM at its constant inset width. Where the
-/// side art ends, the flanks below it are the theme backdrop — no stretched art.
+/// side art runs out, the poles are TILED down the rest of the flank (SQ-0698) —
+/// never stretched, which would elongate them by whatever the slack happens to be.
 #[test]
 fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
     use ratatui::style::Color;
@@ -214,13 +215,23 @@ fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
     };
     let top_ring = (0..vp.y).flat_map(|y| (0..area.width).map(move |x| (x, y))).filter(|&(x, y)| is_image(x, y)).count();
     assert!(top_ring > 0, "the header/status ring stays imaged above the top-anchored story ({top_ring} cells)");
-    // A flank cell in a LEFT-band row above the story-native bottom carries side
-    // art; a flank cell deep below it is the theme backdrop (Reset), proving the
-    // art is not stretched or tiled into the reclaimed space.
+    // A flank cell in a LEFT-band row beside the top of the story carries side
+    // art — and so does one deep below it.
+    //
+    // RE-BLESSED, SQ-0698. This assertion used to read the other way: the flank
+    // below the poles had to be `Color::Reset`, the theme backdrop, because
+    // SQ-0511 clipped the Extend plan's ring to the artwork's own lowest opaque
+    // row and left the rest bare. The user reported the consequence — "the side
+    // columns for arthur does not stretch all the way down" — and it is
+    // measurable: at this 90x40 pane Arthur's poles stop at native row 379 of
+    // 400, which is terminal row 31 of 40, so the frame stood open down its
+    // whole lower quarter. The poles are now TILED to the band's full height
+    // (a 4-row texture cut at 90% of the pole's height, then its own foot —
+    // Bocfel's `draw_arthur_side_images`), so the same cell is painted.
     let flank_art = (vp.y..vp.y + 6).any(|y| buf.cell((vp.x - 1, y)).unwrap().bg != Color::Reset);
     assert!(flank_art, "the side border art shows in the flank beside the top of the story");
     let deep = buf.cell((vp.x - 1, area.height - 2)).unwrap();
-    assert_eq!(deep.bg, Color::Reset, "the flank below the side art is the theme backdrop, not stretched art: {deep:?}");
+    assert_ne!(deep.bg, Color::Reset, "the flank keeps its border art all the way down the pane: {deep:?}");
 }
 
 /// (SQ-0549) FRAMELESS: Arthur's status bar must ANCHOR TO THE TOP of the pane.

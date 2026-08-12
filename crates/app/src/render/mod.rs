@@ -36,6 +36,7 @@ pub mod screen;
 pub mod scroll;
 pub mod tidy_panel;
 pub mod transcript;
+pub mod v6_border;
 pub mod v6_layout;
 pub mod command_band;
 

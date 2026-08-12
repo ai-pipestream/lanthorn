@@ -16,3 +16,5 @@ mod v6_game_colour_regression;
 mod v6_prose_freeze;
 #[path = "suites/v6_raster_text_loss.rs"]
 mod v6_raster_text_loss;
+#[path = "suites/v6_side_border_tiling.rs"]
+mod v6_side_border_tiling;
