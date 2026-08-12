@@ -103,7 +103,32 @@ fn frame(session: &GameSession, state: &app::state::AppState, char_mode: bool) -
 /// reader would see rather than the raw symbol.
 fn glyph(buf: &Buffer, x: u16, y: u16) -> String {
     let s = buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
-    if s.chars().any(|c| c == PLACEHOLDER) { "#".into() } else { s }
+    if s.chars().any(|c| c == PLACEHOLDER) { "#".into() } else { strip_kitty_apc(&s) }
+}
+
+/// A cell's PROSE, with any kitty APC graphics payload removed.
+///
+/// The graphics layer rides its escapes out on a cell's symbol so they emit in
+/// frame order, and since SQ-0753 that includes image DELETES. Those carry an
+/// image id, ids are handed out per session, and this test renders the same
+/// frame TWICE in lockstep — so two runs legitimately disagree on the id while
+/// agreeing on every visible character. Comparing the raw symbol reports that
+/// as prose painting outside the viewport, which it is not.
+///
+/// Stripping only the `ESC _ G … ESC \` payload keeps the property under test
+/// intact: a real leak changes the CHARACTER, which survives this untouched.
+fn strip_kitty_apc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("\u{1b}_G") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("\u{1b}\\") {
+            Some(end) => rest = &rest[start + end + 2..],
+            None => return out, // unterminated APC: nothing visible follows
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn advance(session: &mut GameSession, key: u8) -> String {
@@ -263,4 +288,28 @@ fn journeys_frame_border_is_a_single_native_pixel_column() {
             }
         }
     }
+}
+
+/// [`strip_kitty_apc`] removes the payload and NOTHING else — the guard on the
+/// guard, because a stripper that returned `""` would make the containment test
+/// above pass no matter what the prose did.
+#[test]
+fn stripping_the_apc_payload_keeps_every_visible_character() {
+    // The exact shape that failed the merge: a delete riding on a prose cell.
+    assert_eq!(strip_kitty_apc("\u{1b}_Gq=2,a=d,d=I,i=1755510252\u{1b}\\J"), "J");
+    // Two runs differing ONLY in the image id must compare equal…
+    assert_eq!(
+        strip_kitty_apc("\u{1b}_Ga=d,d=I,i=1\u{1b}\\J"),
+        strip_kitty_apc("\u{1b}_Ga=d,d=I,i=999999\u{1b}\\J"),
+    );
+    // …while a real prose difference must NOT.
+    assert_ne!(
+        strip_kitty_apc("\u{1b}_Ga=d,d=I,i=1\u{1b}\\J"),
+        strip_kitty_apc("\u{1b}_Ga=d,d=I,i=1\u{1b}\\K"),
+    );
+    // Plain prose is untouched; several payloads in one cell all go.
+    assert_eq!(strip_kitty_apc("The Party"), "The Party");
+    assert_eq!(strip_kitty_apc("\u{1b}_Gi=1\u{1b}\\a\u{1b}_Gi=2\u{1b}\\b"), "ab");
+    // An unterminated payload swallows the rest rather than leaking escape bytes.
+    assert_eq!(strip_kitty_apc("x\u{1b}_Gi=1"), "x");
 }
