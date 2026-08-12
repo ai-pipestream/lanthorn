@@ -4191,8 +4191,9 @@ impl AppState {
     }
 
     /// [`push_transcript_runs`](Self::push_transcript_runs) for a `read_char` turn,
-    /// folding a bare KEYSTROKE ECHO onto the line the player is typing on instead
-    /// of opening a new one (SQ-0726).
+    /// keeping output the game printed WHERE THE CURSOR ALREADY WAS on the line it
+    /// was already on, instead of opening a new one (SQ-0726, generalised by
+    /// SQ-0804).
     ///
     /// Every push starts a new transcript line, which is how the host supplies the
     /// newline an interpreter echoes after a `read` (ZMSD §7.1.1.1): the typed
@@ -4203,33 +4204,43 @@ impl AppState {
     /// `print_char`s each keystroke straight back — so the player's word arrived one
     /// character per transcript line, the first of them a line below the prompt.
     ///
-    /// Only the echo folds. Dropping the fabricated newline for EVERY keypress turn
-    /// is the same statement and reads better on paper, but it was measured across
-    /// the v6 corpus and it moves six other titles: it joins Arthur's, Shogun's,
+    /// `continues` is [`Engine::output_continued_line`](crate::engine::Engine::output_continued_line):
+    /// the game's own cursor, which is the only thing that knows. SQ-0726 shipped a
+    /// stand-in — "the turn's whole output is one character, so it must be an echo"
+    /// — because the printed text alone cannot decide it and folding every keypress
+    /// turn was measured to move six other titles, joining Arthur's, Shogun's,
     /// Journey's, advent's and fmvpoker's menu repaints to the line above and
-    /// concatenates four of mysterious01's re-asked prompts into one. Those games
-    /// reposition between reprints in ways the host transcript does not model, so
-    /// "continues the line" is not decidable from the turn's text alone — except in
-    /// the one case where the text IS the keystroke, which nothing else in the
-    /// corpus produces. The general form wants the game's own cursor and is a
-    /// separate piece of work (SQ-0804, which carries the measurements).
+    /// concatenating four of mysterious01's re-asked prompts into one. Those games
+    /// reposition between reprints, which the text does not show and the cursor
+    /// does: swept across the v6 corpus the cursor rule leaves every one of them
+    /// byte-identical and moves sunburst alone — onto the shape sunburst's own
+    /// screen has, `>look.` on one line where the host used to break after `>look`.
+    ///
+    /// Two guards ride with it, and both are load-bearing:
+    ///
+    /// * text that OPENS with a newline is the game's own line break, so the split
+    ///   is the game's and not the host's.
+    /// * a fold needs a live line to fold onto. A last line that is not game output
+    ///   (a `/help` dump, the host's own command echo) is left alone per
+    ///   [`last_transcript_line_is_story`](Self::last_transcript_line_is_story), and
+    ///   so is a transcript sitting exactly on a screen-clear boundary — everything
+    ///   above `clear_anchor` belongs to a screen the game has wiped, and the cursor
+    ///   agreeing there is a coincidence of both being at the window's origin.
     ///
     /// The fold is [`merge_line_into_previous`](Self::merge_line_into_previous) —
-    /// the same call the game-self-echo path uses — so the echoed character's style
-    /// runs shift onto the line they join rather than being dropped. A last line
-    /// that is not game output (a `/help` dump, the host's own command echo) is left
-    /// alone, on the same rule as
-    /// [`last_transcript_line_is_story`](Self::last_transcript_line_is_story).
+    /// the same call the game-self-echo path uses — so the moved text's style runs
+    /// shift onto the line they join rather than being dropped.
     pub fn push_transcript_runs_char_echo(
         &mut self,
         text: &str,
         kind: TranscriptKind,
         chunks: &[crate::session::CaptureRun],
+        continues: bool,
     ) {
-        // One character and no line break of its own: the game handed back what the
-        // player pressed, and an echo belongs where the player is typing.
-        let echo = text.chars().count() == 1 && !text.starts_with('\n');
-        let fold = echo && self.last_transcript_line_is_story();
+        let fold = continues
+            && !text.starts_with('\n')
+            && self.last_transcript_line_is_story()
+            && self.clear_anchor != Some(self.transcript.len());
         let before = self.transcript.len();
         self.push_transcript_runs(text, kind, chunks);
         if fold && self.transcript.len() > before {

@@ -348,6 +348,24 @@ sets one. `sunburst.z6` is that game — a real 640×400 story window with a 0×
 char grid — so it got a phantom twin at the same rect, filed away as frame
 furniture. One screen, one story window.
 
+## A window keeps its own text style
+
+Bold, italic and reverse video are *per window* in Version 6. The standard lists
+the style as window property 10 (§8.8.3.2) and says it "is set just as in Version
+4, using `set_text_style` (which sets that for the current window)" — so selecting
+a window makes that window's style live, exactly as it makes that window's colour
+pair live. A game can leave the status bar reversed indefinitely and go on printing
+plain prose below it, and on a conforming interpreter it never has to say so.
+
+Shogun does precisely that, but only when it thinks it is on an Amiga: it selects
+window 1, turns reverse video on, paints the status line, and returns to window 0
+without turning it off. Reading the style as one global setting therefore left the
+Amiga release printing everything in inverse from its second turn onwards — the `>`
+prompt, the room headings, the death notice. It is the kind of bug that only one
+build shows, so it is worth saying which: `James Clavell's Shogun.adf`, release 295
+/ serial 890321, which is a different build from the `shogun-r322-s890706.z6`
+sitting beside it and the only title in the corpus the fix moves at all.
+
 ## The authentic screen: 640×400, an 8×16 cell, art doubled
 
 There's a subtlety in "how big is this thing" that decides whether the whole
@@ -1007,6 +1025,22 @@ line it falls *inside* gave four, drew the five labels fifteen pixels high, and
 put them clear of the band the game's own mouse handler accepts for them. The
 labels were visible and dead: clicking one did nothing, while clicking the blank
 row beneath it played the hand.
+
+**A keypress turn's output does not automatically open a line, either.** The
+transcript puts each turn's output on a fresh line, and for a typed command that is
+right: an interpreter echoes a `read` together with its terminating newline
+(§7.1.1.1), so babelmap appends what you typed to the game's `>` and lets the reply
+start below. `read_char` echoes nothing at all (§10.7), so for a keypress turn that
+line break is babelmap's own invention — and whether it belongs cannot be read off
+the text, because a game redrawing a menu moves its cursor and prints no newline
+either way. The game's cursor is asked instead: output whose first character lands
+exactly where the last output left the cursor continues that line, and everything
+else opens a new one. `sunburst.z6` is what it buys — a game with no line reader
+that runs `read_char` in a loop and echoes each key back, so typing `look` and
+pressing Enter used to arrive as `>look` and then a lone `.` a line lower, where the
+game's own screen has `>look.` on one row. Games that reposition between reprints —
+the Mysterious Adventures re-asking `Resume play on a game ?`, Journey's and
+fmvpoker's menu repaints — keep their line breaks, because their cursor says so.
 
 ## A window the game drew a frame around is a canvas, not a page
 

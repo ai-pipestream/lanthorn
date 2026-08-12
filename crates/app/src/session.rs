@@ -600,6 +600,13 @@ pub struct GameSession {
     /// transcript instead of being stripped. Default true. See
     /// [`Engine::set_strip_prompt`].
     strip_prompt: bool,
+    /// Where the prose window's cursor sat when the last keypress was supplied
+    /// (SQ-0804), armed by [`GameSession::submit_char`] and consumed by
+    /// `drain_turn`. `None` for every other kind of turn, and below v6.
+    pen_before_char: Option<(u16, u16)>,
+    /// Whether the turn just drained began printing exactly where the previous
+    /// output left the cursor — see [`Engine::output_continued_line`].
+    output_continued: bool,
     /// Lazily-built, memoized disassembly cache (routine-discovery boundaries).
     /// `RefCell` because the Debugger read-path is `&self`; consistent with the
     /// existing `mem_fault` interior-mutability pattern.
@@ -931,7 +938,7 @@ impl GameSession {
         let (pending, quit) = run_settled(&mut machine);
 
         Ok(GameSession {
-            machine, quit, pending, strip_prompt: true,
+            machine, quit, pending, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -1282,8 +1289,29 @@ impl GameSession {
     /// Supply a single keypress, step until the next input request or Quit,
     /// and return the turn result.
     pub fn submit_char(&mut self, ch: u8) -> TurnResult {
+        self.arm_line_continuation();
         self.machine.supply_char(ch);
         self.advance_after_input(false)
+    }
+
+    /// Note where the prose window's cursor is, and forget where the last burst
+    /// of prose started, so `drain_turn` can tell whether this turn's output
+    /// CONTINUED the line the previous one left the cursor on (SQ-0804).
+    ///
+    /// A `read_char` echoes nothing at all (ZMSD §10.7), so the host has to
+    /// decide for itself whether the turn's output opens a transcript line, and
+    /// the printed text does not say: a game redrawing a menu `set_cursor`s back
+    /// to the top with no newline in sight. The window's own cursor does say.
+    /// Armed only for a keypress, which is the only turn that has the question —
+    /// an interpreter echoes a `read` together with its terminating newline
+    /// (§7.1.1.1), so a command turn's reply always opens a line.
+    fn arm_line_continuation(&mut self) {
+        let idx = self.machine.screen.v6_input_window as usize;
+        self.pen_before_char = self.machine.screen.v6.as_mut().and_then(|v6| {
+            let w = v6.windows.get_mut(idx)?;
+            w.clear_stream_origin();
+            Some(w.pen())
+        });
     }
 
     /// While a timed read/read_char is pending, `(time_tenths, packed_routine)`
@@ -1447,6 +1475,18 @@ impl GameSession {
             self.window_fills.clear();
             self.v6_win0_chars_seen = 0;
         }
+        // Did this turn's first printed glyph land exactly where the previous
+        // output left the cursor (SQ-0804)? Answered before anything else drains,
+        // and only for a turn `arm_line_continuation` armed.
+        self.output_continued = self.pen_before_char.take().is_some_and(|pen| {
+            let idx = self.machine.screen.v6_input_window as usize;
+            self.machine
+                .screen
+                .v6
+                .as_ref()
+                .and_then(|v6| v6.windows.get(idx))
+                .is_some_and(|w| w.stream_origin == Some(pen))
+        });
         let win0_base = self.v6_win0_chars_seen;
         let cleared_at = sink_mut(&mut self.machine).take_cleared_at();
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
@@ -4089,6 +4129,10 @@ impl Engine for GameSession {
         self.strip_prompt = on;
     }
 
+    fn output_continued_line(&self) -> bool {
+        self.output_continued
+    }
+
     fn pending_input(&self) -> InputKind {
         self.pending
     }
@@ -6257,7 +6301,7 @@ mod tests {
         // source that resolves resource #1 to the red 2x2 PNG.
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6317,7 +6361,7 @@ mod tests {
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_red(320, 200));
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6377,7 +6421,7 @@ mod tests {
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6437,7 +6481,7 @@ mod tests {
         // A 2×2 picture; every draw covers 4×4 unit pixels (V6_ART_SCALE).
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6507,7 +6551,7 @@ mod tests {
 
         let blorb = crate::graphics::test_blorb_with_pict(3, &png_bytes_red(23, 200));
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6548,7 +6592,7 @@ mod tests {
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6602,7 +6646,7 @@ mod tests {
         machine.screen.v6 = Some(V6Windows { windows, current: 1 });
 
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6698,7 +6742,7 @@ mod tests {
         machine.screen.v6 = Some(V6Windows { windows, current: 1 });
 
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
@@ -6749,7 +6793,7 @@ mod tests {
         windows[7] = ZWindow { x_size: 0xFFFF, y_size: 0xFFFF, ..Default::default() };
         machine.screen.v6 = Some(V6Windows { windows, current: 7 });
         let mut sess = GameSession {
-            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
