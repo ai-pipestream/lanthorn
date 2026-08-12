@@ -173,9 +173,10 @@ const HUFF_LEN: usize = 256;
 /// nothing to inherit this is the fallback, and it is also what the Blorb
 /// conversions of Zork Zero baked into such pictures.
 ///
-/// It is *not* claimed to be the IBM EGA or CGA hardware table, and a PC EGA or
-/// CGA archive — which stores no palettes of its own — should be drawn through
-/// one the caller supplies rather than through this.
+/// It is *not* the IBM EGA or CGA hardware table — index 6 is dark yellow where
+/// both of those show brown — and a PC EGA or CGA archive, which stores no
+/// palettes of its own, must be drawn through [`InfocomPics::hardware_palette`]
+/// instead of through this. SQ-0794.
 pub const DEFAULT_PALETTE: [Rgb; 16] = [
     [0, 0, 0],
     [0, 0, 170],
@@ -193,6 +194,127 @@ pub const DEFAULT_PALETTE: [Rgb; 16] = [
     [255, 85, 255],
     [255, 255, 85],
     [255, 255, 255],
+];
+
+/// The IBM EGA's sixteen default colours, which an `.EG1`/`.EG2` archive's
+/// pixel indices name directly (SQ-0794).
+///
+/// The EGA drove six digital lines — a primary and a secondary bit per channel
+/// — so a channel is off, one third, two thirds or full: **0, 85, 170, 255**.
+/// Indices 0..=7 use the primaries alone (170 where lit) and 8..=15 add the
+/// intensity bit (255 where the primary is lit, 85 where it is not).
+///
+/// **Index 6 is the exception, and it is the whole reason this table exists
+/// separately from [`DEFAULT_PALETTE`].** Arithmetic says dark yellow,
+/// `(170, 170, 0)`; the hardware halves green and shows **brown**,
+/// `(170, 85, 0)`. Zork Zero's EGA artwork dithers brown against bright red to
+/// make its bronze scrollwork, so getting this one entry wrong turns the whole
+/// plate pink and olive.
+///
+/// Verified against four sources that agree entry for entry:
+///
+/// * Spatterlight bocfel's `ega_colormap` (`z6/draw_image.cpp:58`), which is
+///   what it hands every EGA picture (`populate_color_table`, same file);
+/// * the IBM EGA's own 2-bits-per-channel encoding, as ModdingWiki's *EGA
+///   Palette* states it — "each 2-bit EGA red, green or blue value should be
+///   multiplied by 85", with index 6 remapped to `#AA5500` by "additional
+///   circuitry";
+/// * int10h.org's *IBM 5153's True CGA Palette*, which quotes the canonical
+///   sixteen as `#000000 #0000AA #00AA00 #00AAAA #AA0000 #AA00AA #AA5500
+///   #AAAAAA #555555 #5555FF #55FF55 #55FFFF #FF5555 #FF55FF #FFFF55 #FFFFFF`;
+/// * Frotz's DOS front end, indirectly but decisively: `bcpic.c` sets
+///   `colour_shift = 0` for `_EGA_`, so a stored index goes to the EGA hardware
+///   colour of the same number with no reserved-slot shift — which is what makes
+///   this a flat 0..=15 table rather than one starting at [`PALETTE_BASE`].
+///
+/// Bocfel's own comment records a disagreement — "this is `{170,170,0}` in
+/// pix2gif (?)" — and pix2gif is the one that is wrong: it is the arithmetic
+/// value, i.e. exactly the entry [`DEFAULT_PALETTE`] carries.
+pub const EGA_PALETTE: [Rgb; 16] = [
+    [0, 0, 0],
+    [0, 0, 170],
+    [0, 170, 0],
+    [0, 170, 170],
+    [170, 0, 0],
+    [170, 0, 170],
+    [170, 85, 0], // brown, not the arithmetic dark yellow
+    [170, 170, 170],
+    [85, 85, 85],
+    [85, 85, 255],
+    [85, 255, 85],
+    [85, 255, 255],
+    [255, 85, 85],
+    [255, 85, 255],
+    [255, 255, 85],
+    [255, 255, 255],
+];
+
+/// The colours a `.CG1` archive's pixel indices name — **black and white, and
+/// nothing else** (SQ-0794).
+///
+/// # Why a CGA rendition has two colours and not four
+///
+/// A `.CG1` declares a 640-wide picture space ([`InfocomPics::picture_space_width`]),
+/// and the IBM CGA had exactly one 640-wide mode: mode 6, 640x200, **two**
+/// colours. Its four-colour mode is 320 wide. So there is no cyan/magenta or
+/// green/red/brown palette to choose here; there is a foreground and a
+/// background, and Infocom used the default white on black.
+///
+/// Both reference interpreters say the same thing in their own terms:
+///
+/// * Frotz's DOS front end wrote straight to CGA hardware. `bcpic.c` sets
+///   `colour_shift = -2` for `_CGA_` and then reduces the shifted index to a
+///   single bit (`xor ah,1; ror ah,1`) before OR-ing it into the framebuffer —
+///   one bit per pixel. Its comment on the packed form is explicit: "A pixel
+///   must be white if the corresponding bit is set, otherwise it must be black."
+/// * Spatterlight bocfel's `populate_color_table` (`z6/draw_image.cpp`) groups
+///   `kGraphicsTypeCGA` with `kGraphicsTypeMacBW` and fills only two slots —
+///   `color_table[2]` white, `color_table[3]` black — leaving the rest black.
+///   Its opaque path, `draw_opaque_cga`, expands one bit per pixel to
+///   `monochrome_white`/`monochrome_black`.
+///
+/// # Why slots 1 and 2 are both white
+///
+/// [`InfocomPics::decode`] normalises a CGA archive's **two** pixel packings into
+/// one index-per-pixel buffer, and they do not agree on which index means white:
+///
+/// | packing | condition | indices it yields |
+/// |---|---|---|
+/// | one bit per pixel | `EF_MONO`, no `EF_TRANS` | 1 = set = white, 0 = clear = black |
+/// | one byte per pixel | `EF_MONO` and `EF_TRANS` | 0 = transparent, 2 = white, 3 = black |
+///
+/// Slots 2 and 3 are the archive's own colour numbers, exactly as both witnesses
+/// above read them. Slot 1 is this decoder's rendering of a set bit, and giving
+/// it white is unambiguous because the two packings never share a picture: across
+/// `zork0.cg1`, `arthur.cg1`, `journey.cg1` and `shogun.cg1` — 710 pictures — the
+/// packed ones use `{0, 1}` and only `{0, 1}`, and the byte-per-pixel ones use
+/// `{0, 2, 3}` and only `{0, 2, 3}`. Index 1 therefore never appears in a picture
+/// where it would have to mean black.
+///
+/// Slot 0 is black for the packed pictures; in the byte-per-pixel ones it is the
+/// transparent colour, which [`Picture::rgba_with`] drops before this table is
+/// consulted.
+///
+/// bocfel lets a theme override its `monochrome_black`/`monochrome_white`. This
+/// table does not: it states what the hardware did, and a host that wants to
+/// recolour it can pass its own table to [`Picture::rgba_with`].
+pub const CGA_PALETTE: [Rgb; 16] = [
+    [0, 0, 0],       // 0: packed clear bit; transparent in the byte-per-pixel form
+    [255, 255, 255], // 1: packed set bit
+    [255, 255, 255], // 2: the archive's white
+    [0, 0, 0],       // 3: the archive's black
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
 ];
 
 /// Colour index at which a picture's own palette starts. Indices 0 and 1 are
@@ -237,8 +359,10 @@ impl PicEntry {
     /// A PC **EGA or CGA** archive stores no palettes at all — its records are
     /// 12 bytes with no room for one, because those adapters fix their colours
     /// in hardware. Every picture in such a file therefore reads as adaptive,
-    /// and a caller must supply the hardware table. Only MCGA, which could
-    /// choose its sixteen colours freely, carries palettes on the PC side.
+    /// and a caller must supply the hardware table —
+    /// [`InfocomPics::hardware_palette`] is where it comes from. Only MCGA,
+    /// which could choose its sixteen colours freely, carries palettes on the PC
+    /// side.
     pub fn has_own_palette(&self) -> bool {
         self.palette != 0
     }
@@ -567,6 +691,65 @@ impl InfocomPics {
             Flavour::Pc if self.data[1] & 0x08 != 0 => 640,
             Flavour::Pc => 320,
         }
+    }
+
+    /// The colour table this archive's HARDWARE fixed, for the renditions that
+    /// store no palettes because there was nothing to store. `None` when the
+    /// pictures bring their own colours (SQ-0794).
+    ///
+    /// This is the answer to the question [`PicEntry::has_own_palette`] raises
+    /// and cannot settle: a 12-byte PC record has no room for a palette pointer,
+    /// so every picture in an EGA or CGA archive reads as adaptive, when in fact
+    /// none of them is — their colours were in the video card. A caller that
+    /// takes their silence for deference draws them through
+    /// [`DEFAULT_PALETTE`], which is a different table, and Zork Zero's bronze
+    /// scrollwork comes out pink.
+    ///
+    /// # How the rendition is told, without asking the filename
+    ///
+    /// Both reference interpreters know which card they are on before they open
+    /// anything — bocfel maps `.EG1` to `kGraphicsTypeEGA` and `.CG1` to
+    /// `kGraphicsTypeCGA` in `find_graphics_files.cpp`, and Frotz's `bcpic.c`
+    /// builds the extension from the display mode. babelmap has no display mode
+    /// and does not read renditions out of filenames (see the module header), so
+    /// this reads the directory instead. Two questions, in order:
+    ///
+    /// 1. **Does any picture carry a palette?** If so the archive is MCGA or
+    ///    Amiga/Mac and nothing here applies. This is the record shape asking
+    ///    itself — a 12-byte record can never answer yes — and it is deliberately
+    ///    `any` rather than `all`, because an MCGA archive mixes pictures that
+    ///    carry palettes with pictures that genuinely are adaptive.
+    /// 2. **Does every picture with pixels set `EF_MONO`?** That is CGA; anything
+    ///    else is EGA. `EF_MONO` is "two-color picture", which no 16-colour
+    ///    rendition has a use for, and the corpus splits on it perfectly: all 710
+    ///    pixel-bearing pictures in `zork0.cg1`, `arthur.cg1`, `journey.cg1` and
+    ///    `shogun.cg1` set it, and none of the 617 in `zork0.eg1`, `arthur.eg1`,
+    ///    `journey.eg1`, `shogun.eg1` or `FMVPOKER.EG1` does. The pixels agree
+    ///    independently: every CGA picture stays inside indices 0..=3 and every
+    ///    EGA one uses all sixteen.
+    ///
+    /// An unrecognisable file therefore falls to EGA, which is the safe way
+    /// round: EGA's table is a superset of the colours CGA art can name, so a
+    /// misread CGA plate comes out in the wrong hues, whereas a misread EGA plate
+    /// would come out as thirteen shades of black.
+    pub fn hardware_palette(&self) -> Option<[Rgb; 16]> {
+        if self.flavour != Flavour::Pc || self.entries.iter().any(|e| e.has_own_palette()) {
+            return None;
+        }
+        let mut with_pixels = 0usize;
+        let mut mono = 0usize;
+        for e in self.entries.iter().filter(|e| e.has_pixels()) {
+            with_pixels += 1;
+            mono += usize::from(e.flags & EF_MONO != 0);
+        }
+        if with_pixels == 0 {
+            return None;
+        }
+        Some(if mono == with_pixels {
+            CGA_PALETTE
+        } else {
+            EGA_PALETTE
+        })
     }
 
     /// Every directory record, in file order.
@@ -1353,6 +1536,116 @@ mod tests {
         assert_eq!(&p.rgba()[..8], &[9, 8, 7, 255, 6, 5, 4, 255]);
     }
 
+    /// SQ-0794. The one entry that separates the IBM EGA's default table from
+    /// [`DEFAULT_PALETTE`], stated as a difference so the table cannot be
+    /// "corrected" back into the arithmetic value without this failing.
+    ///
+    /// Index 6 is brown, `(170, 85, 0)`, not the dark yellow `(170, 170, 0)`
+    /// that two thirds of green would give. Every other entry is the plain
+    /// 0/85/170/255 arithmetic. Sources are named on [`EGA_PALETTE`]; the two
+    /// that state RGB directly (bocfel's `ega_colormap`, ModdingWiki's *EGA
+    /// Palette*, int10h.org's canonical sixteen) agree entry for entry, and the
+    /// only dissent on record is the one bocfel itself flags — pix2gif, which
+    /// carries the arithmetic value.
+    #[test]
+    fn the_ega_table_is_the_default_one_with_brown_at_index_six() {
+        assert_eq!(EGA_PALETTE[6], [170, 85, 0], "EGA index 6 is brown");
+        assert_eq!(DEFAULT_PALETTE[6], [170, 170, 0], "…and the fallback's is dark yellow");
+        for i in 0..16 {
+            if i == 6 {
+                continue;
+            }
+            assert_eq!(EGA_PALETTE[i], DEFAULT_PALETTE[i], "entry {i} is common to both");
+        }
+        // The encoding the other fifteen come out of: two bits per channel,
+        // times 85. Index 6 is the hardware's exception to it.
+        for (i, c) in EGA_PALETTE.iter().enumerate() {
+            for ch in c {
+                assert!(
+                    matches!(ch, 0 | 85 | 170 | 255),
+                    "entry {i} channel {ch} is one of the four EGA levels"
+                );
+            }
+        }
+    }
+
+    /// SQ-0794. A CGA rendition is two colours, because the only 640-wide mode
+    /// the IBM CGA had was 640x200 mode 6 — and both witnesses read the archive's
+    /// indices the same way: 2 is white and 3 is black, with slot 1 standing in
+    /// for a set bit in the packed form.
+    #[test]
+    fn the_cga_table_is_black_and_white_only() {
+        assert_eq!(CGA_PALETTE[0], [0, 0, 0]);
+        assert_eq!(CGA_PALETTE[1], [255, 255, 255], "a set bit in the packed form");
+        assert_eq!(CGA_PALETTE[2], [255, 255, 255], "the archive's white");
+        assert_eq!(CGA_PALETTE[3], [0, 0, 0], "the archive's black");
+        for (i, c) in CGA_PALETTE.iter().enumerate().skip(4) {
+            assert_eq!(*c, [0, 0, 0], "entry {i} is unused and stays black");
+        }
+    }
+
+    /// SQ-0794. Which hardware table an archive's pixels resolve through, read
+    /// off the directory rather than the filename.
+    ///
+    /// Falsified by returning `EGA_PALETTE` unconditionally from
+    /// `hardware_palette`: the CGA case then reports white where it must report
+    /// green, which is precisely the defect on `zork0.cg1`.
+    #[test]
+    fn a_palette_less_pc_archive_names_its_hardware_table() {
+        let ega = || PcPic {
+            id: 1,
+            w: 4,
+            h: 1,
+            flags: EF_TRANS,
+            codes: vec![LZW_CLEAR, 6, 6, 12, 12, LZW_END],
+            palette: vec![],
+        };
+        let pics = InfocomPics::parse(pc_archive(&[ega()])).unwrap();
+        assert_eq!(pics.hardware_palette(), Some(EGA_PALETTE));
+        // …and the picture itself still declares no palette of its own, because
+        // its record genuinely has nowhere to keep one.
+        assert!(pics.decode(1).unwrap().palette.is_none());
+        assert_eq!(
+            &pics.decode(1).unwrap().rgba_with(&EGA_PALETTE)[..8],
+            &[170, 85, 0, 255, 170, 85, 0, 255],
+            "index 6 comes out brown through the hardware table"
+        );
+
+        // Every pixel-bearing picture two-colour ⇒ CGA. Both of the format's CGA
+        // packings, since a real `.CG1` mixes them.
+        let cga = [
+            PcPic { id: 1, w: 4, h: 1, flags: EF_MONO | EF_TRANS, codes: vec![LZW_CLEAR, 2, 3, 2, 3, LZW_END], palette: vec![] },
+            PcPic { id: 2, w: 8, h: 1, flags: EF_MONO, codes: vec![LZW_CLEAR, 0b1010_1010, LZW_END], palette: vec![] },
+        ];
+        let pics = InfocomPics::parse(pc_archive(&cga)).unwrap();
+        assert_eq!(pics.hardware_palette(), Some(CGA_PALETTE));
+        assert_eq!(pics.decode(1).unwrap().indices, vec![2, 3, 2, 3]);
+        assert_eq!(pics.decode(2).unwrap().indices, vec![1, 0, 1, 0, 1, 0, 1, 0]);
+
+        // One picture that is not two-colour is enough to make the archive EGA:
+        // no 16-colour rendition has a use for `EF_MONO`, so "all of them" is the
+        // claim, not "any of them".
+        let mixed = [
+            PcPic { id: 1, w: 8, h: 1, flags: EF_MONO, codes: vec![LZW_CLEAR, 0xFF, LZW_END], palette: vec![] },
+            PcPic { id: 2, w: 2, h: 1, flags: 0, codes: vec![LZW_CLEAR, 9, 10, LZW_END], palette: vec![] },
+        ];
+        assert_eq!(
+            InfocomPics::parse(pc_archive(&mixed)).unwrap().hardware_palette(),
+            Some(EGA_PALETTE)
+        );
+
+        // An archive whose pictures carry palettes fixes nothing in hardware —
+        // MCGA and the Amiga/Mac. `any`, not `all`: an MCGA archive mixes
+        // paletted pictures with genuinely adaptive ones.
+        let mcga = [
+            PcPic { id: 1, w: 2, h: 1, flags: EF_TRANS, codes: vec![LZW_CLEAR, 2, 3, LZW_END], palette: vec![2, 9, 8, 7, 6, 5, 4, 0] },
+            PcPic { id: 2, w: 2, h: 1, flags: EF_TRANS, codes: vec![LZW_CLEAR, 2, 3, LZW_END], palette: vec![] },
+        ];
+        let pics = InfocomPics::parse(pc_archive(&mcga)).unwrap();
+        assert_eq!(pics.hardware_palette(), None);
+        assert_eq!(pics.adaptive_pictures(), vec![2], "the palette-less one is still adaptive");
+    }
+
     /// A stream that keeps going past `width * height` is malformed, not big.
     #[test]
     fn rejects_a_pc_stream_that_overruns_its_picture() {
@@ -1651,6 +1944,64 @@ mod tests {
             let max = pics.entries().iter().map(|e| e.width).max().unwrap();
             assert_eq!(max, widest, "{name} widest record");
             assert!(max <= space, "{name} declares {space} but stores a {max}-wide picture");
+        }
+    }
+
+    /// SQ-0794: which hardware table each rendition in `stories/` resolves
+    /// through, and the corpus split that lets the directory alone decide it.
+    ///
+    /// The two questions [`InfocomPics::hardware_palette`] asks are checked here
+    /// against every real archive in hand, because the rule is a measurement and
+    /// not a reading of any specification — no published source says "a `.CG1`
+    /// sets `EF_MONO` everywhere", it is simply what Infocom shipped. Both
+    /// reference interpreters sidestep the question by knowing which card they
+    /// are on before they open a file.
+    ///
+    /// The pixels are asserted alongside the flags, because the two are
+    /// independent evidence for the same claim: a two-colour rendition should
+    /// stay inside the four indices its packings use, and a sixteen-colour one
+    /// should reach past them.
+    #[test]
+    fn each_palette_less_rendition_names_its_hardware_table() {
+        #[rustfmt::skip]
+        let corpus: [(&str, Option<[Rgb; 16]>); 14] = [
+            ("zork0.eg1",    Some(EGA_PALETTE)),
+            ("arthur.eg1",   Some(EGA_PALETTE)),
+            ("journey.eg1",  Some(EGA_PALETTE)),
+            ("shogun.eg1",   Some(EGA_PALETTE)),
+            ("FMVPOKER.EG1", Some(EGA_PALETTE)),
+            ("zork0.cg1",    Some(CGA_PALETTE)),
+            ("arthur.cg1",   Some(CGA_PALETTE)),
+            ("journey.cg1",  Some(CGA_PALETTE)),
+            ("shogun.cg1",   Some(CGA_PALETTE)),
+            // MCGA and the Amiga carry their colours per picture. `beyondzo.mg1`
+            // is the one that would fool a rule keyed on the picture space: its
+            // flag byte reads 640-wide where every other `.MG1` reads 320.
+            ("zork0.mg1",    None),
+            ("arthur.mg1",   None),
+            ("shogun.mg1",   None),
+            ("beyondzo.mg1", None),
+            ("zork0.pic",    None),
+        ];
+        for (name, want) in corpus {
+            let Some(bytes) = fixture(name) else { continue };
+            let pics = InfocomPics::parse(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(pics.hardware_palette(), want, "{name} hardware table");
+
+            // The pixels, independently. A hardware-table archive's indices must
+            // fit the table it was handed; a CGA one must stay two-colour in both
+            // of its packings.
+            let ceiling = if want == Some(CGA_PALETTE) { 4 } else { 16 };
+            let mut reached = 0usize;
+            for e in pics.entries().iter().filter(|e| e.has_pixels()) {
+                for &i in &pics.decode(e.id).unwrap().indices {
+                    reached = reached.max(usize::from(i) + 1);
+                }
+            }
+            assert!(reached <= ceiling, "{name} reaches index {reached} of {ceiling}");
+            if want == Some(EGA_PALETTE) {
+                assert_eq!(reached, 16, "{name} is a sixteen-colour rendition");
+            }
         }
     }
 
