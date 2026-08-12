@@ -688,7 +688,15 @@ pub(crate) fn apply_game_driven_result(
         state.mark_screen_clear();
     }
     if result.transcript_elems.is_empty() {
-        state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+        // A keystroke a game echoes back stays on the line the player is typing on
+        // (SQ-0726) — see `push_transcript_runs_char_echo`. Not after `erase_lower`:
+        // the line before the push belongs to a screen the game has just wiped, and
+        // the truncate above may have taken it away entirely.
+        if result.erase_lower {
+            state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+        } else {
+            state.push_transcript_runs_char_echo(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+        }
     } else {
         app::state::apply_transcript_elems(state, &result.transcript_elems);
     }
