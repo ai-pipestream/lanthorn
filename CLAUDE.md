@@ -18,12 +18,18 @@ cargo test -p app --test v6_arthur_status -- <name>  # one test within it
 **Full test gate** (run before any commit):
 
 ```sh
-cargo test -p zvm -p gvm -p scott -p app 2>&1 | grep -cE "^error(\[|:)| [1-9][0-9]* failed"
+cargo nextest run -p blorb -p zvm -p gvm -p scott -p app 2>&1 | grep -acE "^error(\[|:)| [1-9][0-9]* failed"
 ```
 
-This must **print 0**. Note: grep exits 1 when it finds zero matches — that exit code IS the pass, so never chain this with `&&` or treat a nonzero exit as failure. Also cross-check completeness: the number of `test result:` lines must equal the number of test binaries launched (compare `grep -c "^     Running\|^   Doc-tests"` against `grep -c "^test result:"`) — a binary that dies mid-run otherwise disappears silently. That check catches a binary that *died*, not one that was never *enumerated*: a newly-created `crates/app/tests/*.rs` can be missing from the first run after you add it, and the counts still match because cargo never launched it. When you add a test file, also confirm its name appears in the `Running` lines (or just re-run the gate).
+This must **print 0**. Note: grep exits 1 when it finds zero matches — that exit code IS the pass, so never chain this with `&&` or treat a nonzero exit as failure. (`-a` because a panicking test can emit a NUL byte, after which grep treats the stream as binary and reports nothing.)
 
-**Clippy gate**: `cargo clippy --workspace --all-targets -- -D warnings` must be clean.
+Cross-check completeness against nextest's own summary rather than by counting lines: `Starting N tests across M binaries` at the top must be followed by `Summary [...] N tests run: N passed`, with the **same N**. A binary that dies mid-run fails the run outright instead of disappearing. That still catches a binary that *died*, not one that was never *enumerated* — a newly-created `crates/app/tests/*.rs` can be missing from the first run after you add it, and every count is self-consistent because cargo never built it. When you add a test file, confirm its name appears in the run (`cargo nextest list | grep <name>`) or just re-run the gate.
+
+`cargo test` still works and is fine for a single binary (above), but it runs test binaries **one at a time**, parallelising only within each. Measured on this workspace at 12 cores: 542s for `cargo test` against 99s for `cargo nextest run`, same 4176 tests — half the binaries carry three tests or fewer while one carries 2343, so global scheduling is worth ~5.5x. Install with `cargo install cargo-nextest --locked`, or the prebuilt binary from <https://get.nexte.st>.
+
+Two consequences of nextest's model worth knowing: it runs **each test in its own process**, so a test that depends on state left behind by another test in the same binary will fail under it (that is a defect, not an incompatibility); and it does not run doctests, which costs us nothing because every crate sets `doctest = false` — if you ever add a real doctest, remove that setting and run `cargo test --doc` alongside.
+
+**Clippy gate**: `cargo clippy --workspace --all-targets -- -D warnings` must be clean. It costs ~149s the first time after a test build (separate fingerprints, so it shares nothing) and ~0.3s when already warm — cheap to re-run, so re-run it rather than assuming.
 
 ## Hard rules
 

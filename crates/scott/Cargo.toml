@@ -4,4 +4,9 @@ version.workspace = true
 edition = "2021"
 license.workspace = true
 
+[lib]
+# No doctests here; skip the rustdoc doctest pass (seconds of harness
+# compilation for zero tests). Remove if real doctests are added.
+doctest = false
+
 [dependencies]
