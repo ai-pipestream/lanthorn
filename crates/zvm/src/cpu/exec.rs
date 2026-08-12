@@ -246,7 +246,13 @@ pub struct Machine {
     /// it belonged to is discarded). Read via [`Machine::is_saveload_pending`].
     pending_restore: bool,
     /// PRNG state for the `random` opcode (xorshift32).
-    /// Initialised to a fixed nonzero constant; seeded by `random` with negative arg.
+    ///
+    /// Initialised to [`Machine::DEFAULT_RNG_SEED`] — a fixed nonzero constant, so
+    /// a bare `Machine` (every unit test) draws the same sequence every time. A
+    /// HOST that wants a fresh game per launch calls [`Machine::set_rng_seed`]
+    /// before the boot run; babelmap seeds from the `random_seed` config key, or
+    /// from entropy when that key is unset (SQ-0811). Also seeded in-game by
+    /// `random` with a negative argument (ZMSD §15).
     rng_state: u32,
     /// VAR opcodes that have hit the unimplemented fallthrough (warned once each).
     pub(crate) warned_var_opcodes: std::collections::HashSet<u8>,
@@ -515,7 +521,7 @@ impl Machine {
             pending_save: None,
             pending_restore_store: None,
             pending_restore: false,
-            rng_state: 0x12345678, // fixed nonzero seed
+            rng_state: Self::DEFAULT_RNG_SEED,
             warned_var_opcodes: std::collections::HashSet::new(),
             warned_ext_opcodes: std::collections::HashSet::new(),
             pending_sounds: Vec::new(),
@@ -921,6 +927,26 @@ impl Machine {
     /// auto default (Frotz's rule). Takes effect at the next `init_caps`.
     pub fn set_interpreter_number(&mut self, n: Option<u8>) {
         self.interpreter_number = n;
+    }
+
+    /// The PRNG seed a bare `Machine` starts from: fixed, so a machine nobody
+    /// seeds replays one sequence. Nonzero — xorshift32 stays at 0 forever.
+    pub const DEFAULT_RNG_SEED: u32 = 0x1234_5678;
+
+    /// Seed the `random` PRNG (ZMSD §15). Call this BEFORE the boot run: a game's
+    /// initialisation routine may already draw from it, so seeding after the first
+    /// prompt is one turn too late to change the game the player is handed.
+    ///
+    /// `0` is coerced to [`Self::DEFAULT_RNG_SEED`]: xorshift32 is an absorbing
+    /// state at zero, and a machine that always returns 0 is not a random one.
+    pub fn set_rng_seed(&mut self, seed: u32) {
+        self.rng_state = if seed == 0 { Self::DEFAULT_RNG_SEED } else { seed };
+    }
+
+    /// The current PRNG state — the seed the next `random` draw advances from.
+    /// Diagnostic only (the startup seed report); the game never sees it.
+    pub fn rng_seed(&self) -> u32 {
+        self.rng_state
     }
 
     /// Publish the interpreter's own default colours to the game.
@@ -1715,7 +1741,11 @@ impl Machine {
                     self.rng_state = if seed == 0 { 1 } else { seed };
                     0
                 } else {
-                    // range == 0: re-randomise (use a fixed increment so no OS calls)
+                    // range == 0: re-randomise. A fixed step off the CURRENT state,
+                    // not a fresh entropy draw: the state it steps from is already
+                    // unpredictable when the host seeded from entropy (SQ-0811), and
+                    // staying a pure function of it is what keeps a run launched with
+                    // an explicit `random_seed` reproducible end to end.
                     self.rng_state = self.rng_state.wrapping_add(0x9E3779B9);
                     if self.rng_state == 0 { self.rng_state = 1; }
                     0
@@ -8296,6 +8326,58 @@ pub(crate) mod tests {
         let result = m.global(0);
         assert!((1..=10).contains(&result),
             "random(10) must be in [1,10], got {result}");
+    }
+
+    /// Draw three `random #1000` values from a machine seeded (or not) by the
+    /// host, the way `GameSession` seeds one before the boot run (SQ-0811).
+    fn three_draws(seed: Option<u32>) -> (u16, u16, u16) {
+        let mut buf = sample_story(5);
+        // Three × [VAR:07 random, type=[Large,omit,omit,omit], 1000, store Gn], quit.
+        // 1000 needs a Large constant (0x3E8), so the type byte is 0x3F, not 0x7F.
+        for (at, store) in [(0x10usize, 0x10u8), (0x15, 0x11), (0x1A, 0x12)].iter() {
+            buf[*at] = 0xE7;
+            buf[at + 1] = 0x3F;
+            buf[at + 2] = 0x03;
+            buf[at + 3] = 0xE8;
+            buf[at + 4] = *store;
+        }
+        buf[0x1F] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        if let Some(s) = seed {
+            m.set_rng_seed(s);
+        }
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        (m.global(0), m.global(1), m.global(2))
+    }
+
+    // -----------------------------------------------------------------------
+    // set_rng_seed — the host picks the game the player is handed (SQ-0811)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_seeded_machine_replays_its_sequence_exactly() {
+        // The reproducibility half of `random_seed`: pin the key and the same
+        // story deals the same dice, run after run.
+        assert_eq!(three_draws(Some(0xC0FF_EE00)), three_draws(Some(0xC0FF_EE00)));
+    }
+
+    #[test]
+    fn different_seeds_deal_different_sequences() {
+        // The other half: without this, "seeding" could be a no-op and the
+        // reproducibility test above would still pass.
+        assert_ne!(three_draws(Some(0xC0FF_EE00)), three_draws(Some(0x0BAD_1DEA)));
+    }
+
+    #[test]
+    fn an_unseeded_machine_is_the_fixed_default_and_seed_zero_joins_it() {
+        // A bare `Machine` stays deterministic — every other test in this file
+        // depends on it — and a zero seed is coerced rather than absorbed: xorshift32
+        // at 0 returns 0 forever, which would make `random` a constant function.
+        assert_eq!(three_draws(None), three_draws(Some(Machine::DEFAULT_RNG_SEED)));
+        assert_eq!(three_draws(Some(0)), three_draws(None));
     }
 
     // -----------------------------------------------------------------------

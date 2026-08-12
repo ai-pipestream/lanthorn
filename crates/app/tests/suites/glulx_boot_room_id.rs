@@ -39,6 +39,7 @@ fn boot_in(dir: &std::path::Path, image: Vec<u8>) -> GlulxSession {
         &[],
         Default::default(),
         false,
+        None,
     )
     .expect("Adventure (Glulx) boots")
 }

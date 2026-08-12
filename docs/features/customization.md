@@ -383,6 +383,20 @@ re-seed the new template, or hand-write the new shape from
   fixed pixel screen, which babelmap scales into whatever pane it has.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
+- **Random seed** — `random_seed` pins the number every engine's random-number
+  generator starts from. Leave it **unset** (the default) and babelmap draws a
+  fresh seed from the system at each launch, so the dice are different every
+  time you sit down — which is the whole point of a game like *Kerkerkruip*,
+  whose dungeon is dealt at the start. Set it and the story becomes a recording:
+  the same shuffles, the same rolls, the same monsters in the same rooms, every
+  run. babelmap prints the seed it used on the console as it starts —
+  `babelmap: random seed 3735928559 (set random_seed = 3735928559 to replay this
+  run)` — so when a run turns out to be the good one, that number is how you ask
+  for it again, and how you hand it to somebody else. A restart (`@restart`, or
+  restarting from the menu) re-draws the seed the same way the launch did: pinned
+  means the same game back, unpinned means a new one. A game that asks the
+  interpreter for entropy *itself* — Glulx's `setrandom 0` — still gets it, seed
+  or no seed; the spec says it must, and almost nothing does.
 - **Command band** — the `[command_band]` section configures the point-and-click
   phrase builder (see [Interface](interface.md#playing-aids); not to be confused
   with the unrelated top-level `command_bar` boolean, which moves the *typed*

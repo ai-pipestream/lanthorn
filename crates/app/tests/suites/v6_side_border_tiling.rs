@@ -174,6 +174,7 @@ fn boot_named(story: &str, archive: &str, release: (u16, &str)) -> Option<GameSe
         v6_art_scale,
         profile.default_colours(),
         None,
+        None,
     )
     .unwrap_or_else(|e| panic!("{story} + {archive}: should boot without a ZError: {e:?}"));
     s.set_pict_source(Some(picts));

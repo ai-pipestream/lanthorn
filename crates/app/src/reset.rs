@@ -103,7 +103,12 @@ pub(crate) fn reset_game(
                 picture_dims,
                 v6_screen_px,
                 v6_art_scale,
-                host_default_colours, None
+                host_default_colours, None,
+                // A restart re-draws the seed the same way the launch did
+                // (SQ-0811): a pinned `random_seed` replays the same game, and an
+                // unpinned one deals a fresh one — which is what restarting a
+                // randomised game is FOR.
+                Some(state.config.effective_random_seed()),
             )
             .map_err(|e| format!("{e:?}"))
             .map(|mut new_session| {
@@ -159,6 +164,8 @@ pub(crate) fn reset_game(
                 // Keep the debug inspector's boot-tracing across @restart when a
                 // `--debug` session is active, so the restarted boot is captured too.
                 state.persist_debug_trace,
+                // Re-seeded exactly as the launch was (SQ-0811) — see the zvm arm.
+                Some(state.config.effective_random_seed()),
             )
             .map_err(|e| format!("{e:?}"))
             .map(|new_session| {
@@ -168,9 +175,12 @@ pub(crate) fn reset_game(
                     .expect("restart re-runs the same Glulx story") = new_session;
             })
         }
-        Ok(app::hints::LoadedStory::Scott(bytes)) => app::scott_session::ScottSession::new(
+        Ok(app::hints::LoadedStory::Scott(bytes)) => app::scott_session::ScottSession::new_with_trace(
             bytes,
             resolve_pict_blorb(story_path, state.config.images),
+            false,
+            // Re-seeded exactly as the launch was (SQ-0811) — see the zvm arm.
+            Some(state.config.effective_random_seed()),
         )
         .map(|new_session| {
                 *session

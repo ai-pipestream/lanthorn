@@ -792,7 +792,7 @@ impl GameSession {
     /// [`Self::new_with_art_scale`] — but every caller of *this* function gets
     /// the rule exactly as it has always been.
     pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>) -> Result<GameSession, ZError> {
-        Self::new_with_art_scale(story, honor_game_colours, sound_available, interpreter_number, trace_from_boot, picture_dims, v6_screen_px, None, default_colours, host_screen)
+        Self::new_with_art_scale(story, honor_game_colours, sound_available, interpreter_number, trace_from_boot, picture_dims, v6_screen_px, None, default_colours, host_screen, None)
     }
 
     /// [`Self::new_with_trace`] with the art scale supplied rather than assumed
@@ -805,12 +805,22 @@ impl GameSession {
     /// archive answers, and only an EGA/CGA one answers with anything other than
     /// `(2, 2)`, so the two entry points are the same function for the whole
     /// corpus.
-    pub fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>) -> Result<GameSession, ZError> {
+    ///
+    /// `random_seed` is the value the story's `random` opcode starts from
+    /// (SQ-0811). It is applied here, before the boot run below, because a game's
+    /// initialisation routine may already draw from the generator — seeding after
+    /// the first prompt is one turn too late to change the game the player is
+    /// handed. `None` — every caller but the launcher — leaves zvm's own fixed
+    /// default, so a test's sequence stays the reproducible one it has always been.
+    pub fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>, random_seed: Option<u32>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
         machine.set_honor_game_colours(honor_game_colours);
         machine.set_sound_available(sound_available);
+        if let Some(seed) = random_seed {
+            machine.set_rng_seed(seed);
+        }
         if let Some((bg, fg)) = default_colours {
             machine.set_default_colours(bg, fg);
         }
