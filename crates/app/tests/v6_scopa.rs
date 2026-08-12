@@ -3,7 +3,7 @@
 //!
 //! Each member below used to be its own test binary. The suites now live in
 //! `tests/suites/`, which cargo does not auto-build, and are pulled in here as
-//! modules — one link instead of 7. `cargo nextest run <old_file_name>` still
+//! modules — one link instead of 8. `cargo nextest run <old_file_name>` still
 //! selects a single suite, because the module path carries the old filename.
 
 #![allow(dead_code, unused_imports)]
@@ -20,5 +20,7 @@ mod v6_scopa_hybrid_no_story;
 mod v6_scopa_painted_cards;
 #[path = "suites/v6_scopa_picture_decks.rs"]
 mod v6_scopa_picture_decks;
+#[path = "suites/v6_scopa_selection_repaint.rs"]
+mod v6_scopa_selection_repaint;
 #[path = "suites/v6_scopa_screen_extent.rs"]
 mod v6_scopa_screen_extent;

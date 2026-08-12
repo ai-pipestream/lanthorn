@@ -50,6 +50,26 @@ Two consequences of nextest's model worth knowing: it runs **each test in its ow
 - **No GitHub PRs.** Workflow is: work on main for routine changes (a feature branch + local merge for major work), then `git push origin HEAD:main`.
 - **Commit trailers**: a git hook requires a quest trailer on every commit — `Quest: SQ-xxxx` (work in progress), `Completes: SQ-xxxx` (closes it), `Confirm: SQ-xxxx` (done but awaiting user verification), or `Quest: none`. Quests are tracked with the side-quest MCP tools / `side-quest` CLI, not files.
 - **Verify spec constants against authoritative sources** (Z-Machine Standards Document, Glk/Glulx specs), never from memory — unit tests that share the implementation's wrong assumption pass anyway. VM/protocol features need a real-game smoke test.
+- **Remove a worktree as soon as its branch is merged.** Each one carries its own `target/` — measured at 4.7–6.8 GB — which is pure garbage the moment the branch lands, and cargo never reclaims it. Five merged worktrees held 27 GB. The check and the removal, from the main checkout:
+  ```sh
+  git log --oneline main..<branch> | wc -l      # 0 means fully merged
+  git worktree remove --force <path> && git branch -D <branch> && git worktree prune
+  ```
+  Do this in the same breath as the merge, not "later" — the cost is invisible until it is enormous.
+
+## Disk hygiene
+
+Cargo has no garbage collection for `target/`: every hash change writes a new artifact beside the old one and orphans it forever (`-Zgc` is nightly and reclaims the *registry* cache, not build output). Two things dominate, and neither needs a tool:
+
+- **`target/debug/incremental`** is a pure cache — delete it freely; the only cost is a slower next build.
+- **Merged worktrees** — see the hard rule above.
+
+For the orphaned artifacts themselves, `cargo sweep` removes exactly what a build did not touch rather than guessing by age:
+
+```sh
+cargo sweep --stamp && cargo nextest run … && cargo sweep --file
+cargo sweep --time 30        # blunter: untouched in 30 days
+```
 
 ## Test fixtures
 
