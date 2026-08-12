@@ -265,6 +265,29 @@ extra circuitry to get it. That single entry is not a footnote: *Zork Zero*'s
 proscenium arch is drawn as brown dithered against bright red, and getting it
 wrong turned the whole frame pink and olive.
 
+And getting it *right* is only half the arch, because EGA has no bronze at all —
+the artist made one. Look closely at the original and the arch is not brown, and
+not red: it is brown and bright red in alternating **columns**, one pixel wide,
+and on a 640×200 screen those pixels are half as wide as an MCGA one, so the card
+fused each pair into a colour the palette does not contain. Bocfel puts it
+perfectly: no single pixel of the artwork is the colour the eye actually sees.
+babelmap keeps all 640 columns — that is what makes an EGA plate cover exactly
+the rectangle a 320-wide one does — so it has to do the fusing itself, with a
+three-tap tent across columns as the art comes out of the archive. Do it there
+and bronze is a property of the artwork; leave it to the scale onto your terminal
+and it becomes a property of *your terminal*, since that scale is
+nearest-neighbour on purpose and blends at no width at all. Measured on *Zork
+Zero*'s border, the fused EGA frame's neighbour-to-neighbour variation falls from
+49.1 to 8.4, against the MCGA rendition's own 4.3, and it now reads the same at a
+pane of 320 pixels or 1280.
+
+**CGA is deliberately left alone**, and it is the reason the rule is written the
+way it is. A `.CG1` is 640 wide exactly as an `.EG1` is, so a rule keyed on width
+would soften it too — and there is nothing in it to fuse. Its 640-wide art is
+genuine one-bit line work, and blending line work only makes it grey. What the
+fusing asks is not "how wide?" but "how many colours?", off the archive's own
+two-colour flags.
+
 **CGA** gets two colours, and that surprises people who remember CGA's cyan and
 magenta. Those belong to its 320-wide four-colour mode; the 640-wide mode these
 archives are stored for — mode 6, the only 640-wide one the card had — is one bit

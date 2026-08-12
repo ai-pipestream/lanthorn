@@ -105,6 +105,27 @@ fn frame_colours(session: &GameSession) -> BTreeSet<Rgb> {
         .collect()
 }
 
+/// Every colour a `[1, 2, 1] / 4` tent of three EGA entries can produce — the set
+/// SQ-0797's column fusion can legally put on an EGA frame, and nothing wider.
+/// Rounding matches `graphics::blend_half_width_columns` exactly (`(sum + 2) / 4`,
+/// per channel).
+fn ega_tent_closure() -> BTreeSet<Rgb> {
+    let mut out = BTreeSet::new();
+    for l in EGA_PALETTE {
+        for m in EGA_PALETTE {
+            for r in EGA_PALETTE {
+                let mut c = [0u8; 3];
+                for k in 0..3 {
+                    let sum = u32::from(l[k]) + 2 * u32::from(m[k]) + u32::from(r[k]);
+                    c[k] = ((sum + 2) / 4) as u8;
+                }
+                out.insert(c);
+            }
+        }
+    }
+    out
+}
+
 /// The reported defect, on the reported fixture: the EGA arch is bronze, which
 /// on a sixteen-colour card means brown dithered against bright red.
 ///
@@ -127,9 +148,21 @@ fn zork_zeros_ega_frame_is_drawn_in_ega_brown_not_dark_yellow() {
             "honor={honor_game_colours}: dark yellow {:?} is the defect, and must be gone",
             DEFAULT_PALETTE[6]
         );
-        // Nothing outside the card's sixteen may reach the frame.
+        // Nothing outside the card's sixteen may reach the frame — but "the
+        // card's sixteen" now means what an EGA CARD put on the glass, not what
+        // the archive stored. SQ-0797 fuses a 640-wide rendition's column dither
+        // with a `[1, 2, 1] / 4` tent, because its pixels are half as wide, and
+        // bronze is by construction a colour the palette does not contain. So the
+        // claim is one step weaker and still catches every palette defect: every
+        // frame colour must be a tent of THREE EGA entries. Dark yellow reaching
+        // the artwork would have to arrive as some blend of the sixteen, and the
+        // assertion below rules it out at full strength either way.
+        let fused = ega_tent_closure();
         for c in &seen {
-            assert!(EGA_PALETTE.contains(c), "honor={honor_game_colours}: {c:?} is not an EGA colour");
+            assert!(
+                fused.contains(c),
+                "honor={honor_game_colours}: {c:?} is not a tent of EGA colours"
+            );
         }
     }
 }
