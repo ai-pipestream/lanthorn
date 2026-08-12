@@ -1437,6 +1437,62 @@ mod tests {
         assert_eq!(pics.adaptive_pictures(), vec![7]);
     }
 
+    /// SQ-0801. The flag word says two things and EGA is the only rendition that
+    /// uses either of them: **which** colour drops out, and whether one drops out
+    /// at all.
+    ///
+    /// Every Amiga, MCGA and CGA archive in hand sets `EF_TRANS` on every picture
+    /// and leaves the top nibble zero, so "the transparent colour is 0" passes
+    /// there whether it is read or assumed. `zork0.eg1` does neither: 132 of its
+    /// 396 pictures have `flags = 0` and are wholly opaque, and 128 of the rest
+    /// name colour 1, 2 or 3. Both arms are load-bearing — an opaque picture that
+    /// dropped colour 0 would show holes, and a picture transparent on 1 that was
+    /// treated as transparent on 0 would paint its background over whatever it
+    /// was placed on. Infocom's own YZIP says exactly this (`apple/yzip/pic.asm`:
+    /// bit 0 clear → `TRANSCLR = $FF`, i.e. no colour matches; else the flag word
+    /// shifted right four bits), and Frotz's `dos/bcpic.c` repeats it.
+    #[test]
+    fn a_pc_picture_names_its_transparent_colour_or_has_none() {
+        let f = pc_archive(&[
+            PcPic {
+                id: 1,
+                w: 4,
+                h: 1,
+                // EGA's shape: EF_TRANS, and colour 1 in the top nibble.
+                flags: 0x1001,
+                codes: vec![LZW_CLEAR, 0, 1, 2, 1, LZW_END],
+                palette: vec![],
+            },
+            PcPic {
+                id: 2,
+                w: 4,
+                h: 1,
+                // …and the deliberately opaque one, which is the same 132 pictures
+                // the card ranks and suits come from.
+                flags: 0,
+                codes: vec![LZW_CLEAR, 0, 1, 2, 1, LZW_END],
+                palette: vec![],
+            },
+        ]);
+        let pics = InfocomPics::parse(f).unwrap();
+
+        let named = pics.decode(1).unwrap();
+        assert_eq!(named.transparent, Some(1), "the top nibble names the colour that drops out");
+        let pal = [[9u8, 9, 9]; 16];
+        assert_eq!(
+            named.rgba_with(&pal).chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+            vec![255, 0, 255, 0],
+            "colour 1 and only colour 1 reaches the host as alpha 0"
+        );
+
+        let opaque = pics.decode(2).unwrap();
+        assert_eq!(opaque.transparent, None, "bit 0 clear is no transparent colour at all");
+        assert!(
+            opaque.rgba_with(&pal).chunks_exact(4).all(|p| p[3] == 255),
+            "an opaque picture paints its whole rectangle, colour 0 included"
+        );
+    }
+
     /// The LZW table itself: a code that stands for a string the stream taught
     /// the decoder, and the self-referential code that is legal one step before
     /// it is defined. Literals alone would leave both untested.
