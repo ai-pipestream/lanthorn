@@ -1537,13 +1537,63 @@ that is no longer quietly accumulating everything it was ever shown.
 
 Order matters more than it looks. A picture being *replaced* is the one your
 terminal is drawing at that moment, and its replacement can be most of a megabyte
-away — Zork Zero's banner is 618 KB every time a compass arrow changes. Free it
-first and those cells have nothing to draw until the new upload lands, which reads
-on screen as a flicker: the compass blinking as it composites, the on-screen map
-blinking as it updates its corner, Arthur's graveyard blinking as Merlin appears in
-it. So a picture nothing is showing any more is freed immediately, and a picture
+away — Zork Zero's banner used to be 618 KB every time a compass arrow changed.
+Free it first and those cells have nothing to draw until the new upload lands, which
+reads on screen as a flicker: the compass blinking as it composites, the on-screen
+map blinking as it updates its corner, Arthur's graveyard blinking as Merlin appears
+in it. So a picture nothing is showing any more is freed immediately, and a picture
 being replaced in place is freed *after* its replacement is on screen. Same frame,
 same batch, nothing held longer than the width of one placement.
+
+## A band is cut into tiles, so a small change is a small upload
+
+That 618 KB is worth staring at. Zork Zero's banner is one 920×126 image, and a
+compass arrow is about 45×40 pixels of it — a third of a percent. Every band already
+hashes only its own native footprint, so a change under *another* band never disturbs
+it; but a change under *this* band re-encoded and re-transmitted all 151 chunks of it.
+Eight arrows over the boot animation, and 4.9 MB had gone down the wire to redraw a
+compass.
+
+There is no way to ask a terminal to patch pixels into a picture it already has.
+Kitty cannot, iterm2 cannot, and building a patch-over-base layer on virtual
+placements only trades the bandwidth for bookkeeping and drift. What you *can* do is
+send a **smaller picture**, so the ring's full-width bands now go up as a row of
+8-column tiles rather than one strip: fifteen images across Zork Zero's banner
+instead of one, and a compass arrow re-sends the one or two it lands in.
+
+The tiles are the same pixels. Every band crops its rectangle out of one scaled
+canvas the frame builds once, at whole device pixels, so column 41 reads exactly the
+same source however the band around it is cut — no resampling boundary at a seam, no
+ceil-versus-round trap, and the first frame's transmitted payload is byte for byte
+what it always was (618,240 bytes: fourteen tiles of 43,008 and one of 16,128). The
+partition is exact by construction — no gap that would leave a column of the ring
+unwritten, no overlap that would put two images on one cell.
+
+Eight columns is arithmetic rather than taste. Kitty takes 4096 base64 characters per
+chunk, so every tile rounds its last chunk up and wastes about 2 KB; cut finer and
+that fixed cost eats the win (115 one-column tiles would add 230 KB to every first
+frame, and leave a terminal that evicts by LRU juggling 115 resident images per band);
+cut coarser and the re-send climbs straight back. Measured on the real binary under a
+pty at 117×64, the same three frames on either side:
+
+| frame | one strip | 15 tiles | |
+|---|---:|---:|---|
+| first frame | 2,089,630 B | 2,093,195 B | +0.17% |
+| compass, one tile | 629,280 B | 43,947 B | **14.3×** |
+| compass, two tiles | 628,566 B | 88,349 B | **7.1×** |
+| whole three-key boot | 4,604,778 B | 2,358,042 B | **1.95×** |
+
+Granularity is per backend, because the trade is not the same everywhere. Kitty and
+iterm2 tile. **Sixel does not** — every sixel image carries its own palette
+definition, so fifteen tiles would mean fifteen palettes where the strip had one,
+which is a real first-frame regression bought for a redraw win. Half-blocks does not
+either, and does not need to: it draws glyphs, and ratatui's own cell diff has always
+sent it just the cells that changed. Side flanks are left whole as well — they are
+tall and thin, and column tiles would buy them nothing.
+
+None of this is visible. With the flicker fixed, this is purely how much goes down
+the wire; on a local terminal you would never notice, and over ssh it is the
+difference between a boot animation that feels snappy and one that does not.
 
 ## `/dump-windows` reports the last frame the *game* drew
 
