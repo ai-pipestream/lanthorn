@@ -18,6 +18,8 @@ mod v6_bpal_oracle;
 mod v6_display_list_capacity;
 #[path = "suites/v6_display_list_restore.rs"]
 mod v6_display_list_restore;
+#[path = "suites/v6_hardware_palette.rs"]
+mod v6_hardware_palette;
 #[path = "suites/v6_native_adaptive_palette.rs"]
 mod v6_native_adaptive_palette;
 #[path = "suites/v6_native_archive_inline.rs"]

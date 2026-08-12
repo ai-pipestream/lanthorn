@@ -212,6 +212,11 @@ pub struct PictSource {
     palette_gen: u64,
     /// Adaptive decodes keyed by `(resnum, palette_gen)`.
     adaptive_cache: HashMap<(u32, u64), Option<Arc<DynamicImage>>>,
+    /// The colour table this source's video hardware fixed, when it had one
+    /// (SQ-0794) — `blorb::infocom_pics::InfocomPics::hardware_palette`. `None`
+    /// for a Blorb, an Amiga/Mac `Pic.data` and an MCGA `.MG1` alike, all of
+    /// which carry their colours per picture.
+    hw_palette: Option<[blorb::infocom_pics::Rgb; 16]>,
 }
 
 impl PictSource {
@@ -228,15 +233,29 @@ impl PictSource {
             current_plte: None,
             palette_gen: 0,
             adaptive_cache: HashMap::new(),
+            hw_palette: None,
         }
     }
 
     /// A source backed by a native Infocom picture archive (Amiga `Pic.data`)
     /// rather than a Blorb — the artwork that shipped on the same disk image as
     /// the story (SQ-0719).
+    ///
+    /// An EGA or CGA archive has **no** adaptive pictures, however its directory
+    /// reads (SQ-0794). Its records are 12 bytes with nowhere to keep a palette,
+    /// so every one of them answers "no palette of my own" — but that is the
+    /// opposite of Blorb §11.3's adaptive, which means *defer to the
+    /// interpreter*. These defer to nothing: their colours were fixed in the
+    /// video card, and `hardware_palette` is that card's table. Emptying the
+    /// adaptive set here is what keeps the Current-Palette machinery from
+    /// splicing a `PLTE` into pictures that have no say in their own colours.
     pub fn from_native(pics: blorb::infocom_pics::InfocomPics) -> PictSource {
-        let adaptive = pics.adaptive_pictures().iter().map(|&id| u32::from(id)).collect();
-        PictSource { native: Some(pics), adaptive, ..PictSource::new(None) }
+        let hw_palette = pics.hardware_palette();
+        let adaptive = match hw_palette {
+            Some(_) => HashSet::new(),
+            None => pics.adaptive_pictures().iter().map(|&id| u32::from(id)).collect(),
+        };
+        PictSource { native: Some(pics), adaptive, hw_palette, ..PictSource::new(None) }
     }
 
     /// Resolve the picture source for `story_path` (SQ-0734's tiers 1 and 2).
@@ -389,7 +408,7 @@ impl PictSource {
                 (Some(b), _) => b
                     .resource(b"Pict", resnum)
                     .and_then(|(_ty, bytes)| crate::cover::decode(bytes)),
-                (None, Some(pics)) => native_image(pics, resnum, None),
+                (None, Some(pics)) => native_image(pics, resnum, self.hw_palette.as_ref()),
                 (None, None) => None,
             };
             self.cache.insert(resnum, decoded.map(Arc::new));
@@ -479,8 +498,18 @@ impl PictSource {
                 // to splice, the Current Palette IS the colour table it expands
                 // through. With none loaded yet it falls back to its own — §11.3
                 // leaves that case undefined and the Blorb path does the same.
+                //
+                // A hardware table outranks the Current Palette outright: an EGA
+                // or CGA picture's colours were the video card's, so there is
+                // nothing for a loaded palette to adapt (SQ-0794). No archive
+                // reaches here with one — `from_native` leaves such a source with
+                // an empty adaptive set — but a restored Current Palette must not
+                // be able to reach in through the replay path either.
                 (None, Some(pics)) => {
-                    native_image(pics, resnum, self.current_plte.as_deref().map(colour_table).as_ref())
+                    let pal = self
+                        .hw_palette
+                        .or_else(|| self.current_plte.as_deref().map(colour_table));
+                    native_image(pics, resnum, pal.as_ref())
                 }
                 (None, None) => None,
             };

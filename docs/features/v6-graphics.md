@@ -195,6 +195,36 @@ characters — the very grid the 640×400 screen already lays out on its 8×16 c
 so choosing a rendition changes the artwork you are looking at and nothing about
 the machine underneath it.
 
+### The colours come with the card
+
+An MCGA or Amiga picture arrives with its own sixteen colours attached. An EGA or
+CGA one does not, and there is nowhere in its directory record to put them —
+those cards had their palettes soldered in, so Infocom stored the pixels and let
+the hardware supply the rest. babelmap now supplies it too, reading the rendition
+straight out of the directory: nobody carrying a palette means EGA or CGA, and
+every picture flagged two-colour means CGA. (Never the file extension. A `.CG1`
+that somebody renamed is still a `.CG1`.)
+
+**EGA** gets the card's sixteen: each channel off, a third, two thirds or full —
+0, 85, 170, 255 — with one famous exception. Colour 6 should arithmetically be a
+dark yellow, and the hardware halves its green and shows **brown** instead,
+`#AA5500`, because IBM thought brown more useful than mustard and wired in the
+extra circuitry to get it. That single entry is not a footnote: *Zork Zero*'s
+proscenium arch is drawn as brown dithered against bright red, and getting it
+wrong turned the whole frame pink and olive.
+
+**CGA** gets two colours, and that surprises people who remember CGA's cyan and
+magenta. Those belong to its 320-wide four-colour mode; the 640-wide mode these
+archives are stored for — mode 6, the only 640-wide one the card had — is one bit
+per pixel. So *Zork Zero*'s CGA rendition really is crisp black-and-white line
+art, exactly as it was in 1988, and not a washed-out version of the EGA one.
+
+Neither is *adaptive*, which matters more than it sounds. A picture that carries
+no palette normally means "draw me with whatever palette is current" (below), and
+an EGA picture carries none for an entirely different reason — it has no say in
+its colours at all. babelmap keeps those out of the Current-Palette machinery
+altogether, so nothing can tint a rendition whose colours were decided by a chip.
+
 ## Splitting the screen TILES it
 
 A v6 game reserves room for artwork by splitting the screen, and the standard is
@@ -997,7 +1027,8 @@ in every mode.
 
 Some of Zork Zero's pictures — the compass rose overlays, the little scene
 tiles — don't carry a real palette of their own. They ship with a placeholder
-(the stock 16-colour EGA table) and are flagged in the Blorb's `APal` chunk as
+(a stock 16-colour table, close to the EGA card's but not it — see above) and are
+flagged in the Blorb's `APal` chunk as
 *adaptive*: the interpreter is meant to draw them with the "Current Palette"
 established by the last ordinary picture it plotted (Blorb spec §11.3). Zork
 Zero leans on this hard — it paints a base illustration to set the mood's
