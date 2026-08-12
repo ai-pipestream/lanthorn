@@ -800,6 +800,30 @@ impl OneRunOverrides {
     }
 }
 
+// ── Entropy ───────────────────────────────────────────────────────────────────
+
+/// A fresh, unpredictable 32-bit seed for an engine's PRNG (SQ-0811).
+///
+/// No dependency and no `unsafe`: `std::collections::hash_map::RandomState` is
+/// the hasher std seeds `HashMap` with, and the OS randomises its keys once per
+/// process (each later `RandomState::new()` in a thread steps them again), so
+/// hashing a fixed salt through one yields a value that differs between launches
+/// AND between calls. That second property is what lets a restart deal a new
+/// game. Cross-platform for free — std does the platform work.
+///
+/// Never returns 0: every engine here runs xorshift32, which is an absorbing
+/// state at zero and would then return zero for the rest of the session.
+pub fn entropy_seed() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u32(0x9E37_79B9); // fixed salt; the entropy is in the random keys
+    // Mix both halves rather than truncating: RandomState's low word carries the
+    // per-call step, and folding the high word in keeps the whole hash's spread.
+    let full = h.finish();
+    let s = (full as u32) ^ ((full >> 32) as u32);
+    if s == 0 { 0x2BAD_C0DE } else { s }
+}
+
 /// Current `config.toml` schema version. Bump when a config change means an
 /// older hand-written file may behave unexpectedly. `write_config` stamps this
 /// as `version = N`; a future babelmap can compare a file's `version` against
@@ -996,6 +1020,20 @@ pub struct Config {
     /// on `Cli::interpreter_number`, which overrides this for one run.
     #[serde(default)]
     pub interpreter_number: Option<u8>,
+    /// The seed every engine's random-number generator starts from (SQ-0811).
+    ///
+    /// `None` — the default — means "a different game every launch": babelmap
+    /// draws a fresh seed from the OS at boot, which is what Frotz, Glulxe and
+    /// Git all do and what a randomised game like Kerkerkruip needs to be a
+    /// different game twice. Set it to any number to PIN the run instead, so the
+    /// same story replays the same shuffles, the same dice and the same dungeon —
+    /// the seed babelmap reports on the console at startup is exactly the value
+    /// to put here to play that run again.
+    ///
+    /// A pinned seed does not gag a game that asks for entropy itself: Glulx's
+    /// `setrandom(0)` is specified to reseed from the system and still does.
+    #[serde(default)]
+    pub random_seed: Option<u32>,
     /// The config file this `Config` was READ from, so a later save goes back to the
     /// same file rather than to `user_dir` (SQ-0574). Set by [`resolve`]; never
     /// persisted, and not part of the file's schema.
@@ -1076,6 +1114,16 @@ impl Config {
             .is_some_and(|n| self.one_run.int(keys::INTERPRETER_NUMBER) == Some(i64::from(n)))
     }
 
+    /// The seed to start this engine's PRNG from: the pinned [`Config::random_seed`]
+    /// when the user set one, else a fresh draw from [`entropy_seed`] (SQ-0811).
+    ///
+    /// Called once per engine construction, which makes the two cases behave the
+    /// way each is meant to: a pinned seed replays the same game after a restart,
+    /// and an unpinned one deals a new one.
+    pub fn effective_random_seed(&self) -> u32 {
+        self.random_seed.unwrap_or_else(entropy_seed)
+    }
+
     /// The interpreter number a one-run source pinned for this launch, if any.
     /// `boot_story` needs it because the CLI's value and the global config's value
     /// live in the same field and outrank the per-game sidecar differently.
@@ -1136,6 +1184,7 @@ impl Default for Config {
             config_file: default_config_file(),
             config_error: None,
             interpreter_number: None,
+            random_seed: None,
             one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             pictures_override: None,
@@ -1243,6 +1292,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.honor_game_colours = from_file.honor_game_colours;
             cfg.honor_timed_input = from_file.honor_timed_input;
             cfg.interpreter_number = from_file.interpreter_number;
+            cfg.random_seed = from_file.random_seed;
             cfg.enable_sound = from_file.enable_sound;
             cfg.volume = from_file.volume;
             cfg.search = from_file.search;
@@ -1516,6 +1566,11 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         "interpreter_number",
         cfg.interpreter_number.map(|n| (n as i64).into()),
     );
+    // Written only when the user pinned one. An absent key is "a fresh seed every
+    // launch", and writing back the seed THIS session happened to draw would turn
+    // one entropy draw into a permanent pin — every later launch replaying the one
+    // game the user happened to get today (SQ-0811).
+    doc.put_or_remove("random_seed", cfg.random_seed.map(|n| i64::from(n).into()));
     // Written only when the user pinned one: an absent key means "follow the
     // story pane" (ZMSD §8.4), and emitting the measured size would silently turn
     // this session's terminal into a permanent override. (SQ-0532/A-F1)
@@ -1590,6 +1645,64 @@ mod tests {
     #[test]
     fn undo_levels_defaults_to_16() {
         assert_eq!(Config::default().undo_levels, 16);
+    }
+
+    // ── random_seed (SQ-0811) ─────────────────────────────────────────────────
+
+    /// THE defect: with no `random_seed` set, two fresh boots must not be handed
+    /// the same seed. Both VM cores construct with a fixed constant, so before
+    /// this key existed every launch of a game that never seeds itself replayed
+    /// one identical sequence — for a roguelike, the same dungeon forever.
+    ///
+    /// Twenty draws rather than two: a single unlucky collision between two
+    /// 32-bit values would be a flaky failure, and this asserts the whole run is
+    /// not one repeated value, which is what the old behaviour looked like.
+    #[test]
+    fn an_unpinned_seed_is_different_on_every_boot() {
+        let cfg = Config::default();
+        assert_eq!(cfg.random_seed, None, "unset is the default: a new game every launch");
+        let draws: std::collections::HashSet<u32> =
+            (0..20).map(|_| cfg.effective_random_seed()).collect();
+        assert!(draws.len() > 1, "every boot drew the same seed {draws:?}");
+        assert!(!draws.contains(&0), "0 absorbs xorshift32: random() would freeze");
+    }
+
+    /// The other direction: a pinned key makes the run reproducible, which is the
+    /// whole point of exposing it. Without this, "pinned" could be drawing fresh
+    /// entropy and the test above would still pass.
+    #[test]
+    fn a_pinned_seed_is_handed_to_every_boot_unchanged() {
+        let cfg = Config { random_seed: Some(0xC0FF_EE00), ..Config::default() };
+        assert_eq!(cfg.effective_random_seed(), 0xC0FF_EE00);
+        assert_eq!(cfg.effective_random_seed(), 0xC0FF_EE00);
+    }
+
+    #[test]
+    fn random_seed_loads_from_the_file_and_round_trips_through_a_save() {
+        let parsed: Config = toml::from_str("random_seed = 20250811\n").unwrap();
+        assert_eq!(parsed.random_seed, Some(20250811));
+
+        let dir = std::env::temp_dir().join(format!("bm-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+
+        // Unset writes no key at all. Emitting the seed this session happened to
+        // draw would silently pin one entropy draw for every later launch.
+        let mut cfg = Config { config_file: cfg_path.clone(), ..Config::default() };
+        write_config_at(&cfg_path, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(!back.contains("random_seed"), "an unset seed must stay unset: {back}");
+        assert_eq!(toml::from_str::<Config>(&back).unwrap().random_seed, None);
+
+        // Pinned survives the save, and `resolve` carries it off disk — the merge
+        // step that fails silently when a new field is missed.
+        cfg.random_seed = Some(20250811);
+        write_config_at(&cfg_path, &cfg).unwrap();
+        let reloaded = resolve(&cli_with_config(&cfg_path, None));
+        assert_eq!(reloaded.random_seed, Some(20250811));
+        assert_eq!(reloaded.effective_random_seed(), 20250811);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2145,6 +2258,7 @@ use_defaults = false
             config_file: default_config_file(),
             config_error: None,
             interpreter_number: None,
+            random_seed: None,
             one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             pictures_override: None,

@@ -555,19 +555,30 @@ roughly 7.9× (23.78M → 3.00M). Accordingly the `Acceleration` (9) and
 `AccelFunc` (10) gestalt selectors report support. The stored assignments
 remain readable via `Machine::accel_func_for` / `accel_param`.
 
-## 18. PRNG (Phase 2c, spec §2.7)
+## 18. PRNG (Phase 2c, spec §2.14)
 
 | Opcode    | Num   | L | S | Effect                                              |
 |-----------|-------|---|---|-----------------------------------------------------|
 | random    | 0x110 | 1 | 1 | `[0, L1)` if L1 > 0; `(L1, 0]` if L1 < 0; any 32-bit value if L1 == 0 |
 | setrandom | 0x111 | 1 | 0 | seed the generator with L1 (L1 == 0 → reseed)       |
 
-A deterministic xorshift32 generator on the `Machine`. `random(L1)`: for `L1 > 0`
-return `next() mod L1`; for `L1 < 0` return `-(next() mod |L1|)` (values from
-`L1+1` to 0); for `L1 == 0` return the raw 32-bit value. A fixed seed yields a
-fully reproducible sequence. `setrandom(0)` is specified to seed from true
-entropy; that needs `std::time`/a dependency and is **deferred**, so we reseed
-from a fixed deterministic default (`DEFAULT_SEED`) and record a diagnostic.
+A xorshift32 generator on the `Machine`. `random(L1)`: for `L1 > 0` return
+`next() mod L1`; for `L1 < 0` return `-(next() mod |L1|)` (values from `L1+1` to
+0); for `L1 == 0` return the raw 32-bit value. A fixed seed yields a fully
+reproducible sequence.
+
+`setrandom(0)` reseeds from true entropy, as the spec requires. No dependency is
+involved: `Machine::entropy_seed` draws from std's `RandomState` (the OS-seeded
+hasher `HashMap` uses), and coerces a zero result to `DEFAULT_SEED` (xorshift32
+is absorbing at zero).
+
+`DEFAULT_SEED` is the seed a bare `Machine` starts from — fixed, so an unseeded
+machine is reproducible and the unit tests here mean something. Handing a PLAYER
+that same sequence on every launch is a bug (SQ-0811), so the host seeds the
+machine before the boot drive with `Machine::set_rng_seed`: babelmap uses the
+`random_seed` config key when the user pinned one, and an entropy draw when they
+did not. `restart` deliberately leaves the state alone rather than snapping back
+to `DEFAULT_SEED`, so a restarted roguelike is a new game and not the last one.
 
 ## 19. Glk I/O model (Glulx sub-project 3a, Glk spec 0.7.5)
 

@@ -67,6 +67,7 @@ fn fmvpoker_ega_dealt() -> Option<GameSession> {
         scale,
         None,
         None,
+        None,
     )
     .expect("a valid v6 story");
     s.set_pict_source(Some(picts));

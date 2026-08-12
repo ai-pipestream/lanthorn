@@ -749,9 +749,13 @@ impl Machine {
     /// Maximum number of in-memory undo snapshots retained (oldest dropped).
     const UNDO_CAP: usize = 16;
 
-    /// Deterministic default PRNG seed (also used for `setrandom(0)`, whose
-    /// true-entropy reseed is deferred — see GLULX_NOTES §18).
-    const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
+    /// The PRNG seed a bare `Machine` starts from: fixed, so a machine nobody
+    /// seeds replays one sequence (every unit test relies on that). A HOST that
+    /// wants a fresh game per launch calls [`Machine::set_rng_seed`] before the
+    /// boot drive — babelmap seeds from the `random_seed` config key, or from
+    /// entropy when that key is unset (SQ-0811). Also the nonzero fallback for
+    /// [`Machine::entropy_seed`] and for a state that reached 0.
+    pub const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
 
     /// Build a machine over `mem`, entering the start function (no arguments).
     /// Text output flows through the Glk model to `backend`.
@@ -2745,7 +2749,11 @@ impl Machine {
         self.undo_stack.clear();
         self.accel_funcs.clear();
         self.accel_params.clear();
-        self.rng = Self::DEFAULT_SEED;
+        // The PRNG is NOT reset. Snapping back to `DEFAULT_SEED` would throw away
+        // the seed the host installed at launch and hand every `@restart` of a
+        // randomised game the same opening it gave the last one — the SQ-0811
+        // defect, one restart later. zvm's restart leaves its state alone for the
+        // same reason, and so does Glulxe.
         self.cur_frame_len = 0;
         self.cur_localspos = 0;
         self.cur_locals.clear();
@@ -2923,6 +2931,21 @@ impl Machine {
     /// work done by intercepted functions when acceleration is enabled.
     pub fn insn_count(&self) -> u64 {
         self.insn_count
+    }
+
+    /// Seed the PRNG (Glulx spec §2.14, the `setrandom` semantics). Call this
+    /// BEFORE the boot drive: a game's initialisation may already draw from it,
+    /// so seeding after the first `glk_select` is too late to change the game the
+    /// player is handed. `0` is coerced to [`Self::DEFAULT_SEED`] — xorshift32 is
+    /// an absorbing state at zero.
+    pub fn set_rng_seed(&mut self, seed: u32) {
+        self.rng = if seed == 0 { Self::DEFAULT_SEED } else { seed };
+    }
+
+    /// The current PRNG state — the seed the next `random` draw advances from.
+    /// Diagnostic only (the startup seed report); the game never sees it.
+    pub fn rng_seed(&self) -> u32 {
+        self.rng
     }
 
     /// A best-effort entropy seed for `setrandom(0)`, drawn from std's
@@ -8788,6 +8811,56 @@ mod tests {
         assert_eq!(run(0x1234), run(0x1234)); // same seed → same sequence
         assert_ne!(run(0x1234), run(0x4321)); // different seed → different sequence
         assert_ne!(run(0), run(0)); // setrandom(0): entropy-seeded, non-reproducible
+    }
+
+    /// Draw two `random` values from a machine the HOST seeded before the program
+    /// ran — the way `GlulxSession` seeds one before the boot drive (SQ-0811) —
+    /// with no `setrandom` in the program at all. A game that never seeds itself
+    /// is exactly the case the fixed construction seed used to decide forever.
+    fn host_seeded_draws(seed: Option<u32>) -> (u32, u32) {
+        let mut body = asm::ins(0x110, &[asm::Op::C32(1_000_000), asm::Op::Mem16(0x0100)]);
+        body.extend(asm::ins(0x110, &[asm::Op::C32(1_000_000), asm::Op::Mem16(0x0104)]));
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        if let Some(s) = seed {
+            m.set_rng_seed(s);
+        }
+        m.run();
+        (m.mem.read32(0x100).unwrap(), m.mem.read32(0x104).unwrap())
+    }
+
+    #[test]
+    fn a_host_seed_decides_a_game_that_never_calls_setrandom() {
+        // Reproducible under a pinned seed…
+        assert_eq!(host_seeded_draws(Some(0xC0FF_EE00)), host_seeded_draws(Some(0xC0FF_EE00)));
+        // …and genuinely steered by it, so seeding cannot be silently a no-op.
+        assert_ne!(host_seeded_draws(Some(0xC0FF_EE00)), host_seeded_draws(Some(0x0BAD_1DEA)));
+    }
+
+    #[test]
+    fn an_unseeded_machine_is_the_fixed_default_and_seed_zero_joins_it() {
+        // A bare `Machine` stays deterministic — the rest of this file depends on
+        // it — and a zero seed is coerced, never absorbed (xorshift32 at 0 is stuck).
+        assert_eq!(host_seeded_draws(None), host_seeded_draws(Some(Machine::DEFAULT_SEED)));
+        assert_eq!(host_seeded_draws(Some(0)), host_seeded_draws(None));
+    }
+
+    #[test]
+    fn restart_keeps_the_host_seed_instead_of_snapping_back_to_the_default() {
+        // A restart that reset the PRNG to `DEFAULT_SEED` would hand a restarted
+        // roguelike the same opening as the last one, whatever the host seeded —
+        // SQ-0811's defect, one `@restart` later.
+        let mut m = machine_with_body(&[], asm::ins(0x120, &[]));
+        m.set_rng_seed(0xC0FF_EE00);
+        let _ = m.rand_range(1_000_000); // advance the stream, as a played turn would
+        let advanced = m.rng_seed();
+        m.op_restart().expect("restart re-enters the start function");
+        assert_ne!(m.rng_seed(), Machine::DEFAULT_SEED, "restart must not re-impose the default");
+        // And the stream CARRIES ON rather than rewinding, so the restarted game
+        // is a new deal and not the one just abandoned.
+        assert_eq!(m.rng_seed(), advanced);
     }
 
     #[test]

@@ -77,22 +77,30 @@ impl ScottSession {
     /// the game's own Blorb when it is a `.blb` graphics container (carrying the
     /// room `Pict` images); `None` for a plain text `.dat`.
     pub fn new(bytes: Vec<u8>, pict_blorb: Option<blorb::Blorb>) -> Result<ScottSession, String> {
-        ScottSession::new_with_trace(bytes, pict_blorb, false)
+        ScottSession::new_with_trace(bytes, pict_blorb, false, None)
     }
 
     /// Like [`ScottSession::new`], but starts the VM with fired-action tracing
     /// on (the `--debug` boot path) so the opening occurrence pass — run inside
     /// `Vm::new_with_trace`, before any host code can toggle tracing — is
     /// captured as coverage from the first frame.
+    ///
+    /// `random_seed` is the value the occurrence rolls start from (SQ-0811). It
+    /// goes into the constructor, not a later `seed_rng`, because that same
+    /// opening occurrence pass rolls its percentage chances inside it. `None` —
+    /// every caller but the launcher — leaves scott's own fixed default, so a
+    /// test's sequence stays the reproducible one it has always been.
     pub fn new_with_trace(
         bytes: Vec<u8>,
         pict_blorb: Option<blorb::Blorb>,
         trace: bool,
+        random_seed: Option<u32>,
     ) -> Result<ScottSession, String> {
         let src = std::str::from_utf8(&bytes)
             .map_err(|_| "Scott .dat is not valid text".to_string())?;
         let db = scott::Database::parse(src).map_err(|e| format!("invalid Scott .dat: {e:?}"))?;
-        let mut vm = scott::Vm::new_with_trace(db, trace);
+        let mut vm =
+            scott::Vm::new_seeded(db, trace, random_seed.unwrap_or(scott::Vm::DEFAULT_RNG_SEED));
         let mut intro = vm.take_output();
         if !vm.has_quit() {
             intro.push_str(PROMPT);
@@ -404,13 +412,32 @@ mod tests {
         );
     }
 
+    /// The seed the launcher hands a session must reach the VM, and reach it
+    /// BEFORE the opening occurrence pass — which runs inside the constructor and
+    /// rolls its own percentage chances. A `seed_rng` call after construction
+    /// compiles just as well and decides nothing about the game the player is
+    /// handed, which is why this asserts on the wiring rather than the API
+    /// (SQ-0811).
+    #[test]
+    fn a_launch_seed_reaches_the_scott_vm_before_the_opening_pass() {
+        let seeded = ScottSession::new_with_trace(dat(), None, false, Some(0xC0FF_EE00)).unwrap();
+        // The intro pass already advanced the generator, so the state cannot still
+        // BE the seed — but it must be off that seed's stream, not the default's.
+        let same = ScottSession::new_with_trace(dat(), None, false, Some(0xC0FF_EE00)).unwrap();
+        let other = ScottSession::new_with_trace(dat(), None, false, Some(0x0BAD_1DEA)).unwrap();
+        let unseeded = ScottSession::new(dat(), None).unwrap();
+        assert_eq!(seeded.vm.rng_seed(), same.vm.rng_seed(), "the same seed replays");
+        assert_ne!(seeded.vm.rng_seed(), other.vm.rng_seed(), "a different seed diverges");
+        assert_ne!(seeded.vm.rng_seed(), unseeded.vm.rng_seed(), "the seed really was applied");
+    }
+
     #[test]
     fn debug_inspector_wires_scott_sections_and_tracks_fired_actions() {
         // End-to-end through the real session + panel: open the inspector, adopt
         // the Scott layout, refresh, and confirm the sections are populated and
         // Call Stack / Eval Stack / Memory are hidden. Then play a turn with
         // tracing on and confirm coverage accrues.
-        let mut s = ScottSession::new_with_trace(dat(), None, true).unwrap();
+        let mut s = ScottSession::new_with_trace(dat(), None, true, None).unwrap();
         assert!(s.debugger().is_some(), "Scott exposes a debugger");
 
         let mut panel = {

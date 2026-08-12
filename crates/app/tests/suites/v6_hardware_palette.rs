@@ -79,6 +79,7 @@ fn boot(archive: &str, honor_game_colours: bool) -> Option<GameSession> {
         v6_art_scale,
         None,
         None,
+        None,
     )
     .expect("Zork Zero (v6) loads and boots without a ZError");
     session.set_pict_source(Some(picts));

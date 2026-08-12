@@ -301,7 +301,7 @@ impl GlulxSession {
         Self::new_in(
             std::path::PathBuf::new(), image, cols, rows, acceleration,
             graphics_enabled, sound_enabled, false, char_px, pict_blorb, vfs_bytes,
-            [[(None, None); 11]; 2], false,
+            [[(None, None); 11]; 2], false, None,
         )
     }
 
@@ -313,6 +313,13 @@ impl GlulxSession {
     ///
     /// `debug` enables the debug inspector's execution tracing from the very first
     /// boot instruction (the `--debug` flag); leave it `false` for a normal launch.
+    ///
+    /// `random_seed` is the value the story's `random` opcode starts from
+    /// (SQ-0811). It is applied before the boot drive below, because a Glulx
+    /// game's initialisation may already draw from the generator — and for a
+    /// roguelike that is precisely where the dungeon is dealt. `None` — every
+    /// caller but the launcher — leaves gvm's own fixed default, so a test's
+    /// sequence stays the reproducible one it has always been.
     #[allow(clippy::too_many_arguments)]
     pub fn new_in(
         game_dir: std::path::PathBuf,
@@ -328,6 +335,7 @@ impl GlulxSession {
         vfs_bytes: &[u8],
         theme: crate::glk_backend::GlkStylePairs,
         debug: bool,
+        random_seed: Option<u32>,
     ) -> Result<GlulxSession, GError> {
         let mem = Memory::new(image)?;
         let picts = crate::graphics::PictSource::new(pict_blorb);
@@ -340,6 +348,9 @@ impl GlulxSession {
         machine.set_acceleration(acceleration);
         machine.set_graphics(graphics_enabled);
         machine.set_sound(sound_enabled);
+        if let Some(seed) = random_seed {
+            machine.set_rng_seed(seed);
+        }
         // Per-game borderless-windows mode: applies from the first relayout at
         // boot, so the game's windows abut with no reserved gutter (SQ-0341).
         machine.set_borderless(borderless);
@@ -1539,7 +1550,7 @@ mod tests {
 
         let mut sess = GlulxSession::new_in(
             dir.clone(), image_for(body, 3), 80, 24, true, false, false, false, (1, 1), None, &[],
-            [[(None, None); 11]; 2], false,
+            [[(None, None); 11]; 2], false, None,
         )
         .expect("new_in");
         assert_eq!(sess.pending_input(), InputKind::Line);
@@ -1994,7 +2005,7 @@ mod tests {
 
         let sess = GlulxSession::new_in(
             dir.clone(), image_for(body, 2), 80, 24, true, false, false, false, (1, 1), None, &[],
-            [[(None, None); 11]; 2], false,
+            [[(None, None); 11]; 2], false, None,
         )
         .expect("new");
         // No Save request reached the host: the boot drive ran straight to the prompt.

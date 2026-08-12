@@ -218,6 +218,19 @@ const INTERPRETER: &[Row] = &[
             "a single run with `babelmap --interpreter-number N`.",
         ],
     ),
+    ex(
+        "random_seed",
+        "20250811",
+        &[
+            "Pin the seed every engine's random-number generator starts from, so a",
+            "story replays exactly: the same shuffles, the same dice, the same dungeon.",
+            "Unset (default) draws a fresh seed from the system at every launch, which",
+            "is what makes a randomised game like Kerkerkruip a different game twice.",
+            "babelmap prints the seed it used on the console as it starts — copy that",
+            "number in here to play that run again. A game that asks the interpreter",
+            "for entropy itself (Glulx setrandom 0) still gets it, seed or no seed.",
+        ],
+    ),
     d(
         "glk_pixel_scale",
         "\"native\"",

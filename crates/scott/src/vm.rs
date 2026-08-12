@@ -77,6 +77,10 @@ pub struct Vm {
 }
 
 impl Vm {
+    /// The PRNG seed a `Vm` nobody seeds starts from: fixed, so every unit test
+    /// draws the same sequence. Nonzero — xorshift32 is absorbing at zero.
+    pub const DEFAULT_RNG_SEED: u32 = 0x1234_5678;
+
     /// Initialize: item_loc from each item's start_loc, player=start_room, lamp=light_time,
     /// flags/counters cleared, current_counter=0, saved_room/saved_rooms=0, needs_line=true.
     /// Describes the starting room into `out` so the host can read the intro via
@@ -91,6 +95,17 @@ impl Vm {
     /// captured too. The app's `--debug` boot path uses this so a Scott story's
     /// start-of-game auto-events show up as fired from the first frame.
     pub fn new_with_trace(db: Database, trace_fired: bool) -> Vm {
+        Vm::new_seeded(db, trace_fired, Vm::DEFAULT_RNG_SEED)
+    }
+
+    /// [`Vm::new_with_trace`] with the PRNG seed supplied (SQ-0811).
+    ///
+    /// A seed belongs in the CONSTRUCTOR, not in a `seed_rng` call after it: the
+    /// opening occurrence pass runs below, inside this function, and occurrences
+    /// roll percentage chances — so a game seeded afterwards has already had its
+    /// first random events decided by the default seed. babelmap passes the
+    /// `random_seed` config key here, or an entropy draw when that key is unset.
+    pub fn new_seeded(db: Database, trace_fired: bool, seed: u32) -> Vm {
         let item_loc = db.items.iter().map(|i| i.start_loc).collect();
         let player = db.start_room;
         let lamp = db.light_time;
@@ -108,7 +123,7 @@ impl Vm {
             quit: false,
             needs_line: true,
             last_noun: String::new(),
-            rng_state: 0x1234_5678,
+            rng_state: seed.max(1),
             pending_line: None,
             save_requested: false,
             pending_picture: None,
@@ -329,8 +344,16 @@ impl Vm {
     }
 
     /// Seed the deterministic PRNG (used by occurrence percentage rolls).
+    /// To seed a NEW game use [`Vm::new_seeded`] — the opening occurrence pass
+    /// runs inside the constructor, before this could be called.
     pub fn seed_rng(&mut self, s: u32) {
         self.rng_state = s.max(1);
+    }
+
+    /// The current PRNG state — the seed the next roll advances from.
+    /// Diagnostic only (the startup seed report); the game never sees it.
+    pub fn rng_seed(&self) -> u32 {
+        self.rng_state
     }
 
     /// xorshift32 PRNG, deterministic given `rng_state`.

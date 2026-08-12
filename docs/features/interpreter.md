@@ -133,6 +133,19 @@ itself instead of quietly rebasing someone's investigation.
   `honor_timed_input` (default on), the `/toggle-timed-input` command, and the
   settings row; `zvm-cli` takes `--no-timed-input`. The VM stays zero-dependency —
   the wall clock lives in the hosts, not the interpreter.
+- **A different game every time you sit down** — every engine here runs the same
+  xorshift generator, and a VM core built in isolation seeds it from a fixed
+  constant so its own tests mean something. That is exactly the wrong thing to
+  hand a *player*: a story that never calls the seeding opcode would deal the
+  identical sequence on every launch, and a roguelike would be the same dungeon
+  forever. So the app seeds each engine from the OS before the story boots —
+  before, because a game's initialisation routine is precisely where the
+  shuffling is done, and a seed installed after the first prompt changes nothing
+  the player will ever see. Set `random_seed` in `config.toml` to pin it instead
+  and the run becomes reproducible end to end; babelmap names the seed it used on
+  the console at startup, so an interesting run can be asked for again. The VM
+  crates stay dependency-free through all of it — the entropy comes from std's
+  own OS-seeded hasher, not a crate.
 - **Interpreter number** — the story header's interpreter number (byte `0x1E`)
   defaults to **1 (DECSystem-20)**, following Frotz's rule (6 / IBM PC only for
   v6). This byte is what unlocks colour on several Infocom games: Beyond Zork, for

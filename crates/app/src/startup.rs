@@ -34,7 +34,8 @@ use app::storage::{default_state_path, game_dir as story_game_dir, story_key};
 
 use crate::engine_helpers::{restore_error_msg, zvm_session_opt_mut};
 use crate::{
-    install_panic_hook, loading_line, picker_ui, resolve_pict_blorb, restore_terminal, saves_dir,
+    install_panic_hook, loading_line, picker_ui, random_seed_line, resolve_pict_blorb,
+    restore_terminal, saves_dir,
 };
 
 /// Everything [`boot`] produces that `main()`'s event loop then owns: the boxed
@@ -464,6 +465,15 @@ pub(crate) fn boot_story(
     // or a zero-area frame) leaves the constructor's existing fallback in place.
     let host_screen = pre_boot_host_screen(&cfg, &cs, &garglk_overlay);
 
+    // SQ-0811: the seed every engine's PRNG starts from, drawn ONCE here and
+    // handed to whichever engine builds below, so the console line further down
+    // names the seed the story actually ran on. Unset `random_seed` means a fresh
+    // draw per launch — without it a game that never calls the seeding opcode
+    // replays one identical sequence forever, which for a roguelike is the whole
+    // game. Every engine takes it in its CONSTRUCTOR: the boot run happens in
+    // there, and a game's initialisation is exactly where the shuffling is done.
+    let random_seed = cfg.effective_random_seed();
+
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
@@ -549,7 +559,7 @@ pub(crate) fn boot_story(
             // rule (Frotz's: 6 for v6, 1 otherwise) stays in force untouched.
             let interpreter_number =
                 cfg.interpreter_number.or_else(|| cfg.interpreter_profile.interpreter_number());
-            let mut s = match GameSession::new_with_art_scale(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, v6_art_scale, host_default_colours, host_screen) {
+            let mut s = match GameSession::new_with_art_scale(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, v6_art_scale, host_default_colours, host_screen, Some(random_seed)) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;
@@ -618,6 +628,7 @@ pub(crate) fn boot_story(
                 // `--debug` (SQ-0465): trace from the first boot instruction so the
                 // game's initialisation code is captured (a later `/debug` can't).
                 cli.debug,
+                Some(random_seed),
             ) {
                 Ok(s) => Box::new(s),
                 Err(e) => {
@@ -632,6 +643,7 @@ pub(crate) fn boot_story(
             // `--debug` (SQ-0449/SQ-0464): trace from boot so the opening
             // occurrence pass (run inside the VM constructor) is captured.
             cli.debug,
+            Some(random_seed),
         ) {
             Ok(s) => Box::new(s),
             Err(e) => {
@@ -664,6 +676,14 @@ pub(crate) fn boot_story(
     if let Some(line) = &garglk_line {
         eprintln!("babelmap: {line}");
     }
+
+    // SQ-0811: name the seed the story just booted on. A run that turns out
+    // interesting is only replayable if the player can find out what it was
+    // seeded with, and this is the last moment before the alternate screen takes
+    // the terminal — so it stays in the scrollback afterwards, like the warnings
+    // above it. Said on every launch, because the interesting run is never the
+    // one you thought to ask about beforehand.
+    eprintln!("babelmap: {}", random_seed_line(random_seed, cfg.random_seed.is_some()));
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 

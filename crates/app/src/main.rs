@@ -1293,6 +1293,20 @@ fn loading_line(name: &str, bytes: usize, frame: char) -> String {
     format!("babelmap: loading {name} ({:.1} MB) {frame}", bytes as f64 / 1_048_576.0)
 }
 
+/// Format the startup line naming the PRNG seed this launch handed the engine
+/// (SQ-0811). `pinned` is whether it came from the `random_seed` config key.
+///
+/// The unpinned line says how to keep the run, because a fresh seed is the whole
+/// point of the default and a player who has just had a remarkable game has no
+/// other way to ask for it again.
+fn random_seed_line(seed: u32, pinned: bool) -> String {
+    if pinned {
+        format!("random seed {seed} (pinned by random_seed in config.toml)")
+    } else {
+        format!("random seed {seed} (set random_seed = {seed} to replay this run)")
+    }
+}
+
 /// Clear the terminal, and tell the graphics cache that it just lost every image
 /// placement (SQ-0587).
 ///
@@ -5042,6 +5056,21 @@ mod tests {
         assert!(line.contains("CounterfeitMonkey-11.gblorb"), "names the story");
         assert!(line.contains("11.3 MB"), "shows size in MB, got: {line}");
         assert!(line.ends_with('/'), "ends with the spinner frame glyph");
+    }
+
+    /// The startup line is the only place a player learns what seed their run was
+    /// dealt, so an unpinned run must print the key AND the value to put in it —
+    /// naming the number without saying where it goes leaves the run unrepeatable
+    /// (SQ-0811).
+    #[test]
+    fn the_seed_line_tells_an_unpinned_run_how_to_keep_itself() {
+        let line = super::random_seed_line(20250811, false);
+        assert!(line.contains("20250811"), "names the seed: {line}");
+        assert!(line.contains("random_seed = 20250811"), "spells the config key: {line}");
+
+        let pinned = super::random_seed_line(20250811, true);
+        assert!(pinned.contains("20250811"), "names the seed: {pinned}");
+        assert!(pinned.contains("config.toml"), "says where it came from: {pinned}");
     }
 
 }

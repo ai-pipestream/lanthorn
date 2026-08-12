@@ -72,6 +72,7 @@ fn boot(image: Vec<u8>, blorb: blorb::Blorb, theme: GlkStylePairs) -> GlulxSessi
         &[], // empty VFS: the game has no remembered answer to reuse
         theme,
         false,
+        None,
     )
     .expect("Kerkerkruip boots")
 }
