@@ -65,6 +65,8 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # story_info_blurb = { parent = "muted", italic = true }
 # story_info_link = { parent = "accent", underline = true }
 # story_info_cover = { parent = "chrome" }
+# story_info_artwork = { parent = "story_info_value" }
+# "story_info_artwork:active" = { parent = "accent", bold = true }
 # graphics = { parent = "chrome" }
 # inline_image = { parent = "chrome" }
 # story_header = { parent = "muted" }

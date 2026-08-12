@@ -14,10 +14,13 @@
 //! Two properties matter more than the plumbing and are what this suite pins.
 //!
 //! **Discovery for DISPLAY is safe; discovery for PAIRING is not.** Enumerating
-//! the archives beside a story and showing them to a person is safe for exactly
-//! the reason auto-pairing is unsafe: the person knows which game they own and
-//! supplies the assertion the format cannot make. So the list exists, and nothing
-//! consumes it automatically.
+//! the archives that carry a story's name and showing them to a person is safe
+//! for exactly the reason auto-pairing is unsafe: the person knows which game
+//! they own and supplies the assertion the format cannot make. So the list
+//! exists, and nothing consumes it automatically. The name filter narrows which
+//! rows a person is *shown* and decides nothing — an archive under an unrelated
+//! name stays reachable by being named, through `--pictures` or the `pictures`
+//! key, which is where it always belonged.
 //!
 //! **The sidecar's "absent key = inherit" contract survives the checkbox.** A key
 //! written at the value it already inherits is not the same as a key left absent
@@ -83,37 +86,99 @@ fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
 }
 
 /// A story library is usually one flat folder — `stories/` holds Arthur,
-/// Journey, Shogun and Zork Zero together — so "the archives beside this story"
-/// is mostly other games' art. Resembling names sort to the top so the list is
-/// usable, and NOTHING is filtered out, because the case tier 3 exists for is
-/// exactly the archive whose name does not match (`FMVPOKER.EG1` is Zork Zero's
-/// art under another name). Order is the only thing this guess is allowed to
-/// touch; it never selects, which is the auto-pairing SQ-0734 rejected.
+/// Journey, Shogun and Zork Zero together — so "every archive beside this story"
+/// is mostly other games' art, and offering it all was a dialog that made the
+/// user do the filtering. The list is now what its heading says: the archives
+/// detected **for this story**.
+///
+/// This is the table the whole change rests on, pinned against the real library.
+/// Every pairing here is one the normalised name test finds, and each names the
+/// direction it needed: a story stem that contains the archive's (`zork0` inside
+/// `zork0-r393-s890714`), an archive stem that is only a prefix of a longer game
+/// name (`beyondzo`), a spaced disk-image title that a prefix rule could never
+/// have matched (`James Clavell's Shogun`), and a pair that differ only in case.
 #[test]
-fn likely_names_sort_first_and_nothing_is_ever_filtered_out() {
+fn each_game_in_the_library_detects_its_own_archives_and_no_others() {
+    // (story, must detect, must NOT detect)
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        (
+            "zork0-r393-s890714.z6",
+            &["zork0.cg1", "zork0.eg1", "zork0.mg1", "zork0.pic"],
+            &["arthur.mg1", "journey.mg1", "shogun.mg1", "FMVPOKER.EG1", "beyondzo.mg1"],
+        ),
+        (
+            "arthur-r74-s890714.z6",
+            &["arthur.cg1", "arthur.eg1", "arthur.eg2", "arthur.mg1", "arthur.pic"],
+            &["zork0.mg1", "journey.mg1", "shogun.mg1"],
+        ),
+        (
+            "journey-r83-s890706.z6",
+            &["journey.cg1", "journey.eg1", "journey.eg2", "journey.mg1"],
+            &["zork0.mg1", "arthur.mg1", "shogun.mg1"],
+        ),
+        (
+            "shogun-r322-s890706.z6",
+            &["shogun.cg1", "shogun.eg1", "shogun.mg1"],
+            &["zork0.mg1", "arthur.mg1", "journey.mg1"],
+        ),
+        // `beyondzo` is the DOS 8.3 truncation of the game's name: a prefix of
+        // the story stem, never the whole of it.
+        ("beyondzork-r57-s871221.z5", &["beyondzo.mg1"], &["zork0.mg1", "arthur.mg1"]),
+        // The renamed archive the escape hatch exists for — for the fan game it
+        // was renamed FOR, the name now matches outright.
+        ("fmvpoker.z6", &["FMVPOKER.EG1"], &["zork0.mg1", "arthur.mg1"]),
+        // Disk images: a spaced, punctuated, article-carrying title on one side
+        // and an 8.3 stem on the other. Only normalising both and testing for
+        // containment in either direction connects them.
+        ("James Clavell's Shogun.adf", &["shogun.mg1"], &["zork0.mg1", "journey.mg1"]),
+        (
+            "Beyond Zork - The Coconut of Quendor.adf",
+            &["beyondzo.mg1"],
+            &["zork0.mg1", "arthur.mg1"],
+        ),
+    ];
+
+    for (story, wanted, unwanted) in cases {
+        let path = stories_dir().join(story);
+        if !path.is_file() {
+            continue; // gitignored fixture
+        }
+        let found = discover_art_candidates(&path);
+        let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
+        for w in *wanted {
+            // Only assert on archives this library actually has.
+            if stories_dir().join(w).is_file() {
+                assert!(
+                    found.iter().any(|c| c.filename.eq_ignore_ascii_case(w)),
+                    "{story} must detect {w}; got {names:?}"
+                );
+            }
+        }
+        for u in *unwanted {
+            assert!(
+                !found.iter().any(|c| c.filename.eq_ignore_ascii_case(u)),
+                "{story} must NOT be offered {u}; got {names:?}"
+            );
+        }
+    }
+}
+
+/// The list is sorted and stable, and it never carries the story itself or a
+/// Blorb — the two files most likely to be sitting right beside it.
+#[test]
+fn the_detected_list_is_sorted_and_holds_only_native_archives() {
     let z0 = stories_dir().join("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return;
     }
     let found = discover_art_candidates(&z0);
-    let first_unlikely = found.iter().position(|c| !c.likely).unwrap_or(found.len());
-    assert!(
-        found[..first_unlikely].iter().all(|c| c.likely),
-        "the two groups must not interleave"
-    );
-    if found.iter().any(|c| c.filename.eq_ignore_ascii_case("zork0.mg1")) {
-        assert!(
-            found[..first_unlikely].iter().any(|c| c.filename.eq_ignore_ascii_case("zork0.mg1")),
-            "zork0.mg1 resembles zork0-r393-s890714 and belongs at the top"
-        );
-    }
-    // Everything found is still offered — an unrelated game's archive is listed,
-    // just later. Removing it would remove the orphan case with it.
-    if stories_dir().join("arthur.mg1").is_file() {
-        let arthur = found.iter().find(|c| c.filename.eq_ignore_ascii_case("arthur.mg1"));
-        let arthur = arthur.expect("a non-matching archive is still listed, not hidden");
-        assert!(!arthur.likely, "…but it is not presented as a likely match");
-    }
+    let names: Vec<String> = found.iter().map(|c| c.filename.to_lowercase()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "the list is alphabetical");
+    assert_eq!(found, discover_art_candidates(&z0), "and stable across calls");
+    assert!(found.iter().all(|c| !c.filename.eq_ignore_ascii_case("Zork0.blb")));
+    assert!(found.iter().all(|c| !c.filename.to_lowercase().ends_with(".z6")));
 }
 
 /// The dialog is a door into SQ-0734's mechanism, not a second one: the name it

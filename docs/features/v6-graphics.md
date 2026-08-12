@@ -125,12 +125,29 @@ meaning without one.
 you have before you choose. Select a story in the browser and press **Shift-Enter**
 — plain Enter launches as it always has, so you meet this only when you ask for
 it. (`o` does the same thing on terminals that can't tell Shift-Enter from Enter,
-and so does double-right-clicking a row.) It lists every native archive in the
-folder — flavour, picture count, part number — with the ones whose names resemble
-this story's floated to the top, and it shows you the interpreter number your
-choices imply *and where that number came from*, because picking prettier art
-can quietly change the machine you're emulating and that is not a thing to
-discover later.
+and so does double-right-clicking a row.) It lists the archives detected **for
+that story** — flavour, picture count, part number — and it shows you the
+interpreter number your choices imply *and where that number came from*, because
+picking prettier art can quietly change the machine you're emulating and that is
+not a thing to discover later.
+
+"Detected for that story" means the name matches, in either direction, once both
+names are reduced to their letters and digits. That is enough to connect
+`zork0.mg1` to `zork0-r393-s890714.z6`, `beyondzo.mg1` to *Beyond Zork* under
+either of its filenames, and `shogun.*` to a floppy called *James Clavell's
+Shogun* — across every game in a real library it finds each one's art and nobody
+else's, so *Zork Zero*'s dialog offers four renditions rather than a folder. An
+archive under a name that resembles nothing simply isn't in the list; you reach
+it the way you always could, by naming it — `--pictures`, or the `pictures` key
+— and the dialog says so on its last line rather than leaving you to wonder.
+
+The same list appears, read-only, in the browser's **info panel**, so you can see
+what a game has without opening anything: each detected archive with its flavour
+and picture count, and an arrow against the one the game's `config.toml` actually
+names. Panel and dialog run the same detection, so they cannot tell you two
+different stories about what you own. If your `pictures` key names something the
+detector would never have found — that renamed `FMVPOKER.EG1` — the panel names
+it anyway, because it is what the game will draw.
 
 Everything in that dialog applies to **this launch only** — until you tick *Save
 as this game's default*, which writes it to the game's `config.toml`. That is the
@@ -158,7 +175,9 @@ anyway. Get it wrong and there is no error: *Arthur*'s illuminated plates simply
 appear in *Zork Zero*, looking exactly like artwork. Better to be asked than to
 guess wrong silently. (Listing what it *finds*, so you can pick, is a different
 and perfectly safe thing — that just hands the choice back to the person who
-knows which game they own.)
+knows which game they own. Which is exactly why the name matching described
+above is allowed to exist: it decides which rows you are *shown*, never which
+file gets opened. Nothing downstream of that list acts on it.)
 
 And when the key names a file babelmap can't use — missing, truncated, or not a
 picture archive at all — it says so, out loud, naming the file and the reason,

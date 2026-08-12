@@ -2136,6 +2136,8 @@ fn draw_info_panel(
     let story_info_blurb = cs.theme.get("story_info_blurb").style;
     let story_info_link = cs.theme.get("story_info_link").style;
     let story_info_cover = cs.theme.get("story_info_cover").style;
+    let story_info_artwork = cs.theme.get("story_info_artwork").style;
+    let story_info_artwork_active = cs.theme.get("story_info_artwork:active").style;
     let scrollbar = app::render::scroll::ScrollbarLook::from_theme(&cs.theme);
     // Background fill.
     for y in area.top()..area.bottom() {
@@ -2327,6 +2329,51 @@ fn draw_info_panel(
     let feats = feature_words(&meta.features, aux);
     if !feats.is_empty() {
         lines.push((format!("Features: {}", feats.join(" ")), story_info_value));
+    }
+
+    // Detected picture archives (SQ-0789). Read-only inventory: what art this
+    // story has beside it, and which of it is actually in force. The list comes
+    // from `discover_art_candidates`, the *same* function the launch-options
+    // dialog offers, so the panel and the dialog cannot drift into two answers.
+    //
+    // Display-only, and it must stay that way: enumerating candidates is safe
+    // because a person reads the list and supplies the pairing the file format
+    // cannot (no release number, no serial). Nothing here may ever be fed into
+    // `PictureOverride::resolve` — that is the auto-pairing SQ-0734 rejected,
+    // whose failure mode is Arthur's plates drawn into Zork Zero with nothing on
+    // screen to say so.
+    if let Some(a) =
+        aux.filter(|a| !a.art_candidates.is_empty() || a.art_in_use.is_some())
+    {
+        lines.push((String::new(), story_info_value));
+        lines.push((
+            format!("Artwork · {} detected for this story", a.art_candidates.len()),
+            story_info_label,
+        ));
+        for c in &a.art_candidates {
+            let in_use = a.art_in_use.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&c.filename));
+            // The dialog's columns, minus what a read-only row cannot use: the
+            // part number appears only when it is not the ordinary 1, because a
+            // panel with other content to show cannot spend a column on a
+            // constant.
+            let mut row = format!(" {:<13} {:<8} {} pictures", c.filename, c.rendition, c.pictures);
+            if c.part != 1 {
+                row.push_str(&format!(" · part {}", c.part));
+            }
+            if in_use {
+                row.push_str("  ← in use");
+            }
+            lines.push((row, if in_use { story_info_artwork_active } else { story_info_artwork }));
+        }
+        // A named archive that is not among the detected ones — an absolute
+        // path, or a file under an unrelated name like the renamed FMVPOKER.EG1
+        // — is still what the game will draw. Saying so keeps the block honest:
+        // the list above is a name guess, the config key is an instruction.
+        if let Some(name) = a.art_in_use.as_deref().filter(|n| {
+            !a.art_candidates.iter().any(|c| c.filename.eq_ignore_ascii_case(n))
+        }) {
+            lines.push((format!(" in use: {name}"), story_info_artwork_active));
+        }
     }
 
     // Saves + sidecars (SQ-0285). Rendered above Resources so the user's own
@@ -3463,6 +3510,8 @@ mod tests {
                 is_default: false, trigger: app::archive::SaveTrigger::HostState,
             }],
             sidecars: vec!["default.aux"],
+            art_candidates: vec![],
+            art_in_use: None,
         };
         // Wide enough that the resource detail suffix and the save-summary row aren't clipped.
         let area = Rect::new(0, 0, 100, 25);
@@ -3698,6 +3747,8 @@ mod tests {
             qzl_saves: vec![],
             auto_saves: vec![],
             sidecars: vec![],
+            art_candidates: vec![],
+            art_in_use: None,
         };
         let area = Rect::new(0, 0, 60, 16);
         let mut buf = Buffer::empty(area);
@@ -3712,6 +3763,91 @@ mod tests {
         let blorb_pos = text.find("Resource blorb:").expect("sidecar line present");
         let res_pos = text.find("Resources").expect("resources header present");
         assert!(blorb_pos < res_pos, "sidecar name is up-front, before the Resources section");
+    }
+
+    /// SQ-0789: the info panel lists the picture archives detected for the
+    /// selected story — read-only, from the *same* `discover_art_candidates` the
+    /// launch-options dialog offers, so the two surfaces cannot disagree about
+    /// what the story has. Driven off the real library so the list is the real
+    /// one; skips vacuously when `stories/` is absent (gitignored fixtures).
+    #[test]
+    fn info_panel_lists_the_archives_detected_for_this_story() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let z0 = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/zork0-r393-s890714.z6");
+        if !z0.is_file() {
+            return;
+        }
+        let candidates = app::launch_options::discover_art_candidates(&z0);
+        assert!(!candidates.is_empty(), "Zork Zero's archives sit beside it");
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = minimal_story_meta();
+        let aux = app::picker::StoryAux {
+            assoc_blorb: None,
+            saves: vec![],
+            hints_available: false,
+            game_dir: std::path::PathBuf::from("/tmp/zork0"),
+            qzl_saves: vec![],
+            auto_saves: vec![],
+            sidecars: vec![],
+            art_candidates: candidates.clone(),
+            // What the game's own config.toml names, so the panel can mark it.
+            art_in_use: Some("zork0.mg1".into()),
+        };
+        // Tall enough that the block is on screen without scrolling.
+        let area = Rect::new(0, 0, 62, 40);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        super::draw_info_panel(
+            "Zork Zero", "zork0-r393-s890714.z6", &meta, Some(&aux), 0, area, None,
+            &mut cover, &z0, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+        );
+        let text = buffer_to_string(&buf, area);
+        println!("{text}");
+
+        assert!(text.contains("Artwork ·"), "the block has a header: {text:?}");
+        // Every detected archive, with enough to tell the renditions apart.
+        for c in &candidates {
+            assert!(text.contains(&c.filename), "{} is listed: {text:?}", c.filename);
+        }
+        assert!(text.contains("MCGA") || text.contains("Amiga"), "flavour shown: {text:?}");
+        assert!(text.contains("pictures"), "picture count shown: {text:?}");
+        assert!(text.contains("← in use"), "the archive in force is marked: {text:?}");
+        // And no other game's art, which is the filter the dialog now shares.
+        assert!(!text.contains("arthur."), "another game's archives stay out: {text:?}");
+        assert!(!text.contains("journey."), "{text:?}");
+    }
+
+    /// A `pictures` key naming something the name filter would never detect —
+    /// the renamed `FMVPOKER.EG1` case, or an absolute path — is still what the
+    /// game draws, so the panel says so rather than showing an empty block.
+    #[test]
+    fn info_panel_names_an_archive_the_filter_would_never_have_found() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = minimal_story_meta();
+        let aux = app::picker::StoryAux {
+            assoc_blorb: None,
+            saves: vec![],
+            hints_available: false,
+            game_dir: std::path::PathBuf::from("/tmp/zork0"),
+            qzl_saves: vec![],
+            auto_saves: vec![],
+            sidecars: vec![],
+            art_candidates: vec![],
+            art_in_use: Some("FMVPOKER.EG1".into()),
+        };
+        let area = Rect::new(0, 0, 62, 30);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        super::draw_info_panel(
+            "Zork Zero", "zork0.z6", &meta, Some(&aux), 0, area, None, &mut cover,
+            std::path::Path::new("zork0.z6"), false, None, &cs, &mut buf, &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        let text = buffer_to_string(&buf, area);
+        assert!(text.contains("Artwork · 0 detected"), "{text:?}");
+        assert!(text.contains("in use: FMVPOKER.EG1"), "the named archive is named: {text:?}");
     }
 
     /// Regression (SQ-0367 link vs scrollbar): hyperrat leaves the OSC 8 first

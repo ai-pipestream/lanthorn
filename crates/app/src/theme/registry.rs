@@ -343,6 +343,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("story_info_blurb", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
     row("story_info_link", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
     row("story_info_cover", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // SQ-0789: the info panel's read-only list of picture archives detected for
+    // the selected story — the same list the launch-options dialog offers. Plain
+    // value text, because it is inventory; the `:active` variant marks the one
+    // the game's own config actually names, which is the single row in the block
+    // that is a statement of fact rather than an option.
+    row("story_info_artwork", Section::Elements, Kind::Style, Some("story_info_value"), Delta::EMPTY),
+    row("story_info_artwork:active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
     row("graphics", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
     row("inline_image", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
     row("story_header", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
@@ -572,6 +579,9 @@ mod tests {
         "story_info_blurb",
         "story_info_link",
         "story_info_cover",
+        // SQ-0789: the info panel's detected-artwork block
+        "story_info_artwork",
+        "story_info_artwork:active",
         "graphics",
         "inline_image",
         "story_header",
