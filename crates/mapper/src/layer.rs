@@ -92,6 +92,16 @@ pub fn layer_region(graph: &MapGraph, layer: LayerId) -> Option<Region> {
     Some(Region { anchor, rooms: rooms.into_iter().collect() })
 }
 
+/// True when `region` is everything on its layer.
+///
+/// The shape [`move_region`] refuses against a NEW target — there is nothing to separate it from,
+/// so the move would only rename the layer — and harmless against an existing one, where moving a
+/// whole layer's contents into another IS a merge.
+pub fn is_whole_layer(graph: &MapGraph, region: &Region) -> bool {
+    let all = graph.rooms_in_layer(graph.layer_of(region.anchor));
+    all.len() == region.rooms.len() && all.iter().all(|id| region.rooms.contains(id))
+}
+
 /// [`planar_region`], plus `cut`: any connection it accepts is severed too, on top of the
 /// portal-edge cut. Lets a caller name its own seam (SQ-0360).
 fn region_with_cut(
@@ -331,14 +341,19 @@ pub fn parent_layer(graph: &MapGraph, layer: LayerId) -> LayerId {
 /// those are free in the target; a room whose cell is already taken lands on the nearest free one,
 /// because two layers laid out independently have no reason to interleave cleanly and two rooms on
 /// one cell would draw as one.
+///
+/// A move onto an EXISTING layer also silences the auto-suggest at every passage it just folded
+/// shut (SQ-0439). Putting rooms together is an answer — the strongest one the player can give —
+/// and the detector must not turn round and offer to take them apart again next time they walk
+/// through. Carving a fresh layer needs no such note: the seam then spans two layers, and a
+/// crossing that already spans two layers has nothing left to separate.
 pub fn move_region(
     graph: &mut MapGraph,
     region: &Region,
     target: MoveTarget,
 ) -> Result<LayerId, MoveRefusal> {
     let src = graph.layer_of(region.anchor);
-    let whole_layer: BTreeSet<RoomId> = graph.rooms_in_layer(src).into_iter().collect();
-    let is_whole = region.rooms == whole_layer;
+    let is_whole = is_whole_layer(graph, region);
     let dest = match target {
         MoveTarget::New => {
             if is_whole {
@@ -382,7 +397,27 @@ pub fn move_region(
     if graph.rooms_in_layer(src).is_empty() {
         graph.remove_layer(src); // a no-op for MAIN_LAYER, which is never emptied anyway
     }
+    if matches!(target, MoveTarget::Existing(_)) {
+        silence_boundary_seams(graph, region);
+    }
     Ok(dest)
+}
+
+/// Mark every passage across `region`'s boundary as ignored, so the auto-suggest never proposes
+/// re-opening a boundary the player has just folded shut (SQ-0439).
+///
+/// Both orientations of a reciprocal pair are recorded, because the two triggers key on opposite
+/// ends of the same passage — the structural one on the way out, the semantic one on the way in.
+fn silence_boundary_seams(graph: &mut MapGraph, region: &Region) {
+    let keys: Vec<crate::suggest::SeamKey> = graph
+        .connections()
+        .iter()
+        .filter(|c| region.rooms.contains(&c.origin) != region.rooms.contains(&c.dest))
+        .map(|c| crate::suggest::SeamKey { from: c.origin, dir: c.dir })
+        .collect();
+    for key in keys {
+        graph.set_seam_decision(key, crate::suggest::SeamDecision::Ignored);
+    }
 }
 
 /// One portal badge per connection that LEAVES `layer` — i.e. whose ORIGIN is in

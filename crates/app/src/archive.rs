@@ -1695,6 +1695,89 @@ mod tests {
         assert!(ac.meta.ifid.is_none());
     }
 
+    /// SQ-0439: a seam the player declined must come back out of the archive still declined.
+    ///
+    /// These are player DECISIONS, so nothing downstream can recompute them — and a Restore State
+    /// that quietly re-armed every prompt would re-ask about the trapdoor the player already said
+    /// no to, which is exactly the nagging the memory exists to prevent.
+    ///
+    /// The restore itself is not the test. The CROSSING after it is: everything looks fine at the
+    /// moment a map is loaded, and the seam only has anything to say the next time it is walked.
+    #[test]
+    fn a_declined_layer_suggestion_survives_the_archive() {
+        use mapper::layer::{move_region, planar_region, MoveTarget};
+        use mapper::suggest::{SeamDecision, SeamKey};
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+
+        // A four-room cellar behind one trapdoor, walked back to the foot of the stairs.
+        let mut mapper = Mapper::default();
+        mapper.observe(1, "Hall", None);
+        mapper.observe(2, "Study", Some(Direction::E));
+        mapper.observe(1, "Hall", Some(Direction::W));
+        mapper.observe(3, "Cellar", Some(Direction::Down));
+        mapper.observe(4, "Wine Cellar", Some(Direction::E));
+        mapper.observe(5, "Vault", Some(Direction::E));
+        mapper.observe(6, "Crypt", Some(Direction::E));
+        mapper.observe(5, "Vault", Some(Direction::W));
+        mapper.observe(4, "Wine Cellar", Some(Direction::W));
+        mapper.observe(3, "Cellar", Some(Direction::W));
+        let seam = SeamKey { from: 3, dir: Direction::Up };
+        mapper.graph.set_seam_decision(seam, SeamDecision::Ignored);
+
+        let path = temp_archive_path("seam-memory");
+        save_archive_m(&path, &mapper, &dummy_machine(), &[], &[], &[], &[], &[])
+            .expect("save_archive");
+        let ac = load_archive(&path).expect("load_archive");
+        let _ = std::fs::remove_file(&path);
+
+        let mut restored = ac.mapper;
+        assert_eq!(restored.graph.seam_decision(seam), SeamDecision::Ignored);
+
+        // Perturb, THEN assert: climb the stairs the player already declined to split.
+        restored.observe(1, "Hall", Some(Direction::Up));
+        assert_eq!(
+            restored.take_suggestion(),
+            None,
+            "a restored game does not re-ask about a seam already declined"
+        );
+
+        // ...and the same climb on an otherwise identical map that never declined it does ask, so
+        // the silence above is the memory and not the fixture.
+        let mut fresh = mapper::persist::from_json(&to_json(&small_cellar_mapper())).unwrap();
+        fresh.observe(1, "Hall", Some(Direction::Up));
+        let s = fresh.take_suggestion().expect("an un-declined seam still speaks up");
+        assert_eq!(s.seam, seam);
+        assert_eq!(s.region.rooms, [3, 4, 5, 6].into_iter().collect());
+        assert_eq!(s.destinations, vec![MoveTarget::New]);
+        // And the region it names is the one an accepted move would take.
+        let mut g = fresh.graph.clone();
+        let region = planar_region(&g, 3);
+        assert_eq!(region.rooms, s.region.rooms);
+        move_region(&mut g, &region, MoveTarget::New).expect("the suggestion is actionable");
+    }
+
+    /// The fixture `a_declined_layer_suggestion_survives_the_archive` compares against: the same
+    /// manor, with nothing declined.
+    fn small_cellar_mapper() -> Mapper {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Study", Some(Direction::E));
+        m.observe(1, "Hall", Some(Direction::W));
+        m.observe(3, "Cellar", Some(Direction::Down));
+        m.observe(4, "Wine Cellar", Some(Direction::E));
+        m.observe(5, "Vault", Some(Direction::E));
+        m.observe(6, "Crypt", Some(Direction::E));
+        m.observe(5, "Vault", Some(Direction::W));
+        m.observe(4, "Wine Cellar", Some(Direction::W));
+        m.observe(3, "Cellar", Some(Direction::W));
+        m
+    }
+
     // -------------------------------------------------------------------------
     // read_archive_meta: cheap meta-only read matches load_archive's meta
     // -------------------------------------------------------------------------

@@ -91,6 +91,15 @@ pub fn short_label(d: Direction) -> &'static str {
     }
 }
 
+/// True for the four passages a layer boundary is made of: Up, Down, In, Out.
+///
+/// Narrower than "has no [`grid_offset`]", which also catches [`Direction::Unknown`] — a passage
+/// whose direction was never learned, not a portal. A region walk may treat both as a cut, but only
+/// a real portal is EVIDENCE that somewhere is somewhere else (SQ-0439).
+pub fn is_portal(d: Direction) -> bool {
+    matches!(d, Direction::Up | Direction::Down | Direction::In | Direction::Out)
+}
+
 pub fn grid_offset(d: Direction) -> Option<(i32, i32)> {
     match d {
         Direction::N => Some((0, -1)),

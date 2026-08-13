@@ -3,6 +3,7 @@ use crate::direction::{Direction, parse_direction};
 use crate::graph::{MapGraph, RoomId};
 use crate::layout::{nearest_free_cell, occupied_cells, place_incremental};
 use crate::layout::mark_distorted;
+use crate::suggest::LayerSuggestion;
 
 #[derive(Debug, Default)]
 pub struct Mapper {
@@ -18,9 +19,22 @@ pub struct Mapper {
     /// direction because the passage is not reliably reciprocal — a bare peel needs the
     /// edge itself, not a guess at the way back.
     pub(crate) arrived_via: Option<(RoomId, Direction)>,
+    /// What the map noticed about the move just made, waiting for a prompt to show it (SQ-0439).
+    ///
+    /// Transient and derived — never persisted, and replaced by every move, because a suggestion is
+    /// about the crossing that produced it and a stale one describes a step the player has already
+    /// walked away from. What DOES persist is the answer (`MapGraph::seam_decision`).
+    pub(crate) pending_suggestion: Option<LayerSuggestion>,
 }
 
 impl Mapper {
+    /// A mapper around a graph loaded from a save. Both of the fields beside the graph describe the
+    /// CURRENT session — the passage just walked, and what the map made of it — and a restore has
+    /// walked nothing yet, so both start empty.
+    pub fn restored(graph: MapGraph) -> Self {
+        Mapper { graph, arrived_via: None, pending_suggestion: None }
+    }
+
     /// Observe the player's location after a turn. The conservative form: when the location has
     /// not changed, nothing is minted — the direction is merely recorded as tried.
     pub fn observe(&mut self, location: RoomId, name: &str, via: Option<Direction>) {
@@ -48,6 +62,8 @@ impl Mapper {
 
     fn observe_inner(&mut self, location: RoomId, name: &str, via: Option<Direction>, moved: bool) {
         self.graph.upsert_room(location, name.to_string());
+        // Whatever the last move had to say is about the last move; this one answers for itself.
+        self.pending_suggestion = None;
         let prev = self.graph.current();
         // Record the direction against the room it was TYPED IN — the one we are leaving, not the
         // one we arrive at — and do it whether or not the move worked (SQ-0391). A direction that
@@ -75,6 +91,10 @@ impl Mapper {
                     // this move was Unknown. Edge hygiene is independent of layout mode. (SQ-0220)
                     self.graph.collapse_unknown_edges();
                     place_incremental(&mut self.graph, prev_id, location, edge_dir);
+                    // Only now, with the passage minted and both rooms placed, does the map have
+                    // enough to judge the crossing by (SQ-0439).
+                    self.pending_suggestion =
+                        crate::suggest::on_arrival(&self.graph, prev_id, edge_dir, location);
                 } else if let (true, Some(d)) = (moved, via) {
                     // The player walked `d` and came out where they went in: a self-loop
                     // (SQ-0666). No placement and no `collapse_unknown_edges` — the edge carries
@@ -97,6 +117,14 @@ impl Mapper {
         self.arrived_via
     }
 
+    /// Take the suggestion the last move produced, if it produced one (SQ-0439).
+    ///
+    /// Taking it is how a prompt claims it: the map has said its piece and will not say it again
+    /// until the player crosses something else worth mentioning.
+    pub fn take_suggestion(&mut self) -> Option<LayerSuggestion> {
+        self.pending_suggestion.take()
+    }
+
     pub fn observe_command(&mut self, location: RoomId, name: &str, command: &str) {
         self.observe(location, name, parse_direction(command));
     }
@@ -111,8 +139,10 @@ impl Mapper {
     /// position. (SQ-0259)
     pub fn observe_relocation(&mut self, location: RoomId, name: &str) {
         // A death/teleport is not a walked passage, so it leaves no arrival
-        // direction for a bare peel to cut at.
+        // direction for a bare peel to cut at — and nothing for the detector to
+        // judge either: there is no crossing here to be on either side of.
         self.arrived_via = None;
+        self.pending_suggestion = None;
         self.graph.upsert_room(location, name.to_string());
         let prev = self.graph.current();
         if self.graph.room(location).and_then(|r| r.pos).is_none() {

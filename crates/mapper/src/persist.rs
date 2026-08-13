@@ -1,7 +1,21 @@
 use std::collections::BTreeMap;
+use crate::direction::Direction;
 use crate::graph::{Connection, MapGraph, Room, RoomId};
 use crate::layer::{LayerId, LayerMeta};
 use crate::mapper::Mapper;
+use crate::suggest::{SeamDecision, SeamKey};
+
+/// One answer the player gave a layer-suggestion prompt (SQ-0439).
+///
+/// A flat list rather than a map because the key is a room-plus-direction pair and JSON object keys
+/// are strings; flattening it also keeps the file readable, which is the whole point of storing the
+/// map as JSON.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SeamRecord {
+    pub from: RoomId,
+    pub dir: Direction,
+    pub decision: SeamDecision,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct PersistState {
@@ -22,6 +36,11 @@ pub struct PersistState {
     /// resumes it past whatever it backfills onto the rooms in that case anyway.
     #[serde(default)]
     pub next_seq: u64,
+    /// The player's answers to the layer-suggestion prompt (SQ-0439). Player DECISIONS, so nothing
+    /// can recompute them and the map has to carry them: a restored game that re-asked about a
+    /// passage already declined would be the exact nagging the prompt was designed to avoid.
+    #[serde(default)]
+    pub seams: Vec<SeamRecord>,
 }
 
 pub fn to_json(mapper: &Mapper) -> String {
@@ -34,6 +53,12 @@ pub fn to_json(mapper: &Mapper) -> String {
         next_layer_id: mapper.graph.next_layer_id(),
         last_visited: mapper.graph.last_visited_map().clone(),
         next_seq: mapper.graph.next_seq(),
+        seams: mapper
+            .graph
+            .seam_decisions()
+            .iter()
+            .map(|(k, v)| SeamRecord { from: k.from, dir: k.dir, decision: *v })
+            .collect(),
     };
     serde_json::to_string_pretty(&state).expect("PersistState is always serializable")
 }
@@ -47,9 +72,15 @@ pub fn from_json(s: &str) -> Result<Mapper, serde_json::Error> {
     // Collapse `?` stubs that a real directional edge already covers, so existing saved maps
     // clean up on load. (SQ-0220)
     graph.collapse_unknown_edges();
+    graph.restore_seam_decisions(
+        state
+            .seams
+            .into_iter()
+            .map(|r| (SeamKey { from: r.from, dir: r.dir }, r.decision)),
+    );
     // A loaded map has no walked arrival: the player has not moved yet this
     // session, so a bare peel falls back to the portal-seam search until they do.
-    Ok(Mapper { graph, arrived_via: None })
+    Ok(Mapper::restored(graph))
 }
 
 #[cfg(test)]

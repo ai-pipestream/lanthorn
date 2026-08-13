@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::direction::Direction;
 use crate::layer::{LayerId, LayerMeta, MapView, MAIN_LAYER};
+use crate::suggest::{SeamDecision, SeamKey};
 
 pub type RoomId = u16;
 
@@ -101,6 +102,14 @@ pub struct MapGraph {
     /// id (see the `layer_of` re-check at the recenter call site) rather than this map trying to
     /// stay in sync with every layer edit.
     last_visited: BTreeMap<LayerId, RoomId>,
+    /// What the player has already said about each layer-suggestion prompt (SQ-0439), keyed by the
+    /// passage the prompt was about. Absent means [`SeamDecision::Armed`] — never asked — so the
+    /// map only ever carries the seams the player has actually answered for.
+    ///
+    /// These are DECISIONS, not derived state: nothing can recompute "the player told us to stop
+    /// asking about the trapdoor", so unlike everything else the detector uses, this has to be
+    /// carried in the save.
+    seam_decisions: BTreeMap<SeamKey, SeamDecision>,
 }
 
 impl Default for MapGraph {
@@ -115,6 +124,7 @@ impl Default for MapGraph {
             next_layer_id: 1,
             next_seq: 0,
             last_visited: BTreeMap::new(),
+            seam_decisions: BTreeMap::new(),
         }
     }
 }
@@ -172,7 +182,51 @@ impl MapGraph {
             .into_iter()
             .filter(|(_, room)| rooms.contains_key(room))
             .collect();
-        Self { rooms, conns, current, layers, next_layer_id, next_seq, last_visited }
+        Self {
+            rooms,
+            conns,
+            current,
+            layers,
+            next_layer_id,
+            next_seq,
+            last_visited,
+            // Restored separately (`restore_seam_decisions`) rather than as an eighth positional
+            // argument: this list validates against the rooms `from_parts` has just settled.
+            seam_decisions: BTreeMap::new(),
+        }
+    }
+
+    /// What the player has already said about the suggestion at `key` (SQ-0439). A seam nobody has
+    /// answered for is [`SeamDecision::Armed`].
+    pub fn seam_decision(&self, key: SeamKey) -> SeamDecision {
+        self.seam_decisions.get(&key).copied().unwrap_or_default()
+    }
+
+    /// Record the player's answer at `key`. Setting it back to [`SeamDecision::Armed`] forgets the
+    /// seam outright, so the map carries only answers actually given.
+    pub fn set_seam_decision(&mut self, key: SeamKey, decision: SeamDecision) {
+        match decision {
+            SeamDecision::Armed => self.seam_decisions.remove(&key),
+            other => self.seam_decisions.insert(key, other),
+        };
+    }
+
+    /// Every answer the player has given, for persistence. Nothing else should need it.
+    pub fn seam_decisions(&self) -> &BTreeMap<SeamKey, SeamDecision> {
+        &self.seam_decisions
+    }
+
+    /// Reinstate persisted seam answers, dropping any that name a room this map no longer has —
+    /// the same hygiene `from_parts` applies to connections, `current` and `last_visited`, and for
+    /// the same reason: a phantom id here would silence a prompt about a passage that cannot exist.
+    pub fn restore_seam_decisions(
+        &mut self,
+        entries: impl IntoIterator<Item = (SeamKey, SeamDecision)>,
+    ) {
+        self.seam_decisions = entries
+            .into_iter()
+            .filter(|(k, _)| self.rooms.contains_key(&k.from))
+            .collect();
     }
 
     pub fn room(&self, id: RoomId) -> Option<&Room> {
@@ -403,6 +457,17 @@ impl MapGraph {
         if self.current == Some(old) {
             self.current = Some(new);
         }
+        // A seam answer names a room too, and a decision that quietly stopped applying because the
+        // room was re-keyed would bring a dismissed prompt back from the dead (SQ-0439).
+        self.seam_decisions = std::mem::take(&mut self.seam_decisions)
+            .into_iter()
+            .map(|(mut k, v)| {
+                if k.from == old {
+                    k.from = new;
+                }
+                (k, v)
+            })
+            .collect();
         true
     }
 
@@ -578,6 +643,8 @@ impl MapGraph {
             next_layer_id: 1,
             next_seq: self.next_seq,
             last_visited: BTreeMap::new(),
+            // A routing scratch graph never prompts, so it carries no prompt answers either.
+            seam_decisions: BTreeMap::new(),
         }
     }
 

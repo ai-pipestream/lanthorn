@@ -3514,16 +3514,6 @@ fn parse_move_region_arg(
     Err(format!("move-region: no layer named '{whole}'"))
 }
 
-/// True when `region` is everything on its layer — the shape [`mapper::layer::move_region`] refuses
-/// against a NEW target, and the one that sends a bare move looking for a seam to cut instead.
-fn region_is_whole_layer(
-    graph: &mapper::graph::MapGraph,
-    region: &mapper::layer::Region,
-) -> bool {
-    let all = graph.rooms_in_layer(graph.layer_of(region.anchor));
-    all.len() == region.rooms.len() && all.iter().all(|id| region.rooms.contains(id))
-}
-
 /// Why the rooms to move could not be settled — a refusal that belongs to the SEAM, not to the
 /// destination (SQ-0439).
 enum SeamRefusal {
@@ -3575,7 +3565,7 @@ fn choose_region(
         };
     }
     let region = mapper::layer::planar_region(graph, room);
-    if !region_is_whole_layer(graph, &region) {
+    if !mapper::layer::is_whole_layer(graph, &region) {
         return Ok((region, None)); // tier 1
     }
     match mapper::layer::inbound_seams(graph, room).as_slice() {
@@ -3599,7 +3589,7 @@ fn move_targets(
 ) -> Vec<mapper::layer::MoveTarget> {
     use mapper::layer::{MoveTarget, MAIN_LAYER};
     let src = graph.layer_of(region.anchor);
-    let is_whole = region_is_whole_layer(graph, region);
+    let is_whole = mapper::layer::is_whole_layer(graph, region);
     let mut out = Vec::new();
     if !is_whole {
         out.push(MoveTarget::New);
