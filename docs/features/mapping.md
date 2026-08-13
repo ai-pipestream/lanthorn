@@ -114,21 +114,34 @@ The map is a place you can move through, not just a picture.
   trailing `⌗` marker (`Maze ⌗`) in both tab strips. `cycle-layer next|prev` switches
   between them. Carving a layer off and folding one back turned out to be the same
   move — *take these rooms and put them on that layer* — so there is one verb for
-  both: **`move-region <destination> [direction]`**. `move-region new` carves the
-  region you're in onto a fresh layer, `move-region main` folds it back into Main,
+  both: **`move-region [destination] [direction]`**. `move-region new` carves the
+  region onto a fresh layer, `move-region main` folds it back into Main,
   `move-region parent` sends it home to whatever it was carved from, and any layer
   name works in place of those (`move-region Cellar`).
-  babelmap works out *which* rooms travel: bare, it cuts at the passage you just
-  walked in through — step into the maze, `move-region new`, and the maze goes to
-  its own layer — which works even when the entrance is one-way or the way back is
-  some other direction entirely. Add a direction (`move-region new east`) to name
-  the seam yourself; with neither, it falls back to hunting for a stairway or other
-  portal to cut at. Nothing is ever severed: the passage you cut at simply becomes a
+  Everything is anchored on the **selected room** — click one, or `select-room` —
+  and *its* side of whatever gets cut is the side that travels. You never have to
+  point at an edge, because babelmap works out which rooms go, in three steps.
+  First it walks the compass exits and stops where the portals are: that is a floor,
+  a cellar, a tower, and it needs nothing from you but the room you picked. If the
+  walk finds no portal to stop at and swallows the whole layer — Zork's underground
+  being thirty-odd rooms of solid compass maze — it looks instead at the passages
+  leading **into** your room, and cuts the one that is a genuine boundary. Exactly
+  one usually is, and it says which: *cut the S passage from At West End of Long
+  Hall*. That is the case that used to be unsayable, because the way in may be
+  one-way and there is then no direction out of the room that names it. If several
+  ways in are real boundaries — you are standing mid-corridor, and cutting east or
+  cutting west take opposite halves of the map — it lists them (`e from A`,
+  `w from C`) and waits, because either answer would be a guess. Name one with a
+  direction (`move-region new e`) and that is the passage it cuts; a direction that
+  leads nowhere *in* is read as the passage leading *out*, which is how you name a
+  one-way exit. The destination follows the same rule: leave it off and `move-region`
+  takes the only possible answer when there is one, and lists the choices when there
+  is not. Nothing is ever severed — the passage you cut at simply becomes a
   connection *between* layers, which is why every move goes back the way it came.
   Because the destination is just an argument, a stranded room finally has a cure. A
   room discovered while exploring a maze layer is minted *onto* the maze layer even
-  when it is really outside — a back door to the surface, say — so stand in it,
-  `move-region main east` to cut it off the maze and send it home in one go. Rooms
+  when it is really outside — a back door to the surface, say — so select it and
+  `move-region main` cuts it off the maze and sends it home in one go. Rooms
   keep their positions where free; a room whose cell is taken in the destination
   lands on the nearest free one. Two things it will refuse, and it says which: a
   fresh layer for a region that is *already* the whole layer (that would only rename
