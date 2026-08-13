@@ -146,6 +146,22 @@ fn a_disk_image_yields_both_the_story_and_its_artwork() {
     let img = picts.image(7).expect("picture 7 decodes");
     assert_eq!((img.width(), img.height()), (4, 2));
 
+    // SQ-0838: an archive INSIDE the medium can also be named by hand. The
+    // Macintosh is where that matters — its disk carries two archives and only
+    // one of them is automatic — but the door is one piece of code and an Amiga
+    // floppy gets it too, so it is checked on both media.
+    let dir = std::env::temp_dir();
+    let over = app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some("Pic.data"));
+    assert!(
+        matches!(over, app::graphics::PictureOverride::Loaded { .. }),
+        "a bare name absent from the filesystem is looked up on the volume, got {over:?}"
+    );
+    let mut named = PictSource::resolve_with_override(&path, over);
+    assert_eq!(named.all_pict_dims(), vec![(7, 4, 2)]);
+    let absent =
+        app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some("Nope.data"));
+    assert!(matches!(absent, app::graphics::PictureOverride::Missing { .. }), "and only that name");
+
     let _ = std::fs::remove_file(&path);
 }
 
