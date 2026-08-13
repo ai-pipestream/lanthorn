@@ -100,6 +100,42 @@ it was measured on. `crates/app/tests/suites/real_media_releases.rs` pins this w
 table, plus the frame each build lays out, so an upgraded fixture announces
 itself instead of quietly rebasing someone's investigation.
 
+### The command-line player takes a floppy too
+
+`zvm-cli` — the no-map DOS-style player — now mounts a disk image exactly the way
+the TUI does, and it cost nothing to give it: `blorb` hand-rolls its AmigaDOS
+reader with zero dependencies, and `zvm-cli` already linked it. So
+`zvm-cli "Zork I - The Great Underground Empire.adf"` drops you at *West of
+House* off the original floppy, no unpacking, no rename, and the same
+content-based identification decides what on the disk is a story.
+
+One thing the CLI needs that a single-game floppy never asks for: **which one**.
+Amiga releases came one game to a disk, but the compilations did not — an Atari
+ST or PC collection carries four to six stories on a single image — so when more
+than one turns up you get a menu:
+
+```
+This disk holds 4 stories:
+  1) Story.data  (v3 r59 s851108)
+  2) Zork1.Data  (v3 r88 s840726)
+  3) Planet.Data  (v3 r37 s851003)
+  4) Trinity.Data  (v4 r12 s860926)
+Which one? [1-4] 3
+Opening 3) Planet.Data  (v3 r37 s851003)
+```
+
+Every line carries its Z-machine version, release and serial, and that is not
+decoration: a collection disk names its stories `STORY.DAT` four times over, and
+the corpus holds three different builds of *Hitchhiker's* alone. The header is
+what tells them apart when the filename refuses to.
+
+A disk with one story opens straight into it and asks nothing. A disk with none
+says what it mounted instead of failing later as a corrupt story file. And
+nothing here ever blocks a script: pipe stdin, and rather than prompt at a
+terminal that isn't there, `zvm-cli` lists the candidates and tells you to pass
+**`--story <n|name>`** — a menu number, or any part of a name that picks out one
+story.
+
 ## Z-machine
 
 - **Standard Quetzal save/restore** — the game's own SAVE/RESTORE writes and reads

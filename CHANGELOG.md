@@ -16,6 +16,15 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **`zvm-cli` plays the original floppy.** Hand the command-line player an Amiga
+  `.adf` release disk and it mounts it and plays what is on it, as the TUI has
+  all along — free, because `blorb`'s AmigaDOS reader takes no dependencies and
+  `zvm-cli` already linked it. A disk carrying more than one story (which the
+  compilations all do) asks at startup with a numbered menu, each line labelled
+  with its Z-machine version, release and serial — the only thing that tells four
+  files called `STORY.DAT` apart. One story opens without asking; a disk with
+  none says what it mounted; and with stdin piped it never prompts into the void,
+  listing the candidates and naming `--story <n|name>` instead.
 - **The map sometimes speaks first.** Twice in a game babelmap notices that a set
   of rooms wants a layer of its own and offers to make one. It never acts —
   layers still come only from a move you asked for. The first case is structural:
