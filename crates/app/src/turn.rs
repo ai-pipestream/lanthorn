@@ -686,6 +686,9 @@ pub(crate) fn apply_game_driven_result(
         }
         state.mark_screen_clear();
     }
+    // Whether this turn's output CONTINUED the transcript's last pre-turn row
+    // instead of opening one below it — the pager needs it (below).
+    let mut continued_row = false;
     if result.transcript_elems.is_empty() {
         // Output the game printed where the cursor already was stays on the line it
         // was already on (SQ-0726, generalised in SQ-0804) — see
@@ -696,7 +699,7 @@ pub(crate) fn apply_game_driven_result(
             state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
         } else {
             let continues = session.output_continued_line();
-            state.push_transcript_runs_char_echo(
+            continued_row = state.push_transcript_runs_char_echo(
                 &result.transcript,
                 TranscriptKind::Story,
                 &result.transcript_runs,
@@ -719,7 +722,7 @@ pub(crate) fn apply_game_driven_result(
     // sound-finish routine from reloading the baseline or dismissing an active
     // pager — a timeout is not a keystroke.
     state.pager.arm_after_turn(
-        state.last_transcript_total_rows,
+        app::pager::baseline_before(state.last_transcript_total_rows, continued_row),
         session.pending_input(),
         app::pager::more_suppressed(session),
         driver,

@@ -28,6 +28,28 @@
 //! the tail of the last prose row instead of reserving one, so there
 //! `prompt_rows` is 0 and nothing moves.
 //!
+//! # A turn that CONTINUES the row above it (SQ-0823)
+//!
+//! The baseline is a row count, and rows are atomic to [`activation_target`] —
+//! every row below `before_rows` is old, every row at or above it is new. That
+//! holds only while a turn's output OPENS a line. It does not have to: a
+//! `read_char` turn whose game printed where the cursor already was is folded onto
+//! the line it was already on ([`push_transcript_runs_char_echo`](crate::state::
+//! AppState::push_transcript_runs_char_echo)), and then the last pre-turn row is
+//! PARTLY OLD AND PARTLY NEW. Counted as old, its new half is exactly what slips
+//! past the pause.
+//!
+//! Arthur's InvisiClues are the report. Its hint pages print a `1> ` prompt and
+//! wait; the key that answers appends the whole page after that prompt, on that
+//! row. Measured on the Amiga floppy at 80x48, `before_rows` 79 and 124 rows after,
+//! the park put absolute row 79 on top — leaving `1> SENIOR PROGRAMMER`, the
+//! section heading its list of names belongs to, one row above the fold.
+//!
+//! So [`baseline_before`] steps the baseline back onto that row. Note it steps back
+//! exactly ONE row, never the whole logical line: only the pre-turn wrap's LAST row
+//! is shared, and any rows the appended text wraps onto are wholly new and already
+//! counted. What is on screen is what is measured.
+//!
 //! # Arming ruleset (SQ-0539)
 //!
 //! The v1 (SQ-0404) pager only armed behind a LINE read on a turn that did not
@@ -128,6 +150,18 @@ impl Pager {
             }
         }
     }
+}
+
+/// The baseline to arm with, given the last rendered frame's wrapped-row total and
+/// whether this turn's output CONTINUED the last of those rows rather than opening
+/// a line below it (SQ-0823 — see the [module docs](self)).
+///
+/// A continued row is partly this turn's, so it is new and the baseline steps back
+/// onto it. Exactly one row: the pre-turn wrap's last row is the only shared one,
+/// and rows the appended text wraps onto are wholly new and lie above the baseline
+/// already.
+pub fn baseline_before(last_frame_rows: u16, continued_row: bool) -> u16 {
+    last_frame_rows.saturating_sub(u16::from(continued_row))
 }
 
 /// What drove the turn whose output the pager is about to measure.
@@ -348,6 +382,32 @@ mod tests {
         assert_eq!(state.transcript_scroll, 31, "parked one row past the prompt-less ceiling");
         // Which is exactly the offset that shows row 0 at the top of a 9-row body.
         assert_eq!(40 - state.transcript_scroll - (10 - 1), 0);
+    }
+
+    /// SQ-0823: a turn whose output continued the last pre-turn row makes that row
+    /// new, so the baseline steps back onto it — and by exactly one row however far
+    /// the appended text wraps, because only that row is shared.
+    #[test]
+    fn a_continued_row_steps_the_baseline_back_onto_itself() {
+        assert_eq!(baseline_before(79, false), 79, "a turn that opens a line measures from the top of it");
+        assert_eq!(baseline_before(79, true), 78, "a continued row is this turn's too");
+        assert_eq!(baseline_before(0, true), 0, "nothing to step back onto at the very start");
+
+        // Arthur's credits page, measured on the Amiga floppy at 80x48: 79 rows
+        // before, 124 after, a 44-row viewport whose [more] bar takes one. Parked
+        // from the unadjusted baseline the top row was 79 — the row carrying
+        // `1> SENIOR PROGRAMMER` sat one above the fold.
+        let (before, after, viewport, prompt) = (79u16, 124u16, 44u16, 1u16);
+        let stale = activation_target(before, after, viewport, prompt).unwrap();
+        assert_eq!(after - stale - (viewport - prompt), 79, "the reported symptom");
+        let fixed = activation_target(baseline_before(before, true), after, viewport, prompt).unwrap();
+        assert_eq!(after - fixed - (viewport - prompt), 78, "the continued row is the top row now");
+
+        // The wrap boundary: the appended text turns that one row into three. Two of
+        // them are wholly new and already above the baseline, so the step back is
+        // still one row and the park still lands on the shared row.
+        let target = activation_target(baseline_before(20, true), 60, 10, 1).unwrap();
+        assert_eq!(60 - target - (10 - 1), 19);
     }
 
     #[test]

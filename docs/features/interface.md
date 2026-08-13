@@ -200,7 +200,11 @@ know which side you're on).
   via `more_prompt`. "First fresh screenful" is measured against the rows that
   actually carry prose — the bar's own row, a v3 status line, the optional
   command bar and a suggestion strip are none of them readable, and counting
-  them let a line slip past the pause (SQ-0823).
+  them let a line slip past the pause (SQ-0823). And "fresh" allows for a page
+  that starts on the row the game stopped on: Arthur's InvisiClues print a `1> `
+  prompt, wait for a key, and then print the page *after* that prompt, on that
+  row — so it is part of the new page, and the pause shows it rather than
+  scrolling its heading away (SQ-0823).
 - **The command band** (**F2**, or `/open-command-band`) — a Journey-style
   bottom dock that builds a command by pointing, and suggests one as you type
   (it never takes the keyboard from the prompt — see "typing always wins"
