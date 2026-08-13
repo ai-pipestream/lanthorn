@@ -16,6 +16,8 @@ mod drawn_edge_honesty;
 mod input_suggestion_border_style;
 #[path = "suites/more_pager_arming.rs"]
 mod more_pager_arming;
+#[path = "suites/more_pager_first_new_row.rs"]
+mod more_pager_first_new_row;
 #[path = "suites/pane_title_sources.rs"]
 mod pane_title_sources;
 #[path = "suites/print_then_erase_boundary.rs"]

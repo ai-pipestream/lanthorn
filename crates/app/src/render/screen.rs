@@ -25,8 +25,19 @@ pub struct StoryPaneMetrics {
     pub scrollbar: bool,
     /// The largest meaningful `transcript_scroll` value.
     pub max_scroll: u16,
-    /// The transcript viewport height (rows).
+    /// The transcript viewport height: the rows of the pane that actually carry
+    /// prose this frame, once the status line, the input bar, a suggestion strip
+    /// and (while it is showing) the `[more]` row have taken theirs. It used to be
+    /// the whole pane rect, which counted every one of those as readable and left
+    /// the pager measuring against rows the reader never gets (SQ-0823).
     pub viewport_rows: u16,
+    /// Rows the `[more]` prompt takes OUT of `viewport_rows` while it shows: `1`
+    /// on the cell paths (it reserves its own row at the foot of the transcript),
+    /// `0` on the raster path, which draws the prompt as an overlay on the last
+    /// prose row and so gives up nothing. The pager parks the view on the frame
+    /// BEFORE the prompt appears, so this is what tells it the screenful it is
+    /// aiming at will be one row shorter (SQ-0823).
+    pub prompt_rows: u16,
     /// Total wrapped rows of the transcript this frame (for the [more] pager,
     /// which needs the true total even when it fits — SQ-0404).
     pub total_rows: u16,
@@ -250,9 +261,17 @@ fn render_story_pane_frame(
         };
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
         let tarea = reserve_text_margin(tarea, state, margin_style(model, state), buf);
-        let (scrollbar, max_scroll, total_rows, mut tlinks) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
-        links.append(&mut tlinks);
-        return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height, total_rows, links, transcript_surface: true };
+        let mut t = render_transcript(&model.status, introspect, state, tarea, buf, gi);
+        links.append(&mut t.links);
+        return StoryPaneMetrics {
+            scrollbar: t.scrollbar,
+            max_scroll: t.max_scroll,
+            viewport_rows: t.viewport_rows,
+            prompt_rows: t.prompt_rows,
+            total_rows: t.total_rows,
+            links,
+            transcript_surface: true,
+        };
     }
 
     // Generic multi-window path. Grid windows push their hyperlink cells into
@@ -287,6 +306,7 @@ fn render_story_pane_frame(
         scrollbar: false,
         max_scroll: 0,
         viewport_rows: area.height,
+        prompt_rows: 0,
         total_rows: 0,
         links: Vec::new(),
         transcript_surface: false,
@@ -568,9 +588,16 @@ fn render_node(
         WinNode::Buffer(b) => {
             if b.primary {
                 let area = reserve_text_margin(area, state, state.colors.theme.get("transcript").style, buf);
-                let (scrollbar, max_scroll, total_rows, links) =
-                    render_transcript(status, introspect, state, area, buf, game_input);
-                Some(StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: area.height, total_rows, links, transcript_surface: true })
+                let t = render_transcript(status, introspect, state, area, buf, game_input);
+                Some(StoryPaneMetrics {
+                    scrollbar: t.scrollbar,
+                    max_scroll: t.max_scroll,
+                    viewport_rows: t.viewport_rows,
+                    prompt_rows: t.prompt_rows,
+                    total_rows: t.total_rows,
+                    links: t.links,
+                    transcript_surface: true,
+                })
             } else {
                 render_inline_buffer(b, state, area, buf);
                 None
@@ -1974,6 +2001,10 @@ fn render_node(
                         scrollbar: false,
                         max_scroll: rm.max_scroll,
                         viewport_rows: rm.viewport_rows,
+                        // The raster `[more]` is stamped over the tail of the last
+                        // prose row (below), not given a row of its own, so this
+                        // path's viewport does not shrink when it shows.
+                        prompt_rows: 0,
                         total_rows: rm.total_rows,
                         links: Vec::new(),
                         transcript_surface: true,
@@ -6464,7 +6495,7 @@ mod tests {
         let mut state2 = frameless_state();
         state2.push_transcript("x");
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height - used);
-        let (_, _, _, _) = render_transcript(&model.status, None, &state2, tarea, &mut buf, None);
+        let _ = render_transcript(&model.status, None, &state2, tarea, &mut buf, None);
         let geom = state2.transcript_geom.get().expect("geometry published").area;
         assert_eq!(geom.width, cols, "transcript wraps at the declared width");
         assert_eq!(geom.x, area.x, "and starts at the same column the grid does");
@@ -7438,10 +7469,14 @@ mod tests {
         let mut buf_b = Buffer::empty(area);
         let used = draw_upper_window(model.grid().unwrap(), false, &state.colors, area, &mut buf_b, state.config.honor_game_colours, &mut Vec::new());
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
-        let (sb, ms, _, _) = render_transcript(&model.status, None, &state, tarea, &mut buf_b, None);
+        let t = render_transcript(&model.status, None, &state, tarea, &mut buf_b, None);
 
         assert_eq!(buf_a, buf_b, "the simple path must be byte-identical to the legacy path");
-        assert_eq!((ma.scrollbar, ma.max_scroll, ma.viewport_rows), (sb, ms, tarea.height));
+        // The metrics are the transcript's own, verbatim — including the viewport,
+        // which is the rows it gave to PROSE, not the pane rect it was handed
+        // (`tarea.height`, one more here: the v3 status line takes a row). SQ-0823.
+        assert_eq!((ma.scrollbar, ma.max_scroll, ma.viewport_rows), (t.scrollbar, t.max_scroll, t.viewport_rows));
+        assert_eq!(ma.viewport_rows, tarea.height - 1, "the status line's row is not a readable transcript row");
     }
 
     fn graphics_node() -> WinNode {

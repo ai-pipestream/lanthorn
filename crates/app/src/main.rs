@@ -527,6 +527,10 @@ struct PaneRects {
     /// Visible transcript rows this frame (the transcript viewport height). Used
     /// to size a PageUp/PageDown step.
     pub transcript_viewport_rows: u16,
+    /// Rows the `[more]` prompt takes out of that viewport while it shows (1 on
+    /// the cell paths, 0 on the raster one) — the pager parks the view a frame
+    /// before the prompt appears and has to allow for it (SQ-0823).
+    pub transcript_prompt_rows: u16,
     /// Total wrapped transcript rows this frame. Cached so a command turn can
     /// measure how many rows its output added (the [more] pager, SQ-0404).
     pub transcript_total_rows: u16,
@@ -591,6 +595,7 @@ fn draw_frame(
     let mut modal_list_viewport: usize = 0;
     let mut transcript_max_scroll: u16 = 0;
     let mut transcript_viewport_rows: u16 = 0;
+    let mut transcript_prompt_rows: u16 = 0;
     let mut transcript_total_rows: u16 = 0;
     let mut transcript_surface = false;
     let mut transcript_links_out: Vec<((u16, u16), u32)> = Vec::new();
@@ -721,6 +726,7 @@ fn draw_frame(
             let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
             transcript_max_scroll = m.max_scroll;
             transcript_viewport_rows = m.viewport_rows;
+            transcript_prompt_rows = m.prompt_rows;
             transcript_total_rows = m.total_rows;
             transcript_surface = m.transcript_surface;
             transcript_links_out = m.links;
@@ -754,6 +760,7 @@ fn draw_frame(
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
                     transcript_viewport_rows = m.viewport_rows;
+                    transcript_prompt_rows = m.prompt_rows;
                     transcript_total_rows = m.total_rows;
                     transcript_surface = m.transcript_surface;
                     transcript_links_out = m.links;
@@ -787,6 +794,7 @@ fn draw_frame(
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
                     transcript_viewport_rows = m.viewport_rows;
+                    transcript_prompt_rows = m.prompt_rows;
                     transcript_total_rows = m.total_rows;
                     transcript_surface = m.transcript_surface;
                     transcript_links_out = m.links;
@@ -1068,7 +1076,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── Command-band mouse routing ───────────────────────────────────────────────
@@ -1695,6 +1703,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     &mut state,
                     panes.transcript_max_scroll,
                     panes.transcript_viewport_rows,
+                    panes.transcript_prompt_rows,
                     panes.transcript_total_rows,
                     panes.transcript_surface,
                 );

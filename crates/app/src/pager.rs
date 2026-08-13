@@ -14,6 +14,20 @@
 //!      height, so [`activation_target`] decides whether to engage and where to
 //!      park the scroll offset.
 //!
+//! # Measuring against what the reader actually gets (SQ-0823)
+//!
+//! The viewport in that arithmetic has to be the rows of PROSE the pane shows,
+//! and the pane rect is not that number: the status line, the input bar, a
+//! suggestion strip and the `[more]` bar itself each take one. Counting any of
+//! them as readable parks the view low and slips a line past the pause — the
+//! reported symptom, *"it scrolls one line too many before the [more] prompt is
+//! shown"*. The renderer therefore reports its true body height, and reports the
+//! `[more]` bar's row separately (`prompt_rows`) because the park is computed one
+//! frame BEFORE the bar exists: the screenful being aimed at is a row shorter than
+//! the frame doing the aiming. On the v6 raster path the prompt is stamped over
+//! the tail of the last prose row instead of reserving one, so there
+//! `prompt_rows` is 0 and nothing moves.
+//!
 //! # Arming ruleset (SQ-0539)
 //!
 //! The v1 (SQ-0404) pager only armed behind a LINE read on a turn that did not
@@ -157,12 +171,28 @@ pub fn more_suppressed(engine: &dyn crate::engine::Engine) -> bool {
 ///
 /// Returns `None` when the new output fits within one screen (no pager needed).
 ///
-/// Derivation: the viewport shows absolute rows `[after - scroll - viewport ..
-/// after - scroll]`. To put the first new row (`before`) at the viewport top:
-/// `after - scroll - viewport = before` → `scroll = added - viewport`, where
-/// `added = after - before`. That offset is always `<= max_scroll`
-/// (`after - viewport`), so it never over-scrolls.
-pub fn activation_target(before_rows: u16, after_rows: u16, viewport_rows: u16) -> Option<u16> {
+/// `viewport_rows` is the rows of PROSE the pane shows with no prompt up, and
+/// `prompt_rows` how many of them the `[more]` bar takes once it appears (1 on the
+/// cell paths, which reserve it a row; 0 on the raster path, which overlays it).
+/// Both matter, and to different halves of the decision:
+///
+/// - **Whether to engage** is measured against the full `viewport_rows`. With no
+///   pager there is no prompt bar, so a turn that adds exactly a screenful is
+///   entirely on screen and nothing was missed.
+/// - **Where to park** is measured against `viewport_rows - prompt_rows`, because
+///   that is the screenful the reader will actually be looking at.
+///
+/// Derivation: the paged viewport shows absolute rows `[after - scroll - body ..
+/// after - scroll]` for `body = viewport - prompt`. To put the first new row
+/// (`before`) at its top: `after - scroll - body = before` → `scroll = added -
+/// body`, where `added = after - before`. Getting `prompt_rows` wrong here is a
+/// row of prose scrolling past unread before the pause — the SQ-0823 report.
+pub fn activation_target(
+    before_rows: u16,
+    after_rows: u16,
+    viewport_rows: u16,
+    prompt_rows: u16,
+) -> Option<u16> {
     if viewport_rows == 0 {
         return None;
     }
@@ -170,7 +200,7 @@ pub fn activation_target(before_rows: u16, after_rows: u16, viewport_rows: u16) 
     if added <= viewport_rows {
         return None; // fits in one screen — leave the view at the bottom
     }
-    Some(added - viewport_rows)
+    Some(added - viewport_rows.saturating_sub(prompt_rows))
 }
 
 /// Post-frame transcript bookkeeping, run once per drawn frame with the story
@@ -191,6 +221,7 @@ pub fn apply_frame(
     state: &mut crate::state::AppState,
     max_scroll: u16,
     viewport_rows: u16,
+    prompt_rows: u16,
     total_rows: u16,
     transcript_surface: bool,
 ) {
@@ -199,9 +230,16 @@ pub fn apply_frame(
     }
     state.transcript_scroll = state.transcript_scroll.min(max_scroll);
     if let Some(before) = state.pager.pending_before_rows.take() {
-        match activation_target(before, total_rows, viewport_rows) {
+        match activation_target(before, total_rows, viewport_rows, prompt_rows) {
             Some(target) => {
-                state.scroll_transcript_to(target.min(max_scroll));
+                // `max_scroll` came from THIS frame, which has no prompt bar on it;
+                // the frame the target is for gives `prompt_rows` of its viewport to
+                // the bar, so it can scroll that much further back. Clamping to the
+                // prompt-less ceiling would pin a whole-transcript overflow (a boot
+                // banner, `before == 0`) one row short and drop its first line —
+                // exactly the row this quest is about, on the one turn where the
+                // clamp binds (SQ-0823).
+                state.scroll_transcript_to(target.min(max_scroll.saturating_add(prompt_rows)));
                 state.pager.active = true;
             }
             None => state.pager.active = false,
@@ -224,14 +262,14 @@ mod tests {
         let mut state = crate::state::AppState::default();
 
         // A settled session: 500-row backlog, reader scrolled 100 rows up.
-        apply_frame(&mut state, 476, 24, 500, true);
+        apply_frame(&mut state, 476, 24, 0, 500, true);
         assert_eq!(state.last_transcript_total_rows, 500);
         state.transcript_scroll = 100;
 
         // `look at rebus` arms the pager with the real pre-turn total, then the
         // picture frame draws: no transcript surface, all metrics zero.
         state.pager.arm(state.last_transcript_total_rows);
-        apply_frame(&mut state, 0, 40, 0, false);
+        apply_frame(&mut state, 0, 40, 0, 0, false);
         assert_eq!(state.transcript_scroll, 100, "a picture frame must not clamp scrollback away");
         assert_eq!(state.last_transcript_total_rows, 500, "a picture frame must not become the pager baseline");
         assert_eq!(state.pager.pending_before_rows, Some(500), "a pending arm survives until a real transcript frame");
@@ -239,7 +277,7 @@ mod tests {
         // The dismissing keypress re-arms from the (unpoisoned) baseline; the
         // normal frame returns with the same 500 rows: nothing new, no pager.
         state.pager.arm(state.last_transcript_total_rows);
-        apply_frame(&mut state, 476, 24, 500, true);
+        apply_frame(&mut state, 476, 24, 0, 500, true);
         assert!(!state.pager.active, "returning from the picture pages nothing (no rows were added)");
         assert_eq!(state.transcript_scroll, 100, "the reader's position survives the picture round-trip");
     }
@@ -247,20 +285,69 @@ mod tests {
     #[test]
     fn no_pager_when_output_fits_one_screen() {
         // 8 rows added, viewport 10 → fits, no pager.
-        assert_eq!(activation_target(20, 28, 10), None);
+        assert_eq!(activation_target(20, 28, 10, 0), None);
         // Exactly one screen added is still "fits" (nothing past the fold).
-        assert_eq!(activation_target(20, 30, 10), None);
+        assert_eq!(activation_target(20, 30, 10, 0), None);
         // Degenerate viewport never engages.
-        assert_eq!(activation_target(0, 100, 0), None);
+        assert_eq!(activation_target(0, 100, 0, 0), None);
     }
 
     #[test]
     fn pager_parks_at_first_new_screenful() {
         // 25 rows added, viewport 10 → engage; first screenful sits 15 rows up.
-        assert_eq!(activation_target(2, 27, 10), Some(15));
+        assert_eq!(activation_target(2, 27, 10, 0), Some(15));
         // The target never exceeds max_scroll (= after - viewport = 17).
-        let t = activation_target(2, 27, 10).unwrap();
+        let t = activation_target(2, 27, 10, 0).unwrap();
         assert!(t <= 27u16.saturating_sub(10));
+    }
+
+    /// SQ-0823: the `[more]` bar takes a row of the viewport for itself on the
+    /// cell paths, and the park is computed on the frame BEFORE it appears — so
+    /// the screenful being aimed at is one row shorter than the frame doing the
+    /// aiming. Ignore that and the top row of the first new screenful is exactly
+    /// the row the bar displaces: one line of prose scrolled past, unread, which
+    /// is the report.
+    #[test]
+    fn the_prompt_row_comes_out_of_the_parked_screenful() {
+        // Same 25-row overflow as above, on a path that reserves a prompt row: the
+        // reader gets 9 rows of prose, so the park is one row further back.
+        assert_eq!(activation_target(2, 27, 10, 1), Some(16));
+        // …and the row it puts on top is the first NEW row: with the parked frame
+        // showing `viewport - prompt` rows ending at `after - scroll`, the top row
+        // is `after - scroll - (viewport - prompt)` = `before`.
+        let scroll = activation_target(2, 27, 10, 1).unwrap();
+        assert_eq!(27 - scroll - (10 - 1), 2, "the first new row lands at the viewport top");
+        // The raster path overlays its prompt instead (`prompt_rows == 0`), so its
+        // park must not move.
+        let scroll = activation_target(2, 27, 10, 0).unwrap();
+        assert_eq!(27 - scroll - 10, 2);
+    }
+
+    /// The prompt row changes where to park, never WHETHER to. With no pager up
+    /// there is no bar, so a turn that adds exactly a screenful is entirely on
+    /// screen — engaging would raise a `[more]` over output nobody missed.
+    #[test]
+    fn the_prompt_row_does_not_lower_the_activation_threshold() {
+        assert_eq!(activation_target(20, 30, 10, 1), None, "exactly one screen still fits");
+        assert_eq!(activation_target(20, 31, 10, 1), Some(2), "one row past the fold pages");
+    }
+
+    /// The clamp has to allow for the prompt row too. `max_scroll` is measured on
+    /// the frame that decides — which has no bar on it — while the target is for
+    /// the frame that does, whose shorter body can scroll one row further back.
+    /// The clamp only ever binds when the whole transcript is new (a boot banner,
+    /// `before == 0`), and that is precisely where clamping to the prompt-less
+    /// ceiling drops the banner's first line (SQ-0823).
+    #[test]
+    fn the_activation_clamp_allows_for_the_prompt_row() {
+        let mut state = crate::state::AppState::default();
+        // A 40-row boot banner into a 10-row viewport, nothing before it.
+        state.pager.arm(0);
+        apply_frame(&mut state, 30, 10, 1, 40, true);
+        assert!(state.pager.active);
+        assert_eq!(state.transcript_scroll, 31, "parked one row past the prompt-less ceiling");
+        // Which is exactly the offset that shows row 0 at the top of a 9-row body.
+        assert_eq!(40 - state.transcript_scroll - (10 - 1), 0);
     }
 
     #[test]
@@ -313,9 +400,9 @@ mod tests {
         p.arm_after_turn(100, InputKind::Char, false, Driver::PlayerInput);
         assert_eq!(p.pending_before_rows, Some(100), "a clearing turn arms like any other");
         // 6 post-clear rows into a 10-row viewport: fits, nothing to page.
-        assert_eq!(activation_target(100, 106, 10), None);
+        assert_eq!(activation_target(100, 106, 10, 0), None);
         // 26 post-clear rows into the same viewport: page from the first screenful.
-        assert_eq!(activation_target(100, 126, 10), Some(16));
+        assert_eq!(activation_target(100, 126, 10, 0), Some(16));
     }
 
     #[test]
