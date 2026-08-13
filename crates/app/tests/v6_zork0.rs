@@ -12,6 +12,8 @@
 mod v6_band_tiling;
 #[path = "suites/v6_ega_dither_blend.rs"]
 mod v6_ega_dither_blend;
+#[path = "suites/v6_float_margin_ground.rs"]
+mod v6_float_margin_ground;
 #[path = "suites/v6_hybrid_zork0.rs"]
 mod v6_hybrid_zork0;
 #[path = "suites/v6_mouse_zork0.rs"]
