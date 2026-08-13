@@ -41,11 +41,40 @@ the story and the pictures came off one disk, so the pairing is guaranteed by th
 medium rather than guessed from a filename.
 
 The Macintosh releases wrote the *same* container, so a Mac disk image works the
-same way — with one wrinkle. Apple sold two screens, and Infocom shipped an
-archive for each: a colour `CPic.data` and a monochrome `Pic.data`. babelmap
-draws the colour one. The monochrome archive packs its directory records
-differently (no palette to store, on a screen with two colours) and is not yet
-decoded, so a Mac disk currently plays in colour or not at all.
+same way — with one wrinkle worth knowing about. Apple sold two screens, and
+Infocom shipped an archive for each: a colour `CPic.data` and a monochrome
+`Pic.data`. **babelmap reads both.** It draws the colour one, because that is
+what every other medium here supplies and nothing on the disk argues otherwise;
+the black-and-white artwork is a thing you ask for:
+
+```sh
+babelmap "Zork Zero Disk.image" --pictures Pic.data
+```
+
+That name is looked up *on the volume*. A story mounted out of a disk image has
+no folder for a loose archive to sit beside it in, so `--pictures` now reaches
+into the medium when the name it was given is not on your filesystem — an Amiga
+`.adf` gets the same door by the same code.
+
+What comes back is not a recoloured copy of the colour art. It is a different
+screen: the mono archive's plates are **480×300** where the colour ones are
+320×200, drawn for the standard Macintosh's black-and-white display, and its
+sprites are redrawn rather than scaled — the same 483 picture numbers, the same
+386 of them carrying pixels, at sizes that mostly do not divide. Infocom's own
+Mac interpreter says so in the flag's own definition: *"this pic is mono, and
+scaled for a 480x300 screen (std Mac)"*. It also displayed that art 1:1 where it
+scaled the colour art by 1.5 or 2, and babelmap does the same — 480×300 is the
+one picture space in this whole format that does not double onto the 640×400
+screen.
+
+Underneath, the monochrome archive is not a new codec at all, which was the
+surprise. It runs the same Huffman + run-length + XOR as everything else on this
+side of the format and lands one byte per pixel, using colour numbers 2 and 3 —
+white and black — where a colour picture uses all sixteen. What it does differently
+is its *directory*: 12-byte records rather than 14, because a two-colour screen
+has no palette to point at. That is the same twelve bytes an EGA or CGA archive
+spends for the same reason, so the PC and the Macintosh turn out to be one case
+and not two.
 
 The two sources are close but not identical, and where they disagree the original
 media wins. Five *Zork Zero* pictures are cropped in the circulating Blorb —
@@ -131,7 +160,10 @@ the story belong together:
    The name is relative to the story file (an absolute path works too), and a
    named archive **wins outright** — over a Blorb sitting right beside the story,
    over a floppy's own `Pic.data`, over everything. Naming it is an instruction,
-   not a hint.
+   not a hint. If the name is a bare filename that is not on your filesystem and
+   the story was mounted out of a disk image, it is looked for *on that disk* —
+   which is how you reach the Macintosh's monochrome `Pic.data`, or either
+   archive on an Amiga floppy, without unpacking anything first.
 
 Tier 3 is how you *pick a rendition*, not just how you rescue a game. *Zork Zero*
 alone can be played four ways from the files that survive — the Amiga `zork0.pic`,
@@ -242,7 +274,7 @@ CGA addressed a 640-column screen with pixels half as wide, so their plates are
 640 across where MCGA's are 320 — the same picture, twice the samples, each one
 half the width. Both cover the same rectangle, so both land on the same 640×400
 screen: an MCGA or Amiga plate doubles on both axes, an EGA or CGA plate doubles
-only vertically. *Arthur* is the clean proof — all 125 pictures its `.mg1` and
+only vertically, and the Macintosh's 480×300 monochrome plate doubles on neither. *Arthur* is the clean proof — all 125 pictures its `.mg1` and
 `.eg1` share come out at byte-identical sizes once each is mapped that way, and
 *Zork Zero* agrees on 446 of its 503 (the rest differ by a pixel or two, because
 these are separately drawn renditions rather than one scaled copy). Frotz reads
@@ -260,9 +292,12 @@ An MCGA or Amiga picture arrives with its own sixteen colours attached. An EGA o
 CGA one does not, and there is nowhere in its directory record to put them —
 those cards had their palettes soldered in, so Infocom stored the pixels and let
 the hardware supply the rest. babelmap now supplies it too, reading the rendition
-straight out of the directory: nobody carrying a palette means EGA or CGA, and
-every picture flagged two-colour means CGA. (Never the file extension. A `.CG1`
-that somebody renamed is still a `.CG1`.)
+straight out of the directory: nobody carrying a palette means the colours came
+from somewhere else, and every picture flagged two-colour means black and white.
+(Never the file extension. A `.CG1` that somebody renamed is still a `.CG1`.)
+The Macintosh's monochrome archive answers that second question the same way a
+`.CG1` does and gets the same two colours, which is exactly how bocfel treats it
+too — its own code handles Mac black-and-white and CGA in a single branch.
 
 **EGA** gets the card's sixteen: each channel off, a third, two thirds or full —
 0, 85, 170, 255 — with one famous exception. Colour 6 should arithmetically be a
