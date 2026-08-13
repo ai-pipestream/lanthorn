@@ -516,6 +516,48 @@ fn open_launch_options(
     )
 }
 
+/// Where one wheel notch over the picker goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WheelTarget {
+    /// Swallowed by the topmost modal. The launch-options dialog's list of
+    /// options is shorter than its own dialog, so under SQ-0831's rule there
+    /// is nothing there to scroll — but the notch must still stop here rather
+    /// than reaching the story list underneath, which would otherwise slide
+    /// around behind an open modal (SQ-0832).
+    Swallowed,
+    /// The IFDB search modal's own results/files list.
+    Search,
+    /// The preview modal zooms instead of scrolling (SQ-0486).
+    PreviewZoom,
+    /// The info panel's body, when the pointer is over it.
+    InfoPanel,
+    /// The story list (or the cover grid) itself — the coalesced notch.
+    StoryList,
+}
+
+/// Route a wheel notch through the picker's modal ladder. The order is
+/// z-order, the same precedence the picker's clicks already take, and it lives
+/// here as one total function so "which surface owns the wheel right now?" has
+/// a single answer that can be pinned by a test.
+fn wheel_target(
+    launch_open: bool,
+    search_open: bool,
+    preview_open: bool,
+    over_info_panel: bool,
+) -> WheelTarget {
+    if launch_open {
+        WheelTarget::Swallowed
+    } else if search_open {
+        WheelTarget::Search
+    } else if preview_open {
+        WheelTarget::PreviewZoom
+    } else if over_info_panel {
+        WheelTarget::InfoPanel
+    } else {
+        WheelTarget::StoryList
+    }
+}
+
 /// Run the pre-game story picker for a directory passed at launch. Returns the
 /// chosen story (with any launch-time overrides), or `None` if the user quit.
 /// Exits the process with a message when the directory contains no launchable
@@ -1569,32 +1611,43 @@ pub(crate) fn run_story_picker(
                         );
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
-                    // The IFDB search modal owns the wheel while it is open, the
-                    // same precedence its clicks already take — it scrolls its own
-                    // results/files list, and never the story list behind it
-                    // (SQ-0831).
-                    if let Some(sm) = search_modal.as_mut() {
-                        sm.on_wheel(d, anim);
-                    } else
-                    // Over the preview modal, the wheel zooms instead of
-                    // scrolling the list behind it (SQ-0486; a no-op prior to
-                    // that, per SQ-0347): up zooms in, down zooms out.
-                    if let Some(pv) = preview.as_mut() {
-                        pv.zoom = if d < 0 { pv.zoom.step_in() } else { pv.zoom.step_out() };
-                    } else {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if slide.open && last_panel_area.contains(pt) {
-                        if d < 0 {
-                            panel_scroll = panel_scroll.saturating_sub((-d) as usize);
-                        } else {
-                            panel_scroll = (panel_scroll + d as usize).min(panel_max);
+                    match wheel_target(
+                        launch_opts.is_some(),
+                        search_modal.is_some(),
+                        preview.is_some(),
+                        slide.open && last_panel_area.contains(pt),
+                    ) {
+                        // A modal with nothing to scroll still eats the notch.
+                        WheelTarget::Swallowed => {}
+                        // The IFDB search modal owns the wheel while it is open,
+                        // the same precedence its clicks already take — it
+                        // scrolls its own results/files list, and never the
+                        // story list behind it (SQ-0831).
+                        WheelTarget::Search => {
+                            if let Some(sm) = search_modal.as_mut() {
+                                sm.on_wheel(d, anim);
+                            }
                         }
-                    } else {
+                        // Over the preview modal, the wheel zooms instead of
+                        // scrolling the list behind it (SQ-0486; a no-op prior to
+                        // that, per SQ-0347): up zooms in, down zooms out.
+                        WheelTarget::PreviewZoom => {
+                            if let Some(pv) = preview.as_mut() {
+                                pv.zoom = if d < 0 { pv.zoom.step_in() } else { pv.zoom.step_out() };
+                            }
+                        }
+                        WheelTarget::InfoPanel => {
+                            if d < 0 {
+                                panel_scroll = panel_scroll.saturating_sub((-d) as usize);
+                            } else {
+                                panel_scroll = (panel_scroll + d as usize).min(panel_max);
+                            }
+                        }
                         // Record the notch's direction; the coalesced step is
                         // applied at the loop top once this notch's event burst
                         // drains, so one notch scrolls the list exactly one row.
-                        pending_wheel = Some(d);
-                    }
+                        WheelTarget::StoryList => pending_wheel = Some(d),
                     }
                 }
             }
@@ -2800,6 +2853,31 @@ mod tests {
     /// user's rebinding.
     fn km() -> app::keymap::KeyMap {
         app::keymap::KeyMap::default()
+    }
+
+    /// A wheel notch goes to the topmost open surface, and no further. The
+    /// launch-options dialog (SQ-0789) had no wheel handling at all, so a notch
+    /// over the open dialog scrolled the story list BEHIND it — the list you can
+    /// see moving around under a modal you are talking to. Its own option list is
+    /// shorter than its dialog, so there is nothing there to scroll under
+    /// SQ-0831's rule; the fix is that the modal eats the notch (SQ-0832).
+    #[test]
+    fn the_launch_options_dialog_swallows_the_wheel_instead_of_leaking_it_to_the_list() {
+        use super::{wheel_target, WheelTarget};
+
+        // Nothing open: the notch is the story list's.
+        assert_eq!(wheel_target(false, false, false, false), WheelTarget::StoryList);
+        assert_eq!(wheel_target(false, false, false, true), WheelTarget::InfoPanel);
+
+        // The launch dialog is topmost — over the info panel, and over every
+        // other modal it can be opened on top of.
+        assert_eq!(wheel_target(true, false, false, false), WheelTarget::Swallowed);
+        assert_eq!(wheel_target(true, false, false, true), WheelTarget::Swallowed);
+        assert_eq!(wheel_target(true, true, true, true), WheelTarget::Swallowed);
+
+        // The rest of the ladder is unchanged (SQ-0831/SQ-0486).
+        assert_eq!(wheel_target(false, true, false, true), WheelTarget::Search);
+        assert_eq!(wheel_target(false, false, true, true), WheelTarget::PreviewZoom);
     }
 
 

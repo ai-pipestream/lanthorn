@@ -286,6 +286,19 @@ pub struct CommandBandState {
     pub quick_hover: Option<usize>,
     /// Per-column selection + animated scroll.
     pub scroll: [crate::list_scroll::ListScroll; BAND_COLS],
+    /// Each column's visible list height this frame, published by the render
+    /// (`draw_command_band`) for the wheel to scroll within — a `Cell` for the
+    /// same reason `transcript_geom` is one: a draw only ever sees `&AppState`.
+    /// A column the frame did not draw (mid-slide, or the narrow single-column
+    /// fallback) reads 0, and `ListScroll::scroll_by` correctly refuses to
+    /// scroll a window whose size it does not know. (SQ-0832)
+    ///
+    /// PER COLUMN, and deliberately not the shared `modal_list_viewport`: the
+    /// VERB column reclaims its header row as a list row (see `draw_column`)
+    /// and so is one row taller than its neighbours, and a modal drawn later
+    /// in the same frame overwrites that one global slot while the band is
+    /// still on screen underneath it.
+    pub col_viewport: std::cell::Cell<[usize; BAND_COLS]>,
     /// Objects in the current room, refreshed every frame from the engine.
     pub here: Vec<String>,
     /// Objects the player carries, refreshed every frame from the engine.
