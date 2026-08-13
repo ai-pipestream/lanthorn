@@ -1478,10 +1478,33 @@ pub fn inventory_items(
 
 // ── Main render function ───────────────────────────────────────────────────────
 
-/// A rendered transcript pass: `(scrollbar_drawn, max_scroll, links)` — whether a
-/// scrollbar gutter was drawn, the largest meaningful `transcript_scroll`, and a
-/// per-frame map from rendered cell `(col, row)` to Glk hyperlink value.
-type TranscriptRender = (bool, u16, u16, Vec<((u16, u16), u32)>);
+/// What a rendered transcript pass reports back to the story pane.
+#[derive(Debug, Default, Clone)]
+pub struct TranscriptRender {
+    /// Whether a scrollbar gutter was drawn in the rightmost column.
+    pub scrollbar: bool,
+    /// The largest meaningful `transcript_scroll` for this frame
+    /// (`total_rows - viewport_rows`).
+    pub max_scroll: u16,
+    /// Total wrapped rows of the whole transcript (the `[more]` pager needs the
+    /// true total even when it fits).
+    pub total_rows: u16,
+    /// Rows of the pane that actually carry transcript prose this frame: what is
+    /// left of it after the status line, the input bar, a suggestion/search strip
+    /// and — while it is showing — the `[more]` prompt row. This is the number the
+    /// pager and the paging keys must measure against; the pane rect they used to
+    /// get instead counted every one of those reserved rows as readable, and a
+    /// turn that overflowed by exactly those rows scrolled past unpaged (SQ-0823).
+    pub viewport_rows: u16,
+    /// Rows the `[more]` prompt takes OUT of `viewport_rows` while it is showing —
+    /// `1` on this cell path (it reserves its own row), `0` when the region is too
+    /// short to spare one. The pager parks the view on the frame BEFORE the prompt
+    /// appears, so it has to subtract this itself or the top row of the first new
+    /// screenful is the one the prompt bar displaces (SQ-0823).
+    pub prompt_rows: u16,
+    /// Per-frame map from rendered cell `(col, row)` to Glk hyperlink value.
+    pub links: Vec<((u16, u16), u32)>,
+}
 
 /// Render the GAME pane into `buf` within `area`:
 ///
@@ -1493,9 +1516,10 @@ type TranscriptRender = (bool, u16, u16, Vec<((u16, u16), u32)>);
 /// - Bottom row(s): `"> " + state.input`; cursor indicator `_` when `state.focus == Focus::Game`.
 ///   When `state.colors.input_line_style != None`, the input line is wrapped in a box
 ///   (3 rows total).  Falls back to plain when the area is too small.
-///   Renders the GAME pane. Returns `(scrollbar_drawn, max_scroll)`: whether the
-///   transcript drew a scrollbar gutter (so the caller can exclude that column
-///   from text selection) and the largest meaningful `transcript_scroll` value.
+///
+/// Returns this pass's [`TranscriptRender`]: the scrollbar gutter flag (so the
+/// caller can exclude that column from text selection), the scroll clamps, and
+/// the rows this frame really gave to prose.
 pub fn render_transcript(
     status: &StatusModel,
     // No longer used here: the inventory moved out of this pane into the
@@ -1509,7 +1533,7 @@ pub fn render_transcript(
     game_input: Option<Style>,
 ) -> TranscriptRender {
     if area.height == 0 || area.width == 0 {
-        return (false, 0, 0, Vec::new());
+        return TranscriptRender::default();
     }
 
     // SQ-0740: under ZMSD §8.3's Amiga interpreter the machine itself has one ink
@@ -1557,7 +1581,7 @@ pub fn render_transcript(
     }
 
     if area.height < status_rows + 1 {
-        return (false, 0, 0, Vec::new());
+        return TranscriptRender::default();
     }
 
     // ── Bottom row(s): input line ─────────────────────────────────────────────
@@ -1583,7 +1607,7 @@ pub fn render_transcript(
     let middle_top = area.y + status_rows;
     let middle_bottom = input_region_top;
     if middle_top >= middle_bottom {
-        return (false, 0, 0, Vec::new());
+        return TranscriptRender::default();
     }
     let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
     render_middle(state, buf, middle_area, normal_style, game_input)
@@ -1840,10 +1864,9 @@ fn render_input_content(
 }
 
 /// Render the middle section: suggestion line (or search hint), transcript body.
-/// Returns `(scrollbar_drawn, max_scroll, links)` — whether a scrollbar gutter
-/// was drawn in the rightmost column, the largest meaningful `transcript_scroll`
-/// value (total wrapped rows minus the viewport) so the caller can clamp it, and
-/// a per-frame map from rendered cell `(col, row)` → Glk hyperlink value.
+/// Returns this pass's [`TranscriptRender`] — the scrollbar gutter flag, the
+/// scroll clamps, the rows this frame really gave to prose, and the per-frame
+/// cell → hyperlink map.
 fn render_middle(
     state: &AppState,
     buf: &mut Buffer,
@@ -1852,7 +1875,7 @@ fn render_middle(
     game_input: Option<Style>,
 ) -> TranscriptRender {
     if area.height == 0 || area.width == 0 {
-        return (false, 0, 0, Vec::new());
+        return TranscriptRender::default();
     }
     let w = area.width as usize;
 
@@ -1922,7 +1945,7 @@ fn render_middle(
     // ── Transcript body ───────────────────────────────────────────────────────
     if area.height < 2 {
         // Not enough room for transcript when there's a suggestion row.
-        return (false, 0, 0, Vec::new());
+        return TranscriptRender::default();
     }
 
     let transcript_top = area.y;
@@ -1934,13 +1957,16 @@ fn render_middle(
         middle_bottom
     };
     // [more] pager (SQ-0404): reserve the bottom row for the prompt when active,
-    // as long as at least one transcript row remains above it.
-    let more_row = (state.pager.active && transcript_bottom > transcript_top + 1)
-        .then_some(transcript_bottom - 1);
+    // as long as at least one transcript row remains above it. `prompt_rows`
+    // reports that reservation whether or not the prompt is up right now — the
+    // pager parks the view one frame BEFORE it appears, and has to know that this
+    // layout will spend a row on it (SQ-0823).
+    let prompt_rows = u16::from(transcript_bottom > transcript_top + 1);
+    let more_row = (state.pager.active && prompt_rows == 1).then_some(transcript_bottom - 1);
     let transcript_bottom = transcript_bottom - more_row.is_some() as u16;
 
     if transcript_top >= transcript_bottom {
-        return (false, 0, 0, Vec::new());
+        return TranscriptRender::default();
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
@@ -2461,7 +2487,14 @@ fn render_middle(
     }
     let max_scroll = total_rows.saturating_sub(transcript_rows).min(u16::MAX as usize) as u16;
     let total = total_rows.min(u16::MAX as usize) as u16;
-    (drew_scrollbar, max_scroll, total, links)
+    TranscriptRender {
+        scrollbar: drew_scrollbar,
+        max_scroll,
+        total_rows: total,
+        viewport_rows: transcript_rows.min(u16::MAX as usize) as u16,
+        prompt_rows,
+        links,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -3319,9 +3352,10 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        let (_sb, _ms, _total, links) = render_transcript(
+        let links = render_transcript(
             &crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None,
-        );
+        )
+        .links;
 
         // Exactly the 9 linked chars map to 42; the plain line contributes none.
         assert_eq!(links.len(), 9, "one entry per linked char, none from plain text");
@@ -3667,9 +3701,10 @@ mod tests {
             state.focus = Focus::Game;
             let area = Rect::new(0, 0, 40, 10);
             let mut buf = Buffer::empty(area);
-            let (_sb, _ms, _total, links) = render_transcript(
+            let links = render_transcript(
                 &crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None,
-            );
+            )
+            .links;
             assert_eq!(links.len(), 5, "one cell per linked char (honor={honor})");
             let cols: Vec<u16> = links.iter().map(|((c, _), _)| *c).collect();
             assert_eq!(cols, vec![5, 6, 7, 8, 9], "link cells sit on north's glyphs");

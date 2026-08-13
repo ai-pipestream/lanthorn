@@ -197,7 +197,10 @@ know which side you're on).
   and repaint start you at the top; output that fits shows no bar; babelmap's
   own output (`/help` and friends) never pages; and a game that asks for
   `[MORE]` suppression (Zork Zero's demo mode) gets it. The bar is themeable
-  via `more_prompt`.
+  via `more_prompt`. "First fresh screenful" is measured against the rows that
+  actually carry prose — the bar's own row, a v3 status line, the optional
+  command bar and a suggestion strip are none of them readable, and counting
+  them let a line slip past the pause (SQ-0823).
 - **The command band** (**F2**, or `/open-command-band`) — a Journey-style
   bottom dock that builds a command by pointing, and suggests one as you type
   (it never takes the keyboard from the prompt — see "typing always wins"

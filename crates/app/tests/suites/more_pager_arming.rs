@@ -72,13 +72,13 @@ fn story_state() -> AppState {
 }
 
 /// Render `state`'s transcript through the REAL story-pane renderer and return
-/// `(total wrapped rows, viewport rows)` — the two numbers the run loop feeds
-/// [`activation_target`] after every frame.
-fn measure(session: &GameSession, state: &AppState, w: u16, h: u16) -> (u16, u16) {
+/// `(total wrapped rows, viewport rows, prompt rows)` — the three numbers the run
+/// loop feeds [`activation_target`] after every frame.
+fn measure(session: &GameSession, state: &AppState, w: u16, h: u16) -> (u16, u16, u16) {
     let area = Rect::new(0, 0, w, h);
     let mut buf = Buffer::empty(area);
     let m = app::render::screen::render_story_pane(&session.screen(), true, None, state, area, &mut buf);
-    (m.total_rows, m.viewport_rows)
+    (m.total_rows, m.viewport_rows, m.prompt_rows)
 }
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -116,7 +116,7 @@ fn char_input_overflow_pages_before_the_read_char_gets_a_key() {
     // The menu is a full-height upper window, so the last frame before the turn
     // reported no transcript viewport at all; that IS the baseline the run loop
     // caches in `last_transcript_total_rows`.
-    let (before_rows, _) = measure(&s, &state, 52, 24);
+    let (before_rows, _, _) = measure(&s, &state, 52, 24);
     state.last_transcript_total_rows = before_rows;
 
     let turn = s.submit_char(b'\r');
@@ -138,9 +138,9 @@ fn char_input_overflow_pages_before_the_read_char_gets_a_key() {
     assert_eq!(pager.pending_before_rows, Some(before_rows));
 
     // 2. Activation, measured by the real renderer.
-    let (after_rows, viewport) = measure(&s, &state, 52, 24);
+    let (after_rows, viewport, prompt) = measure(&s, &state, 52, 24);
     eprintln!("zork0izm credits: before={before_rows} after={after_rows} viewport={viewport}");
-    let target = activation_target(before_rows, after_rows, viewport).unwrap_or_else(|| {
+    let target = activation_target(before_rows, after_rows, viewport, prompt).unwrap_or_else(|| {
         panic!(
             "premise: this keypress turn brings the story pane to {after_rows} rows — {} more than \
              the last frame showed — which must overflow the {viewport}-row viewport",
@@ -185,13 +185,13 @@ fn the_same_char_turn_does_not_page_when_it_fits() {
     s.submit_char(b'\r');
     s.submit_char(b'1');
 
-    let (before_rows, _) = measure(&s, &state, 80, 30);
+    let (before_rows, _, _) = measure(&s, &state, 80, 30);
     let turn = s.submit_char(b'\r');
     state.push_transcript(&turn.transcript);
-    let (after_rows, viewport) = measure(&s, &state, 80, 30);
+    let (after_rows, viewport, prompt) = measure(&s, &state, 80, 30);
     eprintln!("zork0izm credits at 80x30: before={before_rows} after={after_rows} viewport={viewport}");
     assert_eq!(
-        activation_target(before_rows, after_rows, viewport),
+        activation_target(before_rows, after_rows, viewport, prompt),
         None,
         "{} added rows fit in {viewport}: nothing was missed, so no [more]",
         after_rows - before_rows
@@ -218,10 +218,10 @@ fn boot_that_overflows_and_waits_on_a_keypress_arms_the_pager() {
     );
     // A small pane (a 40-column story column on a short terminal) — the opening
     // warning is 13 wrapped rows there.
-    let (total, viewport) = measure(&s, &state, 40, 12);
+    let (total, viewport, prompt) = measure(&s, &state, 40, 12);
     eprintln!("zork0izm boot at 40x12: total={total} viewport={viewport}");
     assert!(
-        activation_target(0, total, viewport).is_some(),
+        activation_target(0, total, viewport, prompt).is_some(),
         "the {total}-row opening screen overflows a {viewport}-row pane and must page"
     );
 }

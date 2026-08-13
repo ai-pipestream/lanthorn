@@ -627,7 +627,9 @@ fn zork0_raster_shows_its_opening_drop_cap() {
     );
     // Broken build: pinned to the newest rows, the drop-cap is cropped away.
     let unparked = drop_cap_pixels(&before, &drop_cap, sx, sy);
-    let target = app::pager::activation_target(0, m.total_rows, m.viewport_rows).expect(
+    // `prompt_rows = 0`: the raster path stamps its `[more]` over the tail of the
+    // last prose row instead of reserving one, so its viewport doesn't shrink.
+    let target = app::pager::activation_target(0, m.total_rows, m.viewport_rows, 0).expect(
         "Zork0's opening banner overflows its 20-row story box — the pager must engage, or the \
          drop-cap on the first row is scrolled away unread",
     );
