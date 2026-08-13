@@ -445,6 +445,67 @@ when the game asks for it back, which is the whole point of the trick scopa is
 pulling. `/dump-windows` shows both: the size the game set, and what of it is on
 screen.
 
+## Art grows with a hard filter and shrinks with a soft one
+
+Everything above lands the artwork on a 640×400 game screen. Getting *that* onto
+your terminal is one more scale, and which way it goes changes what the right
+answer is.
+
+Growing is easy and it is the case pixel art is famous for: nearest-neighbour,
+which replicates whole source pixels and invents no colours. Journey's canyon
+plate is 222×254 native pixels drawn from a palette of fourteen; magnified 1.48×
+it still holds exactly fourteen. Run the same plate through a smoothing filter
+and you get 1,636 — every one of them a blend nobody painted. That is why the
+scale caps out (`MAX_V6_UPSCALE`) rather than reaching for your pane's full
+device resolution, and why it has always been nearest.
+
+Shrinking is the same rule read backwards, and that is the trap. The instruction
+"take the source pixel nearest this destination pixel" *replicates* one on the way
+up and **drops** one on the way down. At a 60×24 pane Journey's plate is asked for
+168×198, and 54 of its 222 columns and 56 of its 254 rows are then never sampled
+at all. On a flat wall you would not notice. On a dithered one — a checkerboard of
+two inks standing in for a third — every surviving pixel is a coin toss about which
+ink you keep, and the shadow that should read as a smooth gradient breaks into
+noise. Which is precisely the report this section exists because of: distortion in
+the artwork *only when the artwork is smaller*, worst in the foreground rocks and
+the dithered shadow.
+
+So the filter is now chosen by direction, per axis, at every one of the places art
+is resampled: the raster composite, the hybrid ring's bands, and the stretched
+flanks. An axis that grows gets nearest; an axis that shrinks gets an area filter
+whose kernel is as wide as the ratio, so the dither *fuses* into the colour it was
+always standing in for. The two axes are decided separately because a band can grow
+on one while it shrinks on the other — that is exactly what an elongated frame
+column is — and a pass at 1:1 is a bit-exact identity, so the ordinary case still
+costs a single resize.
+
+Measured against the honest ideal (an area average where an axis shrinks,
+replication where it grows), on Journey's plate at the sizes the pane sweep
+actually produces:
+
+| filter | RMS on a shrink | what it does to a dithered gradient |
+|---|---:|---|
+| Nearest | 9.9–10.7 | drops rows and columns; the reported aliasing |
+| **Triangle** | **0.4–1.6** | fuses the dither — the area filter |
+| CatmullRom | 2.1–2.6 | over-sharpens; raises contrast *above* the ideal |
+| Lanczos3 | 3.8–4.1 | over-sharpens harder, and rings |
+| Gaussian | 2.4–3.5 | over-blurs |
+
+There is a second, quieter fix folded in. The raster composite's own pre-scale was
+clamped at 1.0, so a pane smaller than the composite made a full identity copy of
+it that bought nothing at all, and then left the actual shrink to the image
+protocol's *default* filter — nearest again. It now hands over the native canvas
+and names the filter, which is one resample from the best source there is instead
+of two from a worse one.
+
+`/dump-windows` reports the decision, since a band's cell rect never could: every
+band's log line ends with `resample 222x254->200x234 x:area y:area`. If art ever
+looks wrong at a particular size again, that line says which direction it moved and
+which filter it went through.
+
+Nothing changes at or above native size. A magnifying resample is still exact pixel
+replication, and the corpus tests pin it that way.
+
 ## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
