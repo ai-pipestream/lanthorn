@@ -9,6 +9,8 @@
 
 #![allow(dead_code, unused_imports)]
 
+#[path = "suites/v6_art_resample.rs"]
+mod v6_art_resample;
 #[path = "suites/v6_journey_amiga_frame.rs"]
 mod v6_journey_amiga_frame;
 #[path = "suites/v6_journey_boot_text.rs"]

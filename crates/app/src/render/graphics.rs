@@ -26,6 +26,94 @@ fn scaled_to_native(sp: u32, np: u32, sp_max: u32) -> u32 {
     v.clamp(0, np as i64 - 1) as u32
 }
 
+/// Resample `src` to `tw × th`, picking the filter per axis by the DIRECTION that
+/// axis moves in (SQ-0824).
+///
+/// Nearest is what keeps pixel art crisp when an axis GROWS: it replicates whole
+/// source pixels and invents no colours — a 1.48× magnification of Journey's canyon
+/// plate comes back with the same 14 colours it went in with, where Triangle returns
+/// 1636. It is exactly the wrong filter when an axis SHRINKS, because the same rule
+/// that replicates a pixel on the way up DROPS one on the way down: at the smallest
+/// pane swept, 54 of the plate's 222 columns and 56 of its 254 rows were never
+/// sampled at all, and a dithered foreground is precisely where "some pixels survive
+/// and their neighbours don't" reads as noise.
+///
+/// Measured against the per-axis ideal (an area average where the axis shrinks,
+/// replication where it grows), on that same plate: Nearest scores an RMS of
+/// 9.9–10.7 on a minification, Triangle 0.4–1.6. CatmullRom (2.1–2.6) and Lanczos3
+/// (3.8–4.1) over-sharpen dithered art — they push adjacent-pixel contrast ABOVE the
+/// ideal rather than fusing the dither — and Gaussian (2.4–3.5) over-blurs. Triangle,
+/// whose kernel `image` widens to the resampling ratio, is the area filter here.
+///
+/// The axes go in separate passes because a band can grow on one and shrink on the
+/// other — that is what [`GraphicsRender::draw_chrome_band_stretched`] exists for —
+/// while `image` takes one filter for the pair. A pass at a 1:1 ratio is a bit-exact
+/// identity under either filter, so the ordinary uniform case still costs one resize.
+fn resize_directional(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
+    use image::imageops::FilterType;
+    let pick = |t: u32, s: u32| if t < s { FilterType::Triangle } else { FilterType::Nearest };
+    let (sw, sh) = src.dimensions();
+    let (fx, fy) = (pick(tw, sw), pick(th, sh));
+    if fx == fy {
+        return image::imageops::resize(src, tw, th, fx);
+    }
+    let mid = image::imageops::resize(src, tw, sh, fx);
+    image::imageops::resize(&mid, tw, th, fy)
+}
+
+/// The image the v6 raster composite goes to the protocol as, and the fit mode that
+/// finishes it — the whole of [`GraphicsRender::encode_v6`]'s resampling decision,
+/// kept pure so it can be measured (SQ-0824).
+///
+/// `Resize::Fit` only ever SHRINKS, so a pane bigger than the composite needs the
+/// magnification done here: Nearest, capped at [`MAX_V6_UPSCALE`], after which the
+/// protocol's own (also Nearest) fit at most nudges the result onto the cell grid.
+///
+/// A pane SMALLER than the composite needs no pre-scale at all, and that is the fix.
+/// The scale used to be clamped at 1.0, which turned this branch into a full identity
+/// copy of the canvas that bought nothing — and then left the actual shrink to the
+/// protocol's DEFAULT filter, Nearest, which drops whole rows and columns exactly
+/// where Journey's dithered foreground keeps its detail. Naming the area filter makes
+/// it one resample, from the best source there is, in the right direction.
+fn v6_fit_source(canvas: &image::RgbaImage, box_w: u32, box_h: u32) -> (image::RgbaImage, Resize) {
+    let (cw, ch) = canvas.dimensions();
+    let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).min(MAX_V6_UPSCALE);
+    if scale < 1.0 {
+        return (canvas.clone(), Resize::Fit(Some(image::imageops::FilterType::Triangle)));
+    }
+    let (tw, th) = ((cw as f64 * scale) as u32, (ch as f64 * scale) as u32);
+    let scaled =
+        image::imageops::resize(canvas, tw.max(cw), th.max(ch), image::imageops::FilterType::Nearest);
+    (scaled, Resize::Fit(None))
+}
+
+/// How [`resize_directional`] will treat a resample, for the band log and
+/// `/dump-windows` (SQ-0824). Which filter a band went through is not inferable from
+/// its cell rect — the direction depends on the band's own native extent against its
+/// device box, and a band that magnifies sits beside one that shrinks — and "is this
+/// art being minified?" is the question a report of aliasing in fine detail is
+/// answered by.
+fn resample_note(sw: u32, sh: u32, tw: u32, th: u32) -> String {
+    let axis = |t: u32, s: u32| if t < s { "area" } else { "nearest" };
+    format!("resample {sw}x{sh}->{tw}x{th} x:{} y:{}", axis(tw, sw), axis(th, sh))
+}
+
+/// How many native pixels beyond a band's own footprint can alter its scaled pixels
+/// (SQ-0824). Nearest samples exactly one native pixel per scaled pixel, so a
+/// magnifying (or 1:1) letterbox has no halo at all; a minifying one goes through
+/// Triangle, whose kernel `image` widens to the resampling ratio, so a scaled pixel
+/// averages roughly `1/s` native pixels either side of its centre. The band freshness
+/// hash in [`GraphicsRender::draw_chrome_band`] covers the footprint plus this halo,
+/// or a change just outside a band's own native rect could alter its image without
+/// altering its key.
+fn scale_halo(s: f32) -> u32 {
+    if s >= 1.0 || !s.is_finite() || s <= 0.0 {
+        0
+    } else {
+        (1.0 / s).ceil() as u32 + 1
+    }
+}
+
 /// Render a graphics window directly as per-cell background colours when it is a
 /// solid fill or a thin strip — the shape games use for chrome: panel dividers,
 /// colour bars, backgrounds (e.g. Kerkerkruip draws its rules as 1×N / N×1 solid
@@ -766,13 +854,9 @@ impl GraphicsRender {
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
-        let (cw, ch) = (canvas.width(), canvas.height());
-        let scale =
-            ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).clamp(1.0, MAX_V6_UPSCALE);
-        let (tw, th) = ((cw as f64 * scale) as u32, (ch as f64 * scale) as u32);
-        let scaled = image::imageops::resize(canvas, tw.max(cw), th.max(ch), image::imageops::FilterType::Nearest);
-        let img = image::DynamicImage::ImageRgba8(scaled);
-        match picker.new_protocol(img, Size::new(area.width, area.height), Resize::Fit(None)) {
+        let (img, fit) = v6_fit_source(canvas, box_w, box_h);
+        let img = image::DynamicImage::ImageRgba8(img);
+        match picker.new_protocol(img, Size::new(area.width, area.height), fit) {
             Ok(proto) => Some(V6Ready {
                 gen,
                 area_w: area.width,
@@ -1104,7 +1188,7 @@ impl GraphicsRender {
         (sw, sh).hash(&mut h);
         let key = h.finish();
         if !matches!(&self.chrome_scaled, Some((k, _)) if *k == key) {
-            let scaled = image::imageops::resize(chrome_canvas, sw, sh, image::imageops::FilterType::Nearest);
+            let scaled = resize_directional(chrome_canvas, sw, sh);
             self.chrome_scaled = Some((key, scaled));
         }
         &self.chrome_scaled.as_ref().expect("just inserted").1
@@ -1164,10 +1248,15 @@ impl GraphicsRender {
         // the screen is answered by.
         let mut footprint = None;
         if sx_lo < sx_hi && sy_lo < sy_hi {
-            let nx0 = scaled_to_native(sx_lo as u32, nw, sw);
-            let nx1 = scaled_to_native(sx_hi as u32 - 1, nw, sw) + 1;
-            let ny0 = scaled_to_native(sy_lo as u32, nh, sh);
-            let ny1 = scaled_to_native(sy_hi as u32 - 1, nh, sh) + 1;
+            // A minifying letterbox resamples through an area filter whose kernel is
+            // as wide as the ratio, so a scaled pixel reads native pixels either side
+            // of the one Nearest would have picked. The footprint carries that halo
+            // (zero when magnifying, where Nearest is exact) — SQ-0824.
+            let halo = scale_halo(scale.s);
+            let nx0 = scaled_to_native(sx_lo as u32, nw, sw).saturating_sub(halo);
+            let nx1 = (scaled_to_native(sx_hi as u32 - 1, nw, sw) + 1 + halo).min(nw);
+            let ny0 = scaled_to_native(sy_lo as u32, nh, sh).saturating_sub(halo);
+            let ny1 = (scaled_to_native(sy_hi as u32 - 1, nh, sh) + 1 + halo).min(nh);
             footprint = Some((nx0, ny0, nx1 - nx0, ny1 - ny0));
             (nx0, nx1, ny0, ny1).hash(&mut h);
             for ny in ny0..ny1 {
@@ -1257,7 +1346,7 @@ impl GraphicsRender {
         match placed {
             Some((dest, sz, id)) => {
                 self.band_log.push(format!(
-                    "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{} at ({},{}) · native {}",
+                    "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{} at ({},{}) · native {} · {}",
                     band.width, band.height, band.x, band.y,
                     if fresh { "cache HIT" } else { "encoded" },
                     sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
@@ -1265,6 +1354,7 @@ impl GraphicsRender {
                         Some((x, y, w, h)) => format!("{w}x{h}@({x},{y})"),
                         None => "— (entirely in the letterbox margin)".to_string(),
                     },
+                    resample_note(nw, nh, sw, sh),
                 ));
                 self.remember_band_id(key, id);
                 self.note_op(GraphicsOp::Place {
@@ -1364,7 +1454,7 @@ impl GraphicsRender {
                     src.put_pixel(ox, oy, *chrome_canvas.get_pixel(nx, ny));
                 }
             }
-            let stretched = image::imageops::resize(&src, bw, bh, image::imageops::FilterType::Nearest);
+            let stretched = resize_directional(&src, bw, bh);
             let img = image::DynamicImage::ImageRgba8(stretched);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
@@ -1415,10 +1505,11 @@ impl GraphicsRender {
         match placed {
             Some((dest, sz, id)) => {
                 self.band_log.push(format!(
-                    "band {}x{}@({},{}) [{slot:?}, stretched]: {} · proto {}x{} · placed {}x{} at ({},{}) · native {cw_n}x{ch_n}@({cx},{cy})",
+                    "band {}x{}@({},{}) [{slot:?}, stretched]: {} · proto {}x{} · placed {}x{} at ({},{}) · native {cw_n}x{ch_n}@({cx},{cy}) · {}",
                     band.width, band.height, band.x, band.y,
                     if fresh { "cache HIT" } else { "encoded" },
                     sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+                    resample_note(cw_n, ch_n, bw, bh),
                 ));
                 self.remember_band_id(key, id);
                 self.note_op(GraphicsOp::Place {
@@ -1475,7 +1566,7 @@ impl GraphicsRender {
         let key = (slot as u8, band.x, band.y, band.width, band.height);
         let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
         if !fresh {
-            let scaled = image::imageops::resize(src, bw, bh, image::imageops::FilterType::Nearest);
+            let scaled = resize_directional(src, bw, bh);
             let img = image::DynamicImage::ImageRgba8(scaled);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
@@ -1519,12 +1610,13 @@ impl GraphicsRender {
             Some((dest, sz, id)) => {
                 let (blank, run, run_at) = blank_rows(src);
                 self.band_log.push(format!(
-                    "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · blank rows {}, longest run {} at {}",
+                    "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · blank rows {}, longest run {} at {} · {}",
                     band.width, band.height, band.x, band.y,
                     if fresh { "cache HIT" } else { "encoded" },
                     sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
                     src.width(), src.height(),
                     blank, run, run_at,
+                    resample_note(src.width(), src.height(), bw, bh),
                 ));
                 self.remember_band_id(key, id);
                 self.note_op(GraphicsOp::Place {
@@ -1917,6 +2009,282 @@ fn parse_placement_row(symbol: &str) -> Option<PlacementRow<'_>> {
     let extra_d = diacritics.next()?;
     let cells = u16::try_from(tail.chars().filter(|&c| c == '\u{10EEEE}').count()).ok()?;
     Some(PlacementRow { prefix, fg, row_d, extra_d, cells })
+}
+
+/// SQ-0824: the resampler picks its filter by direction, so a pane smaller than the
+/// artwork stops dropping the rows and columns a dithered picture keeps its detail in.
+///
+/// Judged against the per-axis single-resample ideal — an area average where an axis
+/// shrinks, replication where it grows — which is the thing "resample once, from the
+/// best source, with the right filter" is trying to be. Nearest cannot come close on a
+/// minification: it is off by an RMS of ~10 on a dithered plate where the directional
+/// resampler is off by ~1, and that gap IS the reported aliasing.
+///
+/// FALSIFY by restoring `image::imageops::resize(src, tw, th, FilterType::Nearest)` as
+/// the body of `resize_directional`: every minifying case fails on its RMS bound.
+#[cfg(test)]
+mod resample_tests {
+    use super::resize_directional;
+    use image::{Rgba, RgbaImage};
+
+    /// A plate in the shape of the artwork this quest is about: a four-ink palette laid
+    /// down as broad flat regions, joined by checkerboard-dithered transition bands
+    /// (the shadow gradients Journey's canyon is built from), with hard one-pixel edges
+    /// cutting across (the foreground rocks). Synthetic, so the case runs on a machine
+    /// without the gitignored story — the shipped floppy's real plate is measured by
+    /// `v6_art_resample.rs`, which skips when the fixture is absent.
+    fn dithered_plate(w: u32, h: u32) -> RgbaImage {
+        let mut img = RgbaImage::new(w, h);
+        let inks = [
+            Rgba([0x20, 0x18, 0x10, 0xff]),
+            Rgba([0xc8, 0x70, 0x28, 0xff]),
+            Rgba([0x48, 0x38, 0x60, 0xff]),
+            Rgba([0xf0, 0xe0, 0xa0, 0xff]),
+        ];
+        for y in 0..h {
+            for x in 0..w {
+                // Four horizontal regions; the middle third of each boundary dithers
+                // between the two inks either side of it rather than stepping.
+                let t = y as f64 * 4.0 / h.max(1) as f64;
+                let band = (t.floor() as usize).min(3);
+                let frac = t - t.floor();
+                let ink = if frac > 0.85 && band < 3 && (x + y) % 2 == 0 {
+                    inks[band + 1]
+                } else if x % 37 == 0 || y % 41 == 0 || (x / 8 + y / 8) % 11 == 0 {
+                    inks[(band + 2) % inks.len()]
+                } else {
+                    inks[band]
+                };
+                img.put_pixel(x, y, ink);
+            }
+        }
+        img
+    }
+
+    /// The area-weighted average — the correct answer for a shrinking axis.
+    fn area_average(src: &RgbaImage, tw: u32, th: u32) -> RgbaImage {
+        let (sw, sh) = src.dimensions();
+        let (fx, fy) = (sw as f64 / tw as f64, sh as f64 / th as f64);
+        let mut out = RgbaImage::new(tw, th);
+        for y in 0..th {
+            let (y0, y1) = (y as f64 * fy, (y as f64 + 1.0) * fy);
+            for x in 0..tw {
+                let (x0, x1) = (x as f64 * fx, (x as f64 + 1.0) * fx);
+                let (mut acc, mut wsum) = ([0f64; 4], 0f64);
+                for sy in (y0.floor() as u32)..(y1.ceil() as u32).min(sh) {
+                    let wy = (y1.min(sy as f64 + 1.0) - y0.max(sy as f64)).max(0.0);
+                    for sx in (x0.floor() as u32)..(x1.ceil() as u32).min(sw) {
+                        let w = wy * (x1.min(sx as f64 + 1.0) - x0.max(sx as f64)).max(0.0);
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        let p = src.get_pixel(sx, sy).0;
+                        (0..4).for_each(|c| acc[c] += p[c] as f64 * w);
+                        wsum += w;
+                    }
+                }
+                let mut px = [0u8; 4];
+                (0..4).for_each(|c| px[c] = (acc[c] / wsum).round().clamp(0.0, 255.0) as u8);
+                out.put_pixel(x, y, Rgba(px));
+            }
+        }
+        out
+    }
+
+    /// Nearest replication along x — the correct answer for a growing axis.
+    fn nearest_x(src: &RgbaImage, tw: u32) -> RgbaImage {
+        let (sw, sh) = src.dimensions();
+        let mut out = RgbaImage::new(tw, sh);
+        for y in 0..sh {
+            for x in 0..tw {
+                let sx = (((x as f64 + 0.5) * sw as f64 / tw as f64).floor() as u32).min(sw - 1);
+                out.put_pixel(x, y, *src.get_pixel(sx, y));
+            }
+        }
+        out
+    }
+
+    fn transpose(src: &RgbaImage) -> RgbaImage {
+        let (w, h) = src.dimensions();
+        let mut out = RgbaImage::new(h, w);
+        for y in 0..h {
+            for x in 0..w {
+                out.put_pixel(y, x, *src.get_pixel(x, y));
+            }
+        }
+        out
+    }
+
+    fn ideal(src: &RgbaImage, tw: u32, th: u32) -> RgbaImage {
+        let (sw, sh) = src.dimensions();
+        let mid = if tw < sw { area_average(src, tw, sh) } else { nearest_x(src, tw) };
+        let t = transpose(&mid);
+        let t = if th < sh { area_average(&t, th, tw) } else { nearest_x(&t, th) };
+        transpose(&t)
+    }
+
+    fn rms(a: &RgbaImage, b: &RgbaImage) -> f64 {
+        assert_eq!(a.dimensions(), b.dimensions());
+        let (mut s, mut n) = (0f64, 0f64);
+        for (pa, pb) in a.pixels().zip(b.pixels()) {
+            for c in 0..3 {
+                let d = pa.0[c] as f64 - pb.0[c] as f64;
+                s += d * d;
+                n += 1.0;
+            }
+        }
+        (s / n).sqrt()
+    }
+
+    /// Every direction regime the three art paths can put a resample in, at the ratios
+    /// the pane sweep actually produces on Journey's 222×254 canyon plate. The bound is
+    /// 2.0 everywhere; Nearest measures 9.9–10.7 on each of the shrinking cases.
+    #[test]
+    fn resampling_tracks_the_single_resample_ideal_in_every_direction() {
+        let src = dithered_plate(222, 254);
+        for (tw, th, regime) in [
+            (168u32, 198u32, "both axes shrink, hard"),
+            (200, 234, "both axes shrink"),
+            (212, 244, "both axes shrink, barely"),
+            (212, 256, "x shrinks while y grows"),
+            (217, 259, "x shrinks barely while y grows"),
+            (224, 270, "both axes grow, barely"),
+            (328, 378, "both axes grow"),
+            (222, 254, "no change at all"),
+        ] {
+            let got = resize_directional(&src, tw, th);
+            assert_eq!(got.dimensions(), (tw, th), "222x254 -> {tw}x{th} ({regime})");
+            let ideal = ideal(&src, tw, th);
+            let err = rms(&got, &ideal);
+            let nearest =
+                rms(&image::imageops::resize(&src, tw, th, image::imageops::FilterType::Nearest), &ideal);
+            if tw < 222 || th < 254 {
+                assert!(
+                    err < 4.0 && err * 2.0 < nearest,
+                    "222x254 -> {tw}x{th} ({regime}): RMS {err:.3} against the per-axis \
+                     single-resample ideal, where a plain Nearest resample scores {nearest:.3}. \
+                     A filter chosen by direction must stay under 4 AND beat Nearest by more \
+                     than 2x — Nearest on a shrinking axis IS the reported aliasing."
+                );
+            } else {
+                assert_eq!(
+                    err, 0.0,
+                    "222x254 -> {tw}x{th} ({regime}): a resample that only magnifies must BE \
+                     the ideal, pixel for pixel — that is the crisp look at native size and \
+                     above, and it is not negotiable"
+                );
+            }
+        }
+    }
+
+    /// The other half of the rule, and the one that must NOT regress: magnification is
+    /// still bit-exact pixel replication, so art at or above its native size keeps the
+    /// crisp look `MAX_V6_UPSCALE` and the corpus tests exist to protect. A smoothing
+    /// filter would show up here instantly — Triangle turns this plate's four inks into
+    /// hundreds of blends.
+    #[test]
+    fn magnification_invents_no_colours() {
+        let src = dithered_plate(222, 254);
+        let inks = |img: &RgbaImage| {
+            img.pixels().map(|p| p.0).collect::<std::collections::HashSet<_>>().len()
+        };
+        for (tw, th) in [(444u32, 508u32), (328, 378), (224, 270), (222, 508)] {
+            let got = resize_directional(&src, tw, th);
+            assert_eq!(
+                inks(&got),
+                inks(&src),
+                "222x254 -> {tw}x{th} magnifies, so every pixel must be a replicated \
+                 source pixel — a growing axis is exactly what Nearest is for"
+            );
+        }
+    }
+
+    /// The two-pass form leans on a 1:1 pass being a true identity, or a band that grows
+    /// on one axis and shrinks on the other would be resampled twice over on the axis
+    /// that did not move.
+    #[test]
+    fn an_unmoved_axis_is_untouched() {
+        let src = dithered_plate(64, 64);
+        assert_eq!(resize_directional(&src, 64, 64).as_raw(), src.as_raw(), "1:1 is identity");
+        let narrowed = resize_directional(&src, 48, 64);
+        let twice = resize_directional(&narrowed, 48, 64);
+        assert_eq!(twice.as_raw(), narrowed.as_raw(), "an unmoved axis re-resamples to itself");
+    }
+
+    /// A minifying letterbox reads native pixels either side of the one Nearest would
+    /// have picked, so the band freshness hash has to cover a halo; a magnifying one
+    /// does not, and must not pay for one.
+    #[test]
+    fn only_a_shrinking_letterbox_carries_a_halo() {
+        assert_eq!(super::scale_halo(2.0), 0, "magnifying: Nearest samples one pixel");
+        assert_eq!(super::scale_halo(1.0), 0, "1:1: Nearest samples one pixel");
+        assert_eq!(super::scale_halo(0.5), 3, "half size: a kernel two native pixels wide");
+        assert_eq!(super::scale_halo(0.0), 0, "degenerate scales are not a panic");
+    }
+
+    /// The RASTER composite's half of the same rule, measured through the protocol's own
+    /// `Resize` rather than around it — a pane smaller than the composite must land on
+    /// the area-averaged ideal, and one bigger must still be exact pixel replication.
+    ///
+    /// FALSIFY by restoring `.clamp(1.0, MAX_V6_UPSCALE)` and `Resize::Fit(None)` in
+    /// `v6_fit_source`: the shrinking cases fail on their RMS bound, because the pane
+    /// then gets an identity copy of the canvas followed by a Nearest shrink.
+    #[test]
+    fn the_raster_composite_takes_one_resample_in_the_right_direction() {
+        use ratatui_image::FontSize;
+        // Journey's composite: its 320x200 screen at the uniform `V6_ART_SCALE`.
+        let canvas = dithered_plate(640, 400);
+        let fs = FontSize::new(8, 18);
+        for (cols, rows) in [(60u16, 24u16), (70, 30), (76, 28), (100, 40), (160, 60)] {
+            let (box_w, box_h) = (cols as u32 * 8, rows as u32 * 18);
+            let (src, fit) = super::v6_fit_source(&canvas, box_w, box_h);
+            let dyn_src = image::DynamicImage::ImageRgba8(src.clone());
+            let cells = fit.size_for(&dyn_src, fs, ratatui::layout::Size::new(cols, rows));
+            let got = fit.resize(&dyn_src, fs, cells, None).to_rgba8();
+            // The protocol pads its output out to the cell grid with a TRANSPARENT
+            // background; the composite itself is opaque, so the drawn extent is
+            // exactly the opaque part. Measuring the padding would drown the signal.
+            let dw = (0..got.width()).filter(|&x| got.get_pixel(x, 0).0[3] != 0).count() as u32;
+            let dh = (0..got.height()).filter(|&y| got.get_pixel(0, y).0[3] != 0).count() as u32;
+            let drawn = image::imageops::crop_imm(&got, 0, 0, dw, dh).to_image();
+            let ideal = ideal(&canvas, dw, dh);
+            let err = rms(&drawn, &ideal);
+            assert!(dw > 0 && dh > 0, "raster pane {cols}x{rows}: nothing opaque was drawn");
+            if dw < canvas.width() {
+                let nearest = rms(
+                    &image::imageops::resize(&canvas, dw, dh, image::imageops::FilterType::Nearest),
+                    &ideal,
+                );
+                assert!(
+                    err < 6.0 && err * 2.0 < nearest,
+                    "raster pane {cols}x{rows}: the composite reached {dw}x{dh} with an RMS of \
+                     {err:.3} against the single-resample ideal, where the Nearest shrink it \
+                     used to get scores {nearest:.3}. A pane smaller than the composite must be \
+                     ONE area-filtered shrink, not an identity copy followed by a Nearest one."
+                );
+            } else {
+                assert_eq!(
+                    err, 0.0,
+                    "raster pane {cols}x{rows}: at or above native size the composite must be \
+                     replicated pixel for pixel"
+                );
+            }
+        }
+    }
+
+    /// The band log names the direction, because a cell rect never could.
+    #[test]
+    fn the_band_log_names_the_direction() {
+        assert_eq!(super::resample_note(222, 254, 200, 234), "resample 222x254->200x234 x:area y:area");
+        assert_eq!(
+            super::resample_note(222, 254, 212, 256),
+            "resample 222x254->212x256 x:area y:nearest"
+        );
+        assert_eq!(
+            super::resample_note(222, 254, 328, 378),
+            "resample 222x254->328x378 x:nearest y:nearest"
+        );
+    }
 }
 
 #[cfg(test)]
