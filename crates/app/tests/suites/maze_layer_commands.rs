@@ -1,4 +1,4 @@
-//! `/view-map`, `/mark-maze-layer`, and the tangle offer that points at them (SQ-0666).
+//! `/view-map` and `/mark-maze-layer` — flagging a maze is a manual act (SQ-0666).
 
 use mapper::direction::Direction;
 use mapper::layer::{LayerId, MapView, MAIN_LAYER};
@@ -180,29 +180,6 @@ fn panning_scrolls_the_table_when_the_matrix_is_showing() {
     assert_eq!(st.matrix_scroll.1, 0, "never above the first row");
     apply_action(Action::Pan(0, 99), &mut st, &mut m);
     assert_eq!(st.matrix_scroll.1, 11, "nor past the last of the twelve rooms");
-}
-
-// ── The tangle offer ──────────────────────────────────────────────────────────
-
-/// The offer is a nudge: one line, on the layer it is about, once. It must not fire on the
-/// ordinary cave layer of the very same map, which is explored to the same partial degree.
-#[test]
-fn the_tangle_offer_fires_once_on_the_maze_and_never_on_the_overworld() {
-    let g = advent();
-    let maze = mapper::matrix::tangles(&g.graph, MAZE);
-    assert_eq!(maze.len(), 1, "the maze qualifies");
-    assert!(mapper::matrix::tangles(&g.graph, MAIN_LAYER).is_empty(), "the overworld does not");
-
-    // Flagging the layer silences it for good — the offer has been taken.
-    let mut g2 = advent();
-    g2.graph.set_layer_maze(MAZE, true);
-    assert!(g2.graph.layer_is_maze(MAZE));
-
-    // And the session's own once-per-layer guard is a plain set, so a second turn on the same
-    // layer cannot re-offer.
-    let mut st = AppState::default();
-    assert!(st.tangle_suggested.insert(MAZE));
-    assert!(!st.tangle_suggested.insert(MAZE), "the second offer never happens");
 }
 
 // ── Trail ─────────────────────────────────────────────────────────────────────

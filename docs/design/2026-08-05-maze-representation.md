@@ -32,6 +32,13 @@ layer; `/mark-maze-layer` flags an existing layer in place (the user's
 hand-peeled "Maze" layer converts with one command). Detection is a
 convenience that flips a default; nothing else depends on it.
 
+> **Superseded (SQ-0826).** The asymmetry-based tangle detector described
+> above shipped and was removed: it needs enough passages walked *both*
+> ways before it can say anything, so it fired late, never, or on an
+> ordinary ring of rooms. Flagging a maze is now a purely manual act
+> (`/mark-maze-layer`). SQ-0439 revisits detection on evidence available at
+> *first contact* instead. Everything else on this page still stands.
+
 The matrix is also inherently screen-reader-friendly (a table linearises
 where a drawn map cannot) — relevant to the SQ-0609 accessibility thread.
 
