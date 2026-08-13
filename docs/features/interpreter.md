@@ -37,8 +37,10 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   and audio. A resources-only Blorb sitting *beside* the story counts too.
 - **ZIP archives** — the first `.z3`/`.z5`/`.z8` entry is unwrapped in memory.
 - **Amiga `.adf` disk images** — the original release floppy, played as it shipped.
+- **Macintosh disk images** — a DiskCopy 4.2 `.image` (or a bare HFS volume), the
+  Mac release floppy, likewise played as it shipped.
 
-That last one is worth its own paragraph. Infocom's Amiga releases came on 880 KB
+Those last two are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
 titles circulate in their native form. Hand babelmap one — `babelmap "Zork
 Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem (both OFS and FFS),
@@ -61,10 +63,28 @@ pairing as a Blorb is. Loose archives are a different matter — babelmap will u
 one, but only if you name it, and it never guesses from a filename. See
 [Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws).
 
+The Macintosh floppy is the same story one filesystem over, and a good deal more
+work: a DiskCopy 4.2 image is an 84-byte header wrapped around an HFS volume,
+with 12 bytes of sector tag per block trailing behind that are *not* part of the
+filesystem. Inside is a B\*-tree catalog — the most structure any medium here
+asks for — and babelmap walks it, extents overflow file and all. macOS is no help
+whatsoever: `hdiutil attach` has refused HFS-standard images since 10.14, so
+every layer of that chain is hand-rolled, with the same zero dependencies the
+rest of the container reading takes.
+
+And the same content-first rule decides what to run, because the `.image`
+extension means nothing in particular and the Mac disk carries a story, an
+application, the Finder's desktop database and **two** picture archives — one for
+the colour screen and one for the black-and-white one. babelmap draws the colour
+archive; the monochrome one packs its directory differently and is not yet
+decoded.
+
 Disk images are first-class in the library too: point babelmap at a directory of
 them and the picker's TYPE column names the container alongside the format —
-`Z6 (ADF)` — from the same content-based identification, so a floppy is never
-listed as a bare story file. See [Story picker](interface.md#story-picker).
+`Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh one — from the same
+content-based identification, so a floppy is never listed as a bare story file,
+and one machine's media is never labelled as another's. See
+[Story picker](interface.md#story-picker).
 
 ### A floppy is a different release
 
@@ -88,6 +108,12 @@ What each medium carries, measured across the collection:
 | Zork II | release 48, serial 840904 | release 48, serial 840904 |
 | Zork III | release 17, serial 840727 | release 17, serial 840727 |
 | Zork: The Undiscovered Underground | release 16, serial 970828 | — |
+
+Zork Zero has a third medium, and it is the outlier of the whole collection: the
+Macintosh floppy carries **release 296, serial 881019** — October 1988, where the
+Amiga disk is March 1989 and the bare story file July 1989. Ninety-seven releases
+separate the Mac build from the PC one. Treat a finding made on it as describing
+that build and no other.
 
 Every graphical title ships a *different* build on its floppy; the v3/v5 ones
 ship the same build on both media. A resource `.blb` beside a story is never a
@@ -222,6 +248,15 @@ story.
   reported as the interpreter's defaults, and the palette Infocom's own Amiga
   interpreter loaded — a slightly darker green and blue than the standard's, a
   warmer yellow, and its own three Version 6 greys.
+
+  **The Macintosh has no profile of its own yet**, and that is deliberate rather
+  than an oversight. A Mac release floppy mounts, plays, and draws its own
+  artwork at the right size — the archive states the picture space it was drawn
+  for, so nothing has to be inferred — but what a Mac's palette and default page
+  looked like is not something the media in hand can settle, and a bundle guessed
+  from memory is exactly the incoherent half-machine profiles exist to prevent.
+  So a Macintosh disk gets the IBM PC bundle, the historical default, until a
+  fixture proves otherwise.
 
   The artwork can select the machine too, and it sits between the two. If you
   name a picture archive for a game — the `pictures` key described under

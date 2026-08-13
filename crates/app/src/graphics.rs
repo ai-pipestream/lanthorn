@@ -286,15 +286,26 @@ impl PictSource {
 
     /// Resolve the picture source for `story_path` (SQ-0734's tiers 1 and 2).
     ///
-    /// An Amiga `.adf` disk image supplies its own art: the story and the
-    /// picture archive came off the same floppy, so the pairing is guaranteed
-    /// by the medium and needs no configuration. Everything else — including an
-    /// `.adf` that carries no readable archive — resolves the story's resource
-    /// Blorb exactly as before.
+    /// A release disk image supplies its own art: the story and the picture
+    /// archive came off the same floppy, so the pairing is guaranteed by the
+    /// medium and needs no configuration. That holds for an Amiga `.adf`
+    /// (SQ-0719) and for a Macintosh HFS volume (SQ-0837) alike. Everything else
+    /// — including a disk image that carries no readable archive — resolves the
+    /// story's resource Blorb exactly as before.
+    ///
+    /// The Macintosh shipped **two** archives per game, one per screen it sold:
+    /// a colour one and a monochrome one. `Hfs::pictures` returns the colour
+    /// archive, which is an ordinary big-endian Infocom container this decoder
+    /// already reads; the monochrome one declares 12-byte directory records and
+    /// is not a container it knows, so it never gets here.
     pub fn resolve(story_path: &std::path::Path) -> PictSource {
         if let Ok(raw) = std::fs::read(story_path) {
             if blorb::adf::Adf::looks_like_adf(&raw) {
                 if let Some(pics) = blorb::adf::Adf::mount(raw).ok().and_then(|a| a.pictures()) {
+                    return PictSource::from_native(pics.1);
+                }
+            } else if blorb::hfs::Hfs::looks_like_hfs(&raw) {
+                if let Some(pics) = blorb::hfs::Hfs::mount(raw).ok().and_then(|h| h.pictures()) {
                     return PictSource::from_native(pics.1);
                 }
             }
@@ -425,6 +436,27 @@ impl PictSource {
     /// chunks of these games say.
     pub fn std_window(&self) -> Option<(u16, u16)> {
         self.blorb.as_ref().and_then(|b| b.std_window())
+    }
+
+    /// The standard window a NATIVE archive implies — the picture space every
+    /// Infocom archive draws into, whichever machine wrote it (SQ-0837).
+    ///
+    /// This is the same constant, for the same reason,
+    /// [`PictureOverride::std_window`] hands back when a user names an archive
+    /// outright: mounting an archive off the disk it shipped on must not produce
+    /// different geometry from pointing at that very file by hand.
+    ///
+    /// It is deliberately the LAST link in `startup.rs`'s chain, after the
+    /// machine, so no medium that already had an answer moves: the Amiga profile
+    /// still answers for a `.adf` (with the same numbers, by the same
+    /// reasoning), and a Blorb-less story that is not a disk image still has no
+    /// native archive and so still draws its art 1:1 (SQ-0715/SQ-0718). What it
+    /// covers is the medium whose machine has no profile — a Macintosh disk —
+    /// where without it the art would arrive at its own 320×200 size on a screen
+    /// the game is told is 640×400, which is precisely the 1× symptom SQ-0736
+    /// was reported for.
+    pub fn native_std_window(&self) -> Option<(u16, u16)> {
+        self.native.as_ref().map(|_| INFOCOM_V6_STD_WINDOW)
     }
 
     /// The per-axis factor this source's art is scaled by on its way into the

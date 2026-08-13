@@ -79,7 +79,7 @@ fn journey_floppy_at_menu() -> Option<GameSession> {
             return None;
         }
     };
-    assert!(mounted, "{FIXTURE}: the mount must report a floppy, not a bare story file");
+    assert!(mounted.is_some(), "{FIXTURE}: the mount must report a floppy, not a bare story file");
     let bytes = loaded.bytes().to_vec();
     assert_eq!(
         u16::from_be_bytes([bytes[2], bytes[3]]),

@@ -119,7 +119,12 @@ fn boot(file: &str, honor_game_colours: bool) -> Option<GameSession> {
         ctx(file)
     );
     assert_eq!(&bytes[0x12..0x18], serial.as_bytes(), "{}: serial", ctx(file));
-    assert_eq!(mounted, file.ends_with(".adf"), "{}: the mount reports the medium", ctx(file));
+    assert_eq!(
+        mounted == Some(app::hints::DiskImage::Adf),
+        file.ends_with(".adf"),
+        "{}: the mount reports the medium",
+        ctx(file)
+    );
 
     let profile = InterpreterProfile::resolve(&story_path, None, None);
     assert_eq!(

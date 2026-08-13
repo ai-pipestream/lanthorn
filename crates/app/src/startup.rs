@@ -545,10 +545,17 @@ pub(crate) fn boot_story(
                 cfg.honor_game_colours = false;
                 cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, false);
             }
+            // SQ-0837: and last, the archive the MEDIUM supplied. A Macintosh
+            // disk carries its own artwork exactly as an Amiga floppy does, but
+            // the Macintosh has no profile to answer for it — so the archive
+            // answers for itself, with the same standard window a named archive
+            // already implies. Last in the chain, so no medium that already had
+            // an answer moves.
             let v6_screen_px = picts
                 .std_window()
                 .or(named_art_std_window)
-                .or_else(|| cfg.interpreter_profile.std_window());
+                .or_else(|| cfg.interpreter_profile.std_window())
+                .or_else(|| picts.native_std_window());
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a
             // Blorb's does; an EGA/CGA one is 640 wide with half-width pixels and
@@ -891,7 +898,8 @@ pub(crate) fn boot_story(
     state.title =
         app::session::resolve_title(None, meta_title.as_deref(), banner_title.as_deref(), &story_path);
     let story_filename = story_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    state.pane_title = app::session::format_pane_title(&state.title, story_filename, disk_image);
+    state.pane_title =
+        app::session::format_pane_title(&state.title, story_filename, disk_image.is_some());
     state.ifid = ifid.clone();
     state.game_dir = game_dir.clone();
     // Restore the per-game map-panel visibility (SQ-0304): if the user last hid

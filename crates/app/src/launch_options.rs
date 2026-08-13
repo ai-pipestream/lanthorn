@@ -434,7 +434,7 @@ pub const INTERPRETER_CHOICES: [Option<u8>; 12] =
 pub fn derived_interpreter(
     explicit: Option<u8>,
     art: Option<&ArtCandidate>,
-    disk_image: bool,
+    disk_image: Option<crate::hints::DiskImage>,
     z_version: Option<u8>,
 ) -> Option<(u8, InterpreterSource)> {
     if let Some(n) = explicit {
@@ -447,7 +447,12 @@ pub fn derived_interpreter(
         let n = c.profile().interpreter_number().unwrap_or(if version == 6 { 6 } else { 1 });
         return Some((n, InterpreterSource::Artwork));
     }
-    if disk_image {
+    // Only the Amiga has a profile of its own, so only Amiga media move the
+    // number. A Macintosh disk falls through to the default rule, which is
+    // exactly what `InterpreterProfile::resolve` does at boot — the dialog must
+    // report the machine that will actually run, not the one the medium came
+    // from (SQ-0837).
+    if disk_image == Some(crate::hints::DiskImage::Adf) {
         return Some((crate::interpreter::AMIGA_INTERPRETER_NUMBER, InterpreterSource::DiskImage));
     }
     Some((if version == 6 { 6 } else { 1 }, InterpreterSource::Default))
@@ -490,8 +495,8 @@ pub struct LaunchOptionsState {
     /// The story's Z-machine version, for the default-rule half of the derived
     /// interpreter number. `None` for a non-Z story.
     pub z_version: Option<u8>,
-    /// The story was mounted out of an Amiga release floppy.
-    pub disk_image: bool,
+    /// The release disk image the story was mounted out of, if any.
+    pub disk_image: Option<crate::hints::DiskImage>,
 }
 
 /// What a key did to the dialog.
@@ -517,7 +522,7 @@ impl LaunchOptionsState {
         inherited_pictures: Option<&str>,
         inherited_interpreter: Option<u8>,
         z_version: Option<u8>,
-        disk_image: bool,
+        disk_image: Option<crate::hints::DiskImage>,
     ) -> LaunchOptionsState {
         let candidates = discover_art_candidates(story_path);
         // A sidecar naming an archive that is not in the list (an absolute path,
@@ -832,7 +837,7 @@ mod tests {
         let dir = tmp("untouched");
         let story = dir.join("story.z6");
         std::fs::write(&story, b"x").unwrap();
-        let st = LaunchOptionsState::new("Story", &story, None, None, Some(6), false);
+        let st = LaunchOptionsState::new("Story", &story, None, None, Some(6), None);
         assert_eq!(st.overrides(), LaunchOverrides::default());
         assert!(st.overrides().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -847,7 +852,7 @@ mod tests {
         let story = dir.join("story.z6");
         std::fs::write(&story, b"x").unwrap();
         let game_dir = dir.join("game");
-        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(6), false);
+        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(6), None);
 
         // Nothing changed → nothing written; the sidecar is not even created.
         st.persist_to(&game_dir).unwrap();
@@ -867,19 +872,19 @@ mod tests {
     fn the_derived_interpreter_reports_its_provenance() {
         // Explicit beats everything.
         assert_eq!(
-            derived_interpreter(Some(3), None, true, Some(6)),
+            derived_interpreter(Some(3), None, Some(crate::hints::DiskImage::Adf), Some(6)),
             Some((3, InterpreterSource::Explicit))
         );
         // A story with no Z version (Glulx/Scott) has no header 0x1E to report.
-        assert_eq!(derived_interpreter(None, None, false, None), None);
+        assert_eq!(derived_interpreter(None, None, None, None), None);
         // The medium.
         assert_eq!(
-            derived_interpreter(None, None, true, Some(6)),
+            derived_interpreter(None, None, Some(crate::hints::DiskImage::Adf), Some(6)),
             Some((4, InterpreterSource::DiskImage))
         );
         // Frotz's rule, both halves.
-        assert_eq!(derived_interpreter(None, None, false, Some(6)), Some((6, InterpreterSource::Default)));
-        assert_eq!(derived_interpreter(None, None, false, Some(5)), Some((1, InterpreterSource::Default)));
+        assert_eq!(derived_interpreter(None, None, None, Some(6)), Some((6, InterpreterSource::Default)));
+        assert_eq!(derived_interpreter(None, None, None, Some(5)), Some((1, InterpreterSource::Default)));
     }
 
     #[test]
@@ -898,16 +903,16 @@ mod tests {
         };
         let pc = ArtCandidate { flavour: Flavour::Pc, rendition: "MCGA", ..amiga.clone() };
         assert_eq!(
-            derived_interpreter(None, Some(&amiga), false, Some(6)),
+            derived_interpreter(None, Some(&amiga), None, Some(6)),
             Some((4, InterpreterSource::Artwork))
         );
         assert_eq!(
-            derived_interpreter(None, Some(&pc), false, Some(6)),
+            derived_interpreter(None, Some(&pc), None, Some(6)),
             Some((6, InterpreterSource::Artwork))
         );
         // …and an explicit number still wins over the art.
         assert_eq!(
-            derived_interpreter(Some(6), Some(&amiga), false, Some(6)),
+            derived_interpreter(Some(6), Some(&amiga), None, Some(6)),
             Some((6, InterpreterSource::Explicit))
         );
     }
@@ -918,7 +923,7 @@ mod tests {
         let dir = tmp("keys");
         let story = dir.join("story.z6");
         std::fs::write(&story, b"x").unwrap();
-        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(6), false);
+        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(6), None);
         let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
 
         // No candidates here, so rows are: Art(0), Interpreter, Persist.
@@ -969,7 +974,7 @@ mod tests {
         if !z0.is_file() {
             return;
         }
-        let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), false);
+        let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), None);
         let Some(idx) = st.candidates.iter().position(|c| c.filename.eq_ignore_ascii_case("zork0.mg1")) else {
             return;
         };
@@ -979,7 +984,7 @@ mod tests {
         assert_eq!(ov.interpreter_number, None, "an untouched interpreter row overrides nothing");
         // Seeding from that same sidecar value makes it the baseline, so the
         // dialog reopened on it overrides nothing at all.
-        let st2 = LaunchOptionsState::new("Zork Zero", &z0, Some("zork0.mg1"), None, Some(6), false);
+        let st2 = LaunchOptionsState::new("Zork Zero", &z0, Some("zork0.mg1"), None, Some(6), None);
         assert_eq!(st2.art, idx + 1);
         assert!(st2.overrides().is_empty());
     }

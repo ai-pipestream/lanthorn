@@ -410,10 +410,12 @@ hint badge is uppercase (`H`) when a hint file is present locally and lowercase
 the type label rather than a separate badge.)
 
 The container is part of that label, so a story you're playing off its original
-Amiga release floppy reads `Z6 (ADF)` and is never mistaken for a loose story
-file. The disk says so, not the filename: the suffix comes from the mount that
-found the story inside the image, so a `.adf` named anything at all is labelled
-one, and a plain story file that happens to be called `.adf` is not.
+release floppy reads `Z6 (ADF)` off an Amiga disk or `Z6 (HFS)` off a Macintosh
+one, and is never mistaken for a loose story file. The disk says so, not the
+filename: the suffix comes from the mount that found the story inside the image,
+so a floppy named anything at all is labelled for the filesystem it actually
+carries, and a plain story file that happens to be called `.adf` is not labelled
+at all.
 
 When you launch from a directory this way, `/quit-to-library` drops the current
 story and returns you to the picker to choose another (honouring the usual

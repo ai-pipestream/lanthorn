@@ -12,6 +12,8 @@
 mod adf_disk_image;
 #[path = "suites/glulx_banner_rooms.rs"]
 mod glulx_banner_rooms;
+#[path = "suites/hfs_disk_image.rs"]
+mod hfs_disk_image;
 #[path = "suites/glulx_boot_room_id.rs"]
 mod glulx_boot_room_id;
 #[path = "suites/glulx_game_colours.rs"]
