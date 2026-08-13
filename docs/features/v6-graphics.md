@@ -530,6 +530,50 @@ directions round-trip exactly, so a fully opaque plate — Journey's canyon, eve
 number in the table above — is bit-identical either way, and a magnifying pass skips
 the conversion entirely.
 
+### One resample, and the 2× that is not a second one
+
+Journey's canyon plate lives in unit space as 222×254 pixels, and its *artwork* is
+111×127: the plate is that art replicated exactly 2×, the uniform `V6_ART_SCALE`
+every v6 picture reaches the 640×400 unit screen through. Which naturally raises
+the question — is the picture being scaled twice, once to double it and again to
+fit the pane, with the second scale sampling the first one's guesses?
+
+No. It is two *calls*, and that is not the same thing as two samplings. Doubling at
+an integer ratio is pure replication: output pixel `i` takes source pixel `i/2`,
+rounded down, and nothing is invented. A nearest resample of *that* takes
+`floor((o+0.5)·2N/T)` of it, and `floor(floor(2u)/2) = floor(u)` for every `u` — so
+the pair **is** the single resample `floor((o+0.5)·N/T)` straight from the artwork's
+own resolution. Not approximately; bit for bit, which is what
+`the_art_scale_predouble_composes_away_under_nearest` asserts at the ratios the pane
+sweep produces. Wherever a band magnifies — every pane from about 80 columns up —
+the pixels on screen are already one resample from the native artwork, and swapping
+the source for the artwork itself cannot change a single one of them.
+
+What it *would* change is the direction decision above, and only in one narrow band:
+a target between the artwork's size and its double magnifies from the artwork while
+it minifies from the unit-space plate, so the same target picks nearest one way and
+the area filter the other. Measured on the real plate against the artwork's own area
+average, at the sizes the small panes ask for:
+
+| target | from the unit plate (shipped) | from the artwork |
+|---|---:|---:|
+| 160×180 | **RMS 1.96** | RMS 11.26 |
+| 168×198 | **RMS 1.64** | RMS 10.68 |
+| 200×234 | **RMS 0.80** | RMS 9.93 |
+
+Those right-hand numbers are the aliasing this whole section is about, back again:
+sampling the artwork means *magnifying* it 1.4×, and nearest at 1.4× keeps some art
+pixels twice and others once. So the pipeline stays as it is. The unit-space plate
+is the better source precisely because it is bigger, and the pre-double costs
+nothing to compose through.
+
+What the non-integer magnification *does* cost is uniformity. At a 166×44 terminal
+one art pixel is 3.69 device pixels wide, so the emitted image draws it as 3 pixels
+sometimes and 4 others (measured across the plate: 7,757 runs of 4 against 3,372 of
+3). Snapping that factor to a whole number would make every art pixel exactly 4 wide
+— but the factor is the uniform letterbox scale the story viewport is mapped through
+as well, so it cannot be moved without moving the text with it. That trade is open.
+
 ## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
