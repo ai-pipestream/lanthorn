@@ -49,16 +49,78 @@ fn scaled_to_native(sp: u32, np: u32, sp_max: u32) -> u32 {
 /// other — that is what [`GraphicsRender::draw_chrome_band_stretched`] exists for —
 /// while `image` takes one filter for the pair. A pass at a 1:1 ratio is a bit-exact
 /// identity under either filter, so the ordinary uniform case still costs one resize.
+///
+/// A BLENDING pass runs on ASSOCIATED (premultiplied) colour, and that is not a
+/// refinement (SQ-0827). `image` filters the four channels independently, so where an
+/// opaque pixel meets a transparent one it averages the transparent pixel's RGB —
+/// which is `(0,0,0)`, a colour nothing on screen ever had — into its neighbour, and
+/// drops the alpha to match. Composited, the pair reads as a dark fringe one pixel
+/// wide: a Zork Zero flank whose art ends in the story page abutting clear canvas
+/// emitted `(38,38,38,57)` at the seam, which over that page draws
+/// `38·57/255 + 173·198/255 = 142` against the page's own 173 — the reported line down
+/// both edges of the story pane. Nearest never blended, so the defect arrived with the
+/// area filter above and not with anything that touched it.
+///
+/// Associating first makes the average one of light-with-nothing rather than
+/// light-with-black, and the seam comes back out as page. It costs nothing where it is
+/// not needed: at `a = 255` both directions round-trip exactly (`(255v+127)/255 = v`),
+/// so a fully opaque plate — Journey's canyon, every RMS figure above — is bit-identical
+/// either way, and a magnifying pass skips the conversion entirely.
 fn resize_directional(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
     use image::imageops::FilterType;
     let pick = |t: u32, s: u32| if t < s { FilterType::Triangle } else { FilterType::Nearest };
     let (sw, sh) = src.dimensions();
     let (fx, fy) = (pick(tw, sw), pick(th, sh));
-    if fx == fy {
-        return image::imageops::resize(src, tw, th, fx);
+    // Only a filter that AVERAGES neighbours can smear a transparent pixel's colour
+    // into an opaque one; Nearest picks one source pixel whole.
+    let blends = fx == FilterType::Triangle || fy == FilterType::Triangle;
+    let associated;
+    let src = if blends {
+        associated = associate_alpha(src);
+        &associated
+    } else {
+        src
+    };
+    let mut out = if fx == fy {
+        image::imageops::resize(src, tw, th, fx)
+    } else {
+        let mid = image::imageops::resize(src, tw, sh, fx);
+        image::imageops::resize(&mid, tw, th, fy)
+    };
+    if blends {
+        unassociate_alpha(&mut out);
     }
-    let mid = image::imageops::resize(src, tw, sh, fx);
-    image::imageops::resize(&mid, tw, th, fy)
+    out
+}
+
+/// Straight (unassociated) RGBA → premultiplied, for [`resize_directional`].
+fn associate_alpha(src: &image::RgbaImage) -> image::RgbaImage {
+    let mut out = src.clone();
+    for p in out.pixels_mut() {
+        let a = u32::from(p.0[3]);
+        for c in 0..3 {
+            p.0[c] = ((u32::from(p.0[c]) * a + 127) / 255) as u8;
+        }
+    }
+    out
+}
+
+/// Premultiplied RGBA → straight, undoing [`associate_alpha`] after the resample.
+///
+/// Triangle's weights are non-negative and sum to one, so no channel can come back
+/// above its own alpha and the division cannot overflow; the `min` is belt and braces
+/// against a future filter with negative lobes.
+fn unassociate_alpha(img: &mut image::RgbaImage) {
+    for p in img.pixels_mut() {
+        let a = u32::from(p.0[3]);
+        if a == 0 {
+            p.0 = [0, 0, 0, 0];
+            continue;
+        }
+        for c in 0..3 {
+            p.0[c] = ((u32::from(p.0[c]) * 255 + a / 2) / a).min(255) as u8;
+        }
+    }
 }
 
 /// The image the v6 raster composite goes to the protocol as, and the fit mode that
@@ -2270,6 +2332,121 @@ mod resample_tests {
                 );
             }
         }
+    }
+
+    // ── SQ-0827: the seam where art ends and the canvas is clear ────────────────
+
+    /// A flank in the shape Zork Zero's is: a column of art, then the story page it
+    /// abuts, then CLEAR canvas past the crop's inner edge. The alpha step is the whole
+    /// specimen — the art either side of it is flat, so anything dark that comes out of
+    /// the resample was invented by the filter.
+    fn flank_with_a_clear_edge(w: u32, h: u32, art_to: u32, page_to: u32) -> RgbaImage {
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let p = if x < art_to {
+                    Rgba([0x44, 0x00, 0x00, 0xff]) // the pillar
+                } else if x < page_to {
+                    Rgba([0xad, 0xad, 0xad, 0xff]) // the game's page, opaque
+                } else {
+                    Rgba([0, 0, 0, 0]) // clear: the cell background shows through
+                };
+                img.put_pixel(x, y, p);
+            }
+        }
+        img
+    }
+
+    /// What a terminal puts on screen for one emitted pixel: straight-alpha compositing
+    /// over the cell background behind the band.
+    fn over(px: Rgba<u8>, bg: [u8; 3]) -> [u8; 3] {
+        let a = f64::from(px.0[3]) / 255.0;
+        let mut out = [0u8; 3];
+        for c in 0..3 {
+            out[c] = (f64::from(px.0[c]) * a + f64::from(bg[c]) * (1.0 - a)).round() as u8;
+        }
+        out
+    }
+
+    /// SQ-0827, the reported symptom: a one-pixel darker column down the story pane's
+    /// edge. Where the flank's opaque page meets clear canvas, no emitted pixel may
+    /// composite darker than the page it is part of — the band is drawn OVER a cell
+    /// flooded with that same page, so a correct seam is invisible.
+    ///
+    /// FALSIFY by dropping the `associate_alpha`/`unassociate_alpha` pair from
+    /// `resize_directional`: the seam pixel comes back as `(38,38,38,57)`, which over
+    /// the page draws 142 against 173, and this fails naming that column.
+    #[test]
+    fn a_shrinking_band_leaves_no_dark_fringe_where_its_art_meets_clear_canvas() {
+        const PAGE: [u8; 3] = [0xad, 0xad, 0xad];
+        // 95 native columns into an 84px band is Zork Zero's own ratio on the Amiga
+        // floppy at an 83-column terminal; the rest sweep the regime either side of it.
+        for (nw, bw) in [(95u32, 84u32), (94, 70), (95, 91), (128, 64), (100, 99)] {
+            let src = flank_with_a_clear_edge(nw, 40, nw * 3 / 4, nw - 7);
+            let got = resize_directional(&src, bw, 34);
+            let y = got.height() / 2;
+            for x in 0..got.width() {
+                let px = *got.get_pixel(x, y);
+                let seen = over(px, PAGE);
+                assert!(
+                    // Only a PARTLY TRANSPARENT pixel is judged: an opaque one that
+                    // reads darker is the pillar itself, which is meant to be dark.
+                    // The one level of slack is the 8-bit premultiply round trip — the
+                    // page's own 173 comes back as 172 — against the 31 levels the
+                    // reported line was worth.
+                    px.0[3] == 0xff || (0..3).all(|c| seen[c] + 1 >= PAGE[c]),
+                    "{nw}->{bw}: emitted pixel x={x} is {:?}, which over the page behind the \
+                     band draws {seen:?} against the page's own {PAGE:?} — a partly \
+                     transparent pixel whose colour was averaged with the (0,0,0) of clear \
+                     canvas IS the one-pixel dark line down the story pane's edge",
+                    px.0
+                );
+            }
+        }
+    }
+
+    /// …and the same specimen at the same ratios under a GROWING axis, which takes the
+    /// Nearest arm and must not pay for the conversion at all: every output pixel is a
+    /// source pixel, alpha included.
+    #[test]
+    fn a_growing_band_still_replicates_whole_pixels_across_an_alpha_edge() {
+        let src = flank_with_a_clear_edge(84, 20, 60, 77);
+        let got = resize_directional(&src, 95, 30);
+        let inks: std::collections::HashSet<_> = got.pixels().map(|p| p.0).collect();
+        assert_eq!(
+            inks,
+            src.pixels().map(|p| p.0).collect::<std::collections::HashSet<_>>(),
+            "a magnifying pass invents no colour, so an alpha edge stays a step"
+        );
+    }
+
+    /// The reason the conversion is free where it is not needed, and the reason every
+    /// RMS figure in this module is untouched by it: on FULLY OPAQUE art it is the
+    /// identity, bit for bit. Journey's canyon plate is exactly that.
+    #[test]
+    fn associating_a_fully_opaque_plate_is_the_identity() {
+        let src = dithered_plate(222, 254);
+        assert!(src.pixels().all(|p| p.0[3] == 0xff), "the specimen must be opaque to prove this");
+        assert_eq!(super::associate_alpha(&src).as_raw(), src.as_raw(), "premultiply by 1");
+        let mut back = src.clone();
+        super::unassociate_alpha(&mut back);
+        assert_eq!(back.as_raw(), src.as_raw(), "and divide by 1");
+        // Both axes shrink: the single-pass Triangle arm.
+        for (tw, th) in [(200u32, 234u32), (168, 198)] {
+            assert_eq!(
+                resize_directional(&src, tw, th).as_raw(),
+                image::imageops::resize(&src, tw, th, image::imageops::FilterType::Triangle)
+                    .as_raw(),
+                "222x254 -> {tw}x{th}: opaque art resamples exactly as it did before SQ-0827"
+            );
+        }
+        // …and the mixed arm, whose two passes are equally untouched.
+        let mid = image::imageops::resize(&src, 212, 254, image::imageops::FilterType::Triangle);
+        assert_eq!(
+            resize_directional(&src, 212, 256).as_raw(),
+            image::imageops::resize(&mid, 212, 256, image::imageops::FilterType::Nearest).as_raw(),
+            "222x254 -> 212x256 shrinks on x and grows on y, and is unchanged too"
+        );
     }
 
     /// The band log names the direction, because a cell rect never could.

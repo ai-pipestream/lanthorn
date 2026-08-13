@@ -506,6 +506,30 @@ which filter it went through.
 Nothing changes at or above native size. A magnifying resample is still exact pixel
 replication, and the corpus tests pin it that way.
 
+### The seam that came with it
+
+An area filter averages neighbours, and it will happily average a pixel that is not
+there. babelmap's canvases are RGBA, and a *transparent* pixel carries the colour
+`(0,0,0)` behind its zero alpha — a colour no game ever drew. Filter the four
+channels independently and every place opaque art meets clear canvas comes out with
+its colour dragged toward black and its alpha dropped to match; composited, that
+reads as a dark hairline exactly one pixel wide.
+
+It was reported on the Amiga Zork Zero floppy as *a very thin dark line down both
+edges of the story pane*, which went away when the terminal was made wider — wider
+means the flanks grow rather than shrink, which puts them back on the nearest arm,
+which never blends. At an 83-column terminal the flank shrinks 95 native pixels to
+84, and the pixel where its story page meets clear canvas went out as
+`(38,38,38,57)`: over the page the band is drawn on, 142 against that page's own
+173.
+
+Every blending pass now runs on *associated* (premultiplied) colour, so the average
+is one of light-with-nothing rather than light-with-black, and the seam comes back
+out as page. It costs nothing where it is not needed: at full opacity both
+directions round-trip exactly, so a fully opaque plate — Journey's canyon, every
+number in the table above — is bit-identical either way, and a magnifying pass skips
+the conversion entirely.
+
 ## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
