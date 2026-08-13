@@ -16,6 +16,8 @@ mod v6_ega_dither_blend;
 mod v6_float_margin_ground;
 #[path = "suites/v6_hybrid_zork0.rs"]
 mod v6_hybrid_zork0;
+#[path = "suites/v6_macintosh_profile.rs"]
+mod v6_macintosh_profile;
 #[path = "suites/v6_mouse_zork0.rs"]
 mod v6_mouse_zork0;
 #[path = "suites/v6_zork0_hints.rs"]

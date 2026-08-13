@@ -142,6 +142,12 @@ const V6_FRAMES: &[V6Frame] = &[
     // one medium untrue of the other.
     V6Frame { file: "Zork Zero - The Revenge of Megaboz.adf", turns: 12, prose_window: 0, box_px: (89, 81, 464, 320) },
     V6Frame { file: "zork0-r393-s890714.z6", turns: 12, prose_window: 0, box_px: (87, 79, 468, 320) },
+    // …and the Macintosh disk's r296, on the big colour Mac's 640×400 screen —
+    // the same box r393 lays out, which is the point: the Mac's COLOUR archive
+    // is the Amiga's picture space (`wx := 2*GFXAM_X`), so the geometry does not
+    // move. Only the monochrome archive is a different screen (SQ-0838), and
+    // `v6_macintosh_profile.rs` is where that one is pinned.
+    V6Frame { file: "Zork Zero Disk.image", turns: 12, prose_window: 0, box_px: (87, 79, 468, 320) },
     // Shogun and Arthur agree across their two builds. Pinned so that stays a
     // measured fact rather than an assumption.
     V6Frame { file: "James Clavell's Shogun.adf", turns: 12, prose_window: 0, box_px: (47, 33, 548, 368) },
@@ -156,6 +162,12 @@ const V6_FRAMES: &[V6Frame] = &[
 const NARRATED: &[(&str, &[&str])] = &[
     ("Zork Zero - The Revenge of Megaboz.adf", &["Release 366 / Serial number 890323"]),
     ("zork0-r393-s890714.z6", &["Release 393 / Pix 393 / Serial number 890714"]),
+    // The Macintosh disk goes one better than ZTUU: Zork Zero r296 does not
+    // print the NUMBER, it prints the MACHINE. "Macintosh Interpreter version
+    // 6.65" is the game's own reading of header `$1E`, and it says Macintosh
+    // only because SQ-0838 told it 3 — the same disk answered "IBM Interpreter"
+    // for as long as an HFS volume resolved to the IBM PC default.
+    ("Zork Zero Disk.image", &["Macintosh Interpreter version", "Release 296 / Serial number 881019"]),
     ("James Clavell's Shogun.adf", &["Release 295 / Serial number 890321"]),
     ("shogun-r322-s890706.z6", &["Release 322 / Pix 322 / Serial number 890706"]),
     ("Zork I - The Great Underground Empire.adf", &["Revision 88 / Serial number 840726"]),
@@ -279,8 +291,14 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path);
     let picture_dims = picts.all_pict_dims();
-    let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
-    let mut s = GameSession::new_with_trace(
+    // The same chain, in the same order: the Blorb's `Reso`, the archive the
+    // medium supplied, then the machine (SQ-0838). No medium here names an
+    // archive by hand, so tier 3's link is the one that is absent.
+    let v6_screen_px = picts
+        .std_window()
+        .or_else(|| picts.native_std_window())
+        .or_else(|| profile.std_window());
+    let mut s = GameSession::new_with_art_scale(
         bytes,
         honor_game_colours,
         false,
@@ -288,7 +306,9 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
         false,
         picture_dims,
         v6_screen_px,
+        picts.art_scale(),
         profile.default_colours(),
+        None,
         None,
     )
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", ctx(m)));
@@ -447,12 +467,14 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             continue;
         }
         ran += 1;
-        // Only the Amiga has a profile of its own. A Macintosh disk resolves to
-        // the IBM PC bundle — the historical default — because nothing in the
-        // corpus can verify a Macintosh palette or art path yet, and inventing
-        // one from memory is exactly what this project forbids (SQ-0837).
+        // SQ-0838 lifted the Macintosh's block: an HFS volume now resolves to
+        // the Macintosh bundle (interpreter 3, black on white, a screen sized by
+        // the archive it carries), all of it read out of Infocom's own Mac
+        // interpreter rather than out of anyone's memory. Everything that is not
+        // release media is still the IBM PC default.
         let expected = match m.image {
             Some(DiskImage::Adf) => InterpreterProfile::Amiga,
+            Some(DiskImage::Hfs) => InterpreterProfile::Macintosh,
             _ => InterpreterProfile::IbmPc,
         };
         assert_eq!(

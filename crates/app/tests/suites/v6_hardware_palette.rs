@@ -66,7 +66,11 @@ fn boot(archive: &str, honor_game_colours: bool) -> Option<GameSession> {
     let story = read("zork0-r393-s890714.z6")?;
     let mut picts = native(archive)?;
     let picture_dims = picts.all_pict_dims();
-    let v6_screen_px = picts.std_window().or(Some(app::graphics::INFOCOM_V6_STD_WINDOW));
+    // The chain `startup.rs` runs: a Blorb's `Reso`, else the archive's own
+    // picture space (SQ-0838 — 320x200 for MCGA/Amiga, 640x200 for EGA/CGA, and
+    // 480x300 for the standard Macintosh's mono plate). The screen is that space
+    // times the density below, which is 640x400 for every rendition here.
+    let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
     let v6_art_scale = picts.art_scale();
     let mut session = GameSession::new_with_art_scale(
         story,

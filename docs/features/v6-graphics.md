@@ -67,6 +67,46 @@ scaled the colour art by 1.5 or 2, and babelmap does the same — 480×300 is th
 one picture space in this whole format that does not double onto the 640×400
 screen.
 
+#### Two Macintosh screens
+
+Which raises the obvious question, and the answer turns out to be the whole
+Macintosh screen model: if the mono plates are 480×300 and the colour ones are
+640×400 once doubled, **what is the screen?** Both, depending on which archive
+is in hand — and that is not a compromise babelmap invented, it is one decision
+in Infocom's own interpreter. It sized its window and chose its picture file on
+the same test: a Mac big enough for colour got a 640×400 window and `CPic.Data`,
+and everything else got a 480×300 window and `Pic.Data`. The source says it in
+one breath: *"for a small window use mono gfx, for a big window use color gfx"*.
+
+| you asked for | picture space | drawn at | the screen the story is told about |
+|---|---|---|---|
+| `CPic.data` (the default) | 320×200 | 2× | 640×400 — the Amiga's own unit space |
+| `Pic.data` | 480×300 | 1:1 | 480×300 |
+
+So the colour path needs nothing new: 320×200 doubled is the space every other
+Infocom rendition already lands in, which is also why a Macintosh colour archive
+is indistinguishable from an Amiga one — there was nothing to distinguish. And
+neither path has stretched pixels. Every scaling arm in the Mac interpreter
+moves both axes by the same factor, unlike the IBM PC's EGA rendition, whose
+pixels really are half as wide. Both Mac archives are 1.6:1 and stay 1.6:1.
+
+**512×342 is the hardware, and never the screen the game hears about.** The
+compact Mac's screen appears in the interpreter only as the thing the game
+window is centred *inside* — a 300-pixel-tall window placed at y=38 on a
+342-pixel screen, which is exactly a menu bar plus a title bar. A photograph of a
+real Mac *Zork Zero* is 512×342 with the game filling nearly all of it, while the
+game itself is being told 480×300. The interpreter computes what it reports
+straight off its own window rect, in pixels, with the divide-by-font-size
+commented out.
+
+One rounding the Mac did not have to do: 300 is not a whole number of babelmap's
+16-pixel Version 6 cells. A real Mac fitted 20 rows of its own 15-pixel Geneva
+into exactly 300; babelmap rounds to the nearest cell, 19 rows and 304 pixels, so
+the screen *contains* the 480×300 plate with four pixels to spare. Rounding the
+other way would have handed the game a 288-pixel screen and clipped the bottom
+twelve pixels off its own artwork, which is the sort of thing that turns into a
+missing pillar base.
+
 Underneath, the monochrome archive is not a new codec at all, which was the
 surprise. It runs the same Huffman + run-length + XOR as everything else on this
 side of the format and lands one byte per pixel, using colour numbers 2 and 3 —
@@ -265,26 +305,33 @@ are structurally different and a filename can lie. An explicit
 `interpreter_number` still overrules it.
 
 Native archives carry no `Reso` chunk — the format has no such concept — so the
-standard window comes from the machine instead, and every machine that shipped
-one of these games drew v6 on the same 320×200 one. That is precisely what every
+archive states the picture space its own coordinates use, and the screen is that
+space at the scale the machine drew it in. For every rendition but one that
+works out to the same 320×200-doubled 640×400, which is precisely what every
 Infocom v6 Blorb's `Reso` declares anyway, so the geometry below is unchanged.
+The exception is the standard Macintosh, [above](#two-macintosh-screens).
 
 What *does* differ between renditions is how densely the art is stored. EGA and
 CGA addressed a 640-column screen with pixels half as wide, so their plates are
 640 across where MCGA's are 320 — the same picture, twice the samples, each one
 half the width. Both cover the same rectangle, so both land on the same 640×400
 screen: an MCGA or Amiga plate doubles on both axes, an EGA or CGA plate doubles
-only vertically, and the Macintosh's 480×300 monochrome plate doubles on neither. *Arthur* is the clean proof — all 125 pictures its `.mg1` and
+only vertically, and the Macintosh's 480×300 monochrome plate doubles on neither
+— which is why it is a different screen rather than a denser drawing of this one.
+*Arthur* is the clean proof — all 125 pictures its `.mg1` and
 `.eg1` share come out at byte-identical sizes once each is mapped that way, and
 *Zork Zero* agrees on 446 of its 503 (the rest differ by a pixel or two, because
 these are separately drawn renditions rather than one scaled copy). Frotz reads
 the same header bit as `x_scale = (flags & 0x08) ? 640 : 320`; Spatterlight's
 bocfel calls it `pixelwidth` and sets it to 0.5.
 
-The character grid never moves. EGA ran 640×200 on an 8×8 cell, which is 80×25
-characters — the very grid the 640×400 screen already lays out on its 8×16 cell —
-so choosing a rendition changes the artwork you are looking at and nothing about
-the machine underneath it.
+The character grid never moves between *cards*. EGA ran 640×200 on an 8×8 cell,
+which is 80×25 characters — the very grid the 640×400 screen already lays out on
+its 8×16 cell — so choosing a rendition changes the artwork you are looking at
+and nothing about the machine underneath it. Choosing a *machine's other screen*
+does move it, and only the Macintosh has one: 480×300 on the same 8×16 cell is
+60×19 characters, a genuinely smaller grid, because that really was a smaller
+screen.
 
 ### The colours come with the card
 

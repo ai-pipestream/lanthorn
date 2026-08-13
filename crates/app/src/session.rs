@@ -898,19 +898,45 @@ impl GameSession {
         machine.set_picture_dims(picture_dims);
         machine.set_interpreter_number(interpreter_number);
         machine.init_caps();
-        // v6 (SQ-0479): present the reference-authentic 640×400 UNIT screen —
-        // the Blorb `Reso` standard window (the ART resolution, default 320×200)
-        // scaled by `V6_ART_SCALE`, matching Frotz's Amiga/DOS profile (640×400,
-        // 8×16 cell → 80×25). The screen and the picture dims (above) double
-        // together, so the game's window/art layout math and our `is_content_art`
-        // ratios stay consistent. init_caps seeded the v1–5 default; this
-        // overrides it for v6 only, before the game can read it.
+        // v6 (SQ-0479): present the reference-authentic UNIT screen — the Blorb
+        // `Reso` standard window (the ART resolution, default 320×200) at the
+        // scale the machine drew it, which for the whole corpus but one is the
+        // ×2 of Frotz's Amiga/DOS profile (640×400, 8×16 cell → 80×25). The
+        // screen and the picture dims (above) scale together, so the game's
+        // window/art layout math and our `is_content_art` ratios stay
+        // consistent. init_caps seeded the v1–5 default; this overrides it for
+        // v6 only, before the game can read it.
         if machine.mem.version() == 6 {
             let (art_w, art_h) = v6_screen_px.unwrap_or((320, 200));
-            let w = art_w.saturating_mul(V6_ART_SCALE as u16);
-            let h = art_h.saturating_mul(V6_ART_SCALE as u16);
-            let cols = (w / zvm::screen::V6_FONT_WIDTH).clamp(1, 255) as u8;
-            let rows = (h / zvm::screen::V6_FONT_HEIGHT).clamp(1, 255) as u8;
+            // SQ-0838: the screen is the art's picture space AT THE SCALE THIS
+            // MACHINE DREW IT, which is one statement covering what used to be
+            // a fixed doubling. For every rendition that existed before it is
+            // the same arithmetic by another name — 320×200 at (2,2) and EGA's
+            // 640×200 at (1,2) are both 640×400 — and the difference it buys is
+            // the standard Macintosh, whose monochrome plate is drawn for a
+            // 480×300 screen and displayed 1:1 (`mac/gfx.p`). Doubling that one
+            // anyway would put a 960×600 screen behind a 480×300 plate.
+            //
+            // Absent a declared window there is no picture space to scale, so
+            // the uniform rule stands and the screen is the 640×400 it always
+            // was — the Blorb-less v6 stories (scopa, mysterious01) reach this.
+            let screen_scale = match (v6_screen_px, v6_art_scale) {
+                (Some(_), Some(s)) => s,
+                _ => (V6_ART_SCALE, V6_ART_SCALE),
+            };
+            let w = art_w.saturating_mul(screen_scale.0.max(1) as u16);
+            let h = art_h.saturating_mul(screen_scale.1.max(1) as u16);
+            // Round to the NEAREST whole cell rather than truncating. Every
+            // screen but the Macintosh's is an exact multiple of the 8×16 cell,
+            // so this changes nothing for them; 300 is 18.75 rows, and rounding
+            // down would tell the game its screen is 288 pixels tall and clip
+            // the bottom twelve pixels off its own artwork.
+            let cells = |px: u16, cell: u16| {
+                let cell = u32::from(cell.max(1));
+                ((u32::from(px) + cell / 2) / cell).clamp(1, 255) as u8
+            };
+            let cols = cells(w, zvm::screen::V6_FONT_WIDTH);
+            let rows = cells(h, zvm::screen::V6_FONT_HEIGHT);
             machine.set_screen_dims(rows, cols);
         } else if let Some((r, c)) = host_screen {
             // SQ-0680: seed the REAL host pane before boot, so a v4/v5 status

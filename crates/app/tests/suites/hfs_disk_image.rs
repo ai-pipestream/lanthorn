@@ -240,17 +240,19 @@ fn the_mount_names_the_container_it_came_out_of() {
     assert_eq!(image, Some(app::hints::DiskImage::Hfs));
     assert_eq!(image.map(|i| i.label()), Some("HFS"));
 
-    // …and the launch dialog therefore does NOT report interpreter 4. Only the
-    // Amiga has a profile of its own; a Macintosh disk gets the default rule,
-    // which is what `InterpreterProfile::resolve` will actually apply.
+    // …and the launch dialog reports the MACHINE, which since SQ-0838 is a
+    // Macintosh: interpreter 3 (ZMSD §11.1.3), sourced from the disk rather than
+    // from the default rule. It is emphatically not 4 — the Amiga and the
+    // Macintosh wrote the same colour archive, and only the volume tells them
+    // apart.
     assert_eq!(
         app::launch_options::derived_interpreter(None, None, image, Some(6)),
-        Some((6, app::launch_options::InterpreterSource::Default)),
-        "a Macintosh disk must not be reported as an Amiga"
+        Some((3, app::launch_options::InterpreterSource::DiskImage)),
+        "an HFS volume is a Macintosh, and never an Amiga"
     );
     assert_eq!(
         app::interpreter::InterpreterProfile::resolve(&path, None, None),
-        app::interpreter::InterpreterProfile::IbmPc,
+        app::interpreter::InterpreterProfile::Macintosh,
         "and the boot path agrees with the dialog"
     );
 

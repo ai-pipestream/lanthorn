@@ -22,6 +22,8 @@
 //!   what shipped.
 //! - [`InterpreterProfile::Amiga`] is the sibling, for stories that came off
 //!   Amiga media.
+//! - [`InterpreterProfile::Macintosh`] is the third, for stories that came off
+//!   an HFS volume (SQ-0838).
 //!
 //! **Selection**, most specific first (SQ-0734):
 //!
@@ -36,11 +38,18 @@
 //!    are structurally distinguishable — not from its extension, which a rename
 //!    can make a lie.
 //! 3. The medium: a story mounted out of an Amiga `.adf` release floppy is an
-//!    Amiga. The medium→machine mapping itself is [`blorb::medium`]'s, not this
-//!    module's, because `zvm-cli` has to reach the same conclusion off the same
-//!    bytes and does not depend on `app` (SQ-0839). A Macintosh disk is
-//!    recognised and deliberately implies nothing yet — see
-//!    [`blorb::medium::DiskImage::interpreter_number`].
+//!    Amiga, and one mounted out of an HFS volume is a Macintosh. The
+//!    medium→machine mapping itself is [`blorb::medium`]'s, not this module's,
+//!    because `zvm-cli` has to reach the same conclusion off the same bytes and
+//!    does not depend on `app` (SQ-0839).
+//!
+//!    **The medium is the only honest discriminator for the Macintosh**, and
+//!    that is a measurement rather than a preference: the Amiga and the
+//!    Macintosh wrote the *same* colour archive, and `Zork Zero Disk.image`
+//!    proves it — its `CPic.data` is structurally indistinguishable from an
+//!    Amiga `Pic.data`, which is why [`Self::for_art_flavour`] still answers
+//!    `Amiga` for the whole of [`Flavour::AmigaMac`]. A volume, by contrast,
+//!    cannot be mistaken: HFS is Apple's filesystem and nothing else wrote one.
 //! 4. [`InterpreterProfile::IbmPc`], for everything else.
 //!
 //! Step 2 cannot move the existing corpus, and that is worth stating because
@@ -84,6 +93,10 @@ pub enum InterpreterProfile {
     /// 640×400 screen, the Amiga's own default colours, and the palette
     /// Infocom's Amiga interpreter loaded.
     Amiga,
+    /// A Macintosh: interpreter 3, black text on a white page, and a screen
+    /// that is **whichever one the artwork in hand was drawn for** — see
+    /// [`Self::std_window`], which is where the interesting part is.
+    Macintosh,
 }
 
 impl InterpreterProfile {
@@ -132,10 +145,17 @@ impl InterpreterProfile {
     /// reclassifies a `Pic.data` as monochrome Macintosh when the file's flags
     /// byte reads `0x0e`, with the honest comment that the flags "always *seem*
     /// to equal 0xe if the graphics are monochrome" — a heuristic, and one that
-    /// separates only the B&W Mac. babelmap has no Macintosh profile to select
-    /// anyway, and every colour `Pic.data` in hand is Amiga media, so the whole
-    /// flavour resolves to [`Self::Amiga`]. Give this a real discriminator before
-    /// a Macintosh bundle is added, not after.
+    /// separates only the B&W Mac.
+    ///
+    /// **There is a [`Self::Macintosh`] to select now (SQ-0838), and this still
+    /// answers [`Self::Amiga`]** — because the archive is not what knows. The
+    /// Macintosh release disk settled it by counterexample: `CPic.data` off
+    /// `Zork Zero Disk.image` is a Mac colour archive, and nothing in it
+    /// distinguishes it from an Amiga one. Only the MEDIUM does, which is where
+    /// the Macintosh hangs (see the module docs, precedence 3). Naming an
+    /// archive by hand therefore still asks for the machine the *codec* implies,
+    /// and a `Pic.data` on the Mac disk gets the Macintosh anyway, from the disk
+    /// under it.
     pub fn for_art_flavour(flavour: Flavour) -> Self {
         match flavour {
             Flavour::Pc => Self::IbmPc,
@@ -143,16 +163,19 @@ impl InterpreterProfile {
         }
     }
 
-    /// The profile a story header byte `$1E` value implies. Only the Amiga has a
-    /// profile of its own so far; every other machine is served by the IBM PC
-    /// bundle, which is also the historical default.
+    /// The profile a story header byte `$1E` value implies. The Amiga and the
+    /// Macintosh have profiles of their own; every other machine is served by
+    /// the IBM PC bundle, which is also the historical default.
     pub fn for_interpreter_number(n: u8) -> Self {
-        if n == AMIGA_INTERPRETER_NUMBER { Self::Amiga } else { Self::IbmPc }
+        match n {
+            AMIGA_INTERPRETER_NUMBER => Self::Amiga,
+            MACINTOSH_INTERPRETER_NUMBER => Self::Macintosh,
+            _ => Self::IbmPc,
+        }
     }
 
     /// The interpreter number the medium at `path` defaults to, or `None` when
-    /// it is not release media (or answers no number of its own — a Macintosh
-    /// disk, see [`blorb::medium::DiskImage::interpreter_number`]).
+    /// it is not release media.
     ///
     /// Content, not extension: [`blorb::medium::DiskImage::detect`] reads the
     /// filesystem, exactly as `PictSource::resolve` and `hints::read_story_file`
@@ -176,6 +199,7 @@ impl InterpreterProfile {
         match self {
             Self::IbmPc => None,
             Self::Amiga => Some(AMIGA_INTERPRETER_NUMBER),
+            Self::Macintosh => Some(MACINTOSH_INTERPRETER_NUMBER),
         }
     }
 
@@ -196,10 +220,66 @@ impl InterpreterProfile {
     ///
     /// [`Self::IbmPc`] returns `None`: a Blorb-sourced story keeps deciding for
     /// itself, exactly as before.
+    ///
+    /// # The Macintosh has TWO screens, and the artwork picks
+    ///
+    /// This is the one machine whose answer is not a single pair, and the
+    /// reason is that Infocom's own Macintosh interpreter sized its window and
+    /// chose its picture file in **one decision**. `mac/xzip.lst`:
+    ///
+    /// ```text
+    ///   IF ((ydisplay < 2*GFXAM_Y) OR (xdisplay < 2*GFXAM_X))
+    ///     OR ((mColor = FALSE) OR (ttyToggle)) THEN
+    ///     BEGIN  myBig := FALSE;  wy := GFXMAC_Y;  wx := GFXMAC_X;  END
+    ///   ELSE
+    ///     BEGIN  myBig := TRUE;   wy := 2*GFXAM_Y; wx := 2*GFXAM_X; END
+    /// ```
+    ///
+    /// with `GFXAM_X = 320; GFXAM_Y = 200` ("raw" size of full-screen Amiga
+    /// pics) and `GFXMAC_X = 480; GFXMAC_Y = 300` ("1.5 x Amiga sizes") — and
+    /// the very same flag then names the file: *"for a small window use mono
+    /// gfx, for a big window use color gfx"*, `IF myBig THEN gfxName :=
+    /// 'CPic.Data' ELSE gfxName := 'Pic.Data'`.
+    ///
+    /// So a big colour Macintosh runs a **640×400** window off `CPic.data`
+    /// (320×200 art at 2×), and a standard compact Mac runs a **480×300** window
+    /// off `Pic.data` (480×300 monochrome art at 1× — `IF ge.mono OR myTiny THEN
+    /// { scale 1x for display }`). The screen the game is told about is that
+    /// window and nothing else:
+    ///
+    /// ```text
+    ///   { calculate our logical screen size, based on window size }
+    ///     WITH myWindow^.portRect DO
+    ///       BEGIN
+    ///       totRows := (bottom - top) {DIV lineheight};
+    ///       totCols := ((right - left) - (2 * wMarg)) {DIV colWidth};
+    ///       END;
+    /// ```
+    ///
+    /// (the `DIV`s commented out, so both are in PIXELS, and the `2 * wMarg`
+    /// takes the 4-pixel text inset back off — `totCols` is exactly `wx`.)
+    ///
+    /// **512×342 is the hardware, not the standard window.** The compact Mac's
+    /// screen only ever appears here as `screenRect := screenBits.bounds`, the
+    /// thing the window is centred *in*: `SizeWindow (myWindow, wx + (2*wMarg),
+    /// wy, FALSE)` then `MoveWindow (myWindow, ((xdisplay-wx) DIV 2) - wMarg,
+    /// (ydisplay-wy) DIV 2 + 17 {mbar fudge}, TRUE)`. On a 512×342 screen that
+    /// is a 488×300 content rect at y = (342−300)/2 + 17 = 38 — which leaves
+    /// exactly the 20-pixel menu bar and a 19-pixel title bar above it, and 4
+    /// pixels below. A screenshot of a real Mac Zork Zero is therefore 512×342
+    /// with the game filling nearly all of it, and the story is still being told
+    /// its screen is 480×300.
+    ///
+    /// This profile answers with the big-colour pair, because that is the
+    /// machine the disk's DEFAULT archive belongs to. The 480×300 screen is not
+    /// this knob's to state: it arrives with the monochrome archive, from
+    /// [`crate::graphics::PictSource::native_std_window`], exactly as it arrived
+    /// with `Pic.Data` on the Mac. One decision there too.
     pub fn std_window(self) -> Option<(u16, u16)> {
         match self {
             Self::IbmPc => None,
             Self::Amiga => Some(AMIGA_STD_WINDOW),
+            Self::Macintosh => Some(MACINTOSH_STD_WINDOW),
         }
     }
 
@@ -216,13 +296,31 @@ impl InterpreterProfile {
         match self {
             Self::IbmPc => None,
             Self::Amiga => Some((AMIGA_DEFAULT_BACKGROUND, AMIGA_DEFAULT_FOREGROUND)),
+            Self::Macintosh => Some((MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND)),
         }
     }
 
     /// The palette the story's colour NUMBERS resolve through.
+    ///
+    /// The Macintosh resolves through [`zvm::screen::Palette::Standard`], and
+    /// that is a reading rather than a default. `mac/xzip.lst`'s `MapColor`
+    /// **is** ZMSD §8.3.1's table, one arm per colour and no others:
+    ///
+    /// ```text
+    ///   CONST zBLACK = 2; zRED = 3; zGREEN = 4; zYELLOW = 5;
+    ///         zBLUE = 6; zMAGENTA = 7; zCYAN = 8; zWHITE = 9;
+    ///   CASE zcid OF
+    ///     zBLACK: mcid := blackColor;   zRED:   mcid := redColor;   …
+    ///     zWHITE: mcid := whiteColor;
+    ///   OTHERWISE mcid := 0;  { "map Z id to Mac id, 0 if err/unchanged" }
+    /// ```
+    ///
+    /// Those eight are QuickDraw's original saturated planar constants, so the
+    /// Macintosh named the standard colours and meant them — where the Amiga
+    /// loaded a palette of its own, which is why only it needs one here.
     pub fn palette(self) -> zvm::screen::Palette {
         match self {
-            Self::IbmPc => zvm::screen::Palette::Standard,
+            Self::IbmPc | Self::Macintosh => zvm::screen::Palette::Standard,
             Self::Amiga => zvm::screen::Palette::Amiga,
         }
     }
@@ -248,6 +346,19 @@ impl InterpreterProfile {
     /// the horizontal density, and that belongs to the archive rather than to
     /// the machine — three video cards, one IBM PC, one cell. See
     /// [`crate::graphics::PictSource::art_scale`].
+    ///
+    /// **The Macintosh is the case that genuinely differs, and it is not
+    /// expressed** (SQ-0838, reported rather than quietly rounded). Infocom's
+    /// Mac interpreter set `stdFont := geneva; textSize (12); lineHeight := 15
+    /// {16}; colWidth := 7` — a 7×15 cell, giving 68×20 characters on the
+    /// 480×300 standard-Mac screen where babelmap's 8×16 gives 60×18. Honouring
+    /// it means making `V6_FONT_WIDTH`/`V6_FONT_HEIGHT` runtime state throughout
+    /// `zvm`'s screen model, its location heuristics and the app's render path,
+    /// which is the same refactor this knob declined for EGA and a far larger
+    /// change than the profile it would be arriving inside. The cost is a
+    /// slightly larger typeface than a real Mac's and up to 4 pixels of vertical
+    /// slack; see [`crate::graphics::PictSource::native_std_window`] for where
+    /// that slack lands.
     pub fn v6_font_cell(self) -> (u16, u16) {
         (8, 16)
     }
@@ -257,6 +368,50 @@ impl InterpreterProfile {
 /// [`blorb::medium`] and re-exported here: it is the number the medium→machine
 /// mapping hands out, and `zvm-cli` hands out the same one (SQ-0839).
 pub use blorb::medium::AMIGA_INTERPRETER_NUMBER;
+
+/// Macintosh, from the same §11.1.3 table and the same place (SQ-0838). Read
+/// from the standard, not recalled: *"1 DECSystem-20, 2 Apple IIe, **3
+/// Macintosh**, 4 Amiga, 5 Atari ST, 6 IBM PC …"*.
+pub use blorb::medium::MACINTOSH_INTERPRETER_NUMBER;
+
+/// The Macintosh Version 6 standard window: the **big colour** Mac's, 320×200
+/// art doubled onto a 640×400 window — the same numbers as the Amiga's, and
+/// from the same place. `mac/xzip.lst` sizes that window as `wy := 2*GFXAM_Y;
+/// wx := 2*GFXAM_X` off `GFXAM_X = 320; GFXAM_Y = 200; { "raw" size of
+/// full-screen Amiga pics }`, which says outright that the Macintosh's colour
+/// artwork *is* the Amiga's picture space.
+///
+/// The standard Macintosh's other window — 480×300, `GFXMAC_X`/`GFXMAC_Y`,
+/// "1.5 x Amiga sizes" — belongs to the monochrome archive and arrives with it.
+/// See [`InterpreterProfile::std_window`], which quotes the whole decision.
+pub const MACINTOSH_STD_WINDOW: (u16, u16) = (320, 200);
+
+/// The Macintosh's default background: standard colour **9**, white.
+///
+/// One line of `mac/xzip.lst` settles both this and [`MAC_DEFAULT_FOREGROUND`],
+/// and it is the same `(back << 8) | fore` idiom the Amiga interpreter uses
+/// (see [`AMIGA_DEFAULT_BACKGROUND`], where the sources had to be weighed):
+///
+/// ```text
+///   FUNCTION SetColor (fore, back: INTEGER): INTEGER;  { return back/fore defaults }
+///   BEGIN
+///     SetColor := (zWHITE*256) + zBLACK;   { Mac defaults: white under black }
+/// ```
+///
+/// with `zWHITE = 9` and `zBLACK = 2` declared eleven lines above it. The same
+/// function's fallbacks say it twice more — `IF fore = 1 THEN mcid :=
+/// blackColor { default }` and `IF back = 1 THEN mcid := whiteColor` — because
+/// colour 1 means "the default" (ZMSD §8.3.1), so asking for the default
+/// foreground gets black and the default background white.
+///
+/// A white page is the Macintosh's whole visual signature and the opposite of
+/// the Amiga's dark grey, so `honor_game_colours` is doing real work on this
+/// profile: turning it off returns the user's theme, as ever.
+pub const MAC_DEFAULT_BACKGROUND: u8 = 9;
+
+/// The Macintosh's default foreground: standard colour 2, black. Same line,
+/// same source — see [`MAC_DEFAULT_BACKGROUND`].
+pub const MAC_DEFAULT_FOREGROUND: u8 = 2;
 
 /// The Amiga Version 6 standard window: 320×200 art, doubled onto the 640×400
 /// hi-res interlaced screen the games lay themselves out on. This is the same
@@ -343,9 +498,35 @@ mod tests {
     }
 
     #[test]
+    fn macintosh_knobs_are_the_verified_constants() {
+        // Every one of these is quoted at its constant, from ZMSD §11.1.3 and
+        // from Infocom's own Macintosh interpreter (`mac/xzip.lst`, `mac/gfx.p`).
+        let p = InterpreterProfile::Macintosh;
+        assert_eq!(p.interpreter_number(), Some(3), "ZMSD §11.1.3: 3 = Macintosh");
+        assert_eq!(p.std_window(), Some((320, 200)), "wx := 2*GFXAM_X, wy := 2*GFXAM_Y");
+        assert_eq!(
+            p.default_colours(),
+            Some((9, 2)),
+            "SetColor := (zWHITE*256) + zBLACK — 'Mac defaults: white under black'",
+        );
+        // And the page really is the LIGHT one, which is the whole visual
+        // difference from the Amiga's dark grey — asserted as a relation rather
+        // than a repeat of the pair, so a swapped tuple cannot pass.
+        let (mac_bg, _) = p.default_colours().expect("the Mac states its defaults");
+        let (amiga_bg, _) =
+            InterpreterProfile::Amiga.default_colours().expect("so does the Amiga");
+        assert_ne!(mac_bg, amiga_bg, "white page against dark grey");
+        assert_eq!(p.palette(), zvm::screen::Palette::Standard, "MapColor IS §8.3.1's table");
+    }
+
+    #[test]
     fn the_v6_cell_matches_what_zvm_advertises() {
         // Knob 6: stated for completeness, pinned so it cannot silently drift.
-        for p in [InterpreterProfile::IbmPc, InterpreterProfile::Amiga] {
+        // The Macintosh's real cell is 7×15 (Geneva 12) and is deliberately NOT
+        // expressed — see `v6_font_cell`'s docs.
+        for p in
+            [InterpreterProfile::IbmPc, InterpreterProfile::Amiga, InterpreterProfile::Macintosh]
+        {
             assert_eq!(
                 p.v6_font_cell(),
                 (zvm::screen::V6_FONT_WIDTH, zvm::screen::V6_FONT_HEIGHT),
@@ -359,8 +540,9 @@ mod tests {
         // SQ-0734 precedence 1, and the fix for the incoherent machine the user
         // hit: asking for interpreter 4 asks for the Amiga, not just the byte.
         assert_eq!(InterpreterProfile::for_interpreter_number(4), InterpreterProfile::Amiga);
+        assert_eq!(InterpreterProfile::for_interpreter_number(3), InterpreterProfile::Macintosh);
         // Every other number is served by the IBM PC bundle, the historical default.
-        for n in [1u8, 2, 3, 5, 6, 7, 8, 9, 10, 11] {
+        for n in [1u8, 2, 5, 6, 7, 8, 9, 10, 11] {
             assert_eq!(
                 InterpreterProfile::for_interpreter_number(n),
                 InterpreterProfile::IbmPc,

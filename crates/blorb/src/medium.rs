@@ -49,6 +49,14 @@ use crate::infocom_pics::InfocomPics;
 /// 8 Commodore 64, 9 Apple IIc, 10 Apple IIgs, 11 Tandy Color).
 pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
 
+/// Macintosh, from the same ZMSD §11.1.3 table, read from the standard rather
+/// than recalled: *"Infocom used the interpreter numbers: 1 DECSystem-20,
+/// 2 Apple IIe, **3 Macintosh**, 4 Amiga, 5 Atari ST, 6 IBM PC, …"* — and the
+/// same section is explicit that this matters here in particular: *"In Version
+/// 6, the decision is more serious, as existing Infocom story files depend on
+/// interpreter number in many ways"*.
+pub const MACINTOSH_INTERPRETER_NUMBER: u8 = 3;
+
 /// Which release medium a story was mounted out of, when it was one at all.
 ///
 /// The variant is the mount's own answer — every one of them is decided by the
@@ -104,16 +112,13 @@ impl DiskImage {
     /// requested number win over this one. That ordering is the other half of
     /// the user's rule and is pinned on both front-ends.
     ///
-    /// **[`DiskImage::Hfs`] deliberately answers `None`, and this is not an
-    /// oversight.** ZMSD §11.1.3 numbers the Macintosh 3, and that constant is
-    /// verifiable — but the number is not inert: a game reads `$1E` and can take
-    /// machine-specific paths, and the Macintosh's default colours, palette and
-    /// screen geometry are not established by anything in the corpus. Telling
-    /// *Zork Zero* release 296 that it is on a Macintosh while rendering it as a
-    /// PC is a behaviour change with no evidence behind it. A Mac disk therefore
-    /// keeps resolving to the IBM PC default, pinned in the app's
-    /// `real_media_releases` and `hfs_disk_image` suites, until SQ-0838 lands the
-    /// profile half that would make the number honest.
+    /// [`DiskImage::Hfs`] answered `None` until SQ-0838, on the grounds that the
+    /// number is not inert — a game reads `$1E` and can take machine-specific
+    /// paths — and that the Macintosh's screen, colours and palette were not
+    /// established by anything in hand, so `3` would have been a byte without a
+    /// machine behind it. They are established now, out of Infocom's own
+    /// Macintosh interpreter (`mac/xzip.lst`, `mac/gfx.p`), and the whole bundle
+    /// ships together in `app::interpreter::InterpreterProfile::Macintosh`.
     pub fn interpreter_number(self) -> Option<u8> {
         self.row().interpreter_number
     }
@@ -156,7 +161,7 @@ const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::Hfs,
         label: "HFS",
-        interpreter_number: None,
+        interpreter_number: Some(MACINTOSH_INTERPRETER_NUMBER),
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
     },
@@ -445,12 +450,12 @@ mod tests {
         assert_eq!(DiskImage::Adf.interpreter_number(), Some(4));
     }
 
-    /// SQ-0838's block, pinned so it cannot be "fixed" by someone who reads
-    /// §11.1.3 and stops there. The Macintosh's number is known; its machine is
-    /// not, and this crate hands out numbers for machines we can present.
+    /// SQ-0838 lifted this block: the Macintosh's number was always known, and
+    /// now its machine is too, so the medium hands the number out like any
+    /// other. ZMSD §11.1.3, quoted at [`MACINTOSH_INTERPRETER_NUMBER`].
     #[test]
-    fn a_macintosh_disk_names_itself_but_defaults_no_number() {
-        assert_eq!(DiskImage::Hfs.interpreter_number(), None, "SQ-0838, not an oversight");
+    fn a_macintosh_disk_defaults_to_interpreter_three() {
+        assert_eq!(DiskImage::Hfs.interpreter_number(), Some(3), "ZMSD §11.1.3: 3 = Macintosh");
         assert_eq!(DiskImage::Hfs.label(), "HFS");
     }
 
@@ -518,7 +523,7 @@ mod tests {
         for image in census {
             let (label, interpreter) = match image {
                 DiskImage::Adf => ("ADF", Some(AMIGA_INTERPRETER_NUMBER)),
-                DiskImage::Hfs => ("HFS", None),
+                DiskImage::Hfs => ("HFS", Some(MACINTOSH_INTERPRETER_NUMBER)),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
