@@ -4341,6 +4341,50 @@ type FlankBorderExt = (Rect, BorderInk);
 /// and the native `(x, y, w, h)` crop of the canvas to draw into it.
 type FlankPanel = (image::Rgba<u8>, Rect, Rect, BandCrop);
 
+/// SQ-0828: the whole-cell box closest in ASPECT to a `dw × dh` device rect.
+///
+/// A band is placed at cell granularity, so the art is drawn into `cols · cw` by
+/// `rows · ch` device pixels — and [`menu_flank_panel`] used to reach those by ceiling
+/// each axis on its own. A cell is 8 wide and 18 tall, so the two ceilings round by
+/// wildly different amounts: Journey's 222x254 plate at a 80x24 pane (uniform scale
+/// exactly 1.0) came out 224x270 — x1.0090 against y1.0630, a **5.3% aspect error**,
+/// with the picture stretched vertically for no reason anyone chose. Cell quantization
+/// on a coarse grid is unavoidable; picking the WORST corner of it is not.
+///
+/// So both axes are chosen together, against the exact criterion
+/// `cols · cw · dh == rows · ch · dw` — the cross-product, so no division and no
+/// tolerance — over the four boxes the ideal falls between (each axis floored and
+/// ceiled), and the least wrong one wins. Ties go to the larger box, because two boxes
+/// with the same aspect error are the same picture and the bigger one is more of it.
+/// Every candidate is within ONE cell of the ideal on each axis, so this can neither
+/// grow the art to fill its column nor starve it — it only chooses which corner of the
+/// grid to land on. On the same 80x24 pane the answer becomes 224x252: a 1.7% error, and
+/// the floor for that pane, since 14 rows of 18px cannot express 254/222 any better.
+///
+/// `max_cols`/`max_rows` are the caller's own bounds and are applied to every candidate,
+/// so a capped axis still gets the best partner for the width it is left with.
+fn aspect_cells(dw: f32, dh: f32, cw: u32, ch: u32, max_cols: u16, max_rows: u16) -> (u16, u16) {
+    let (cf, cc) = ((dw / cw as f32).floor() as i32, (dw / cw as f32).ceil() as i32);
+    let (rf, rc) = ((dh / ch as f32).floor() as i32, (dh / ch as f32).ceil() as i32);
+    let mut best: Option<(u16, u16, f64, u32)> = None;
+    for c in [cf, cc] {
+        for r in [rf, rc] {
+            let cols = (c.max(1) as u16).min(max_cols.max(1));
+            let rows = (r.max(1) as u16).min(max_rows.max(1));
+            // Normalised so this is a RATIO error and comparable across sizes.
+            let err = ((cols as f64 * cw as f64 * dh as f64) - (rows as f64 * ch as f64 * dw as f64))
+                .abs()
+                / (dw as f64 * dh as f64).max(1.0);
+            let area = cols as u32 * rows as u32;
+            if best.is_none_or(|(_, _, be, ba)| err < be - 1e-9 || (err < be + 1e-9 && area > ba)) {
+                best = Some((cols, rows, err, area));
+            }
+        }
+    }
+    let (cols, rows, ..) = best.expect("the 2x2 candidate box is never empty");
+    (cols, rows)
+}
+
 /// SQ-0547: treat a Menu-plan side flank as a PANEL rather than a top-anchored
 /// strip of art over bare backdrop.
 ///
@@ -4430,23 +4474,23 @@ fn menu_flank_panel(
     // Horizontal placement is unchanged from the band mapping: the art's native left
     // edge through the same scale. Only the VERTICAL anchor moves (centred).
     let x = band.x + ((scale.off_x as f32 + ax0 as f32 * scale.s) / cw as f32).floor() as u16;
-    let mut cols = (((art_w as f32 * scale.s) / cw as f32).ceil() as u16)
-        .clamp(1, band.right().saturating_sub(x).max(1));
-    let mut rows = (((art_h as f32 * scale.s) / ch as f32).ceil() as u16).clamp(1, band.height);
+    // The art's ideal device extent at the uniform scale — what the cell box below is
+    // trying to be.
+    let (dw, dh) = (art_w as f32 * scale.s, art_h as f32 * scale.s);
+    let mut col_cap = band.right().saturating_sub(x).max(1);
     // Keep one column of panel fill between the picture and the divider, so the
     // panel frames the art on that side the way the art's own native left margin
-    // frames it on the other. Both axes shrink by the SAME factor, so the aspect
-    // ratio is untouched (the draw stretches the crop into this rect). Only applies
-    // when the divider lies to the RIGHT of the art — i.e. a left-hand flank, the
-    // only kind any Menu-plan game has; a right-hand flank keeps today's placement.
+    // frames it on the other. Only applies when the divider lies to the RIGHT of the
+    // art — i.e. a left-hand flank, the only kind any Menu-plan game has; a right-hand
+    // flank keeps today's placement. It is a CAP on the columns, and the rows follow
+    // from the aspect below, so narrowing the picture can no longer squash it.
     if let Some(dx) = inner.map(|d| d.x).filter(|&dx| dx > x) {
         let limit = dx.saturating_sub(x).saturating_sub(1);
-        if limit > 0 && cols > limit {
-            let f = limit as f32 / cols as f32;
-            cols = limit;
-            rows = ((rows as f32 * f).round() as u16).max(1);
+        if limit > 0 {
+            col_cap = col_cap.min(limit);
         }
     }
+    let (cols, rows) = aspect_cells(dw, dh, cw, ch, col_cap, band.height);
     let y = band.y + (band.height - rows) / 2;
     // SQ-0747 item (A): the FILL is the panel's own extent, and the band is wider than
     // that. A band runs to the story VIEWPORT's edge, and the viewport is quantized
@@ -5883,6 +5927,81 @@ mod tests {
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;
     use ratatui::layout::Rect;
+
+    /// SQ-0828: a flank panel's cell box does not distort the picture in it.
+    ///
+    /// The defect, exactly: `menu_flank_panel` ceiled `cols` and `rows` INDEPENDENTLY,
+    /// and a cell is 8 wide against 18 tall, so the two ceilings rounded by quite
+    /// different amounts. Journey's 222x254 plate at an 80x24 pane (uniform scale 1.0)
+    /// went into 224x270 — x1.0090 against y1.0630 — and the picture was stretched 5.3%
+    /// vertically. Nobody chose that; it fell out of the arithmetic.
+    ///
+    /// Some quantization is unavoidable on a 8x18 grid, so the property asserted is that
+    /// NO whole-cell box within a cell of the ideal distorts less — the function's actual
+    /// promise, which cannot be too tight or too slack — plus the magnitude on the one
+    /// case the quest reports. Story-free, so it gates in CI where the floppy is absent.
+    ///
+    /// FALSIFY by restoring the two independent ceilings — `(dw / cw).ceil()` for both
+    /// bounds of each axis in `aspect_cells`: the sweep fails on its first shape
+    /// ("222x254 at scale 0.5 … landed in a 14x8 cell box = 112x144, stretching the
+    /// picture by 12.37% — but 104x126 would have stretched it 5.89%"), and the reported
+    /// 222x254 @ s=1.0 case comes back 224x270, the quest's 5.35%.
+    #[test]
+    fn a_flank_panels_cell_box_keeps_the_pictures_aspect() {
+        // How much taller the box is drawn than wide, relative to the art — the quest's
+        // own reading of the defect (x1.0090 against y1.0630).
+        let stretch = |bw: f32, bh: f32, dw: f32, dh: f32| (bh / dh) / (bw / dw) - 1.0;
+        // Journey's plate, then other shapes so the rule is not fitted to one.
+        for (aw, ah) in [(222.0f32, 254.0f32), (248.0, 272.0), (111.0, 127.0), (320.0, 200.0)] {
+            for s in [0.5f32, 0.725, 1.0, 1.215, 1.6, 1.845, 2.475, 3.69] {
+                let (dw, dh) = (aw * s, ah * s);
+                let (cols, rows) = aspect_cells(dw, dh, 8, 18, 500, 500);
+                let (bw, bh) = (cols as f32 * 8.0, rows as f32 * 18.0);
+                let got = stretch(bw, bh, dw, dh).abs();
+                // …the box stays within a cell of the ideal on each axis, so this can
+                // neither inflate the art to fill its column nor starve it.
+                assert!(
+                    (bw - dw).abs() <= 8.0 && (bh - dh).abs() <= 18.0,
+                    "{aw}x{ah} at scale {s}: {bw}x{bh} is more than one cell from the \
+                     ideal {dw}x{dh}"
+                );
+                // …and it is the least distorting box that is.
+                for c in [(dw / 8.0).floor(), (dw / 8.0).ceil()] {
+                    for r in [(dh / 18.0).floor(), (dh / 18.0).ceil()] {
+                        let (ow, oh) = (c.max(1.0) * 8.0, r.max(1.0) * 18.0);
+                        assert!(
+                            got <= stretch(ow, oh, dw, dh).abs() + 1e-6,
+                            "{aw}x{ah} at scale {s} (ideal {dw}x{dh} device px) landed in \
+                             a {cols}x{rows} cell box = {bw}x{bh}, stretching the picture \
+                             by {:.2}% — but {ow}x{oh} would have stretched it {:.2}%",
+                            got * 100.0,
+                            stretch(ow, oh, dw, dh).abs() * 100.0
+                        );
+                    }
+                }
+            }
+        }
+        // The reported case, by the numbers: Journey's plate at an 80x24 pane, where the
+        // uniform scale is exactly 1.0 and the art therefore wants its own 222x254.
+        let (cols, rows) = aspect_cells(222.0, 254.0, 8, 18, 500, 500);
+        assert_eq!((cols, rows), (28, 14), "Journey's plate at s=1.0 goes into 224x252");
+        assert!(
+            stretch(224.0, 252.0, 222.0, 254.0).abs() < 0.02,
+            "the reported 5.35% stretch (224x270) must be under 2%"
+        );
+    }
+
+    /// The caller's caps still bind — a flank narrowed to leave a column of panel fill
+    /// beside the divider gets the best partner for the width it is left with, not a box
+    /// that overruns the rule.
+    #[test]
+    fn a_capped_flank_panel_stays_inside_its_caps() {
+        for cap in 1u16..=40 {
+            let (cols, rows) = aspect_cells(222.0, 254.0, 8, 18, cap, 12);
+            assert!((1..=cap).contains(&cols), "cap {cap}: {cols} columns");
+            assert!((1..=12).contains(&rows), "cap {cap}: {rows} rows");
+        }
+    }
 
     /// SQ-0818's whole safety argument, as a property: the tiles of a band PARTITION
     /// it. Every column of the strip is covered by exactly one tile — a gap would

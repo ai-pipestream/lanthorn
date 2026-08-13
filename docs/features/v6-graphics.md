@@ -574,6 +574,24 @@ sometimes and 4 others (measured across the plate: 7,757 runs of 4 against 3,372
 — but the factor is the uniform letterbox scale the story viewport is mapped through
 as well, so it cannot be moved without moving the text with it. That trade is open.
 
+### A picture is not stretched by the grid it sits on
+
+A flank panel's art is placed at *cell* granularity — whole terminal columns and
+rows — and cells are 8 wide against 18 tall. Rounding each axis up on its own
+therefore rounds them by quite different amounts: Journey's 222×254 plate at an
+80×24 pane, where the uniform scale is exactly 1.0 and the art wants its own size
+back, went into a 224×270 box. That is ×1.0090 horizontally against ×1.0630
+vertically — the picture drawn **5.3% taller than it is wide**, for no reason anyone
+chose.
+
+Both axes are now picked together, against the exact criterion `cols·cw·dh ==
+rows·ch·dw`, over the four boxes the ideal falls between. Every candidate is within
+one cell of the ideal on each axis, so this can neither inflate the art to fill its
+column nor starve it — it only chooses which corner of the grid to land on. The
+80×24 answer becomes 224×252, a 1.7% error, and that is the floor: fourteen rows of
+18 pixels cannot express 254/222 any better. The pane sweep improves everywhere it
+was wrong and moves nothing that was already right.
+
 ## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
