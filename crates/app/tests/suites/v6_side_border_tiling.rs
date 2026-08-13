@@ -174,7 +174,11 @@ fn boot_named(story: &str, archive: &str, release: (u16, &str)) -> Option<GameSe
     // `PictSource::std_window` answers from a Blorb's `Reso` chunk only; the
     // standard window a NAMED archive implies is `PictureOverride::std_window`,
     // and it is the same for every rendition (SQ-0790).
-    let v6_screen_px = picts.std_window().or(Some(app::graphics::INFOCOM_V6_STD_WINDOW));
+    // The chain `startup.rs` runs: a Blorb's `Reso`, else the archive's own
+    // picture space (SQ-0838 — 320x200 for MCGA/Amiga, 640x200 for EGA/CGA, and
+    // 480x300 for the standard Macintosh's mono plate). The screen is that space
+    // times the density below, which is 640x400 for every rendition here.
+    let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
     let v6_art_scale = picts.art_scale();
     let mut s = GameSession::new_with_art_scale(
         bytes,

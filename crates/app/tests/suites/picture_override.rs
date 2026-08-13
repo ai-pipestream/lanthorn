@@ -316,9 +316,9 @@ fn naming_a_pc_archive_leaves_the_v6_corpus_on_ibm_pc() {
 /// §11's "non-scalable, draw 1:1" declaration is what left Zork Zero's art at
 /// half size. The archive does say it, in the picture space its coordinates use.
 ///
-/// Every rendition of a game is a drawing of the SAME screen, so every one of
-/// them supplies the same 320×200 standard window. What differs is how dense the
-/// drawing is, and that is the art scale, not the window (SQ-0790).
+/// Every rendition of THIS game is a drawing of the same screen, so whichever
+/// one is named, the screen it implies is the same 640×400. What differs is how
+/// dense the drawing is, and that is the art scale, not the screen (SQ-0790).
 ///
 /// SQ-0734 answered `None` here for a 640-wide EGA/CGA archive, as a recorded
 /// deferral: its true presentation looked like a 640×200 screen on an 8×8 cell,
@@ -326,6 +326,13 @@ fn naming_a_pc_archive_leaves_the_v6_corpus_on_ibm_pc() {
 /// was wrong and this test is where it changes. 640×200 on an 8×8 cell is 80×25
 /// characters — the same character grid the 640×400 unit screen already gives on
 /// its 8×16 cell — so the screen never needed to move. Only the art density did.
+///
+/// SQ-0838 turned the assertion inside out without changing what it protects.
+/// An archive now states its own PICTURE SPACE and the scale closes the gap, so
+/// what is pinned here is the product — because there exists one Infocom
+/// rendition for which the product is NOT 640×400 (the standard Macintosh's
+/// 480×300 monochrome plate, `v6_macintosh_profile.rs`), and the whole point is
+/// that these four are not it.
 #[test]
 fn every_rendition_supplies_the_same_standard_window() {
     for name in ["zork0.pic", "zork0.mg1", "zork0.eg1", "zork0.cg1"] {
@@ -334,7 +341,14 @@ fn every_rendition_supplies_the_same_standard_window() {
         }
         let dir = game_dir_with(&format!("stdwin-{name}"), Some(&format!("pictures = {name:?}\n")));
         let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-        assert_eq!(over.std_window(), Some((320, 200)), "{name}");
+        let space = over.std_window().unwrap_or_else(|| panic!("{name} declares a picture space"));
+        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over);
+        let (sx, sy) = picts.art_scale().unwrap_or_else(|| panic!("{name} declares a density"));
+        assert_eq!(
+            (u32::from(space.0) * sx, u32::from(space.1) * sy),
+            (640, 400),
+            "{name}: picture space {space:?} at ({sx}, {sy}) must be the 640×400 unit screen",
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
     // Nothing named declares nothing.

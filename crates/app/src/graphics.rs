@@ -446,17 +446,47 @@ impl PictSource {
     /// outright: mounting an archive off the disk it shipped on must not produce
     /// different geometry from pointing at that very file by hand.
     ///
-    /// It is deliberately the LAST link in `startup.rs`'s chain, after the
-    /// machine, so no medium that already had an answer moves: the Amiga profile
-    /// still answers for a `.adf` (with the same numbers, by the same
-    /// reasoning), and a Blorb-less story that is not a disk image still has no
-    /// native archive and so still draws its art 1:1 (SQ-0715/SQ-0718). What it
-    /// covers is the medium whose machine has no profile — a Macintosh disk —
-    /// where without it the art would arrive at its own 320×200 size on a screen
-    /// the game is told is 640×400, which is precisely the 1× symptom SQ-0736
-    /// was reported for.
+    /// It sits AHEAD of the machine in `startup.rs`'s chain, and that ordering
+    /// is Infocom's rather than ours (SQ-0838). Their Macintosh interpreter
+    /// picked its window and its picture file in one decision — *"for a small
+    /// window use mono gfx, for a big window use color gfx"* — so the archive in
+    /// hand is the better evidence about the screen, not the worse. SQ-0837 put
+    /// this link last, when it answered one fixed pair and could only ever
+    /// restate what the machine already said; now that it answers per archive it
+    /// has to come first, or a mono-only Mac volume would be laid out on the
+    /// colour Mac's screen. **Nothing else moves**: for a `.adf` this is
+    /// (320, 200) and so is the Amiga profile, and a Blorb-less story that is
+    /// not a disk image still has no native archive at all and still draws its
+    /// art 1:1 (SQ-0715/SQ-0718).
+    ///
+    /// # The screen is the picture space, at the scale the machine drew it
+    ///
+    /// | rendition                     | picture space | scale | screen  |
+    /// |-------------------------------|---------------|-------|---------|
+    /// | Amiga/Mac colour, MCGA `.MG1` | 320×200       | (2,2) | 640×400 |
+    /// | EGA `.EG1`/`.EG2`, CGA `.CG1` | 640×200       | (1,2) | 640×400 |
+    /// | Macintosh mono `Pic.data`     | 480×300       | (1,1) | 480×300 |
+    ///
+    /// The first two rows are the corpus as it already stood: SQ-0790's reading
+    /// that a 320-wide and a 640-wide rendition are *two drawings of one screen*
+    /// survives intact, because the denser one's half-width pixels put it back
+    /// on the same 640×400. What that reading could not express is a third
+    /// rendition drawn for a genuinely different screen, and the standard
+    /// Macintosh's monochrome plate is one: `mac/gfx.p` calls it "scaled for a
+    /// 480x300 screen (std Mac)" and Infocom's interpreter really did open a
+    /// 480×300 window for it. Multiplying the space by the scale gives every
+    /// old rendition the screen it already had and the new one the screen it
+    /// asks for — see [`Self::art_scale`] and
+    /// [`crate::interpreter::InterpreterProfile::std_window`].
+    ///
+    /// **A caveat this cannot hide**: 300 is not a multiple of the 16-pixel v6
+    /// cell, so `session.rs` rounds the screen to 19 rows — 304 pixels, four
+    /// more than the Mac's, where a real Mac fitted 20 rows of its own 15-pixel
+    /// Geneva into exactly 300. Rounding the other way would hand the game a
+    /// 288-pixel screen and clip the bottom twelve pixels off its own artwork.
     pub fn native_std_window(&self) -> Option<(u16, u16)> {
-        self.native.as_ref().map(|_| INFOCOM_V6_STD_WINDOW)
+        let pics = self.native.as_ref()?;
+        Some((pics.picture_space_width(), pics.picture_space_height()))
     }
 
     /// The per-axis factor this source's art is scaled by on its way into the
@@ -874,14 +904,21 @@ impl PictureOverride {
     /// the standard window is the machine's, and every machine that wrote one of
     /// these archives drew v6 on the same one.
     ///
-    /// Every rendition answers with the SAME standard window, and that is the
-    /// point (SQ-0790). A 320-wide archive (Amiga/Mac `Pic.data`, MCGA `.MG1`)
+    /// Nearly every rendition answers with the SAME standard window, and that is
+    /// the point (SQ-0790). A 320-wide archive (Amiga/Mac colour, MCGA `.MG1`)
     /// and a 640-wide one (EGA `.EG1`/`.EG2`, CGA `.CG1`) are two drawings of
     /// one screen, not two screens: the EGA plate has twice as many pixels
     /// across because each is half as wide, so both cover the same rectangle.
     /// What differs between them is the DENSITY of the art, which is
     /// [`PictSource::art_scale`]'s business — 320-wide doubles onto the 640×400
-    /// unit screen, 640-wide is x1 across and x2 down.
+    /// unit screen, 640-wide is x1 across and x2 down. Answering with the
+    /// picture space and letting the scale close the gap says exactly that, and
+    /// says it for the one rendition that really is a second screen: the
+    /// standard Macintosh's 480×300 monochrome plate, which lands 1:1 on a
+    /// 480×300 screen. See [`PictSource::native_std_window`] for the table and
+    /// the sources; mounting an archive off the disk it shipped on and naming
+    /// that very file by hand must not produce different geometry, so the two
+    /// are deliberately one answer.
     ///
     /// SQ-0734 shipped `None` here for a 640-wide archive as an explicit
     /// deferral, on the reading that its true presentation was a 640×200 screen
@@ -892,13 +929,13 @@ impl PictureOverride {
     /// art scale is the whole of it.
     pub fn std_window(&self) -> Option<(u16, u16)> {
         match self {
-            // `INFOCOM_V6_STD_WINDOW` rather than
-            // `interpreter::AMIGA_STD_WINDOW`: the two are the same numbers for
-            // the same reason (this is the Infocom v6 standard window, which the
-            // Amiga also happens to use), but naming the Amiga's constant here
-            // would read as a claim that an MCGA archive is Amiga media, and it
-            // is not.
-            PictureOverride::Loaded { .. } => Some(INFOCOM_V6_STD_WINDOW),
+            // The archive's own picture space, rather than
+            // `interpreter::AMIGA_STD_WINDOW`: for an MCGA `.MG1` the two are
+            // the same numbers, but naming the Amiga's constant here would read
+            // as a claim that an MCGA archive is Amiga media, and it is not.
+            PictureOverride::Loaded { pics, .. } => {
+                Some((pics.picture_space_width(), pics.picture_space_height()))
+            }
             _ => None,
         }
     }

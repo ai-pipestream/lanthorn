@@ -131,7 +131,9 @@ Zork Zero has a third medium, and it is the outlier of the whole collection: the
 Macintosh floppy carries **release 296, serial 881019** — October 1988, where the
 Amiga disk is March 1989 and the bare story file July 1989. Ninety-seven releases
 separate the Mac build from the PC one. Treat a finding made on it as describing
-that build and no other.
+that build and no other. It will also tell you which machine it thinks it is on
+if you ask — `version` off that disk answers *"Macintosh Interpreter version
+6.65"*, which is the game reading header byte `0x1E` back to you.
 
 Every graphical title ships a *different* build on its floppy; the v3/v5 ones
 ship the same build on both media. A resource `.blb` beside a story is never a
@@ -247,7 +249,8 @@ Amiga floppy or anywhere else.
 - **Interpreter number** — the story header's interpreter number (byte `0x1E`)
   defaults to **1 (DECSystem-20)**, following Frotz's rule (6 / IBM PC only for
   v6) — unless you opened a release disk image, in which case the medium picks
-  the number instead (an `.adf` is an Amiga's 4), in every front-end alike.
+  the number instead (an `.adf` is an Amiga's 4, an HFS volume a Macintosh's 3),
+  in every front-end alike.
   This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
@@ -289,14 +292,30 @@ Amiga floppy or anywhere else.
   still wins: a number set in config, `--interpreter-number`, or `-I` outranks
   the medium every time, and only the *default* moves.
 
-  **The Macintosh has no profile of its own yet**, and that is deliberate rather
-  than an oversight. A Mac release floppy mounts, plays, and draws its own
-  artwork at the right size — the archive states the picture space it was drawn
-  for, so nothing has to be inferred — but what a Mac's palette and default page
-  looked like is not something the media in hand can settle, and a bundle guessed
-  from memory is exactly the incoherent half-machine profiles exist to prevent.
-  So a Macintosh disk gets the IBM PC bundle, the historical default, until a
-  fixture proves otherwise.
+  **Macintosh** is the third, and it was the last one to arrive because it was
+  the last one anybody could *prove*. A Mac release floppy has mounted and played
+  for a while, but what a Mac's page, palette and screen looked like was not
+  something the media in hand could settle, and a bundle guessed from memory is
+  exactly the incoherent half-machine profiles exist to prevent. Infocom's own
+  Macintosh interpreter settles all of it, so the bundle now ships: interpreter
+  number 3, black ink on a **white** page — the Mac's whole visual signature, and
+  the exact opposite of the Amiga's dark grey — and the standard colour table,
+  because the Mac's own colour mapping *is* that table and nothing more.
+
+  It hangs on the **medium**, and it has to. The Amiga and the Macintosh wrote
+  the same colour archive, byte for byte indistinguishable, and the Mac release
+  disk proves it by carrying one. A volume cannot be mistaken that way: HFS is
+  Apple's filesystem and nobody else wrote one.
+
+  And the Macintosh is the one machine with **two screens**, which is the part
+  worth knowing about. Infocom's Mac interpreter sized its window and picked its
+  picture file in a single decision — a big colour Mac got a 640×400 window and
+  the colour archive drawn at double size, and a standard compact Mac got a
+  480×300 window and the *monochrome* archive drawn 1:1. So on a Mac disk the
+  artwork you choose is the screen you get, and
+  [the artwork's own page](v6-graphics.md#two-macintosh-screens) has the numbers.
+  (512×342, the compact Mac's famous screen, is the *hardware* — the game window
+  sits inside it under the menu bar, and the story is told about the window.)
 
   The artwork can select the machine too, and it sits between the two. If you
   name a picture archive for a game — the `pictures` key described under
@@ -307,13 +326,21 @@ Amiga floppy or anywhere else.
   the two containers are structurally different and a renamed file would
   otherwise lie about which machine you asked for. (The Macintosh wrote the same
   container as the Amiga and cannot be told apart from it in general, so it is
-  not claimed to be.) MCGA, EGA and CGA are three video cards in one machine, so
+  not claimed to be — naming an archive off a Mac *disk* still gets you the
+  Macintosh, from the disk underneath it.) MCGA, EGA and CGA are three video
+  cards in one machine, so
   all three name the IBM PC and none of them moves byte `0x1E`; what a card does
   change is how densely its artwork was stored, which is
   [the art's business rather than the machine's](v6-graphics.md#choosing-which-artwork-a-game-draws).
   The character cell is 8×16 on every profile — EGA's own 640×200 mode on an 8×8
-  cell is the same 80×25 grid — so no rendition alters the screen a game is
-  handed. Setting `interpreter_number` yourself names the
+  cell is the same 80×25 grid — so no *rendition* alters the screen a game is
+  handed. (The one machine that would have moved it is the Macintosh, whose
+  interpreter typeset Version 6 in 12-point Geneva on a 7×15 cell. babelmap keeps
+  its 8×16, so a standard-Mac screen comes out 60×19 characters where a real Mac
+  fitted 68×20 — slightly larger type, and four pixels of slack at the bottom.
+  Making the cell a per-machine runtime value reaches into every corner of the
+  screen model, and is not something a profile should smuggle in.) Setting
+  `interpreter_number` yourself names the
   machine outright and outranks both, so `interpreter_number = 4` gets you
   the whole Amiga rather than just the byte — which is the point: a number that
   changed what games did without changing the machine it implied was never a

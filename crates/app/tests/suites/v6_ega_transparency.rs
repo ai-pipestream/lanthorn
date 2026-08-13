@@ -56,6 +56,7 @@ fn fmvpoker_ega_dealt() -> Option<GameSession> {
     let mut picts = PictSource::from_native(pics);
     let dims = picts.all_pict_dims();
     let scale = picts.art_scale();
+    let picts_std_window = picts.native_std_window();
     let mut s = GameSession::new_with_art_scale(
         bytes,
         true,
@@ -63,7 +64,9 @@ fn fmvpoker_ega_dealt() -> Option<GameSession> {
         None,
         false,
         dims,
-        Some(app::graphics::INFOCOM_V6_STD_WINDOW),
+        // The archive's own 640x200 picture space; with `scale`'s (1, 2) below
+        // that is the same 640x400 unit screen every rendition lands on (SQ-0838).
+        picts_std_window,
         scale,
         None,
         None,

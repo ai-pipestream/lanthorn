@@ -78,8 +78,15 @@ pub(crate) fn reset_game(
             // restart does not quietly change what the artwork looks like.
             picts.set_fuse_dither(state.config.fuse_art_dither);
             let picture_dims = picts.all_pict_dims();
-            let v6_screen_px =
-                picts.std_window().or(named_art_std_window).or_else(|| profile.std_window());
+            // The same four links `startup.rs` resolves, in the same order, so a
+            // restart comes back on the screen the launch settled — including
+            // the archive's own picture space, which is the standard Macintosh's
+            // 480×300 when the mono archive is the one mounted (SQ-0838).
+            let v6_screen_px = picts
+                .std_window()
+                .or(named_art_std_window)
+                .or_else(|| picts.native_std_window())
+                .or_else(|| profile.std_window());
             // SQ-0790: and the density the art arrives at, so a restart of a
             // story playing its EGA rendition comes back with the same geometry
             // it booted with. `None` for every Blorb-sourced story.

@@ -545,17 +545,20 @@ pub(crate) fn boot_story(
                 cfg.honor_game_colours = false;
                 cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, false);
             }
-            // SQ-0837: and last, the archive the MEDIUM supplied. A Macintosh
-            // disk carries its own artwork exactly as an Amiga floppy does, but
-            // the Macintosh has no profile to answer for it — so the archive
-            // answers for itself, with the same standard window a named archive
-            // already implies. Last in the chain, so no medium that already had
-            // an answer moves.
+            // SQ-0837/SQ-0838: then the archive the MEDIUM supplied, and only
+            // then the machine. The archive comes first because Infocom's own
+            // Macintosh interpreter chose its window and its picture file in one
+            // decision ("for a small window use mono gfx, for a big window use
+            // color gfx"), so a mono `Pic.data` mounted off a Mac volume states
+            // the 480×300 std-Mac screen it was drawn for. It cannot disturb any
+            // other medium: for an `.adf` the archive and the Amiga profile give
+            // the same 320×200, and a story with no native archive falls through
+            // to the machine exactly as before.
             let v6_screen_px = picts
                 .std_window()
                 .or(named_art_std_window)
-                .or_else(|| cfg.interpreter_profile.std_window())
-                .or_else(|| picts.native_std_window());
+                .or_else(|| picts.native_std_window())
+                .or_else(|| cfg.interpreter_profile.std_window());
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a
             // Blorb's does; an EGA/CGA one is 640 wide with half-width pixels and
