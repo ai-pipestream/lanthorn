@@ -66,7 +66,26 @@ fn scaled_to_native(sp: u32, np: u32, sp_max: u32) -> u32 {
 /// not needed: at `a = 255` both directions round-trip exactly (`(255v+127)/255 = v`),
 /// so a fully opaque plate — Journey's canyon, every RMS figure above — is bit-identical
 /// either way, and a magnifying pass skips the conversion entirely.
-fn resize_directional(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
+///
+/// # What it guarantees, to any caller
+///
+/// This is deliberately GENERAL, not v6-private: it takes an image and a target size and
+/// assumes nothing about unit space, chrome bands or the Z-machine. Two guarantees, and
+/// they are the two the rest of the app's resamples do not have (SQ-0829, which unifies
+/// the seven other call sites onto this one — `render/inline_image.rs`, `render/screen.rs`,
+/// `graphics.rs`, `picker_ui.rs` and `cover.rs` each picked their own filter and none
+/// premultiplies):
+///
+/// * **Direction.** Each axis is filtered by the way it moves — replication when it grows
+///   (pixel art stays crisp and gains no colours) and an area average when it shrinks
+///   (nothing is dropped). A band that grows on one axis and shrinks on the other gets
+///   both, in separate passes.
+/// * **Alpha.** A blending pass runs on associated colour, so a transparent neighbour
+///   contributes its coverage and not its `(0,0,0)`.
+///
+/// An axis that does not move is a bit-exact identity, so the common uniform case still
+/// costs one resize.
+pub(crate) fn resize_directional(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
     use image::imageops::FilterType;
     let pick = |t: u32, s: u32| if t < s { FilterType::Triangle } else { FilterType::Nearest };
     let (sw, sh) = src.dimensions();
@@ -2257,6 +2276,61 @@ mod resample_tests {
                 inks(&src),
                 "222x254 -> {tw}x{th} magnifies, so every pixel must be a replicated \
                  source pixel — a growing axis is exactly what Nearest is for"
+            );
+        }
+    }
+
+    /// SQ-0824, second pass: **the `V6_ART_SCALE` pre-double is not a resample the final
+    /// one compounds with — it composes away exactly.**
+    ///
+    /// The premise under investigation was that v6 art is "pre-scaled 2x and then scaled
+    /// again off the pre-scale", so the picture the player sees has been through two
+    /// samplers. It has been through two *calls*, and that is not the same thing. The
+    /// doubling is `image`'s Nearest at an integer ratio, which is pure replication:
+    /// output pixel `i` takes source `floor(i/2)`. A second Nearest then takes
+    /// `floor((o+0.5)·2N/T)` of that, and `floor(floor(2u)/2) = floor(u)` for every real
+    /// `u ≥ 0` — so the pair IS `floor((o+0.5)·N/T)`, the single Nearest resample straight
+    /// from the artwork's own resolution. Not approximately: bit for bit, which is what
+    /// this case asserts, in both directions and at the ratios the pane sweep produces.
+    ///
+    /// The consequence is worth stating plainly, because it decides a fix: sampling the
+    /// native artwork instead of the unit-space replica **cannot change a single pixel**
+    /// anywhere the final resample magnifies — which is every pane at or above ~80
+    /// columns, including the 166x44 the defect was reported at. Whatever is wrong there
+    /// is not double sampling. (Journey's plate at 166x44 is one art pixel per 3.69 device
+    /// pixels, so Nearest emits it as runs of 3 and 4 — the unevenness is the non-integer
+    /// magnification itself, and it survives any change of source.)
+    ///
+    /// Where the two DO differ is the direction decision above, and only there: a target
+    /// between the artwork's size and its double magnifies from native while it minifies
+    /// from the replica, so the same target picks Nearest one way and the area filter the
+    /// other. That is the `(168, 198)` row below, and it is a policy question — this
+    /// quest's own shrink win — not an arithmetic one.
+    #[test]
+    fn the_art_scale_predouble_composes_away_under_nearest() {
+        use image::imageops::FilterType;
+        let native = dithered_plate(111, 127);
+        // Exactly what `session::v6_scaled_art` does at `V6_ART_SCALE`.
+        let doubled = image::imageops::resize(&native, 222, 254, FilterType::Nearest);
+        for (tw, th) in
+            [(444u32, 508u32), (456, 522), (410, 468), (328, 378), (224, 270), (222, 254), (168, 198)]
+        {
+            assert_eq!(
+                image::imageops::resize(&doubled, tw, th, FilterType::Nearest).as_raw(),
+                image::imageops::resize(&native, tw, th, FilterType::Nearest).as_raw(),
+                "111x127 doubled to 222x254 and then Nearest-resampled to {tw}x{th} must be \
+                 BIT-IDENTICAL to one Nearest resample from the native artwork — an integer \
+                 replication composes with the sampler that follows it, so the pre-double is \
+                 not a second sampling and cannot be what distorts the picture"
+            );
+        }
+        // …and therefore the shipped resampler is a single resample from native wherever
+        // it magnifies, which is the regime the defect was reported in.
+        for (tw, th) in [(444u32, 508u32), (456, 522), (410, 468), (328, 378), (224, 270)] {
+            assert_eq!(
+                resize_directional(&doubled, tw, th).as_raw(),
+                image::imageops::resize(&native, tw, th, FilterType::Nearest).as_raw(),
+                "a magnifying {tw}x{th} band already samples the native artwork exactly once"
             );
         }
     }
