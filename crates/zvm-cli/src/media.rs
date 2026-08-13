@@ -1,8 +1,15 @@
 //! Opening an original release disk image.
 //!
-//! `blorb` already mounts an Amiga release floppy for the TUI, and `zvm-cli`
-//! already links `blorb` — so pointing this front-end at a `.adf` costs no new
-//! dependency and no new parsing, only the wiring in this file (SQ-0834).
+//! `blorb` mounts release floppies for the TUI, and `zvm-cli` already links
+//! `blorb` — so pointing this front-end at one costs no new dependency and no
+//! new parsing, only the wiring in this file (SQ-0834).
+//!
+//! **Every format `blorb` reads, this front-end opens** (SQ-0840). Nothing here
+//! names a filesystem: `blorb::medium` is asked whether the bytes are a disk and
+//! what is on it, so an Amiga floppy and a Macintosh volume arrive by the same
+//! road and the next format arrives without this file changing. That is the
+//! user's rule — *"please keep the functionality consistent for all disk image
+//! formats"* — made structural rather than remembered.
 //!
 //! The one thing a disk needs that a bare story file does not is a **choice**.
 //! An original single-game floppy carries one story and opens straight away,
@@ -10,8 +17,7 @@
 //! somebody has to pick from it: the player at a prompt, or `--story` when
 //! nobody is watching.
 
-use blorb::adf::Adf;
-use blorb::medium::DiskImage;
+use blorb::medium::{DiskImage, MountedDisk};
 
 /// One story found on a mounted disk image.
 pub struct Candidate {
@@ -57,35 +63,44 @@ impl Candidate {
 
 /// Are these bytes a disk image this front-end can mount?
 ///
-/// Content, not extension — exactly as the TUI asks the question, and through
-/// the same shared recogniser (`blorb::medium`), so an image with any name is
-/// recognised and a mis-named story file is not. Narrower than
-/// [`blorb::medium::DiskImage::detect`] on purpose: the TUI mounts a Macintosh
-/// volume too, and until [`story_candidates`] grows an HFS arm this front-end
-/// must not claim an image it cannot open.
+/// Content, not extension — exactly as the TUI asks the question, of exactly the
+/// same recogniser, so an image with any name is recognised and a mis-named
+/// story file is not.
+///
+/// It used to be **narrower** than [`blorb::medium::DiskImage::detect`], pinned
+/// to `Adf` alone with a comment explaining that this front-end must not claim
+/// an image it cannot open — an honest guard around a real hole, since
+/// `story_candidates` had no HFS arm and a Macintosh disk would have detected
+/// and then failed. The hole is gone: detect and mount now walk one table
+/// (SQ-0840), so whatever `blorb` recognises, `blorb` opens, and the guard has
+/// nothing left to guard.
 pub fn looks_like_image(raw: &[u8]) -> bool {
-    DiskImage::detect(raw) == Some(DiskImage::Adf)
+    DiskImage::detect(raw).is_some()
 }
 
 /// Mount `raw` and return every story on it, in disk order.
 ///
-/// Identified by content: AmigaDOS has no extensions, so `blorb`'s
-/// `looks_like_story` is what says a file is a story — and it is strict enough
-/// to reject the saved games the original *Zork Zero* floppy carries.
+/// Identified by content: a release disk's filenames prove nothing — AmigaDOS
+/// has no extensions and every Atari ST story is called `STORY.DAT` — so
+/// `blorb` decides by the bytes, strictly enough to reject the saved games the
+/// original *Zork Zero* floppy carries.
 pub fn story_candidates(raw: Vec<u8>) -> Result<Vec<Candidate>, String> {
-    let adf = Adf::mount(raw).map_err(|e| format!("Error: cannot mount the disk image: {e:?}"))?;
-    let mounted = adf.files().len();
-    let found: Vec<Candidate> = adf
-        .files()
-        .iter()
-        .filter_map(|e| adf.read(e).map(|bytes| Candidate { name: e.name.clone(), bytes }))
-        .filter(|c| blorb::adf::looks_like_story(&c.bytes))
+    let disk =
+        MountedDisk::mount(raw).map_err(|e| format!("Error: cannot mount the disk image: {e}"))?;
+    let mounted = disk.file_count();
+    let found: Vec<Candidate> = disk
+        .stories()
+        .into_iter()
+        .map(|s| Candidate { name: s.name, bytes: s.bytes })
         .collect();
     if found.is_empty() {
         let files = if mounted == 1 { "file" } else { "files" };
+        // Formats that keep a volume name say it; the ones that do not read the
+        // same as they always did.
+        let named = disk.volume_name().map(|n| format!(" on {n}")).unwrap_or_default();
         return Err(format!(
             "Error: no story file on this disk image \
-             ({mounted} {files} mounted; is this the boot disk?)"
+             ({mounted} {files} mounted{named}; is this the boot disk?)"
         ));
     }
     Ok(found)
@@ -175,6 +190,58 @@ pub fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare, structurally valid HFS volume with an empty catalog: the
+    /// cheapest thing that is unmistakably a Macintosh disk and not an
+    /// AmigaDOS one. Signature `BD` a kilobyte in, then a Master Directory
+    /// Block whose geometry describes the volume it sits in.
+    fn macintosh_volume() -> Vec<u8> {
+        let mut v = vec![0u8; 1600 * 512];
+        let mdb = 2 * 512;
+        v[mdb..mdb + 2].copy_from_slice(&0x4244u16.to_be_bytes()); // drSigWord
+        v[mdb + 18..mdb + 20].copy_from_slice(&1596u16.to_be_bytes()); // drNmAlBlks
+        v[mdb + 20..mdb + 24].copy_from_slice(&512u32.to_be_bytes()); // drAlBlkSiz
+        v[mdb + 28..mdb + 30].copy_from_slice(&4u16.to_be_bytes()); // drAlBlSt
+        v
+    }
+
+    /// An AmigaDOS floppy, boot block and all.
+    fn amiga_floppy() -> Vec<u8> {
+        let mut v = vec![0u8; 1760 * 512];
+        v[0..3].copy_from_slice(b"DOS");
+        v
+    }
+
+    /// **The rule, as a test**: whatever `blorb` recognises, this front-end
+    /// claims — for every format, with no exceptions carved out here.
+    ///
+    /// FALSIFICATION: narrow `looks_like_image` back to `== Some(DiskImage::Adf)`
+    /// and this fails on the Macintosh volume, which is exactly the reported
+    /// bug — `zvm-cli` opened an Amiga floppy and refused a Mac disk that
+    /// `blorb` had been able to read for a month.
+    #[test]
+    fn this_front_end_claims_every_disk_blorb_can_open() {
+        for raw in [amiga_floppy(), macintosh_volume()] {
+            let detected = DiskImage::detect(&raw).expect("a disk image");
+            assert!(
+                looks_like_image(&raw),
+                "blorb detects {detected:?} but this front-end will not claim it"
+            );
+            // …and claiming it means being able to open it, not merely to name
+            // it: a detector that claims a disk and then fails is worse than one
+            // that declines it (SQ-0840).
+            let mounted = MountedDisk::mount(raw).expect("what we claim, we can mount");
+            assert_eq!(mounted.format(), detected);
+        }
+    }
+
+    /// The other half: an ordinary story file is not a disk, and is not claimed.
+    #[test]
+    fn a_plain_story_file_is_not_claimed_as_a_disk() {
+        assert!(!looks_like_image(&story(3, 88, "840726")));
+        assert!(!looks_like_image(b"FORM\x00\x00\x00\x04IFRS"));
+        assert!(!looks_like_image(&[]));
+    }
 
     /// A story buffer whose header carries a given version, release and serial.
     /// Only the header is read here, so the rest can stay zero.

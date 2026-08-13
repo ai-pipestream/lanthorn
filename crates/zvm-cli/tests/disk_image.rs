@@ -171,6 +171,80 @@ fn a_single_story_floppy_opens_without_asking() {
     assert!(!stderr_of(&out).contains("--story"), "nothing to pick:\n{}", stderr_of(&out));
 }
 
+// ── every format, not just the Amiga's (SQ-0840) ──────────────────────────────
+
+/// A bare, structurally valid HFS volume with an empty catalog — unmistakably a
+/// Macintosh disk, and nothing like an AmigaDOS one. Signature `BD` a kilobyte
+/// in, then a Master Directory Block whose geometry describes the volume it sits
+/// in. No fixture needed, so this never skips.
+fn macintosh_volume() -> Vec<u8> {
+    let mut v = vec![0u8; 1600 * BSIZE];
+    let mdb = 2 * BSIZE;
+    v[mdb..mdb + 2].copy_from_slice(&0x4244u16.to_be_bytes()); // drSigWord
+    v[mdb + 18..mdb + 20].copy_from_slice(&1596u16.to_be_bytes()); // drNmAlBlks
+    v[mdb + 20..mdb + 24].copy_from_slice(&512u32.to_be_bytes()); // drAlBlkSiz
+    v[mdb + 28..mdb + 30].copy_from_slice(&4u16.to_be_bytes()); // drAlBlSt
+    v
+}
+
+/// **The bug this quest was filed for.** `zvm-cli` refused a Macintosh disk
+/// outright — `blorb` had read that filesystem since SQ-0837, but this
+/// front-end's detector was pinned to `Adf`, so the raw image went to the VM as
+/// if it were a story file.
+///
+/// A Mac volume must now be *mounted* like any other disk, and the message must
+/// be about what is on the disk. This one has nothing on it, so that message is
+/// the boot-disk one.
+///
+/// FALSIFICATION: restore `looks_like_image` to `== Some(DiskImage::Adf)` and
+/// this fails with the symptom as reported —
+/// `Error: Z-machine version 0 is not supported.` — byte 0 of an unmounted
+/// volume, read as a story header.
+#[test]
+fn a_macintosh_volume_is_mounted_like_any_other_disk() {
+    let image = write_temp("mac-empty.image", &macintosh_volume());
+    let out = run(&image, &[], "");
+    assert!(!out.status.success(), "an empty volume holds no game");
+    let err = stderr_of(&out);
+    assert!(err.contains("no story file on this disk image"), "mounted, and said so:\n{err}");
+    assert!(!err.contains("is not supported"), "never handed to the VM as a story:\n{err}");
+    let _ = std::fs::remove_file(&image);
+}
+
+/// The real Macintosh release disk: *Zork Zero* release 296 / serial 881019, an
+/// HFS volume inside a DiskCopy 4.2 wrapper. It mounts, and is then declined at
+/// load because `zvm-cli` renders no v6 graphics — which is this front-end's own
+/// limitation and the same answer the five graphical Amiga floppies get. **The
+/// user must see the v6 refusal, not a disk error**; that is what says the mount
+/// worked.
+///
+/// FALSIFICATION: with `looks_like_image` narrowed back to `Adf`, this reads
+/// `Error: Z-machine version 14 is not supported.` — 14 being the Pascal length
+/// of the DiskCopy header's disk name, `Zork Zero Disk`.
+#[test]
+fn the_real_macintosh_release_disk_mounts_and_is_declined_as_v6() {
+    let Some(image) = story_path("Zork Zero Disk.image") else { return };
+    let out = run(&image, &[], "");
+    let err = stderr_of(&out);
+    assert!(err.contains("v6 graphical games are not supported"), "the v6 refusal:\n{err}");
+    assert!(!err.contains("version"), "not a version-number complaint about the image:\n{err}");
+    assert!(!err.contains("disk image"), "not a disk error — the disk mounted fine:\n{err}");
+}
+
+/// The same disk on the other medium, for contrast: the Amiga *Zork Zero* is
+/// also v6 and gets the identical refusal. Two formats, one behaviour — which is
+/// the whole of the user's rule.
+#[test]
+fn an_amiga_v6_floppy_is_declined_exactly_as_the_macintosh_one_is() {
+    let Some(amiga) = story_path("Zork Zero - The Revenge of Megaboz.adf") else { return };
+    let Some(mac) = story_path("Zork Zero Disk.image") else { return };
+    assert_eq!(
+        stderr_of(&run(&amiga, &[], "")),
+        stderr_of(&run(&mac, &[], "")),
+        "the medium changes nothing about how the CLI declines a v6 game"
+    );
+}
+
 // ── the menu ──────────────────────────────────────────────────────────────────
 
 /// Nobody at the keyboard and more than one story: list what is there, name the

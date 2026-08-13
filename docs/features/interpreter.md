@@ -86,6 +86,24 @@ content-based identification, so a floppy is never listed as a bare story file,
 and one machine's media is never labelled as another's. See
 [Story picker](interface.md#story-picker).
 
+### One road in, whatever the disk is
+
+Two filesystems this far apart could easily have grown two of everything, and for
+a while they did: the "is this a disk, and what is on it" question was written
+out three separate times — once for artwork, once for story loading, once in
+`zvm-cli` — and the third copy had never learned about Macintosh disks at all. So
+the command-line player mounted an Amiga floppy happily and refused a Mac one a
+month after babelmap had learned to read it. Nobody wrote that rule; it was what
+you get when three places each answer the same question separately.
+
+There is one road now. A single table inside `blorb` lists the formats, and
+everything that touches a disk — the picker, story loading, artwork, the CLI's
+menu, the interpreter number the medium implies — asks that table rather than
+naming a filesystem. **Whatever babelmap can recognise as a disk, it can open**,
+because recognising and opening are the same lookup. A format added to the table
+arrives everywhere at once, which is the point: DOS/Atari ST FAT12 and Apple
+ProDOS are next, and neither will need a line changed in any front-end.
+
 ### A floppy is a different release
 
 Worth knowing before you compare two runs: the disk image is not the same story
@@ -128,12 +146,19 @@ itself instead of quietly rebasing someone's investigation.
 
 ### The command-line player takes a floppy too
 
-`zvm-cli` — the no-map DOS-style player — now mounts a disk image exactly the way
-the TUI does, and it cost nothing to give it: `blorb` hand-rolls its AmigaDOS
-reader with zero dependencies, and `zvm-cli` already linked it. So
+`zvm-cli` — the no-map DOS-style player — mounts a disk image exactly the way the
+TUI does, and it cost nothing to give it: `blorb` hand-rolls every one of these
+readers with zero dependencies, and `zvm-cli` already linked it. So
 `zvm-cli "Zork I - The Great Underground Empire.adf"` drops you at *West of
 House* off the original floppy, no unpacking, no rename, and the same
 content-based identification decides what on the disk is a story.
+
+**Exactly the way** is meant literally: the CLI opens every format the TUI does,
+Macintosh disks included, because both go through the same table. Point it at a
+graphical v6 disk of either kind and you get the v6 refusal — the one every
+graphical Amiga floppy already gets, telling you to run it in babelmap — rather
+than a complaint about the disk. That distinction matters: it says the mount
+worked and only the renderer is missing.
 
 One thing the CLI needs that a single-game floppy never asks for: **which one**.
 Amiga releases came one game to a disk, but the compilations did not — an Atari

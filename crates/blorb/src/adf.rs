@@ -336,7 +336,7 @@ fn be32(b: &[u8], off: usize) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Number of blocks on a real 880 KB DD floppy.
@@ -418,6 +418,17 @@ mod tests {
             }
             self.put32(owner, 8, in_owner as u32);
         }
+    }
+
+    /// One synthetic OFS floppy carrying `files`, for the mount-seam tests in
+    /// [`crate::medium`]. They need a real volume of every format and cannot
+    /// reach a builder that is private to this module.
+    pub(crate) fn sample_disk(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut d = DiskBuilder::new(false);
+        for (name, data) in files {
+            d.add_file(name, data);
+        }
+        d.image
     }
 
     /// A minimal but structurally valid v6 story header, padded to `len`.
