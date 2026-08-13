@@ -973,6 +973,33 @@ session-only switch that never touches your saved config:
   swaps the two flanks' 37-pixel stone blocks on alternate tiles so the courses
   trade sides, and that is a statement about the pair which only the scene identity
   justifies.
+  **The standard Macintosh's pillars have a ring in them, and a ring will not
+  tile.** Every rendition above has a featureless shaft, which is the only reason a
+  fixed stride was ever invisible: cut anywhere, repeat forever, stamp the foot over
+  the overshoot, and nobody can tell you where the joins are. The monochrome
+  `Pic.data` on *Zork Zero Disk.image* (release 296) is drawn differently — capital,
+  shaft, a banded ring at mid-height, more shaft, then a flared base — and it broke
+  the flank path in two places at once. First it was not recognised as a pillar at
+  all: a v6 screen is the archive's picture space rounded up to a whole 8×16 cell,
+  the mono space is 480×300, and 300 is four pixels short of the 304-row screen that
+  makes, so "does the art reach the bottom?" answered *no* and handed a pillar to
+  Shogun's single-piece recipe — which extends a slab by mirroring the whole thing
+  below itself. On screen that reads as a doubled foot at the art's own bottom and
+  then bare shaft, and at 120×90 a second capital, running past the base and down to
+  the pane's last row. Reaching the bottom now means reaching it *to within one text
+  row*, which is the largest a full-height plate can ever miss by. Second, and once
+  it was recognised: repeating a plain length of a *banded* shaft puts the ring back
+  wherever the stride lands, leaves whatever is left over as the gap above the foot,
+  and — because alternate tiles are mirrored — moves the ring by twice its offset
+  from the unit's centre every other time. So a banded column is composed the other
+  way round. The repeat unit is everything below the capital, foot included, and the
+  copies are laid at a stride that divides the extension exactly, so the last one's
+  base lands on the bottom row and every ring is one stride from the next. The
+  rhythm that keeps is the picture's own at every pane height: capital to first ring
+  and last ring to base are both exactly what the artist drew, because both come
+  from an unmodified copy of the art. A taller pane gets *more* rings rather than
+  longer gaps — one at 40 rows, three at 64, four at 90 — which is the articulation
+  a 480×300 window never had room to show.
   The obvious escape from all of this — autocorrelate the flank down its own y
   axis, take the strongest period as the tile height, and never ask which scene is
   on screen — was measured across the corpus and **does not work**, for a reason

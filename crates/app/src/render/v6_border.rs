@@ -38,6 +38,12 @@
 
 use image::{Rgba, RgbaImage};
 
+/// One v6 text row in unit space — `InterpreterProfile::v6_font_cell()`'s 16,
+/// which is the grain a v6 screen height is rounded to and therefore the most a
+/// full-height plate can fall short of the screen it was drawn for. See
+/// [`recognize`].
+const V6_TEXT_ROW: u32 = 16;
+
 /// Which of the three Infocom v6 side-border layouts a flank is showing.
 ///
 /// Recognised from the art's own native extent rather than from the story's
@@ -125,13 +131,25 @@ fn painted_widths(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32)) -> Opti
 /// So every Zork Zero flank we can measure is at or below 0.81 and every Shogun
 /// flank at or above 0.96. The cut is at **9/10**, in the gap, and both ends of
 /// it are pinned by `v6_side_border_tiling.rs`.
+///
+/// **"Reaches the bottom" means to within one text row, and that is SQ-0841.**
+/// A v6 screen is the archive's picture space rounded UP to a whole cell, so a
+/// full-height plate can stop short of the screen by that rounding. Every
+/// rendition but one divides exactly and nobody noticed: the standard
+/// Macintosh's monochrome archive is 480x300 laid on babelmap's 8x16 cell, which
+/// rounds to a **304**-row screen (SQ-0838 — see `InterpreterProfile::v6_font_cell`
+/// for the four pixels of slack it names by hand). Zork Zero's monochrome
+/// pillars are painted to row 300 of that 304, so an exact test read them as
+/// Shogun's single-piece slab and extended them by MIRRORING the whole column —
+/// which is what stamped a second capital, and a length of bare shaft, below
+/// their feet.
 pub fn recognize(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), native_h: u32) -> Option<BorderArt> {
     let (top, bottom) = art;
     if bottom <= top {
         return None;
     }
     let (lo, hi) = painted_widths(canvas, x0, x1, art)?;
-    if bottom >= native_h && lo * 10 < hi * 9 {
+    if bottom + V6_TEXT_ROW > native_h && lo * 10 < hi * 9 {
         return Some(BorderArt::ZorkZeroPillars);
     }
     if top == 0 {
@@ -473,6 +491,129 @@ pub fn pillar_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
     Some((top, bottom))
 }
 
+/// The **banded** shaft of a pillar — `(top, bottom_exclusive)` — for a column
+/// whose shaft is not one constant span because a decorative band interrupts it.
+/// SQ-0841.
+///
+/// [`pillar_shaft`] answers for a shaft that holds ONE opaque span for most of
+/// the flank, which is every Zork Zero rendition Infocom shipped for a PC or an
+/// Amiga. The standard Macintosh's monochrome plate is not one of them: measured
+/// on `stories/Zork Zero Disk.image` (**Zork Zero r296 / s881019**) with
+/// `--pictures Pic.data`, at a gameplay frame, both flanks carry a ring in the
+/// middle of an otherwise plain shaft —
+///
+/// | flank | capital | shaft         | ring       | foot     |
+/// |-------|---------|---------------|------------|----------|
+/// | left  | 0..63   | 63..285 (8..45) | 163..173 (±1 col) | 285..300 |
+/// | right | 0..63   | 63..286 (17..53)| 164..173 (±1 col) | 286..300 |
+///
+/// — so the longest CONSTANT run is only 112 of the flank's 300 rows (37%) and
+/// the majority test rejects it, correctly: by that measurement this is not a
+/// plain shaft. It is still a shaft, and this says so by scanning for the
+/// longest run of rows whose span stays within **one column at each edge** of
+/// some reference row's. The ring deviates by exactly one column, which is why
+/// one column is the tolerance and not two: at two, `zork0.mg1`'s underground
+/// masonry starts declaring shafts again and the flanks stop agreeing, which is
+/// the failure SQ-0792 removed.
+///
+/// The reference is scanned over every row rather than taken from the run's
+/// first, because a run anchored to its first row breaks at the ring on the
+/// RIGHT flank (its shaft is 17..53, its ring 18..52, and its own taper row is
+/// 16..54 — two columns apart from the ring, one from the shaft). Anchoring to
+/// the shaft itself finds all 225 rows; anchoring to whatever happens to come
+/// first finds 102 and 122 and neither is a majority. Same gates as
+/// [`pillar_shaft`] otherwise, majority included.
+pub fn banded_shaft(dst: &RgbaImage, art_bottom: u32) -> Option<(u32, u32)> {
+    let w = dst.width();
+    let span = |y: u32| -> Option<(u32, u32)> {
+        let mut first = None;
+        let mut last = 0;
+        for x in 0..w {
+            if dst.get_pixel(x, y)[3] >= 128 {
+                first.get_or_insert(x);
+                last = x;
+            }
+        }
+        first.map(|f| (f, last))
+    };
+    let rows: Vec<Option<(u32, u32)>> = (0..art_bottom.min(dst.height())).map(span).collect();
+    let widest = rows.iter().flatten().map(|(f, l)| l - f + 1).max()?;
+    /// One column at each edge — the ring's own deviation, and no more.
+    const SLACK: u32 = 1;
+    let near = |s: Option<(u32, u32)>, r: (u32, u32)| {
+        matches!(s, Some((f, l)) if f.abs_diff(r.0) <= SLACK && l.abs_diff(r.1) <= SLACK)
+    };
+    let mut best: Option<(u32, u32, (u32, u32))> = None;
+    for (i, r) in rows.iter().enumerate() {
+        let Some(reference) = *r else { continue };
+        let mut top = i;
+        while top > 0 && near(rows[top - 1], reference) {
+            top -= 1;
+        }
+        let mut bottom = i + 1;
+        while bottom < rows.len() && near(rows[bottom], reference) {
+            bottom += 1;
+        }
+        let (top, bottom) = (top as u32, bottom as u32);
+        if best.is_none_or(|(t, b, _)| bottom - top > b - t) {
+            best = Some((top, bottom, reference));
+        }
+    }
+    let (top, bottom, (first, last)) = best?;
+    if last - first + 1 >= widest || top == 0 || bottom >= art_bottom || (bottom - top) * 2 < art_bottom {
+        return None;
+    }
+    Some((top, bottom))
+}
+
+/// **A banded pillar, repeated at a uniform stride with its foot flush at the
+/// bottom** — SQ-0841, and the composition [`extend_pillars`] cannot express.
+///
+/// [`extend_pillars`] cuts a plain length of shaft, tiles it at a fixed stride
+/// until it passes the bottom, and stamps the foot over whatever the last tile
+/// overshot. On a featureless shaft that is invisible and it is what Bocfel
+/// does. On a shaft with a band in it, two things show:
+///
+/// 1. **The remainder.** The run ends wherever the fixed stride happens to
+///    reach, so the gap between the last band and the foot is whatever is left
+///    over — never the gap between two bands.
+/// 2. **The mirror.** [`extend_pillars`] alternates each tile's vertical flip
+///    (SQ-0808) because a duplicated row hides a seam a translation cannot. On a
+///    plain shaft a mirror is indistinguishable from a translation; on a banded
+///    one it MOVES the band, by twice its offset from the unit's centre.
+///
+/// So a banded column is composed the other way round: the repeat unit is the
+/// whole of the pillar BELOW its capital — shaft, band and foot together — and
+/// `k` further copies are laid at a stride that divides the extension exactly,
+/// so the last copy's foot lands on the bottom row and every band is one stride
+/// from the next. Each copy overwrites the one above it from its own top down,
+/// so only the last copy's foot survives; the rest contribute shaft and bands.
+///
+/// The rhythm this keeps is the ART's own, at every pane height: the capital-to
+/// first-band distance and the last-band-to-foot distance are both exactly what
+/// the picture was drawn with, because both come from an unmodified copy of it.
+///
+/// `top_cut` is where the unit is cut (just below the capital), `art_bottom` the
+/// art's own last painted row, `desired_height` the band to fill. `k` is derived
+/// from the span, so a taller pane gets MORE bands rather than longer ones.
+pub fn extend_banded_pillars(dst: &mut RgbaImage, top_cut: u32, art_bottom: u32, desired_height: u32) {
+    if art_bottom <= top_cut || desired_height <= art_bottom {
+        return;
+    }
+    let unit_h = art_bottom - top_cut;
+    // What the copies below the first have to cover. `k` is the fewest of them
+    // that can, so the stride is as long as the art allows and never longer.
+    let extra = desired_height - art_bottom;
+    let k = extra.div_ceil(unit_h);
+    let unit = snapshot(dst, top_cut, unit_h);
+    for i in 1..=k {
+        stamp(dst, &unit, top_cut + (i * extra) / k, false);
+    }
+    // Copy `k` sits at `top_cut + extra`, so its foot ends exactly on
+    // `desired_height`. Nothing may follow it.
+    erase_below(dst, desired_height);
+}
+
 /// **Zork Zero** — `extend_pillars(43, 13, 200, 142, 0, false, false)`, the
 /// CASTLE border on the VGA / Amiga / Blorb artwork (`zorkzero.cpp`), with
 /// every one of those four numbers **measured off the art** instead.
@@ -605,7 +746,13 @@ fn zork_zero(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
     const UNIT: u32 = 284;
     let (top_cut, foot, unit) = match pillar_shaft(dst, art_bottom) {
         Some((top, bottom)) => (top + INSET, art_bottom - bottom, (bottom - top).saturating_sub(2 * INSET)),
-        None => (TOP_CUT, FOOT, UNIT),
+        // A shaft with a BAND in it is not a plain one, and repeating a plain
+        // length of it is what left bare shaft below the Macintosh column's
+        // feet. SQ-0841 — see [`extend_banded_pillars`].
+        None => match banded_shaft(dst, art_bottom) {
+            Some((top, _)) => return extend_banded_pillars(dst, top + INSET, art_bottom, desired_height),
+            None => (TOP_CUT, FOOT, UNIT),
+        },
     };
     if unit == 0 || foot == 0 || art_bottom <= top_cut + foot {
         return;
