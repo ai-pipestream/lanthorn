@@ -227,6 +227,46 @@ fn region_across(
     Ok(Region { anchor: keep, rooms })
 }
 
+/// A passage from OUTSIDE into a room, whose cut is a real boundary — a seam a move may take,
+/// paired with the region taking it would move (SQ-0439).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundSeam {
+    /// The room the passage comes FROM. Cutting the seam leaves it behind, which is what makes it
+    /// "outside": the walk that built `region` proved it so rather than assuming it.
+    pub from: RoomId,
+    /// The direction of travel, `from` → the room the seam was computed for. The passage may be
+    /// ONE-WAY — that is the case the old direction-out-of-the-current-room surface could not name
+    /// at all, and the whole reason this list is oriented as arrivals.
+    pub dir: Direction,
+    /// The rooms that move when this seam is cut: the anchor room's own side, `from` excluded.
+    pub region: Region,
+}
+
+/// Every passage INTO `room` that is a real boundary, in graph order (SQ-0439).
+///
+/// This is the set a move may legally cut, and it is usually tiny — often one, which is why a
+/// player need never point at an edge. The observation it rests on: a move can only ever sever a
+/// BRIDGE, because [`region_at_arrival`] refuses [`RegionRefusal::NotASeam`] the moment the two
+/// ends stay connected another way. So "which edges could this cut?" is not a question about the
+/// whole graph, it is this list.
+///
+/// Membership is decided by running the cut, not by guessing: an inbound connection is a seam iff
+/// [`region_at_arrival`] accepts it, which also throws out the cases that were never candidates —
+/// portals (already a cut, and [`planar_region`]'s job), passages from another layer, and self
+/// loops.
+pub fn inbound_seams(graph: &MapGraph, room: RoomId) -> Vec<InboundSeam> {
+    let mut out = Vec::new();
+    for c in graph.connections() {
+        if c.dest != room || c.origin == room {
+            continue;
+        }
+        if let Ok(region) = region_at_arrival(graph, c.origin, c.dir) {
+            out.push(InboundSeam { from: c.origin, dir: c.dir, region });
+        }
+    }
+    out
+}
+
 /// True iff the connection's endpoints are in different layers.
 pub fn is_interlayer(graph: &MapGraph, conn: &Connection) -> bool {
     graph.layer_of(conn.origin) != graph.layer_of(conn.dest)
@@ -588,6 +628,80 @@ mod tests {
         );
         assert_eq!(g.layers().len(), 1, "and nothing was peeled");
         assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![1, 2, 3], "all three rooms stay put");
+    }
+
+    // ── SQ-0439: the inbound seams — what a move may legally cut ─────────────
+
+    /// Adventure's maze again, but asked the other way round: which passages INTO the entrance
+    /// room are boundaries at all? Exactly one, and it is the ONE-WAY passage that was walked —
+    /// no direction out of the maze room names it, which is the entire complaint this answers.
+    #[test]
+    fn the_only_inbound_seam_at_a_maze_entrance_is_the_one_way_passage_in() {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "At West End of Long Hall"), (2, "Maze"), (3, "Maze"), (4, "Maze")] {
+            g.upsert_room(id, n.into());
+        }
+        g.add_edge(1, Direction::S, 2); // walked in — one way, no reciprocal
+        g.add_edge(2, Direction::Down, 1); // the way back: a portal, and not the reciprocal
+        g.add_edge(2, Direction::N, 3);
+        g.add_edge(3, Direction::S, 2);
+        g.add_edge(2, Direction::E, 4);
+        g.add_edge(4, Direction::N, 3);
+
+        let seams = inbound_seams(&g, 2);
+        assert_eq!(seams.len(), 1, "the maze's innards hold each other together: {seams:?}");
+        assert_eq!((seams[0].from, seams[0].dir), (1, Direction::S));
+        assert_eq!(
+            seams[0].region.rooms,
+            [2, 3, 4].into_iter().collect::<BTreeSet<_>>(),
+            "and the seam already knows what it would move — the maze, without the hall"
+        );
+        assert_eq!(seams[0].region.anchor, 2, "anchored on the room the seams were asked about");
+
+        // The consequence the design accepts openly: a room in the MIDDLE of the maze has no
+        // inbound boundary at all, because every way in has a way round.
+        assert!(inbound_seams(&g, 3).is_empty(), "mid-maze: nothing to cut");
+    }
+
+    /// A corridor is the ambiguous case, and it is ambiguous for a real reason: standing in the
+    /// middle of A-B-C-D, cutting the passage from A and cutting the passage from C are both
+    /// legal boundaries that take opposite halves of the map.
+    #[test]
+    fn a_room_mid_corridor_has_one_inbound_seam_per_side() {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "A"), (2, "B"), (3, "C"), (4, "D")] {
+            g.upsert_room(id, n.into());
+        }
+        for (a, b) in [(1, 2), (2, 3), (3, 4)] {
+            g.add_edge(a, Direction::E, b);
+            g.add_edge(b, Direction::W, a);
+        }
+        let seams = inbound_seams(&g, 2);
+        let named: Vec<(RoomId, Direction)> = seams.iter().map(|s| (s.from, s.dir)).collect();
+        assert_eq!(named, vec![(1, Direction::E), (3, Direction::W)]);
+        assert_eq!(seams[0].region.rooms, [2, 3, 4].into_iter().collect::<BTreeSet<_>>());
+        assert_eq!(seams[1].region.rooms, [1, 2].into_iter().collect::<BTreeSet<_>>());
+    }
+
+    /// Neither a portal nor a passage from another layer is ever a candidate: a portal is already
+    /// a cut ([`planar_region`]'s business), and a seam divides ONE layer rather than crossing one.
+    /// Membership is decided by running the cut, so both fall out for free.
+    #[test]
+    fn portals_and_cross_layer_passages_are_never_inbound_seams() {
+        let mut g = two_floors();
+        let seams = inbound_seams(&g, 3);
+        assert_eq!(
+            seams.iter().map(|s| (s.from, s.dir)).collect::<Vec<_>>(),
+            vec![(4, Direction::W)],
+            "1↓3 is a portal, so it never appears — only the Wine Cellar's planar passage does"
+        );
+
+        peel(&mut g, 3).expect("peel the cellar off Main");
+        assert_eq!(
+            inbound_seams(&g, 1).iter().map(|s| (s.from, s.dir)).collect::<Vec<_>>(),
+            vec![(2, Direction::W)],
+            "3↑1 now crosses layers as well as being a portal, and is still not a seam"
+        );
     }
 
     /// A passage whose ends stay connected another way is not a boundary, and says so.

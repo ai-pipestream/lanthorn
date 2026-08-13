@@ -3432,6 +3432,9 @@ fn select_adjacent(state: &mut AppState, mapper: &Mapper, delta: i32) {
 /// Where `move-region` was told to put the rooms, as the player named it (SQ-0439).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MoveDest {
+    /// Nothing was named. Auto-pick when only one destination is possible, ask when more are —
+    /// the same rule the seam follows, applied to where the rooms land (SQ-0439).
+    Auto,
     /// A fresh layer — the old `peel-layer`.
     New,
     /// The layer the region's own was peeled from — the old bare `merge-layer`.
@@ -3477,14 +3480,27 @@ fn resolve_move_dest(
 /// "Dead End North" resolves whole; only when the words name no destination at all is the last
 /// one read as a seam. That ordering is the only reason this cannot happen in `slash.rs`, which
 /// dispatches without a graph to ask.
+///
+/// Both halves may be left out. No words at all is the bare command — seam and destination both
+/// auto-picked. A lone direction names the seam and leaves the destination to the auto-pick, which
+/// is what lets each refusal suggest a command that fixes only the ambiguity it is complaining
+/// about (`move-region north`, `move-region new`) instead of demanding both at once.
 fn parse_move_region_arg(
     graph: &mapper::graph::MapGraph,
     arg: &str,
 ) -> Result<(MoveDest, Option<Direction>), String> {
     let words: Vec<&str> = arg.split_whitespace().collect();
+    if words.is_empty() {
+        return Ok((MoveDest::Auto, None));
+    }
     let whole = words.join(" ");
     if let Some(dest) = resolve_move_dest(graph, &whole)? {
         return Ok((dest, None));
+    }
+    if words.len() == 1 {
+        if let Some(dir) = mapper::direction::parse_direction(words[0]) {
+            return Ok((MoveDest::Auto, Some(dir)));
+        }
     }
     if words.len() >= 2 {
         if let Some(dir) = mapper::direction::parse_direction(words[words.len() - 1]) {
@@ -3498,10 +3514,108 @@ fn parse_move_region_arg(
     Err(format!("move-region: no layer named '{whole}'"))
 }
 
+/// True when `region` is everything on its layer — the shape [`mapper::layer::move_region`] refuses
+/// against a NEW target, and the one that sends a bare move looking for a seam to cut instead.
+fn region_is_whole_layer(
+    graph: &mapper::graph::MapGraph,
+    region: &mapper::layer::Region,
+) -> bool {
+    let all = graph.rooms_in_layer(graph.layer_of(region.anchor));
+    all.len() == region.rooms.len() && all.iter().all(|id| region.rooms.contains(id))
+}
+
+/// Why the rooms to move could not be settled — a refusal that belongs to the SEAM, not to the
+/// destination (SQ-0439).
+enum SeamRefusal {
+    /// The seam was named and the region walk turned it down; the pair is the passage tried.
+    Region(mapper::layer::RegionRefusal, Option<(mapper::graph::RoomId, Direction)>),
+    /// Several passages lead into the room and each cuts a different map. Nothing to auto-pick
+    /// from, so the player says which. (Lane D turns this list into a picker; until then it is a
+    /// refusal that names the candidates and the command that resolves them.)
+    Ambiguous(Vec<mapper::layer::InboundSeam>),
+}
+
+/// Which rooms move, in three tiers, anchored on the SELECTED room (SQ-0439).
+///
+/// The old surface anchored on the room you were STANDING IN and asked for the direction pointing
+/// back out of the area you wanted — inverted from how a player thinks about it, and unsayable
+/// when the way in was one-way. Anchoring on the selection dissolves both, because the seam can
+/// then be found rather than named:
+///
+/// 1. **Portal boundary.** [`mapper::layer::planar_region`] walks the compass edges and stops at
+///    portals, which is a floor, a cellar, a tower — the common case, and it needs no input beyond
+///    which room was picked. Accepted whenever it is a proper part of its layer.
+/// 2. **The unique inbound bridge.** When the walk covers the whole layer there is no boundary to
+///    find that way, so look at the passages leading INTO the room. Exactly one is a real seam →
+///    cut it. One-way passages are included, which is precisely the case that had no direction to
+///    name. A layer with NO inbound seam falls back to the whole-layer region and lets the move
+///    itself answer — folding a whole layer into another is a merge, not an error.
+/// 3. **Several inbound bridges.** Ambiguous, so ask.
+///
+/// A named direction skips the tiers and resolves the seam directly: an inbound passage of that
+/// direction first — so the command a tier-3 refusal suggests means what the list said it meant —
+/// falling back to the passage of that direction OUT of the room, which is the only way to name a
+/// one-way exit.
+fn choose_region(
+    graph: &mapper::graph::MapGraph,
+    room: mapper::graph::RoomId,
+    dir: Option<Direction>,
+) -> Result<(mapper::layer::Region, Option<(mapper::graph::RoomId, Direction)>), SeamRefusal> {
+    if let Some(d) = dir {
+        let named: Vec<mapper::layer::InboundSeam> = mapper::layer::inbound_seams(graph, room)
+            .into_iter()
+            .filter(|s| s.dir == d)
+            .collect();
+        return match named.as_slice() {
+            [one] => Ok((one.region.clone(), Some((one.from, d)))),
+            [] => mapper::layer::region_at_edge(graph, room, d)
+                .map(|r| (r, Some((room, d))))
+                .map_err(|why| SeamRefusal::Region(why, Some((room, d)))),
+            _ => Err(SeamRefusal::Ambiguous(named)),
+        };
+    }
+    let region = mapper::layer::planar_region(graph, room);
+    if !region_is_whole_layer(graph, &region) {
+        return Ok((region, None)); // tier 1
+    }
+    match mapper::layer::inbound_seams(graph, room).as_slice() {
+        [one] => Ok((one.region.clone(), Some((one.from, one.dir)))), // tier 2
+        // Nothing divides this layer at all. The whole-layer region is still the right answer for
+        // a merge, and `move_region` says so better than a seam refusal could.
+        [] => Ok((region, None)),
+        many => Err(SeamRefusal::Ambiguous(many.to_vec())), // tier 3
+    }
+}
+
+/// The layers `region` could legally land on, `new` included — what a bare `move-region` picks from
+/// when exactly one is possible (SQ-0439).
+///
+/// Mirrors [`mapper::layer::move_region`]'s own refusals rather than inventing a second rule: a new
+/// layer is only a rename when the region is its whole layer, and Main may be moved out of but
+/// never emptied.
+fn move_targets(
+    graph: &mapper::graph::MapGraph,
+    region: &mapper::layer::Region,
+) -> Vec<mapper::layer::MoveTarget> {
+    use mapper::layer::{MoveTarget, MAIN_LAYER};
+    let src = graph.layer_of(region.anchor);
+    let is_whole = region_is_whole_layer(graph, region);
+    let mut out = Vec::new();
+    if !is_whole {
+        out.push(MoveTarget::New);
+    }
+    if !(src == MAIN_LAYER && is_whole) {
+        out.extend(
+            graph.layers().keys().copied().filter(|&t| t != src).map(MoveTarget::Existing),
+        );
+    }
+    out
+}
+
 /// `move-region`: compute the region, then re-home it (SQ-0439). Those are two steps because they
 /// are two concerns — which rooms, and onto what — and each refuses for its own reasons.
 fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
-    use mapper::layer::{MoveTarget, Region};
+    use mapper::layer::MoveTarget;
     let Some(room) = state.selected_room.or_else(|| mapper.graph.current()) else {
         state.notifications.push("move-region: no room selected");
         return;
@@ -3514,36 +3628,16 @@ fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
         }
     };
 
-    // With a direction, the player names a seam leading OUT of the room. Without one, cut the
-    // passage they walked IN through (SQ-0552) — that is what separates the area just entered
-    // from the one behind, and unlike an outgoing seam it works when the way in was one-way or
-    // the way back is some other direction entirely.
-    //
-    // The arrival only describes the room the player is standing in, so a move aimed at some
-    // other selected room ignores it. Nor does it help when the passage walked was a portal: the
-    // region walk already treats those as cuts, which is exactly what the portal-seam search
-    // (SQ-0360) is for. That search is also the fallback when nothing was walked to get here —
-    // the first room of a game, a death or teleport, a move whose command named no direction, or
-    // a freshly loaded map.
-    let arrival = mapper
-        .arrived_via()
-        .filter(|_| Some(room) == mapper.graph.current())
-        .filter(|&(_, d)| mapper::direction::grid_offset(d).is_some());
-    let computed: Result<Region, mapper::layer::RegionRefusal> = match (dir, arrival) {
-        (Some(d), _) => mapper::layer::region_at_edge(&mapper.graph, room, d),
-        (None, Some((prev, d))) => mapper::layer::region_at_arrival(&mapper.graph, prev, d),
-        (None, None) => Ok(mapper::layer::planar_region(&mapper.graph, room)),
-    };
-    // The seam actually attempted, for the refusal message: the named passage out of the room,
-    // else the one walked in through. Reporting the raw `dir` instead named "Unknown" for every
-    // bare move — a direction nothing had tried.
-    let seam = dir.map(|d| (room, d)).or(arrival);
-    let region = match computed {
-        Ok(r) => r,
+    let (region, seam) = match choose_region(&mapper.graph, room, dir) {
+        Ok(v) => v,
         // A refusal used to be silent, which reads as a broken command — say which of the several
         // quite different reasons it was (SQ-0360).
-        Err(why) => {
-            state.notifications.push(region_refusal_message(&mapper.graph, room, seam, why));
+        Err(SeamRefusal::Region(why, tried)) => {
+            state.notifications.push(region_refusal_message(&mapper.graph, room, tried, why));
+            return;
+        }
+        Err(SeamRefusal::Ambiguous(seams)) => {
+            state.notifications.push(seam_choice_message(&mapper.graph, room, dest, &seams));
             return;
         }
     };
@@ -3553,11 +3647,31 @@ fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
         MoveDest::New => MoveTarget::New,
         MoveDest::Parent => MoveTarget::Existing(mapper::layer::parent_layer(&mapper.graph, src)),
         MoveDest::Layer(id) => MoveTarget::Existing(id),
+        // Same rule as the seam, one step later: pick when there is nothing to pick between.
+        MoveDest::Auto => match move_targets(&mapper.graph, &region).as_slice() {
+            [one] => *one,
+            many => {
+                state.notifications.push(destination_choice_message(&mapper.graph, dir, many));
+                return;
+            }
+        },
     };
     let moved = region.rooms.len();
     match mapper::layer::move_region(&mut mapper.graph, &region, target) {
         Ok(landed) => {
             state.bump_graph_gen(); // rooms changed layer → invalidate the render memo (SQ-0305)
+            // A seam the player did not name was chosen FOR them, so say which passage was cut —
+            // otherwise a bare move silently picks a boundary and the map simply changes shape.
+            if dir.is_none() {
+                if let Some((from, d)) = seam {
+                    let name = mapper
+                        .graph
+                        .room(from)
+                        .map(|r| r.label().to_string())
+                        .unwrap_or_else(|| format!("#{from}"));
+                    state.set_status(format!("move-region: cut the {d:?} passage from {name}"));
+                }
+            }
             if !matches!(target, MoveTarget::New) {
                 let s = if moved == 1 { "" } else { "s" };
                 state.set_status(format!(
@@ -3584,8 +3698,8 @@ fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
 /// at it.
 ///
 /// `seam` is the passage that was actually tried — `(the room it leads out of, its direction)` —
-/// which for a bare move is the one the player walked IN through, and so is anchored at the room
-/// they came FROM, not the one they are standing in (SQ-0552).
+/// which is anchored at the room the passage leads FROM, not at the selected room, because an
+/// inbound seam's whole point is that it may have no counterpart out of the selection (SQ-0439).
 fn region_refusal_message(
     graph: &mapper::graph::MapGraph,
     room: mapper::graph::RoomId,
@@ -3621,6 +3735,76 @@ fn region_refusal_message(
             format!("move-region: {here}'s passage already leaves {layer}. A seam divides one layer.")
         }
     }
+}
+
+/// Tier 3: several passages lead into the room, so name them and the command that picks one
+/// (SQ-0439).
+///
+/// The suggested command carries the destination back through verbatim, so answering the question
+/// asked does not silently re-open the other one. Directions use the tags
+/// [`mapper::direction::parse_direction`] itself accepts, so the line can be typed as printed.
+///
+/// A direction cannot always separate them — a maze happily has two rooms whose SOUTH exits both
+/// land here — so the hint is only offered when some direction appears once. When none does, the
+/// message says so plainly rather than suggesting a command that would ask the same question again.
+fn seam_choice_message(
+    graph: &mapper::graph::MapGraph,
+    room: mapper::graph::RoomId,
+    dest: MoveDest,
+    seams: &[mapper::layer::InboundSeam],
+) -> String {
+    let name = |id: mapper::graph::RoomId| {
+        graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id}"))
+    };
+    let list: Vec<String> = seams
+        .iter()
+        .map(|s| format!("{} from {}", mapper::direction::short_label(s.dir), name(s.from)))
+        .collect();
+    let prefix = match dest {
+        MoveDest::Auto => "move-region".to_string(),
+        MoveDest::New => "move-region new".to_string(),
+        MoveDest::Parent => "move-region parent".to_string(),
+        MoveDest::Layer(id) => format!("move-region {}", graph.layer_name(id)),
+    };
+    let unique = seams.iter().find(|s| seams.iter().filter(|o| o.dir == s.dir).count() == 1);
+    let hint = match unique {
+        Some(s) => format!(" (e.g. {prefix} {})", mapper::direction::short_label(s.dir)),
+        None => " They share a direction, so naming one is not possible yet.".to_string(),
+    };
+    format!(
+        "move-region: several passages lead into {} — say which to cut: {}.{hint}",
+        name(room),
+        list.join(", ")
+    )
+}
+
+/// The destination half of the same question: nothing was named and more than one layer could take
+/// these rooms, so list them (SQ-0439).
+fn destination_choice_message(
+    graph: &mapper::graph::MapGraph,
+    dir: Option<Direction>,
+    targets: &[mapper::layer::MoveTarget],
+) -> String {
+    use mapper::layer::MoveTarget;
+    if targets.is_empty() {
+        return "move-region: nowhere to put these rooms — they are the whole of their layer, so a \
+                new one would only rename it, and there is no other layer to fold them into."
+            .to_string();
+    }
+    let names: Vec<String> = targets
+        .iter()
+        .map(|t| match t {
+            MoveTarget::New => "new".to_string(),
+            MoveTarget::Existing(id) => graph.layer_name(*id).to_string(),
+        })
+        .collect();
+    // Repeat the seam the player already named, so answering this does not re-open the other half.
+    let seam = dir.map(|d| format!(" {}", mapper::direction::short_label(d))).unwrap_or_default();
+    format!(
+        "move-region: name a destination — {}. (e.g. move-region {}{seam})",
+        names.join(", "),
+        names[0]
+    )
 }
 
 /// Say why the MOVE refused, once the region itself was fine (SQ-0439). Nothing here is about
@@ -8613,10 +8797,6 @@ mod tests {
         m.observe(1, "Hall", None);
         m.observe(2, "Cellar", Some(Direction::Down));
         let mut s = AppState::default();
-        // SQ-0552 made a bare peel cut the passage just walked through. This test
-        // predates that and wants the portal-seam search, so clear the arrival:
-        // a relocation is by definition not a walked passage.
-        m.observe_relocation(2, "Cellar");
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m); // Cellar -> L1
         m.observe(3, "Vault", Some(Direction::E)); // joins L1
         m.observe(2, "Cellar", Some(Direction::W)); // walk back, so the Vault has a way out to cut
@@ -8651,7 +8831,6 @@ mod tests {
         m.observe(1, "West of House", None);
         m.observe(2, "Maze", Some(Direction::Down));
         let mut s = AppState::default();
-        m.observe_relocation(2, "Maze");
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m); // Maze -> L1
         let maze = m.graph.layer_of(2);
         // The back door: a surface room discovered FROM the maze inherits the maze layer.
@@ -8681,7 +8860,6 @@ mod tests {
         m.observe(1, "Hall", None);
         m.observe(2, "Cellar", Some(Direction::Down));
         let mut s = AppState::default();
-        m.observe_relocation(2, "Cellar");
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m); // Cellar -> L1
         let cellar = m.graph.layer_of(2);
         s.set_viewed_layer(Some(cellar));
@@ -8708,7 +8886,6 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);
         m.observe(2, "Cellar", Some(Direction::Down));
-        m.observe_relocation(2, "Cellar"); // no walked arrival: fall back to the portal seam
         let mut s = AppState::default();
 
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
@@ -8731,7 +8908,6 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);
         m.observe(2, "Cellar", Some(Direction::Down));
-        m.observe_relocation(2, "Cellar");
         let mut s = AppState::default();
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m); // Cellar -> L1
         let cellar = m.graph.layer_of(2);
@@ -8746,10 +8922,8 @@ mod tests {
         assert_eq!(m.graph.layer_of(3), cellar, "a sub-region of Main moved onto another layer");
         assert_eq!(m.graph.rooms_in_layer(mapper::layer::MAIN_LAYER), vec![1], "Main keeps the Hall");
 
-        // What is LEFT of Main is now its whole contents: refused, and it says why. (The walked
-        // arrival now points at a passage the Study took to another layer, so clear it and let
-        // the portal-seam walk answer — this is about the MOVE refusing, not the region.)
-        m.observe_relocation(1, "Hall");
+        // What is LEFT of Main is now its whole contents: refused, and it says why — this is
+        // about the MOVE refusing, not about which rooms were chosen.
         s.select_room(Some(1));
         apply_action(Action::MoveRegion("Cellar".into()), &mut s, &mut m);
         assert_eq!(m.graph.layer_of(1), mapper::layer::MAIN_LAYER, "Main was not emptied");
@@ -8784,6 +8958,14 @@ mod tests {
             "destinations are case-insensitive, and the seam takes the game's own vocabulary"
         );
         assert_eq!(parse_move_region_arg(&m.graph, "parent"), Ok((MoveDest::Parent, None)));
+        // Either half may be left out, so a refusal can suggest a fix for just the ambiguity it
+        // is complaining about instead of demanding both at once (SQ-0439).
+        assert_eq!(parse_move_region_arg(&m.graph, ""), Ok((MoveDest::Auto, None)));
+        assert_eq!(
+            parse_move_region_arg(&m.graph, "west"),
+            Ok((MoveDest::Auto, Some(Direction::W))),
+            "a lone direction is a seam, with the destination left to the auto-pick"
+        );
         assert!(parse_move_region_arg(&m.graph, "Attic").is_err(), "an unknown name is refused");
         assert!(
             parse_move_region_arg(&m.graph, "Attic east").is_err(),
@@ -8803,9 +8985,6 @@ mod tests {
         m.observe(3, "Damp Cave", Some(Direction::E));
         let mut s = AppState::default();
         s.select_room(Some(1));
-        // SQ-0552: with a walked arrival a bare peel cuts THAT seam instead. This
-        // case is the fallback — no passage was walked to get here — so clear it.
-        m.observe_relocation(3, "Damp Cave");
 
         // Plain peel: one connected region, so it refuses — and now explains itself.
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
@@ -8848,12 +9027,10 @@ mod tests {
         assert!(msg.contains("no W passage"), "{msg:?}");
     }
 
-    // ── SQ-0552: a bare peel cuts the passage walked in through ──────────────
+    // ── SQ-0439: the three seam tiers, anchored on the selected room ─────────
 
     /// The user's Adventure map, in miniature: walk SOUTH out of the Long Hall into the maze,
     /// whose only ways out are DOWN back to the hall and an Unknown link to the Inside Building.
-    /// A bare peel used to cut `opposite(S)` OUT of the maze room — an edge to another maze room —
-    /// and refuse with "not a boundary". The seam is the edge that was walked.
     fn advent_maze() -> (AppState, Mapper) {
         let mut m = Mapper::default();
         m.observe(1, "Inside Building", None);
@@ -8871,56 +9048,194 @@ mod tests {
         (AppState::default(), m)
     }
 
-    #[test]
-    fn a_bare_peel_cuts_the_passage_walked_in_through() {
-        let (mut s, mut m) = advent_maze();
-        apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
-        assert_eq!(s.notifications.latest_text(), None, "no complaint — the walked passage is a seam");
-        let new = s.viewed_layer.expect("the peeled layer is in view");
-        assert_eq!(m.graph.rooms_in_layer(new), vec![3, 4], "the maze leaves, both its rooms");
-        assert_eq!(
-            m.graph.rooms_in_layer(0),
-            vec![1, 2],
-            "the hall and the building behind stay put"
-        );
-    }
-
-    /// The arrival describes the room the player is IN. Aiming the peel at some other selected
-    /// room must not cut a passage that has nothing to do with it.
-    #[test]
-    fn a_bare_peel_at_another_selected_room_ignores_the_arrival() {
-        let (mut s, mut m) = advent_maze();
-        s.select_room(Some(2)); // the hall, not the maze room we are standing in
-        apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
-        // The portal-seam search takes over and peels the SELECTION's own planar region — which
-        // reaches through the walked passage into the maze, so the hall leaves with it. That is
-        // the pre-SQ-0552 behaviour, and the point: the arrival did not steer this peel.
-        let new = s.viewed_layer.expect("the portal-seam search still has something to cut");
-        assert_eq!(m.graph.rooms_in_layer(new), vec![2, 3, 4], "the selected room's region peels");
-        assert_eq!(
-            m.graph.rooms_in_layer(0),
-            vec![1],
-            "the walked passage was never cut — the hall and maze stayed one region"
-        );
-    }
-
-    /// The refusal used to name the direction the player TYPED — `None` for a bare peel, which
-    /// printed as "Unknown": a passage nothing had tried. It must name the seam actually cut at.
-    #[test]
-    fn a_bare_peel_refusal_names_the_passage_it_tried() {
+    /// A hall whose ONLY way into the maze is a one-way south passage, with the way back a portal.
+    /// The compass walk therefore reaches the hall and covers the whole layer, so this is the
+    /// fixture for tier 2 — and for the complaint that started SQ-0439, since no direction OUT of
+    /// the maze names the way in.
+    fn one_way_maze() -> (AppState, Mapper) {
         let mut m = Mapper::default();
-        m.observe(1, "Hall", None);
-        m.observe(2, "Cave", Some(Direction::E)); // walked east...
-        m.graph.upsert_room(3, "Tunnel".into());
-        m.graph.add_edge(1, Direction::N, 3); // ...but Hall→Tunnel→Cave goes round the back
-        m.graph.add_edge(3, Direction::E, 2);
-        let mut s = AppState::default();
+        for (id, n) in [(1, "At West End of Long Hall"), (2, "Maze"), (3, "Maze"), (4, "Maze")] {
+            m.graph.upsert_room(id, n.into());
+        }
+        for (a, d, b) in [
+            (1, Direction::S, 2),    // walked in — one way, no reciprocal to name
+            (2, Direction::Down, 1), // the way back: a portal, and not the reciprocal
+            (2, Direction::N, 3),
+            (3, Direction::S, 2),
+            (2, Direction::E, 4),
+            (4, Direction::N, 3),
+        ] {
+            m.graph.add_edge(a, d, b);
+        }
+        m.graph.set_current(2);
+        (AppState::default(), m)
+    }
 
+    /// A chain with no portal in it: every room's compass walk is the whole layer, so tier 1 can
+    /// never fire and tier 2/3 do all the work.
+    fn corridor() -> (AppState, Mapper) {
+        let mut m = Mapper::default();
+        for (id, n) in [(1, "A"), (2, "B"), (3, "C"), (4, "D")] {
+            m.graph.upsert_room(id, n.into());
+        }
+        for (a, b) in [(1, 2), (2, 3), (3, 4)] {
+            m.graph.add_edge(a, Direction::E, b);
+            m.graph.add_edge(b, Direction::W, a);
+        }
+        m.graph.set_current(1);
+        (AppState::default(), m)
+    }
+
+    /// TIER 1. A region the portals already bound is the answer, and the seam search is never
+    /// reached — no passage is cut, so nothing is announced as cut. It is also the whole reason a
+    /// floor needs no input beyond which room was picked.
+    #[test]
+    fn a_portal_bounded_region_never_looks_for_a_seam() {
+        let (mut s, mut m) = advent_maze();
+        s.select_room(Some(3));
+        apply_action(Action::MoveRegion(String::new()), &mut s, &mut m);
+        let new = s.viewed_layer.expect("the region moved to a layer of its own");
+        assert_eq!(
+            m.graph.rooms_in_layer(new),
+            vec![2, 3, 4],
+            "the compass walk stops at the portals, and takes everything inside them"
+        );
+        assert_eq!(m.graph.rooms_in_layer(0), vec![1], "the building beyond the portal stays");
+        assert_eq!(
+            s.notifications.latest_text(),
+            None,
+            "nothing was cut, so nothing is reported cut — and nothing refused"
+        );
+    }
+
+    /// TIER 2, and the complaint that started this: the way in is ONE-WAY, so no direction out of
+    /// the maze names it. Exactly one passage leads in, so it is cut without being asked for — and
+    /// said out loud, because a boundary chosen for the player must not be invisible.
+    #[test]
+    fn the_one_way_passage_in_is_found_cut_and_named() {
+        let (mut s, mut m) = one_way_maze();
+        s.select_room(Some(2));
+        apply_action(Action::MoveRegion(String::new()), &mut s, &mut m);
+
+        let new = s.viewed_layer.expect("the maze moved to a layer of its own");
+        assert_eq!(m.graph.rooms_in_layer(new), vec![2, 3, 4], "the maze leaves, all three rooms");
+        assert_eq!(m.graph.rooms_in_layer(0), vec![1], "the hall stays put");
+        let msg = s.notifications.latest_text().expect("an auto-picked seam must speak").to_string();
+        assert!(msg.contains("cut the S passage"), "says which passage: {msg:?}");
+        assert!(msg.contains("Long Hall"), "and where it came from: {msg:?}");
+    }
+
+    /// TIER 3. Two ways in, each cutting a different half of the map: no auto-pick is honest here,
+    /// so the candidates are named and nothing moves. (Lane D turns this list into a picker.)
+    #[test]
+    fn several_ways_in_are_offered_rather_than_guessed() {
+        let (mut s, mut m) = corridor();
+        s.select_room(Some(2));
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
+
+        assert_eq!(m.graph.layers().len(), 1, "an ambiguous seam moves nothing");
         let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
-        assert!(msg.contains("not a boundary"), "{msg:?}");
-        assert!(msg.contains("E passage from Hall"), "names the seam it tried: {msg:?}");
-        assert!(!msg.contains("Unknown"), "and never a direction nothing tried: {msg:?}");
+        assert!(msg.contains("several passages lead into B"), "{msg:?}");
+        assert!(msg.contains("e from A"), "names each way in and where it comes from: {msg:?}");
+        assert!(msg.contains("w from C"), "{msg:?}");
+        assert!(msg.contains("move-region new e"), "and the command that picks one: {msg:?}");
+    }
+
+    /// The command that refusal suggests must mean what the list said it meant: a direction picks
+    /// the passage IN of that direction, taking the selected room's side — not the passage of the
+    /// same name leading out, which cuts the opposite half.
+    #[test]
+    fn naming_a_way_in_cuts_that_one_and_takes_the_selection_with_it() {
+        let (mut s, mut m) = corridor();
+        s.select_room(Some(2));
+        apply_action(Action::MoveRegion("new e".into()), &mut s, &mut m);
+        let new = s.viewed_layer.expect("the named seam cut");
+        assert_eq!(m.graph.rooms_in_layer(new), vec![2, 3, 4], "the A→B passage was the seam");
+        assert_eq!(m.graph.rooms_in_layer(0), vec![1], "A is what stayed behind");
+    }
+
+    /// A direction OUT of the room is still nameable, and is the only way to name a one-way exit.
+    /// It is the fallback, reached when no passage leads IN that way.
+    #[test]
+    fn a_direction_with_no_way_in_falls_back_to_the_passage_out() {
+        let (mut s, mut m) = corridor();
+        s.select_room(Some(1)); // A: nothing leads in from the east, but A leads out east
+        apply_action(Action::MoveRegion("new e".into()), &mut s, &mut m);
+        let new = s.viewed_layer.expect("the outbound seam cut");
+        assert_eq!(m.graph.rooms_in_layer(new), vec![1], "A's own side leaves, as it always has");
+    }
+
+    /// A maze can perfectly well have two rooms whose SOUTH exits both land here, and then a
+    /// direction cannot separate them. Say so rather than suggesting a command that would ask the
+    /// same question again.
+    #[test]
+    fn a_shared_direction_says_it_cannot_tell_the_passages_apart() {
+        let (mut s, mut m) = advent_maze(); // 2→S→3 and 4→S→3 are both boundaries
+        s.select_room(Some(3));
+        apply_action(Action::MoveRegion("new south".into()), &mut s, &mut m);
+        assert_eq!(m.graph.layers().len(), 1, "nothing moved");
+        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
+        assert!(msg.contains("s from At West End of Long Hall"), "{msg:?}");
+        assert!(msg.contains("s from Maze"), "{msg:?}");
+        assert!(msg.contains("share a direction"), "and admits the direction is no use: {msg:?}");
+        assert!(!msg.contains("e.g."), "so it suggests nothing that would loop: {msg:?}");
+    }
+
+    /// The consequence the design accepts openly: a room in the MIDDLE of a maze has no inbound
+    /// boundary, so there is nothing to auto-cut and the whole-layer region falls through to the
+    /// move's own refusal. It never guesses a seam.
+    #[test]
+    fn a_room_mid_maze_falls_back_instead_of_guessing() {
+        let (mut s, mut m) = one_way_maze();
+        s.select_room(Some(3)); // every way in has a way round
+        apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
+        assert_eq!(m.graph.layers().len(), 1, "nothing moved");
+        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
+        assert!(msg.contains("one connected region"), "{msg:?}");
+    }
+
+    // ── SQ-0439: the destination auto-picks on the same rule as the seam ─────
+
+    /// With Main the only layer there is, `new` is the only place a region can go — so the bare
+    /// command says nothing and simply does it.
+    #[test]
+    fn a_bare_move_picks_the_only_destination_there_is() {
+        let (mut s, mut m) = one_way_maze();
+        s.select_room(Some(2));
+        assert_eq!(m.graph.layers().len(), 1, "the premise: only Main exists");
+        apply_action(Action::MoveRegion(String::new()), &mut s, &mut m);
+        let new = s.viewed_layer.expect("a layer was minted without being asked for");
+        assert_ne!(new, mapper::layer::MAIN_LAYER);
+        assert_eq!(m.graph.rooms_in_layer(new), vec![2, 3, 4]);
+    }
+
+    /// Add a second layer and `new` is no longer the only answer — the rooms could equally fold
+    /// into it — so the bare command asks instead of guessing, and lists what it is choosing between.
+    #[test]
+    fn a_bare_move_asks_once_more_than_one_destination_is_possible() {
+        let (mut s, mut m) = one_way_maze();
+        m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Attic".into());
+        s.select_room(Some(2));
+        apply_action(Action::MoveRegion(String::new()), &mut s, &mut m);
+
+        assert_eq!(m.graph.layer_of(2), mapper::layer::MAIN_LAYER, "an ambiguous target moves nothing");
+        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
+        assert!(msg.contains("name a destination"), "{msg:?}");
+        assert!(msg.contains("new"), "lists the fresh layer: {msg:?}");
+        assert!(msg.contains("Attic"), "and every layer that could take them: {msg:?}");
+    }
+
+    /// The two questions stay separate: a seam the player already named is carried into the
+    /// destination question, so answering one does not silently re-open the other.
+    #[test]
+    fn a_named_seam_survives_into_the_destination_question() {
+        let (mut s, mut m) = corridor();
+        m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Attic".into());
+        s.select_room(Some(2));
+        apply_action(Action::MoveRegion("e".into()), &mut s, &mut m);
+        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
+        assert!(msg.contains("name a destination"), "the seam resolved; the target did not: {msg:?}");
+        assert!(msg.contains("move-region new e"), "and the suggestion keeps the seam: {msg:?}");
     }
 
     #[test]

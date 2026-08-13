@@ -319,20 +319,14 @@ pub static COMMANDS: &[CommandSpec] = &[
     // layer — differing only in whether the destination is minted or named. `peel-layer` and
     // `merge-layer` are retired in favour of the one verb that says so.
     CommandSpec { name: "move-region", category: Category::Map, context: Context::Map,
-        usage: "move-region <new|parent|layer> [direction]",
-        description: "re-home a region onto a fresh layer, its parent, or any named layer; a direction names the seam to cut at",
-        dispatch: |a| {
-            use crate::input::Action;
-            // The destination may be a layer NAME with spaces in it ("Dead End"), and the seam is
-            // an optional trailing direction, so neither can be split off here: the whole
-            // remainder goes to `apply_action`, which has the live layer list to resolve it
-            // against.
-            if a.is_empty() {
-                err("move-region: name a destination — new, parent, or a layer (e.g. move-region main)")
-            } else {
-                SlashOutcome::Action(Action::MoveRegion(a.join(" ")))
-            }
-        } },
+        usage: "move-region [new|parent|layer] [direction]",
+        description: "re-home the selected room's region onto a fresh layer, its parent, or any named layer; bare picks both when only one choice is possible",
+        // The destination may be a layer NAME with spaces in it ("Dead End"), and the seam is an
+        // optional trailing direction, so neither can be split off here: the whole remainder goes
+        // to `apply_action`, which has the live layer list to resolve it against. That includes
+        // the EMPTY remainder — bare `move-region` auto-picks the seam and the destination when
+        // each has only one possibility, which only the graph can answer (SQ-0439).
+        dispatch: |a| SlashOutcome::Action(crate::input::Action::MoveRegion(a.join(" "))) },
     CommandSpec { name: "toggle-room-dock", category: Category::Map, context: Context::Map,
         usage: "toggle-room-dock", description: "open or close the room dock under the map",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomDock) },
@@ -727,9 +721,13 @@ mod tests {
             parse("move-region Dead End", '/'),
             SlashOutcome::Action(Action::MoveRegion(ref s)) if s == "Dead End"
         ));
-        // A destination is not optional here: bare, the two old verbs meant opposite things
-        // (peel to a new layer / fold into the parent), so silence would have to guess.
-        assert!(matches!(parse("move-region", '/'), SlashOutcome::Error(_)));
+        // Bare is a real form, not an error: the destination auto-picks when only one is
+        // possible and asks otherwise, and only the live graph can tell which (SQ-0439). So the
+        // empty remainder goes through like any other.
+        assert!(matches!(
+            parse("move-region", '/'),
+            SlashOutcome::Action(Action::MoveRegion(ref s)) if s.is_empty()
+        ));
     }
 
     /// The retired verbs are gone outright — pre-release, so no aliases (SQ-0439).
