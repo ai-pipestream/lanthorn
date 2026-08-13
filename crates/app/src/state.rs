@@ -4245,22 +4245,30 @@ impl AppState {
     /// The fold is [`merge_line_into_previous`](Self::merge_line_into_previous) —
     /// the same call the game-self-echo path uses — so the moved text's style runs
     /// shift onto the line they join rather than being dropped.
+    ///
+    /// Returns whether the fold happened, which the `[more]` pager needs: a folded
+    /// turn's output starts on a row that was already on screen, so that row is
+    /// partly this turn's and the pager's baseline has to step back onto it. See
+    /// [`app::pager`](crate::pager) — getting this wrong scrolled Arthur's hint
+    /// pages one line too far (SQ-0823).
     pub fn push_transcript_runs_char_echo(
         &mut self,
         text: &str,
         kind: TranscriptKind,
         chunks: &[crate::session::CaptureRun],
         continues: bool,
-    ) {
+    ) -> bool {
         let fold = continues
             && !text.starts_with('\n')
             && self.last_transcript_line_is_story()
             && self.clear_anchor != Some(self.transcript.len());
         let before = self.transcript.len();
         self.push_transcript_runs(text, kind, chunks);
-        if fold && self.transcript.len() > before {
+        let folded = fold && self.transcript.len() > before;
+        if folded {
             self.merge_line_into_previous(before);
         }
+        folded
     }
 
     /// Append a logical image unit: an empty placeholder line tagged `Story`
@@ -4904,6 +4912,49 @@ mod tests {
         // A default bold char: bold + black on white.
         assert!(runs.iter().any(|r| r.bits == 2 && r.fg == black && r.bg == white),
             "default bold echo chars take the current black-on-white");
+    }
+
+    /// SQ-0823: the char-echo push reports whether it folded, because a folded
+    /// turn's output starts on a row that was already on screen and the `[more]`
+    /// pager has to step its baseline back onto that row. Every reason the fold is
+    /// declined has to report `false` — a `true` there parks the view one row too
+    /// far BACK, showing a row of the previous screen.
+    #[test]
+    fn the_char_echo_push_reports_whether_it_folded() {
+        let page = "SENIOR PROGRAMMER\nDuane Beck";
+        let prompt = |s: &mut AppState| s.push_transcript_runs("1> ", TranscriptKind::Story, &[]);
+
+        // The Arthur shape: the game's cursor was still on the prompt's line.
+        let mut s = AppState::default();
+        prompt(&mut s);
+        assert!(s.push_transcript_runs_char_echo(page, TranscriptKind::Story, &[], true));
+        assert_eq!(s.transcript[0], "1> SENIOR PROGRAMMER");
+
+        // The cursor says otherwise — the game moved before printing.
+        let mut s = AppState::default();
+        prompt(&mut s);
+        assert!(!s.push_transcript_runs_char_echo(page, TranscriptKind::Story, &[], false));
+
+        // The game's own leading newline is the game's line break, not the host's.
+        let mut s = AppState::default();
+        prompt(&mut s);
+        assert!(!s.push_transcript_runs_char_echo(&format!("\n{page}"), TranscriptKind::Story, &[], true));
+
+        // Nothing to fold onto: the last line is not game output.
+        let mut s = AppState::default();
+        s.push_transcript_kind("help: N, S, LOOK", TranscriptKind::Meta);
+        assert!(!s.push_transcript_runs_char_echo(page, TranscriptKind::Story, &[], true));
+
+        // …nor when the transcript sits exactly on a screen-clear boundary.
+        let mut s = AppState::default();
+        prompt(&mut s);
+        s.mark_screen_clear();
+        assert!(!s.push_transcript_runs_char_echo(page, TranscriptKind::Story, &[], true));
+
+        // An empty turn pushes nothing, so there is nothing to have folded.
+        let mut s = AppState::default();
+        prompt(&mut s);
+        assert!(!s.push_transcript_runs_char_echo("", TranscriptKind::Story, &[], true));
     }
 
     #[test]

@@ -111,6 +111,9 @@ struct Parked {
     active: bool,
     /// Whether the parked frame really drew the `[more]` label.
     label_on_screen: bool,
+    /// Every row of the parked frame as text, for cases that assert on the prose
+    /// the reader is actually looking at rather than on a row index.
+    screen: Vec<String>,
 }
 
 /// Fold one turn's output into the transcript exactly as the run loop does
@@ -135,27 +138,88 @@ fn apply_turn(state: &mut AppState, r: &app::session::TurnResult) {
     }
 }
 
+/// The keypress half of `apply_game_driven_result` (`turn.rs`, which lives in the
+/// binary): a `read_char` turn's output goes through the char-echo push, which
+/// folds it onto the line the game's cursor was already on. Returns whether it
+/// folded — the pager's baseline needs it (SQ-0823).
+fn apply_keypress(state: &mut AppState, s: &GameSession, r: &app::session::TurnResult) -> bool {
+    if !r.transcript_elems.is_empty() {
+        app::state::apply_transcript_elems(state, &r.transcript_elems);
+        return false;
+    }
+    if r.erase_lower {
+        if let Some(anchor) = state.clear_anchor {
+            state.truncate_transcript(anchor);
+        }
+        state.mark_screen_clear();
+        state.push_transcript_runs(&r.transcript, app::state::TranscriptKind::Story, &r.transcript_runs);
+        return false;
+    }
+    state.push_transcript_runs_char_echo(
+        &r.transcript,
+        app::state::TranscriptKind::Story,
+        &r.transcript_runs,
+        s.output_continued_line(),
+    )
+}
+
 /// Drive `cmds` as one turn's worth of output and run the run loop's own pager
 /// sequence around it: cache the pre-turn total, arm, render (the frame that
 /// decides), `apply_frame`, render again (the frame the reader sees).
 fn park(s: &mut GameSession, state: &mut AppState, area: Rect, cmds: &[&str]) -> Parked {
+    park_with(s, state, area, |s, state| {
+        for c in cmds {
+            let t = s.submit(c);
+            apply_turn(state, &t);
+        }
+        false
+    })
+}
+
+/// [`park`] for a single `read_char` keypress — the turn kind Arthur's hint pages
+/// are read with, and the only one whose output can land on a row that was already
+/// on screen.
+fn park_key(s: &mut GameSession, state: &mut AppState, area: Rect, key: u8) -> Parked {
+    park_with(s, state, area, |s, state| {
+        let t = s.submit_char(key);
+        apply_keypress(state, s, &t)
+    })
+}
+
+/// The arm → frame → activate → frame cycle shared by both. `drive` runs the turn
+/// and reports whether its output CONTINUED the transcript's last pre-turn row, the
+/// one case where that row is not wholly old (SQ-0823).
+fn park_with(
+    s: &mut GameSession,
+    state: &mut AppState,
+    area: Rect,
+    drive: impl FnOnce(&mut GameSession, &mut AppState) -> bool,
+) -> Parked {
     let render = |state: &AppState, s: &GameSession| {
         let mut buf = Buffer::empty(area);
         let m = app::render::screen::render_story_pane(&s.screen(), false, None, state, area, &mut buf);
         (m, state.transcript_geom.get(), buf)
     };
 
-    state.push_transcript(&s.take_transcript());
+    // Flush anything the session buffered before this turn (boot output). Only when
+    // there IS some: `push_transcript("")` pushes one empty line, and a blank line
+    // dropped after the game's read prompt is a line the game never printed — it
+    // takes the cursor's row out from under the turn about to continue it.
+    let pending = s.take_transcript();
+    if !pending.is_empty() {
+        state.push_transcript(&pending);
+    }
     let (m0, _, _) = render(state, s);
     state.last_transcript_total_rows = m0.total_rows;
-    // Rows `0..total` are old; row `total` is the first row this turn adds.
-    let first_new_row = m0.total_rows;
-    state.pager.arm(first_new_row);
 
-    for c in cmds {
-        let t = s.submit(c);
-        apply_turn(state, &t);
-    }
+    let continued_row = drive(s, state);
+    // Rows `0..total` are old and row `total` is the first row this turn adds —
+    // unless the turn continued the last of them, which makes that row partly its
+    // own and so the first new row on screen. Spelled out rather than taken from
+    // `app::pager::baseline_before`, so that reverting the fix moves what the run
+    // loop arms with while leaving what the reader is owed where it is.
+    let first_new_row = m0.total_rows - u16::from(continued_row && m0.total_rows > 0);
+    state.pager.arm(app::pager::baseline_before(m0.total_rows, continued_row));
 
     let (m1, _, _) = render(state, s);
     app::pager::apply_frame(
@@ -177,17 +241,21 @@ fn park(s: &mut GameSession, state: &mut AppState, area: Rect, cmds: &[&str]) ->
     }
     let (m2, g2, buf) = render(state, s);
     let g2 = g2.expect("the parked frame lays the transcript out");
-    let label_on_screen = (0..area.height).any(|y| {
-        let row: String =
-            (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
-        row.contains("[more]")
-    });
+    let screen: Vec<String> = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+                .collect()
+        })
+        .collect();
+    let label_on_screen = screen.iter().any(|row| row.contains("[more]"));
     Parked {
         first_new_row,
         top_visible_row: g2.first_abs_row,
         viewport_rows: m2.viewport_rows,
         active: state.pager.active,
         label_on_screen,
+        screen,
     }
 }
 
@@ -340,6 +408,157 @@ fn a_turn_that_clears_mid_output_parks_on_the_first_new_row() {
     // Second turn: the menu paints past the viewport, and this one pages.
     let p = park(&mut s, &mut state, area, &[""]);
     assert_nothing_scrolled_past(&p, true, &format!("{file} [release 322, serial 890706] boot menu"));
+}
+
+/// A turn whose output CONTINUES the row the game left the cursor on — the report,
+/// exactly as the user played it.
+///
+/// Arthur's InvisiClues print a `1> ` prompt and wait on a key; the key that
+/// answers prints the page AFTER that prompt, on that row, and the char-echo push
+/// folds it there (`push_transcript_runs_char_echo`, SQ-0804) because that is where
+/// the game's own cursor is. The pre-turn row is therefore partly this turn's, and
+/// the baseline has to step back onto it — rows are atomic to `activation_target`,
+/// so counting it as old parks one row low and the page's first line, `1> SENIOR
+/// PROGRAMMER`, goes past the fold. Measured on the Amiga floppy at 80x48 before
+/// the fix: `before_rows` 79, 124 rows after, parked with absolute row 79 (`Duane
+/// Beck`) on top and its section heading gone.
+///
+/// Driven from a cold boot rather than from a save, so it needs nothing but the
+/// medium: `get torque`, `examine crystal` twice to open the crystal, then the
+/// InvisiClues keys — main menu, down to NOTES, into it, down to Credits, and the
+/// two returns that select the page and turn it.
+#[test]
+fn a_turn_that_continues_the_row_above_it_parks_on_that_row() {
+    let file = "Arthur - The Quest for Excalibur.adf";
+    for honor in [true, false] {
+        for rows in [30, 48] {
+            let Some(mut s) = boot_v6(file, 54, "890606", honor) else { return };
+            let mut state = story_state(honor);
+            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.config.v6_render = app::config::V6RenderMode::Hybrid;
+            // Inline-prompt mode, the shipped default: `startup.rs` hands
+            // `command_bar` (false) straight to `set_strip_prompt`, so the game's own
+            // read prompt stays in the transcript. That prompt IS the row this case
+            // is about.
+            s.set_strip_prompt(false);
+            let area = Rect::new(0, 0, 80, rows);
+            let ctx = format!("{file} [release 54, serial 890606] InvisiClues, honor={honor}, {rows} rows");
+
+            for cmd in ["get torque", "examine crystal", "examine crystal"] {
+                let t = s.submit(cmd);
+                apply_turn(&mut state, &t);
+            }
+            // m: main menu. n n n: down to NOTES. Return: into it. n x6: down to
+            // Credits. Return: select it, which prints the `1> ` page prompt.
+            for key in [b'm', b'n', b'n', b'n', 13, b'n', b'n', b'n', b'n', b'n', b'n', 13] {
+                let t = s.submit_char(key);
+                apply_keypress(&mut state, &s, &t);
+            }
+            assert_eq!(
+                state.transcript.last().map(String::as_str),
+                Some("1> "),
+                "{ctx}: premise — the page prompt is the transcript's last line, unterminated"
+            );
+            assert_eq!(s.pending_input(), InputKind::Char, "{ctx}: premise — it is read with a key");
+
+            // …and the key that turns the page prints onto that very row.
+            let p = park_key(&mut s, &mut state, area, 13);
+            assert!(
+                state.transcript.iter().any(|l| l.starts_with("1> SENIOR PROGRAMMER")),
+                "{ctx}: premise — the page's first line lands on the prompt's row"
+            );
+            assert_nothing_scrolled_past(&p, true, &ctx);
+            assert!(
+                p.screen.iter().any(|row| row.contains("SENIOR PROGRAMMER")),
+                "{ctx}: the page's own first line must be ON the parked screen — it is the heading \
+                 the names under it belong to, and the report is that it scrolls past unread:\n{}",
+                p.screen.join("\n"),
+            );
+        }
+    }
+}
+
+/// The boundary case in that arithmetic, with no story file involved: a continued
+/// row that WRAPS.
+///
+/// The pager is shared by every engine, and its subject is RENDERED rows, not
+/// logical lines — so this drives a bare `ScreenModel` with nothing but a primary
+/// buffer in it. When the appended text turns the one row the prompt sat on into
+/// three, two of those rows are wholly new and only the first is shared. The step
+/// back is therefore one row and not three: counting the whole logical line as new
+/// would park two rows of this turn's own output above the fold, the same defect
+/// pointing the other way.
+#[test]
+fn a_continued_row_that_wraps_parks_on_the_row_it_shares_and_no_higher() {
+    use app::engine::{BufferWindow, ScreenModel, StatusModel, WinNode};
+
+    for honor in [true, false] {
+        let model = ScreenModel {
+            root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (0, 0),
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut state = story_state(honor);
+        let render = |state: &AppState| {
+            let mut buf = Buffer::empty(area);
+            let m = app::render::screen::render_story_pane(&model, false, None, state, area, &mut buf);
+            (m, state.transcript_geom.get())
+        };
+
+        // A settled screen whose last line is an unterminated prompt on a row of
+        // its own — the shape a game leaves when it stops to read a key.
+        for _ in 0..6 {
+            state.push_transcript("filler");
+        }
+        state.push_transcript_runs("1> ", app::state::TranscriptKind::Story, &[]);
+        let (m0, _) = render(&state);
+        let prompt_row = m0.total_rows - 1;
+
+        // The key that answers prints a long first line onto that very row, then a
+        // screenful more below it.
+        let mut page = "x".repeat(90);
+        for i in 0..20 {
+            page.push_str(&format!("\nline {i}"));
+        }
+        let folded = state.push_transcript_runs_char_echo(
+            &page,
+            app::state::TranscriptKind::Story,
+            &[],
+            true,
+        );
+        assert!(folded, "honor={honor}: premise — the push folds onto the prompt's line");
+        assert!(
+            state.transcript[6].starts_with("1> xxx"),
+            "honor={honor}: premise — the page's first line joined the prompt, got {:?}",
+            state.transcript[6]
+        );
+
+        let (m1, _) = render(&state);
+        assert!(
+            m1.total_rows >= prompt_row + 3,
+            "honor={honor}: premise — the shared row wrapped into more than one row"
+        );
+        state.pager.arm(app::pager::baseline_before(m0.total_rows, folded));
+        app::pager::apply_frame(
+            &mut state,
+            m1.max_scroll,
+            m1.viewport_rows,
+            m1.prompt_rows,
+            m1.total_rows,
+            m1.transcript_surface,
+        );
+        assert!(state.pager.active, "honor={honor}: the page overflows a 12-row pane");
+        let (_, g2) = render(&state);
+        assert_eq!(
+            g2.expect("the parked frame lays the transcript out").first_abs_row,
+            prompt_row as usize,
+            "honor={honor}: the park lands on the ONE row the turn shares with what came before — \
+             not on the logical line's first row, and not a row below it"
+        );
+    }
 }
 
 /// …and so is the optional command bar. With `command_bar = true` the live input
