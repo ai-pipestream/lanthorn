@@ -564,7 +564,7 @@ fn be32(b: &[u8], off: usize) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A 800K floppy's worth of volume: 1600 logical blocks.
@@ -710,6 +710,18 @@ mod tests {
             self.put16(mdb + MDB_CT_EXT_REC + 2, 3);
             self.volume
         }
+    }
+
+    /// One synthetic Macintosh floppy carrying `files`, DiskCopy wrapper and
+    /// all, for the mount-seam tests in [`crate::medium`]. They need a real
+    /// volume of every format and cannot reach a builder that is private to
+    /// this module.
+    pub(crate) fn sample_disk(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut b = VolumeBuilder::new();
+        for (name, data) in files {
+            b.add_file(name, b"INdf", data, 1);
+        }
+        diskcopy(&b.finish())
     }
 
     fn pad_extents(exts: &[Extent]) -> ExtentRecord {

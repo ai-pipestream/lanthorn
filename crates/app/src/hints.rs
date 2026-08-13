@@ -691,37 +691,28 @@ pub use blorb::medium::DiskImage;
 /// came off (SQ-0737).
 fn read_story_file(path: &Path) -> io::Result<(Vec<u8>, Option<DiskImage>)> {
     let raw = std::fs::read(path)?;
-    // SQ-0719: an original Amiga release floppy. Mount it and take the file
-    // whose CONTENT is a story — AmigaDOS has no extensions, and the disk's
-    // `Story.data` convention is a tiebreak, not a guarantee.
-    if blorb::adf::Adf::looks_like_adf(&raw) {
-        let adf = blorb::adf::Adf::mount(raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
-        return match adf.story() {
-            Some((_, bytes)) => Ok((bytes, Some(DiskImage::Adf))),
+    // An original release floppy, whichever machine pressed it (SQ-0719,
+    // SQ-0837, SQ-0840). One mount path answers for every format: take the file
+    // whose CONTENT is a story, because a release disk's names are a tiebreak
+    // and never a guarantee — AmigaDOS has no extensions at all, and every Atari
+    // ST story is called `STORY.DAT`.
+    //
+    // `detect` first because `mount` consumes the bytes, and a plain story file
+    // has to fall through to the paths below with them intact.
+    if blorb::medium::DiskImage::detect(&raw).is_some() {
+        let disk = blorb::medium::MountedDisk::mount(raw)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        return match disk.story() {
+            Some(story) => Ok((story.bytes, Some(disk.format()))),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "no story file on the disk image {} ({} files; is this the boot disk?)",
+                    "no story file on the disk image {} ({} files{}; is this the boot disk?)",
                     path.display(),
-                    adf.files().len()
-                ),
-            )),
-        };
-    }
-    // SQ-0837: a Macintosh release floppy, the same idea one filesystem over.
-    if blorb::hfs::Hfs::looks_like_hfs(&raw) {
-        let hfs = blorb::hfs::Hfs::mount(raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
-        return match hfs.story() {
-            Some((_, bytes)) => Ok((bytes, Some(DiskImage::Hfs))),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "no story file on the disk image {} ({} files on {}; is this the boot disk?)",
-                    path.display(),
-                    hfs.files().len(),
-                    hfs.volume_name()
+                    disk.file_count(),
+                    // Only some formats keep a volume name; the message says so
+                    // when there is one and reads naturally when there is not.
+                    disk.volume_name().map(|n| format!(" on {n}")).unwrap_or_default(),
                 ),
             )),
         };

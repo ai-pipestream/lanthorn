@@ -288,26 +288,23 @@ impl PictSource {
     ///
     /// A release disk image supplies its own art: the story and the picture
     /// archive came off the same floppy, so the pairing is guaranteed by the
-    /// medium and needs no configuration. That holds for an Amiga `.adf`
-    /// (SQ-0719) and for a Macintosh HFS volume (SQ-0837) alike. Everything else
-    /// — including a disk image that carries no readable archive — resolves the
-    /// story's resource Blorb exactly as before.
+    /// medium and needs no configuration. **Whichever format the disk is** —
+    /// this asks `blorb`'s one mount path (SQ-0840) rather than naming Amiga or
+    /// Macintosh, so a format that lands in `blorb::medium::FORMATS` brings its
+    /// artwork here without a line changing. Everything else — including a disk
+    /// image that carries no readable archive — resolves the story's resource
+    /// Blorb exactly as before.
     ///
     /// The Macintosh shipped **two** archives per game, one per screen it sold:
-    /// a colour one and a monochrome one. `Hfs::pictures` returns the colour
-    /// archive, which is an ordinary big-endian Infocom container this decoder
-    /// already reads; the monochrome one declares 12-byte directory records and
-    /// is not a container it knows, so it never gets here.
+    /// a colour one and a monochrome one. The mount returns the colour archive,
+    /// which is an ordinary big-endian Infocom container this decoder already
+    /// reads; the monochrome one declares 12-byte directory records and is not a
+    /// container it knows, so it never gets here.
     pub fn resolve(story_path: &std::path::Path) -> PictSource {
         if let Ok(raw) = std::fs::read(story_path) {
-            if blorb::adf::Adf::looks_like_adf(&raw) {
-                if let Some(pics) = blorb::adf::Adf::mount(raw).ok().and_then(|a| a.pictures()) {
-                    return PictSource::from_native(pics.1);
-                }
-            } else if blorb::hfs::Hfs::looks_like_hfs(&raw) {
-                if let Some(pics) = blorb::hfs::Hfs::mount(raw).ok().and_then(|h| h.pictures()) {
-                    return PictSource::from_native(pics.1);
-                }
+            if let Some(art) = blorb::medium::MountedDisk::mount(raw).ok().and_then(|d| d.pictures())
+            {
+                return PictSource::from_native(art.pictures);
             }
         }
         PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b))
