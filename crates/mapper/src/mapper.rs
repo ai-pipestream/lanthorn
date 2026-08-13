@@ -136,7 +136,7 @@ impl Mapper {
     /// and current pointer ([`MapGraph::rekey_room`]) AND the mapper's own `arrived_via`, which
     /// the graph knows nothing about. Callers must use this, not the graph method, whenever a
     /// `Mapper` owns the graph: re-keying underneath it leaves `arrived_via` holding the dead id,
-    /// and a bare `/peel-layer` within the one-turn window then refuses with `NoSuchPassage`
+    /// and a bare `/move-region` within the one-turn window then refuses with `NoSuchPassage`
     /// (SQ-0632). Same return contract as the graph method.
     pub fn rekey_room(&mut self, old: RoomId, new: RoomId) -> bool {
         let done = self.graph.rekey_room(old, new);
@@ -176,7 +176,7 @@ impl Mapper {
 mod arrival_tests {
     use super::*;
 
-    /// SQ-0552: a bare `/peel-layer` cuts the passage the player arrived through, so the
+    /// SQ-0552: a bare `/move-region` cuts the passage the player arrived through, so the
     /// mapper has to remember the whole passage — the room left AND the direction. The
     /// graph cannot answer it: several edges can lead into one room and the one just used
     /// is not recoverable from them.
@@ -204,7 +204,7 @@ mod arrival_tests {
 
     /// SQ-0632: the SQ-0526 Glulx id remap re-keys rooms mapped during the learning window —
     /// including, possibly, the room the player just walked out of. `arrived_via` must follow
-    /// the rename, or a bare `/peel-layer` in the one-turn window refuses with `NoSuchPassage`
+    /// the rename, or a bare `/move-region` in the one-turn window refuses with `NoSuchPassage`
     /// because the edge it looks for now hangs off the new id.
     #[test]
     fn rekeying_a_room_carries_arrived_via_with_it() {

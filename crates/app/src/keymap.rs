@@ -578,7 +578,7 @@ type DefaultGroup = (&'static str, &'static [DefaultEntry]);
 
 const DEFAULT_GROUPS: &[DefaultGroup] = &[
     ("Layout", &[('t', "tidy-map", "tidy the layout"), ('a', "animate-tidy", "animate a tidy pass")]),
-    ("Layers", &[('p', "peel-layer", "peel region into a new layer"), ('m', "merge-layer", "merge layer down"), ('c', "cycle-layer next", "next map layer"), ('z', "mark-maze-layer", "flag layer as a maze")]),
+    ("Layers", &[('p', "move-region new", "region into a new layer"), ('m', "move-region parent", "region into the parent layer"), ('c', "cycle-layer next", "next map layer"), ('z', "mark-maze-layer", "flag layer as a maze")]),
     ("Edit", &[('r', "rename-room", "rename room"), ('n', "edit-notes", "edit room notes"), ('d', "delete-connection", "delete connection"), ('e', "relabel-edge", "relabel edge")]),
     ("View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-command-band", "command band"), ('u', "view-map", "drawn / matrix view"), ('k', "toggle-room-dock", "room dock")]),
     // SQ-0599: zoom and centring used to be plain +/- and c while the map held

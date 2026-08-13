@@ -112,20 +112,28 @@ The map is a place you can move through, not just a picture.
   strip across the top of the map (e.g. `Main  Cellar  Maze`, each with its room
   count); the active tab is highlighted, and a layer flagged as a maze carries a
   trailing `⌗` marker (`Maze ⌗`) in both tab strips. `cycle-layer next|prev` switches
-  between them. Carve a region off with `peel-layer` or fold one back with
-  `merge-layer`. A bare `peel-layer` cuts at the passage you just walked in through —
-  step into the maze, peel, and the maze goes to its own layer — which works even
-  when the entrance is one-way or the way back is some other direction entirely.
-  `peel-layer <direction>` names the seam yourself; with neither, it falls back to
-  hunting for a stairway or other portal to cut at. A bare `merge-layer` folds the
-  active layer into the one it was peeled from; `merge-layer <name>` folds it into
-  **any** layer (`merge-layer main`). That second form is how a stranded room gets
-  home: a room discovered while exploring a maze layer is minted *onto* the maze
-  layer even when it is really outside — a back door to the surface, say — so stand
-  in it, `peel-layer <direction>` to cut it off the maze, then `merge-layer main`.
-  Rooms keep their positions where free; a room whose cell is taken lands on the
-  nearest free one.
-- **Switching layers recenters the view** — cycling, clicking a tab, peeling, merging,
+  between them. Carving a layer off and folding one back turned out to be the same
+  move — *take these rooms and put them on that layer* — so there is one verb for
+  both: **`move-region <destination> [direction]`**. `move-region new` carves the
+  region you're in onto a fresh layer, `move-region main` folds it back into Main,
+  `move-region parent` sends it home to whatever it was carved from, and any layer
+  name works in place of those (`move-region Cellar`).
+  babelmap works out *which* rooms travel: bare, it cuts at the passage you just
+  walked in through — step into the maze, `move-region new`, and the maze goes to
+  its own layer — which works even when the entrance is one-way or the way back is
+  some other direction entirely. Add a direction (`move-region new east`) to name
+  the seam yourself; with neither, it falls back to hunting for a stairway or other
+  portal to cut at. Nothing is ever severed: the passage you cut at simply becomes a
+  connection *between* layers, which is why every move goes back the way it came.
+  Because the destination is just an argument, a stranded room finally has a cure. A
+  room discovered while exploring a maze layer is minted *onto* the maze layer even
+  when it is really outside — a back door to the surface, say — so stand in it,
+  `move-region main east` to cut it off the maze and send it home in one go. Rooms
+  keep their positions where free; a room whose cell is taken in the destination
+  lands on the nearest free one. Two things it will refuse, and it says which: a
+  fresh layer for a region that is *already* the whole layer (that would only rename
+  it), and anything that would leave `Main` with no rooms at all.
+- **Switching layers recenters the view** — cycling, clicking a tab, moving a region,
   or loading a map all land the viewport somewhere with a room in it, never on empty
   scroll space: on the room you're standing in if it's on the layer you switched to,
   else the last room you visited there, else that layer's own bounding-box centre. A

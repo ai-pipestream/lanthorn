@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn render_layer_flags_rooms_with_outgoing_cross_layer_portal() {
-        use crate::layer::{peel_region, MAIN_LAYER};
+        use crate::layer::{move_region, planar_region, MoveTarget, MAIN_LAYER};
         let mut g = crate::graph::MapGraph::new();
         for (id, n) in [(1, "Hall"), (2, "Cellar")] {
             g.upsert_room(id, n.into());
@@ -150,7 +150,8 @@ mod tests {
         g.set_pos(2, (0, 1));
         g.add_edge(1, Direction::Down, 2);
         g.add_edge(2, Direction::Up, 1);
-        peel_region(&mut g, 2).expect("peel cellar");
+        let region = planar_region(&g, 2);
+        move_region(&mut g, &region, MoveTarget::New).expect("peel cellar");
         let rm = render_layer(&g, MAIN_LAYER);
         let hall = rm.rooms.iter().find(|r| r.id == 1).unwrap();
         assert!(hall.has_layer_portal, "Hall has an outgoing portal to the cellar layer");
