@@ -350,14 +350,9 @@ fading breadcrumb (`map.trail`) — the "how did I get here" a drawn map would h
 answered by itself. The flag also puts a `⌗` marker on the layer's tab (`Maze ⌗`) in
 both tab strips, and takes it away again when unflagged.
 
-babelmap will offer, once per layer, when a connected cluster starts to look like
-one: at least six rooms, at least eight passages walked in *both* directions, and
-three-quarters of those coming back by some direction other than the compass
-inverse. That last measure is deliberately over round trips actually walked, not
-over all edges — a passage nobody has walked back through yet says nothing about
-geometry, only about how far exploration has got. (On the reference save the maze
-scores 0.90 by that measure and the ordinary cave beside it 0.56; over *all* edges
-the two are 0.96 and 0.82, which separates nothing.)
+**Flagging a maze is a manual act.** babelmap never guesses: you are in the maze
+long before any statistic could tell, so the moment you decide "this is a maze",
+press `z`. There is nothing to wait for and nothing to dismiss.
 
 ### Honest edges on the drawn map
 

@@ -1991,10 +1991,6 @@ pub struct AppState {
     /// different things in different units, and sharing one field would make a pan of one view
     /// silently derange the other every time `/view-map` was pressed.
     pub matrix_scroll: (u16, u16),
-    /// Layers the tangle detector has already offered `/mark-maze-layer` for (SQ-0666). Session
-    /// state, not persisted: the offer is a nudge, and a nudge you have to remember forever is a
-    /// setting. Once the layer is flagged the detector stops on its own.
-    pub tangle_suggested: std::collections::BTreeSet<LayerId>,
     /// The last few rooms the player walked into, most recent LAST (SQ-0666). Bounded at
     /// [`MAP_TRAIL_LEN`]; used only on maze-flagged layers, where "how did I get here" is the
     /// question a drawn map would have answered by itself.
@@ -2601,7 +2597,6 @@ impl Default for AppState {
             selected_room: None,
             room_path: Vec::new(),
             matrix_scroll: (0, 0),
-            tangle_suggested: std::collections::BTreeSet::new(),
             map_trail: std::collections::VecDeque::new(),
             death_watch: crate::session::DeathWatch::default(),
             transcript: Vec::new(),

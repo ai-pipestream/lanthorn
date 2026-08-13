@@ -156,7 +156,6 @@ pub(crate) fn finish_command_turn(
         || mapper.graph.connections().len() != conns_before
     {
         state.graph_gen = state.graph_gen.wrapping_add(1);
-        offer_maze_layer(state, mapper);
     }
 
     // Game-initiated (v4+) save/restore: open the saves dialog in
@@ -811,34 +810,6 @@ pub(crate) fn next_input_deadline(
     } else {
         None
     }
-}
-
-/// Offer `/mark-maze-layer` once, the first time the layer the player is standing in looks like a
-/// tangle (SQ-0666).
-///
-/// One quiet transcript line and never again for that layer. Detection is a convenience that
-/// flips a default — nothing depends on it, so an offer the player ignores must cost them nothing
-/// but the line they already read. Only checked on turns that changed the map's geometry, which
-/// is the only kind of turn that can make a layer newly tangled.
-fn offer_maze_layer(state: &mut AppState, mapper: &mapper::mapper::Mapper) {
-    let Some(here) = mapper.graph.current() else { return };
-    let layer = mapper.graph.layer_of(here);
-    if mapper.graph.layer_is_maze(layer) || state.tangle_suggested.contains(&layer) {
-        return;
-    }
-    let Some(t) = mapper::matrix::tangles(&mapper.graph, layer).into_iter().next() else {
-        return; // not yet — and not remembered, so a layer can qualify later
-    };
-    state.tangle_suggested.insert(layer);
-    state.push_transcript_internal(
-        &format!(
-            "{} rooms here mostly do not come back the way you went ({}%). \
-             `/mark-maze-layer` shows this layer as a direction table.",
-            t.rooms.len(),
-            (t.asymmetry() * 100.0).round() as u32,
-        ),
-        TranscriptKind::Meta,
-    );
 }
 
 #[cfg(test)]

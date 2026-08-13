@@ -1,4 +1,4 @@
-//! The matrix view and tangle detection against REAL player data (SQ-0666).
+//! The matrix view against REAL player data (SQ-0666).
 //!
 //! `unit_tests/advent_maze_map.json` is a verbatim copy of the `map.json` inside a babelmap
 //! archive: one player's partial mapping of Colossal Cave, mid-game, with the "all alike" maze
@@ -226,71 +226,4 @@ fn inbound_border_edges_finds_the_one_door_into_the_maze() {
 
     let inbound = matrix::inbound_border_edges(&g, MAZE_LAYER);
     assert_eq!(inbound, vec![(long_hall, Direction::S, ids["Maze 11"])], "{inbound:?}");
-}
-
-/// Detection has to fire on the maze and stay silent on the ordinary cave beside it — in the
-/// SAME map file, explored by the same player to the same partial degree. That is the only
-/// comparison that means anything, and it is why the threshold is measured over round trips
-/// actually walked rather than over all edges.
-///
-/// Clusters are grown through asymmetric round trips rather than through plain adjacency
-/// (SQ-0683), so what fires here is the maze ROOMS, not the whole 12-room layer: the player's
-/// evidence splits these twelve into a 6-room cluster (every round trip in it disagrees with the
-/// compass) and a 5-room one, joined only by passages nobody has walked back through yet. Half a
-/// maze is still a maze, and the offer only needs one.
-#[test]
-fn the_maze_is_a_tangle_and_the_cave_beside_it_is_not() {
-    let g = advent();
-
-    let maze = mapper::matrix::tangles(&g, MAZE_LAYER);
-    assert_eq!(maze.len(), 1, "one cluster on the maze layer clears the bars: {maze:?}");
-    assert_eq!(maze[0].rooms.len(), 6);
-    assert_eq!((maze[0].known_returns, maze[0].asymmetric), (12, 12), "counted from both ends");
-    assert!(maze[0].asymmetry() > 0.75, "asymmetry {}", maze[0].asymmetry());
-    assert!(
-        maze[0].rooms.iter().all(|&r| g.layer_of(r) == MAZE_LAYER),
-        "and it never reaches off the layer"
-    );
-
-    // The rest of the layer: too few rooms to offer a peel on, not too tidy.
-    let all = mapper::matrix::tangles_with(&g, MAZE_LAYER, 0.75, 2, 8);
-    assert_eq!(
-        all.iter().map(|t| (t.rooms.len(), t.known_returns, t.asymmetric)).collect::<Vec<_>>(),
-        vec![(5, 8, 6), (6, 12, 12)],
-        "the other cluster is a maze too, and only its size holds it back: {all:?}"
-    );
-
-    let main = mapper::matrix::tangles(&g, mapper::layer::MAIN_LAYER);
-    assert!(main.is_empty(), "the overworld is not a maze: {main:?}");
-    // …and not because it is unexplored: no cluster of ordinary cave grows to maze size at all.
-    let any = mapper::matrix::tangles_with(&g, mapper::layer::MAIN_LAYER, 0.0, 2, 0);
-    assert!(
-        any.iter().all(|t| t.rooms.len() < 6),
-        "the overworld's scattered asymmetric links do not chain into a maze-sized cluster: {:?}",
-        any.iter().map(|t| (t.rooms.len(), t.known_returns, t.asymmetric)).collect::<Vec<_>>()
-    );
-
-    // The naive measure — non-reciprocal share over ALL edges — cannot tell them apart, which is
-    // the whole reason the implemented one uses known round trips as its denominator.
-    let share = |layer| {
-        let e: Vec<_> = g
-            .connections()
-            .iter()
-            .filter(|c| g.layer_of(c.origin) == layer && g.layer_of(c.dest) == layer)
-            .collect();
-        let recip = e
-            .iter()
-            .filter(|c| {
-                e.iter().any(|b| {
-                    b.origin == c.dest
-                        && b.dest == c.origin
-                        && b.dir == mapper::direction::opposite(c.dir)
-                })
-            })
-            .count();
-        1.0 - recip as f32 / e.len() as f32
-    };
-    assert!(share(MAZE_LAYER) > 0.9 && share(mapper::layer::MAIN_LAYER) > 0.8,
-        "both layers look equally 'non-reciprocal' by the naive measure ({} vs {})",
-        share(MAZE_LAYER), share(mapper::layer::MAIN_LAYER));
 }
