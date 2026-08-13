@@ -21,6 +21,14 @@
 //!
 //! `parse` receives the input AFTER the leading prefix character has been
 //! stripped. It does not know what the prefix was.
+//!
+//! The registry also carries the **pre-game story browser's** commands
+//! (`Category::Library` / `Context::Browser`, SQ-0796). They are the one group
+//! that is not typeable — the browser has no command line — so they are left out
+//! of `/help` and Tab autocomplete, and reach the picker as
+//! `SlashOutcome::Browser` rather than an `Action`, there being no `AppState`
+//! that early. The gate is two-way: neither world's commands parse in the
+//! other's context. See [`crate::browser`].
 
 use crate::input::Action;
 use crate::keymap::Context;
@@ -100,6 +108,10 @@ pub enum SlashOutcome {
     /// next mode (`None` = bare). Session-only — the config screen persists.
     /// Handled in `slash_dispatch` (mutates `state.config.v6_render`).
     SetV6Render(Option<crate::config::V6RenderMode>),
+    /// Act on the pre-game story browser. The browser has no `AppState`, so it
+    /// cannot take an [`Action`]; its verbs are their own type and are applied
+    /// by the picker loop. See [`crate::browser`] (SQ-0796).
+    Browser(crate::browser::BrowserAction),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -125,10 +137,14 @@ pub enum Category {
     Export,
     Animation,
     Help,
+    /// The pre-game story browser (SQ-0796). Not shown in the game's `/help`,
+    /// because the browser has no command line to type them into — see
+    /// [`help_text`].
+    Library,
 }
 
 impl Category {
-    pub const ORDER: [Category; 8] = [
+    pub const ORDER: [Category; 9] = [
         Category::Game,
         Category::Map,
         Category::View,
@@ -137,6 +153,7 @@ impl Category {
         Category::Export,
         Category::Animation,
         Category::Help,
+        Category::Library,
     ];
 
     pub fn title(self) -> &'static str {
@@ -149,6 +166,7 @@ impl Category {
             Category::Export => "Export",
             Category::Animation => "Animation",
             Category::Help => "Help",
+            Category::Library => "Library",
         }
     }
 }
@@ -490,6 +508,77 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "help", category: Category::Help, context: Context::Global,
         usage: "help [command]", description: "list all commands by category; with a name, show one command's detail",
         dispatch: |_| SlashOutcome::Help },
+
+    // ── Library (the pre-game story browser) ──────────────────────────────
+    // SQ-0796. These run before there is an `AppState`, so they dispatch to a
+    // `BrowserAction` rather than an `Action`, and `Context::Browser` keeps the
+    // two sets from crossing. Bind them under `[keymap.browser]`.
+    CommandSpec { name: "move-selection", category: Category::Library, context: Context::Browser,
+        usage: "move-selection <dx> <dy>", description: "move the browser's selection by dx columns and dy rows (columns exist only in the cover gallery)",
+        dispatch: |a| {
+            use crate::browser::BrowserAction;
+            let dx = a.first().and_then(|s| s.parse::<isize>().ok());
+            let dy = a.get(1).and_then(|s| s.parse::<isize>().ok());
+            match (dx, dy) {
+                (Some(dx), Some(dy)) => SlashOutcome::Browser(BrowserAction::MoveSelection { dx, dy }),
+                _ => err("move-selection requires two integers (e.g. move-selection 0 -1)"),
+            }
+        } },
+    CommandSpec { name: "page-selection", category: Category::Library, context: Context::Browser,
+        usage: "page-selection <n>", description: "move the browser's selection by n pages",
+        dispatch: |a| match a.first().and_then(|s| s.parse::<isize>().ok()) {
+            Some(n) => SlashOutcome::Browser(crate::browser::BrowserAction::PageSelection(n)),
+            None => err("page-selection requires an integer (e.g. page-selection -1)"),
+        } },
+    CommandSpec { name: "select-edge", category: Category::Library, context: Context::Browser,
+        usage: "select-edge first|last", description: "jump the browser's selection to the first or last story",
+        dispatch: |a| {
+            use crate::browser::{BrowserAction, Edge};
+            match a.first().copied() {
+                Some("first") => SlashOutcome::Browser(BrowserAction::SelectEdge(Edge::First)),
+                Some("last") => SlashOutcome::Browser(BrowserAction::SelectEdge(Edge::Last)),
+                _ => err("select-edge requires an argument: first | last"),
+            }
+        } },
+    CommandSpec { name: "play-story", category: Category::Library, context: Context::Browser,
+        usage: "play-story", description: "launch the selected story",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::PlayStory) },
+    CommandSpec { name: "open-launch-options", category: Category::Library, context: Context::Browser,
+        usage: "open-launch-options", description: "open the launch-options dialog for the selected story",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenLaunchOptions) },
+    CommandSpec { name: "toggle-info-panel", category: Category::Library, context: Context::Browser,
+        usage: "toggle-info-panel", description: "open or close the browser's story info panel",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ToggleInfoPanel) },
+    CommandSpec { name: "toggle-gallery", category: Category::Library, context: Context::Browser,
+        usage: "toggle-gallery", description: "switch the browser between the story list and the cover gallery",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ToggleGallery) },
+    CommandSpec { name: "fetch-story", category: Category::Library, context: Context::Browser,
+        usage: "fetch-story", description: "re-fetch the selected story's IFDB metadata, ignoring the cache",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::FetchStory) },
+    CommandSpec { name: "refresh-library", category: Category::Library, context: Context::Browser,
+        usage: "refresh-library", description: "fetch IFDB metadata for every story that is missing or stale",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::RefreshLibrary) },
+    CommandSpec { name: "set-ifdb-url", category: Category::Library, context: Context::Browser,
+        usage: "set-ifdb-url", description: "point the selected story at an IFDB page by hand",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SetIfdbUrl) },
+    CommandSpec { name: "search-ifdb", category: Category::Library, context: Context::Browser,
+        usage: "search-ifdb", description: "search IFDB by title or author and download a story into this directory",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SearchIfdb) },
+    CommandSpec { name: "download-hints", category: Category::Library, context: Context::Browser,
+        usage: "download-hints", description: "download a matching InvisiClues hint file for the selected story",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::DownloadHints) },
+    CommandSpec { name: "sort-library", category: Category::Library, context: Context::Browser,
+        usage: "sort-library", description: "cycle the browser's sort column, keeping the direction",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SortLibrary) },
+    CommandSpec { name: "reverse-sort", category: Category::Library, context: Context::Browser,
+        usage: "reverse-sort", description: "reverse the browser's sort direction, keeping the column",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ReverseSort) },
+    CommandSpec { name: "quit-browser", category: Category::Library, context: Context::Browser,
+        usage: "quit-browser", description: "leave the story browser",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::QuitBrowser) },
+    CommandSpec { name: "cancel-browser", category: Category::Library, context: Context::Browser,
+        usage: "cancel-browser", description: "cancel a running fetch, or leave the browser when nothing is in flight",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::CancelBrowser) },
 ];
 
 pub fn find_command(name: &str) -> Option<&'static CommandSpec> {
@@ -545,6 +634,17 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
         return SlashOutcome::Error(format!("{} is only available during animation playback", spec.name));
     }
 
+    // The browser's commands and the game's are disjoint worlds, so the gate runs
+    // both ways (SQ-0796). A browser command in the game has no browser to act on;
+    // a game command in the browser has no `AppState` to act on, and would
+    // otherwise hand the picker an outcome it cannot apply.
+    if spec.context == Context::Browser && ctx != Context::Browser {
+        return SlashOutcome::Error(format!("{} is only available in the story browser", spec.name));
+    }
+    if ctx == Context::Browser && spec.context != Context::Browser {
+        return SlashOutcome::Error(format!("{} is not available in the story browser", spec.name));
+    }
+
     let tokens: Vec<&str> = body.split_whitespace().collect();
     (spec.dispatch)(&tokens[1..])
 }
@@ -553,9 +653,14 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
 
 /// All known slash-command names (for Tab autocomplete).
 ///
-/// Returns the registry command names.
+/// Returns the registry command names, minus the story browser's: that surface
+/// has no command line, so completing a name there is impossible and offering it
+/// here would complete a command the game then refuses (SQ-0796).
 pub fn slash_names() -> Vec<String> {
-    COMMANDS.iter().map(|c| c.name.to_string()).collect()
+    COMMANDS.iter()
+        .filter(|c| c.context != Context::Browser)
+        .map(|c| c.name.to_string())
+        .collect()
 }
 
 // ── help_text / help_for_command ──────────────────────────────────────────────
@@ -565,13 +670,19 @@ pub fn slash_names() -> Vec<String> {
 /// `prefix` is the configured command prefix character used in all display strings.
 /// Commands are grouped by category in `Category::ORDER` order, sorted by name
 /// within each group.
+///
+/// The story browser's commands are omitted: this list is what you can *type*,
+/// and the browser is a pre-game loop with no command line (SQ-0796). They are
+/// documented as key bindings instead — see `docs/features/customization.md`.
 pub fn help_text(prefix: char) -> Vec<String> {
     let mut lines = vec![
         format!("Slash commands (type {prefix}<command> [args]):"),
         String::new(),
     ];
     for cat in Category::ORDER {
-        let mut group: Vec<&CommandSpec> = COMMANDS.iter().filter(|c| c.category == cat).collect();
+        let mut group: Vec<&CommandSpec> = COMMANDS.iter()
+            .filter(|c| c.category == cat && c.context != Context::Browser)
+            .collect();
         if group.is_empty() { continue; }
         group.sort_by_key(|c| c.name);
         lines.push(format!("{}:", cat.title()));
@@ -793,9 +904,10 @@ mod tests {
 
     #[test]
     fn category_order_and_titles() {
-        assert_eq!(Category::ORDER.len(), 8);
+        assert_eq!(Category::ORDER.len(), 9);
         assert_eq!(Category::ORDER[0], Category::Game);
         assert_eq!(Category::ORDER[7], Category::Help);
+        assert_eq!(Category::ORDER[8], Category::Library);
         assert_eq!(Category::Game.title(), "Game");
         assert_eq!(Category::Animation.title(), "Animation");
     }
@@ -834,7 +946,23 @@ mod tests {
         // SQ-0692 added `toggle-room-dock`; `toggle-inspector` kept its name and
         // now flips the SAME dock to its diagnostics body.
         // SQ-0761 added `dump-cells`, the cell-buffer half of `dump-windows`.
-        assert_eq!(COMMANDS.len(), 62, "registry must match the spec's Full command table");
+        // SQ-0796 added the 16-command Library group — the pre-game story
+        // browser's own keys, which used to be hardcoded match arms outside the
+        // registry entirely.
+        assert_eq!(COMMANDS.len(), 78, "registry must match the spec's Full command table");
+    }
+
+    /// SQ-0796: `Category::ORDER` must list every category, or a whole group of
+    /// commands silently vanishes from `/help`.
+    #[test]
+    fn category_order_covers_every_category_in_use() {
+        for c in COMMANDS {
+            assert!(
+                Category::ORDER.contains(&c.category),
+                "{} is in a category missing from Category::ORDER",
+                c.name
+            );
+        }
     }
 
     #[test]

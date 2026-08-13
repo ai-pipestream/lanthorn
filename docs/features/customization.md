@@ -216,8 +216,8 @@ switches that make babelmap feel like yours without opening the whole registry.
   the first free letter), and the letter's color is themeable via the
   `hotkey_key` style selector. Direct key bindings
   still live in `[keymap.global]`, `[keymap.map]` (reached only while the debug
-  inspector holds the right-hand pane; it ships no defaults of its own), and
-  `[keymap.anim]` as
+  inspector holds the right-hand pane; it ships no defaults of its own),
+  `[keymap.anim]`, and `[keymap.browser]` (the story browser — see below) as
   `"key" = "command args"` — the **key on the left**, the command it runs on the
   right, spelled the way the registry spells it (hyphenated: `save-state`,
   `zoom-map in`). Bind one command to two keys by writing two entries. Get the two
@@ -238,6 +238,28 @@ switches that make babelmap feel like yours without opening the whole registry.
   "ctrl+d" = "dump-windows"
   "ctrl+g" = "dump-cells"
   ```
+- **The story browser's keys are bindable too** — the screen you get when
+  babelmap is pointed at a directory used to be the one surface whose keys were
+  not data: hardcoded match arms, and a footer hint typed out by hand beside
+  them. They now go through the same registry as everything else, in their own
+  `Browser` context, so every one of them can be moved:
+
+  ```toml
+  [keymap.browser]
+  "p" = "play-story"
+  "ctrl+f" = "search-ifdb"
+  ```
+
+  The commands are `move-selection <dx> <dy>`, `page-selection <n>`,
+  `select-edge first|last`, `play-story`, `open-launch-options`,
+  `toggle-info-panel`, `toggle-gallery`, `fetch-story`, `refresh-library`,
+  `set-ifdb-url`, `search-ifdb`, `download-hints`, `sort-library`,
+  `reverse-sort`, `quit-browser` and `cancel-browser`. They are a world of their
+  own: a game command in `[keymap.browser]` is refused with a warning (there is
+  no game yet for it to act on), and these do not appear in `/help` or the
+  command palette, because the browser has no command line to type them into.
+  The footer hint bar is *generated* from these bindings, so rebind `g` and the
+  footer says so without anyone editing a string.
 - **Command palette** — press `/` at an empty prompt (or `/` inside the leader
   panel) to open a fuzzy search over every command; its rows theme via five
   `[elements]` selectors: `palette_query` (the input line), `palette_name` (a

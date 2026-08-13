@@ -6,6 +6,7 @@ pub mod anim;
 pub mod archive;
 pub mod cell_dump;
 pub mod aux_store;
+pub mod browser;
 pub mod clipboard;
 pub mod export;
 pub mod history;

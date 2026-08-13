@@ -427,6 +427,14 @@ const TRAILER: &str = r#"
 #
 # [keymap.anim]
 # "ctrl+t" = "animate-tidy"
+#
+# The story browser (the screen you get when babelmap is pointed at a directory)
+# has its own context. Only its own commands work there — it runs before a story
+# is loaded, so nothing that acts on a running game has anything to act on.
+#
+# [keymap.browser]
+# "p" = "play-story"
+# "ctrl+f" = "search-ifdb"
 
 # ── Hotkey dialog ─────────────────────────────────────────────────────────────
 # prefix       — the key that opens the hotkey dialog

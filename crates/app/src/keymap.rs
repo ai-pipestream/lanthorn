@@ -2,8 +2,11 @@
 //!
 //! Commands are identified by their registry command-string (see `crate::slash`).
 //! `KeySpec` is a parsed keystroke (key code + modifier flags). `Context`
-//! partitions bindings into Global, Map, and Anim layers. `KeyMap` holds the
-//! full binding table and exposes lookup / resolve / primary-key queries.
+//! partitions bindings into Global, Map, Anim and Browser layers — the first
+//! three are in-game, and Browser is the pre-game story browser, which runs
+//! before there is an `AppState` and so shares nothing with them (SQ-0796).
+//! `KeyMap` holds the full binding table and exposes lookup / resolve /
+//! primary-key queries.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -18,6 +21,10 @@ pub enum Context {
     Map,
     /// Tidy-animation sub-mode (does NOT fall through).
     Anim,
+    /// The pre-game story browser (SQ-0796). Its own world: it runs before there
+    /// is an `AppState`, so nothing here falls through to Global and no Global
+    /// binding reaches it — a game command has nothing to act on there.
+    Browser,
 }
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
@@ -346,6 +353,50 @@ impl Default for KeyMap {
         bind!(plain(Esc), "anim-exit", Context::Anim);
         bind!(plain(Enter), "anim-exit", Context::Anim);
 
+        // ── Browser ───────────────────────────────────────────────────────────
+        // The pre-game story browser (SQ-0796). These are the keys the picker
+        // used to match on directly; they are data now, so `[keymap.browser]`
+        // can move any of them and the footer hints follow (`crate::browser`).
+        //
+        // ORDER MATTERS for those hints: a command's first binding is its
+        // rank-0 key, which is what a one-rank hint shows and what leads a
+        // multi-rank one — hence arrows before hjkl, and Shift-Enter before `o`.
+        bind!(plain(Up), "move-selection 0 -1", Context::Browser);
+        bind!(plain(Char('k')), "move-selection 0 -1", Context::Browser);
+        bind!(plain(Down), "move-selection 0 1", Context::Browser);
+        bind!(plain(Char('j')), "move-selection 0 1", Context::Browser);
+        // Horizontal movement means something only in the cover gallery; in the
+        // list these are bound but inert, exactly as they were.
+        bind!(plain(Left), "move-selection -1 0", Context::Browser);
+        bind!(plain(Char('h')), "move-selection -1 0", Context::Browser);
+        bind!(plain(Right), "move-selection 1 0", Context::Browser);
+        bind!(plain(Char('l')), "move-selection 1 0", Context::Browser);
+        bind!(plain(PageUp), "page-selection -1", Context::Browser);
+        bind!(plain(PageDown), "page-selection 1", Context::Browser);
+        bind!(plain(Home), "select-edge first", Context::Browser);
+        bind!(plain(End), "select-edge last", Context::Browser);
+
+        // Enter plays; Shift modifies the default action rather than introducing
+        // a mode (SQ-0789), and `o` is the same command on a key every terminal
+        // can deliver — Shift-Enter needs the kitty keyboard protocol to be
+        // distinguishable from Enter at all.
+        bind!(plain(Enter), "play-story", Context::Browser);
+        bind!(g(Enter, false, true), "open-launch-options", Context::Browser);
+        bind!(plain(Char('o')), "open-launch-options", Context::Browser);
+
+        bind!(plain(Char('i')), "toggle-info-panel", Context::Browser);
+        bind!(plain(Tab), "toggle-info-panel", Context::Browser);
+        bind!(plain(Char('g')), "toggle-gallery", Context::Browser);
+        bind!(plain(Char('f')), "fetch-story", Context::Browser);
+        bind!(plain(Char('r')), "refresh-library", Context::Browser);
+        bind!(plain(Char('u')), "set-ifdb-url", Context::Browser);
+        bind!(plain(Char('/')), "search-ifdb", Context::Browser);
+        bind!(g(Char('H'), false, true), "download-hints", Context::Browser);
+        bind!(plain(Char('s')), "sort-library", Context::Browser);
+        bind!(plain(Char('d')), "reverse-sort", Context::Browser);
+        bind!(plain(Char('q')), "quit-browser", Context::Browser);
+        bind!(plain(Esc), "cancel-browser", Context::Browser);
+
         KeyMap { bindings: b }
     }
 }
@@ -410,6 +461,7 @@ impl KeyMap {
             (Context::Global, &cfg.global),
             (Context::Map, &cfg.map),
             (Context::Anim, &cfg.anim),
+            (Context::Browser, &cfg.browser),
         ] {
             for (key, command) in section {
                 let spec = match key.parse::<KeySpec>() {
@@ -431,6 +483,21 @@ impl KeyMap {
                     }
                 };
                 let cmd_name = command.split_whitespace().next().unwrap_or("");
+                // The browser's commands and the game's cannot be bound into each
+                // other's context — the dispatcher refuses the pairing either way
+                // (SQ-0796), so binding one would be a key that silently does
+                // nothing. Say so here instead.
+                if let Some(spec) = crate::slash::find_command(cmd_name) {
+                    let in_browser = ctx == Context::Browser;
+                    if (spec.context == Context::Browser) != in_browser {
+                        warnings.push(if in_browser {
+                            format!("keymap: '{command}' is a game command and cannot be bound in [keymap.browser]; skipped")
+                        } else {
+                            format!("keymap: '{command}' is a story-browser command — bind it in [keymap.browser]; skipped")
+                        });
+                        continue;
+                    }
+                }
                 if crate::slash::find_command(cmd_name).is_none() {
                     // The registry spells its names with hyphens; the template used
                     // to say snake_case, so say which spelling to use rather than
@@ -796,6 +863,58 @@ mod tests {
         // Global bindings still reach through the map context's fallthrough.
         assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-state"));
         assert_eq!(km.lookup(&g(Char('r'), true, false), Context::Map), Some("restore-state"));
+    }
+
+    /// SQ-0796: the browser is its own context and does NOT fall through to
+    /// Global, because nothing Global does has anything to act on before a story
+    /// is loaded. Its own keys resolve; the game's do not reach it, and its keys
+    /// do not leak into the game.
+    #[test]
+    fn the_browser_context_stands_alone() {
+        let km = KeyMap::default();
+        let g = |code, ctrl, shift| KeySpec { code, ctrl, shift, alt: false };
+        use KeyCode::*;
+        assert_eq!(km.lookup(&g(Enter, false, false), Context::Browser), Some("play-story"));
+        assert_eq!(
+            km.lookup(&g(Enter, false, true), Context::Browser),
+            Some("open-launch-options")
+        );
+        // Ctrl+S saves in the game; in the browser there is nothing to save.
+        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Browser), None);
+        // …and `g` opens the cover gallery only there.
+        assert_eq!(km.lookup(&g(Char('g'), false, false), Context::Global), None);
+        assert_eq!(km.lookup(&g(Char('g'), false, false), Context::Map), None);
+    }
+
+    /// SQ-0796: binding across the two worlds is refused with a warning rather
+    /// than accepted into a key that could only ever do nothing.
+    #[test]
+    fn resolve_refuses_a_command_from_the_other_world() {
+        let mut cfg = crate::config::KeymapConfig::default();
+        cfg.browser.insert("ctrl+w".into(), "quit".into());
+        cfg.global.insert("ctrl+w".into(), "sort-library".into());
+        let (km, warnings) = KeyMap::resolve(&cfg);
+        assert_eq!(warnings.len(), 2, "both directions warn: {warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("game command")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("[keymap.browser]")), "{warnings:?}");
+        let spec: KeySpec = "ctrl+w".parse().unwrap();
+        assert_eq!(km.lookup(&spec, Context::Browser), None, "the binding was skipped");
+        assert_eq!(km.lookup(&spec, Context::Global), None, "and so was the other one");
+    }
+
+    /// SQ-0796: a browser binding from config layers onto the defaults exactly as
+    /// a Global one does.
+    #[test]
+    fn resolve_layers_browser_overrides_onto_the_defaults() {
+        let mut cfg = crate::config::KeymapConfig::default();
+        cfg.browser.insert("f5".into(), "refresh-library".into());
+        let (km, warnings) = KeyMap::resolve(&cfg);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let f5: KeySpec = "f5".parse().unwrap();
+        assert_eq!(km.lookup(&f5, Context::Browser), Some("refresh-library"));
+        // The shipped `r` survives — an override adds, it does not replace.
+        let r = KeySpec { code: KeyCode::Char('r'), ctrl: false, shift: false, alt: false };
+        assert_eq!(km.lookup(&r, Context::Browser), Some("refresh-library"));
     }
 
     // ── HotkeyLayout tests ────────────────────────────────────────────────────

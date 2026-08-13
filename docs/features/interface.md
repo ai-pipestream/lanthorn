@@ -404,6 +404,14 @@ save-on-quit prompt) — `/quit` still exits babelmap outright. Launched against
 single story file, there's no library to return to, so `/quit-to-library` just
 says so.
 
+Every key on this screen is **rebindable**. The picker runs before there is a
+game to act on, so it has its own layer in the one command registry — its own
+context, its own verbs (`play-story`, `toggle-gallery`, `sort-library`, and the
+rest) — and `[keymap.browser]` in `config.toml` moves any of them; see
+[Customization](customization.md). The hint bar along the bottom is generated
+from those bindings rather than written out by hand, so it names the key you
+actually have bound and quietly stops advertising anything you unbind.
+
 Once a story's metadata has been fetched, a **RATING** column carries IFDB's
 community average with the number of votes behind it — `3.8 (226)`, the plain
 number to one decimal, no star glyphs to squint at. The vote count is there
