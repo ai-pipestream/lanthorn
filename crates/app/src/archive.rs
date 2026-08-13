@@ -1761,6 +1761,60 @@ mod tests {
         move_region(&mut g, &region, MoveTarget::New).expect("the suggestion is actionable");
     }
 
+    /// SQ-0439, the same guarantee one layer up: a "Never" pressed IN THE PROMPT must come back
+    /// out of the archive still meaning never.
+    ///
+    /// The test above pins the mapper's own memory; this one pins the path a player actually
+    /// takes — the prompt writes the decision, the archive carries it, and the next crossing has
+    /// to stay quiet. As before, the restore is not the test: the CROSSING after it is.
+    #[test]
+    fn a_never_pressed_in_the_prompt_survives_the_archive() {
+        use crate::input::{apply_region_prompt, offer_layer_suggestion};
+        use crate::state::{AppState, RegionPromptAct};
+        use mapper::suggest::{SeamDecision, SeamKey};
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+
+        let mut state = AppState::default();
+        let mut mapper = small_cellar_mapper();
+        mapper.observe(1, "Hall", Some(Direction::Up)); // the return crossing
+        offer_layer_suggestion(&mut state, &mut mapper);
+        assert!(state.overlays.region_prompt.is_some(), "the prompt is what is being answered");
+        apply_region_prompt(&mut state, &mut mapper, RegionPromptAct::Never);
+
+        let seam = SeamKey { from: 3, dir: Direction::Up };
+        let path = temp_archive_path("prompt-never");
+        save_archive_m(&path, &mapper, &dummy_machine(), &[], &[], &[], &[], &[])
+            .expect("save_archive");
+        let ac = load_archive(&path).expect("load_archive");
+        let _ = std::fs::remove_file(&path);
+
+        let mut restored = ac.mapper;
+        assert_eq!(restored.graph.seam_decision(seam), SeamDecision::Ignored);
+
+        // Perturb, THEN assert: walk back down and climb out again.
+        let mut after = AppState::default();
+        restored.observe(3, "Cellar", Some(Direction::Down));
+        restored.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut after, &mut restored);
+        assert!(
+            after.overlays.region_prompt.is_none(),
+            "a restored game does not re-ask about a passage the player answered 'never' to"
+        );
+
+        // …and the identical walk on a map that never answered DOES ask, so the silence above is
+        // the memory and not the fixture.
+        let mut fresh = small_cellar_mapper();
+        let mut control = AppState::default();
+        fresh.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut control, &mut fresh);
+        assert!(control.overlays.region_prompt.is_some(), "an unanswered seam still speaks up");
+    }
+
     /// The fixture `a_declined_layer_suggestion_survives_the_archive` compares against: the same
     /// manor, with nothing declined.
     fn small_cellar_mapper() -> Mapper {

@@ -417,6 +417,15 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // these are the lines that stop a user picking a rendition and being puzzled
     // by the result, so they must not read as decoration.
     row("dialog.launch_caveat", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
+    // ── SQ-0439: the region prompt — the modal that asks whether a set of rooms
+    // wants a layer of its own, and that picks between passages or destinations
+    // when a `move-region` cannot settle one for itself. It reuses the dialog
+    // chrome; these style its contents. The chosen row borrows the shared modal
+    // list highlight rather than minting a seventh look for "this is the one".
+    row("dialog.region_prompt.body", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
+    row("dialog.region_prompt.rooms", Section::Dialog, Kind::Style, Some("dialog.list_footer"), Delta::EMPTY),
+    row("dialog.region_prompt.option", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
+    row("dialog.region_prompt.option:chosen", Section::Dialog, Kind::Style, Some("dialog.list_selected"), Delta::EMPTY),
     // ── SQ-0664: the command band (bottom dock). Its rows reuse
     // `dialog.list_selected`. SQ-0667 (2026-08-05) retired the band's own
     // frame (it draws no `panel.border` anymore — see `render/command_band.rs`)
@@ -624,6 +633,11 @@ mod tests {
         "dialog.input_preview",
         // SQ-0789: the launch-options dialog's caveat lines
         "dialog.launch_caveat",
+        // SQ-0439: the region prompt
+        "dialog.region_prompt.body",
+        "dialog.region_prompt.rooms",
+        "dialog.region_prompt.option",
+        "dialog.region_prompt.option:chosen",
         // SQ-0664: the command band
         "band.column_header",
         "band.column_header:active",

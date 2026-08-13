@@ -23,6 +23,7 @@ pub mod map;
 pub mod matrix;
 pub mod palette;
 pub mod quit_dialog;
+pub mod region_prompt;
 pub mod reset_dialog;
 pub mod save_name_dialog;
 pub mod text_entry_dialog;

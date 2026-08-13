@@ -36,6 +36,7 @@ use app::render::launch_dialog::{
 };
 use app::render::palette::draw_palette;
 use app::render::quit_dialog::{draw_quit_dialog, quit_dialog_key_focused, QuitDialogAction, QuitDialogRects};
+use app::render::region_prompt::{draw_region_prompt, region_prompt_key_focused, RegionPromptRects};
 use app::render::reset_dialog::{draw_reset_dialog, reset_dialog_key_focused, ResetDialogAction, ResetDialogRects};
 use app::render::save_name_dialog::{draw_save_name_dialog, save_name_dialog_key, SaveNameAction, SaveNameDialogRects};
 use app::render::saves::draw_saves;
@@ -63,6 +64,7 @@ pub(crate) struct OverlayRects {
     pub confirm_overwrite: Option<ConfirmOverwriteDialogRects>,
     pub quit_dialog: Option<QuitDialogRects>,
     pub launch_dialog: Option<LaunchDialogRects>,
+    pub region_prompt: Option<RegionPromptRects>,
     pub hints_panel: Option<HintsPanelRects>,
 }
 
@@ -97,6 +99,7 @@ pub(crate) fn draw_all(
         confirm_overwrite: None,
         quit_dialog: None,
         launch_dialog: None,
+        region_prompt: None,
         hints_panel: None,
     };
 
@@ -209,6 +212,8 @@ pub(crate) enum OverlayAct {
     QuitCancel,
     LaunchResume,
     LaunchNewGame,
+    /// The region prompt was answered (SQ-0439). Applying it needs the mapper.
+    RegionPrompt(app::state::RegionPromptAct),
 }
 
 /// The result of routing one event to the top-most open common-dialog overlay.
@@ -233,6 +238,7 @@ pub(crate) enum OverlayKind {
     ConfirmDelete,
     Quit,
     Launch,
+    RegionPrompt,
 }
 
 pub(crate) trait Overlay {
@@ -266,6 +272,9 @@ pub(crate) const COMMON_DIALOGS: &[&dyn Overlay] = &[
     &ConfirmDeleteOverlay,
     &QuitOverlay,
     &LaunchOverlay,
+    // The region prompt sits at the bottom: it is the only modal in this ladder the app raises on
+    // its own initiative, so anything the player asked for outranks it (SQ-0439).
+    &RegionPromptOverlay,
 ];
 
 /// The highest-priority open common-dialog overlay, or `None`. Pure over
@@ -700,6 +709,72 @@ impl Overlay for LaunchOverlay {
     }
 }
 
+// ── Region prompt (the map's own suggestion, and the two manual pickers) ───
+struct RegionPromptOverlay;
+impl Overlay for RegionPromptOverlay {
+    fn kind(&self) -> OverlayKind { OverlayKind::RegionPrompt }
+    fn is_open(&self, ov: &OverlayState) -> bool { ov.region_prompt.is_some() }
+    fn draw(&self, state: &AppState, area: Rect, buf: &mut Buffer, out: &mut OverlayRects) {
+        out.region_prompt = draw_region_prompt(state, area, buf);
+    }
+    fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
+        let Some(prompt) = state.overlays.region_prompt.as_ref() else {
+            return OverlayOutcome::Consumed;
+        };
+        let slots = prompt.focus_slots();
+        let step = match key.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => Some(1),
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => Some(-1),
+            _ => None,
+        };
+        if let Some(step) = step {
+            let focus = cycle_focus(state.overlays.dialog_focus, slots, step);
+            state.overlays.dialog_focus = focus;
+            // The options are a radio list, so resting on one CHOOSES it — there is nothing left
+            // for a second keystroke to do, and Enter can therefore mean "yes" everywhere.
+            if let Some(p) = state.overlays.region_prompt.as_mut() {
+                if focus < p.options.len() {
+                    p.choice = focus;
+                }
+            }
+            return OverlayOutcome::Consumed;
+        }
+        match region_prompt_key_focused(key.code, prompt, state.overlays.dialog_focus) {
+            Some(act) => OverlayOutcome::Act(OverlayAct::RegionPrompt(act)),
+            None => OverlayOutcome::Consumed,
+        }
+    }
+    fn mouse(&self, state: &mut AppState, m: &MouseEvent, panes: &PaneRects) -> OverlayOutcome {
+        use app::state::RegionPromptAct as A;
+        let Some(pt) = left_down(m) else { return OverlayOutcome::Consumed };
+        let Some(rp) = &panes.region_prompt else { return OverlayOutcome::Consumed };
+        if let Some(i) = rp.options.iter().position(|r| r.width > 0 && r.contains(pt)) {
+            state.overlays.dialog_focus = i;
+            if let Some(p) = state.overlays.region_prompt.as_mut() {
+                p.choice = i;
+            }
+            return OverlayOutcome::Consumed;
+        }
+        let hit = |r: &Option<Rect>| r.is_some_and(|r| r.contains(pt));
+        // Closing a suggestion is "not now" — the same as Esc, and not a refusal.
+        let closing = if state.overlays.region_prompt.as_ref().is_some_and(|p| p.buttons() == 3) {
+            A::Defer
+        } else {
+            A::Dismiss
+        };
+        if hit(&rp.accept) {
+            OverlayOutcome::Act(OverlayAct::RegionPrompt(A::Accept))
+        } else if hit(&rp.never) {
+            OverlayOutcome::Act(OverlayAct::RegionPrompt(A::Never))
+        } else if hit(&rp.later) || hit(&rp.cancel) || hit(&rp.close) {
+            OverlayOutcome::Act(OverlayAct::RegionPrompt(closing))
+        } else {
+            // Click outside: swallow, keep it open.
+            OverlayOutcome::Consumed
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,6 +848,77 @@ mod tests {
         // Aux sits above everything.
         o.aux_prompt = true;
         assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::Aux);
+    }
+
+    /// A region prompt for the ladder / focus tests: two destinations to choose between.
+    #[cfg(test)]
+    fn a_region_prompt() -> app::state::RegionPrompt {
+        use app::state::{RegionOption, RegionPrompt, RegionPromptKind};
+        use mapper::layer::{MoveTarget, Region, MAIN_LAYER};
+        RegionPrompt {
+            kind: RegionPromptKind::PickDest {
+                region: Region { anchor: 2, rooms: [2, 3].into_iter().collect() },
+                cut: None,
+            },
+            title: "Where do these rooms go?".into(),
+            body: vec!["More than one layer could take them.".into()],
+            rooms: "2 rooms: B, C".into(),
+            options: vec![
+                RegionOption::Dest { label: "a new layer".into(), target: MoveTarget::New },
+                RegionOption::Dest { label: "Main".into(), target: MoveTarget::Existing(MAIN_LAYER) },
+            ],
+            choice: 0,
+        }
+    }
+
+    /// SQ-0439: the region prompt is the only modal in the ladder the APP raises on its own, so it
+    /// sits at the bottom — anything the player asked for wins the scan.
+    #[test]
+    fn a_region_prompt_yields_to_every_modal_the_player_asked_for() {
+        let mut o = OverlayState::default();
+        o.region_prompt = Some(a_region_prompt());
+        assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::RegionPrompt);
+        o.quit_dialog = true;
+        assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::Quit);
+        o.quit_dialog = false;
+        o.launch_dialog = true;
+        assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::Launch);
+    }
+
+    /// The prompt's focus ring runs its options first and then its buttons, and resting on an
+    /// option CHOOSES it — so Enter can mean "yes" wherever the ring happens to be. Shift-Tab
+    /// reverses, per the standing convention.
+    #[test]
+    fn region_prompt_focus_chooses_the_option_it_rests_on() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::default();
+        state.overlays.region_prompt = Some(a_region_prompt());
+        state.overlays.dialog_focus = 0;
+        let ov = topmost_common_dialog(&state.overlays).expect("the prompt is open");
+
+        // Two options + Move + Cancel = a four-slot ring.
+        ov.key(&mut state, &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.overlays.dialog_focus, 1);
+        assert_eq!(state.overlays.region_prompt.as_ref().unwrap().choice, 1, "focus chose it");
+
+        // Onto the buttons: the choice stays where the ring left it.
+        ov.key(&mut state, &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.overlays.dialog_focus, 2);
+        assert_eq!(
+            state.overlays.region_prompt.as_ref().unwrap().choice,
+            1,
+            "a button does not un-choose the option"
+        );
+
+        // Shift-Tab reverses back onto it.
+        ov.key(&mut state, &KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(state.overlays.dialog_focus, 1);
+
+        // And the ring wraps at four, not at two.
+        for _ in 0..3 {
+            ov.key(&mut state, &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+        assert_eq!(state.overlays.dialog_focus, 0, "four slots: two options and two buttons");
     }
 
     /// SQ-0648: the save-as flow leaves the save-name dialog open BEHIND the

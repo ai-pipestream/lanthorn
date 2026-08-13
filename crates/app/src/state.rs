@@ -1560,6 +1560,100 @@ impl TextEntryDialog {
     }
 }
 
+// ── The region prompt ─────────────────────────────────────────────────────────
+
+/// One row of the region prompt's choice list — a radio button, not a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionOption {
+    /// Send the rooms here. The label is `new` or a layer's name.
+    Dest { label: String, target: mapper::layer::MoveTarget },
+    /// Cut this passage, and take the side the selected room is on. The label reads as the
+    /// passage does — `s from At West End of Long Hall`.
+    Seam { label: String, from: RoomId, dir: mapper::direction::Direction },
+}
+
+/// What the region prompt is asking, and everything the answer needs (SQ-0439).
+///
+/// Three questions arrive here, and they are the same question twice over — *which rooms*, and
+/// *onto what* — which is why one modal answers all of them. The map's own suggestion has already
+/// settled the rooms and asks only where they go; a manual `move-region` may have either half
+/// unsettled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionPromptKind {
+    /// The map spoke first. The options are destinations, and the three buttons are the three
+    /// outcomes the design settled on: separate now / ask again next crossing / never ask.
+    Suggest {
+        trigger: mapper::suggest::Trigger,
+        /// The crossing that fired it — the key a deferral or a refusal is remembered under.
+        seam: mapper::suggest::SeamKey,
+        region: mapper::layer::Region,
+    },
+    /// Several passages lead into the selected room and each cuts a different map, so the options
+    /// are those passages. `dest` is whatever the player already named, carried through so
+    /// answering this question does not silently reopen the other one.
+    PickSeam { room: RoomId, dest: crate::input::MoveDest },
+    /// The rooms are settled and the destination is not, so the options are the layers they could
+    /// land on. `cut` is the passage the seam step chose, kept only to report it once the move
+    /// goes through.
+    PickDest {
+        region: mapper::layer::Region,
+        cut: Option<(RoomId, mapper::direction::Direction)>,
+    },
+}
+
+/// An open region prompt (SQ-0439). Held in [`OverlayState::region_prompt`].
+///
+/// The focus ring is `options.len()` option rows followed by the buttons, cycled by Tab/Shift-Tab
+/// through the shared `dialog_focus`; moving focus onto an option CHOOSES it, so `choice` is
+/// simply the last option the ring rested on and survives focus moving down to the buttons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionPrompt {
+    pub kind: RegionPromptKind,
+    /// The modal's title bar.
+    pub title: String,
+    /// What is being asked, in one or two sentences.
+    pub body: Vec<String>,
+    /// The rooms that would move, named — dimmer than the body, and empty when the rooms are not
+    /// settled yet (a seam pick, where each option takes a different set).
+    pub rooms: String,
+    /// The choices, best first. Never empty — a prompt with nothing to offer is not opened.
+    pub options: Vec<RegionOption>,
+    /// Index into `options` of the chosen row.
+    pub choice: usize,
+}
+
+impl RegionPrompt {
+    /// How many slots the focus ring has: one per option, then one per button.
+    pub fn focus_slots(&self) -> usize {
+        self.options.len() + self.buttons()
+    }
+
+    /// How many buttons this prompt shows — three outcomes for a suggestion, Move/Cancel for a
+    /// pick.
+    pub fn buttons(&self) -> usize {
+        if matches!(self.kind, RegionPromptKind::Suggest { .. }) { 3 } else { 2 }
+    }
+
+    /// The chosen option, or `None` when the list is somehow empty.
+    pub fn chosen(&self) -> Option<&RegionOption> {
+        self.options.get(self.choice)
+    }
+}
+
+/// What the player told the region prompt to do (SQ-0439).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionPromptAct {
+    /// Do it, with the chosen option.
+    Accept,
+    /// Put it off: re-arm this seam for the next crossing. Also what Esc means on a suggestion,
+    /// because declining to answer is not the same as saying no.
+    Defer,
+    /// Never ask about this passage again.
+    Never,
+    /// Close a manual pick without moving anything.
+    Dismiss,
+}
+
 /// Which modal the run loop opens for a `create_by_prompt` filename request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilenameModal {
@@ -1941,6 +2035,10 @@ pub struct OverlayState {
     pub launch_dialog: bool,
     /// Active Hints panel session. `None` means the panel is closed.
     pub hints: Option<HintSession>,
+    /// The open `move-region` prompt, if any (SQ-0439): the map's own suggestion that a set of
+    /// rooms wants a layer, or the half of a manual `move-region` the command could not settle by
+    /// itself. `None` means nothing is being asked.
+    pub region_prompt: Option<RegionPrompt>,
     /// Index of the currently focused button in an open modal dialog. Reset to
     /// a button index when a modal opens; cycled by Tab/Shift-Tab.
     pub dialog_focus: usize,
@@ -3152,6 +3250,7 @@ impl AppState {
             || self.overlays.launch_dialog
             || self.overlays.hints.is_some()
             || self.overlays.replay.is_some()
+            || self.overlays.region_prompt.is_some()
             || self.resize_mode
     }
 
