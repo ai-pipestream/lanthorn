@@ -113,6 +113,28 @@ struct Parked {
     label_on_screen: bool,
 }
 
+/// Fold one turn's output into the transcript exactly as the run loop does
+/// (`turn.rs`): a menu redraw collapses the previous reprint back to its clear
+/// anchor, a screen clear re-anchors without deleting scrollback, and a turn that
+/// carries `TranscriptElem`s goes through them in order — which is the only way a
+/// clear that lands in the MIDDLE of a turn's output reaches the transcript. A
+/// hint/menu page is exactly that shape (Shogun's boot turn prints nine header
+/// lines, moves window 0, then prints into the new box), so a harness that only
+/// pushed `result.transcript` would measure a screen the app never draws.
+fn apply_turn(state: &mut AppState, r: &app::session::TurnResult) {
+    if r.erase_lower {
+        if let Some(anchor) = state.clear_anchor {
+            state.truncate_transcript(anchor);
+        }
+        state.mark_screen_clear();
+    }
+    if r.transcript_elems.is_empty() {
+        state.push_transcript_runs(&r.transcript, app::state::TranscriptKind::Story, &r.transcript_runs);
+    } else {
+        app::state::apply_transcript_elems(state, &r.transcript_elems);
+    }
+}
+
 /// Drive `cmds` as one turn's worth of output and run the run loop's own pager
 /// sequence around it: cache the pre-turn total, arm, render (the frame that
 /// decides), `apply_frame`, render again (the frame the reader sees).
@@ -132,7 +154,7 @@ fn park(s: &mut GameSession, state: &mut AppState, area: Rect, cmds: &[&str]) ->
 
     for c in cmds {
         let t = s.submit(c);
-        state.push_transcript(&t.transcript);
+        apply_turn(state, &t);
     }
 
     let (m1, _, _) = render(state, s);
@@ -269,6 +291,55 @@ fn a_v3_status_line_is_not_a_readable_transcript_row() {
 
     let p = park(&mut s, &mut state, area, &["verbose", "look", "look", "look"]);
     assert_nothing_scrolled_past(&p, true, "cutthroats-r23-s840809.z3 (v3 status line)");
+}
+
+/// A turn that CLEARS in the middle of its own output still parks on the first new
+/// row — the shape a hint or menu page has, and the one the arming ruleset's
+/// SQ-0539 note is about ("a menu/hint page that CLEARS and then paints more than
+/// a screenful").
+///
+/// Shogun's boot is that turn for real (`v6_prose_freeze.rs` reads it out of the
+/// screen ops): it prints nine centred header lines, MOVES window 0 into a small
+/// box beside its menu — which freezes the header as paint and lands a
+/// `TranscriptElem::ScreenClear` mid-output — erases the new box and prints into
+/// it. The clear preserves scrollback and re-anchors, so "rows this turn added"
+/// still measures the repaint; the park must land on the first of them and not one
+/// row down. Measured at 80x30 on `shogun-r322-s890706.z6`: the second boot turn
+/// adds 31 rows into a 28-row viewport and parks at offset 4, first new row on top.
+///
+/// Shogun is also the user's own control for SQ-0823 ("Shogun [more] seems to work
+/// fine"), so it is worth a case of its own whatever the answer.
+#[test]
+fn a_turn_that_clears_mid_output_parks_on_the_first_new_row() {
+    let file = "shogun-r322-s890706.z6";
+    let path = stories_dir().join(file);
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("SKIP: gitignored story missing at {}", path.display());
+        return;
+    };
+    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 322, "{file}: release");
+    assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), "890706", "{file}: serial");
+    let mut picts = PictSource::resolve(&path);
+    let dims = picts.all_pict_dims();
+    let std_win = picts.std_window();
+    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, std_win, None, None)
+        .expect("Shogun boots");
+    s.set_pict_source(Some(picts));
+    s.flush_boot_pictures();
+
+    let mut state = story_state(true);
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 80, 30);
+
+    // First boot turn: header + mid-turn clear + one line — it fits, so no pager,
+    // and the fresh box is pinned to the top of the transcript region.
+    let first = park(&mut s, &mut state, area, &[""]);
+    assert!(!first.active, "Shogun's opening turn fits its box — nothing to page");
+
+    // Second turn: the menu paints past the viewport, and this one pages.
+    let p = park(&mut s, &mut state, area, &[""]);
+    assert_nothing_scrolled_past(&p, true, &format!("{file} [release 322, serial 890706] boot menu"));
 }
 
 /// …and so is the optional command bar. With `command_bar = true` the live input
