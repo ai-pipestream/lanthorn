@@ -29,6 +29,12 @@
 //! specified in the header file.
 //! ```
 //!
+//! That one codec covers the Macintosh's **monochrome** `Pic.data` as well as
+//! its colour `CPic.data` and every Amiga archive: two-colour art runs the same
+//! three stages and lands one byte per pixel, using colour numbers 2 and 3 (and
+//! 0 for transparent) instead of all sixteen. See [`InfocomPics::decode`] and
+//! [`CGA_PALETTE`]; SQ-0838.
+//!
 //! **PC** archives are little-endian and carry no Huffman tree at all. Each
 //! picture's data offset points at a bare GIF-style LZW stream — minimum code
 //! size 8, so clear is 256 and end-of-stream 257, codes packed least-significant
@@ -97,8 +103,8 @@ pub enum PicError {
     /// Blorb conversions render these as `Rect` resources.
     NoPixelData,
     /// The entry uses a compression variant this module does not decode: on the
-    /// Amiga/Mac side raw un-Huffman'd RLE or 1-bit mono, and on either side an
-    /// embedded IFF (`EF_IFF`).
+    /// Amiga/Mac side raw un-Huffman'd RLE, and on either side an embedded IFF
+    /// (`EF_IFF`).
     UnsupportedCompression(u16),
     /// The compressed stream did not expand to `width * height` pixels.
     BadPixelData,
@@ -149,12 +155,28 @@ const ENTRY_SIZE: usize = 14;
 /// flavour. See [`InfocomPics::parse`].
 const HUFF_PTR_SIZE: usize = 2;
 
-/// The PC record with no palette pointer: `picID`, `picX`, `picY`, `eFlags`,
+/// The record with no palette pointer: `picID`, `picX`, `picY`, `eFlags`,
 /// `dataOff` (3 bytes) and one pad byte. `mac/gfx.p`'s `ReadGFXEntry` is where
-/// that pad byte is written down — a record with no palette offset
-/// "skip[s] over /single/ pad byte" instead. EGA and CGA archives use it: the
-/// hardware fixes their colours, so there is nothing to store.
-const PC_ENTRY_SIZE: usize = 12;
+/// that pad byte is written down, and it names the condition too — a *mono*
+/// entry has no palette offset and so "skip[s] over /single/ pad byte" instead:
+///
+/// ```text
+/// { is there a palette entry? }
+/// IF ge.mono THEN                         { NO [implied] }
+///     BEGIN
+///     doZero (4);
+///     pEnt := Ptr (ORD4(pEnt) + 1);       { skip over /single/ pad byte }
+///     END
+/// ELSE                                    { Yes, read/align palOff }
+/// ```
+///
+/// **Both machines spend the same twelve bytes for the same reason**, and it is
+/// one phenomenon and not two: a screen whose colours are not the picture's to
+/// choose has no palette to store. On the PC that is EGA and CGA, whose hardware
+/// fixed sixteen and two colours respectively; on the Macintosh it is the
+/// two-colour `Pic.data` that ships beside the colour `CPic.data`. All 483 of
+/// the Mac monochrome archive's records leave this byte zero (SQ-0838).
+const ENTRY_SIZE_NO_PAL: usize = 12;
 /// The PC record with a palette pointer, laid out exactly like the Amiga's 14.
 /// MCGA archives use it — MCGA could pick its 16 colours freely, so it had to
 /// carry them.
@@ -256,8 +278,20 @@ pub const EGA_PALETTE: [Rgb; 16] = [
     [255, 255, 255],
 ];
 
-/// The colours a `.CG1` archive's pixel indices name — **black and white, and
-/// nothing else** (SQ-0794).
+/// The colours a TWO-COLOUR archive's pixel indices name — **black and white,
+/// and nothing else** (SQ-0794).
+///
+/// # Two machines, one table
+///
+/// It keeps the CGA name because a `.CG1` is where it was first needed, but it
+/// is not the IBM's alone: the Macintosh's monochrome `Pic.data` resolves
+/// through it too (SQ-0838), and it does so under the same `EF_MONO` test and
+/// with the same stored colour numbers. bocfel writes that identity into its own
+/// code — `populate_color_table` handles `kGraphicsTypeMacBW` and
+/// `kGraphicsTypeCGA` in a single fallthrough — and the Mac archive's pixels
+/// bear it out: across all 386 of Zork Zero's monochrome pictures the indices
+/// that appear are exactly `{0, 2, 3}`, with 0 appearing only in the 128
+/// pictures that declare `EF_TRANS`.
 ///
 /// # Why a CGA rendition has two colours and not four
 ///
@@ -289,6 +323,11 @@ pub const EGA_PALETTE: [Rgb; 16] = [
 /// |---|---|---|
 /// | one bit per pixel | `EF_MONO`, no `EF_TRANS` | 1 = set = white, 0 = clear = black |
 /// | one byte per pixel | `EF_MONO` and `EF_TRANS` | 0 = transparent, 2 = white, 3 = black |
+///
+/// The bit-packed row is the PC's alone. Monochrome MACINTOSH art is always the
+/// byte-per-pixel form — bocfel's "unlike monochrome Mac images which use the
+/// same wasteful format as transparent ones" — so it reaches slots 2 and 3 and
+/// never slot 1, whether or not it declares `EF_TRANS`.
 ///
 /// Slots 2 and 3 are the archive's own colour numbers, exactly as both witnesses
 /// above read them. Slot 1 is this decoder's rendering of a set bit, and giving
@@ -497,8 +536,12 @@ impl InfocomPics {
     /// Then:
     ///
     /// * **12** — no palette pointer, just a pad byte ("skip over /single/ pad
-    ///   byte"). The EGA and CGA archives, whose colours the hardware fixes.
-    /// * **14** — a 3-byte `palOff`. The Amiga/Mac archives, and the MCGA ones.
+    ///   byte"). The EGA and CGA archives, whose colours the hardware fixes —
+    ///   **and the Macintosh's monochrome `Pic.data`**, whose two colours are
+    ///   likewise not the picture's to choose. `ReadGFXEntry` reaches this
+    ///   branch on `ge.mono`, i.e. on the entry flag `GF_MONO`, and the two
+    ///   machines are one case and not two (SQ-0838).
+    /// * **14** — a 3-byte `palOff`. The Amiga/Mac colour archives, and MCGA.
     /// * **16** — `palOff` plus a per-entry Huffman-tree word, which
     ///   `ReadGFXEntry` reads only when the header declares `HF_EHUFF` without
     ///   `HF_GHUFF`:
@@ -511,10 +554,12 @@ impl InfocomPics {
     ///
     /// Zork Zero, Journey and Arthur declare `6` (`HF_EHUFF | HF_GHUFF`) on the
     /// Amiga and share one global tree in 14-byte records; Shogun declares `2`
-    /// (`HF_EHUFF` alone) and carries 48 trees in 16-byte records. On the
-    /// Amiga/Mac side the record size the header declares must therefore be the
-    /// one its flags imply; on the PC side, where no tree exists, 12 and 14 are
-    /// both accepted and the size alone says whether palettes are stored.
+    /// (`HF_EHUFF` alone) and carries 48 trees in 16-byte records; the
+    /// Macintosh's monochrome `Pic.data` declares `0x0e` — Zork Zero's `6` plus
+    /// the `GF_MONO` bit — and shares one global tree in **12**-byte records.
+    /// So 16 is demanded exactly when `HF_EHUFF` stands alone, and otherwise 12
+    /// and 14 are both read, the size alone saying whether palettes are stored.
+    /// That is the same rule the PC side already used, and it is now one rule.
     ///
     /// # Validation
     ///
@@ -534,8 +579,17 @@ impl InfocomPics {
         if !per_entry_huff && be16(&data, 2) == 0 {
             return Self::parse_pc(data);
         }
-        let entry_size = ENTRY_SIZE + if per_entry_huff { HUFF_PTR_SIZE } else { 0 };
-        if usize::from(data[8]) != entry_size {
+        // 16 exactly when the records carry their own trees; otherwise 14, or 12
+        // when the pictures are monochrome and have no palette to point at.
+        let entry_size = usize::from(data[8]);
+        let allowed = if per_entry_huff {
+            ENTRY_SIZE + HUFF_PTR_SIZE
+        } else if entry_size == ENTRY_SIZE_NO_PAL {
+            ENTRY_SIZE_NO_PAL
+        } else {
+            ENTRY_SIZE
+        };
+        if entry_size != allowed {
             return Err(PicError::UnsupportedContainer);
         }
         let count = usize::from(be16(&data, 4));
@@ -562,7 +616,13 @@ impl InfocomPics {
                 height: be16(&data, o + 4),
                 flags: be16(&data, o + 6),
                 data: be24(&data, o + 8),
-                palette: be24(&data, o + 11),
+                // A 12-byte record spends its last byte on padding, not on a
+                // palette pointer — `ReadGFXEntry`'s mono branch.
+                palette: if entry_size == ENTRY_SIZE_NO_PAL {
+                    0
+                } else {
+                    be24(&data, o + 11)
+                },
                 huff: if per_entry_huff {
                     usize::from(be16(&data, o + 14)) * 2
                 } else {
@@ -610,7 +670,7 @@ impl InfocomPics {
     /// directory.
     fn parse_pc(data: Vec<u8>) -> Result<InfocomPics, PicError> {
         let entry_size = usize::from(data[8]);
-        if entry_size != PC_ENTRY_SIZE && entry_size != PC_ENTRY_SIZE_PAL {
+        if entry_size != ENTRY_SIZE_NO_PAL && entry_size != PC_ENTRY_SIZE_PAL {
             return Err(PicError::UnsupportedContainer);
         }
         let count = usize::from(le16(&data, 4));
@@ -772,17 +832,46 @@ impl InfocomPics {
     /// every `.EG1`/`.EG2`/`.CG1` reads `0x38` or `0x39`, while `zork0.pic`
     /// reads `0x06`.
     ///
-    /// One caveat, deliberately not acted on: bocfel reclassifies an Amiga/Mac
-    /// archive whose whole flags byte is `0x0e` as monochrome Macintosh and
-    /// plots it 480 wide. Bit 3 is set in `0x0e`, so the bit alone would
-    /// mis-measure such a file — which is why it is read only on
-    /// [`Flavour::Pc`], and the whole Amiga/Mac side answers 320, where every
-    /// archive in hand is 320-wide Amiga media.
+    /// **The Macintosh's monochrome archive is the exception, and it is 480 wide**
+    /// (SQ-0838). Bit 3 of the flags byte is set in its `0x0e` too, so the PC
+    /// rule would call it 640 and be wrong by a third; the answer comes from the
+    /// archive's own [`Self::is_monochrome`] instead, and it is sourced twice
+    /// over. `mac/gfx.p` writes the whole picture space into the flag's own
+    /// definition — `GF_MONO = $0008; { this pic is mono, and scaled for a
+    /// 480x300 screen (std Mac) }` — and bocfel's width table says the same
+    /// (`case kGraphicsTypeMacBW: hw_screenwidth = 480; pixelwidth = 1.0;`).
+    /// The directory agrees: the archive's widest picture is exactly 480, where
+    /// the colour `CPic.data` beside it tops out at 320.
+    ///
+    /// An Amiga/Mac COLOUR archive still answers 320, as every one in hand is.
     pub fn picture_space_width(&self) -> u16 {
         match self.flavour {
+            Flavour::AmigaMac if self.is_monochrome() => 480,
             Flavour::AmigaMac => 320,
             Flavour::Pc if self.data[1] & 0x08 != 0 => 640,
             Flavour::Pc => 320,
+        }
+    }
+
+    /// The height of the picture space [`Self::picture_space_width`] names — the
+    /// other axis of the screen this archive's coordinates were drawn for.
+    ///
+    /// Every rendition Infocom shipped is 200 lines tall except the standard
+    /// Macintosh's monochrome one, which `mac/gfx.p` calls a "480x300 screen
+    /// (std Mac)". That is not a scaled copy of the 320×200 colour art: the two
+    /// archives on the Macintosh Zork Zero disk hold the same 483 pictures at
+    /// separately drawn sizes, agreeing on 1.5× only for the full-screen plates
+    /// (480×300 against 320×200) and going their own way on the sprites.
+    ///
+    /// A host needs both axes because a 480×300 space is the one that does NOT
+    /// double onto a 640×400 unit screen — see `app`'s `PictSource::art_scale`,
+    /// where every other rendition's vertical factor works out to 2 and this
+    /// one's to 1.
+    pub fn picture_space_height(&self) -> u16 {
+        if self.flavour == Flavour::AmigaMac && self.is_monochrome() {
+            300
+        } else {
+            200
         }
     }
 
@@ -807,39 +896,46 @@ impl InfocomPics {
     /// and does not read renditions out of filenames (see the module header), so
     /// this reads the directory instead. Two questions, in order:
     ///
-    /// 1. **Does any picture carry a palette?** If so the archive is MCGA or
-    ///    Amiga/Mac and nothing here applies. This is the record shape asking
-    ///    itself — a 12-byte record can never answer yes — and it is deliberately
-    ///    `any` rather than `all`, because an MCGA archive mixes pictures that
-    ///    carry palettes with pictures that genuinely are adaptive.
-    /// 2. **Does every picture with pixels set `EF_MONO`?** That is CGA; anything
-    ///    else is EGA. `EF_MONO` is "two-color picture", which no 16-colour
+    /// 1. **Does any picture carry a palette?** If so the archive brings its own
+    ///    colours and nothing here applies — MCGA, or an Amiga/Mac *colour*
+    ///    archive. This is the record shape asking itself — a 12-byte record can
+    ///    never answer yes — and it is deliberately `any` rather than `all`,
+    ///    because an MCGA archive mixes pictures that carry palettes with
+    ///    pictures that genuinely are adaptive.
+    /// 2. **Does every picture with pixels set `EF_MONO`?** That is a two-colour
+    ///    rendition. `EF_MONO` is "two-color picture", which no 16-colour
     ///    rendition has a use for, and the corpus splits on it perfectly: all 710
     ///    pixel-bearing pictures in `zork0.cg1`, `arthur.cg1`, `journey.cg1` and
     ///    `shogun.cg1` set it, and none of the 617 in `zork0.eg1`, `arthur.eg1`,
-    ///    `journey.eg1`, `shogun.eg1` or `FMVPOKER.EG1` does. The pixels agree
-    ///    independently: every CGA picture stays inside indices 0..=3 and every
-    ///    EGA one uses all sixteen.
+    ///    `journey.eg1`, `shogun.eg1` or `FMVPOKER.EG1` does. All 386 in the
+    ///    Macintosh Zork Zero's `Pic.data` set it too, which is the whole reason
+    ///    this question is asked of both flavours and not only the PC (SQ-0838).
+    ///    The pixels agree independently: every two-colour picture stays inside
+    ///    indices 0..=3 and every EGA one uses all sixteen.
     ///
-    /// An unrecognisable file therefore falls to EGA, which is the safe way
-    /// round: EGA's table is a superset of the colours CGA art can name, so a
-    /// misread CGA plate comes out in the wrong hues, whereas a misread EGA plate
-    /// would come out as thirteen shades of black.
-    /// Is this a TWO-COLOUR rendition — a CGA archive?
+    /// Otherwise **only a PC archive gets an answer**, and it is EGA — the safe
+    /// way round, because EGA's table is a superset of the colours two-colour art
+    /// can name, so a misread CGA plate comes out in the wrong hues whereas a
+    /// misread EGA plate would come out as thirteen shades of black. An
+    /// Amiga/Mac archive with no palettes and no `EF_MONO` is genuinely
+    /// adaptive — its colours come from the interpreter, and there is no video
+    /// card to ask.
+    /// Is this a TWO-COLOUR rendition?
     ///
-    /// The same `EF_MONO` test [`Self::hardware_palette`] uses to choose between
-    /// the CGA and EGA tables, asked directly, because the answer decides more
-    /// than which palette to expand through: a two-colour display has no colours
-    /// to give a story at all (SQ-0806).
+    /// The same `EF_MONO` test [`Self::hardware_palette`] uses to choose the
+    /// two-colour table, asked directly, because the answer decides more than
+    /// which palette to expand through: a two-colour display has no colours to
+    /// give a story at all (SQ-0806).
     ///
-    /// Content, not extension — a `.cg1` somebody renamed is still a `.cg1`, and
-    /// a `.eg1` somebody renamed is not one.
+    /// Content, not extension — a `.cg1` somebody renamed is still a `.cg1`, a
+    /// `.eg1` somebody renamed is not one, and the Macintosh's monochrome
+    /// `Pic.data` answers yes under exactly the same test as a `.cg1`.
     pub fn is_monochrome(&self) -> bool {
         self.hardware_palette() == Some(CGA_PALETTE)
     }
 
     pub fn hardware_palette(&self) -> Option<[Rgb; 16]> {
-        if self.flavour != Flavour::Pc || self.entries.iter().any(|e| e.has_own_palette()) {
+        if self.entries.iter().any(|e| e.has_own_palette()) {
             return None;
         }
         let mut with_pixels = 0usize;
@@ -851,11 +947,15 @@ impl InfocomPics {
         if with_pixels == 0 {
             return None;
         }
-        Some(if mono == with_pixels {
-            CGA_PALETTE
-        } else {
-            EGA_PALETTE
-        })
+        if mono == with_pixels {
+            // Two colours, whichever machine drew them (SQ-0838).
+            return Some(CGA_PALETTE);
+        }
+        // The sixteen-colour fallback is the PC's alone. An Amiga/Mac archive
+        // that stores no palettes is *adaptive* — its colours come from the
+        // interpreter's current table, not from a video card — so answering
+        // `EGA_PALETTE` for one would be inventing hardware it never had.
+        (self.flavour == Flavour::Pc).then_some(EGA_PALETTE)
     }
 
     /// Every directory record, in file order.
@@ -917,8 +1017,39 @@ impl InfocomPics {
     }
 
     /// Amiga/Mac: Huffman, then run-length, then undo the per-line XOR.
+    ///
+    /// # `EF_MONO` changes nothing here, and that is the finding
+    ///
+    /// On the PC side `EF_MONO` picks a second pixel packing — one bit per
+    /// pixel, rows padded to whole bytes (see [`decode_lzw`]). On this side it
+    /// picks **nothing**: a monochrome Macintosh picture runs the same Huffman,
+    /// the same run-length stage and the same per-line XOR, and lands as one
+    /// byte per pixel exactly as a sixteen-colour one does. The flag is a
+    /// statement about the artwork, not about its packing.
+    ///
+    /// Three witnesses, and they agree:
+    ///
+    /// * `mac/gfx.p` sizes the mono buffer at one byte per pixel outright —
+    ///   "because a mono pic decompresses into so many bytes (144000 prior to
+    ///   MonoPic)", and 144000 is 480×300, the mono picture space (see
+    ///   [`Self::picture_space_width`]). Its `MonoPic` then packs those bytes
+    ///   down to bits for QuickDraw, which is a *display* step: "note: src rows
+    ///   are unpadded".
+    /// * bocfel routes `kGraphicsTypeMacBW` to `decompress_amiga` and then to
+    ///   `draw_amiga_mac_cga_ega_vga`, the byte-per-pixel path, and says why in
+    ///   as many words: "Opaque CGA images store 8 pixels per byte (unlike
+    ///   monochrome Mac images which use the same wasteful format as transparent
+    ///   ones)".
+    /// * the archive itself. All 386 pixel-bearing pictures of the Macintosh
+    ///   Zork Zero's `Pic.data` (r296/s881019) expand to exactly `width *
+    ///   height` bytes through this function, with no length left over and none
+    ///   short.
+    ///
+    /// SQ-0838.
+    ///
+    /// [`decode_lzw`]: InfocomPics::decode_lzw
     fn decode_huffed(&self, e: &PicEntry) -> Result<Vec<u8>, PicError> {
-        if e.flags & (EF_MONO | EF_IFF) != 0 || e.flags & EF_PHUFF == 0 {
+        if e.flags & EF_IFF != 0 || e.flags & EF_PHUFF == 0 {
             return Err(PicError::UnsupportedCompression(e.flags));
         }
 
@@ -1300,6 +1431,90 @@ mod tests {
         f
     }
 
+    /// A hand-built MONOCHROME archive in the 12-byte flavour (SQ-0838), the
+    /// shape the Macintosh's `Pic.data` has: header flags `0x0e` — `HF_EHUFF |
+    /// HF_GHUFF` plus the `GF_MONO` bit — one global Huffman tree, and records
+    /// that spend their twelfth byte on padding because there is no palette to
+    /// point at.
+    ///
+    /// Its one picture is 4x2, rows `2222` then `3333`, encoded exactly as
+    /// [`synthetic`]'s is: two colours out of the sixteen the codec can carry,
+    /// which is the whole of what "monochrome" means to this format.
+    fn synthetic_mono() -> Vec<u8> {
+        const E: usize = ENTRY_SIZE_NO_PAL;
+        let mut f = vec![0u8; 16];
+        f[0] = 1; // part
+        f[1] = HF_EHUFF | HF_GHUFF | EF_MONO as u8; // 0x0e, as Zork Zero's Mac disk reads
+        let huff = 16 + E;
+        f[2..4].copy_from_slice(&u16::try_from(huff / 2).unwrap().to_be_bytes()); // huffOff, in words
+        f[5] = 1; // one picture
+        f[8] = E as u8;
+        let data_off = huff + HUFF_LEN;
+        f.extend_from_slice(&[
+            0, 7, // id 7
+            0, 4, // width
+            0, 2, // height
+            0, (EF_MONO | EF_PHUFF) as u8,
+            (data_off >> 16) as u8,
+            (data_off >> 8) as u8,
+            data_off as u8,
+            0, // pad, not a palette pointer
+        ]);
+        let mut tree = vec![0u8; HUFF_LEN];
+        tree[0] = 128 + 2; // `0`  -> symbol 2
+        tree[1] = 1; // `1`  -> node 1
+        tree[2] = 128 + 1; // `10` -> symbol 1
+        tree[3] = 128 + 18; // `11` -> repeat 3 more
+        f.extend_from_slice(&tree);
+        f.extend_from_slice(&[0, 0, 1]); // minSize
+        f.extend_from_slice(&[0, 0, 4]); // midSize: four symbols
+        f.push(0b0111_0110);
+        f
+    }
+
+    /// SQ-0838: the 12-byte monochrome flavour parses, and its pixels come out
+    /// of the SAME codec the colour side uses.
+    ///
+    /// Both halves matter and they fail differently. Before this quest `parse`
+    /// refused the container on its record size (`UnsupportedContainer`), and
+    /// even with the size accepted `decode` refused every picture in it on
+    /// `EF_MONO` (`UnsupportedCompression(0x0a)`) — the flag is set on every
+    /// pixel-bearing record such an archive has.
+    #[test]
+    fn decodes_a_twelve_byte_monochrome_archive() {
+        let pics = InfocomPics::parse(synthetic_mono()).unwrap();
+        assert_eq!(pics.flavour(), Flavour::AmigaMac, "big-endian with a global tree, not PC");
+        assert_eq!(pics.entries().len(), 1);
+
+        let p = pics.decode(7).unwrap();
+        assert_eq!((p.width, p.height), (4, 2));
+        assert_eq!(p.indices, vec![2, 2, 2, 2, 3, 3, 3, 3], "one byte per pixel, not one bit");
+        assert_eq!(p.transparent, None, "no `EF_TRANS` on this record");
+
+        // A 12-byte record has nowhere to put a palette, so the picture is
+        // adaptive and the archive answers with the two-colour hardware table.
+        assert!(!pics.entry(7).unwrap().has_own_palette());
+        assert!(p.palette.is_none());
+        assert!(pics.is_monochrome());
+        assert_eq!(pics.hardware_palette(), Some(CGA_PALETTE));
+
+        // And the picture space is the standard Macintosh's, not the Amiga's —
+        // even though bit 3 of `0x0e` is the same bit that means 640 on the PC.
+        assert_eq!((pics.picture_space_width(), pics.picture_space_height()), (480, 300));
+    }
+
+    /// The twelfth byte of a mono record is padding, and reading it as the top
+    /// of a palette pointer is the mistake the shared 14-byte layout invites.
+    /// `ReadGFXEntry` skips it; so must this.
+    #[test]
+    fn a_monochrome_records_twelfth_byte_is_padding() {
+        let mut f = synthetic_mono();
+        f[16 + 11] = 0xff; // a byte no palette offset could survive
+        let pics = InfocomPics::parse(f).expect("the pad byte is not read");
+        assert!(!pics.entry(7).unwrap().has_own_palette());
+        assert_eq!(pics.decode(7).unwrap().indices, vec![2, 2, 2, 2, 3, 3, 3, 3]);
+    }
+
     /// SQ-0744. Shogun's Amiga archive declares `HF_EHUFF` without `HF_GHUFF`,
     /// which by `ReadGFXEntry` gives every picture its own Huffman tree in a
     /// 16-byte record. Both record sizes must read, and each picture must go
@@ -1475,7 +1690,7 @@ mod tests {
         let entry_size = if paletted {
             PC_ENTRY_SIZE_PAL
         } else {
-            PC_ENTRY_SIZE
+            ENTRY_SIZE_NO_PAL
         };
         let dir_end = 16 + pics.len() * entry_size;
         let mut dir = Vec::new();
@@ -1841,7 +2056,7 @@ mod tests {
         assert!(InfocomPics::parse(pc_archive(&two())).is_ok());
 
         let mut f = pc_archive(&two());
-        f[16 + PC_ENTRY_SIZE] = 1; // the second record now claims id 1 as well
+        f[16 + ENTRY_SIZE_NO_PAL] = 1; // the second record now claims id 1 as well
         assert_eq!(
             InfocomPics::parse(f).err(),
             Some(PicError::UnsupportedContainer)
@@ -2536,5 +2751,141 @@ mod tests {
             let Some(pics) = adf_pictures(image) else { continue };
             assert_eq!(fingerprint(&pics), want, "{image} decoded differently");
         }
+    }
+
+    /// Both archives off the Macintosh Zork Zero disk (v6 r296 s881019), or
+    /// `None` with a SKIP note when the gitignored image is not there.
+    fn mac_zork_zero() -> Option<(InfocomPics, InfocomPics)> {
+        let p: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/Zork Zero Disk.image");
+        let Ok(bytes) = std::fs::read(&p) else {
+            eprintln!("SKIP: Macintosh disk image missing at {}", p.display());
+            return None;
+        };
+        let hfs = crate::hfs::Hfs::mount(bytes).expect("the Macintosh floppy mounts");
+        let colour = InfocomPics::parse(hfs.read_named("CPic.data")?).expect("CPic.data parses");
+        let mono = InfocomPics::parse(hfs.read_named("Pic.data")?).expect("Pic.data parses");
+        Some((mono, colour))
+    }
+
+    /// SQ-0838's oracle: **the two Macintosh archives are the same catalogue.**
+    ///
+    /// `Pic.data` and `CPic.data` ship on one disk and hold one game's artwork
+    /// for the two screens Apple sold. The colour side is already verified — its
+    /// 386 pictures decode through the Amiga path and were checked against
+    /// `Zork0.blb` — so it is a reference the monochrome side can be held to
+    /// without appealing to any external file or any remembered constant. What
+    /// the two must agree on is the DIRECTORY: the same 483 records, the same
+    /// ids in the same order, and the same 386 of them carrying pixels.
+    ///
+    /// **What they must NOT agree on is dimensions, and that is a finding rather
+    /// than a loosened assertion.** The monochrome archive is drawn for a 480×300
+    /// screen (`mac/gfx.p`: "this pic is mono, and scaled for a 480x300 screen
+    /// (std Mac)") and the colour one for 320×200, so 480 of the 483 records
+    /// differ. The three that "agree" agree only because they are placeholders
+    /// with a zero axis — ids 361 (0×0), 410 (0×15) and 412 (15×0) — so not one
+    /// picture with pixels matches, which is the opposite of luck. Full-screen
+    /// plates come out at exactly 1.5× (480×300 against 320×200); the sprites do
+    /// not, because they are separately drawn artwork and not a scaled copy —
+    /// id 2 is 60×50 against 42×35, id 9 is 61×59 against 45×40.
+    #[test]
+    fn the_two_macintosh_archives_are_one_catalogue() {
+        let Some((mono, colour)) = mac_zork_zero() else { return };
+
+        let shape = |p: &InfocomPics| -> Vec<(u16, bool)> {
+            p.entries().iter().map(|e| (e.id, e.has_pixels())).collect()
+        };
+        assert_eq!(shape(&mono).len(), 483);
+        assert_eq!(shape(&mono), shape(&colour), "same ids, same pixel-bearing records");
+        assert_eq!(mono.entries().iter().filter(|e| e.has_pixels()).count(), 386);
+
+        // Dimensions differ everywhere they can. Only the three records with a
+        // zero axis coincide, and none of them has pixels.
+        let same: Vec<u16> = mono
+            .entries()
+            .iter()
+            .zip(colour.entries())
+            .filter(|(a, b)| (a.width, a.height) == (b.width, b.height))
+            .map(|(a, _)| a.id)
+            .collect();
+        assert_eq!(same, vec![361, 410, 412]);
+        assert!(same.iter().all(|id| !mono.entry(*id).unwrap().has_pixels()));
+
+        // The full-screen plates, where the two picture spaces line up exactly.
+        for id in [1u16, 5, 6, 7] {
+            let (m, c) = (mono.entry(id).unwrap(), colour.entry(id).unwrap());
+            assert_eq!((m.width, m.height), (480, 300), "mono plate {id}");
+            assert_eq!((c.width, c.height), (320, 200), "colour plate {id}");
+        }
+    }
+
+    /// SQ-0838, the pixels: every monochrome picture decodes, and to a shape and
+    /// a colour range only this codec can produce.
+    ///
+    /// The per-picture length check is the strong one. Nothing about the entry
+    /// says how many bytes its stream should yield — the run-length stage decides
+    /// that as it runs — so `width * height` coming out 386 times in a row is not
+    /// something a wrong packing survives. A bit-per-pixel reading would land
+    /// eight times short every time.
+    #[test]
+    fn every_macintosh_monochrome_picture_decodes() {
+        let Some((mono, _)) = mac_zork_zero() else { return };
+        assert_eq!(mono.flavour(), Flavour::AmigaMac, "big-endian, one global Huffman tree");
+        assert!(mono.is_monochrome());
+        assert_eq!(mono.hardware_palette(), Some(CGA_PALETTE));
+        assert_eq!((mono.picture_space_width(), mono.picture_space_height()), (480, 300));
+        // No 12-byte record can carry a palette, so all 386 are adaptive and the
+        // hardware table above is the only thing that colours them.
+        assert_eq!(mono.adaptive_pictures().len(), 386);
+
+        let (mut decoded, mut opaque, mut transparent) = (0usize, 0usize, 0usize);
+        let mut seen = [false; 16];
+        for e in mono.entries().iter().filter(|e| e.has_pixels()) {
+            let p = mono.decode(e.id).unwrap_or_else(|err| panic!("picture {}: {err:?}", e.id));
+            assert_eq!(
+                p.indices.len(),
+                usize::from(e.width) * usize::from(e.height),
+                "picture {} decoded to the wrong size",
+                e.id
+            );
+            for &i in &p.indices {
+                seen[usize::from(i) & 15] = true;
+            }
+            match p.transparent {
+                Some(t) => {
+                    assert_eq!(t, 0, "colour 0 is the transparent one on this side");
+                    transparent += 1;
+                }
+                None => {
+                    assert!(
+                        !p.indices.contains(&0),
+                        "picture {} is opaque yet uses the transparent colour",
+                        e.id
+                    );
+                    opaque += 1;
+                }
+            }
+            decoded += 1;
+        }
+        assert_eq!((decoded, opaque, transparent), (386, 258, 128));
+
+        // The colour numbers, and they are the two-colour ones: 2 and 3 (white
+        // and black, per bocfel's shared Mac-B/W-and-CGA table), plus 0 where a
+        // picture declares a transparent colour. Index 1 — this decoder's
+        // rendering of a PC bit-packed set bit — never appears, which is what
+        // says the Macintosh never uses that packing.
+        assert_eq!(seen[..4], [true, false, true, true]);
+        assert!(seen[4..].iter().all(|&s| !s), "nothing reaches past the four low indices");
+    }
+
+    /// The whole monochrome archive, in one number, so that a change to any
+    /// pixel or any resolved colour of it fails loudly (SQ-0838).
+    #[test]
+    fn the_macintosh_monochrome_archive_is_pinned() {
+        let Some((mono, colour)) = mac_zork_zero() else { return };
+        assert_eq!(fingerprint(&mono), (483, 386, 0x61bf_7af0_03c5_ffb4));
+        // And the colour archive beside it has not moved: this quest touched the
+        // record-size rule every Amiga/Mac archive goes through.
+        assert_eq!(fingerprint(&colour), (483, 386, 0xb855_8076_4f4a_7aec));
     }
 }

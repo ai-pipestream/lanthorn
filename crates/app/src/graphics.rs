@@ -294,10 +294,13 @@ impl PictSource {
     /// story's resource Blorb exactly as before.
     ///
     /// The Macintosh shipped **two** archives per game, one per screen it sold:
-    /// a colour one and a monochrome one. `Hfs::pictures` returns the colour
-    /// archive, which is an ordinary big-endian Infocom container this decoder
-    /// already reads; the monochrome one declares 12-byte directory records and
-    /// is not a container it knows, so it never gets here.
+    /// a colour one and a monochrome one, and this decoder reads both (SQ-0838).
+    /// `Hfs::pictures` hands back the COLOUR one, because that is what every
+    /// other medium here supplies and choosing two-colour art for a terminal
+    /// with sixteen million of them would need a reason the disk does not give.
+    /// The monochrome archive is reached by naming it — `--pictures Pic.data`,
+    /// through [`PictureOverride`], which now looks inside the medium for a name
+    /// that is not on the host filesystem.
     pub fn resolve(story_path: &std::path::Path) -> PictSource {
         if let Ok(raw) = std::fs::read(story_path) {
             if blorb::adf::Adf::looks_like_adf(&raw) {
@@ -475,6 +478,18 @@ impl PictSource {
     /// |------------------------------|---------------|-------|
     /// | Amiga `Pic.data`, MCGA `.MG1`| 320×200       | (2, 2)|
     /// | EGA `.EG1`/`.EG2`, CGA `.CG1`| 640×200       | (1, 2)|
+    /// | Macintosh mono `Pic.data`    | 480×300       | (1, 1)|
+    ///
+    /// The last row is why the vertical factor is derived rather than fixed at
+    /// [`crate::session::V6_ART_SCALE`] (SQ-0838). Every rendition Infocom
+    /// shipped is 200 lines tall except the standard Macintosh's monochrome one,
+    /// which `mac/gfx.p` calls a "480x300 screen (std Mac)" and displays 1:1
+    /// where it scales the colour art by 1.5 or 2 (`IF ge.mono OR myTiny THEN {
+    /// scale 1x for display }`). 480×300 is the one picture space that does not
+    /// double onto the 640×400 unit screen, and doubling it anyway would put a
+    /// 960×600 plate on a 640×400 screen. Deriving both axes the same way leaves
+    /// all four existing renditions exactly where they were — 400/200 is 2 — and
+    /// is a change of reasoning rather than of behaviour for them.
     ///
     /// The 640-wide row is the whole of SQ-0790, and it is not a compromise: an
     /// EGA pixel really is half as wide as an MCGA one. Bocfel encodes exactly
@@ -491,9 +506,12 @@ impl PictSource {
     /// or two because the two renditions are separately drawn artwork, not one
     /// scaled copy).
     pub fn art_scale(&self) -> Option<(u32, u32)> {
-        let space_w = u32::from(self.native.as_ref()?.picture_space_width()).max(1);
+        let pics = self.native.as_ref()?;
+        let space_w = u32::from(pics.picture_space_width()).max(1);
+        let space_h = u32::from(pics.picture_space_height()).max(1);
         let unit_w = u32::from(INFOCOM_V6_STD_WINDOW.0) * crate::session::V6_ART_SCALE;
-        Some(((unit_w / space_w).max(1), crate::session::V6_ART_SCALE))
+        let unit_h = u32::from(INFOCOM_V6_STD_WINDOW.1) * crate::session::V6_ART_SCALE;
+        Some(((unit_w / space_w).max(1), (unit_h / space_h).max(1)))
     }
 
     fn get(&mut self, resnum: u32) -> Option<&Arc<DynamicImage>> {
@@ -785,6 +803,21 @@ impl PictureOverride {
     /// still beats a Blorb and an `.adf`'s own `Pic.data`, its flavour still
     /// picks the machine, and a name that is absent or will not decode is still
     /// loud. A door is not a policy.
+    ///
+    /// # Naming a file that is INSIDE the medium
+    ///
+    /// A story mounted out of a disk image has no directory to put a loose
+    /// archive next to, and the archive a user would want to name is already on
+    /// the volume. So when the bare name does not exist on the host filesystem
+    /// and the story is a disk image, the name is looked up on the volume
+    /// instead — see [`read_off_the_medium`].
+    ///
+    /// This is what makes the Macintosh's **monochrome** `Pic.data` reachable
+    /// (SQ-0838). Its disk carries two archives, `Hfs::pictures` hands back the
+    /// colour one, and choosing the other is a preference nothing on the disk
+    /// states — so it is the user's to state, with `--pictures Pic.data`, and
+    /// there is nowhere else for that name to point. An Amiga `.adf` gains the
+    /// same door by the same code, which is the point: a door, not a policy.
     pub fn resolve_with_session(
         story_path: &std::path::Path,
         game_dir: &std::path::Path,
@@ -805,7 +838,10 @@ impl PictureOverride {
         let raw = match std::fs::read(&path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return PictureOverride::Missing { path };
+                match read_off_the_medium(story_path, named) {
+                    Some(raw) => raw,
+                    None => return PictureOverride::Missing { path },
+                }
             }
             Err(e) => return PictureOverride::Unusable { path, reason: e.to_string() },
         };
@@ -938,6 +974,35 @@ pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf>
     *ext.last_mut()? = b'0' + part;
     let ext = String::from_utf8(ext).ok()?;
     Some(path.with_file_name(format!("{stem}.{ext}")))
+}
+
+/// Read a bare filename off the disk image `story_path` was mounted from, for a
+/// user naming an archive that lives INSIDE the medium (SQ-0838).
+///
+/// The Macintosh release is the case that needs it: its disk carries a colour
+/// `CPic.data` and a monochrome `Pic.data`, the automatic choice is colour, and
+/// the other one exists nowhere on the host filesystem for `--pictures` to point
+/// at. An Amiga `.adf` is read by the same three lines.
+///
+/// **Only a bare filename**, and only after the host filesystem has been tried
+/// and come up empty. A name with a directory in it is an instruction about
+/// where to look and is honoured as one; a name that resolves to a real file
+/// beside the story still wins, so nothing that worked before moves. The lookup
+/// is by name because that is what the user typed — the CONTENT tiers
+/// ([`PictSource::resolve`]) are what identify an archive nobody named.
+fn read_off_the_medium(story_path: &std::path::Path, named: &std::path::Path) -> Option<Vec<u8>> {
+    let name = named.file_name()?.to_str()?;
+    if std::path::Path::new(name) != named {
+        return None;
+    }
+    let raw = std::fs::read(story_path).ok()?;
+    if blorb::adf::Adf::looks_like_adf(&raw) {
+        blorb::adf::Adf::mount(raw).ok()?.read_named(name)
+    } else if blorb::hfs::Hfs::looks_like_hfs(&raw) {
+        blorb::hfs::Hfs::mount(raw).ok()?.read_named(name)
+    } else {
+        None
+    }
 }
 
 /// Merge every continuation of `path` into `pics`, and return the complaint if

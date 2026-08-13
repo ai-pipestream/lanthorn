@@ -395,15 +395,15 @@ fn zork_zero_boots_from_its_macintosh_release_floppy() {
 /// The disk's own artwork, and the answer to "does the Macintosh release carry
 /// art at all" — it carries **two** archives, one per screen Apple sold.
 ///
-/// The colour one is an ordinary big-endian Infocom container and every one of
-/// its 386 pictures decodes today. The monochrome one is not: it declares
-/// 12-byte directory records, which is a container variant `InfocomPics` does
-/// not read, and it is the file bocfel identifies by its header flags reading
-/// `0x0e`. That is a separate piece of work, and so is a Macintosh interpreter
-/// profile — this suite pins what is on the disk, not what a Macintosh screen
+/// Both read now (SQ-0838), and the automatic choice is the COLOUR one. That is
+/// a preference and not a parse failure, which is the whole difference this
+/// quest made: the monochrome archive declares 12-byte directory records and
+/// header flags `0x0e`, and used to be refused as a container variant
+/// `InfocomPics` did not know. A Macintosh interpreter PROFILE is still separate
+/// work — this suite pins what is on the disk, not what a Macintosh screen
 /// should look like.
 #[test]
-fn the_macintosh_disk_carries_two_picture_archives_and_one_of_them_reads() {
+fn the_macintosh_disk_carries_two_picture_archives_and_the_colour_one_is_the_art() {
     let Some(path) = mac_disk() else { return };
     let hfs = blorb::hfs::Hfs::mount(std::fs::read(&path).expect("read")).expect("mounts");
 
@@ -432,4 +432,64 @@ fn the_macintosh_disk_carries_two_picture_archives_and_one_of_them_reads() {
     // medium with no interpreter profile of its own would otherwise walk into.
     assert_eq!(picts.native_std_window(), Some((320, 200)));
     assert_eq!(picts.art_scale(), Some((2, 2)), "a 320-wide picture space doubles");
+    assert!(!picts.is_monochrome(), "and it is the colour archive, not the mono one");
+}
+
+/// SQ-0838: naming the monochrome archive by hand draws the monochrome artwork.
+///
+/// The colour archive is the disk's default and stays it; this is the door, not
+/// a change of policy. `--pictures Pic.data` is the same door `--pictures`
+/// already was for a loose `.MG1` beside a story — the only new thing is that
+/// the name is looked up ON THE VOLUME, because a story mounted out of a disk
+/// image has no directory for a loose file to sit in and the archive the user
+/// wants is already there.
+///
+/// What comes back is a different SCREEN, not a recoloured copy of the same one:
+/// 480×300 where the colour archive is 320×200, which is the picture space
+/// `mac/gfx.p` names in `GF_MONO`'s own definition ("scaled for a 480x300 screen
+/// (std Mac)"). So it does not double onto the 640×400 unit screen the way every
+/// other rendition does — it lands 1:1, which is also how Infocom's own
+/// interpreter displayed it (`IF ge.mono OR myTiny THEN { scale 1x for display }`).
+#[test]
+fn naming_the_monochrome_archive_by_hand_draws_the_monochrome_artwork() {
+    let Some(path) = mac_disk() else { return };
+    let dir = std::env::temp_dir().join("babelmap-mac-mono-override");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let over = app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some("Pic.data"));
+    assert!(
+        matches!(over, app::graphics::PictureOverride::Loaded { .. }),
+        "the name is looked up on the volume, got {over:?}"
+    );
+    assert_eq!(over.warning(), None, "a name that loads is not a complaint");
+    assert_eq!(over.flavour(), Some(blorb::infocom_pics::Flavour::AmigaMac));
+
+    let mut picts = app::graphics::PictSource::resolve_with_override(&path, over);
+    assert!(picts.is_monochrome(), "the named archive is the two-colour one");
+    assert_eq!(picts.all_pict_dims().len(), 483, "the same catalogue as the colour archive");
+
+    let img = picts.image(1).expect("picture 1 decodes off the volume");
+    assert_eq!((img.width(), img.height()), (480, 300), "the standard Macintosh screen");
+    assert_eq!(picts.art_scale(), Some((1, 1)), "a 480×300 space does NOT double");
+
+    // Two colours and nothing between them, drawn through the archive's own
+    // hardware table rather than through `DEFAULT_PALETTE` (which would make
+    // colour 2 green and colour 3 cyan).
+    let mut shades: Vec<[u8; 3]> = img
+        .to_rgba8()
+        .pixels()
+        .filter(|p| p.0[3] != 0)
+        .map(|p| [p.0[0], p.0[1], p.0[2]])
+        .collect();
+    shades.sort_unstable();
+    shades.dedup();
+    assert_eq!(shades, vec![[0, 0, 0], [255, 255, 255]], "black and white, and nothing else");
+
+    // A name that is on neither the volume nor the filesystem is still loud.
+    let missing =
+        app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some("NotHere.data"));
+    assert!(matches!(missing, app::graphics::PictureOverride::Missing { .. }));
+    assert!(missing.warning().is_some());
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

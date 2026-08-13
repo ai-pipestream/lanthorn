@@ -82,14 +82,15 @@
 //! | `Desktop` | `FNDR`/`ERIK` | 0 (1 665 rsrc) | the Finder's desktop database |
 //!
 //! So the Macintosh release ships **two** picture archives, one per screen the
-//! machine had. The colour one is an ordinary big-endian Infocom archive and
-//! [`InfocomPics`] reads all 386 of its pictures today. The monochrome one
-//! declares 12-byte directory records — no palette to store, on a screen with
-//! two colours — which the Amiga/Mac reader rejects as a container it does not
-//! know. That is the same file bocfel identifies by its header flags reading
-//! `0x0e`, and supporting it is a separate piece of work from opening the disk.
-//! [`Hfs::pictures`] therefore lands on the colour archive here, by parse rather
-//! than by preference.
+//! machine had, and [`InfocomPics`] reads both (SQ-0838). They hold the same 483
+//! records and the same 386 of them carry pixels; what differs is the screen
+//! they were drawn for — 320×200 in sixteen colours, or 480×300 in two. The
+//! monochrome one declares 12-byte directory records, having no palette to
+//! point at, and its header flags read `0x0e`, which is bocfel's monochrome
+//! marker and is Zork Zero's ordinary `0x06` plus the `GF_MONO` bit.
+//!
+//! [`Hfs::pictures`] lands on the **colour** archive, now by preference rather
+//! than by parse: monochrome is a thing to ask for, not a thing to be given.
 
 use crate::adf::looks_like_story;
 use crate::infocom_pics::InfocomPics;
@@ -362,11 +363,21 @@ impl Hfs {
     /// The native Infocom picture archive on this volume, with its stored name.
     ///
     /// Identified by parsing, exactly as [`crate::adf::Adf::pictures`] does.
-    /// The Macintosh ships two archives — a colour one and a monochrome one —
-    /// and only the colour one is a container [`InfocomPics`] reads, so on the
-    /// media in hand this choice is settled before the tiebreak is reached. The
-    /// tiebreak still names both conventional filenames, then picture count, so
-    /// that a disk offering two readable archives has a deterministic answer.
+    ///
+    /// **The Macintosh ships two archives, and both read** (SQ-0838) — a colour
+    /// `CPic.data` and a monochrome `Pic.data` holding the same 483 pictures, one
+    /// per screen Apple sold. So the choice is a real one now rather than
+    /// something the parser settled by accident, and **colour wins**: it is what
+    /// every other medium in this corpus supplies, it is what the automatic path
+    /// has always drawn here, and choosing the two-colour art for a user whose
+    /// terminal has sixteen million of them would need a reason nothing on the
+    /// disk gives. bocfel makes the same call — its fallback table maps `Pic` to
+    /// `kGraphicsTypeAmiga`, and monochrome is reached only when the user asks
+    /// for it. Naming `Pic.data` by hand through `app`'s `PictureOverride` is
+    /// how you ask for it here.
+    ///
+    /// After that, the conventional filenames, then picture count, so that a disk
+    /// offering two archives of one depth still has a deterministic answer.
     pub fn pictures(&self) -> Option<(String, InfocomPics)> {
         let mut cands: Vec<(String, InfocomPics)> = self
             .files
@@ -379,7 +390,7 @@ impl Hfs {
         cands.sort_by_key(|(name, pics)| {
             let lower = name.to_ascii_lowercase();
             let conventional = CONVENTIONAL_PICTURES.contains(&lower.as_str());
-            (!conventional, std::cmp::Reverse(pics.entries().len()))
+            (pics.is_monochrome(), !conventional, std::cmp::Reverse(pics.entries().len()))
         });
         cands.into_iter().next()
     }
@@ -860,6 +871,70 @@ mod tests {
         assert!(hfs.pictures().is_none());
     }
 
+    /// A one-picture Infocom archive, colour or monochrome — the smallest thing
+    /// [`InfocomPics::parse`] accepts, so that a synthetic volume can carry the
+    /// pair a Macintosh release ships. 4x2, rows `2222` then `3333`.
+    fn fake_pics(mono: bool) -> Vec<u8> {
+        let entry = if mono { 12 } else { 14 };
+        let mut f = vec![0u8; 16];
+        f[0] = 1; // part
+        f[1] = if mono { 0x0e } else { 0x06 };
+        let huff = 16 + entry;
+        f[2..4].copy_from_slice(&((huff / 2) as u16).to_be_bytes());
+        f[5] = 1; // one picture
+        f[8] = entry as u8;
+        let data = huff + 256;
+        f.extend_from_slice(&[0, 1, 0, 4, 0, 2]); // id 1, 4x2
+        f.extend_from_slice(&[0, if mono { 0x0a } else { 0x02 }]); // eFlags
+        f.extend_from_slice(&[(data >> 16) as u8, (data >> 8) as u8, data as u8]);
+        f.resize(16 + entry, 0); // pad byte, or a zero palette offset
+        let mut tree = vec![0u8; 256];
+        tree[0] = 128 + 2; // `0`  -> colour 2
+        tree[1] = 1; // `1`  -> node 1
+        tree[2] = 128 + 1; // `10` -> colour 1
+        tree[3] = 128 + 18; // `11` -> repeat 3 more
+        f.extend_from_slice(&tree);
+        f.extend_from_slice(&[0, 0, 1, 0, 0, 4, 0b0111_0110]);
+        f
+    }
+
+    /// SQ-0838: a Macintosh disk carries two archives and **colour wins**, even
+    /// when the monochrome one holds every other advantage.
+    ///
+    /// Stacked deliberately against the rule: the monochrome archive here is the
+    /// one wearing a conventional Infocom name, and the colour one is called
+    /// something no tiebreak favours and sorts last in the catalog besides. Depth
+    /// is asked first, so it still loses. Reading two-colour art to a terminal
+    /// that has sixteen million of them is a preference, and it is the user's to
+    /// state — by naming the archive — not the disk's to imply.
+    #[test]
+    fn a_disk_with_both_archives_offers_the_colour_one() {
+        let mut b = VolumeBuilder::new();
+        b.add_file("Pic.data", b"INdf", &fake_pics(true), 1);
+        b.add_file("Story.data", b"INdf", &fake_story(4096), 1);
+        b.add_file("ZArt", b"INdf", &fake_pics(false), 1);
+        let hfs = Hfs::mount(b.finish()).expect("mounts");
+
+        let (name, pics) = hfs.pictures().expect("an archive is found");
+        assert_eq!(name, "ZArt", "depth beats both the conventional name and catalog order");
+        assert!(!pics.is_monochrome());
+
+        // Both are readable; the other one is reached by name.
+        let mono = InfocomPics::parse(hfs.read_named("Pic.data").expect("present")).expect("parses");
+        assert!(mono.is_monochrome());
+        assert_eq!(mono.decode(1).unwrap().indices, vec![2, 2, 2, 2, 3, 3, 3, 3]);
+
+        // With only the monochrome archive on the disk it is of course the art —
+        // preferring colour is not refusing monochrome.
+        let mut b = VolumeBuilder::new();
+        b.add_file("Pic.data", b"INdf", &fake_pics(true), 1);
+        b.add_file("Story.data", b"INdf", &fake_story(4096), 1);
+        let hfs = Hfs::mount(b.finish()).expect("mounts");
+        let (name, pics) = hfs.pictures().expect("the only archive is found");
+        assert_eq!(name, "Pic.data");
+        assert!(pics.is_monochrome());
+    }
+
     #[test]
     fn the_conventional_name_only_breaks_a_tie() {
         let mut b = VolumeBuilder::new();
@@ -929,14 +1004,20 @@ mod tests {
         assert_eq!(u16::from_be_bytes([story[2], story[3]]), 296, "release 296, not the PC's 393");
         assert_eq!(&story[0x12..0x18], b"881019");
 
-        // The colour archive reads today; the monochrome one declares 12-byte
-        // records and does not.
+        // Both archives read (SQ-0838), and the automatic choice is the COLOUR
+        // one — a preference now, not a parse failure.
         let (pname, pics) = hfs.pictures().expect("the colour archive is found");
         assert_eq!(pname, "CPic.data");
         assert_eq!(pics.entries().len(), 483);
+        assert!(!pics.is_monochrome(), "the disk's default art is its colour art");
         assert!(pics.decode(1).is_ok(), "picture 1 decodes straight off the disk");
-        let mono = hfs.read_named("Pic.data").expect("the monochrome archive is there");
-        assert_eq!(mono[1], 0x0e, "its header flags are bocfel's monochrome-Macintosh 0x0e");
-        assert_eq!(mono[8], 12, "…and its directory records are 12 bytes, not 14");
+
+        let raw = hfs.read_named("Pic.data").expect("the monochrome archive is there");
+        assert_eq!(raw[1], 0x0e, "its header flags are bocfel's monochrome-Macintosh 0x0e");
+        assert_eq!(raw[8], 12, "…and its directory records are 12 bytes, not 14");
+        let mono = InfocomPics::parse(raw).expect("and it parses");
+        assert!(mono.is_monochrome());
+        assert_eq!(mono.entries().len(), 483, "the same catalogue as the colour archive");
+        assert_eq!(mono.decode(1).unwrap().indices.len(), 480 * 300);
     }
 }
