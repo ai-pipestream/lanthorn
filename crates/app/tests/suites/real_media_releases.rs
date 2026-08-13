@@ -33,6 +33,7 @@ use std::sync::Mutex;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
+use app::hints::DiskImage;
 use app::interpreter::InterpreterProfile;
 use app::session::{GameSession, InputKind};
 
@@ -52,8 +53,10 @@ struct Medium {
     title: &'static str,
     /// Filename under `stories/`.
     file: &'static str,
-    /// An Amiga release floppy (`.adf`) rather than a bare story file.
-    floppy: bool,
+    /// The release disk image this medium is, if it is one rather than a bare
+    /// story file — and which filesystem, because that is what says which
+    /// machine's media it is.
+    image: Option<DiskImage>,
     /// Z-machine version, header $00.
     version: u8,
     /// Release number, header $02.
@@ -71,30 +74,34 @@ struct Medium {
 const MEDIA: &[Medium] = &[
     // Journey — the pair that started this. Different builds, and they differ
     // in which window they narrate through (see `V6_FRAMES`).
-    Medium { title: "Journey", file: "Journey - The Quest Begins.adf", floppy: true, version: 6, release: 30, serial: "890322" },
-    Medium { title: "Journey", file: "journey-r83-s890706.z6", floppy: false, version: 6, release: 83, serial: "890706" },
+    Medium { title: "Journey", file: "Journey - The Quest Begins.adf", image: Some(DiskImage::Adf), version: 6, release: 30, serial: "890322" },
+    Medium { title: "Journey", file: "journey-r83-s890706.z6", image: None, version: 6, release: 83, serial: "890706" },
+    // Zork Zero ships on THREE media here, and all three are different builds.
+    // The Macintosh disk is the outlier by a mile: r296/881019 is October 1988,
+    // where both others are 1989 (SQ-0837).
+    Medium { title: "Zork Zero (Macintosh)", file: "Zork Zero Disk.image", image: Some(DiskImage::Hfs), version: 6, release: 296, serial: "881019" },
     // Zork Zero — different builds, and the floppy lays its story window out at
     // a different place and size.
-    Medium { title: "Zork Zero", file: "Zork Zero - The Revenge of Megaboz.adf", floppy: true, version: 6, release: 366, serial: "890323" },
-    Medium { title: "Zork Zero", file: "zork0-r393-s890714.z6", floppy: false, version: 6, release: 393, serial: "890714" },
+    Medium { title: "Zork Zero", file: "Zork Zero - The Revenge of Megaboz.adf", image: Some(DiskImage::Adf), version: 6, release: 366, serial: "890323" },
+    Medium { title: "Zork Zero", file: "zork0-r393-s890714.z6", image: None, version: 6, release: 393, serial: "890714" },
     // Shogun — different builds that (so far) lay out identically.
-    Medium { title: "Shogun", file: "James Clavell's Shogun.adf", floppy: true, version: 6, release: 295, serial: "890321" },
-    Medium { title: "Shogun", file: "shogun-r322-s890706.z6", floppy: false, version: 6, release: 322, serial: "890706" },
+    Medium { title: "Shogun", file: "James Clavell's Shogun.adf", image: Some(DiskImage::Adf), version: 6, release: 295, serial: "890321" },
+    Medium { title: "Shogun", file: "shogun-r322-s890706.z6", image: None, version: 6, release: 322, serial: "890706" },
     // Arthur — different builds that (so far) lay out identically.
-    Medium { title: "Arthur", file: "Arthur - The Quest for Excalibur.adf", floppy: true, version: 6, release: 54, serial: "890606" },
-    Medium { title: "Arthur", file: "arthur-r74-s890714.z6", floppy: false, version: 6, release: 74, serial: "890714" },
+    Medium { title: "Arthur", file: "Arthur - The Quest for Excalibur.adf", image: Some(DiskImage::Adf), version: 6, release: 54, serial: "890606" },
+    Medium { title: "Arthur", file: "arthur-r74-s890714.z6", image: None, version: 6, release: 74, serial: "890714" },
     // Beyond Zork — the SAME build on both media.
-    Medium { title: "Beyond Zork", file: "Beyond Zork - The Coconut of Quendor.adf", floppy: true, version: 5, release: 57, serial: "871221" },
-    Medium { title: "Beyond Zork", file: "beyondzork-r57-s871221.z5", floppy: false, version: 5, release: 57, serial: "871221" },
+    Medium { title: "Beyond Zork", file: "Beyond Zork - The Coconut of Quendor.adf", image: Some(DiskImage::Adf), version: 5, release: 57, serial: "871221" },
+    Medium { title: "Beyond Zork", file: "beyondzork-r57-s871221.z5", image: None, version: 5, release: 57, serial: "871221" },
     // The Zork trilogy — the same build on both media.
-    Medium { title: "Zork I", file: "Zork I - The Great Underground Empire.adf", floppy: true, version: 3, release: 88, serial: "840726" },
-    Medium { title: "Zork I", file: "zork1-r88-s840726.z3", floppy: false, version: 3, release: 88, serial: "840726" },
-    Medium { title: "Zork II", file: "Zork II - The Wizard of Frobozz.adf", floppy: true, version: 3, release: 48, serial: "840904" },
-    Medium { title: "Zork II", file: "zork2-r48-s840904.z3", floppy: false, version: 3, release: 48, serial: "840904" },
-    Medium { title: "Zork III", file: "Zork III - The Dungeon Master.adf", floppy: true, version: 3, release: 17, serial: "840727" },
-    Medium { title: "Zork III", file: "zork3-r17-s840727.z3", floppy: false, version: 3, release: 17, serial: "840727" },
+    Medium { title: "Zork I", file: "Zork I - The Great Underground Empire.adf", image: Some(DiskImage::Adf), version: 3, release: 88, serial: "840726" },
+    Medium { title: "Zork I", file: "zork1-r88-s840726.z3", image: None, version: 3, release: 88, serial: "840726" },
+    Medium { title: "Zork II", file: "Zork II - The Wizard of Frobozz.adf", image: Some(DiskImage::Adf), version: 3, release: 48, serial: "840904" },
+    Medium { title: "Zork II", file: "zork2-r48-s840904.z3", image: None, version: 3, release: 48, serial: "840904" },
+    Medium { title: "Zork III", file: "Zork III - The Dungeon Master.adf", image: Some(DiskImage::Adf), version: 3, release: 17, serial: "840727" },
+    Medium { title: "Zork III", file: "zork3-r17-s840727.z3", image: None, version: 3, release: 17, serial: "840727" },
     // Zork: The Undiscovered Underground ships on a floppy only.
-    Medium { title: "ZTUU", file: "Zork - The Undiscovered Underground.adf", floppy: true, version: 5, release: 16, serial: "970828" },
+    Medium { title: "ZTUU", file: "Zork - The Undiscovered Underground.adf", image: Some(DiskImage::Adf), version: 5, release: 16, serial: "970828" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -202,7 +209,11 @@ fn ctx(m: &Medium) -> String {
         "{} [{} — {}, release {}, serial {}]",
         m.file,
         m.title,
-        if m.floppy { "Amiga floppy" } else { "story file" },
+        match m.image {
+            Some(DiskImage::Adf) => "Amiga floppy",
+            Some(DiskImage::Hfs) => "Macintosh floppy",
+            None => "story file",
+        },
         m.release,
         m.serial
     )
@@ -216,7 +227,7 @@ fn story_bytes(m: &Medium) -> Option<Vec<u8>> {
         Ok((loaded, mounted)) => {
             assert_eq!(
                 mounted,
-                m.floppy,
+                m.image,
                 "{}: the mount reports the medium, and it disagrees with the table",
                 ctx(m)
             );
@@ -361,7 +372,10 @@ fn a_floppy_and_the_story_file_beside_it_are_pinned_against_each_other() {
         let pair: Vec<&Medium> = MEDIA.iter().filter(|m| m.title == *title).collect();
         assert_eq!(pair.len(), 2, "{title}: PAIRS names a title that is not a pair in MEDIA");
         let (floppy, file) = (pair[0], pair[1]);
-        assert!(floppy.floppy && !file.floppy, "{title}: MEDIA must list the floppy first");
+        assert!(
+            floppy.image.is_some() && file.image.is_none(),
+            "{title}: MEDIA must list the floppy first"
+        );
         let (Some(fb), Some(sb)) = (story_bytes(floppy), story_bytes(file)) else { continue };
         assert_is_the_pinned_release(floppy, &fb);
         assert_is_the_pinned_release(file, &sb);
@@ -433,8 +447,14 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             continue;
         }
         ran += 1;
-        let expected =
-            if m.floppy { InterpreterProfile::Amiga } else { InterpreterProfile::IbmPc };
+        // Only the Amiga has a profile of its own. A Macintosh disk resolves to
+        // the IBM PC bundle — the historical default — because nothing in the
+        // corpus can verify a Macintosh palette or art path yet, and inventing
+        // one from memory is exactly what this project forbids (SQ-0837).
+        let expected = match m.image {
+            Some(DiskImage::Adf) => InterpreterProfile::Amiga,
+            _ => InterpreterProfile::IbmPc,
+        };
         assert_eq!(
             InterpreterProfile::resolve(&path, None, None),
             expected,

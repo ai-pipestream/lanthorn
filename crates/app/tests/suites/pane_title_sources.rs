@@ -50,7 +50,7 @@ fn tmp_base(tag: &str) -> PathBuf {
 fn identity(path: &Path) -> (String, bool, bool) {
     let (loaded, disk_image) = app::hints::load_mounted_story(path).expect("story must load");
     let is_scott = matches!(loaded, app::hints::LoadedStory::Scott(_));
-    (app::ifid::compute_ifid(loaded.bytes()), is_scott, disk_image)
+    (app::ifid::compute_ifid(loaded.bytes()), is_scott, disk_image.is_some())
 }
 
 /// Write the fetched-IFDB sidecar the story browser reads, into `data_base`.

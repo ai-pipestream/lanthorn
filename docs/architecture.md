@@ -19,7 +19,7 @@ model** so a single renderer draws them all.
 | `app` | The `babelmap` TUI binary (ratatui + crossterm): play loop, live map rendering, debug inspector, all interactive features. |
 | `zvm-cli` / `gvm-cli` / `scott-cli` | Standalone DOS-style command-line players (no map): save/restore, single-key input, terminal-bell bleeps — and, piped, a clean deterministic harness for testing/scripting. `zvm-cli` declines graphical **v6** stories at load: they drive a windowed display it cannot present, and every one of them runs away at its first input prompt. `zvm` itself supports v6 fully — play those in `babelmap`. |
 | `cli-host` | The plumbing those three CLIs share: terminal escapes, the input/EOF rule, an RAII terminal restore, and `--help`/`--version`. Not the renderers — see below. |
-| `blorb` | Blorb container parsing — bundled story, cover art, and sound/image resources. |
+| `blorb` | Blorb container parsing — bundled story, cover art, and sound/image resources — plus the release-media readers beside it: Infocom's native picture archives, Amiga `.adf` floppies (`adf.rs`) and Macintosh DiskCopy 4.2 / HFS disks (`hfs.rs`). All hand-rolled; the crate takes no dependencies. |
 | `audio` | Sound playback (rodio) — synthesized bleeps and sampled AIFF / Ogg / ProTracker MOD. |
 | `buildinfo` | A tiny zero-dep helper: a `build.rs` that stamps the git commit hash into non-release build versions. |
 

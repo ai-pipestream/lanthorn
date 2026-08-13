@@ -40,6 +40,13 @@ that shipped on that same floppy becomes the game's art. Nothing to configure:
 the story and the pictures came off one disk, so the pairing is guaranteed by the
 medium rather than guessed from a filename.
 
+The Macintosh releases wrote the *same* container, so a Mac disk image works the
+same way — with one wrinkle. Apple sold two screens, and Infocom shipped an
+archive for each: a colour `CPic.data` and a monochrome `Pic.data`. babelmap
+draws the colour one. The monochrome archive packs its directory records
+differently (no palette to store, on a screen with two colours) and is not yet
+decoded, so a Mac disk currently plays in colour or not at all.
+
 The two sources are close but not identical, and where they disagree the original
 media wins. Five *Zork Zero* pictures are cropped in the circulating Blorb —
 ids 5, 6 and 7 keep only a 29–39 row band of what are full 320×200 decorative

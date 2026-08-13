@@ -269,7 +269,7 @@ mod tests {
         let dir = tmp("draw");
         let story = dir.join("story.z6");
         std::fs::write(&story, b"x").unwrap();
-        let st = LaunchOptionsState::new("Zork Zero", &story, None, None, Some(6), false);
+        let st = LaunchOptionsState::new("Zork Zero", &story, None, None, Some(6), None);
         let (text, rects) = render(&st, 90, 24);
         let r = rects.expect("dialog renders at 90x24");
         assert!(text.contains("Launch options"), "title: {text:?}");
@@ -292,7 +292,7 @@ mod tests {
         let dir = tmp("check");
         let story = dir.join("story.z6");
         std::fs::write(&story, b"x").unwrap();
-        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(5), false);
+        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(5), None);
         st.persist = true;
         let (text, _) = render(&st, 90, 24);
         assert!(text.contains("[x]"), "ticked checkbox: {text:?}");
@@ -306,7 +306,7 @@ mod tests {
         let dir = tmp("explicit");
         let story = dir.join("story.z6");
         std::fs::write(&story, b"x").unwrap();
-        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(6), false);
+        let mut st = LaunchOptionsState::new("Story", &story, None, None, Some(6), None);
         st.interpreter = Some(4);
         let (text, _) = render(&st, 90, 24);
         assert!(text.contains("Interpreter   4 Amiga"), "{text:?}");
@@ -319,7 +319,7 @@ mod tests {
         let dir = tmp("small");
         let story = dir.join("story.z6");
         std::fs::write(&story, b"x").unwrap();
-        let st = LaunchOptionsState::new("Story", &story, None, None, Some(6), false);
+        let st = LaunchOptionsState::new("Story", &story, None, None, Some(6), None);
         let (_, rects) = render(&st, 30, 8);
         assert!(rects.is_none(), "too small → no dialog");
         let _ = std::fs::remove_dir_all(&dir);

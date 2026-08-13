@@ -61,11 +61,12 @@ pub struct StoryMeta {
     pub ifid: String,
     pub features: Features,
     pub self_blorb: Option<Vec<ChunkInfo>>, // Some when the story file itself is a blorb
-    /// The story was mounted out of an Amiga release floppy rather than read as
-    /// a plain file, so the TYPE column names that container: `Z6 (ADF)`
-    /// (SQ-0737). Decided by the mount, from the disk's own boot block — never
-    /// from the filename.
-    pub disk_image: bool,
+    /// The story was mounted out of a release floppy rather than read as a plain
+    /// file, and which kind, so the TYPE column names that container: `Z6 (ADF)`
+    /// for an Amiga disk, `Z6 (HFS)` for a Macintosh one (SQ-0737, SQ-0837).
+    /// Decided by the mount, from the disk's own filesystem — never from the
+    /// filename.
+    pub disk_image: Option<crate::hints::DiskImage>,
     /// Resolved per `resolve`'s precedence: IFmd > fetched sidecar. No TSV/stem
     /// source for these (title-only), so absent means genuinely unknown.
     pub author: Option<String>,
@@ -103,11 +104,16 @@ pub struct StoryEntry {
 
 /// Candidate story-file extensions (matched case-insensitively). `.zblorb` /
 /// `.blorb` / zips are handled by `load_story_bytes`; `.dat` covers some
-/// Infocom releases; `.adf` is an Amiga release floppy, whose story
-/// `load_story` mounts out of the disk image (SQ-0719).
+/// Infocom releases; `.adf` is an Amiga release floppy and `.image` a Macintosh
+/// one, whose story `load_story` mounts out of the disk image (SQ-0719,
+/// SQ-0837).
+///
+/// This list is only a pre-filter on what is worth opening — every candidate is
+/// then mounted and rejected unless a story actually comes out of it — which is
+/// what makes admitting a generic extension like `.image` safe.
 const STORY_EXTS: &[&str] = &[
     "z3", "z4", "z5", "z6", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
-    "adf",
+    "adf", "image",
 ];
 
 pub(crate) fn has_story_ext(path: &Path) -> bool {
@@ -1310,7 +1316,7 @@ mod tests {
                 ifid: String::new(),
                 features: Features::default(),
                 self_blorb: None,
-                disk_image: false,
+                disk_image: None,
                 author: author.map(|s| s.to_string()),
                 year: year.map(|s| s.to_string()),
                 genre: None,
@@ -2012,7 +2018,7 @@ mod tests {
                 size_bytes: 1, story_bytes: 1, modified: None, engine: Engine::ZCode,
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
-                features: Features::default(), self_blorb, disk_image: false,
+                features: Features::default(), self_blorb, disk_image: None,
                 author: None, year: None, genre: None, language: None, description: None,
                 ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None,
                 fetch_not_found: false,

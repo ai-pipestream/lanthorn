@@ -3,6 +3,7 @@
 
 pub mod adf;
 pub mod bpal;
+pub mod hfs;
 pub mod infocom_pics;
 
 /// Errors that can arise while parsing a Blorb container.

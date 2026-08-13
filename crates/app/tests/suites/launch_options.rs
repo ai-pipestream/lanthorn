@@ -287,7 +287,7 @@ fn a_chosen_rendition_becomes_the_same_override_the_config_key_would_have() {
     if !z0.is_file() {
         return;
     }
-    let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), false);
+    let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), None);
     let Some(i) = st.candidates.iter().position(|c| c.filename.eq_ignore_ascii_case("zork0.mg1"))
     else {
         return; // this library has no MCGA rendition
@@ -351,7 +351,7 @@ fn the_checkbox_writes_only_the_keys_the_user_changed() {
     let game_dir = dir.join("game");
     std::fs::create_dir_all(&game_dir).unwrap();
     // A story that already inherits a global interpreter number of 6.
-    let mut st = LaunchOptionsState::new("Story", &story, None, Some(6), Some(6), false);
+    let mut st = LaunchOptionsState::new("Story", &story, None, Some(6), Some(6), None);
 
     // Ticking the box without changing anything writes nothing — an untouched
     // dialog must be indistinguishable from never opening it.
@@ -389,7 +389,7 @@ fn writing_one_launch_key_never_deletes_the_other() {
     )
     .unwrap();
 
-    let mut st = LaunchOptionsState::new("Story", &story, Some("FMVPOKER.EG1"), None, Some(6), false);
+    let mut st = LaunchOptionsState::new("Story", &story, Some("FMVPOKER.EG1"), None, Some(6), None);
     st.interpreter = Some(6);
     st.persist_to(&game_dir).unwrap();
     assert_eq!(read_per_game_pictures(&game_dir), Some("FMVPOKER.EG1".to_string()));
@@ -409,7 +409,7 @@ fn the_art_choice_moves_the_machine_and_the_dialog_can_name_the_source() {
     if !z0.is_file() {
         return;
     }
-    let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), false);
+    let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), None);
 
     // No art named: Frotz's rule, and it says so.
     assert_eq!(st.derived(), Some((6, InterpreterSource::Default)));
@@ -501,8 +501,8 @@ fn a_per_launch_interpreter_number_never_leaks_into_the_global_config() {
 /// report and the dialog must not invent one.
 #[test]
 fn a_non_z_story_has_no_interpreter_number_to_report() {
-    assert_eq!(derived_interpreter(None, None, false, None), None);
-    assert_eq!(derived_interpreter(None, None, true, None), None);
+    assert_eq!(derived_interpreter(None, None, None, None), None);
+    assert_eq!(derived_interpreter(None, None, Some(app::hints::DiskImage::Adf), None), None);
 }
 
 /// Reopening the dialog on a story whose sidecar already names an archive lands
@@ -517,7 +517,7 @@ fn the_dialog_opens_on_what_the_story_already_inherits() {
     let Some(i) = all.iter().position(|c| c.filename.eq_ignore_ascii_case("zork0.eg1")) else {
         return;
     };
-    let st = LaunchOptionsState::new("Zork Zero", &z0, Some("zork0.eg1"), Some(4), Some(6), false);
+    let st = LaunchOptionsState::new("Zork Zero", &z0, Some("zork0.eg1"), Some(4), Some(6), None);
     assert_eq!(st.art, i + 1, "the sidecar's archive is the selected row");
     assert_eq!(st.interpreter, Some(4));
     assert!(st.overrides().is_empty(), "opening and playing changes nothing");
@@ -541,7 +541,7 @@ fn the_dialog_renders_its_list_its_derived_number_and_its_checkbox() {
     if !z0.is_file() {
         return;
     }
-    let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), false);
+    let mut st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), None);
     if let Some(i) = st.candidates.iter().position(|c| c.filename.eq_ignore_ascii_case("zork0.eg1")) {
         st.art = i + 1;
         st.cursor = app::launch_options::Row::Art(i + 1);
