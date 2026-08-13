@@ -146,6 +146,42 @@ The map is a place you can move through, not just a picture.
   lands on the nearest free one. Two things it will refuse, and it says which: a
   fresh layer for a region that is *already* the whole layer (that would only rename
   it), and anything that would leave `Main` with no rooms at all.
+- **The map sometimes speaks first** — twice in a game, babelmap notices that a set of
+  rooms wants to be a layer of its own, and says so. It never acts: layers still come
+  only from a `move-region` you asked for. It **suggests**, and you decide.
+  The first case is structural. You climb down a trapdoor, wander four rooms of cellar,
+  and climb back up — and *that* is the moment the map has something to say, not while
+  you are still down there. Three things have to be true at once, and each one is a
+  prompt you would otherwise have got and not wanted. The cellar must be reachable
+  **only** through portals: a balcony you can also walk round to is not behind a
+  boundary at all, whatever the `up` says. It must be **four rooms or more**, because
+  a cupboard behind a door is not a floor plan and drawing it in place with a dotted
+  stub is the right answer. And you must be **stepping back** across the seam, not
+  outward through it — otherwise the same trapdoor would fire on the way *down* and
+  cheerfully offer to peel your starting town off the map. If you never come back, you
+  are never asked. That is deliberate.
+  The second case is the name. Walk into a room called **Maze** from a room that isn't
+  one, and babelmap says so at the doorway — no four-room floor, no waiting for you to
+  return, because the name *is* the evidence and it is there immediately. It fires on
+  the way **in**, once, and then goes quiet: Zork's maze is fifteen rooms all called
+  "Maze", and asking in each is the nagging this whole design exists to avoid.
+  `\bmaze\b`, as a word — "Amazement Park" is not a maze and neither is "Amazed".
+  When the rooms look like they belong on a layer that **already exists**, that layer is
+  offered too, alongside a fresh one. The evidence is compass edges and nothing else,
+  ranked by how many: a region tied to the Cellar layer by two east-west passages is
+  probably part of the Cellar. Portals never nominate a home — they are what separates
+  layers in the first place, so the `down` you reached the cellar by must not be read as
+  proof the cellar belongs upstairs. Grid position is not evidence either; the router
+  derives it, so a suggestion built on it could change without the map changing.
+  And whatever you answer, babelmap remembers it, in the map file: **not now** re-arms
+  the seam for your next crossing, **never** silences that passage for good, and folding
+  a layer back into another silences every passage it just closed — you have already
+  said those rooms belong together. A prompt that comes back on the very next step is
+  worse than no prompt at all, because it teaches you to dismiss it blind.
+  A layer you have flagged as a maze is exempt from the structural trigger outright:
+  the point of flagging it was to keep the whole maze together.
+  *(The detection and its memory are in place; the prompt that puts the choice in front
+  of you lands next.)*
 - **Switching layers recenters the view** — cycling, clicking a tab, moving a region,
   or loading a map all land the viewport somewhere with a room in it, never on empty
   scroll space: on the room you're standing in if it's on the layer you switched to,
@@ -371,9 +407,15 @@ fading breadcrumb (`map.trail`) — the "how did I get here" a drawn map would h
 answered by itself. The flag also puts a `⌗` marker on the layer's tab (`Maze ⌗`) in
 both tab strips, and takes it away again when unflagged.
 
-**Flagging a maze is a manual act.** babelmap never guesses: you are in the maze
-long before any statistic could tell, so the moment you decide "this is a maze",
-press `z`. There is nothing to wait for and nothing to dismiss.
+**The flag is always yours to set.** babelmap never guesses from *statistics* — you
+are in the maze long before any measure of tangledness could tell, which is why the
+old asymmetry detector fired late, never, or on an ordinary ring of rooms. So the
+moment you decide "this is a maze", press `z`; there is nothing to wait for.
+What it *will* do is read: walk into a room the game itself calls a **Maze** and the
+map offers to take it apart into a layer of its own — see [the map sometimes speaks
+first](#getting-around-the-map). Accepting that offer sets this flag too, because you
+just confirmed it by accepting a prompt that said so. Accepting a *structural*
+suggestion sets nothing: a cellar is not a maze.
 
 ### Honest edges on the drawn map
 
