@@ -23,6 +23,8 @@ use crate::anim::Easing;
 ///   "left" = "pan-map -1 0"
 ///   [keymap.anim]
 ///   "l" = "anim-step forward"
+///   [keymap.browser]
+///   "p" = "play-story"
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct KeymapConfig {
@@ -30,6 +32,10 @@ pub struct KeymapConfig {
     pub global: std::collections::BTreeMap<String, String>,
     pub map: std::collections::BTreeMap<String, String>,
     pub anim: std::collections::BTreeMap<String, String>,
+    /// The pre-game story browser's keys (SQ-0796). Only `Library` commands may
+    /// be bound here; a game command has no `AppState` to act on before a story
+    /// is chosen.
+    pub browser: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for KeymapConfig {
@@ -39,6 +45,7 @@ impl Default for KeymapConfig {
             global: Default::default(),
             map: Default::default(),
             anim: Default::default(),
+            browser: Default::default(),
         }
     }
 }

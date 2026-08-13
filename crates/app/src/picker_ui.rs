@@ -324,31 +324,41 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
     }
 }
 
-/// Optional footer hint segments, most-important (least-guessable) first.
-/// Included left-to-right while they still fit next to the always-shown
-/// core hints; the rest are dropped — `PgUp/PgDn` goes last since it's a
-/// standard convention nobody needs told, and the launch-options gestures go
-/// first because a gesture nobody knows about is a feature nobody uses: nothing
-/// on screen would otherwise hint that a story can be started any way but the
-/// default one (SQ-0789).
-const FOOTER_OPTIONAL: [&str; 10] =
-    ["Shift-Enter / o / 2×right-click: options", "/: IFDB search","g: covers", "f: fetch", "r: refresh", "u: IFDB url", "H: get hints", "s: sort", "d: reverse", "PgUp/PgDn"];
+/// Render the hint segments of `hints` that are reachable in `km`.
+///
+/// A hint whose commands nobody has bound simply is not shown — the footer has
+/// no way to claim a key that does not exist, which is the drift SQ-0796 set out
+/// to end.
+fn hint_segments(km: &app::keymap::KeyMap, hints: &[app::browser::Hint]) -> Vec<String> {
+    hints.iter().filter_map(|h| app::browser::render_hint(km, h)).collect()
+}
 
-fn build_footer(width: u16) -> String {
-    const CORE_LEFT: &str = " ↑/↓ or j/k: move";
-    const CORE_RIGHT: &str = "Enter / 2×click: open   i/Tab: info   q / Esc: quit";
-    let mut footer = CORE_LEFT.to_string();
-    for seg in FOOTER_OPTIONAL {
-        let candidate = format!("{footer}   {seg}   {CORE_RIGHT}");
+/// The optional footer segments, most-important (least-guessable) first, in the
+/// order they are added as the terminal widens.
+fn footer_optional(km: &app::keymap::KeyMap) -> Vec<String> {
+    hint_segments(km, app::browser::HINTS_OPTIONAL)
+}
+
+/// Build the list footer for `width`.
+///
+/// The core hints (move / open / info / quit) are always shown; the optional
+/// ones are added left-to-right while they still fit. Every segment's KEYS come
+/// from the live keymap, so rebinding one relabels its hint (SQ-0796).
+fn build_footer(km: &app::keymap::KeyMap, width: u16) -> String {
+    let core_left = app::browser::render_hint(km, &app::browser::HINT_MOVE).unwrap_or_default();
+    let core_right = hint_segments(km, app::browser::HINTS_CORE_RIGHT).join("   ");
+    let mut footer = format!(" {core_left}");
+    for seg in footer_optional(km) {
+        let candidate = format!("{footer}   {seg}   {core_right}");
         if UnicodeWidthStr::width(candidate.as_str()) as u16 <= width {
             footer.push_str("   ");
-            footer.push_str(seg);
+            footer.push_str(&seg);
         } else {
             break;
         }
     }
     footer.push_str("   ");
-    footer.push_str(CORE_RIGHT);
+    footer.push_str(&core_right);
     footer
 }
 
@@ -562,6 +572,12 @@ pub(crate) fn run_story_picker(
     let cover_picker = if cfg.images { build_cover_picker(cfg.image_protocol) } else { None };
     let mut cover = app::cover::CoverState::default();
 
+    // The browser's keys, resolved the same way the game's are (SQ-0796): the
+    // built-in `Context::Browser` bindings with any `[keymap.browser]` overrides
+    // layered on. Resolution warnings are dropped here on purpose — the game's
+    // own startup resolves the very same config and reports them once.
+    let (keymap, _keymap_warnings) = app::keymap::KeyMap::resolve(&cfg.keymap);
+
     let mut list = app::list_scroll::ListScroll::new();
     list.len(stories.len());
     let anim = &cfg.animation;
@@ -721,7 +737,7 @@ pub(crate) fn run_story_picker(
             match view {
                 PickerView::List => {
                     let (rects, vp, hrects) = draw_story_picker(
-                        &stories, &list, &row_badges, &badge_glyphs, dir, &cs,
+                        &stories, &list, &row_badges, &badge_glyphs, dir, &cs, &keymap,
                         sort, list_area, buf,
                     );
                     row_rects = rects;
@@ -735,7 +751,7 @@ pub(crate) fn run_story_picker(
                     // and corrupting its border where covers meet the edges (SQ-0389).
                     if preview.is_none() {
                         let (rects, cols, vis) = draw_story_gallery(
-                            &stories, list.selected, &mut gallery_first_row, dir, &cs,
+                            &stories, list.selected, &mut gallery_first_row, dir, &cs, &keymap,
                             cover_picker.as_ref(), &mut cover, list_area, buf,
                         );
                         gallery_cols = cols.max(1);
@@ -1185,109 +1201,79 @@ pub(crate) fn run_story_picker(
                         app::cover_gallery::move_index(sel, gallery_cols, stories.len(), dx, dy)
                     };
                     let gallery = matches!(view, PickerView::Gallery);
-                    match k.code {
-                        // Horizontal movement exists only in the grid.
-                        Left | Char('h') if gallery => {
-                            panel_scroll = 0;
-                            list.select(gm(list.selected, -1, 0), viewport, anim);
-                        }
-                        Right | Char('l') if gallery => {
-                            panel_scroll = 0;
-                            list.select(gm(list.selected, 1, 0), viewport, anim);
-                        }
-                        // Non-gallery (list view) movement is the shared
-                        // `list_scroll::nav_key` (SQ-0682) — the same
-                        // mechanism the IFDB search modal's lists and the
-                        // command band's columns navigate with. The gallery
-                        // grid stays bespoke: it's a 2D cursor, not a plain
-                        // list index.
-                        Up | Char('k') => {
-                            panel_scroll = 0;
+                    // ── BROWSER KEY DISPATCH (registry-driven, SQ-0796) ─────────
+                    // Everything below is keyed on a `BrowserAction`, and the only
+                    // thing that produces one is a `slash::COMMANDS` entry in
+                    // `Context::Browser` that some key is bound to. Nothing in
+                    // this region may look at the keystroke again — that is what
+                    // makes a new gesture impossible to add without a registry
+                    // entry, and it is pinned by
+                    // `browser_dispatch_never_reads_the_key_event` below.
+                    let action = app::browser::action_for_key(&keymap, k);
+                    match action {
+                        // Movement. In the grid this is a 2D cursor; in the list
+                        // it is the shared `list_scroll::nav_key` (SQ-0682) — the
+                        // same mechanism the IFDB search modal's lists and the
+                        // command band's columns navigate with — and a horizontal
+                        // step has no meaning there, so it does nothing at all.
+                        Some(app::browser::BrowserAction::MoveSelection { dx, dy }) => {
                             if gallery {
-                                list.select(gm(list.selected, 0, -1), viewport, anim);
-                            } else {
-                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
+                                panel_scroll = 0;
+                                list.select(gm(list.selected, dx, dy), viewport, anim);
+                            } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
+                                panel_scroll = 0;
+                                app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
                             }
                         }
-                        Down | Char('j') => {
+                        Some(app::browser::BrowserAction::PageSelection(n)) => {
                             panel_scroll = 0;
                             if gallery {
-                                list.select(gm(list.selected, 0, 1), viewport, anim);
-                            } else {
-                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
+                                list.select(gm(list.selected, 0, n * gallery_vis as isize), viewport, anim);
+                            } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
+                                app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
                             }
                         }
-                        PageUp => {
+                        Some(app::browser::BrowserAction::SelectEdge(edge)) => {
                             panel_scroll = 0;
                             if gallery {
-                                list.select(gm(list.selected, 0, -(gallery_vis as isize)), viewport, anim);
-                            } else {
-                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
-                            }
-                        }
-                        PageDown => {
-                            panel_scroll = 0;
-                            if gallery {
-                                list.select(gm(list.selected, 0, gallery_vis as isize), viewport, anim);
-                            } else {
-                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
-                            }
-                        }
-                        Home => {
-                            panel_scroll = 0;
-                            if gallery {
-                                list.select(0, viewport, anim);
-                            } else {
-                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
-                            }
-                        }
-                        End => {
-                            panel_scroll = 0;
-                            if gallery {
-                                list.select(stories.len().saturating_sub(1), viewport, anim);
-                            } else {
-                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
-                            }
-                        }
-                        // `.get`, not indexing (SQ-0659): Enter on an empty
-                        // list (all stories vanished externally) is a no-op,
-                        // not a panic.
-                        //
-                        // SQ-0789: Shift modifies the default action rather than
-                        // introducing a mode — Shift-Enter is "launch, but let me
-                        // choose first", the same shape as Shift-Tab reversing a
-                        // Tab-cycler. Plain Enter is untouched.
-                        Enter => {
-                            if let Some(entry) = stories.get(list.selected) {
-                                if shift {
-                                    launch_opts = Some(open_launch_options(entry, cfg, data_base));
-                                } else {
-                                    break Some(PickedStory::plain(entry.path.clone()));
+                                match edge {
+                                    app::browser::Edge::First => list.select(0, viewport, anim),
+                                    app::browser::Edge::Last => {
+                                        list.select(stories.len().saturating_sub(1), viewport, anim)
+                                    }
                                 }
+                            } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
+                                app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
                             }
                         }
-                        // `o`: the same dialog, on a key every terminal can
-                        // deliver. Shift-Enter needs the kitty keyboard protocol
-                        // to be distinguishable from Enter at all — Ghostty sends
-                        // it, a plain xterm cannot — so without this alias the
-                        // feature would simply be missing on some terminals, and
-                        // would launch the story instead of explaining itself.
-                        Char('o') => {
+                        // `.get`, not indexing (SQ-0659): playing an empty list
+                        // (all stories vanished externally) is a no-op, not a
+                        // panic.
+                        Some(app::browser::BrowserAction::PlayStory) => {
+                            if let Some(entry) = stories.get(list.selected) {
+                                break Some(PickedStory::plain(entry.path.clone()));
+                            }
+                        }
+                        // Shift-Enter, `o` and the double right-click are one
+                        // command reaching one constructor (SQ-0789): the dialog
+                        // has a single seeding site, and now a single binding
+                        // target as well.
+                        Some(app::browser::BrowserAction::OpenLaunchOptions) => {
                             if let Some(entry) = stories.get(list.selected) {
                                 launch_opts = Some(open_launch_options(entry, cfg, data_base));
                             }
                         }
-                        Char('q') => break None,
-                        // Esc cancels a running sweep first; only quits when
-                        // nothing is in flight.
-                        Esc => {
+                        Some(app::browser::BrowserAction::QuitBrowser) => break None,
+                        // Cancels a running sweep first; only quits when nothing
+                        // is in flight.
+                        Some(app::browser::BrowserAction::CancelBrowser) => {
                             if fetcher.busy() {
                                 fetcher.cancel();
                             } else {
                                 break None;
                             }
                         }
-                        Char('i') | Tab => {
+                        Some(app::browser::BrowserAction::ToggleInfoPanel) => {
                             let target = !slide.open;
                             if !target || can_open_panel(last_area.width) {
                                 let instant = !cfg.animation.enabled || cfg.animation.scroll_ms == 0;
@@ -1299,21 +1285,21 @@ pub(crate) fn run_story_picker(
                                 }
                             }
                         }
-                        // `g`: toggle the cover-gallery grid (SQ-0374). Selection
+                        // Toggle the cover-gallery grid (SQ-0374). Selection
                         // carries over; reset the grid scroll so the selected
                         // cover is framed on entry (the next draw scrolls to it).
-                        Char('g') => {
+                        Some(app::browser::BrowserAction::ToggleGallery) => {
                             view = match view {
                                 PickerView::List => PickerView::Gallery,
                                 PickerView::Gallery => PickerView::List,
                             };
                             gallery_first_row = 0;
                         }
-                        // `f`: refetch only the selected story, ignoring its
-                        // cache. Ignored while a sweep is already running, so a
-                        // second press can't garble the in-flight progress line.
-                        Char('f') if !fetcher.busy() => {
-                            if let Some(entry) = stories.get(list.selected) {
+                        // Refetch only the selected story, ignoring its cache.
+                        // Ignored while a sweep is already running, so a second
+                        // press can't garble the in-flight progress line.
+                        Some(app::browser::BrowserAction::FetchStory) => {
+                            if let Some(entry) = stories.get(list.selected).filter(|_| !fetcher.busy()) {
                                 fetch_is_single = true;
                                 sweep_fetched = 0;
                                 sweep_skipped = 0;
@@ -1327,34 +1313,43 @@ pub(crate) fn run_story_picker(
                                 });
                             }
                         }
-                        // `r`: sweep the whole library; the worker itself skips
-                        // any story already at the current FETCH_VERSION. Ignored
-                        // while a sweep is already running (see `f`).
-                        Char('r') if !fetcher.busy() => {
-                            let total = stories.len();
-                            let order: Vec<(PathBuf, String)> =
-                                stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
-                            fetch_is_single = false;
-                            sweep_fetched = 0;
-                            sweep_skipped = 0;
-                            sweep_not_found = 0;
-                            sweep_failed = 0;
-                            progress_line = Some(format!("Fetching 0/{total}"));
-                            fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
+                        // Sweep the whole library; the worker itself skips any
+                        // story already at the current FETCH_VERSION. Ignored
+                        // while a sweep is already running (see fetch-story).
+                        Some(app::browser::BrowserAction::RefreshLibrary) => {
+                            // A busy-worker check is an `if` inside the arm, never
+                            // a match guard: a guarded arm does not count towards
+                            // exhaustiveness, and it is exhaustiveness here that
+                            // makes a new `BrowserAction` a compile error rather
+                            // than a gesture that quietly does nothing.
+                            if !fetcher.busy() {
+                                let total = stories.len();
+                                let order: Vec<(PathBuf, String)> =
+                                    stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
+                                fetch_is_single = false;
+                                sweep_fetched = 0;
+                                sweep_skipped = 0;
+                                sweep_not_found = 0;
+                                sweep_failed = 0;
+                                progress_line = Some(format!("Fetching 0/{total}"));
+                                fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
+                            }
                         }
-                        // `u`: point the selected story at an IFDB page by hand
-                        // (for a story whose IFID IFDB doesn't index). Opens the
+                        // Point the selected story at an IFDB page by hand (for a
+                        // story whose IFID IFDB doesn't index). Opens the
                         // manual-entry field; ignored mid-sweep (SQ-0371).
-                        Char('u') if !fetcher.busy() => {
-                            manual_ifdb = Some(app::text_field::TextField::new(""));
-                            progress_line = None;
+                        Some(app::browser::BrowserAction::SetIfdbUrl) => {
+                            if !fetcher.busy() {
+                                manual_ifdb = Some(app::text_field::TextField::new(""));
+                                progress_line = None;
+                            }
                         }
-                        // `/`: open the IFDB search modal (SQ-0413) — search by
+                        // Open the IFDB search modal (SQ-0413) — search by
                         // title/author, browse results, and download a story file
-                        // into this directory. `/` is the conventional search key.
-                        // Opens on a "Popular on IFDB" seed list (SQ-0473),
-                        // fetched non-blocking through the same worker.
-                        Char('/') => {
+                        // into this directory. Opens on a "Popular on IFDB" seed
+                        // list (SQ-0473), fetched non-blocking through the same
+                        // worker.
+                        Some(app::browser::BrowserAction::SearchIfdb) => {
                             let mut sm = app::ifdb_search_modal::SearchModal::new();
                             // So the chooser can mark files this directory
                             // already holds (SQ-0597) — the same `dir` every
@@ -1365,12 +1360,12 @@ pub(crate) fn run_story_picker(
                             dispatch_search_action(seed_action, &search_worker, dir, &mut search_modal);
                             progress_line = None;
                         }
-                        // `H`: download a matching InvisiClues hint file for the
+                        // Download a matching InvisiClues hint file for the
                         // selected story (SQ-0445) when it has none locally — SLAG
                         // (IF Archive) preferred, else the Internet Archive izm set.
                         // Saved beside the story; ignored while one is downloading.
-                        Char('H') if !hint_dl.busy() => {
-                            if let Some(entry) = stories.get(list.selected) {
+                        Some(app::browser::BrowserAction::DownloadHints) => {
+                            if let Some(entry) = stories.get(list.selected).filter(|_| !hint_dl.busy()) {
                                 if entry.hint_sidecar.is_some() {
                                     progress_line = Some(format!("{} already has a hint file", entry.title));
                                 } else {
@@ -1395,10 +1390,10 @@ pub(crate) fn run_story_picker(
                                 }
                             }
                         }
-                        // `s`: cycle the sort column, keeping direction. `d`:
-                        // toggle direction, keeping the column. Both preserve
-                        // the selection by path, never by index.
-                        Char('s') => {
+                        // Cycle the sort column, keeping direction; or toggle the
+                        // direction, keeping the column. Both preserve the
+                        // selection by path, never by index.
+                        Some(app::browser::BrowserAction::SortLibrary) => {
                             sort.key = match sort.key {
                                 app::picker::SortKey::Title => app::picker::SortKey::Author,
                                 app::picker::SortKey::Author => app::picker::SortKey::Year,
@@ -1412,7 +1407,7 @@ pub(crate) fn run_story_picker(
                                 anim,
                             );
                         }
-                        Char('d') => {
+                        Some(app::browser::BrowserAction::ReverseSort) => {
                             sort.desc = !sort.desc;
                             list.select(
                                 resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
@@ -1420,8 +1415,11 @@ pub(crate) fn run_story_picker(
                                 anim,
                             );
                         }
-                        _ => {}
+                        // An unbound key. The ONLY catch-all in this match, so the
+                        // compiler still requires an arm per action above.
+                        None => {}
                     }
+                    // ── END BROWSER KEY DISPATCH ────────────────────────────────
                 }
             }
             Ok(Event::Mouse(m)) => {
@@ -1610,6 +1608,10 @@ type HeaderHitRects = Vec<(app::picker::SortKey, Rect)>;
 /// Draw the story-picker screen. Returns the per-row hit-rects (index, rect)
 /// for mouse selection, the row count, and the column-header hit-rects
 /// (Task 9 hit-tests these for click-to-sort).
+///
+/// `km` is the resolved keymap, read only to name the keys in the footer hints
+/// (SQ-0796) — the drawing itself never consults it.
+#[allow(clippy::too_many_arguments)]
 fn draw_story_picker(
     stories: &[app::picker::StoryEntry],
     list: &app::list_scroll::ListScroll,
@@ -1617,6 +1619,7 @@ fn draw_story_picker(
     glyphs: &app::picker::BadgeGlyphs,
     dir: &std::path::Path,
     cs: &app::colors::ColorScheme,
+    km: &app::keymap::KeyMap,
     sort: app::picker::Sort,
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
@@ -1834,7 +1837,7 @@ fn draw_story_picker(
     }
 
     // Footer hint.
-    let footer = build_footer(area.width);
+    let footer = build_footer(km, area.width);
     let fstyle = Style::new().fg(Color::DarkGray).patch(dialog);
     draw_str_clipped(buf, area.x, list_bottom, &footer, fstyle, area);
 
@@ -1856,6 +1859,7 @@ fn draw_story_gallery(
     first_row: &mut usize,
     dir: &std::path::Path,
     cs: &app::colors::ColorScheme,
+    km: &app::keymap::KeyMap,
     picker: Option<&ratatui_image::picker::Picker>,
     cover: &mut app::cover::CoverState,
     area: Rect,
@@ -2025,12 +2029,13 @@ fn draw_story_gallery(
         app::render::scroll::draw_scrollbar(buf, sb_area, total_rows, vis, *first_row, scrollbar);
     }
 
-    // Footer hint.
-    let footer = " ←/→/↑/↓: move   Enter / 2×click: open   i/Tab: info   g: list   q / Esc: quit";
+    // Footer hint, from the same registry-driven hints the list footer uses
+    // (SQ-0796) — the gallery's is a fixed line rather than a dropping one.
+    let footer = format!(" {}", hint_segments(km, app::browser::HINTS_GALLERY).join("   "));
     let fstyle = ratatui::style::Style::new()
         .fg(ratatui::style::Color::DarkGray)
         .patch(dialog);
-    let footer_txt = truncate_to_width(footer, area.width as usize);
+    let footer_txt = truncate_to_width(&footer, area.width as usize);
     draw_str_clipped(buf, area.x, grid_bottom, &footer_txt, fstyle, area);
 
     (tile_rects, cols, vis)
@@ -2768,6 +2773,45 @@ fn ifdb_download_landing(
 
 #[cfg(test)]
 mod tests {
+    /// The shipped browser keymap, which is what the footer hints are drawn
+    /// from (SQ-0796). Every draw test uses it, since none of them is about a
+    /// user's rebinding.
+    fn km() -> app::keymap::KeyMap {
+        app::keymap::KeyMap::default()
+    }
+
+
+    /// **The anti-drift guard (SQ-0796).** The browser's key dispatch must stay
+    /// keyed on `BrowserAction`, which only a `slash::COMMANDS` entry can produce
+    /// — so the region may not inspect the keystroke at all. Add a hardcoded
+    /// `k.code` arm for a new gesture and this fails; the only way to make a key
+    /// do something in the browser is to put it in the registry.
+    ///
+    /// Read off the source because that is where the property lives: no runtime
+    /// assertion can tell you a match arm you did not write is absent.
+    #[test]
+    fn browser_dispatch_never_reads_the_key_event() {
+        const BEGIN: &str = "── BROWSER KEY DISPATCH";
+        const END: &str = "── END BROWSER KEY DISPATCH";
+        let src = include_str!("picker_ui.rs");
+        let start = src.find(BEGIN).expect("the dispatch region's opening marker");
+        let end = start + src[start..].find(END).expect("the dispatch region's closing marker");
+        let region = &src[start..end];
+        assert!(region.len() > 500, "the region markers must bracket the real dispatch");
+        assert!(
+            region.contains("action_for_key"),
+            "the region must be the registry-driven dispatch"
+        );
+        for banned in ["k.code", "k.modifiers", "KeyCode", "KeyModifiers", "KeyEvent", "shift"] {
+            assert!(
+                !region.contains(banned),
+                "the browser dispatch must not mention `{banned}` — a gesture that \
+                 reads the keystroke here bypasses the slash::COMMANDS registry \
+                 (SQ-0796). Add a Context::Browser command instead."
+            );
+        }
+    }
+
     // ── Story-picker row badges (type + present artifacts) ─────────────────────
 
     /// SQ-0659: where the cursor lands after an IFDB download's rescan.
@@ -2948,7 +2992,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let dir = std::path::Path::new("/tmp");
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, dir, &cs, app::picker::Sort::default(), area, &mut buf,
+            &stories, &list, &badges, &glyphs, dir, &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
 
         let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
@@ -2990,7 +3034,7 @@ mod tests {
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-                          &cs, app::picker::Sort::default(), area, &mut buf);
+                          &cs, &km(), app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         assert!(row0.contains('h'), "available hint shows lowercase glyph: {row0:?}");
         assert!(!row0.contains('H'), "available hint is NOT the uppercase present glyph: {row0:?}");
@@ -3016,7 +3060,7 @@ mod tests {
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-                          &cs, app::picker::Sort::default(), area, &mut buf);
+                          &cs, &km(), app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         // The configured save glyph is used for the artifact badge. Type and
         // blorb are no longer badges (they're the TYPE column), so their
@@ -3048,7 +3092,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, app::picker::Sort::default(), area, &mut buf,
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let header = row_text(&buf, 1, area); // header row is area.y + 1
         assert!(header.contains("TITLE ▲"), "active column shows the ascending arrow: {header:?}");
@@ -3062,7 +3106,7 @@ mod tests {
         let sort2 = app::picker::Sort { key: app::picker::SortKey::Year, desc: true };
         super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, sort2, area, &mut buf2,
+            &cs, &km(), sort2, area, &mut buf2,
         );
         let header2 = row_text(&buf2, 1, area);
         assert!(header2.contains("YEAR ▼"), "active column shows the descending arrow: {header2:?}");
@@ -3086,7 +3130,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, app::picker::Sort::default(), area, &mut buf,
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row0 = row_text(&buf, 2, area);
         let row1 = row_text(&buf, 3, area);
@@ -3125,7 +3169,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, app::picker::Sort::default(), area, &mut buf,
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row1 = row_text(&buf, 3, area);
         assert!(row1.contains("(no metadata yet)"), "reads as 'nothing fetched yet': {row1:?}");
@@ -3169,7 +3213,7 @@ mod tests {
             let mut buf = Buffer::empty(area);
             super::draw_story_picker(
                 &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-                &cs, app::picker::Sort::default(), area, &mut buf,
+                &cs, &km(), app::picker::Sort::default(), area, &mut buf,
             );
             let row = row_text(&buf, 2, area);
             assert_eq!(row.contains("Michael S. Gentry"), want_author, "width {width}: {row:?}");
@@ -3200,7 +3244,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, app::picker::Sort::default(), area, &mut buf,
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row0 = row_text(&buf, 2, area);
         assert!(!row0.contains(long_author), "long author must be truncated: {row0:?}");
@@ -3232,7 +3276,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, app::picker::Sort::default(), area, &mut buf,
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row = row_text(&buf, 2, area);
         assert!(row.contains(author), "author shown in full when there is room: {row:?}");
@@ -3253,7 +3297,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let (_, _, header_rects) = super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, app::picker::Sort::default(), area, &mut buf,
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         // 60 cells is too narrow for the RATING column, so four headers show.
         assert_eq!(header_rects.len(), 4, "title/author/year/type at this width: {header_rects:?}");
@@ -3300,7 +3344,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let (_, _, header_rects) = super::draw_story_picker(
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-            &cs, app::picker::Sort::default(), area, &mut buf,
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let rect = header_rects
             .iter()
@@ -3343,7 +3387,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let sort = app::picker::Sort { key: app::picker::SortKey::Rating, desc: true };
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"), &cs, sort, area, &mut buf,
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"), &cs, &km(), sort, area, &mut buf,
         );
         let header = row_text(&buf, 1, area);
         assert!(header.contains("RATING ▼"), "active RATING column shows the arrow: {header:?}");
@@ -3372,31 +3416,53 @@ mod tests {
     fn footer_hints_drop_right_to_left_keeping_f_and_r_longest() {
         // Narrow: none of the new hints fit, but the existing core (move/open/
         // info/quit) is always present.
-        let narrow = super::build_footer(60);
+        let km = km();
+        let narrow = super::build_footer(&km, 60);
         assert!(narrow.contains("move") && narrow.contains("open") && narrow.contains("info") && narrow.contains("quit"));
         assert!(!narrow.contains("f: fetch") && !narrow.contains("PgUp/PgDn"), "{narrow:?}");
 
-        // Segments appear in FOOTER_OPTIONAL order as width grows (least-
-        // guessable first): each one's minimum fitting width is >= the previous
-        // one's, and the core is always present. Robust to segment-set changes.
+        // Segments appear in declared order as width grows (least-guessable
+        // first): each one's minimum fitting width is >= the previous one's, and
+        // the core is always present. Robust to segment-set changes.
+        //
+        // SQ-0796: the segments are now GENERATED from the registry and the
+        // keymap rather than being a table of literal strings, so the list comes
+        // from `footer_optional` instead of a `FOOTER_OPTIONAL` constant. Same
+        // ordering property, same assertions — but a hint can no longer name a
+        // key nothing is bound to.
         let min_width = |seg: &str| -> u16 {
-            (10u16..=240).find(|&w| super::build_footer(w).contains(seg)).unwrap_or(u16::MAX)
+            (10u16..=280).find(|&w| super::build_footer(&km, w).contains(seg)).unwrap_or(u16::MAX)
         };
-        let widths: Vec<u16> = super::FOOTER_OPTIONAL.iter().map(|s| min_width(s)).collect();
+        let optional = super::footer_optional(&km);
+        let widths: Vec<u16> = optional.iter().map(|s| min_width(s)).collect();
         for pair in widths.windows(2) {
             assert!(pair[0] <= pair[1], "segments appear in declared order: {widths:?}");
         }
-        // f: fetch (first, least guessable) appears well before PgUp/PgDn (last).
+        // The first (least guessable) appears well before the last.
         assert!(widths[0] < *widths.last().unwrap(), "{widths:?}");
-        // At a wide-enough terminal, every optional hint (incl. the new u) shows.
-        // 240 rather than 200 since SQ-0789: the launch-options segment names
-        // three gestures, and the full set no longer fits an old 200-column
-        // assumption. The drop-right-to-left behaviour under 240 is what the rest
-        // of this test pins, and it is unchanged.
-        let wide = super::build_footer(240);
-        for seg in super::FOOTER_OPTIONAL {
+        // At a wide-enough terminal, every optional hint shows. 280 rather than
+        // 240 since SQ-0796: Home/End joined the set, having been unadvertised
+        // while the hints were hand-written. The drop-right-to-left behaviour
+        // below that width is what the rest of this test pins, and it is
+        // unchanged.
+        let wide = super::build_footer(&km, 280);
+        for seg in &optional {
             assert!(wide.contains(seg), "wide footer shows {seg:?}: {wide:?}");
         }
+    }
+
+    /// SQ-0796: the footer's keys come from the keymap, so rebinding one moves
+    /// the hint with it — the drift a hand-written string could not survive.
+    #[test]
+    fn footer_hints_follow_a_rebinding() {
+        let mut cfg = app::config::KeymapConfig::default();
+        cfg.browser.insert("ctrl+g".into(), "toggle-gallery".into());
+        let (km, warns) = app::keymap::KeyMap::resolve(&cfg);
+        assert!(warns.is_empty(), "{warns:?}");
+        let wide = super::build_footer(&km, 280);
+        // Both keys are advertised — the override adds a binding, it does not
+        // remove `g` — and neither string was authored by hand.
+        assert!(wide.contains("g/Ctrl+G: covers"), "the new key is advertised: {wide:?}");
     }
 
     // ── Story-picker info panel ─────────────────────────────────────────────────
@@ -4419,7 +4485,7 @@ mod tests {
         let mut first_row = 0usize;
         // No picker → no cover art → each tile shows its title centred in the band.
         let (rects, cols, vis) = super::draw_story_gallery(
-            &stories, 1, &mut first_row, std::path::Path::new("/tmp"), &cs, None, &mut cover, area, &mut buf,
+            &stories, 1, &mut first_row, std::path::Path::new("/tmp"), &cs, &km(), None, &mut cover, area, &mut buf,
         );
 
         assert!(cols >= 1 && vis >= 1);
@@ -4664,7 +4730,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let mut first_row = 0usize;
         let (rects, _cols, _vis) = super::draw_story_gallery(
-            &stories, 39, &mut first_row, std::path::Path::new("/tmp"), &cs, None, &mut cover, area, &mut buf,
+            &stories, 39, &mut first_row, std::path::Path::new("/tmp"), &cs, &km(), None, &mut cover, area, &mut buf,
         );
         assert!(first_row > 0, "grid scrolled down to keep the last cover visible");
         assert!(rects.iter().any(|(i, _)| *i == 39), "the selected tile is on screen");

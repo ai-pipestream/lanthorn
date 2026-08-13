@@ -574,6 +574,14 @@ pub(crate) fn dispatch_slash_outcome(
                 }
             }
         }
+        // The story browser's own verbs (SQ-0796). `parse_in_context` only emits
+        // these in `Context::Browser`, which the running game never is, and the
+        // picker loop applies them itself — so reaching here means a binding was
+        // resolved in the wrong context, and the honest answer is to say so
+        // rather than silently swallow the key.
+        SlashOutcome::Browser(_) => {
+            state.set_status("[that command belongs to the story browser]".to_string());
+        }
     }
     false
 }
