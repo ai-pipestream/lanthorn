@@ -100,7 +100,18 @@ type BandCacheKey = (usize, u16, u16, u16, u32);
 ///
 /// The margin stays transparent here and is resolved by [`flatten_onto`] against
 /// the story's page, so the padding matches the paper the icon sits on.
-pub(crate) fn fit_preserving_aspect(
+///
+/// The resample is [`crate::render::graphics::resize_directional`] (SQ-0829). This
+/// site runs in BOTH directions — a picture wider than the transcript body is
+/// shrunk to it, while one that already fits is nudged UP to its ceil-to-cells box,
+/// and frameless mode deliberately asks for a whole 2×/3× enlargement
+/// (`InlineImage::frameless_scaled`, "an integer 2×/3× for pixel-art crispness").
+/// Triangle at every size served neither: it blurred away the very crispness the
+/// integer factor was chosen for, and, filtering the four channels independently,
+/// averaged the `(0, 0, 0)` behind a transparent pixel into its neighbours — which
+/// is the whole population here, since Zork Zero's drop caps and room icons are
+/// cut-out PNGs.
+pub fn fit_preserving_aspect(
     src: &image::RgbaImage,
     box_w: u32,
     box_h: u32,
@@ -109,7 +120,7 @@ pub(crate) fn fit_preserving_aspect(
     // The largest whole-pixel size with the source's aspect that still fits.
     let dw = (box_w).min((sw as u64 * box_h as u64 / sh as u64).max(1) as u32).max(1);
     let dh = (box_h).min((sh as u64 * dw as u64 / sw as u64).max(1) as u32).max(1);
-    let resized = image::imageops::resize(src, dw, dh, image::imageops::FilterType::Triangle);
+    let resized = crate::render::graphics::resize_directional(src, dw, dh);
     if dw == box_w && dh == box_h {
         return resized;
     }

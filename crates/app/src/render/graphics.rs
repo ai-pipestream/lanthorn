@@ -71,10 +71,12 @@ fn scaled_to_native(sp: u32, np: u32, sp_max: u32) -> u32 {
 ///
 /// This is deliberately GENERAL, not v6-private: it takes an image and a target size and
 /// assumes nothing about unit space, chrome bands or the Z-machine. Two guarantees, and
-/// they are the two the rest of the app's resamples do not have (SQ-0829, which unifies
-/// the seven other call sites onto this one — `render/inline_image.rs`, `render/screen.rs`,
-/// `graphics.rs`, `picker_ui.rs` and `cover.rs` each picked their own filter and none
-/// premultiplies):
+/// they were the two nothing else in the app had until SQ-0829 brought the rest of the
+/// art scaling here — Glulx's `glk_image_draw_scaled`
+/// ([`Canvas::draw_image`](crate::graphics::Canvas::draw_image)), inline transcript
+/// pictures ([`super::inline_image::fit_preserving_aspect`]) and, through
+/// [`fit_for_protocol`], cover art, gallery tiles, the resource preview and the
+/// non-kitty graphics-window blit:
 ///
 /// * **Direction.** Each axis is filtered by the way it moves — replication when it grows
 ///   (pixel art stays crisp and gains no colours) and an area average when it shrinks
@@ -110,6 +112,69 @@ pub(crate) fn resize_directional(src: &image::RgbaImage, tw: u32, th: u32) -> im
         unassociate_alpha(&mut out);
     }
     out
+}
+
+/// The size an aspect-preserving fit of `w × h` into `nw × nh` lands on — the
+/// arithmetic `ratatui-image` calls `fit_area_proportionally`, reproduced here so
+/// [`fit_for_protocol`] can land on exactly the pixels the crate would have chosen
+/// and differ from it ONLY in the filter.
+fn fit_proportionally(w: u32, h: u32, nw: u32, nh: u32) -> (u32, u32) {
+    let ratio = (nw as f64 / w.max(1) as f64).min(nh as f64 / h.max(1) as f64);
+    ((((w as f64) * ratio).round() as u32).max(1), (((h as f64) * ratio).round() as u32).max(1))
+}
+
+/// Pre-scale `img` for [`Picker::new_protocol`] through [`resize_directional`],
+/// and return it with the cell [`Size`] to hand the picker (SQ-0829).
+///
+/// Hand the pair to `new_protocol` with `Resize::Fit(None)`, which is then a
+/// no-op: the returned image is already exactly `size × font_size` pixels, so the
+/// crate's own `needs_resize` short-circuits and never resamples. That is the whole
+/// point — `Resize::Fit(None)` means "resize with the DEFAULT filter", and the
+/// default is `FilterType::Nearest`. Every delegation to it was therefore a Nearest
+/// resample chosen by omission rather than on purpose, and `Fit` is overwhelmingly
+/// a MINIFICATION: a 1200×1600 cover into a 20-cell panel is a 7× reduction in
+/// which Nearest keeps one source row in seven and throws the rest away.
+///
+/// `upscale` picks between the crate's two aspect-preserving modes — `false` is
+/// `Resize::Fit` (clamped to the image's own size, so a picture smaller than the
+/// box is not blown up to fill it) and `true` is `Resize::Scale` (fills the box in
+/// both directions). Aspect is preserved either way, so both axes always travel the
+/// same way and [`resize_directional`]'s per-axis split costs nothing here; what it
+/// brings is the direction itself, plus the alpha association a cut-out PNG needs.
+///
+/// The leftover strip below/right of the fitted picture is transparent padding, laid
+/// down top-left — byte for byte what the crate does with a picker that was never
+/// given a `background_color`, which is every picker babelmap builds.
+pub fn fit_for_protocol(
+    picker: &Picker,
+    img: &image::DynamicImage,
+    target: Size,
+    upscale: bool,
+) -> (image::DynamicImage, Size) {
+    if target.width == 0 || target.height == 0 {
+        return (img.clone(), target);
+    }
+    let fs = picker.font_size();
+    let (fw, fh) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+    let (sw, sh) = (img.width().max(1), img.height().max(1));
+    let (bw, bh) = (target.width as u32 * fw, target.height as u32 * fh);
+    // Which cell rect the protocol will report: the fit, rounded UP to whole cells.
+    let (cw, ch) = if upscale { (bw, bh) } else { (bw.min(sw), bh.min(sh)) };
+    let (aw, ah) = fit_proportionally(sw, sh, cw, ch);
+    let area = Size::new(aw.div_ceil(fw) as u16, ah.div_ceil(fh) as u16);
+    // Then the pixels inside it. The second fit is not redundant: the ceil above can
+    // add up to a cell on each axis, and the crate resamples into that whole box.
+    let (pw, ph) = (area.width as u32 * fw, area.height as u32 * fh);
+    let (tw, th) = fit_proportionally(sw, sh, pw, ph);
+    let scaled = resize_directional(&img.to_rgba8(), tw, th);
+    let out = if (tw, th) == (pw, ph) {
+        scaled
+    } else {
+        let mut padded = image::RgbaImage::new(pw, ph);
+        image::imageops::replace(&mut padded, &scaled, 0, 0);
+        padded
+    };
+    (image::DynamicImage::ImageRgba8(out), area)
 }
 
 /// Straight (unassociated) RGBA → premultiplied, for [`resize_directional`].
@@ -689,11 +754,18 @@ impl GraphicsRender {
             Some((v, w, h, _)) if *v == gw.version && *w == area.width && *h == area.height);
         if !fresh {
             let img = image::DynamicImage::ImageRgba8((*gw.canvas).clone());
-            // `Scale` upscales a small canvas to fill the window (aspect
-            // preserved, Nearest filter → crisp pixel art); `Fit` leaves it at
-            // native size, centered. Scott room pictures want the former.
-            let resize = if gw.upscale { Resize::Scale(None) } else { Resize::Fit(None) };
-            match picker.new_protocol(img, Size::new(area.width, area.height), resize) {
+            // `upscale` blows a small canvas up to fill the window (aspect
+            // preserved → crisp pixel art); otherwise the canvas stays at native
+            // size, centered. Scott room pictures want the former.
+            //
+            // Only the NON-kitty backends reach here — kitty placed the canvas
+            // itself and returned, above — so this is the sixel/iTerm2/halfblocks
+            // resample, and it went through the crate's default Nearest in BOTH
+            // directions. A canvas larger than its window (advent.blb's 1104-px
+            // toolbar in a narrow pane) was minified by dropping columns (SQ-0829).
+            let (img, size) =
+                fit_for_protocol(picker, &img, Size::new(area.width, area.height), gw.upscale);
+            match picker.new_protocol(img, size, Resize::Fit(None)) {
                 Ok(p) => { self.cache.insert(gw.win, (gw.version, area.width, area.height, p)); }
                 Err(_) => return,
             }

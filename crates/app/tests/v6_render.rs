@@ -1,5 +1,6 @@
 //! Group binary: The v6 render path itself, game-agnostic — frame borders at every medium,
-//! the game-colour regression matrix, prose freezing and raster text loss.
+//! the game-colour regression matrix, prose freezing and raster text loss — plus the
+//! app-wide art-scaling policy every one of those paths now shares (SQ-0829).
 //!
 //! Each member below used to be its own test binary. The suites now live in
 //! `tests/suites/`, which cargo does not auto-build, and are pulled in here as
@@ -8,6 +9,8 @@
 
 #![allow(dead_code, unused_imports)]
 
+#[path = "suites/art_resample_policy.rs"]
+mod art_resample_policy;
 #[path = "suites/v6_amiga_global_colour_pair.rs"]
 mod v6_amiga_global_colour_pair;
 #[path = "suites/v6_amiga_shipped_interpreter.rs"]
