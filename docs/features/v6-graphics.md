@@ -764,6 +764,22 @@ session-only switch that never touches your saved config:
   A game whose frame *encloses* the story to the screen bottom (Zork Zero's full
   frame) keeps the centred letterbox untouched, and a pane at or below the scaled
   native height (no dead space) degrades to that same centred layout.
+  **What the pane is shaped like decides how much is reclaimed; it never decides
+  what the game has.** Those are two questions and the planner used to run them
+  together, taking its "no dead space, centre it" shortcut *before* it had so much
+  as looked for a command menu. So on any pane whose vertical edge is the binding
+  one — a wide, short terminal, where the frame already fills the height exactly —
+  Journey stopped counting as a menu game at all, and everything that follows from
+  being one went out with it: its picture column lost the panel it sits in, lost its
+  fill sampled from the art's own edge, lost its centring, and fell through to the
+  side-border tiler, which happily tiled canyon wall down a column that was never a
+  border. It is a frame-shaped fact about the game, so it is asked first now, and
+  slack gates only the reclaim. A menu game at zero slack simply gets "menu, no
+  reclaim", which costs nothing to arrange: with no dead space the centred offset
+  and the top-anchored one are the same offset, so not a band moves — only the
+  flank's treatment changes, which was the whole of the complaint. 166×44 was one of
+  these panes, and one of the commonest: 164×41 cells of v6 area on an 8×18 cell is
+  1312×738 device pixels, and 738⁄400 = 1.845 lands on the scale exactly.
   **One window is fixed-height and the rest take what remains — and in Journey it
   is the one at the bottom.** Nearly every v6 title puts its fixed window on top
   (Arthur's status bar, Zork Zero's banner) and lets the story grow downward;
@@ -935,10 +951,11 @@ session-only switch that never touches your saved config:
   pane's last row, as Zork Zero's does — keeps it: the test is whether there is
   artwork *between* the flanks, not where the row sits.
   Clicks follow the same seam. The command menu a game like Journey puts at the foot
-  of the screen is a bottom-anchored strip when the layout has slack to reclaim and an
-  ordinary ring strip when it has none, and both are drawn by packing the game's rows
-  onto consecutive terminal rows — so the click map inverts by row index in both,
-  rather than inverting the pane linearly and landing a row off in the second.
+  of the screen is a bottom-anchored strip of its own now that the menu is recognised
+  at every pane shape, but it used to be an ordinary ring strip whenever the layout
+  had no slack to reclaim; both are drawn by packing the game's rows onto consecutive
+  terminal rows, so the click map inverts by row index in either, rather than
+  inverting the pane linearly and landing a row off in the second.
   And this holds at *every* pane shape, reclaimed layout or
   centred letterbox alike — a short, wide pane leaves no dead space to reclaim and
   used to hand the whole flank, border columns included, to one uploaded band, which
