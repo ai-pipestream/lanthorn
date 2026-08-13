@@ -246,7 +246,9 @@ mod tests {
         g.set_pos(2, (0, 0)); // SAME cell as Hall — only safe because they're different layers
         g.add_edge(1, Direction::Down, 2);
         g.add_edge(2, Direction::Up, 1);
-        let l = mapper::layer::peel_region(&mut g, 2).expect("peel cellar");
+        let region = mapper::layer::planar_region(&g, 2);
+        let l = mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New)
+            .expect("peel cellar");
         let dump = render_dump(&g);
         // ROOM legend tags the peeled room's layer; the base room carries no tag.
         assert!(dump.contains(&format!("ROOM 2 \"Cellar\" pos=0,0 align=none layer={l}")), "dump:\n{dump}");

@@ -1392,7 +1392,9 @@ mod tests {
         // #180 between Living Room and Kitchen. Ejecting interlopers coincident with an endpoint
         // keeps 193 directly west-adjacent to 203.
         let mut g = a129_house_graph();
-        crate::layer::peel_region(&mut g, 27).expect("27's region peels into a new layer");
+        let region = crate::layer::planar_region(&g, 27);
+        crate::layer::move_region(&mut g, &region, crate::layer::MoveTarget::New)
+            .expect("27's region peels into a new layer");
         let mut sub = g.layer_subgraph(crate::layer::MAIN_LAYER);
         relayout_auto(&mut sub);
         let p = |id: u16| sub.room(id).unwrap().pos.unwrap();

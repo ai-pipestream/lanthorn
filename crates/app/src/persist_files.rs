@@ -473,7 +473,9 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);
         m.observe(2, "Cellar", Some(Direction::Down));
-        let l = mapper::layer::peel_region(&mut m.graph, 2).expect("peel");
+        let region = mapper::layer::planar_region(&m.graph, 2);
+        let l = mapper::layer::move_region(&mut m.graph, &region, mapper::layer::MoveTarget::New)
+            .expect("peel");
         m.graph.set_layer_name(l, "Basement".into());
         std::fs::write(&path, to_json(&m)).unwrap();
         let loaded = load_map(&path).expect("loads");

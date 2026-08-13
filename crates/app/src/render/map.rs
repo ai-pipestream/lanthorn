@@ -2008,7 +2008,7 @@ fn draw_portal_icons(
 
     // Helper: the glyph for the move that crosses to the other layer.
     //
-    // A COMPASS edge can cross layers since `peel-layer <direction>` cuts a seam at one
+    // A COMPASS edge can cross layers since `move-region <dest> <direction>` cuts a seam at one
     // (SQ-0360). Only portals could before, so every compass direction fell through to the
     // `unknown` marker — a badge that said "?" about a passage whose direction we know
     // perfectly well. Show the arrow you travel (SQ-0362).
@@ -2046,7 +2046,7 @@ fn draw_portal_icons(
             continue;
         }
         // A cross-layer COMPASS passage has no portal slot — the slots only ever had to hold the
-        // four directions that could leave a layer before `peel-layer <direction>` cut seams at
+        // four directions that could leave a layer before a named seam could cut at
         // compass ones (SQ-0360). Falling through to `portal_slot` therefore dropped it silently,
         // icon and label both. Place it by bearing instead (SQ-0363).
         if edge.is_interlayer && portal_slot(edge.dir).is_none() {
@@ -5105,7 +5105,7 @@ mod tests {
         // Rendering MAIN_LAYER in portal view must show the destination layer name ("Cellar")
         // floating beside Hall's box — confirming inter-layer stubs render their dest_label.
         use mapper::graph::MapGraph;
-        use mapper::layer::{peel_region, MAIN_LAYER};
+        use mapper::layer::{move_region, planar_region, MoveTarget, MAIN_LAYER};
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
         g.upsert_room(2, "Study".into());
@@ -5121,7 +5121,8 @@ mod tests {
         g.add_edge(3, Direction::Up, 1);
         g.add_edge(3, Direction::E, 4);
         g.add_edge(4, Direction::W, 3);
-        peel_region(&mut g, 3).expect("cellar + wine must peel into a new layer");
+        let region = planar_region(&g, 3);
+        move_region(&mut g, &region, MoveTarget::New).expect("cellar + wine must peel into a new layer");
         // render_layer builds the MAIN_LAYER sub-graph and appends inter-layer badge stubs.
         let rm = mapper::render::render_layer(&g, MAIN_LAYER);
         // At least one inter-layer badge stub with a dest_label must be present.
@@ -5151,7 +5152,7 @@ mod tests {
         // A room with an outgoing portal to another layer renders with a double-line box
         // outline (╔═╗ … ║) instead of the rounded one, so cross-layer exits read at a glance.
         use mapper::graph::MapGraph;
-        use mapper::layer::{peel_region, MAIN_LAYER};
+        use mapper::layer::{move_region, planar_region, MoveTarget, MAIN_LAYER};
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
         g.upsert_room(2, "Cellar".into());
@@ -5159,7 +5160,8 @@ mod tests {
         g.set_pos(2, (0, 1));
         g.add_edge(1, Direction::Down, 2);
         g.add_edge(2, Direction::Up, 1);
-        peel_region(&mut g, 2).expect("peel cellar into its own layer");
+        let region = planar_region(&g, 2);
+        move_region(&mut g, &region, MoveTarget::New).expect("peel cellar into its own layer");
         let rm = mapper::render::render_layer(&g, MAIN_LAYER);
         assert!(
             rm.rooms.iter().find(|r| r.id == 1).unwrap().has_layer_portal,
@@ -5841,7 +5843,8 @@ mod tests {
         g.set_pos(2, (0, 0));
         g.add_edge(1, Direction::Down, 2);
         g.add_edge(2, Direction::Up, 1);
-        mapper::layer::peel_region(&mut g, 2).expect("peel cellar");
+        let region = mapper::layer::planar_region(&g, 2);
+        mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New).expect("peel cellar");
         g
     }
 
@@ -6048,7 +6051,7 @@ mod tests {
 
     /// SQ-0363: with portal labels on, a cross-layer COMPASS passage rendered NOTHING — no icon,
     /// no name. `portal_slot` only ever had to hold Up/Down/In/Out, the four directions that could
-    /// leave a layer before `peel-layer <direction>` cut seams at compass ones, so a compass edge
+    /// leave a layer before a named seam could cut at compass ones, so a compass edge
     /// fell through it and was dropped. Each direction must land on the border it leads through,
     /// with its "Room · Layer" name floating clear on that side.
     #[test]
@@ -6073,7 +6076,9 @@ mod tests {
             g.add_edge(2, mapper::direction::opposite(dir), 1);
             // Peel the VAULT's side (SQ-0364: a peel takes the selected room's own side), so
             // Here stays on Main and its `dir` passage is the one that crosses.
-            mapper::layer::peel_at_edge(&mut g, 2, mapper::direction::opposite(dir))
+            let region = mapper::layer::region_at_edge(&g, 2, mapper::direction::opposite(dir))
+                .expect("the walked passage is a seam");
+            mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New)
                 .expect("cut at the seam");
 
             let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
@@ -6107,7 +6112,7 @@ mod tests {
 
     #[test]
     fn a_cross_layer_compass_badge_shows_its_direction_not_the_unknown_marker() {
-        // SQ-0362. Until `peel-layer <direction>` (SQ-0360) cut seams at compass passages, only
+        // SQ-0362. Until a named seam (SQ-0360) could cut at compass passages, only
         // portals could ever cross layers — so the badge mapped Up/Down/In/Out and let every
         // compass direction fall through to `unknown`. A room whose east passage leads to another
         // layer then wore a "?", about a direction we know perfectly well.
@@ -6123,7 +6128,9 @@ mod tests {
         g.add_edge(2, Direction::W, 1);
         // Peel THERE's side, so HERE stays on Main and its east passage crosses layers. A peel
         // takes the selected room's OWN side (SQ-0364), hence standing at the far end.
-        let peeled = mapper::layer::peel_at_edge(&mut g, 2, Direction::W).expect("cut at the seam");
+        let region = mapper::layer::region_at_edge(&g, 2, Direction::W).expect("cut at the seam");
+        let peeled = mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New)
+            .expect("and the region moves onto a fresh layer");
         assert_eq!(g.layer_of(2), peeled, "There is now a layer away, across a COMPASS edge");
         assert_eq!(g.layer_of(1), mapper::layer::MAIN_LAYER, "Here stayed put");
 
@@ -6227,7 +6234,7 @@ mod tests {
         // read straight off the compass and lands on the bottom row; no partner lookup, which
         // matters because the destination is on another plane entirely.
         use mapper::graph::MapGraph;
-        use mapper::layer::{peel_region, MAIN_LAYER};
+        use mapper::layer::{move_region, planar_region, MoveTarget, MAIN_LAYER};
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
         g.upsert_room(2, "Cellar".into());
@@ -6235,7 +6242,8 @@ mod tests {
         g.set_pos(2, (0, 1));
         g.add_edge(1, Direction::Down, 2);
         g.add_edge(2, Direction::Up, 1);
-        peel_region(&mut g, 2).expect("the cellar peels into its own layer");
+        let region = planar_region(&g, 2);
+        move_region(&mut g, &region, MoveTarget::New).expect("the cellar peels into its own layer");
         let rm = mapper::render::render_layer(&g, MAIN_LAYER);
         assert!(
             rm.rooms.iter().find(|r| r.id == 1).unwrap().has_layer_portal,

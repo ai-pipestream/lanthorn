@@ -315,27 +315,22 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "relabel-edge", category: Category::Map, context: Context::Map,
         usage: "relabel-edge", description: "relabel the selected edge",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::RelabelSelectedEdge) },
-    CommandSpec { name: "peel-layer", category: Category::Map, context: Context::Map,
-        usage: "peel-layer [direction]", description: "peel a region into its own layer; a direction cuts at that passage",
+    // SQ-0439: peel and merge were always the same operation — re-home a set of rooms onto a
+    // layer — differing only in whether the destination is minted or named. `peel-layer` and
+    // `merge-layer` are retired in favour of the one verb that says so.
+    CommandSpec { name: "move-region", category: Category::Map, context: Context::Map,
+        usage: "move-region <new|parent|layer> [direction]",
+        description: "re-home a region onto a fresh layer, its parent, or any named layer; a direction names the seam to cut at",
         dispatch: |a| {
             use crate::input::Action;
-            match a.first().copied() {
-                None => SlashOutcome::Action(Action::PeelLayer(None)),
-                Some(s) => match mapper::direction::parse_direction(s) {
-                    Some(d) => SlashOutcome::Action(Action::PeelLayer(Some(d))),
-                    None => err(format!("peel-layer: '{s}' is not a direction")),
-                },
-            }
-        } },
-    CommandSpec { name: "merge-layer", category: Category::Map, context: Context::Map,
-        usage: "merge-layer [layer]", description: "merge the selected layer into its parent, or into the named layer",
-        dispatch: |a| {
-            use crate::input::Action;
-            // A layer name may contain spaces ("Dead End") — the whole remainder is the name.
+            // The destination may be a layer NAME with spaces in it ("Dead End"), and the seam is
+            // an optional trailing direction, so neither can be split off here: the whole
+            // remainder goes to `apply_action`, which has the live layer list to resolve it
+            // against.
             if a.is_empty() {
-                SlashOutcome::Action(Action::MergeLayer(None))
+                err("move-region: name a destination — new, parent, or a layer (e.g. move-region main)")
             } else {
-                SlashOutcome::Action(Action::MergeLayer(Some(a.join(" "))))
+                SlashOutcome::Action(Action::MoveRegion(a.join(" ")))
             }
         } },
     CommandSpec { name: "toggle-room-dock", category: Category::Map, context: Context::Map,
@@ -710,37 +705,39 @@ pub fn help_for_command(prefix: char, name: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// SQ-0360: `peel-layer` takes an optional direction naming the seam to cut at.
+    /// SQ-0439: one verb carries the whole remainder — destination and optional seam alike —
+    /// because a layer name may contain spaces ("Dead End") and only the live layer list can
+    /// say where the name ends and a direction begins.
     #[test]
-    fn peel_layer_takes_an_optional_direction() {
+    fn move_region_passes_its_whole_argument_through() {
         use crate::input::Action;
-        use mapper::direction::Direction;
-        assert!(matches!(parse("peel-layer", '/'), SlashOutcome::Action(Action::PeelLayer(None))));
         assert!(matches!(
-            parse("peel-layer east", '/'),
-            SlashOutcome::Action(Action::PeelLayer(Some(Direction::E)))
+            parse("move-region new", '/'),
+            SlashOutcome::Action(Action::MoveRegion(ref s)) if s == "new"
         ));
-        // Whatever `parse_direction` accepts for a game command works here too — one vocabulary.
         assert!(matches!(
-            parse("peel-layer nw", '/'),
-            SlashOutcome::Action(Action::PeelLayer(Some(Direction::NW)))
+            parse("move-region new east", '/'),
+            SlashOutcome::Action(Action::MoveRegion(ref s)) if s == "new east"
         ));
-        assert!(matches!(parse("peel-layer sideways", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(
+            parse("move-region main", '/'),
+            SlashOutcome::Action(Action::MoveRegion(ref s)) if s == "main"
+        ));
+        assert!(matches!(
+            parse("move-region Dead End", '/'),
+            SlashOutcome::Action(Action::MoveRegion(ref s)) if s == "Dead End"
+        ));
+        // A destination is not optional here: bare, the two old verbs meant opposite things
+        // (peel to a new layer / fold into the parent), so silence would have to guess.
+        assert!(matches!(parse("move-region", '/'), SlashOutcome::Error(_)));
     }
 
-    /// SQ-0687: `merge-layer` takes an optional target-layer name; the whole remainder is the
-    /// name, since layer names may contain spaces.
+    /// The retired verbs are gone outright — pre-release, so no aliases (SQ-0439).
     #[test]
-    fn merge_layer_takes_an_optional_target_name() {
-        assert!(matches!(parse("merge-layer", '/'), SlashOutcome::Action(Action::MergeLayer(None))));
-        assert!(matches!(
-            parse("merge-layer main", '/'),
-            SlashOutcome::Action(Action::MergeLayer(Some(ref s))) if s == "main"
-        ));
-        assert!(matches!(
-            parse("merge-layer Dead End", '/'),
-            SlashOutcome::Action(Action::MergeLayer(Some(ref s))) if s == "Dead End"
-        ));
+    fn peel_layer_and_merge_layer_are_retired() {
+        assert!(find_command("peel-layer").is_none());
+        assert!(find_command("merge-layer").is_none());
+        assert!(find_command("move-region").is_some());
     }
 
     #[test]
@@ -949,7 +946,9 @@ mod tests {
         // SQ-0796 added the 16-command Library group — the pre-game story
         // browser's own keys, which used to be hardcoded match arms outside the
         // registry entirely.
-        assert_eq!(COMMANDS.len(), 78, "registry must match the spec's Full command table");
+        // SQ-0439 retired `peel-layer` and `merge-layer` for the one verb they
+        // always were, `move-region` — two entries out, one in.
+        assert_eq!(COMMANDS.len(), 77, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of

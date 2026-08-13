@@ -154,8 +154,8 @@ mod tests {
         assert_eq!(n.history(), &["Saved as: foo".to_string()]);
         assert_eq!(n.latest_text(), Some("Saved as: foo"));
         // Text without brackets is left untouched.
-        n.push("peel-layer: no room selected");
-        assert_eq!(n.latest_text(), Some("peel-layer: no room selected"));
+        n.push("move-region: no room selected");
+        assert_eq!(n.latest_text(), Some("move-region: no room selected"));
     }
 
     #[test]
