@@ -29,6 +29,7 @@ use zvm::memory::Memory;
 
 mod screen;
 mod auxiliary; // "aux" is a reserved filename on Windows — module renamed accordingly
+mod media;
 
 // ── sound ──────────────────────────────────────────────────────────────────────
 
@@ -411,6 +412,52 @@ fn extract_story(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     }
 }
 
+// ── disk images ───────────────────────────────────────────────────────────────
+
+/// Mount an original release floppy and return the story to play (SQ-0834).
+///
+/// The menu goes to stdout and the questions are answered from stdin in the
+/// terminal's own cooked line editing — this runs before raw mode is entered,
+/// so there is nothing to hand back. Anything that leaves no story to open is
+/// fatal and says why: an unmountable image, a disk with no story on it, a
+/// `--story` that matches nothing, or a choice nobody is there to make.
+fn mount_and_pick(raw: Vec<u8>, stdin_is_tty: bool, want: Option<&str>) -> Vec<u8> {
+    let die = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1);
+    };
+    let mut cands = match media::story_candidates(raw) {
+        Ok(c) => c,
+        Err(e) => die(e),
+    };
+    let chosen = media::choose(
+        &cands,
+        want,
+        stdin_is_tty,
+        |s| {
+            print!("{s}");
+            let _ = io::stdout().flush();
+        },
+        || {
+            let mut line = String::new();
+            match io::stdin().read_line(&mut line) {
+                Ok(0) | Err(_) => None,
+                Ok(_) => Some(line),
+            }
+        },
+    );
+    let chosen = match chosen {
+        Ok(i) => i,
+        Err(e) => die(e),
+    };
+    // Say which one opened whenever there was a choice to get wrong — including
+    // the scripted `--story` path, where nothing else on screen would show it.
+    if cands.len() > 1 {
+        println!("Opening {}) {}", chosen + 1, cands[chosen].label());
+    }
+    cands.swap_remove(chosen).bytes
+}
+
 // ── build_machine ─────────────────────────────────────────────────────────────
 
 fn build_machine(
@@ -477,6 +524,8 @@ fn build_machine(
 #[derive(Debug)]
 struct Args {
     story: Option<String>,
+    /// `--story <n|name>`: which story to take off a multi-story disk image.
+    story_pick: Option<String>,
     story_only: bool,
     show_status: bool,
     no_aux: bool,
@@ -508,6 +557,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::valued(&["--volume"]),
     cli_host::Opt::valued(&["--interpreter", "-I"]),
     cli_host::Opt::valued(&["--data-dir"]),
+    cli_host::Opt::valued(&["--story"]),
 ];
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -527,6 +577,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
     Ok(Args {
         story: m.first_positional().map(str::to_string),
+        story_pick: m.value("--story").map(str::to_string),
         story_only: m.has("--story-only"),
         show_status: m.has("--show-status"),
         no_aux: m.has("--no-aux"),
@@ -1030,9 +1081,10 @@ zvm-cli — DOS-style Z-machine player (no map)
 Usage: zvm-cli [OPTIONS] <story-file>
 
 Arguments:
-  <story-file>          Z-code story (.z3/.z5/.z8 …, or a .zblorb container)
-                        Graphical v6 stories are not supported — play those
-                        with babelmap.
+  <story-file>          Z-code story (.z3/.z5/.z8 …, or a .zblorb container),
+                        or an original Amiga release floppy (.adf), whose story
+                        is mounted straight off the disk. Graphical v6 stories
+                        are not supported — play those with babelmap.
 
 Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
@@ -1059,6 +1111,11 @@ Options:
                         undoing --screen-reader's quietening. Off there because
                         a v3 status line carries a move counter, so it changes —
                         and would be re-read — on every single turn.
+      --story <n|name>  Which story to take off a disk image that holds more
+                        than one: its menu number, or part of its name. A disk
+                        with a single story needs no flag; without one, and
+                        without a terminal to ask at, a multi-story disk lists
+                        what it found and stops rather than blocking.
       --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
       --no-more         Disable [MORE] paging on long output (alias: --no-page)
       --no-timed-input  Ignore timed-input interrupts
@@ -1086,12 +1143,34 @@ fn main() {
     };
     let story_path = std::path::PathBuf::from(&story_arg);
 
+    // One decision about what this terminal can take, published process-wide so
+    // the exit paths buried in the read helpers can reach it (SQ-0605).
+    // `--plain`/`--screen-reader`, or TERM=dumb, turns off both escape output
+    // and raw-mode line editing (SQ-0606). Settled before the story is read
+    // because mounting a disk image may have to ask the player a question, and
+    // whether there is anybody there to answer is exactly this decision.
+    let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
+    let stdout_is_tty = mode.rich();
+    let stdin_is_tty = mode.raw_input();
+    let both_tty = mode.both_tty();
+
     let story_bytes = match fs::read(&story_path) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("Error: cannot read '{}': {}", story_path.display(), e);
             std::process::exit(1);
         }
+    };
+
+    // An original release floppy (SQ-0834): mount it and take a story off it.
+    // A single-game disk opens straight away; a compilation asks which one.
+    // The question is `stdin_tty` — the device fact — not `stdin_is_tty`: a
+    // screen-reader run has a real terminal in front of it and should be asked,
+    // even though it wants no raw-mode line editing anywhere else.
+    let story_bytes = if media::looks_like_image(&story_bytes) {
+        mount_and_pick(story_bytes, mode.stdin_tty(), args.story_pick.as_deref())
+    } else {
+        story_bytes
     };
 
     // A .zblorb is a raw Blorb container; extract the embedded Z-code (reject
@@ -1109,15 +1188,6 @@ fn main() {
 
     let game_dir = cli_host::game_dir(&story_path, args.data_dir.as_deref());
     let aux_file = auxiliary::aux_path(&game_dir);
-
-    // One decision about what this terminal can take, published process-wide so
-    // the exit paths buried in the read helpers can reach it (SQ-0605).
-    // `--plain`/`--screen-reader`, or TERM=dumb, turns off both escape output
-    // and raw-mode line editing (SQ-0606).
-    let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
-    let stdout_is_tty = mode.rich();
-    let stdin_is_tty = mode.raw_input();
-    let both_tty = mode.both_tty();
 
     // Restores the terminal on every way out of `main`, including a panic. The
     // explicit `restore` calls below hand it the scroll-region teardown; this
@@ -1609,6 +1679,22 @@ mod arg_tests {
         assert!(!c.story_only && !c.no_aux);
     }
 
+    /// `--story` (which story off a disk image) and `--story-only` (suppress the
+    /// upper window) are different options that share a prefix; the scanner
+    /// matches whole arguments, so asking for one never turns on the other.
+    #[test]
+    fn picking_a_story_off_a_disk_is_not_story_only() {
+        let argv = ["zvm-cli", "--story", "2", "disk.adf"].map(String::from);
+        let a = parse_args(&argv).expect("valid args");
+        assert_eq!(a.story_pick.as_deref(), Some("2"));
+        assert_eq!(a.story.as_deref(), Some("disk.adf"));
+        assert!(!a.story_only);
+
+        let b = parse_args(&["zvm-cli".into(), "--story-only".into(), "disk.adf".into()])
+            .expect("valid args");
+        assert!(b.story_only && b.story_pick.is_none());
+    }
+
     /// SQ-0614. Every flag the binary accepts has to be listed in `parse_args`,
     /// even the ones whose value is read elsewhere, or a valid invocation would
     /// be rejected as unknown. This is the test that catches a flag added to
@@ -1625,7 +1711,7 @@ mod arg_tests {
         }
         // Value-taking flags: the value must be consumed, not read as the story.
         for (flag, value) in [("--volume", "50"), ("-I", "6"), ("--interpreter", "6"),
-                              ("--data-dir", "/tmp/x")] {
+                              ("--data-dir", "/tmp/x"), ("--story", "2")] {
             let a = parse_args(&["zvm-cli".into(), flag.into(), value.into(), "g".into()]).expect("valid args");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} {value} swallowed the story path");
         }
