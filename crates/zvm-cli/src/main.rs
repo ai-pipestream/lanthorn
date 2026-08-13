@@ -1083,8 +1083,10 @@ Usage: zvm-cli [OPTIONS] <story-file>
 Arguments:
   <story-file>          Z-code story (.z3/.z5/.z8 …, or a .zblorb container),
                         or an original Amiga release floppy (.adf), whose story
-                        is mounted straight off the disk. Graphical v6 stories
-                        are not supported — play those with babelmap.
+                        is mounted straight off the disk — and which also sets
+                        the interpreter number to the Amiga's 4 unless -I says
+                        otherwise. Graphical v6 stories are not supported — play
+                        those with babelmap.
 
 Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
@@ -1123,7 +1125,11 @@ Options:
                         (also honoured: NO_COLOR)
       --no-sound        Disable sound (bleeps + sampled audio)
       --volume <0-100>  Set the master volume
-  -I, --interpreter <n> Set the Z-machine interpreter number
+  -I, --interpreter <n> Set the Z-machine interpreter number (ZMSD 11.1.3:
+                        1 DECSystem-20, 2 Apple IIe, 3 Macintosh, 4 Amiga,
+                        5 Atari ST, 6 IBM PC, …). Overrides the medium: a story
+                        opened off a release floppy defaults to that machine's
+                        number, and this beats it.
       --data-dir <path> Base dir for saves/sidecars (default: beside the story)
   -V, --version         Print version and exit
   -h, --help            Print this help and exit
@@ -1161,6 +1167,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // What machine the medium says this is, read BEFORE the mount replaces the
+    // image bytes with the story's (SQ-0839). The mapping is `blorb`'s, shared
+    // with the TUI, so both front-ends default the same way off the same disk
+    // and neither can drift: an Amiga floppy means interpreter 4, an ordinary
+    // story file means nothing at all. `-I` still overrides it — see below.
+    let medium = blorb::medium::DiskImage::detect(&story_bytes);
 
     // An original release floppy (SQ-0834): mount it and take a story off it.
     // A single-game disk opens straight away; a compilation asks which one.
@@ -1217,7 +1230,12 @@ fn main() {
     // colours exactly as `--no-game-colours` does, and leaves the pinned status
     // line alone. Plain mode emits no escapes at all, so colour is moot there.
     let honor = args.honor_colours && !cli_host::no_color();
-    let interpreter = args.interpreter;
+    // The override ordering, and it is a contract (SQ-0839): a number named on
+    // the command line is the machine the player asked for and beats the
+    // medium's own answer, which in turn beats zvm's default rule (`None` here —
+    // Frotz's 6-for-v6, 1 otherwise). Same order the TUI's
+    // `InterpreterProfile::resolve` applies; only the default moves.
+    let interpreter = args.interpreter.or_else(|| medium.and_then(|m| m.interpreter_number()));
 
     let mut machine = match build_machine(
         story_bytes,

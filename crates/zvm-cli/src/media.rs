@@ -11,6 +11,7 @@
 //! nobody is watching.
 
 use blorb::adf::Adf;
+use blorb::medium::DiskImage;
 
 /// One story found on a mounted disk image.
 pub struct Candidate {
@@ -56,11 +57,14 @@ impl Candidate {
 
 /// Are these bytes a disk image this front-end can mount?
 ///
-/// Content, not extension — exactly as the TUI asks the question
-/// (`PictSource::resolve`, `InterpreterProfile::is_adf`), so an image with any
-/// name is recognised and a mis-named story file is not.
+/// Content, not extension — exactly as the TUI asks the question, and through
+/// the same shared recogniser (`blorb::medium`), so an image with any name is
+/// recognised and a mis-named story file is not. Narrower than
+/// [`blorb::medium::DiskImage::detect`] on purpose: the TUI mounts a Macintosh
+/// volume too, and until [`story_candidates`] grows an HFS arm this front-end
+/// must not claim an image it cannot open.
 pub fn looks_like_image(raw: &[u8]) -> bool {
-    Adf::looks_like_adf(raw)
+    DiskImage::detect(raw) == Some(DiskImage::Adf)
 }
 
 /// Mount `raw` and return every story on it, in disk order.

@@ -162,6 +162,17 @@ terminal that isn't there, `zvm-cli` lists the candidates and tells you to pass
 **`--story <n|name>`** — a menu number, or any part of a name that picks out one
 story.
 
+And the floppy now tells the CLI which *machine* it is, not merely which story.
+A disk format is evidence, and evidence that only reaches one front-end is half
+an answer: for a while the TUI took an `.adf` for an Amiga while `zvm-cli`
+mounted the same floppy and then ran it as an IBM PC. Both now ask the same
+question of the same code — `blorb::medium`, the one crate that recognises these
+filesystems and the only one both front-ends share — so
+`zvm-cli "Zork - The Undiscovered Underground.adf"` answers VERSION with
+*Interpreter 4* where the bare story file answers *Interpreter 1*. It is a
+**default**, never a verdict: `-I 6` still puts you on the IBM PC, off the
+Amiga floppy or anywhere else.
+
 ## Z-machine
 
 - **Standard Quetzal save/restore** — the game's own SAVE/RESTORE writes and reads
@@ -210,7 +221,9 @@ story.
   own OS-seeded hasher, not a crate.
 - **Interpreter number** — the story header's interpreter number (byte `0x1E`)
   defaults to **1 (DECSystem-20)**, following Frotz's rule (6 / IBM PC only for
-  v6). This byte is what unlocks colour on several Infocom games: Beyond Zork, for
+  v6) — unless you opened a release disk image, in which case the medium picks
+  the number instead (an `.adf` is an Amiga's 4), in every front-end alike.
+  This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
   key, `babelmap --interpreter-number N`, or `zvm-cli -I N` / `--interpreter N` —
@@ -247,7 +260,9 @@ story.
   that format has no `Reso` chunk to declare it), a dark grey page and white ink
   reported as the interpreter's defaults, and the palette Infocom's own Amiga
   interpreter loaded — a slightly darker green and blue than the standard's, a
-  warmer yellow, and its own three Version 6 greys.
+  warmer yellow, and its own three Version 6 greys. Whatever you name outright
+  still wins: a number set in config, `--interpreter-number`, or `-I` outranks
+  the medium every time, and only the *default* moves.
 
   **The Macintosh has no profile of its own yet**, and that is deliberate rather
   than an oversight. A Mac release floppy mounts, plays, and draws its own

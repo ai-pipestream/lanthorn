@@ -117,6 +117,26 @@ fn quitting_story(version: u8, release: u16, serial: &str) -> Vec<u8> {
     b
 }
 
+/// A story that prints header byte `$1E` — the interpreter number the host told
+/// it it is running on — between brackets, then quits (SQ-0839).
+///
+/// Hand-assembled at the initial PC, which for v1–v5 is a plain byte address
+/// rather than a routine: `print_char '['` (VAR:0x05), `loadb 0 $1E -> sp`
+/// (2OP:0x10, long form, both operands small constants), `print_num sp`
+/// (VAR:0x06, operand on the stack), `print_char ']'`, `quit`. The brackets are
+/// what make the assertion safe — a bare digit would match the score line.
+fn interpreter_reporting_story() -> Vec<u8> {
+    let mut b = quitting_story(3, 88, "840726");
+    b[0x40..0x4E].copy_from_slice(&[
+        0xE5, 0x7F, 0x5B, // print_char '['
+        0x10, 0x00, 0x1E, 0x00, // loadb 0 $1E -> sp
+        0xE6, 0xBF, 0x00, // print_num sp
+        0xE5, 0x7F, 0x5D, // print_char ']'
+        0xBA, // quit
+    ]);
+    b
+}
+
 /// Two stories on one disk, named and released differently so the menu has
 /// something to tell apart.
 fn two_story_floppy(name: &str) -> PathBuf {
@@ -195,6 +215,86 @@ fn story_name_picks_one_off_the_disk() {
     assert!(!out.status.success(), "a name that matches nothing cannot open a story");
     assert!(stderr_of(&out).contains("is named 'zork9'"), "{}", stderr_of(&out));
     let _ = std::fs::remove_file(&image);
+}
+
+// ── the medium picks the machine (SQ-0839) ────────────────────────────────────
+
+/// Write bytes to a temp file and return the path.
+fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("zvm-cli-{}-{name}", std::process::id()));
+    std::fs::write(&path, bytes).expect("temp file written");
+    path
+}
+
+/// The rule, and its override, on one disk: a story mounted off an Amiga floppy
+/// is told it is running on an Amiga — interpreter 4, ZMSD §11.1.3 — and `-I`
+/// still outranks the medium, because the number you name is the machine you
+/// asked for.
+///
+/// FALSIFICATION: drop the `.or_else(|| medium.and_then(…))` in `main.rs` and
+/// the first assertion fails with the reported symptom — `[1]`, the IBM PC
+/// default, on a disk that is not one.
+#[test]
+fn a_story_off_an_amiga_floppy_is_told_it_is_an_amiga() {
+    let mut f = Floppy::new();
+    f.add_file("Story.data", &interpreter_reporting_story());
+    let image = f.write("machine.adf");
+
+    let text = stdout_of(&run(&image, &[], ""));
+    assert!(text.contains("[4]"), "the medium defaults header $1E to the Amiga's 4:\n{text}");
+
+    // The contract: an explicit number beats the medium, in both directions.
+    let text = stdout_of(&run(&image, &["-I", "6"], ""));
+    assert!(text.contains("[6]"), "-I 6 outranks the Amiga floppy it was opened from:\n{text}");
+    let text = stdout_of(&run(&image, &["--interpreter", "3"], ""));
+    assert!(text.contains("[3]"), "--interpreter is the same flag, same rank:\n{text}");
+
+    let _ = std::fs::remove_file(&image);
+}
+
+/// …and the blast radius is exactly zero for everything that is not a medium.
+/// An ordinary story file keeps zvm's own rule (Frotz's: 1 below Version 6), so
+/// this feature cannot move a single story anybody already plays.
+#[test]
+fn an_ordinary_story_file_keeps_the_default_interpreter() {
+    let story = write_temp("plain.z3", &interpreter_reporting_story());
+    let text = stdout_of(&run(&story, &[], ""));
+    assert!(text.contains("[1]"), "no medium, no opinion — zvm's own rule stands:\n{text}");
+    let text = stdout_of(&run(&story, &["-I", "4"], ""));
+    assert!(text.contains("[4]"), "and asking for a machine still works without one:\n{text}");
+    let _ = std::fs::remove_file(&story);
+}
+
+/// The real-media proof, and the one that matters: a genuine Infocom release
+/// floppy, driven as a real game, answering VERSION in its own words.
+///
+/// *Zork: The Undiscovered Underground* (release 16 / serial 970828) is
+/// Inform-compiled, and the Inform library's banner prints header `$1E` outright
+/// — so the game itself says which machine it was told about. The app-side
+/// suite (`real_media_releases.rs`) pins the same line off the same floppy; this
+/// is the CLI reaching the identical conclusion, which is the whole point of
+/// SQ-0839.
+///
+/// FALSIFICATION: with the `main.rs` default reverted this reads
+/// `Interpreter 1 Version A`, which is the bug as reported — an Amiga floppy
+/// mounted and then run as an IBM PC.
+#[test]
+fn a_real_release_floppy_tells_the_game_which_machine_it_is() {
+    let Some(image) = story_path("Zork - The Undiscovered Underground.adf") else { return };
+
+    let text = stdout_of(&run(&image, &["--no-more"], "version\nquit\ny\n"));
+    assert!(
+        text.contains("Release 16 / Serial number 970828"),
+        "this is the build the floppy carries:\n{text}"
+    );
+    assert!(
+        text.contains("Interpreter 4 "),
+        "the game names the Amiga it was told it is running on:\n{text}"
+    );
+
+    // And the override, on the same real media.
+    let text = stdout_of(&run(&image, &["--no-more", "-I", "6"], "version\nquit\ny\n"));
+    assert!(text.contains("Interpreter 6 "), "-I outranks the floppy:\n{text}");
 }
 
 /// A disk with no story on it — an AmigaDOS boot disk, say — says so, rather
