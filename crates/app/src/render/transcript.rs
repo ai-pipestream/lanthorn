@@ -415,6 +415,44 @@ fn shift_runs(runs: Vec<StyleRun>, pad: u16) -> Vec<StyleRun> {
         .collect()
 }
 
+/// The style run for the margin a left-margin float reserves — the `pad` leading
+/// spaces that push a row's prose out past the picture (SQ-0827).
+///
+/// Those spaces carry no run of their own (`shift_runs` moves the line's runs
+/// right past them), so they drew in the row's BASE style while the prose beside
+/// them drew on whatever background its own run named. Wherever the two differ,
+/// the reserved margin reads as a stripe of a different colour down the picture's
+/// flank — reported on Zork Zero under the Amiga profile, where §8.3's machine
+/// pair is the base (dark grey) and the game's window-0 page is the prose's
+/// (light grey). Give the margin the ground the prose beside it sits on and the
+/// stripe is gone.
+///
+/// Colours only: the returned run copies the prose run's BACKGROUND and nothing
+/// else — no bold/reverse bits (a reversed run would paint the margin in ink),
+/// no hyperlink (the margin is not part of the link's glyphs), no foreground
+/// (the margin is blank). A prose run that names no background (`bg == 0`)
+/// yields `None`, so the margin keeps inheriting the base exactly as before —
+/// which is every frame off that one machine, and every frame with the game's
+/// colours declined, since `draw_str_runs` drops a run's game colour there.
+fn margin_ground_run(runs: &[StyleRun], pad: u16) -> Option<StyleRun> {
+    if pad == 0 {
+        return None;
+    }
+    let p = pad as usize;
+    // The run covering the FIRST prose char (the one the margin abuts), else the
+    // row's first run — the ground of the text on this row either way.
+    let prose = runs.iter().find(|r| r.start <= p && p < r.end).or_else(|| runs.first())?;
+    (prose.bg != 0).then_some(StyleRun {
+        start: 0,
+        end: p,
+        bits: 0,
+        fg: 0,
+        bg: prose.bg,
+        link: 0,
+        glk_style: 0,
+    })
+}
+
 /// Wrap a Story/Input logical `line` into display rows honouring its Glk paragraph
 /// layout `pf` (SQ-0330). Returns one `(text, start, end, pad)` per wrapped row:
 /// `text` is the padded row (leading spaces already prepended), `[start, end)` are
@@ -677,13 +715,20 @@ pub(crate) fn wrap_lines_kinded_indexed(
                         (0, None)
                     };
                     let padded = if pad == 0 { text } else { format!("{}{}", " ".repeat(pad as usize), text) };
+                    // Shift the row's runs right by the leading padding so
+                    // selection/copy/search coordinates match the drawn text…
+                    let mut runs = shift_runs(rebase_runs(line_runs, start, end), pad);
+                    // …and give the margin those spaces occupy the prose's own
+                    // ground, so the reserved columns are the page the text sits
+                    // on rather than the row's base style (SQ-0827).
+                    if let Some(m) = margin_ground_run(&runs, pad) {
+                        runs.insert(0, m);
+                    }
                     out.push(WrappedRow {
                         text: padded,
                         kind,
                         style,
-                        // Shift the row's runs right by the leading padding so
-                        // selection/copy/search coordinates match the drawn text.
-                        runs: shift_runs(rebase_runs(line_runs, start, end), pad),
+                        runs,
                         band: None,
                         float: float_band,
                     });
@@ -3496,6 +3541,62 @@ mod tests {
         // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
         assert!(out[0].runs.is_empty());
         assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
+    }
+
+    /// SQ-0827: the margin a left float reserves takes the prose's BACKGROUND and
+    /// nothing else, and only when the prose names one.
+    #[test]
+    fn margin_ground_run_copies_only_the_proses_background() {
+        let bg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(9));
+        // A reversed, bold, linked run beside the margin: only its bg travels.
+        let runs = vec![StyleRun { start: 4, end: 9, bits: 0x03, fg: 7, bg, link: 42, glk_style: 3 }];
+        assert_eq!(
+            margin_ground_run(&runs, 4),
+            Some(StyleRun { start: 0, end: 4, bits: 0, fg: 0, bg, link: 0, glk_style: 0 })
+        );
+        // Prose on the inherited background: nothing to copy, so the margin keeps
+        // inheriting too — every non-Amiga frame takes this arm.
+        let plain = vec![StyleRun { start: 4, end: 9, bits: 0, fg: 0, bg: 0, link: 0, glk_style: 0 }];
+        assert_eq!(margin_ground_run(&plain, 4), None);
+        // No margin, or no runs at all: nothing to do.
+        assert_eq!(margin_ground_run(&runs, 0), None);
+        assert_eq!(margin_ground_run(&[], 4), None);
+        // A run that starts PAST the margin (the row's prose begins mid-run) is
+        // still the ground the margin abuts, via the `first()` fallback.
+        let later = vec![StyleRun { start: 6, end: 9, bits: 0, fg: 0, bg, link: 0, glk_style: 0 }];
+        assert_eq!(margin_ground_run(&later, 4).map(|r| (r.start, r.end, r.bg)), Some((0, 4, bg)));
+    }
+
+    /// …and the wrap really does hand the margin that run, ahead of the prose's
+    /// own (SQ-0827). A `MarginLeft` picture 2 cells wide with a 4-cell margin:
+    /// the row's text is padded by 4, its own run shifts to 4.., and a new run
+    /// covers 0..4 carrying the prose's page.
+    #[test]
+    fn wrap_lines_kinded_grounds_a_floats_reserved_margin() {
+        let bg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(9));
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(2, 2)),
+            align: crate::inline_image::ImageAlign::MarginLeft,
+            scaled: None,
+            margin_px: Some(4),
+            source: crate::inline_image::ImageSource::Story,
+        };
+        let lines = vec![String::new(), "AAAA".to_string()];
+        let kinds = vec![TranscriptKind::Story; 2];
+        let styles = vec![Style::default(); 2];
+        let runs = vec![vec![], vec![StyleRun { start: 0, end: 4, bits: 0, fg: 0, bg, link: 0, glk_style: 0 }]];
+        let images = vec![Some(img), None];
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &images, (1, 1), true, true, 20);
+        let row = out.iter().find(|r| r.text.ends_with("AAAA")).expect("prose flows beside the float");
+        assert_eq!(row.text, "    AAAA", "the float reserves 4 columns of leading pad");
+        assert_eq!(
+            row.runs,
+            vec![
+                StyleRun { start: 0, end: 4, bits: 0, fg: 0, bg, link: 0, glk_style: 0 },
+                StyleRun { start: 4, end: 8, bits: 0, fg: 0, bg, link: 0, glk_style: 0 },
+            ],
+            "the reserved margin carries the prose's own ground"
+        );
     }
 
     // ── SQ-0538 / ZMSD §7.2.1: buffer_mode off ⇒ char-break, never word-wrap ──

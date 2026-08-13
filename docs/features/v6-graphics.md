@@ -968,6 +968,22 @@ converted Blorb records that same placeholder as zero-sized, so the same story
 lands exactly on the cursor there and two pixels off it here. The reserved margin
 is the same claim either way.
 
+**And the reserved margin is page, not chrome.** The columns a float holds back
+are drawn as leading spaces on every row of prose beside the picture, and those
+spaces used to inherit the transcript's base style while the prose an inch to
+their right sat on the background its own text run named. Nothing showed while
+the two were the same colour — which is every machine but one. Under the Amiga
+interpreter the base is the machine's screen pair (§8.3, and the same pair the
+pixel ring around the viewport is drawn in), whose page is dark grey, while Zork
+Zero's window 0 declares a light grey page of its own; the difference turned up
+as a dark stripe down the right-hand edge of every drop-cap and every room icon.
+The margin now takes the ground the prose beside it sits on — its background and
+nothing else, no bold, no reverse, no hyperlink — so the picture, its gutter and
+the paragraph read as one sheet of paper. A paragraph that names no background of
+its own copies nothing and inherits exactly as before, which is why the IBM PC
+profile and both `honor_game_colours` settings render byte-for-byte what they
+always did.
+
 There is a second question, because clearing the screen also puts the cursor
 back at its top-left corner: **is there any room left beside the picture?** A
 float, by definition, has prose flowing next to it. A picture that spans window
