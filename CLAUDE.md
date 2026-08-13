@@ -30,10 +30,12 @@ above, rather than by `--test`.
 **Full test gate** (run before any commit):
 
 ```sh
-cargo nextest run -p blorb -p zvm -p gvm -p scott -p app 2>&1 | grep -acE "^error(\[|:)| [1-9][0-9]* failed"
+cargo nextest run --workspace 2>&1 | grep -acE "^error(\[|:)| [1-9][0-9]* failed"
 ```
 
 This must **print 0**. Note: grep exits 1 when it finds zero matches — that exit code IS the pass, so never chain this with `&&` or treat a nonzero exit as failure. (`-a` because a panicking test can emit a NUL byte, after which grep treats the stream as binary and reports nothing.)
+
+`--workspace`, not a list of `-p` flags. The gate named five crates for months — `blorb`, `zvm`, `gvm`, `scott`, `app` — and every crate outside that list was invisible to it: 4,426 tests against the workspace's 4,965, with the 539-test gap being `mapper` (268), `audio` and the CLI crates. A mapper regression could not fail the gate at all. SQ-0826 found this by removing eleven tests and watching the count drop by one. Naming crates means the gate silently stops covering each new one; `--workspace` cannot go stale, and costs ~30s more.
 
 Cross-check completeness against nextest's own summary rather than by counting lines: `Starting N tests across M binaries` at the top must be followed by `Summary [...] N tests run: N passed`, with the **same N**. A binary that dies mid-run fails the run outright instead of disappearing. That still catches a binary that *died*, not one that was never *enumerated* — a new suite under `crates/app/tests/suites/` that no group binary names is never built, and every count is self-consistent because cargo never saw it. When you add a test file, confirm its name appears in the run (`cargo nextest list | grep <name>`) or just re-run the gate.
 
