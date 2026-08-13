@@ -2896,8 +2896,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             continue 'event_loop;
                         }
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            // The wheel scrolls the candidate list and keeps the
+                            // cursor inside it, like every other list (SQ-0831);
+                            // `PaletteNav` stays the keyboard's cursor move.
                             if let Some(d) = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert) {
-                                apply_action(Action::PaletteNav(d as i32), &mut state, &mut mapper);
+                                apply_action(Action::ListWheel(d as i32), &mut state, &mut mapper);
                             }
                             continue 'event_loop;
                         }

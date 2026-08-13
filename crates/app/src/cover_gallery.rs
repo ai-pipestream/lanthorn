@@ -62,6 +62,43 @@ pub fn move_index(selected: usize, cols: usize, total: usize, dx: isize, dy: isi
     (selected as isize + delta).clamp(0, total as isize - 1) as usize
 }
 
+/// Scroll the grid by `dy` tile ROWS — one mouse-wheel notch — returning the
+/// new `(first_row, selected)`. The grid's answer to `ListScroll::scroll_by`
+/// (SQ-0831): the wheel moves the WINDOW and the selection is clamped into
+/// it, keeping its column, so the cursor rides the
+/// top or bottom row of the visible grid instead of being dragged along or
+/// scrolled off it. `first_row` stops at `total_rows - vis_rows` (never past
+/// the end), and a grid that fits entirely has nothing to scroll — the notch
+/// is then a no-op, cursor included.
+pub fn wheel_scroll(
+    first_row: usize,
+    selected: usize,
+    cols: usize,
+    vis_rows: usize,
+    total: usize,
+    dy: isize,
+) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    let cols = cols.max(1);
+    let vis_rows = vis_rows.max(1);
+    let max_first = total.div_ceil(cols).saturating_sub(vis_rows);
+    if max_first == 0 {
+        return (0, selected.min(total - 1));
+    }
+    let new_first = (first_row as isize + dy).clamp(0, max_first as isize) as usize;
+    let col = selected % cols;
+    let sel = if selected < new_first * cols {
+        (new_first * cols + col).min(total - 1)
+    } else if selected >= (new_first + vis_rows) * cols {
+        ((new_first + vis_rows - 1) * cols + col).min(total - 1)
+    } else {
+        selected.min(total - 1)
+    };
+    (new_first, sel)
+}
+
 /// Screen rect of the tile at grid column `col` and *visible* row `vis_row`
 /// (0-based within the scrolled window), placed inside `grid` (the region below
 /// the header and above the footer). The rect is the full tile box (cover band
@@ -132,6 +169,71 @@ mod tests {
     #[test]
     fn move_index_empty_list_is_zero() {
         assert_eq!(move_index(0, 4, 0, 1, 0), 0);
+    }
+
+    // ── `wheel_scroll` (SQ-0831): one notch = one grid row, cursor clamped
+    // into the window. ───────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_scrolls_a_grid_row_and_pins_the_cursor_to_the_window() {
+        let (cols, vis, total) = (4usize, 3usize, 40usize); // 10 rows, 3 visible
+        // Cursor on row 0, window at rows 0..3: one notch down moves the window
+        // and the cursor stays put (still visible).
+        assert_eq!(wheel_scroll(0, 1, cols, vis, total, 1), (1, 5), "row 0 left the window → same column, row 1");
+        assert_eq!(wheel_scroll(0, 5, cols, vis, total, 1), (1, 5), "row 1 is still on screen: cursor untouched");
+        // Scrolling up pins the cursor to the window's BOTTOM row, same column.
+        assert_eq!(wheel_scroll(4, 18, cols, vis, total, -1), (3, 18), "still visible in rows 3..6");
+        assert_eq!(wheel_scroll(4, 22, cols, vis, total, -1), (3, 22), "row 5 = window's last row");
+        assert_eq!(wheel_scroll(5, 22, cols, vis, total, -2), (3, 22));
+        assert_eq!(wheel_scroll(6, 26, cols, vis, total, -3), (3, 22), "row 6 fell below → row 5, column 2");
+    }
+
+    #[test]
+    fn wheel_stops_at_the_last_full_window_at_both_ends() {
+        let (cols, vis, total) = (4usize, 3usize, 40usize); // 10 rows of 4
+        // 10 rows, 3 visible → the last window starts at row 7, never row 9.
+        let (f, s) = wheel_scroll(0, 0, cols, vis, total, 100);
+        assert_eq!(f, 7, "clamped against total_rows - vis_rows");
+        assert_eq!(s, 28, "cursor pinned to the top row of that window");
+        let (f, s) = wheel_scroll(7, 28, cols, vis, total, -100);
+        assert_eq!((f, s), (0, 8), "…and to the bottom row at the other end");
+    }
+
+    #[test]
+    fn wheel_is_a_no_op_when_the_whole_grid_fits() {
+        let (cols, vis, total) = (4usize, 3usize, 6usize); // 2 rows, 3 visible
+        for d in [1, -1, 9, -9] {
+            assert_eq!(wheel_scroll(0, 5, cols, vis, total, d), (0, 5), "nothing to scroll, cursor untouched");
+        }
+        assert_eq!(wheel_scroll(0, 0, cols, vis, 0, 1), (0, 0), "empty gallery");
+    }
+
+    /// A partial last row: the clamp must land on a real tile, never past the end.
+    #[test]
+    fn wheel_clamps_the_cursor_onto_an_existing_tile() {
+        let (cols, vis, total) = (4usize, 2usize, 10usize); // rows 0-3,4-7,8-9
+        let (f, s) = wheel_scroll(0, 3, cols, vis, total, 5);
+        assert_eq!(f, 1, "3 rows, 2 visible → last window starts at row 1");
+        assert_eq!(s, 7, "column 3 of row 1 (row 2 has no column 3)");
+        let (f, s) = wheel_scroll(1, 4, cols, vis, total, 1);
+        assert_eq!((f, s), (1, 4), "already the last window; cursor already visible");
+    }
+
+    /// The renderer runs `scroll_to` on every frame to keep the selection on
+    /// screen; a wheel scroll would be undone on the spot if it left the cursor
+    /// outside the window. It never does — that is exactly what the clamp is
+    /// for — so the two compose, and this pins it.
+    #[test]
+    fn a_wheel_scroll_survives_the_renderers_scroll_to() {
+        let (cols, vis, total) = (4usize, 3usize, 40usize);
+        let (mut first, mut sel) = (0usize, 0usize);
+        for _ in 0..5 {
+            let (f, s) = wheel_scroll(first, sel, cols, vis, total, 1);
+            first = f;
+            sel = s;
+            assert_eq!(scroll_to(sel, cols, vis, first), first, "the frame keeps the scrolled window");
+        }
+        assert_eq!((first, sel), (5, 20));
     }
 
     #[test]
