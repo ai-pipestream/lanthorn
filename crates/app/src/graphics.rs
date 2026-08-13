@@ -116,13 +116,25 @@ impl Canvas {
     /// larger is clipped by `overlay` anyway, and clamping bounds the
     /// allocation against a malicious/buggy game requesting e.g. a
     /// 0x40000000 x 0x40000000 image.
+    ///
+    /// The resample is [`crate::render::graphics::resize_directional`] (SQ-0829),
+    /// not a fixed filter. A game names both axes independently here, so this one
+    /// call can grow one and shrink the other, and it used to run Triangle at every
+    /// size: a Glulx title card blown up 3× came back blurred — the exact opposite
+    /// of the "crisp integer upscale" pixel art is drawn at — while a cut-out card
+    /// (fmvpoker's deck is stencilled on colour 1) bled its transparent
+    /// `(0, 0, 0)` into every edge it was shrunk past.
     pub fn draw_image(&mut self, src: &DynamicImage, x: i32, y: i32, scale: Option<(u32, u32)>) {
         let scaled;
         let view: &DynamicImage = match scale {
             Some((sw, sh)) if sw > 0 && sh > 0 => {
                 let sw = sw.min(self.img.width());
                 let sh = sh.min(self.img.height());
-                scaled = src.resize_exact(sw, sh, image::imageops::FilterType::Triangle);
+                scaled = DynamicImage::ImageRgba8(crate::render::graphics::resize_directional(
+                    &src.to_rgba8(),
+                    sw,
+                    sh,
+                ));
                 &scaled
             }
             _ => src,
@@ -984,12 +996,15 @@ fn native_image(
 ///
 /// # Why here and not in the renderer
 ///
-/// Because every unit-space→pane scale in the v6 path is
-/// `FilterType::Nearest`, deliberately: crisp DOS pixels are the house style. A
-/// nearest resample never blends. Below 640 px it drops columns (which *aliases*
-/// the dither — sometimes to solid red, sometimes to solid brown, banding either
-/// way) and above 640 it replicates them, so what the player saw was a function
-/// of how wide their terminal happened to be: measured horizontal speckle on
+/// Because the unit-space→pane scale MAGNIFIES at every pane worth playing on, and
+/// magnification is `FilterType::Nearest`, deliberately: crisp DOS pixels are the
+/// house style, and a nearest resample never blends. Above 640 px it replicates the
+/// columns, so the dither arrives at full contrast however wide the pane is; below
+/// 640 the resampler now takes the area arm (SQ-0824,
+/// [`resize_directional`](crate::render::graphics::resize_directional)) and would
+/// fuse the pair itself — but that was never a reason to leave the artwork alone,
+/// because it would make the fused colour a function
+/// of how wide the player's terminal happens to be. Measured horizontal speckle on
 /// Zork Zero's EGA border ran 22.3 / 40.3 / 49.1 / 39.2 / 24.4 at pane widths of
 /// 320 / 480 / 640 / 800 / 1280, against 4.3 for the same frame in MCGA. Fusing
 /// at the archive boundary instead makes the answer a property of the artwork.

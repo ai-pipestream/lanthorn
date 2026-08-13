@@ -506,6 +506,17 @@ which filter it went through.
 Nothing changes at or above native size. A magnifying resample is still exact pixel
 replication, and the corpus tests pin it that way.
 
+The rule outgrew v6. It arrived here because Journey's canyon needed it, but nothing
+about "filter by the direction the axis moves" is Z-machine-shaped, and every other
+place babelmap scaled a picture had quietly picked its own answer: Glulx's
+`glk_image_draw_scaled` smoothed art it was *enlarging*, and cover art, gallery
+tiles, the resource preview and the non-Kitty graphics-window blit all deferred to
+the image crate's default filter, which is nearest — a decimation, at exactly the
+several-fold reductions a jacket scan into an info panel goes through. They now all
+call the same resampler (`resize_directional`, and `fit_for_protocol` for the ones
+that fit into a cell box), so the answer to "what happens to this picture" is one
+answer and not six.
+
 ### The seam that came with it
 
 An area filter averages neighbours, and it will happily average a pixel that is not

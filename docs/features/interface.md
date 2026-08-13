@@ -588,3 +588,17 @@ for the one in use — and the launch-options dialog's warnings carry
   right in the flow of text — same protocol ladder, same fallback — and scroll
   along with the surrounding text. Themeable via the `inline_image` style
   selector.
+- **One rule for scaling every picture.** Cover art, gallery tiles, the resource
+  preview, in-game Glulx graphics and inline transcript pictures all go through
+  the same resampler, and it picks its filter by the direction the picture is
+  *moving* rather than by taste. Growing replicates whole pixels, so a 320×200
+  title card blown up to fill a pane arrives with the palette it left with — the
+  "crisp, not blurry" that pixel art is famous for. Shrinking averages the area
+  each destination pixel covers, so a jacket scan reduced sevenfold into the info
+  panel keeps all seven rows instead of one, and a dithered shadow fuses into the
+  colour it was always standing in for instead of breaking into speckle. Pictures
+  with cut-out edges — Zork Zero's drop caps and room icons, a Glulx card
+  stencilled out of its background — are averaged on *associated* colour, so a
+  transparent neighbour lends its coverage and not the invisible black behind it,
+  and no dark hairline creeps around the cut. Each of these surfaces used to pick
+  its own filter, and covers in particular were shrunk by throwing rows away.

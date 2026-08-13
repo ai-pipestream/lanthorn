@@ -2648,7 +2648,14 @@ fn draw_resource_preview(
                 let target = ratatui::layout::Size::new(content.width, content.height);
                 let built = match pv.zoom {
                     PreviewZoom::Fit => {
-                        picker.new_protocol(img.clone(), target, ratatui_image::Resize::Fit(None))
+                        // The fitted view is a reduction — a blorb Pict is usually
+                        // larger than the modal — so it needs the area filter, and
+                        // a cut-out picture needs its alpha associated (SQ-0829).
+                        // The zoom arm below is already right by construction:
+                        // an integer magnification is what Nearest is FOR.
+                        let (fitted, size) =
+                            app::render::graphics::fit_for_protocol(picker, img, target, false);
+                        picker.new_protocol(fitted, size, ratatui_image::Resize::Fit(None))
                     }
                     PreviewZoom::Factor(n) => {
                         // Scale to an exact integer multiple of the native pixel
