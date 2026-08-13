@@ -1306,6 +1306,13 @@ fn render_node(
                         // those frames draw exactly the bands they drew before. The
                         // extension's bottom is the flank strip's own, since outside the
                         // Menu plan there is no bottom-anchored strip to reach down to.
+                        //
+                        // SQ-0830 took Journey back out of this arm: it holds the Menu plan
+                        // at every aspect now, so the 121x36 pane above is a menu plan and
+                        // its rules come from where they always came from at a tall one. The
+                        // generalisation stands on its own merits — a glyph border under any
+                        // other plan is still a character the game printed, and still must
+                        // not be shipped as a bitmap of itself.
                         let glyph_borders_only = !matches!(plan, BottomPlan::Menu);
                         let flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)> = strips
                             .iter()
@@ -1663,6 +1670,13 @@ fn render_node(
                             // MISSED at 115x31, 150x41 and 234x65 (letterbox). So fall back to
                             // the ring's own bottom-most text strip below the story viewport,
                             // which is the same strip by another name.
+                            //
+                            // SQ-0830 removed the case that motivated this: a game with a menu
+                            // strip now takes the `Menu` plan at any pane aspect, so those three
+                            // sizes are menu plans today and `menu_strips` carries the band. The
+                            // fallback stays because it is not about Journey — any plan can leave
+                            // a text strip below the viewport, and packing is how every one of
+                            // them is drawn.
                             let packed = |r: &Rect, runs: &[&crate::engine::PxText]| {
                                 let rows = runs.iter().map(|t| (t.y.max(1) - 1) / 16);
                                 let first = rows.clone().min()?;
@@ -4049,6 +4063,32 @@ pub fn story_window_is_a_canvas(
 /// (rule 4). Otherwise the below-story region is text-only (→ `Menu`) or empty
 /// (→ `Extend`). The art test is restricted to the STORY COLUMNS so full-height
 /// side borders (which flank, not floor, the story) never read as a bottom band.
+///
+/// SQ-0830: **`Menu` is decided before slack is, because a command menu is a fact
+/// about the FRAME and slack is a fact about the pane.** The `slack == 0` shortcut
+/// used to come first, so any pane whose vertical axis is the binding letterbox
+/// axis stopped recognising Journey's menu as a menu at all — and everything
+/// gated on `plan == Menu` went out together: no `menu_flank_panel` (so no panel
+/// fill sampled from the art's own edge, no vertical centring, no aspect-correct
+/// dest box), no exclusion from `tiled_flanks` (so the picture column fell through
+/// to the side-border TILER, which SQ-0819 established is exactly wrong for a
+/// picture seated in a panel), and `glyph_borders_only` flipped true. The user's
+/// own 166x44 is one such pane: the v6 area is 164x41 cells = 1312x738 device px
+/// at an 8x18 cell, s = min(1312/640, 738/400) = 1.845 exactly, slack 0.
+///
+/// Slack now gates only the RECLAIM, which is all it was ever about — and a Menu
+/// plan at zero slack degrades to "menu, no reclaim" for free rather than needing
+/// an arm of its own: the plan's `menu` scale is `off_y = slack`, and `Letterbox`'s
+/// centred scale is `off_y = slack / 2`, so at `slack == 0` both are the
+/// top-anchored scale and no band moves. Only the flank TREATMENT changes, which
+/// is the whole of the defect.
+///
+/// The hoist is safe against the arms below it because [`menu_strip_below_story`]
+/// carries their guard itself: it is false as soon as the story reaches within a
+/// native text row of the screen bottom, which is precisely when the enclosed-frame
+/// arm fires. Measured across the corpus, this moves Journey (both releases) and
+/// nothing else — Arthur reads no menu at any pane, and Shogun and Zork Zero are
+/// enclosed frames that never get as far as asking.
 fn hybrid_bottom_plan(
     story: &crate::engine::PositionedWindow,
     gfx: &image::RgbaImage,
@@ -4056,6 +4096,9 @@ fn hybrid_bottom_plan(
     native: (u16, u16),
     slack: u32,
 ) -> BottomPlan {
+    if menu_strip_below_story(story, gfx, chrome_runs, native) {
+        return BottomPlan::Menu;
+    }
     if slack == 0 {
         return BottomPlan::Letterbox;
     }
@@ -4093,11 +4136,9 @@ fn hybrid_bottom_plan(
         // full-height side art takes the `Frame` arm above.
         return BottomPlan::Extend;
     }
-    if menu_strip_below_story(story, gfx, chrome_runs, native) {
-        BottomPlan::Menu
-    } else {
-        BottomPlan::Extend
-    }
+    // SQ-0830: the `Menu` arm used to live here. It is now the first question the
+    // function asks, so what is left below the story is empty by elimination.
+    BottomPlan::Extend
 }
 
 /// Does a TEXT-ONLY strip of the game's own chrome sit below the story window?
@@ -4110,8 +4151,10 @@ fn hybrid_bottom_plan(
 /// window" is a property of the FRAME and both modes must read it the same way.
 ///
 /// False as soon as the story reaches (within one native text row of) the screen
-/// bottom — there is no strip below it to find — which is the guard
-/// [`hybrid_bottom_plan`] applies by returning before it gets here.
+/// bottom — there is no strip below it to find. That guard is the function's own,
+/// not the caller's, and since SQ-0830 that matters: [`hybrid_bottom_plan`] asks
+/// this FIRST, ahead of its enclosed-frame and zero-slack arms, so this test is
+/// what keeps Zork Zero's and Shogun's enclosed frames out of the `Menu` plan.
 fn menu_strip_below_story(
     story: &crate::engine::PositionedWindow,
     gfx: &image::RgbaImage,

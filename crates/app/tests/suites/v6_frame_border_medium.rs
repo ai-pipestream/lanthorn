@@ -67,16 +67,24 @@ type Quad = (u16, u16, u16, u16);
 /// of the 117x64 terminal the defect was captured at.
 const WIDTHS: [u16; 6] = [80, 96, 110, 115, 138, 150];
 
-/// SQ-0779: panes with NO letterbox slack, where the ring takes the `Letterbox` plan.
+/// SQ-0779: panes with NO letterbox slack.
 ///
 /// The reclaim plans all need vertical slack to reclaim; a pane whose rows are at or
-/// below the scaled native height has none, and `hybrid_bottom_plan` returns
-/// `Letterbox` before it looks at anything else. For a 640x400 native screen at an
-/// 8x18 cell that is `18·rows <= 5·cols` — an ASPECT threshold, not a width one, which
-/// is why the report's 121x36 terminal (a 119x33 pane) showed the defect while its
-/// 117x64 control did not. Two panes per width: one right at the boundary and one well
-/// inside it. Each case asserts the plan it actually got, so the sweep cannot quietly
-/// drift into the Menu regime the other cases here already cover.
+/// below the scaled native height has none. For a 640x400 native screen at an 8x18
+/// cell that is `18·rows <= 5·cols` — an ASPECT threshold, not a width one, which is
+/// why the report's 121x36 terminal (a 119x33 pane) showed the defect while its 117x64
+/// control did not. Two panes per width: one right at the boundary and one well inside
+/// it.
+///
+/// **SQ-0830 changed what plan these get, and not what they must look like.**
+/// `hybrid_bottom_plan` used to return `Letterbox` here before it looked at anything
+/// else, which is precisely the defect that quest fixed: a command menu is a fact
+/// about the FRAME and slack is a fact about the PANE, so the menu is recognised at
+/// every aspect now and slack gates only the reclaim. These panes are therefore `menu`
+/// plans with nothing to reclaim. The requirements below are unchanged — a border the
+/// game printed is a character on screen, and no artwork stands in its column — and
+/// each case still asserts the plan it actually got, so the sweep cannot quietly drift
+/// out of the regime it was written for.
 const SHORT_PANES: [(u16, u16); 10] =
     [(96, 26), (96, 20), (115, 31), (115, 24), (119, 33), (119, 28), (138, 38), (138, 30), (150, 41), (150, 32)];
 
@@ -414,6 +422,15 @@ fn journeys_frame_side_rules_are_the_characters_the_game_printed() {
 /// FALSIFY by restoring the `matches!(plan, BottomPlan::Menu)` gate on `flank_borders`
 /// in `screen.rs`: every case fails with `the picture's band (1, 1, 50, 22) stands in
 /// column 0, where the game printed its frame's rule "│"`.
+///
+/// SQ-0830 NOTE: that falsification no longer bites on **these** panes, because the
+/// quest removed the route by which Journey reached them without a Menu plan — they
+/// are menu plans now, so the gate it restores is satisfied and `flank_borders` is
+/// produced either way. What the case still asserts is the RULING, which was never
+/// about a plan: artwork does not stand in a column the game printed a rule in, and
+/// every one of those rules reaches the screen as that character. Under the Menu plan
+/// that is delivered by `menu_flank_panel`'s bounds (SQ-0747/0758) rather than by the
+/// `glyph_borders_only` trim, and this is what proves the two agree.
 #[test]
 fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
     let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
@@ -433,17 +450,37 @@ fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
                 let ctx = format!("{file} {profile:?} honor={honor} pane {w}x{h}");
                 assert_eq!(
                     state.v6_ring_plan.get(),
-                    "letterbox",
-                    "{ctx}: this sweep exists to cover the no-slack regime, and this pane is not in it"
+                    "menu",
+                    "{ctx}: this sweep exists to cover the no-slack regime, and since SQ-0830 a \
+                     frame with a command menu is a `menu` plan at every aspect — with nothing to \
+                     reclaim here, but with its flanks treated as the panels they are"
                 );
                 let vp = viewport_of(&state);
-                // Every side ART strip the ring actually DREW (a skipped one says so in
-                // its own label), and the picture is one of them.
-                let drawn: Vec<Quad> = records(&state, "strip:art")
-                    .into_iter()
-                    .filter(|(label, r)| label == "strip:art" && r.2 < w)
-                    .map(|(_, r)| r)
-                    .collect();
+                // Where the picture is actually PUT, which is not the same record under
+                // every plan (SQ-0830). Outside the Menu plan a flank strip IS its own
+                // placement, and `glyph_borders_only` trims the strip rect off the border
+                // columns — so `strip:art` is the span to test. Under the Menu plan the
+                // strip is the whole flank column, the panel fill floods it, and the ART
+                // goes to `menu_flank_panel`'s inset dest, recorded as `flank-art`; asking
+                // `strip:art` there is asking about the panel's ground rather than the
+                // picture standing on it, and the two rules bound the panel by
+                // construction (SQ-0747/0758). The sibling case above makes the same
+                // distinction for the same reason.
+                let menu_plan = state.v6_ring_plan.get() == "menu";
+                let drawn: Vec<Quad> = if menu_plan {
+                    records(&state, "flank-art").into_iter().map(|(_, r)| r).filter(|r| r.2 < w).collect()
+                } else {
+                    records(&state, "strip:art")
+                        .into_iter()
+                        .filter(|(label, r)| label == "strip:art" && r.2 < w)
+                        .map(|(_, r)| r)
+                        .collect()
+                };
+                assert!(
+                    !drawn.is_empty(),
+                    "{ctx}: Journey's picture column is a side flank, so the frame must place it \
+                     somewhere — an empty set here would pass the ruling below vacuously"
+                );
                 // THE RULING: artwork does not overlap a border the game draws.
                 for t in &rules {
                     let col = run_col(t, &model, area);
