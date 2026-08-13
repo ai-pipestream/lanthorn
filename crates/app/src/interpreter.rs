@@ -36,7 +36,11 @@
 //!    are structurally distinguishable — not from its extension, which a rename
 //!    can make a lie.
 //! 3. The medium: a story mounted out of an Amiga `.adf` release floppy is an
-//!    Amiga.
+//!    Amiga. The medium→machine mapping itself is [`blorb::medium`]'s, not this
+//!    module's, because `zvm-cli` has to reach the same conclusion off the same
+//!    bytes and does not depend on `app` (SQ-0839). A Macintosh disk is
+//!    recognised and deliberately implies nothing yet — see
+//!    [`blorb::medium::DiskImage::interpreter_number`].
 //! 4. [`InterpreterProfile::IbmPc`], for everything else.
 //!
 //! Step 2 cannot move the existing corpus, and that is worth stating because
@@ -106,8 +110,8 @@ impl InterpreterProfile {
         if let Some(flavour) = named_art {
             return Self::for_art_flavour(flavour);
         }
-        if Self::is_adf(story_path) {
-            return Self::Amiga;
+        if let Some(n) = Self::medium_interpreter_number(story_path) {
+            return Self::for_interpreter_number(n);
         }
         Self::IbmPc
     }
@@ -146,14 +150,19 @@ impl InterpreterProfile {
         if n == AMIGA_INTERPRETER_NUMBER { Self::Amiga } else { Self::IbmPc }
     }
 
-    /// Does `path` hold an Amiga `.adf` release floppy?
+    /// The interpreter number the medium at `path` defaults to, or `None` when
+    /// it is not release media (or answers no number of its own — a Macintosh
+    /// disk, see [`blorb::medium::DiskImage::interpreter_number`]).
     ///
-    /// Content, not extension: `Adf::looks_like_adf` checks the AmigaDOS boot
-    /// block, exactly as `PictSource::resolve` and `hints::read_story_file` do,
-    /// so a disk image with any name (or none) is recognised and a mis-named
-    /// ordinary story file is not.
-    fn is_adf(path: &Path) -> bool {
-        std::fs::read(path).map(|raw| blorb::adf::Adf::looks_like_adf(&raw)).unwrap_or(false)
+    /// Content, not extension: [`blorb::medium::DiskImage::detect`] reads the
+    /// filesystem, exactly as `PictSource::resolve` and `hints::read_story_file`
+    /// do, so a disk image with any name (or none) is recognised and a mis-named
+    /// ordinary story file is not. The MAPPING is `blorb`'s so that `zvm-cli`
+    /// reaches the same conclusion off the same bytes (SQ-0839) — this only
+    /// supplies the file.
+    fn medium_interpreter_number(path: &Path) -> Option<u8> {
+        let raw = std::fs::read(path).ok()?;
+        blorb::medium::DiskImage::detect(&raw)?.interpreter_number()
     }
 
     /// The interpreter number to advertise in header `$1E`, or `None` to leave
@@ -244,10 +253,10 @@ impl InterpreterProfile {
     }
 }
 
-/// Amiga, from the ZMSD §11.1.3 interpreter-number table (1 DECSystem-20,
-/// 2 Apple IIe, 3 Macintosh, **4 Amiga**, 5 Atari ST, 6 IBM PC, 7 Commodore 128,
-/// 8 Commodore 64, 9 Apple IIc, 10 Apple IIgs, 11 Tandy Color).
-pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
+/// Amiga, from the ZMSD §11.1.3 interpreter-number table. Defined by
+/// [`blorb::medium`] and re-exported here: it is the number the medium→machine
+/// mapping hands out, and `zvm-cli` hands out the same one (SQ-0839).
+pub use blorb::medium::AMIGA_INTERPRETER_NUMBER;
 
 /// The Amiga Version 6 standard window: 320×200 art, doubled onto the 640×400
 /// hi-res interlaced screen the games lay themselves out on. This is the same

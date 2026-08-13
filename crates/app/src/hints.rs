@@ -673,30 +673,13 @@ impl LoadedStory {
 
 /// Which release medium a story was mounted out of, when it was one at all.
 ///
-/// The variant is the mount's own answer — every one of them is decided by the
-/// image's own filesystem rather than by its filename, which is why a `.adf`
-/// under any name is recognised and a mis-named ordinary story file is not.
-/// Callers use it to NAME the container (the picker's TYPE column) and, for the
-/// Amiga, to imply the machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiskImage {
-    /// An Amiga AmigaDOS release floppy — conventionally `.adf` (SQ-0719).
-    Adf,
-    /// A Macintosh HFS volume, bare or inside a DiskCopy 4.2 wrapper —
-    /// conventionally `.image` (SQ-0837).
-    Hfs,
-}
-
-impl DiskImage {
-    /// The acronym the story list shows beside the format: `Z6 (ADF)`,
-    /// `Z6 (HFS)`.
-    pub fn label(self) -> &'static str {
-        match self {
-            DiskImage::Adf => "ADF",
-            DiskImage::Hfs => "HFS",
-        }
-    }
-}
+/// Re-exported rather than declared here (SQ-0839): the medium implies a machine
+/// implies an interpreter number, and `zvm-cli` needs that same conclusion
+/// without depending on `app`. `blorb` is where these filesystems are
+/// recognised and the only crate both front-ends share, so it owns the type and
+/// the mapping — see [`blorb::medium`]. Every existing `app::hints::DiskImage`
+/// spelling keeps working.
+pub use blorb::medium::DiskImage;
 
 /// Read a story file's executable bytes, transparently unwrapping a ZIP whose
 /// first `.z3/.z5/.z8` entry is the story, or a release disk image — Amiga or

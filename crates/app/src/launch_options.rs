@@ -447,13 +447,14 @@ pub fn derived_interpreter(
         let n = c.profile().interpreter_number().unwrap_or(if version == 6 { 6 } else { 1 });
         return Some((n, InterpreterSource::Artwork));
     }
-    // Only the Amiga has a profile of its own, so only Amiga media move the
-    // number. A Macintosh disk falls through to the default rule, which is
-    // exactly what `InterpreterProfile::resolve` does at boot — the dialog must
-    // report the machine that will actually run, not the one the medium came
-    // from (SQ-0837).
-    if disk_image == Some(crate::hints::DiskImage::Adf) {
-        return Some((crate::interpreter::AMIGA_INTERPRETER_NUMBER, InterpreterSource::DiskImage));
+    // The medium's own answer, asked of the one place that knows it
+    // (`blorb::medium`, SQ-0839) rather than restated here — a second copy of
+    // "an `.adf` means 4" is exactly what drifts. A Macintosh disk answers
+    // `None` and falls through to the default rule, which is what
+    // `InterpreterProfile::resolve` does at boot: the dialog must report the
+    // machine that will actually run, not the one the medium came from (SQ-0837).
+    if let Some(n) = disk_image.and_then(|d| d.interpreter_number()) {
+        return Some((n, InterpreterSource::DiskImage));
     }
     Some((if version == 6 { 6 } else { 1 }, InterpreterSource::Default))
 }

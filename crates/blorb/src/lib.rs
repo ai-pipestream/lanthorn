@@ -5,6 +5,7 @@ pub mod adf;
 pub mod bpal;
 pub mod hfs;
 pub mod infocom_pics;
+pub mod medium;
 
 /// Errors that can arise while parsing a Blorb container.
 #[derive(Debug, PartialEq, Eq)]

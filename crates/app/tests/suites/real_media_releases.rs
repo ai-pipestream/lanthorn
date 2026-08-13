@@ -541,6 +541,71 @@ fn a_game_that_names_its_release_names_the_one_the_medium_carries() {
     assert!(ran > 0 || !any_real_media_present(), "media are present but no game was asked");
 }
 
+/// …and the other half of the rule, on the same real floppy: an explicitly
+/// requested interpreter number BEATS the medium (SQ-0839).
+///
+/// The ordering is a contract, not an implementation detail — the medium only
+/// ever moves the DEFAULT — and it is worth proving where the game can be heard
+/// saying so rather than only at `resolve`. ZTUU's Inform banner prints header
+/// `$1E` outright, so asking for the IBM PC's 6 off an Amiga floppy is audible.
+/// `zvm-cli`'s `disk_image` suite pins the identical pair through the CLI.
+///
+/// FALSIFICATION: reorder `InterpreterProfile::resolve` to consult the medium
+/// before the explicit number and the game answers `Interpreter 4`, ignoring
+/// what was asked for.
+#[test]
+fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
+    const ZTUU: &str = "Zork - The Undiscovered Underground.adf";
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let m = MEDIA.iter().find(|m| m.file == ZTUU).expect("ZTUU is in MEDIA");
+    let Some(bytes) = story_bytes(m) else { return };
+    assert_is_the_pinned_release(m, &bytes);
+
+    // The medium says Amiga; the launch says IBM PC. The launch wins, and it
+    // brings its whole profile with it — that is what asking for a number means.
+    let path = stories_dir().join(m.file);
+    let profile = InterpreterProfile::resolve(&path, Some(6), None);
+    assert_eq!(profile, InterpreterProfile::IbmPc, "{}: explicit beats the medium", ctx(m));
+    zvm::screen::set_palette(profile.palette());
+
+    let mut s = GameSession::new_with_trace(
+        bytes,
+        true,
+        false,
+        // The IBM PC profile has no opinion, so the launch's own number is what
+        // reaches the header — exactly as `startup.rs` composes it.
+        profile.interpreter_number().or(Some(6)),
+        false,
+        Vec::new(),
+        profile.std_window(),
+        profile.default_colours(),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", ctx(m)));
+
+    let mut said = String::new();
+    for _ in 0..24 {
+        match s.pending_input() {
+            InputKind::Line => {
+                said = s.submit("version").transcript;
+                break;
+            }
+            InputKind::Char => {
+                let _ = s.submit_char(13);
+            }
+            InputKind::Event => {
+                let _ = s.submit("");
+            }
+        }
+    }
+    let flat = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("Interpreter 6 "),
+        "{}: asked for interpreter 6 off an Amiga floppy, and the game answered {flat:?}",
+        ctx(m)
+    );
+}
+
 /// …and the floppy build reaches the RENDERER, which is where its differently
 /// placed windows could be dropped on the floor. Nothing committed had ever
 /// rendered a frame produced by a disk image at all.
