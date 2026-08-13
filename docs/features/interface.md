@@ -19,13 +19,16 @@ inspecting the machine, and firing commands — without ever leaving the story.
 - **Mouse wheel** pans the map (hold Shift for horizontal, Ctrl to zoom) and
   scrolls every other scrollable surface too — the transcript and the lists
   inside modals (saves, file browser, gallery, config, command palette, the
-  IFDB search results, …). On a list the wheel scrolls *the list*, not the
+  IFDB search results, the command band's columns, …). On a list the wheel
+  scrolls *the list*, not the
   cursor: the highlight stays on the row you left it on and the rows slide
   under it, and only when the window would carry it off the screen does it
   come along, riding the top or bottom row. The keys work the other way round
   — `↑`/`↓` move the cursor and the list follows it — which is why a wheel is
   for browsing and an arrow is for choosing. A list that already fits its
-  window has nothing to scroll, and the wheel there does nothing at all.
+  window has nothing to scroll, and the wheel there does nothing at all — and
+  when that list is inside a dialog, the notch stops there rather than quietly
+  scrolling whatever is behind it.
 - **A scrollbar that gets out of the way** — every scrollable surface draws the
   same bar, and it is drawn as *colour*, not as a glyph: thumb and track are
   background fills, so a line of prose ending one column short of it has a clean
@@ -287,8 +290,11 @@ know which side you're on).
   its neighbour.
 
   It is a dock, not a modal: the story prompt stays live underneath, paste keeps
-  working, and graphical v6 keeps its artwork. Everything visible is clickable
-  and the wheel scrolls whichever column is under the pointer. While it is open
+  working, and graphical v6 keeps its artwork. Everything visible is clickable,
+  and the wheel scrolls whichever column is under the pointer — the column you
+  are looking at, not the one the band is pointing at, and its rows slide under
+  their highlight by the [same rule every other list follows](#map-navigation--inspection).
+  Neither the band's attention nor the other three columns move with it. While it is open
   it subsumes the inventory dock — the *carried* column IS your inventory —
   which returns when you close it.
 
@@ -472,7 +478,9 @@ story — the same list the info panel shows — plus a line reminding you that 
 archive under some other name is still reachable by naming it outright. Inside
 it, `↑`/`↓` move between choices,
 `Space` picks the one under the cursor or flips a checkbox, `Tab`/`Shift-Tab`
-move between the buttons, `Enter` plays and `Esc` backs out. Everything applies
+move between the buttons, `Enter` plays and `Esc` backs out. Its choices always
+fit the dialog, so a wheel notch over it has nothing to scroll — and it is eaten
+there rather than sliding the story list around behind the dialog. Everything applies
 to that launch alone unless you tick *Save as this game's default*, which writes
 your changes — and only your changes — to the game's own `config.toml`. See
 [choosing which artwork a game draws](v6-graphics.md#three-ways-to-say-it).

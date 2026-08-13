@@ -355,8 +355,10 @@ pub struct CommandBandHits {
 /// `layout::compute_pane_layout` from the slide fraction).
 ///
 /// Sets `*vp_out` to the ACTIVE column's visible list height so PageUp/PageDown
-/// page by the right amount. No-op when the band is closed or `area` is too
-/// small to show anything meaningful (mid-slide).
+/// page by the right amount, and publishes EVERY column's height into the
+/// band's own `col_viewport` for the wheel, which scrolls the column under the
+/// pointer rather than the current one (SQ-0832). No-op when the band is closed
+/// or `area` is too small to show anything meaningful (mid-slide).
 pub fn draw_command_band(
     state: &AppState,
     area: Rect,
@@ -367,6 +369,11 @@ pub fn draw_command_band(
     *hits = CommandBandHits::default();
     let Some(band) = &state.overlays.command_band else { return };
     hits.area = area;
+    // Each column republishes its own list height below; clear first so a
+    // column this frame does not draw (mid-slide, or the narrow fallback that
+    // shows only the current one) reads 0 rather than last frame's height, and
+    // a wheel notch over it finds nothing to scroll. (SQ-0832)
+    band.col_viewport.set([0; BAND_COLS]);
 
     if area.width < 8 || area.height == 0 {
         return;
@@ -887,6 +894,14 @@ fn draw_column(
     if is_current {
         *vp_out = list_h as usize;
     }
+    // …and the same height per column, for the wheel: it scrolls whichever
+    // column the pointer is over, which need not be the current one, and VERB's
+    // reclaimed header row makes that a genuinely different number. (SQ-0832)
+    let mut vps = band.col_viewport.get();
+    if let Some(slot) = vps.get_mut(col) {
+        *slot = list_h as usize;
+        band.col_viewport.set(vps);
+    }
     if list_h == 0 {
         return;
     }
@@ -1029,6 +1044,45 @@ mod tests {
         assert!(out.contains("iron door"), "here objects become pickable");
         assert!(out.contains("brass key"), "carried objects become pickable");
         assert!(hits.rows.iter().any(|(c, _, _)| *c == COL_HERE));
+    }
+
+    /// The wheel's viewport is a real per-column MEASUREMENT taken by this
+    /// draw (SQ-0832), so this drives the actual wheel action through an
+    /// actual frame instead of setting a height by hand. Drop the publish and
+    /// every column reads 0, at which point `ListScroll::scroll_by` — quite
+    /// correctly — declines to scroll a window whose size it does not know:
+    /// the band's wheel goes DEAD rather than scrolling, which is exactly the
+    /// silent failure this test exists to catch.
+    #[test]
+    fn the_draw_publishes_a_viewport_per_column_that_the_wheel_scrolls_in() {
+        let mut s = state_with_band();
+        {
+            let b = s.overlays.command_band.as_mut().unwrap();
+            b.pick_word("take");
+            b.here = (0..20).map(|i| format!("thing {i}")).collect();
+        }
+        let mut buf = Buffer::empty(BAND);
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+
+        let vps = s.overlays.command_band.as_ref().unwrap().col_viewport.get();
+        assert!(vps[COL_HERE] > 0, "a drawn column publishes its list height");
+        assert_eq!(
+            vps[COL_VERB],
+            vps[COL_HERE] + 1,
+            "VERB is a row taller, having reclaimed its header row as a list row — which is \
+             why one shared viewport could never have been right for all four columns"
+        );
+
+        // One notch over HERE scrolls THAT column's window by one row.
+        let mut mapper = ::mapper::mapper::Mapper::default();
+        crate::input::apply_action(
+            crate::input::Action::BandWheel(COL_HERE, 1),
+            &mut s,
+            &mut mapper,
+        );
+        let b = s.overlays.command_band.as_ref().unwrap();
+        assert_eq!(b.scroll[COL_HERE].target_offset(), 1, "the list scrolled a row");
+        assert_eq!(b.scroll[COL_HERE].selected, 1, "…and the highlight rides its top edge");
     }
 
     /// SQ-0667 (2026-08-05): the band no longer draws its own frame, title, or

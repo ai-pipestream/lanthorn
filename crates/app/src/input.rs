@@ -2805,15 +2805,23 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
         }
 
         Action::BandWheel(col, delta) => {
-            let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
             if let Some(b) = &mut state.overlays.command_band {
                 // The wheel scrolls the HOVERED column, which need not be the
                 // one the band is pointing at — so this must move a list
                 // without moving the band's own attention.
+                //
+                // …and it scrolls the LIST, clamping the highlight into the
+                // visible window, like every other selection list (SQ-0831).
+                // The viewport is that column's own measured list height,
+                // published by the render each frame (SQ-0832) — the shared
+                // `modal_list_viewport` is the CURRENT column's, which is the
+                // wrong column and the wrong number the moment VERB (one row
+                // taller, having reclaimed its header) is either of the two.
+                let vp = b.col_viewport.get().get(col).copied().unwrap_or(0);
                 let len = b.items(col).len();
                 b.scroll[col].len(len);
-                b.scroll[col].move_by(delta as isize, vp, &anim);
+                b.scroll[col].scroll_by(delta as isize, vp, &anim);
             }
         }
 
@@ -7425,19 +7433,67 @@ mod tests {
         assert_eq!(band(&s).row_sel, None, "…and so is a deletion");
     }
 
-    /// The wheel scrolls a column without stealing the keyboard from another.
+    /// The wheel scrolls a column's LIST, not its cursor (SQ-0831's rule, which
+    /// the band was wrongly left out of — SQ-0832), and it does it to the column
+    /// under the pointer without stealing the keyboard from another.
     #[test]
     fn wheel_scrolls_a_column_without_taking_focus() {
-        use crate::render::command_band::{COL_HERE, COL_VERB};
+        use crate::render::command_band::{BAND_COLS, COL_CARRIED, COL_HERE, COL_VERB};
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
         pick_text(&mut s, &mut mapper, COL_VERB, "take");
-        // Cursor is on the HERE column; scroll CARRIED via the wheel.
+        // Cursor is on the HERE column; the pointer will be over CARRIED.
         assert_eq!(band(&s).focus, COL_HERE);
+        let anim = s.config.animation.clone();
+        {
+            // Lists taller than their windows, plus the per-column window
+            // heights the render publishes every frame — without one there is
+            // no window to scroll and the notch would (correctly) do nothing.
+            let b = s.overlays.command_band.as_mut().expect("band open");
+            b.here = (0..20).map(|i| format!("here {i}")).collect();
+            b.carried = (0..20).map(|i| format!("carried {i}")).collect();
+            b.col_viewport.set([4; BAND_COLS]);
+            b.scroll[COL_CARRIED].len(20);
+            b.scroll[COL_CARRIED].select(6, 4, &anim); // rows 3..7 visible
+        }
+
+        // A notch over HERE: the window slides, and the highlight — which was
+        // on the row the window just left — rides its top edge rather than
+        // being stepped down the list.
         apply_action(Action::BandWheel(COL_HERE, 1), &mut s, &mut mapper);
-        assert_eq!(band(&s).scroll[COL_HERE].selected, 1);
+        assert_eq!(band(&s).scroll[COL_HERE].target_offset(), 1, "the list moved under the cursor");
+        assert_eq!(band(&s).scroll[COL_HERE].selected, 1, "the cursor rides the top edge, not off it");
         assert_eq!(band(&s).focus, COL_HERE, "focus unchanged");
+
+        // …and the other direction, on the column the band is NOT pointing at:
+        // the highlight sits mid-window, so it holds its row while the list
+        // slides, and only starts riding the bottom edge once caught.
+        apply_action(Action::BandWheel(COL_CARRIED, -1), &mut s, &mut mapper);
+        assert_eq!(band(&s).scroll[COL_CARRIED].target_offset(), 2);
+        assert_eq!(band(&s).scroll[COL_CARRIED].selected, 5, "clamped to the window's last row");
+        assert_eq!(band(&s).focus, COL_HERE, "…still without moving the band's attention");
+        assert_eq!(band(&s).scroll[COL_HERE].target_offset(), 1, "and without touching the other column");
+    }
+
+    /// A column the frame never drew has no window, so its wheel is inert —
+    /// `ListScroll::scroll_by` refuses to scroll a viewport it cannot measure,
+    /// and must NOT fall back to stepping the cursor as a consolation.
+    #[test]
+    fn wheel_on_an_unmeasured_column_does_nothing_at_all() {
+        use crate::render::command_band::{BAND_COLS, COL_HERE, COL_VERB};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        {
+            let b = s.overlays.command_band.as_mut().expect("band open");
+            b.here = (0..20).map(|i| format!("here {i}")).collect();
+            b.col_viewport.set([0; BAND_COLS]); // mid-slide: nothing measured yet
+        }
+        apply_action(Action::BandWheel(COL_HERE, 1), &mut s, &mut mapper);
+        assert_eq!(band(&s).scroll[COL_HERE].target_offset(), 0);
+        assert_eq!(band(&s).scroll[COL_HERE].selected, 0, "not stepped as a consolation");
     }
 
     /// Opening/closing follows the drawer pattern the inventory dock uses.
