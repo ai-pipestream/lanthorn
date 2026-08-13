@@ -241,6 +241,15 @@ pub enum Action {
     /// Close the palette without executing (Esc / [X] / outside click). Returns to
     /// the hotkey dialog when the palette was promoted from it.
     PaletteClose,
+    /// A mouse-wheel notch over whichever selection-list modal is open: scroll
+    /// its viewport by `delta` rows and clamp the cursor into the visible
+    /// window (SQ-0831). Deliberately ONE action for every list rather than a
+    /// wheel twin per modal — the rule is the same everywhere, and it lives in
+    /// `ListScroll::scroll_by`. The wheel is not a `*Nav`: a nav key moves the
+    /// cursor and the window follows, a notch moves the window and the cursor
+    /// rides its top or bottom edge (so it never scrolls off screen), and a
+    /// list that fits its window does not move at all.
+    ListWheel(i32),
     /// Open the saves-manager modal (loads the save list).
     OpenSaves,
     /// Navigate the saves list by delta (-1 = up, +1 = down).
@@ -957,27 +966,29 @@ pub fn mouse_to_action(
 
     // ── Mouse-wheel precedence for open scrollable modals ─────────────────────
     // When a scrollable overlay is open, the wheel drives THAT surface's vertical
-    // navigation, ahead of the underlying map/story and ahead of the dialog
-    // chrome hit-testing below. Wheel up → previous/up; wheel down → next/down.
-    // Each list modal reuses its existing Up/Down nav action (no new scroll
-    // state). Corner overlays (room panel, tidy) are intentionally absent — the
-    // wheel still pans the map under them, as before.
+    // scrolling, ahead of the underlying map/story and ahead of the dialog
+    // chrome hit-testing below. Corner overlays (room panel, tidy) are
+    // intentionally absent — the wheel still pans the map under them, as before.
+    //
+    // A list modal gets `ListWheel`, not its Up/Down nav action (SQ-0831): the
+    // wheel scrolls the LIST and pins the cursor to the visible window, where a
+    // nav key moves the cursor and drags the window after it. The replay
+    // overlay keeps `ReplayStep` — it is a stepper over replay positions, not a
+    // list with a cursor in a viewport.
     // `kind` already has the single mouse_wheel_invert applied (above), so map it
     // to a direction with the shared helper and invert=false (never twice).
     let wheel_up = wheel_delta(kind, false).map(|d| d < 0);
     if let Some(up) = wheel_up {
         // Priority mirrors the keyboard modal routing order above.
-        if state.overlays.config_screen.is_some() {
-            return if up { Action::ConfigNav(-1) } else { Action::ConfigNav(1) };
-        }
-        if state.overlays.saves.is_some() {
-            return if up { Action::SavesNav(-1) } else { Action::SavesNav(1) };
+        let d = if up { -1 } else { 1 };
+        if state.overlays.config_screen.is_some() || state.overlays.saves.is_some() {
+            return Action::ListWheel(d);
         }
         if state.overlays.replay.is_some() {
-            return if up { Action::ReplayStep(-1) } else { Action::ReplayStep(1) };
+            return Action::ReplayStep(d as isize);
         }
         if state.overlays.file_browser.is_some() {
-            return if up { Action::FbNav(-1) } else { Action::FbNav(1) };
+            return Action::ListWheel(d);
         }
     }
 
@@ -2341,6 +2352,34 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             // If already open, do nothing.
             state.overlays.hotkey_dialog = false;
             state.overlays.dialog_focus = 0;
+        }
+
+        // SQ-0831: one wheel rule for every selection list. The notch moves the
+        // OFFSET and `ListScroll::scroll_by` clamps the cursor into the visible
+        // window — the opposite of the `*Nav` arms below, where the cursor moves
+        // and the window chases it. Dispatch order mirrors the wheel precedence
+        // in `mouse_to_action` (the palette routes here from the run loop, which
+        // intercepts its own mouse events before that function).
+        Action::ListWheel(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            let d = delta as isize;
+            if let Some(cs) = &mut state.overlays.config_screen {
+                cs.scroll.len(CONFIG_ROW_COUNT);
+                cs.scroll.scroll_by(d, vp, &anim);
+            } else if let Some(s) = &mut state.overlays.saves {
+                let len = s.entries.len();
+                s.scroll.len(len);
+                s.scroll.scroll_by(d, vp, &anim);
+            } else if let Some(fb) = &mut state.overlays.file_browser {
+                let len = fb.entries.len();
+                fb.scroll.len(len);
+                fb.scroll.scroll_by(d, vp, &anim);
+            } else if let Some(p) = &mut state.overlays.palette {
+                let len = crate::complete::palette_candidates(p.query()).len();
+                p.scroll.len(len);
+                p.scroll.scroll_by(d, vp, &anim);
+            }
         }
 
         Action::SavesNav(delta) => {
@@ -5609,9 +5648,27 @@ mod tests {
     // ── Mouse-wheel modal precedence tests ─────────────────────────────────────
     //
     // When a scrollable overlay is open, the wheel must drive THAT surface's
-    // vertical nav (one item per tick) ahead of the underlying map/story, reusing
-    // each modal's existing Up/Down action. A wheel position over the MAP area is
-    // used so the same events also exercise precedence over map pan/zoom.
+    // vertical scrolling (one row per tick) ahead of the underlying map/story. A
+    // list modal resolves to the shared `ListWheel` (SQ-0831 — the wheel scrolls
+    // the list, it is NOT the modal's Up/Down nav action); the replay overlay,
+    // a stepper rather than a list, keeps `ReplayStep`. A wheel position over
+    // the MAP area is used so the same events also exercise precedence over map
+    // pan/zoom.
+
+    /// One save-list entry, for the wheel/scroll tests — only its presence in
+    /// the list matters, so every field but the name is a placeholder.
+    fn dummy_save(name: &str) -> crate::persist_files::SaveInfo {
+        crate::persist_files::SaveInfo {
+            path: std::path::PathBuf::from(format!("/tmp/{name}.babelmap")),
+            name: name.into(),
+            turns: 0,
+            saved_at: String::new(),
+            location: None,
+            score: None,
+            is_default: false,
+            trigger: crate::archive::SaveTrigger::HostState,
+        }
+    }
 
     fn wheel_up() -> crossterm::event::MouseEvent {
         // Position (10, 10) is inside map_rect (0,0,80,40).
@@ -5628,11 +5685,28 @@ mod tests {
         s.overlays.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
-            Action::SavesNav(-1)
+            Action::ListWheel(-1)
         ));
         assert!(matches!(
             mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
-            Action::SavesNav(1)
+            Action::ListWheel(1)
+        ));
+    }
+
+    /// The config screen is the other modal that shares the saves list's wheel
+    /// precedence slot; pinned so the routing above can't lose one of the two.
+    #[test]
+    fn wheel_drives_the_config_screen() {
+        let mut s = AppState::default();
+        apply_action(Action::OpenConfig, &mut s, &mut Mapper::default());
+        assert!(s.overlays.config_screen.is_some(), "sanity: the screen opened");
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::ListWheel(-1)
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::ListWheel(1)
         ));
     }
 
@@ -5660,11 +5734,11 @@ mod tests {
             FbMode::PickFile));
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
-            Action::FbNav(-1)
+            Action::ListWheel(-1)
         ));
         assert!(matches!(
             mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
-            Action::FbNav(1)
+            Action::ListWheel(1)
         ));
     }
 
@@ -5702,7 +5776,7 @@ mod tests {
         // Wheel over the map area, with the dialog open.
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &dialog),
-            Action::SavesNav(-1)
+            Action::ListWheel(-1)
         ));
     }
 
@@ -5716,12 +5790,142 @@ mod tests {
         s.config.mouse_wheel_invert = true;
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
-            Action::SavesNav(1)
+            Action::ListWheel(1)
         ));
         assert!(matches!(
             mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
-            Action::SavesNav(-1)
+            Action::ListWheel(-1)
         ));
+    }
+
+    /// The invert preference is resolved in exactly one place (`wheel_delta`)
+    /// and must never be applied twice for one event: a double inversion is
+    /// invisible with the setting OFF and silently cancels itself with it ON.
+    /// Pinned end-to-end, from the raw event through to the list that moved —
+    /// `mouse_to_action` maps `kind` once and then calls `wheel_delta` with
+    /// `invert: false`, which only a behavioural test can hold in place.
+    #[test]
+    fn wheel_invert_is_applied_exactly_once_end_to_end() {
+        use crate::state::SavesState;
+        let entries: Vec<_> = (0..40).map(|i| dummy_save(&format!("s{i}"))).collect();
+        let mut settled = Vec::new();
+        for invert in [false, true] {
+            let mut s = AppState::default();
+            s.config.animation.enabled = false;
+            s.config.mouse_wheel_invert = invert;
+            s.modal_list_viewport = 5;
+            s.overlays.saves = Some(SavesState { entries: entries.clone(), scroll: Default::default() });
+            // Start mid-list so both directions have room to move.
+            apply_action(Action::SavesNav(20), &mut s, &mut Mapper::default());
+            let base = s.overlays.saves.as_ref().unwrap().scroll.target_offset();
+            let act = mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None);
+            apply_action(act, &mut s, &mut Mapper::default());
+            let after = s.overlays.saves.as_ref().unwrap().scroll.target_offset();
+            settled.push(after as i64 - base as i64);
+        }
+        assert_eq!(settled, vec![1, -1], "one ScrollDown scrolls +1 row, or -1 inverted — never 0");
+    }
+
+    /// SQ-0831, the whole point: a notch moves the LIST, not the cursor. The
+    /// cursor only ever moves to stay inside the window it would otherwise be
+    /// scrolled out of — the originally reported symptom was the wheel stepping
+    /// the selection while the viewport chased it.
+    #[test]
+    fn wheel_scrolls_the_saves_list_and_pins_the_cursor_to_the_window() {
+        use crate::state::SavesState;
+        let mut s = AppState::default();
+        s.config.animation.enabled = false;
+        s.modal_list_viewport = 5;
+        s.overlays.saves = Some(SavesState {
+            entries: (0..40).map(|i| dummy_save(&format!("s{i}"))).collect(),
+            scroll: Default::default(),
+        });
+        let mut m = Mapper::default();
+        let sel = |s: &AppState| s.overlays.saves.as_ref().unwrap().scroll.selected;
+        let off = |s: &AppState| s.overlays.saves.as_ref().unwrap().scroll.target_offset();
+
+        // Park the cursor in the middle of the window, then scroll: the list
+        // moves under a cursor that stays exactly where it is.
+        apply_action(Action::SavesNav(2), &mut s, &mut m);
+        assert_eq!((sel(&s), off(&s)), (2, 0));
+        apply_action(Action::ListWheel(1), &mut s, &mut m);
+        assert_eq!(off(&s), 1, "the list scrolled one row");
+        assert_eq!(sel(&s), 2, "…and the cursor did NOT move with it");
+
+        // Keep scrolling and the cursor eventually rides the window's top edge
+        // rather than being scrolled off the screen.
+        apply_action(Action::ListWheel(1), &mut s, &mut m);
+        apply_action(Action::ListWheel(1), &mut s, &mut m);
+        assert_eq!((off(&s), sel(&s)), (3, 3), "cursor pinned to the first visible row");
+
+        // The far end: the offset stops with the last entry on the bottom row.
+        for _ in 0..100 {
+            apply_action(Action::ListWheel(1), &mut s, &mut m);
+        }
+        assert_eq!(off(&s), 35, "40 entries, 5 rows → the last window starts at 35");
+        assert_eq!(sel(&s), 35);
+        for _ in 0..100 {
+            apply_action(Action::ListWheel(-1), &mut s, &mut m);
+        }
+        assert_eq!((off(&s), sel(&s)), (0, 4), "…and the bottom row at the top of the list");
+    }
+
+    /// A list shorter than its window has nothing to scroll — and the wheel must
+    /// not move the cursor as a consolation prize.
+    #[test]
+    fn wheel_on_a_list_shorter_than_the_window_does_nothing_at_all() {
+        use crate::state::SavesState;
+        let mut s = AppState::default();
+        s.config.animation.enabled = false;
+        s.modal_list_viewport = 10;
+        s.overlays.saves = Some(SavesState {
+            entries: (0..3).map(|i| dummy_save(&format!("s{i}"))).collect(),
+            scroll: Default::default(),
+        });
+        let mut m = Mapper::default();
+        apply_action(Action::SavesNav(1), &mut s, &mut m);
+        for d in [1, 1, -1, -1] {
+            apply_action(Action::ListWheel(d), &mut s, &mut m);
+            let sc = &s.overlays.saves.as_ref().unwrap().scroll;
+            assert_eq!((sc.target_offset(), sc.selected), (0, 1), "nothing to scroll, cursor untouched");
+        }
+    }
+
+    /// The same rule reaches the file browser and the config screen through the
+    /// one `ListWheel` arm — no per-modal wheel behaviour to drift apart.
+    #[test]
+    fn wheel_scrolls_the_file_browser_without_moving_its_cursor() {
+        use crate::state::{FbMode, FileBrowserState};
+        let mut s = AppState::default();
+        s.config.animation.enabled = false;
+        s.modal_list_viewport = 2;
+        let mut fb = FileBrowserState::build(std::env::temp_dir(), FbMode::PickFile);
+        // A synthetic, long-enough list: the temp dir's real contents are not
+        // something a test may assume anything about.
+        fb.entries = (0..20)
+            .map(|i| crate::state::FbEntry { name: format!("e{i}"), is_dir: false })
+            .collect();
+        s.overlays.file_browser = Some(fb);
+        let mut m = Mapper::default();
+        apply_action(Action::ListWheel(1), &mut s, &mut m);
+        let sc = &s.overlays.file_browser.as_ref().unwrap().scroll;
+        assert_eq!(sc.target_offset(), 1, "the browser list scrolled");
+        assert_eq!(sc.selected, 1, "cursor pinned to the top of the window, not stepped past it");
+    }
+
+    #[test]
+    fn wheel_scrolls_the_config_screen_without_moving_its_cursor() {
+        let mut s = AppState::default();
+        s.config.animation.enabled = false;
+        s.modal_list_viewport = 4;
+        let mut m = Mapper::default();
+        apply_action(Action::OpenConfig, &mut s, &mut m);
+        apply_action(Action::ConfigNav(2), &mut s, &mut m);
+        assert_eq!(s.overlays.config_screen.as_ref().unwrap().scroll.selected, 2);
+        apply_action(Action::ListWheel(1), &mut s, &mut m);
+        let sc = &s.overlays.config_screen.as_ref().unwrap().scroll;
+        assert_eq!(sc.target_offset(), 1, "the settings list scrolled");
+        assert_eq!(sc.selected, 2, "…under a cursor that stayed put");
     }
 
     /// SQ-0692: a left-click on a room used to open a floating Room Info popup.

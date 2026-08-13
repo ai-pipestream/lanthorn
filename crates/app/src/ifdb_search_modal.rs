@@ -259,6 +259,36 @@ impl SearchModal {
         crate::list_scroll::nav_key(scroll, code, total, rows, anim)
     }
 
+    /// Feed a mouse-wheel notch: `delta` is ±1 row, already resolved for the
+    /// `mouse_wheel_invert` preference by `input::wheel_delta` (never invert
+    /// again here). Unlike a nav key, the wheel SCROLLS the visible list and
+    /// clamps the selection into the window rather than moving the cursor
+    /// (SQ-0831) — see `ListScroll::scroll_by`, which both list views drive.
+    /// A list that fits its window has nothing to scroll, and the notch does
+    /// nothing at all.
+    pub fn on_wheel(&mut self, delta: isize, anim: &AnimationConfig) {
+        // While a request is in flight the modal ignores input but for Esc; the
+        // wheel is no exception.
+        if self.inflight.is_some() {
+            return;
+        }
+        match self.view {
+            // `View::Input` still shows whatever list was there (SQ-0473's
+            // type-over-the-list), so the wheel scrolls it — only the query box
+            // itself is not a list.
+            View::Input | View::Results => {
+                let len = self.hits.len();
+                self.hit_scroll.len(len);
+                self.hit_scroll.scroll_by(delta, self.list_rows, anim);
+            }
+            View::Choosing => {
+                let len = self.options.len();
+                self.opt_scroll.len(len);
+                self.opt_scroll.scroll_by(delta, self.list_rows, anim);
+            }
+        }
+    }
+
     fn input_key(&mut self, code: KeyCode) -> ModalAction {
         match code {
             KeyCode::Esc => ModalAction::Close,
@@ -1193,6 +1223,90 @@ mod tests {
         m.on_event(&SearchEvent::Results(vec![hit("only", "Only Hit")]));
         assert_eq!(m.hit_scroll.selected, 0);
         assert_eq!(m.hit_scroll.target_offset(), 0, "a fresh list starts at the top");
+    }
+
+    // ── SQ-0831: the wheel scrolls the list, the keys move the cursor ────────
+
+    /// The mirror image of the SQ-0598 test above: a KEY moves the cursor and
+    /// the window follows; a wheel NOTCH moves the window and the cursor stays
+    /// where it is until the window would carry it off screen.
+    #[test]
+    fn the_wheel_scrolls_the_hit_list_instead_of_moving_the_cursor() {
+        let mut m = SearchModal::new();
+        m.open();
+        let hits: Vec<_> = (0..20).map(|i| hit(&format!("t{i}"), &format!("Game {i}"))).collect();
+        m.on_event(&SearchEvent::Results(hits));
+        m.list_rows = 5;
+
+        m.on_key(KeyCode::Down, &anim());
+        m.on_key(KeyCode::Down, &anim());
+        assert_eq!((m.hit_scroll.selected, m.hit_scroll.target_offset()), (2, 0));
+
+        m.on_wheel(1, &anim());
+        assert_eq!(m.hit_scroll.target_offset(), 1, "the list scrolled one row");
+        assert_eq!(m.hit_scroll.selected, 2, "…and the cursor did not move with it");
+
+        // Two more notches and the cursor is at the window's top row; it rides
+        // that edge from here rather than scrolling off the top.
+        m.on_wheel(1, &anim());
+        m.on_wheel(1, &anim());
+        assert_eq!((m.hit_scroll.selected, m.hit_scroll.target_offset()), (3, 3));
+
+        // Both ends: the offset stops at `len - rows`, never past the last hit.
+        for _ in 0..50 {
+            m.on_wheel(1, &anim());
+        }
+        assert_eq!(m.hit_scroll.target_offset(), 15, "20 hits, 5 rows → last window at 15");
+        assert_eq!(m.hit_scroll.selected, 15);
+        for _ in 0..50 {
+            m.on_wheel(-1, &anim());
+        }
+        assert_eq!((m.hit_scroll.target_offset(), m.hit_scroll.selected), (0, 4));
+    }
+
+    #[test]
+    fn the_wheel_does_nothing_on_a_list_that_fits_or_while_busy() {
+        let mut m = SearchModal::new();
+        m.open();
+        m.on_event(&SearchEvent::Results(vec![hit("a", "Alpha"), hit("b", "Beta")]));
+        m.list_rows = 5;
+        m.on_key(KeyCode::Down, &anim());
+        m.on_wheel(1, &anim());
+        assert_eq!((m.hit_scroll.target_offset(), m.hit_scroll.selected), (0, 1),
+            "two hits in a five-row window: nothing to scroll, and the cursor stays");
+
+        // Busy: the modal ignores everything but Esc, wheel included.
+        let mut m = SearchModal::new();
+        m.open();
+        let hits: Vec<_> = (0..20).map(|i| hit(&format!("t{i}"), &format!("Game {i}"))).collect();
+        m.on_event(&SearchEvent::Results(hits));
+        m.list_rows = 5;
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
+        assert!(m.busy());
+        m.on_wheel(1, &anim());
+        assert_eq!(m.hit_scroll.target_offset(), 0, "a request in flight swallows the wheel");
+    }
+
+    /// The file chooser is the modal's other list, and gets the same rule.
+    #[test]
+    fn the_wheel_scrolls_the_download_chooser_too() {
+        let mut m = SearchModal::new();
+        m.open();
+        m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
+        m.on_key(KeyCode::Enter, &anim()); // resolve
+        let opts: Vec<_> = (0..12).map(|i| opt(&format!("f{i}.z5"))).collect();
+        m.on_event(&SearchEvent::Options(resolved(opts)));
+        assert_eq!(m.view, View::Choosing);
+        m.list_rows = 4;
+
+        m.on_wheel(1, &anim());
+        assert_eq!(m.opt_scroll.target_offset(), 1, "the file list scrolled");
+        assert_eq!(m.opt_scroll.selected, 1, "cursor pinned to the top of the window");
+        for _ in 0..50 {
+            m.on_wheel(1, &anim());
+        }
+        assert_eq!(m.opt_scroll.target_offset(), 8, "12 files, 4 rows → last window at 8");
     }
 
     // ── SQ-0473: seed list on open ──────────────────────────────────────────

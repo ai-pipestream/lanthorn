@@ -701,9 +701,10 @@ pub(crate) fn run_story_picker(
     // A failed sidecar write, reported once the alternate screen is gone.
     let mut persist_error: Option<String> = None;
     // A physical wheel notch emits several events, all delivered to the input
-    // buffer together. Record the direction here and apply exactly one selection
-    // step once the buffer drains (at the loop top), so one notch = one story
-    // regardless of how the terminal spaces the events within a notch.
+    // buffer together. Record the direction here and apply exactly one scroll
+    // step once the buffer drains (at the loop top), so one notch = one row
+    // (one grid row in the gallery) regardless of how the terminal spaces the
+    // events within a notch.
     let mut pending_wheel: Option<isize> = None;
 
     let chosen: Option<PickedStory> = loop {
@@ -712,19 +713,26 @@ pub(crate) fn run_story_picker(
 
         // Apply a coalesced wheel step once its notch's event burst has fully
         // drained from the input buffer (poll(0) empty). Separate notches are not
-        // buffered together, so each still moves exactly one story.
+        // buffered together, so each still scrolls exactly one row.
         if let Some(d) = pending_wheel {
             if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
                 pending_wheel = None;
-                panel_scroll = 0;
+                let before = list.selected;
                 if matches!(view, PickerView::Gallery) {
-                    // One notch = one grid row (a whole row of tiles).
-                    let ni = app::cover_gallery::move_index(
-                        list.selected, gallery_cols, stories.len(), 0, d,
+                    // One notch = one grid row (a whole row of tiles) of SCROLL;
+                    // the selection is clamped into the visible grid (SQ-0831).
+                    let (fr, ni) = app::cover_gallery::wheel_scroll(
+                        gallery_first_row, list.selected, gallery_cols, gallery_vis,
+                        stories.len(), d,
                     );
+                    gallery_first_row = fr;
                     list.select(ni, viewport, anim);
                 } else {
-                    list.move_by(d, viewport, anim);
+                    list.scroll_by(d, viewport, anim);
+                }
+                // Only a changed story invalidates the info panel's scroll.
+                if list.selected != before {
+                    panel_scroll = 0;
                 }
             }
         }
@@ -1561,6 +1569,13 @@ pub(crate) fn run_story_picker(
                         );
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
+                    // The IFDB search modal owns the wheel while it is open, the
+                    // same precedence its clicks already take — it scrolls its own
+                    // results/files list, and never the story list behind it
+                    // (SQ-0831).
+                    if let Some(sm) = search_modal.as_mut() {
+                        sm.on_wheel(d, anim);
+                    } else
                     // Over the preview modal, the wheel zooms instead of
                     // scrolling the list behind it (SQ-0486; a no-op prior to
                     // that, per SQ-0347): up zooms in, down zooms out.
@@ -1577,7 +1592,7 @@ pub(crate) fn run_story_picker(
                     } else {
                         // Record the notch's direction; the coalesced step is
                         // applied at the loop top once this notch's event burst
-                        // drains, so one notch moves the selection one story.
+                        // drains, so one notch scrolls the list exactly one row.
                         pending_wheel = Some(d);
                     }
                     }

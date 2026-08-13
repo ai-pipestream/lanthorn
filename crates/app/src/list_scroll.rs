@@ -80,6 +80,34 @@ impl ListScroll {
         self.ensure_visible_and_arm(viewport, anim);
     }
 
+    /// Scroll the VIEWPORT by `delta` rows — the mouse wheel — pinning the
+    /// selection to the visible window instead of dragging it along (SQ-0831).
+    ///
+    /// The inverse of [`Self::move_by`]: a key moves the cursor and the offset
+    /// follows it, a wheel notch moves the offset and the cursor is clamped
+    /// into `[offset, offset + viewport)`, so it rides the top or bottom edge
+    /// of the window rather than being carried off it. Two clamps matter:
+    ///
+    /// * the offset stops at `total - viewport`, not `total - 1` — otherwise
+    ///   the list scrolls into empty space past its last item; and
+    /// * a list SHORTER than its viewport has nothing to scroll, so the wheel
+    ///   is a no-op there — it must not move the cursor as a consolation.
+    pub fn scroll_by(&mut self, delta: isize, viewport: usize, anim: &AnimationConfig) {
+        if viewport == 0 || self.total == 0 {
+            return;
+        }
+        let max_offset = self.total.saturating_sub(viewport);
+        if max_offset == 0 {
+            return; // the whole list fits: nothing to scroll, nothing to move
+        }
+        let new_offset = (self.offset as isize + delta).clamp(0, max_offset as isize) as usize;
+        let last_visible = (new_offset + viewport - 1).min(self.total - 1);
+        let from = self.display_offset();
+        self.offset = new_offset;
+        self.selected = self.selected.clamp(new_offset, last_visible);
+        self.anim = if from == new_offset { None } else { ScrollAnim::to(from, new_offset, anim) };
+    }
+
     /// Page the selection by ~one `viewport` (1-row overlap). `dir > 0` = PageDown.
     pub fn page(&mut self, dir: i32, viewport: usize, anim: &AnimationConfig) {
         let stepped = page_step(self.selected, dir, viewport);
@@ -217,6 +245,83 @@ mod tests {
         l.home(10, &anim_off());
         assert_eq!(l.selected, 0);
         assert_eq!(l.target_offset(), 0);
+    }
+
+    // ── `scroll_by` (SQ-0831): the wheel moves the WINDOW, and the cursor is
+    // clamped into it. ───────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_scrolls_the_window_and_leaves_a_visible_selection_alone() {
+        let mut l = ListScroll::new();
+        l.len(100);
+        // Selection at 0, viewport 10. One notch down scrolls the window; the
+        // cursor is no longer at the top, so it is pulled to the new first row.
+        l.scroll_by(1, 10, &anim_off());
+        assert_eq!(l.target_offset(), 1, "the window moved by one row");
+        assert_eq!(l.selected, 1, "the cursor rides the top edge, not off it");
+
+        // A selection in the middle of the window is untouched by a notch.
+        l.select(5, 10, &anim_off());
+        assert_eq!(l.target_offset(), 1, "5 is already visible in rows 1..11");
+        l.scroll_by(1, 10, &anim_off());
+        assert_eq!(l.target_offset(), 2);
+        assert_eq!(l.selected, 5, "still inside rows 2..12 — the cursor does not move");
+    }
+
+    #[test]
+    fn wheel_pins_the_cursor_to_the_bottom_edge_scrolling_up() {
+        let mut l = ListScroll::new();
+        l.len(100);
+        l.select(50, 10, &anim_off());
+        let off = l.target_offset();
+        assert_eq!(off, 41, "select(50) scrolled 50 onto the last row of the window");
+        l.scroll_by(-1, 10, &anim_off());
+        assert_eq!(l.target_offset(), 40);
+        assert_eq!(l.selected, 49, "clamped to the window's LAST row, not carried up with it");
+    }
+
+    #[test]
+    fn wheel_offset_stops_at_total_minus_viewport_not_total_minus_one() {
+        let mut l = ListScroll::new();
+        l.len(20);
+        // Far more notches than there are rows: the window stops with the last
+        // item on its bottom row, never scrolling into empty space past the end.
+        l.scroll_by(1000, 5, &anim_off());
+        assert_eq!(l.target_offset(), 15, "20 items, 5 rows → last window starts at 15");
+        assert_eq!(l.selected, 15, "cursor pinned to the top of that window");
+        // …and the other end.
+        l.scroll_by(-1000, 5, &anim_off());
+        assert_eq!(l.target_offset(), 0);
+        assert_eq!(l.selected, 4, "cursor pinned to the bottom of the first window");
+    }
+
+    #[test]
+    fn wheel_is_a_no_op_when_the_list_fits_the_viewport() {
+        let mut l = ListScroll::new();
+        l.len(4);
+        l.select(2, 10, &anim_off());
+        for d in [1, -1, 5, -5] {
+            l.scroll_by(d, 10, &anim_off());
+            assert_eq!(l.target_offset(), 0, "nothing to scroll: the whole list is on screen");
+            assert_eq!(l.selected, 2, "…and the cursor is NOT moved as a consolation");
+        }
+        // Exactly-fitting is the same case (total == viewport → no scroll room).
+        let mut l = ListScroll::new();
+        l.len(10);
+        l.select(3, 10, &anim_off());
+        l.scroll_by(1, 10, &anim_off());
+        assert_eq!((l.target_offset(), l.selected), (0, 3));
+    }
+
+    #[test]
+    fn wheel_on_an_empty_or_zero_height_list_does_nothing() {
+        let mut l = ListScroll::new();
+        l.len(0);
+        l.scroll_by(1, 10, &anim_off());
+        assert_eq!((l.target_offset(), l.selected), (0, 0));
+        l.len(100);
+        l.scroll_by(1, 0, &anim_off()); // viewport not measured yet
+        assert_eq!((l.target_offset(), l.selected), (0, 0));
     }
 
     fn anim_on() -> AnimationConfig {

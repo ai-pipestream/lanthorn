@@ -18,7 +18,14 @@ inspecting the machine, and firing commands — without ever leaving the story.
   room it names.
 - **Mouse wheel** pans the map (hold Shift for horizontal, Ctrl to zoom) and
   scrolls every other scrollable surface too — the transcript and the lists
-  inside modals (saves, file browser, gallery, hotkey dialog, …).
+  inside modals (saves, file browser, gallery, config, command palette, the
+  IFDB search results, …). On a list the wheel scrolls *the list*, not the
+  cursor: the highlight stays on the row you left it on and the rows slide
+  under it, and only when the window would carry it off the screen does it
+  come along, riding the top or bottom row. The keys work the other way round
+  — `↑`/`↓` move the cursor and the list follows it — which is why a wheel is
+  for browsing and an arrow is for choosing. A list that already fits its
+  window has nothing to scroll, and the wheel there does nothing at all.
 - **A scrollbar that gets out of the way** — every scrollable surface draws the
   same bar, and it is drawn as *colour*, not as a glyph: thumb and track are
   background fills, so a line of prose ending one column short of it has a clean
@@ -496,7 +503,8 @@ for the one in use — and the launch-options dialog's warnings carry
   the list — so a half-typed query can be parked while you go back to arrow
   through the results, and picked up again where you left it. babelmap queries IFDB's public search API (in the background — the
   picker never freezes) and lists the matching games with their author,
-  rating, and year. `↑`/`↓` (or `j`/`k`) move, and `Enter` on a game fetches
+  rating, and year. `↑`/`↓` (or `j`/`k`) move — the wheel scrolls the results
+  under the highlight instead — and `Enter` on a game fetches
   its download links and opens a small chooser to pick one — including when
   there is only a single playable file, so you always get to see what you are
   about to fetch. Each file in the chooser carries IFDB's own description of it on the
@@ -565,8 +573,10 @@ for the one in use — and the launch-options dialog's warnings carry
 - **Cover gallery.** Press `g` to trade the metadata list for a grid of cover
   thumbnails — as many ~16-column tiles as the pane is wide, each captioned with
   its title and the selected cover highlighted. Arrow keys or `h`/`j`/`k`/`l`
-  drive a 2D cursor, PgUp/PgDn jump a screen of rows, the wheel scrolls a row at
-  a time, and a click (or second click) selects (or opens) a cover. The info
+  drive a 2D cursor, PgUp/PgDn jump a screen of rows, the wheel scrolls the grid
+  a whole row of tiles at a time (the highlight holds its column and rides the
+  top or bottom row rather than being dragged along), and a click (or second
+  click) selects (or opens) a cover. The info
   panel still toggles independently with `i`/`Tab`, `g` returns to the list, and
   the selection carries across both views.
 - **In-game graphics (Glulx).** Games that open Glk graphics windows render
