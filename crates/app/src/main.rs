@@ -492,6 +492,8 @@ struct PaneRects {
     pub aux_dialog: Option<app::render::aux_dialog::AuxDialogRects>,
     /// Hit-rects for the reset dialog (when open).
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
+    /// Hit-rects for the region prompt (when open) — its option rows and its buttons (SQ-0439).
+    pub region_prompt: Option<app::render::region_prompt::RegionPromptRects>,
     /// Hit-rects for the Scott-only game-over dialog (when open).
     pub game_over: Option<app::render::game_over_dialog::GameOverDialogRects>,
     /// Hit-rects for the save-name dialog (when open).
@@ -1076,7 +1078,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, region_prompt: overlay_rects.region_prompt, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── Command-band mouse routing ───────────────────────────────────────────────
@@ -2035,6 +2037,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     }
                     OverlayAct::ResetCancel => {
                         state.overlays.reset_dialog = false;
+                    }
+                    // SQ-0439: the answer closes the prompt and, when it is a decision about a
+                    // seam rather than a move, is written into the map so it is never re-asked.
+                    OverlayAct::RegionPrompt(act) => {
+                        app::input::apply_region_prompt(&mut state, &mut mapper, act);
                     }
                     OverlayAct::GameOverPlayAgain => {
                         // Plain restart: keep the accumulated map and saved data.

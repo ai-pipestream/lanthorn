@@ -137,6 +137,13 @@ pub enum ButtonId {
     PlayAgain,
     Restore,
     Quit,
+    /// The region prompt's three outcomes (SQ-0439): carve these rooms out now, ask again the
+    /// next time this passage is crossed, never ask about it again.
+    Separate,
+    Later,
+    Never,
+    /// The region prompt's confirm when it is a pick rather than a suggestion.
+    MoveRegion,
 }
 
 // ── DialogButton ──────────────────────────────────────────────────────────────

@@ -14,8 +14,52 @@ identifies which beta it is without reading its git hash.
 
 ## Unreleased
 
+### Added
+
+- **The map sometimes speaks first.** Twice in a game babelmap notices that a set
+  of rooms wants a layer of its own and offers to make one. It never acts —
+  layers still come only from a move you asked for. The first case is structural:
+  climb down a trapdoor, wander four rooms of cellar, and climb back *up*, and
+  that is the moment it asks, because the cellar is reachable only through
+  portals and you have finished drawing it. The second is the name — walk into a
+  room the game itself calls a **Maze** from a room that isn't one and it asks at
+  the doorway, once per entrance and never inside, since Zork's maze is fifteen
+  rooms all called "Maze" and asking in each is the nagging this design exists to
+  avoid. The offer is a small modal listing what would travel and where it could
+  go; its three buttons are its three answers, and **whatever you answer is
+  remembered in the map file**: *Not now* re-arms the seam for your next crossing,
+  *Never* silences that passage for good, and folding a layer back into another
+  silences every passage it just closed. `Esc` means *not now*, because declining
+  to answer is not saying no. Accepting a *maze* offer also sets the maze flag —
+  you just confirmed it by accepting a prompt that said so; accepting a
+  structural one sets nothing, because a cellar is not a maze.
+- **`move-region <destination> [direction]`**, and it asks rather than guesses.
+  Carving a layer off and folding one back turned out to be the same move — *take
+  these rooms and put them on that layer* — so there is now one verb for both,
+  anchored on the **selected room** instead of the one you are standing in.
+  `move-region new` carves a fresh layer, `move-region main` folds back into Main,
+  `move-region parent` sends a region home to whatever it was carved from, and any
+  layer name works in place of those. You never point at an edge: it walks the
+  compass exits and stops at the portals, and when that swallows the whole layer
+  it looks at the passages leading **into** your room and cuts the one real
+  boundary, saying which. When more than one way in is a genuine boundary it
+  offers them by name and by size — the only answer that always works, because a
+  maze happily has two rooms whose **south** exits both land where you are
+  standing (Adventure's does) and no direction you could type would tell them
+  apart. The destination follows the same rule: one possible answer is taken
+  silently, several are offered. Nothing is ever severed — the passage you cut at
+  becomes a connection *between* layers — so a room stranded on a maze layer
+  finally has a cure: select it and `move-region main`.
+
 ### Changed
 
+- **`peel-layer` and `merge-layer` are retired** in favour of the single
+  `move-region` above. They were never inverses — one was region-granular and the
+  other layer-granular — so a peel that grabbed one room too many could only be
+  undone by merging the whole layer back and starting again. Their leader keys are
+  unchanged and now run the new verb: `p` is `move-region new`, `m` is
+  `move-region parent`. Beta, so the old names are simply gone; nothing on disk
+  changes.
 - **The story pane names the adventure, and its file when the two differ.** The
   border used to show whatever the file was called. It now shows the resolved
   title, with the filename in parentheses when the two disagree —

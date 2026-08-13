@@ -216,6 +216,10 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # hint_suggestion = { parent = "alert", dim = true }
 # input_preview = { parent = "alert" }
 # launch_caveat = { parent = "alert" }
+# "region_prompt.body" = { parent = "dialog.background" }
+# "region_prompt.rooms" = { parent = "dialog.list_footer" }
+# "region_prompt.option" = { parent = "dialog.background" }
+# "region_prompt.option:chosen" = { parent = "dialog.list_selected" }
 
 # ── Tooltip: hover pop-ups — background and an optional border.
 [tooltip]

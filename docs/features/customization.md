@@ -138,7 +138,14 @@ still reach in and override any single selector by name.
   game/file row), `ifdb_result_selected` (the highlighted row, accent + bold +
   reversed), `ifdb_result_meta` (the rating/year tail and hint line),
   `ifdb_download_marker` (the ⭳ glyph on a download option), and
-  `ifdb_attribution` (the "Results from IFDB" credit line). The **saves manager**
+  `ifdb_attribution` (the "Results from IFDB" credit line). The **region prompt** —
+  the modal that offers to give a set of rooms a layer of its own, and that picks
+  between passages or destinations when `move-region` cannot settle one for itself —
+  adds four more `[dialog]` keys: `region_prompt.body` (what is being asked),
+  `region_prompt.rooms` (the dimmer line naming the rooms that would travel),
+  and `region_prompt.option` / `region_prompt.option:chosen` (a choice row, and
+  the one currently picked, which borrows the shared `list_selected` highlight).
+  The **saves manager**
   adds two more for its Type column: `saves_portable` (accent, and its `glyph`
   supplies the `↗` mark on a save another interpreter can read) and
   `saves_host_only` (muted — a host snapshot that stays put).

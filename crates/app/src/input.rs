@@ -3431,7 +3431,7 @@ fn select_adjacent(state: &mut AppState, mapper: &Mapper, delta: i32) {
 /// guessed size puts the target off-centre on any real pane (SQ-0349).
 /// Where `move-region` was told to put the rooms, as the player named it (SQ-0439).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MoveDest {
+pub enum MoveDest {
     /// Nothing was named. Auto-pick when only one destination is possible, ask when more are —
     /// the same rule the seam follows, applied to where the rooms land (SQ-0439).
     Auto,
@@ -3604,8 +3604,11 @@ fn move_targets(
 
 /// `move-region`: compute the region, then re-home it (SQ-0439). Those are two steps because they
 /// are two concerns — which rooms, and onto what — and each refuses for its own reasons.
+///
+/// Either step can turn out to be a genuine choice rather than a refusal, and both then open the
+/// same prompt: several passages lead in, or several layers could take the rooms. The command does
+/// not guess between them and does not make the player retype it with one more word.
 fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
-    use mapper::layer::MoveTarget;
     let Some(room) = state.selected_room.or_else(|| mapper.graph.current()) else {
         state.notifications.push("move-region: no room selected");
         return;
@@ -3627,11 +3630,29 @@ fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
             return;
         }
         Err(SeamRefusal::Ambiguous(seams)) => {
-            state.notifications.push(seam_choice_message(&mapper.graph, room, dest, &seams));
+            open_seam_prompt(state, &mapper.graph, room, dest, &seams);
             return;
         }
     };
 
+    // A seam the player NAMED needs no reporting back; one chosen for them does.
+    let cut = if dir.is_some() { None } else { seam };
+    move_region_to(state, mapper, region, cut, dest);
+}
+
+/// Resolve the destination and make the move — or, when the destination is a real choice rather
+/// than a lone possibility, ask (SQ-0439).
+///
+/// `cut` is the passage that was chosen for the player, reported back once the move goes through;
+/// `None` when they picked it themselves or when there was nothing to cut.
+fn move_region_to(
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    region: mapper::layer::Region,
+    cut: Option<(mapper::graph::RoomId, Direction)>,
+    dest: MoveDest,
+) {
+    use mapper::layer::MoveTarget;
     let src = mapper.graph.layer_of(region.anchor);
     let target = match dest {
         MoveDest::New => MoveTarget::New,
@@ -3640,27 +3661,43 @@ fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
         // Same rule as the seam, one step later: pick when there is nothing to pick between.
         MoveDest::Auto => match move_targets(&mapper.graph, &region).as_slice() {
             [one] => *one,
+            [] => {
+                state.notifications.push(
+                    "move-region: nowhere to put these rooms — they are the whole of their layer, \
+                     so a new one would only rename it, and there is no other layer to fold them \
+                     into.",
+                );
+                return;
+            }
             many => {
-                state.notifications.push(destination_choice_message(&mapper.graph, dir, many));
+                let many = many.to_vec();
+                open_dest_prompt(state, &mapper.graph, region, cut, &many);
                 return;
             }
         },
     };
+    perform_move(state, mapper, &region, cut, target);
+}
+
+/// The move itself, once both halves are settled: re-home the rooms, say what happened, and follow
+/// them to where they landed (SQ-0439).
+fn perform_move(
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    region: &mapper::layer::Region,
+    cut: Option<(mapper::graph::RoomId, Direction)>,
+    target: mapper::layer::MoveTarget,
+) -> Option<mapper::layer::LayerId> {
+    use mapper::layer::MoveTarget;
     let moved = region.rooms.len();
-    match mapper::layer::move_region(&mut mapper.graph, &region, target) {
+    match mapper::layer::move_region(&mut mapper.graph, region, target) {
         Ok(landed) => {
             state.bump_graph_gen(); // rooms changed layer → invalidate the render memo (SQ-0305)
             // A seam the player did not name was chosen FOR them, so say which passage was cut —
             // otherwise a bare move silently picks a boundary and the map simply changes shape.
-            if dir.is_none() {
-                if let Some((from, d)) = seam {
-                    let name = mapper
-                        .graph
-                        .room(from)
-                        .map(|r| r.label().to_string())
-                        .unwrap_or_else(|| format!("#{from}"));
-                    state.set_status(format!("move-region: cut the {d:?} passage from {name}"));
-                }
+            if let Some((from, d)) = cut {
+                let name = room_label(&mapper.graph, from);
+                state.set_status(format!("move-region: cut the {d:?} passage from {name}"));
             }
             if !matches!(target, MoveTarget::New) {
                 let s = if moved == 1 { "" } else { "s" };
@@ -3675,8 +3712,244 @@ fn apply_move_region(state: &mut AppState, mapper: &mut Mapper, arg: &str) {
             // simply off-screen (SQ-0361).
             state.set_viewed_layer(Some(landed));
             recenter_for_active_layer(state, &mapper.graph);
+            Some(landed)
         }
-        Err(why) => state.notifications.push(move_refusal_message(&mapper.graph, room, why)),
+        Err(why) => {
+            state.notifications.push(move_refusal_message(&mapper.graph, region.anchor, why));
+            None
+        }
+    }
+}
+
+/// A room's name, or `#id` when the map has forgotten it.
+fn room_label(graph: &mapper::graph::MapGraph, id: mapper::graph::RoomId) -> String {
+    graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id}"))
+}
+
+/// The rooms a region holds, named, elided after a few — the dim line under the question.
+fn region_rooms_line(graph: &mapper::graph::MapGraph, region: &mapper::layer::Region) -> String {
+    const SHOWN: usize = 4;
+    let names: Vec<String> =
+        region.rooms.iter().take(SHOWN).map(|&id| room_label(graph, id)).collect();
+    let rest = region.rooms.len().saturating_sub(names.len());
+    let n = region.rooms.len();
+    let s = if n == 1 { "" } else { "s" };
+    if rest == 0 {
+        format!("{n} room{s}: {}", names.join(", "))
+    } else {
+        format!("{n} room{s}: {}, and {rest} more", names.join(", "))
+    }
+}
+
+/// Turn a destination list into prompt options, in the order it was ranked.
+fn dest_options(
+    graph: &mapper::graph::MapGraph,
+    targets: &[mapper::layer::MoveTarget],
+) -> Vec<crate::state::RegionOption> {
+    use mapper::layer::MoveTarget;
+    targets
+        .iter()
+        .map(|&target| crate::state::RegionOption::Dest {
+            label: match target {
+                MoveTarget::New => "a new layer".to_string(),
+                MoveTarget::Existing(id) => graph.layer_name(id).to_string(),
+            },
+            target,
+        })
+        .collect()
+}
+
+/// Open a prompt, focused on its first option so the ring starts where the answer is.
+fn open_region_prompt(state: &mut AppState, prompt: crate::state::RegionPrompt) {
+    state.overlays.dialog_focus = 0;
+    state.overlays.region_prompt = Some(prompt);
+}
+
+/// Pick up whatever the map had to say about the move just made, and put it in front of the player
+/// (SQ-0439).
+///
+/// The detector already ran inside `apply_turn`, so this only TAKES — it never polls. Call it once
+/// a turn is finished, never in the middle of one: a modal already up is a modal the player asked
+/// for, and a suggestion nobody asked for must not shoulder in front of it. Dropping one costs
+/// nothing, because nothing is written down until the player answers, so the same crossing raises
+/// it again.
+pub fn offer_layer_suggestion(state: &mut AppState, mapper: &mut Mapper) {
+    if state.any_modal_overlay_open() {
+        return;
+    }
+    if let Some(s) = mapper.take_suggestion() {
+        open_layer_suggestion(state, &mapper.graph, s);
+    }
+}
+
+/// The map noticed that a set of rooms wants a layer, so put the choice in front of the player
+/// (SQ-0439). Never acts: this is the whole of what "detect and suggest" means.
+pub fn open_layer_suggestion(
+    state: &mut AppState,
+    graph: &mapper::graph::MapGraph,
+    suggestion: mapper::suggest::LayerSuggestion,
+) {
+    use crate::state::{RegionPrompt, RegionPromptKind};
+    use mapper::suggest::Trigger;
+    let from = room_label(graph, suggestion.seam.from);
+    let d = mapper::direction::short_label(suggestion.seam.dir);
+    let n = suggestion.region.rooms.len();
+    let (title, body) = match suggestion.trigger {
+        // The seam is the way OUT, walked just now, and `from` is inside the region.
+        Trigger::Structural => (
+            "Give these rooms their own layer?".to_string(),
+            vec![
+                format!("You came {d} out of {from}."),
+                format!("Those {n} rooms have no other way in."),
+            ],
+        ),
+        // The seam is the way IN, and the region is the maze side of it.
+        Trigger::Name => (
+            "This looks like a maze.".to_string(),
+            vec![
+                format!("{} calls itself a maze.", room_label(graph, suggestion.region.anchor)),
+                "Separating it also flags the layer as a maze.".to_string(),
+            ],
+        ),
+    };
+    let options = dest_options(graph, &suggestion.destinations);
+    if options.is_empty() {
+        return; // `mapper::suggest` never builds one of these, but an empty list has no question
+    }
+    open_region_prompt(state, RegionPrompt {
+        kind: RegionPromptKind::Suggest {
+            trigger: suggestion.trigger,
+            seam: suggestion.seam,
+            region: suggestion.region.clone(),
+        },
+        title,
+        body,
+        rooms: region_rooms_line(graph, &suggestion.region),
+        options,
+        choice: 0,
+    });
+}
+
+/// Tier 3: several passages lead into the selected room and each cuts a different map (SQ-0439).
+///
+/// This is the case a re-issued command cannot always fix. A maze happily has two rooms whose
+/// SOUTH exits both land here — Adventure's does — so `move-region new s` would ask the very same
+/// question again, and until this prompt existed the command simply gave up. Picking from the list
+/// is the only answer that always exists.
+fn open_seam_prompt(
+    state: &mut AppState,
+    graph: &mapper::graph::MapGraph,
+    room: mapper::graph::RoomId,
+    dest: MoveDest,
+    seams: &[mapper::layer::InboundSeam],
+) {
+    use crate::state::{RegionOption, RegionPrompt, RegionPromptKind};
+    let options: Vec<RegionOption> = seams
+        .iter()
+        .map(|s| RegionOption::Seam {
+            label: format!(
+                "{} from {} ({} rooms)",
+                mapper::direction::short_label(s.dir),
+                room_label(graph, s.from),
+                s.region.rooms.len()
+            ),
+            from: s.from,
+            dir: s.dir,
+        })
+        .collect();
+    if options.is_empty() {
+        return;
+    }
+    open_region_prompt(state, RegionPrompt {
+        kind: RegionPromptKind::PickSeam { room, dest },
+        title: "Which passage should be cut?".to_string(),
+        body: vec![
+            format!("Several passages lead into {}.", room_label(graph, room)),
+            "Each one takes a different set of rooms.".to_string(),
+        ],
+        // Deliberately blank: the rooms are not settled until a passage is, and each option
+        // carries its own count.
+        rooms: String::new(),
+        options,
+        choice: 0,
+    });
+}
+
+/// The destination half of the same question: the rooms are settled and more than one layer could
+/// take them (SQ-0439).
+fn open_dest_prompt(
+    state: &mut AppState,
+    graph: &mapper::graph::MapGraph,
+    region: mapper::layer::Region,
+    cut: Option<(mapper::graph::RoomId, Direction)>,
+    targets: &[mapper::layer::MoveTarget],
+) {
+    use crate::state::{RegionPrompt, RegionPromptKind};
+    let options = dest_options(graph, targets);
+    if options.is_empty() {
+        return;
+    }
+    let rooms = region_rooms_line(graph, &region);
+    open_region_prompt(state, RegionPrompt {
+        kind: RegionPromptKind::PickDest { region, cut },
+        title: "Where do these rooms go?".to_string(),
+        body: vec!["More than one layer could take them.".to_string()],
+        rooms,
+        options,
+        choice: 0,
+    });
+}
+
+/// Apply what the player told the region prompt to do, and close it (SQ-0439).
+///
+/// The three suggestion outcomes are a gradient over one mechanism — separate now / ask again next
+/// crossing / never ask about this passage — so only the last two write anything down, and
+/// accepting writes nothing at all: the move puts the seam across two layers, which silences it by
+/// construction.
+pub fn apply_region_prompt(state: &mut AppState, mapper: &mut Mapper, act: crate::state::RegionPromptAct) {
+    use crate::state::{RegionOption, RegionPromptAct as A, RegionPromptKind as K};
+    use mapper::suggest::{SeamDecision, Trigger};
+    let Some(prompt) = state.overlays.region_prompt.take() else { return };
+    let chosen = prompt.chosen().cloned();
+    match (&prompt.kind, act) {
+        (_, A::Dismiss) => {}
+        (K::Suggest { seam, .. }, A::Defer) => {
+            mapper.graph.set_seam_decision(*seam, SeamDecision::Deferred);
+        }
+        (K::Suggest { seam, .. }, A::Never) => {
+            mapper.graph.set_seam_decision(*seam, SeamDecision::Ignored);
+        }
+        // A pick has nothing to remember: declining to choose decided nothing.
+        (_, A::Defer | A::Never) => {}
+        (K::Suggest { trigger, region, .. }, A::Accept) => {
+            let Some(RegionOption::Dest { target, .. }) = chosen else { return };
+            if let Some(landed) = perform_move(state, mapper, region, None, target) {
+                // The player confirmed it is a maze by accepting a prompt that said so. A
+                // structural suggestion sets nothing — a cellar is not a maze.
+                if *trigger == Trigger::Name {
+                    mapper.graph.set_layer_maze(landed, true);
+                }
+            }
+        }
+        (K::PickSeam { room, dest }, A::Accept) => {
+            let Some(RegionOption::Seam { from, dir, .. }) = chosen else { return };
+            // Recomputed with the same walker `inbound_seams` used, so the region cannot disagree
+            // with the one the option was labelled from.
+            match mapper::layer::region_at_arrival(&mapper.graph, from, dir) {
+                // The player picked the passage, so there is nothing to report back.
+                Ok(region) => move_region_to(state, mapper, region, None, *dest),
+                Err(why) => state.notifications.push(region_refusal_message(
+                    &mapper.graph,
+                    *room,
+                    Some((from, dir)),
+                    why,
+                )),
+            }
+        }
+        (K::PickDest { region, cut }, A::Accept) => {
+            let Some(RegionOption::Dest { target, .. }) = chosen else { return };
+            perform_move(state, mapper, region, *cut, target);
+        }
     }
 }
 
@@ -3725,76 +3998,6 @@ fn region_refusal_message(
             format!("move-region: {here}'s passage already leaves {layer}. A seam divides one layer.")
         }
     }
-}
-
-/// Tier 3: several passages lead into the room, so name them and the command that picks one
-/// (SQ-0439).
-///
-/// The suggested command carries the destination back through verbatim, so answering the question
-/// asked does not silently re-open the other one. Directions use the tags
-/// [`mapper::direction::parse_direction`] itself accepts, so the line can be typed as printed.
-///
-/// A direction cannot always separate them — a maze happily has two rooms whose SOUTH exits both
-/// land here — so the hint is only offered when some direction appears once. When none does, the
-/// message says so plainly rather than suggesting a command that would ask the same question again.
-fn seam_choice_message(
-    graph: &mapper::graph::MapGraph,
-    room: mapper::graph::RoomId,
-    dest: MoveDest,
-    seams: &[mapper::layer::InboundSeam],
-) -> String {
-    let name = |id: mapper::graph::RoomId| {
-        graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id}"))
-    };
-    let list: Vec<String> = seams
-        .iter()
-        .map(|s| format!("{} from {}", mapper::direction::short_label(s.dir), name(s.from)))
-        .collect();
-    let prefix = match dest {
-        MoveDest::Auto => "move-region".to_string(),
-        MoveDest::New => "move-region new".to_string(),
-        MoveDest::Parent => "move-region parent".to_string(),
-        MoveDest::Layer(id) => format!("move-region {}", graph.layer_name(id)),
-    };
-    let unique = seams.iter().find(|s| seams.iter().filter(|o| o.dir == s.dir).count() == 1);
-    let hint = match unique {
-        Some(s) => format!(" (e.g. {prefix} {})", mapper::direction::short_label(s.dir)),
-        None => " They share a direction, so naming one is not possible yet.".to_string(),
-    };
-    format!(
-        "move-region: several passages lead into {} — say which to cut: {}.{hint}",
-        name(room),
-        list.join(", ")
-    )
-}
-
-/// The destination half of the same question: nothing was named and more than one layer could take
-/// these rooms, so list them (SQ-0439).
-fn destination_choice_message(
-    graph: &mapper::graph::MapGraph,
-    dir: Option<Direction>,
-    targets: &[mapper::layer::MoveTarget],
-) -> String {
-    use mapper::layer::MoveTarget;
-    if targets.is_empty() {
-        return "move-region: nowhere to put these rooms — they are the whole of their layer, so a \
-                new one would only rename it, and there is no other layer to fold them into."
-            .to_string();
-    }
-    let names: Vec<String> = targets
-        .iter()
-        .map(|t| match t {
-            MoveTarget::New => "new".to_string(),
-            MoveTarget::Existing(id) => graph.layer_name(*id).to_string(),
-        })
-        .collect();
-    // Repeat the seam the player already named, so answering this does not re-open the other half.
-    let seam = dir.map(|d| format!(" {}", mapper::direction::short_label(d))).unwrap_or_default();
-    format!(
-        "move-region: name a destination — {}. (e.g. move-region {}{seam})",
-        names.join(", "),
-        names[0]
-    )
 }
 
 /// Say why the MOVE refused, once the region itself was fine (SQ-0439). Nothing here is about
@@ -9116,19 +9319,66 @@ mod tests {
     }
 
     /// TIER 3. Two ways in, each cutting a different half of the map: no auto-pick is honest here,
-    /// so the candidates are named and nothing moves. (Lane D turns this list into a picker.)
+    /// so the prompt opens on the candidates and nothing moves until one is chosen (SQ-0439).
     #[test]
     fn several_ways_in_are_offered_rather_than_guessed() {
+        use crate::state::{RegionOption, RegionPromptKind};
         let (mut s, mut m) = corridor();
         s.select_room(Some(2));
         apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
 
-        assert_eq!(m.graph.layers().len(), 1, "an ambiguous seam moves nothing");
-        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
-        assert!(msg.contains("several passages lead into B"), "{msg:?}");
-        assert!(msg.contains("e from A"), "names each way in and where it comes from: {msg:?}");
-        assert!(msg.contains("w from C"), "{msg:?}");
-        assert!(msg.contains("move-region new e"), "and the command that picks one: {msg:?}");
+        assert_eq!(m.graph.layers().len(), 1, "an ambiguous seam moves nothing on its own");
+        let p = s.overlays.region_prompt.as_ref().expect("the picker opens");
+        assert!(
+            matches!(p.kind, RegionPromptKind::PickSeam { room: 2, dest: MoveDest::New }),
+            "it asks about the SELECTED room, and carries the destination already named"
+        );
+        let labels: Vec<&str> = p
+            .options
+            .iter()
+            .map(|o| match o {
+                RegionOption::Seam { label, .. } => label.as_str(),
+                _ => panic!("a seam pick offers seams"),
+            })
+            .collect();
+        assert!(labels.iter().any(|l| l.starts_with("e from A")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("w from C")), "{labels:?}");
+    }
+
+    /// Choosing from that picker cuts the passage chosen and nothing else — and because the
+    /// destination rode along in the prompt, answering the seam question does not reopen the
+    /// other one.
+    #[test]
+    fn choosing_a_seam_from_the_picker_makes_the_move() {
+        use crate::state::RegionPromptAct;
+        let (mut s, mut m) = corridor();
+        s.select_room(Some(2));
+        apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
+        // Option 0 is `e from A`; option 1 is `w from C`. Choose the second.
+        s.overlays.region_prompt.as_mut().unwrap().choice = 1;
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Accept);
+
+        assert!(s.overlays.region_prompt.is_none(), "answering closes the prompt");
+        let new = s.viewed_layer.expect("the chosen seam cut");
+        assert_eq!(
+            m.graph.rooms_in_layer(new),
+            vec![1, 2],
+            "cutting C→W→B keeps B's side: A and B travel"
+        );
+        assert_eq!(m.graph.rooms_in_layer(0), vec![3, 4], "C and D stay behind");
+    }
+
+    /// Esc on a seam pick decides nothing and remembers nothing — a pick is not a suggestion.
+    #[test]
+    fn dismissing_a_seam_pick_moves_nothing() {
+        use crate::state::RegionPromptAct;
+        let (mut s, mut m) = corridor();
+        s.select_room(Some(2));
+        apply_action(Action::MoveRegion("new".into()), &mut s, &mut m);
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Dismiss);
+        assert!(s.overlays.region_prompt.is_none());
+        assert_eq!(m.graph.layers().len(), 1, "nothing moved");
+        assert!(m.graph.seam_decisions().is_empty(), "and nothing was written down");
     }
 
     /// The command that refusal suggests must mean what the list said it meant: a direction picks
@@ -9155,20 +9405,36 @@ mod tests {
         assert_eq!(m.graph.rooms_in_layer(new), vec![1], "A's own side leaves, as it always has");
     }
 
-    /// A maze can perfectly well have two rooms whose SOUTH exits both land here, and then a
-    /// direction cannot separate them. Say so rather than suggesting a command that would ask the
-    /// same question again.
+    /// THE REAL DEAD END (SQ-0439). A maze can perfectly well have two rooms whose SOUTH exits
+    /// both land here — Adventure's does — and then no direction separates them, so no re-issued
+    /// command can resolve it and a refusal that names them is a dead end by construction. The
+    /// picker is the only answer that always exists, and it must offer BOTH passages that share
+    /// the direction.
     #[test]
-    fn a_shared_direction_says_it_cannot_tell_the_passages_apart() {
+    fn two_passages_sharing_a_direction_are_still_pickable() {
+        use crate::state::{RegionOption, RegionPromptAct, RegionPromptKind};
         let (mut s, mut m) = advent_maze(); // 2→S→3 and 4→S→3 are both boundaries
         s.select_room(Some(3));
         apply_action(Action::MoveRegion("new south".into()), &mut s, &mut m);
-        assert_eq!(m.graph.layers().len(), 1, "nothing moved");
-        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
-        assert!(msg.contains("s from At West End of Long Hall"), "{msg:?}");
-        assert!(msg.contains("s from Maze"), "{msg:?}");
-        assert!(msg.contains("share a direction"), "and admits the direction is no use: {msg:?}");
-        assert!(!msg.contains("e.g."), "so it suggests nothing that would loop: {msg:?}");
+        assert_eq!(m.graph.layers().len(), 1, "nothing moves until one is chosen");
+        let p = s.overlays.region_prompt.as_ref().expect("the picker opens");
+        assert!(matches!(p.kind, RegionPromptKind::PickSeam { room: 3, .. }));
+        let labels: Vec<&str> = p
+            .options
+            .iter()
+            .map(|o| match o {
+                RegionOption::Seam { label, .. } => label.as_str(),
+                _ => panic!("a seam pick offers seams"),
+            })
+            .collect();
+        assert_eq!(labels.len(), 2, "both S passages are offered: {labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("s from At West End of Long Hall")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("s from Maze")), "{labels:?}");
+
+        // And picking one of them actually moves rooms, which is the whole point: this case had
+        // no route through the command line at all.
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Accept);
+        assert_eq!(m.graph.layers().len(), 2, "the chosen passage was cut");
     }
 
     /// The consequence the design accepts openly: a room in the MIDDLE of a maze has no inbound
@@ -9200,32 +9466,229 @@ mod tests {
     }
 
     /// Add a second layer and `new` is no longer the only answer — the rooms could equally fold
-    /// into it — so the bare command asks instead of guessing, and lists what it is choosing between.
+    /// into it — so the bare command asks instead of guessing, and offers what it is choosing
+    /// between (SQ-0439).
     #[test]
     fn a_bare_move_asks_once_more_than_one_destination_is_possible() {
+        use crate::state::{RegionOption, RegionPromptKind};
         let (mut s, mut m) = one_way_maze();
         m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Attic".into());
         s.select_room(Some(2));
         apply_action(Action::MoveRegion(String::new()), &mut s, &mut m);
 
         assert_eq!(m.graph.layer_of(2), mapper::layer::MAIN_LAYER, "an ambiguous target moves nothing");
-        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
-        assert!(msg.contains("name a destination"), "{msg:?}");
-        assert!(msg.contains("new"), "lists the fresh layer: {msg:?}");
-        assert!(msg.contains("Attic"), "and every layer that could take them: {msg:?}");
+        let p = s.overlays.region_prompt.as_ref().expect("the picker opens");
+        assert!(matches!(p.kind, RegionPromptKind::PickDest { .. }));
+        let labels: Vec<&str> = p
+            .options
+            .iter()
+            .map(|o| match o {
+                RegionOption::Dest { label, .. } => label.as_str(),
+                _ => panic!("a destination pick offers destinations"),
+            })
+            .collect();
+        assert!(labels.contains(&"a new layer"), "lists the fresh layer: {labels:?}");
+        assert!(labels.contains(&"Attic"), "and every layer that could take them: {labels:?}");
+        assert!(p.rooms.contains("3 rooms"), "and says how many rooms travel: {:?}", p.rooms);
     }
 
-    /// The two questions stay separate: a seam the player already named is carried into the
-    /// destination question, so answering one does not silently re-open the other.
+    /// Choosing from the destination picker completes the move the command started.
+    #[test]
+    fn choosing_a_destination_completes_the_move() {
+        use crate::state::{RegionOption, RegionPromptAct};
+        let (mut s, mut m) = one_way_maze();
+        let attic = m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Attic".into());
+        s.select_room(Some(2));
+        apply_action(Action::MoveRegion(String::new()), &mut s, &mut m);
+        let p = s.overlays.region_prompt.as_mut().unwrap();
+        p.choice = p
+            .options
+            .iter()
+            .position(|o| matches!(o, RegionOption::Dest { label, .. } if label == "Attic"))
+            .expect("Attic is on offer");
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Accept);
+        assert_eq!(m.graph.rooms_in_layer(attic), vec![2, 3, 4], "the rooms went where they were sent");
+    }
+
+    /// The two questions stay separate: a seam the player already named resolves the region, and
+    /// the destination question is then asked on its own rather than re-opening the seam.
     #[test]
     fn a_named_seam_survives_into_the_destination_question() {
+        use crate::state::RegionPromptKind;
         let (mut s, mut m) = corridor();
         m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Attic".into());
         s.select_room(Some(2));
         apply_action(Action::MoveRegion("e".into()), &mut s, &mut m);
-        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
-        assert!(msg.contains("name a destination"), "the seam resolved; the target did not: {msg:?}");
-        assert!(msg.contains("move-region new e"), "and the suggestion keeps the seam: {msg:?}");
+        let p = s.overlays.region_prompt.as_ref().expect("only the destination is still open");
+        let RegionPromptKind::PickDest { region, cut } = &p.kind else {
+            panic!("the seam resolved; only the target did not: {:?}", p.kind)
+        };
+        assert_eq!(region.rooms.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4], "the named seam cut");
+        assert_eq!(*cut, None, "and a seam the player named is not reported back at them");
+    }
+
+    // ── SQ-0439: the map's own suggestion, and the prompt that carries it ────
+
+    /// A manor whose four-room cellar hangs off one trapdoor, walked down and back up again —
+    /// the structural trigger's canonical shape. The player ends at the foot of the stairs, so
+    /// one more `Up` is the return crossing the detector waits for.
+    fn manor() -> Mapper {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Study", Some(Direction::E));
+        m.observe(1, "Hall", Some(Direction::W));
+        m.observe(3, "Cellar", Some(Direction::Down));
+        m.observe(4, "Wine Cellar", Some(Direction::E));
+        m.observe(5, "Vault", Some(Direction::E));
+        m.observe(6, "Crypt", Some(Direction::E));
+        m.observe(5, "Vault", Some(Direction::W));
+        m.observe(4, "Wine Cellar", Some(Direction::W));
+        m.observe(3, "Cellar", Some(Direction::W));
+        m
+    }
+
+    /// A hall with a maze through its south door — the semantic trigger's shape. Stops one step
+    /// short so the caller walks in.
+    fn maze_doorway() -> Mapper {
+        let mut m = Mapper::default();
+        m.observe(1, "At West End of Long Hall", None);
+        m.observe(7, "Storeroom", Some(Direction::N));
+        m.observe(1, "At West End of Long Hall", Some(Direction::S));
+        m
+    }
+
+    /// The map speaks: climbing back out of the cellar opens the prompt, and it says what would
+    /// move and where it could go. Nothing has moved yet — detect and SUGGEST.
+    #[test]
+    fn climbing_out_of_the_cellar_opens_the_prompt() {
+        use crate::state::{RegionOption, RegionPromptKind};
+        use mapper::layer::MoveTarget;
+        let mut s = AppState::default();
+        let mut m = manor();
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+
+        let p = s.overlays.region_prompt.as_ref().expect("the map has something to say");
+        let RegionPromptKind::Suggest { trigger, seam, region } = &p.kind else {
+            panic!("a structural suggestion: {:?}", p.kind)
+        };
+        assert_eq!(*trigger, mapper::suggest::Trigger::Structural);
+        assert_eq!(seam.from, 3);
+        assert_eq!(region.rooms.iter().copied().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+        assert!(p.rooms.contains("4 rooms"), "it says how many travel: {:?}", p.rooms);
+        assert!(p.rooms.contains("Cellar"), "and names them: {:?}", p.rooms);
+        assert_eq!(
+            p.options,
+            vec![RegionOption::Dest { label: "a new layer".into(), target: MoveTarget::New }],
+            "with Main un-emptiable, a fresh layer is the only place they can go"
+        );
+        assert_eq!(m.graph.layers().len(), 1, "and nothing has moved: it only suggests");
+    }
+
+    /// Accepting a NAME-triggered suggestion also flags the layer as a maze — the player confirmed
+    /// it by accepting a prompt that said so.
+    #[test]
+    fn accepting_a_maze_suggestion_flags_the_layer() {
+        use crate::state::RegionPromptAct;
+        let mut s = AppState::default();
+        let mut m = maze_doorway();
+        m.observe(2, "Maze", Some(Direction::S));
+        offer_layer_suggestion(&mut s, &mut m);
+        assert!(
+            matches!(
+                s.overlays.region_prompt.as_ref().map(|p| &p.kind),
+                Some(crate::state::RegionPromptKind::Suggest {
+                    trigger: mapper::suggest::Trigger::Name,
+                    ..
+                })
+            ),
+            "the name is the trigger"
+        );
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Accept);
+
+        let landed = s.viewed_layer.expect("the maze moved to a layer of its own");
+        assert_eq!(m.graph.rooms_in_layer(landed), vec![2]);
+        assert!(m.graph.layer_is_maze(landed), "accepting a prompt that said 'maze' sets the flag");
+    }
+
+    /// A STRUCTURAL accept sets nothing. A cellar is not a maze, and the flag freezes a layer's
+    /// geometry and moves its default view — far too much to infer from a trapdoor.
+    #[test]
+    fn accepting_a_structural_suggestion_flags_nothing() {
+        use crate::state::RegionPromptAct;
+        let mut s = AppState::default();
+        let mut m = manor();
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Accept);
+
+        let landed = s.viewed_layer.expect("the cellar moved");
+        assert_eq!(m.graph.rooms_in_layer(landed), vec![3, 4, 5, 6]);
+        assert!(!m.graph.layer_is_maze(landed), "a cellar is not a maze");
+    }
+
+    /// "Not now" is not "no": it re-arms, so the very same climb asks again. Esc means this too,
+    /// which is why the prompt has no Cancel.
+    #[test]
+    fn not_now_re_arms_the_seam() {
+        use crate::state::RegionPromptAct;
+        use mapper::suggest::{SeamDecision, SeamKey};
+        let mut s = AppState::default();
+        let mut m = manor();
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Defer);
+
+        let seam = SeamKey { from: 3, dir: Direction::Up };
+        assert!(s.overlays.region_prompt.is_none(), "answering closes the prompt");
+        assert_eq!(m.graph.seam_decision(seam), SeamDecision::Deferred);
+        assert_eq!(m.graph.layers().len(), 1, "and nothing moved");
+
+        // Down and back up again — and it asks a second time, which is the whole difference
+        // between "not now" and "never".
+        m.observe(3, "Cellar", Some(Direction::Down));
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+        assert!(s.overlays.region_prompt.is_some(), "a deferred seam speaks up on the next crossing");
+    }
+
+    /// "Never" silences that passage for good — a prompt that comes back on the next step teaches
+    /// the player to dismiss it blind, which is the failure this whole design exists to avoid.
+    #[test]
+    fn never_silences_the_seam_for_good() {
+        use crate::state::RegionPromptAct;
+        use mapper::suggest::{SeamDecision, SeamKey};
+        let mut s = AppState::default();
+        let mut m = manor();
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+        apply_region_prompt(&mut s, &mut m, RegionPromptAct::Never);
+
+        assert_eq!(m.graph.seam_decision(SeamKey { from: 3, dir: Direction::Up }), SeamDecision::Ignored);
+        m.observe(3, "Cellar", Some(Direction::Down));
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+        assert!(s.overlays.region_prompt.is_none(), "and it never asks again");
+    }
+
+    /// It must not steal focus mid-turn: a modal the player asked for outranks a suggestion nobody
+    /// did. Dropping the suggestion costs nothing, because declining to show it writes nothing
+    /// down and the same crossing raises it again.
+    #[test]
+    fn a_suggestion_never_shoulders_in_front_of_an_open_modal() {
+        let mut s = AppState::default();
+        let mut m = manor();
+        s.overlays.quit_dialog = true;
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+        assert!(s.overlays.region_prompt.is_none(), "the quit dialog keeps the floor");
+        assert!(m.graph.seam_decisions().is_empty(), "and nothing was decided on the player's behalf");
+
+        s.overlays.quit_dialog = false;
+        m.observe(3, "Cellar", Some(Direction::Down));
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+        assert!(s.overlays.region_prompt.is_some(), "so the next crossing still asks");
     }
 
     #[test]

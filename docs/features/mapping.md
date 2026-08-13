@@ -130,13 +130,15 @@ The map is a place you can move through, not just a picture.
   Hall*. That is the case that used to be unsayable, because the way in may be
   one-way and there is then no direction out of the room that names it. If several
   ways in are real boundaries — you are standing mid-corridor, and cutting east or
-  cutting west take opposite halves of the map — it lists them (`e from A`,
-  `w from C`) and waits, because either answer would be a guess. Name one with a
-  direction (`move-region new e`) and that is the passage it cuts; a direction that
-  leads nowhere *in* is read as the passage leading *out*, which is how you name a
-  one-way exit. The destination follows the same rule: leave it off and `move-region`
-  takes the only possible answer when there is one, and lists the choices when there
-  is not. Nothing is ever severed — the passage you cut at simply becomes a
+  cutting west take opposite halves of the map — it *asks*, offering them by name and
+  by size (`e from A (2 rooms)`), because either answer would be a guess. That prompt is
+  the only answer that always works: a maze happily has two rooms whose **south** exits
+  both land where you are standing (Adventure's does), and no direction you could type
+  would tell them apart. You can still name one from the command line when a direction
+  does distinguish them (`move-region new e`); a direction that leads nowhere *in* is read
+  as the passage leading *out*, which is how you name a one-way exit. The destination
+  follows the same rule: leave it off and `move-region` takes the only possible answer
+  when there is one, and offers you the choices when there is not. Nothing is ever severed — the passage you cut at simply becomes a
   connection *between* layers, which is why every move goes back the way it came.
   Because the destination is just an argument, a stranded room finally has a cure. A
   room discovered while exploring a maze layer is minted *onto* the maze layer even
@@ -180,8 +182,14 @@ The map is a place you can move through, not just a picture.
   worse than no prompt at all, because it teaches you to dismiss it blind.
   A layer you have flagged as a maze is exempt from the structural trigger outright:
   the point of flagging it was to keep the whole maze together.
-  *(The detection and its memory are in place; the prompt that puts the choice in front
-  of you lands next.)*
+  The offer itself is a small modal: what it noticed, which rooms would travel, and the
+  destinations on offer as a list you arrow or `Tab` through — `Enter` accepts wherever the
+  focus is resting, because landing on a choice already selects it. Three buttons, and they
+  are the three answers: **Separate** does it, **Not now** re-arms the seam for your next
+  crossing, **Never** silences that passage for good. `Esc` means *not now* — declining to
+  answer is not the same as saying no, which is why there is no Cancel. And it waits its
+  turn: a suggestion never shoulders in front of a dialog you opened yourself, and a dropped
+  one costs nothing, because nothing is written down until you answer.
 - **Switching layers recenters the view** — cycling, clicking a tab, moving a region,
   or loading a map all land the viewport somewhere with a room in it, never on empty
   scroll space: on the room you're standing in if it's on the layer you switched to,

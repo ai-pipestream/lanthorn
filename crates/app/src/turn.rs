@@ -262,6 +262,14 @@ pub(crate) fn finish_command_turn(
     let should_exit = should_exit_on_turn(&result, state);
     let is_scott = crate::engine_helpers::engine_tag(session) == "scott";
 
+    // SQ-0439: the map may have something to say about the move just made — that a set of rooms
+    // wants a layer of its own. Deliberately at the END of the turn and never mid-one: the two
+    // early returns above are the in-flight cases (the game is waiting on a save/restore or on a
+    // filename), and `offer_layer_suggestion` stands down for a modal the player asked for.
+    if !should_exit {
+        app::input::offer_layer_suggestion(state, mapper);
+    }
+
     // If the debug inspector is open, refresh its snapshot from the VM state
     // this turn just produced (globals/objects/PC may have moved).
     if let Some(p) = &mut state.debug {
