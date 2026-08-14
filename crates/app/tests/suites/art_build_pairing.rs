@@ -14,9 +14,12 @@
 //!
 //! The reassembly is sound (SQ-0852's packed-volume reader verifies that story
 //! against its own header checksum, `$45EB`, and it boots and plays) and the
-//! archive on the volume is not misparsed — `MountedDisk::pictures()` offers
-//! *nothing* for that image, because `InfocomPics::parse` rejects all five
-//! `ARTHUR.D*` segments and every other file on it. So tier 1 ran, and
+//! archive on the volume was not misparsed — `MountedDisk::pictures()` offered
+//! *nothing* for that image, because `InfocomPics::parse` rejected all five
+//! `ARTHUR.D*` segments and every other file on it. (SQ-0863 has since read
+//! them: the archives are INSIDE the segments, in an Apple flavour with 8-byte
+//! directory records, and the disk now draws its own 168 pictures. The rule
+//! below is unchanged by that and the cases say so.) So tier 1 ran, and
 //! `blorb::resolve_resource_blorb`'s directory scan matched `Arthur.blb` on a
 //! six-character stem prefix:
 //!
@@ -67,10 +70,33 @@ fn any_present(names: &[&str]) -> bool {
 const IIGS_ARTHUR: &str = "Arthur Quest 4 Excalibur.2mg";
 const ARTHUR_BLORB: &str = "Arthur.blb";
 
+/// **The same press, dumped twice** — a bare ProDOS 3.5-inch image of release
+/// 63, differing from the `.2mg`'s body in nine of 1600 blocks (`FINDER.DATA`
+/// entries the other lacks). It is the control for the whole reader: two
+/// independent dumps of one pressing must yield the same story and the same
+/// artwork, or something in the reader is keying off incidental block placement
+/// rather than off the container, which is a class of defect a single fixture
+/// cannot show.
+const ARTHUR_PO: &str = "Arthur.po";
+
 /// The Apple II press of *Journey*, whose story is paged across five segments of
 /// which the image carries four (SQ-0852) — and the DOS-press Blorb beside it.
+///
+/// **A short pressing, not an unreadable one**, and the corpus can now prove it:
+/// [`JOURNEY_SET`] and [`JOURNEY_PO`] are complete images of the same release 77
+/// and both load and draw. This one is byte-identical to its archive's canonical
+/// copy, so the missing `JOURNEY.D5` is how it shipped.
 const IIGS_JOURNEY: &str = "Journey.2mg";
 const JOURNEY_BLORB: &str = "Journey.blb";
+
+/// The five-volume 5.25-inch press of *Journey* — the same release 77 with every
+/// segment present, so it reassembles and draws where the `.2mg` does neither.
+const JOURNEY_SET: [&str; 5] =
+    ["journey_s1.dsk", "journey_s2.dsk", "journey_s3.dsk", "journey_s4.dsk", "journey_s5.dsk"];
+
+/// …and the 3.5-inch consolidated pressing of it: one BARE ProDOS volume with
+/// all five segments in `JOURNEY.1/`…`JOURNEY.5/`, which is *Arthur*'s layout.
+const JOURNEY_PO: &str = "Journey.po";
 
 /// The five-volume Apple II press of *Shogun*, whose story is on no single
 /// floppy, and the Blorb beside it.
@@ -88,9 +114,18 @@ const SHOGUN_BLORB: &str = "Shogun.blb";
 fn mismatched() -> Vec<(String, &'static str)> {
     let mut all = vec![
         (IIGS_ARTHUR.to_string(), ARTHUR_BLORB),
+        (ARTHUR_PO.to_string(), ARTHUR_BLORB),
         (IIGS_JOURNEY.to_string(), JOURNEY_BLORB),
+        (JOURNEY_PO.to_string(), JOURNEY_BLORB),
+        // The two Amiga floppies, contradicted by the same DOS Blorbs and
+        // drawing their own `Pic.data` throughout — refused since SQ-0866 and
+        // listed here since SQ-0863, when the census stopped counting only the
+        // refusals a player could SEE. Nothing about them has ever moved.
+        ("Arthur - The Quest for Excalibur.adf".to_string(), ARTHUR_BLORB),
+        ("Journey - The Quest Begins.adf".to_string(), JOURNEY_BLORB),
     ];
     all.extend(SHOGUN_SET.iter().map(|v| (v.to_string(), SHOGUN_BLORB)));
+    all.extend(JOURNEY_SET.iter().map(|v| (v.to_string(), JOURNEY_BLORB)));
     all.retain(|(m, b)| media(m).is_some() && media(b).is_some());
     all.sort();
     all
@@ -101,10 +136,18 @@ fn drawn_pictures(path: &std::path::Path) -> usize {
     PictSource::resolve(path).all_pict_dims().len()
 }
 
-/// The reported case. The IIgs disk draws **nothing** rather than the 326
-/// pictures of a release it is not.
+/// The reported case. The IIgs disk draws **its own 168 pictures** rather than
+/// the 326 of a release it is not.
+///
+/// It drew nothing at all when SQ-0866 fixed the corruption, and that was the
+/// right answer with the evidence of the day: the archives were on the disk and
+/// unreadable, so refusing the DOS Blorb left the screen bare. SQ-0863 read
+/// them — `blorb::infocom_pics`'s Apple flavour, off the segmented container —
+/// and `ProDos::pictures` now offers them, so the refusal costs nothing at all.
+/// **The rule is unchanged and the outcome is better**, which is the only way
+/// this assertion was ever supposed to move.
 #[test]
-fn the_apple_iigs_arthur_draws_nothing_rather_than_another_builds_pictures() {
+fn the_apple_iigs_arthur_draws_its_own_pictures_not_another_builds() {
     let Some(disk) = media(IIGS_ARTHUR) else {
         eprintln!("SKIP: gitignored medium missing: {IIGS_ARTHUR}");
         return;
@@ -125,10 +168,12 @@ fn the_apple_iigs_arthur_draws_nothing_rather_than_another_builds_pictures() {
             "and it says so in its IFhd"
         );
     }
-    assert_eq!(drawn_pictures(&disk), 0, "{IIGS_ARTHUR} must draw no artwork at all");
+    assert_eq!(drawn_pictures(&disk), 168, "{IIGS_ARTHUR} must draw its own 168 pictures");
+    let art = app::graphics::release_art(&disk).expect("off the disk's own segments");
+    assert_eq!(art.name, "ARTHUR.1/ARTHUR.D1", "named for the segment carrying the index");
     assert!(
         resource_blorb(&disk).found.is_none(),
-        "and must reach no resource Blorb to draw it from"
+        "and must still reach no resource Blorb — the refusal is unchanged"
     );
 }
 
@@ -150,20 +195,34 @@ fn the_refusal_names_the_archive_and_both_builds() {
     }
 }
 
-/// The launch dialog's default row is derived from the boot path, so it must now
-/// read "no artwork found" rather than offering an archive the boot will refuse
-/// (SQ-0865's property, held under SQ-0866's rule).
+/// The launch dialog's default row is derived from the boot path, so it must
+/// name exactly what the boot will draw and nothing else (SQ-0865's property,
+/// held under SQ-0866's rule and then under SQ-0863's reader).
+///
+/// Two media, because the property has two sides and only pinning both keeps it
+/// honest: `Arthur Quest 4 Excalibur.2mg` draws its own segmented archive and the
+/// row names it, while `Journey.2mg` is a short pressing that draws nothing and
+/// the row must stay empty rather than offer the Blorb the boot refuses.
 #[test]
-fn the_launch_dialog_offers_no_default_where_the_boot_draws_nothing() {
-    let Some(disk) = media(IIGS_ARTHUR) else {
+fn the_launch_dialog_names_exactly_what_the_boot_will_draw() {
+    if let Some(disk) = media(IIGS_ARTHUR) {
+        let row = app::launch_options::resolved_default_art(&disk)
+            .expect("the boot draws, so the dialog must say what with");
+        assert_eq!(row.filename, "ARTHUR.1/ARTHUR.D1");
+        assert_eq!(row.pictures, 168);
+        assert!(row.on_medium, "it is on the disk, not beside it");
+    } else {
         eprintln!("SKIP: gitignored medium missing: {IIGS_ARTHUR}");
-        return;
-    };
-    assert_eq!(
-        app::launch_options::resolved_default_art(&disk),
-        None,
-        "the default row must not name an archive the boot refuses"
-    );
+    }
+    if let Some(disk) = media(IIGS_JOURNEY) {
+        assert_eq!(
+            app::launch_options::resolved_default_art(&disk),
+            None,
+            "the default row must not name an archive the boot refuses"
+        );
+    } else {
+        eprintln!("SKIP: gitignored medium missing: {IIGS_JOURNEY}");
+    }
 }
 
 /// **The line, half one.** A Blorb that carries no `IFhd` states no build, and
@@ -266,6 +325,15 @@ fn a_disk_with_its_own_artwork_is_never_asked_about_a_blorb() {
         ("James Clavell's Shogun.adf", "Pic.data"),
         ("Zork Zero Disk.image", "CPic.data"),
         ("Zork Zero - The Revenge of Megaboz.adf", "Pic.data"),
+        // …and the Apple II presses, whose archive is not a FILE at all but the
+        // artwork inside the segmented container (SQ-0863). Three of them are
+        // exactly the media SQ-0866 had to leave dark, so these rows are where
+        // "the medium always wins first" stopped being a rule with a hole in it.
+        ("Arthur Quest 4 Excalibur.2mg", "ARTHUR.1/ARTHUR.D1"),
+        ("Journey.po", "JOURNEY.1/JOURNEY.D1"),
+        ("journey_s1.dsk", "JOURNEY.D1"),
+        ("shogun_s1.dsk", "SHOGUN.D1"),
+        ("zork_zero_1.dsk", "ZORK0.D1"),
     ];
     let names: Vec<&str> = CASES.iter().map(|(s, _)| *s).collect();
     let mut ran = 0;
@@ -306,18 +374,15 @@ fn nothing_is_refused_for_want_of_evidence() {
     let mut ran = 0;
     for p in paths {
         let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if !matches!(ext.as_str(), "2mg" | "adf" | "image" | "dsk" | "ima" | "img" | "st" | "d64") {
+        if !matches!(
+            ext.as_str(),
+            "2mg" | "adf" | "image" | "dsk" | "po" | "ima" | "img" | "st" | "d64"
+        ) {
             continue;
         }
         ran += 1;
         let Some(said) = resource_blorb(&p).refused else { continue };
-        // Only a medium with no artwork of its own ever reaches tier 1, so a
-        // refusal on one that has some is inert — the Amiga `Arthur` and
-        // `Journey` floppies are both contradicted by the DOS Blorb beside them
-        // and both draw their own `Pic.data` regardless.
-        if app::graphics::release_art(&p).is_none() {
-            refusals += 1;
-        }
+        refusals += 1;
         let builds = app::graphics::release_builds(&p);
         assert!(
             !builds.is_empty(),
@@ -334,10 +399,17 @@ fn nothing_is_refused_for_want_of_evidence() {
     assert!(ran > 0 || !dir.is_dir(), "the corpus is here but no medium was measured");
     // The corpus does contain real mismatches, so an invariant that held only
     // because nothing was ever refused would be worthless.
+    //
+    // A refusal is counted here whether or not the medium HAS artwork of its
+    // own, which is a change of bookkeeping SQ-0863 forced and not of rule: most
+    // of these media now draw their own segmented plates, so their contradiction
+    // is inert — a refusal nobody sees. What a player actually loses is the
+    // other guard's question, and `no_medium_in_the_corpus_loses_artwork_…`
+    // asks it.
     assert_eq!(
         refusals,
         mismatched().len(),
-        "only the measured contradictions change what a player sees"
+        "only the measured contradictions are refused"
     );
 }
 
@@ -374,6 +446,7 @@ fn no_medium_in_the_corpus_loses_artwork_except_the_mismatched_one() {
                 | "adf"
                 | "image"
                 | "dsk"
+                | "po"
                 | "ima"
                 | "img"
                 | "st"
@@ -403,10 +476,26 @@ fn no_medium_in_the_corpus_loses_artwork_except_the_mismatched_one() {
     }
     // A partial corpus is normal (and CI has none of it), so the expectation is
     // built from what is actually on disk rather than asserted flat.
+    //
+    // **And only the contradicted media with no artwork of their own are in it**
+    // (SQ-0863). A medium that supplies its own plates never reaches the Blorb
+    // tier at all, so its refusal takes nothing from the player — which is where
+    // the Apple *Arthur*, the five *Shogun* floppies and the complete *Journey*
+    // pressings went the moment their segmented archives became readable. The
+    // list is derived rather than retyped so it cannot drift from the loop's own
+    // skip above, and then pinned by name below so it cannot quietly empty.
     let expected: Vec<String> = mismatched()
         .into_iter()
+        .filter(|(m, _)| media(m).is_some_and(|p| app::graphics::release_art(&p).is_none()))
         .map(|(m, b)| format!("{m}: Some(\"{b}\") -> None"))
         .collect();
+    if media(IIGS_JOURNEY).is_some() && media(JOURNEY_BLORB).is_some() {
+        assert_eq!(
+            expected,
+            [format!("{IIGS_JOURNEY}: Some(\"{JOURNEY_BLORB}\") -> None")],
+            "the short Journey pressing is the one medium the rule still leaves dark"
+        );
+    }
     lost.sort();
     assert_eq!(lost, expected, "only the measured pairings may change, and they are the listed ones");
     assert!(ran > 0 || !dir.is_dir(), "the corpus is here but nothing was measured");
@@ -483,7 +572,18 @@ fn the_shogun_blorb_is_refused_by_the_press_it_contradicts() {
     for want in [SHOGUN_BLORB, "release 322", "890706", "release 311", "890510"] {
         assert!(said.contains(want), "the complaint must name {want:?}: {said}");
     }
-    assert_eq!(drawn_pictures(&p), 0, "and no other build's pictures may be drawn");
+    // …and the press draws its OWN plates instead, merged across the five
+    // floppies by `MountedDisk::pictures`'s set-spanning arm (SQ-0863). Refusing
+    // the Blorb and drawing nothing was the state of things while that arm did
+    // not exist; what the rule forbids is release 322's pictures, not artwork.
+    assert_eq!(drawn_pictures(&p), 55, "the press must draw its own 55 plates");
+    let art = app::graphics::release_art(&p).expect("off the set's own segments");
+    assert_eq!(art.name, "SHOGUN.D1");
+    assert_ne!(
+        drawn_pictures(&p),
+        drawn_pictures(&blb),
+        "and they are not the Blorb's, which is the whole point"
+    );
 }
 
 /// **An incomplete press still says what it is.** `Journey.2mg` declares five

@@ -117,8 +117,10 @@ const V3_DISK: &str = "Lost Treasures of Infocom, The (1993)(Big Red Computer Cl
 
 /// The two Version 6 releases. They carry Infocom's own Apple II YZIP, and no
 /// whole story file — the pictures and the story live in the segmented
-/// `ARTHUR.D1`-`.D5` / `JOURNEY.D1`-`.D4` container, which has no reader
-/// (SQ-0852). They are read here for the INTERPRETER, not for a game.
+/// `ARTHUR.D1`-`.D5` / `JOURNEY.D1`-`.D4` container, read by
+/// `blorb::infocom_packed` (SQ-0852) and `blorb::infocom_pics`'s Apple flavour
+/// (SQ-0863). They are read here for the INTERPRETER, not for a game; what the
+/// artwork does to the story's screen is `apple_release_artwork.rs`'s.
 const V6_DISKS: [&str; 2] = ["Journey.2mg", "Arthur Quest 4 Excalibur.2mg"];
 
 /// Every ProDOS image this suite knows about.

@@ -282,13 +282,18 @@ pub struct MountedVolume {
 /// and `disk_set::members` is never even asked, because it wants a disk-image
 /// extension and answers `None` without touching the disk.
 pub fn volumes(story_path: &Path) -> Vec<MountedVolume> {
-    let Some(mut own) = mount(story_path) else {
+    // The release's volumes and the disk number each one carries, from names
+    // alone — no disk is opened to answer it, so asking before the mount below
+    // costs one `read_dir` and nothing else (SQ-0865).
+    let members = crate::disk_set::members_indexed(story_path);
+    // The story's OWN volume is the one mounted across the set, because it is
+    // the one every caller here asks first (SQ-0863). Its siblings are mounted
+    // plainly: a set-spanning container answers the same for whichever volume
+    // holds the question, so mounting all five of them across all five would buy
+    // one answer at five times the reads.
+    let Some(mut own) = mount_across(story_path, members.as_deref()) else {
         return Vec::new();
     };
-    // The release's volumes and the disk number each one carries, from names
-    // alone — no disk is opened to answer it, so asking before the compilation
-    // check below costs one `read_dir` and no mount (SQ-0865).
-    let members = crate::disk_set::members_indexed(story_path);
     own.disk_number =
         members.as_ref().and_then(|m| m.iter().find(|(_, p)| p == story_path).map(|(n, _)| *n));
     let mut stories = own.disk.stories().len();
@@ -321,9 +326,37 @@ pub fn volumes(story_path: &Path) -> Vec<MountedVolume> {
 /// The volume's own disk number is [`volumes`]'s to fill in: it is a property of
 /// the release the image belongs to, which one image cannot see.
 fn mount(path: &Path) -> Option<MountedVolume> {
+    mount_across(path, None)
+}
+
+/// [`mount`], with the other volumes of the release available to the mount
+/// (SQ-0863).
+///
+/// `members` is [`crate::disk_set::members_indexed`]'s answer — names only, no
+/// disk opened — and `path` itself is filtered out of it here. What the
+/// companions can add is what a release keeps on no single volume: the *Shogun*
+/// and *Zork Zero* 5.25-inch presses page both their story and their artwork
+/// across the whole set, and `blorb::medium::MountedDisk::mount_set` is where
+/// those two questions are answered.
+///
+/// **Nothing is read eagerly.** `mount_set` calls the closure only when the
+/// named volume turns out to have no story of its own, so every ordinary floppy,
+/// every compilation and every `.2mg` that answers for itself costs exactly the
+/// one read it always did. The nine packed 5.25-inch volumes in the corpus are
+/// the only ones that pay, and what they pay is the reads they need.
+fn mount_across(path: &Path, members: Option<&[(u64, PathBuf)]>) -> Option<MountedVolume> {
     let raw = std::fs::read(path).ok()?;
     blorb::medium::DiskImage::detect(&raw)?;
-    let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
+    let disk = blorb::medium::MountedDisk::mount_set(raw, || {
+        members
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, m)| m)
+            .filter(|m| m.as_path() != path)
+            .filter_map(|m| std::fs::read(m).ok())
+            .collect()
+    })
+    .ok()?;
     Some(MountedVolume { path: path.to_path_buf(), disk, disk_number: None })
 }
 

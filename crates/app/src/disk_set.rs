@@ -373,8 +373,10 @@ mod tests {
     /// became sets, with not a line of this module changed.
     ///
     /// It is the sharpest case in the corpus for grouping at all: each of these
-    /// nine floppies carries a fifth or a quarter of one story and nothing else,
-    /// so a set that is not recognised is a game that cannot be opened.
+    /// floppies carries a fifth or a quarter of one story and nothing else, so a
+    /// set that is not recognised is a game that cannot be opened. (*Journey*'s
+    /// five joined *Shogun*'s and *Zork Zero*'s in SQ-0863, again with not a
+    /// line of this module changed.)
     #[test]
     fn the_apple_five_and_a_quarter_inch_presses_are_two_sets() {
         let mut names: Vec<String> = (1..=5).map(|n| format!("shogun_s{n}.dsk")).collect();

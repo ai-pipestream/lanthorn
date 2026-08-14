@@ -34,6 +34,8 @@ mod glulx_ingame_save_host_restore;
 mod atari_st_profile;
 #[path = "suites/apple_iigs_profile.rs"]
 mod apple_iigs_profile;
+#[path = "suites/apple_release_artwork.rs"]
+mod apple_release_artwork;
 #[path = "suites/glulx_maze_identity.rs"]
 mod glulx_maze_identity;
 #[path = "suites/glulx_pending_io_host_restore.rs"]

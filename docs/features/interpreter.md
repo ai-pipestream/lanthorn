@@ -47,8 +47,9 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   Apple IIgs disks and the seven-volume *Lost Treasures of Infocom* collection.
   And `.dsk`, the 5.25" press, which is the same filesystem with its sectors in
   the order the drive numbers them rather than the order ProDOS does: hand
-  babelmap any one of *Shogun*'s five floppies or *Zork Zero*'s four and the
-  whole game opens, because a release is not a platter.
+  babelmap any one of *Shogun*'s five floppies, *Journey*'s five or *Zork Zero*'s
+  four and the whole game opens, because a release is not a platter. And `.po`,
+  the same 800 KB volume with no wrapper at all.
 
 Those last five are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
@@ -197,8 +198,8 @@ declared length, which Infocom put there for exactly this kind of doubt — and
 hands back nothing that fails. *Arthur* release 63, serial 890622, 271,304 bytes,
 checksum `$45EB`: that is a game, and you can play it.
 
-*Journey* is the one that cannot be. Its index declares five segments and
-`Journey.2mg` carries four, so ninety-two of its five hundred and fifty-two pages
+`Journey.2mg` is the one that cannot be. Its index declares five segments and
+that image carries four, so ninety-two of its five hundred and fifty-two pages
 are not on the image at all. Nothing is wrong with the reader and nothing is
 wrong with the disk's ProDOS filesystem; the pressing is simply incomplete. The
 honest answer to four fifths of a game is no game, so babelmap mounts the volume,
@@ -211,6 +212,22 @@ writes its name: release 77, serial 890616. So this disk knows what it is even
 though it cannot be played, which is enough to keep the release 83 `Journey.blb`
 next to it from drawing another build's pictures into it — see
 [v6 graphics](v6-graphics.md).
+
+And release 77 *is* playable, off two other pressings of it that are complete:
+the five-floppy `journey_s1.dsk`…`s5` set and the consolidated 3.5" `Journey.po`.
+Both reassemble to 282,176 bytes, checksum `$B136`, and both draw the release's
+own 135 pictures. That is what turns "this image is short" from a suspicion into
+a measurement — the same build, off media that have every segment, behaves.
+
+`Journey.po` is also the reason `.po` is a spelling the library scan knows. A
+`.po` is a **bare** ProDOS volume with nothing wrapped round it, which this reader
+has always been able to open; until these images arrived nothing in the reference
+collection was one, so the extension was in no format's list and the disks were
+openable by name and invisible in the story list. Three of the four now here are
+bare volumes and mount (`Arthur.po`, `Journey.po`, `ZorkZero.po`); the fourth,
+`Shogun.po`, is a DiskCopy 4.2 image wearing a ProDOS name and is declined,
+because recognition is by content and never by extension. Its game is on the
+five-floppy set regardless.
 
 #### …and the same container, one floppy per disk
 
@@ -235,14 +252,18 @@ In the browser they are two games and not nine disks: every volume reports the
 same reassembled build, and the fold that already existed for multi-disk
 collections keeps the first one and drops the rest.
 
-The artwork on those disks is a separate matter and is not read yet. It is in
-there — four picture archives on *Arthur*, in the space the story pages leave
-free at the end of each segment, with the familiar Infocom header and a directory
-of 140×192 and 62×72 pictures at the Apple II's own hi-res dimensions. But the
-Apple wrote a directory record eight bytes wide where the Amiga, Macintosh and PC
-wrote twelve, fourteen or sixteen, and it packs pixels the way Apple hi-res packs
-them, which is like nothing else in this crate. That is a codec, not a container,
-and it is its own piece of work.
+The artwork on those disks was a separate piece of work and it is done. It was in
+there all along — four picture archives on *Arthur*, in the space the story pages
+leave free at the end of each segment, with the familiar Infocom header and a
+directory of 140×192 and 62×72 pictures at the Apple II's own hi-res dimensions.
+The Apple wrote a directory record eight bytes wide where the Amiga, Macintosh and
+PC wrote twelve, fourteen or sixteen, and it packs pixels the way Apple hi-res
+packs them, which is like nothing else in the crate; the same segment index that
+says where the story pages are says where each archive begins. babelmap reads all
+of it now, and every Apple II release here draws its own plates — *Arthur*'s 168,
+*Journey*'s 135, *Shogun*'s 55, *Zork Zero*'s 496. That art comes with a screen of
+its own, 560×384 rather than the 640×400 a Version 6 story gets when nothing
+declares a picture space: see [v6 graphics](v6-graphics.md#apple-ii-artwork).
 
 Disk images are first-class in the library too: point babelmap at a directory of
 them and the picker's TYPE column names the container alongside the format —
@@ -374,9 +395,14 @@ volume opens with:
 | *Lost Treasures* 6 (`INFOCOM6`) | Sherlock, v5 release 21, serial 871214 |
 | *Lost Treasures* 7 (`INFOCOM7`) | Wishbringer, v3 release 69, serial 850920 |
 | `Arthur Quest 4 Excalibur.2mg` | Arthur, v6 release 63, serial 890622 — packed |
+| `Arthur.po` (bare, 3.5") | the same press again — same story, same 168 pictures |
 | `Journey.2mg` | — declares five segments, carries four; no game (its header still says release 77, serial 890616) |
+| `Journey.po` (bare, 3.5") | Journey, v6 release 77, serial 890616 — packed, and complete |
+| `journey_s1.dsk`…`s5` (5.25") | Journey, v6 release 77, serial 890616 — packed across five |
 | `shogun_s1.dsk`…`s5` (5.25") | Shogun, v6 release 311, serial 890510 — packed across five |
+| `Shogun.po` | — a DiskCopy 4.2 image under a ProDOS name; declined, and its game is on the five floppies above |
 | `zork_zero_1.dsk`…`_4` (5.25") | Zork Zero, v6 release 383, serial 890602 — packed across four |
+| `ZorkZero.po` (bare, 3.5") | Zork Zero, v6 release 383, serial 890602 — packed across four subdirectories |
 
 Each of volumes 2–7 carries three to seven games; the one listed is the largest,
 which is what opening the disk gives you when nothing on it wears a conventional
