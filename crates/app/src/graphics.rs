@@ -1018,25 +1018,45 @@ pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf>
 /// the other one exists nowhere on the host filesystem for `--pictures` to point
 /// at. An Amiga `.adf` is read by the same three lines.
 ///
-/// **Only a bare filename**, and only after the host filesystem has been tried
-/// and come up empty. A name with a directory in it is an instruction about
-/// where to look and is honoured as one; a name that resolves to a real file
-/// beside the story still wins, so nothing that worked before moves. The lookup
-/// is by name because that is what the user typed — the CONTENT tiers
-/// ([`PictSource::resolve`]) are what identify an archive nobody named.
+/// **Only after the host filesystem has been tried and come up empty**, and
+/// never for an absolute path, which is an instruction about the host and is
+/// honoured as one. A name that resolves to a real file beside the story still
+/// wins, so nothing that worked before moves. The lookup is by name because that
+/// is what the user typed — the CONTENT tiers ([`PictSource::resolve`]) are what
+/// identify an archive nobody named.
+///
+/// # One mount path, and why this had to become one (SQ-0833)
+///
+/// This read `if looks_like_adf … else if looks_like_hfs` until the DOS and
+/// Atari ST formats arrived — the last copy of the two-reader chain SQ-0840
+/// replaced everywhere else, missed because it predates `MountedDisk`. It was
+/// merely stale while two formats existed and became a **defect** the moment a
+/// third registered: `crate::assets::files` enumerates a disk's artwork through
+/// `blorb::medium` and so offered a FAT12 disk's `ZORK0.EG1` in the launch
+/// dialog, while this function had no arm that could load it. Offered, picked,
+/// and nothing drawn. It goes through the one table now, so the next format
+/// cannot reintroduce the gap.
+///
+/// # A name may carry a directory now
+///
+/// It used to be rejected outright, on the reasonable ground that a directory is
+/// an instruction about where to look — reasonable while no volume HAD
+/// directories. FAT12 does: every story on an Atari ST compilation is called
+/// `STORY.DAT` and the folder is the only thing that tells four of them apart,
+/// so `HITCHHIK/STORY.DAT` is the volume's own spelling and `contents` shows it
+/// that way. What a caller is shown, it must be able to ask for. The components
+/// are re-joined with `/` so a Windows user's backslashes reach the same file;
+/// AmigaDOS and HFS are flat, so a name with a separator simply matches nothing
+/// there, exactly as before.
 fn read_off_the_medium(story_path: &std::path::Path, named: &std::path::Path) -> Option<Vec<u8>> {
-    let name = named.file_name()?.to_str()?;
-    if std::path::Path::new(name) != named {
+    if named.is_absolute() {
         return None;
     }
+    let parts: Option<Vec<&str>> =
+        named.components().map(|c| c.as_os_str().to_str()).collect();
+    let name = parts?.join("/");
     let raw = std::fs::read(story_path).ok()?;
-    if blorb::adf::Adf::looks_like_adf(&raw) {
-        blorb::adf::Adf::mount(raw).ok()?.read_named(name)
-    } else if blorb::hfs::Hfs::looks_like_hfs(&raw) {
-        blorb::hfs::Hfs::mount(raw).ok()?.read_named(name)
-    } else {
-        None
-    }
+    blorb::medium::MountedDisk::mount(raw).ok()?.read_named(&name)
 }
 
 /// Merge every continuation of `path` into `pics`, and return the complaint if

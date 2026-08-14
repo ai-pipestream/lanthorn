@@ -53,8 +53,27 @@ babelmap "Zork Zero Disk.image" --pictures Pic.data
 
 That name is looked up *on the volume*. A story mounted out of a disk image has
 no folder for a loose archive to sit beside it in, so `--pictures` reaches into
-the medium when the name it was given is not on your filesystem — an Amiga `.adf`
-gets the same door by the same code.
+the medium when the name it was given is not on your filesystem — and every
+format gets that door by the same code, which is a claim worth checking rather
+than assuming. It was not true when the DOS and Atari ST readers arrived: this
+one lookup still named `.adf` and HFS by hand, so a PC floppy's `ZORK0.EG1` was
+offered in the dialog and would not load when picked. It goes through the same
+one table as everything else now.
+
+On a format with directories the name may carry one, because that is how the
+volume spells it: an Atari ST compilation's files are `HITCHHIK/STORY.DAT` and
+`CUTHROAT/STORY.DAT`, and what the dialog shows you is what `--pictures` accepts.
+Amiga and Macintosh volumes are flat and behave exactly as they always did.
+
+The PC and Atari ST floppies join the same road, with one caveat that is the
+disk's fault rather than babelmap's. A DOS release stores its art as `.MG1`
+(MCGA), `.EG1`/`.EG2` (EGA) or `.CG1` (CGA) — three video cards, one machine —
+and babelmap will draw whichever of them is on the image you opened. But a PC
+release is often **several** images, and the artwork does not always travel with
+the story: *Zork Zero*'s story and its EGA art are on *Lost Treasures* floppy 5,
+while its CGA art is alone on floppy 4. One mount is one disk, so open the one
+that has the game on it and you get that disk's rendition. (The Atari
+compilations are all text-only, so this never comes up there.)
 
 You do not have to know the name, either. **The launch-options dialog lists what
 is on the disk**, so opening *Zork Zero Disk.image* offers you both of its
@@ -208,8 +227,9 @@ the story belong together:
    over a floppy's own `Pic.data`, over everything. Naming it is an instruction,
    not a hint. If the name is a bare filename that is not on your filesystem and
    the story was mounted out of a disk image, it is looked for *on that disk* —
-   which is how you reach the Macintosh's monochrome `Pic.data`, or either
-   archive on an Amiga floppy, without unpacking anything first.
+   which is how you reach the Macintosh's monochrome `Pic.data`, either archive
+   on an Amiga floppy, or a PC disk's `ZORK0.EG1`, without unpacking anything
+   first.
 
 Tier 3 is how you *pick a rendition*, not just how you rescue a game. *Zork Zero*
 alone can be played four ways from the files that survive — the Amiga `zork0.pic`,
