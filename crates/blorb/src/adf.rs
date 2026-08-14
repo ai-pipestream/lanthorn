@@ -260,8 +260,8 @@ impl Adf {
 /// has no magic at all, so its header is validated instead: a version babelmap
 /// runs, a static-memory base that a header actually fits under, the object and
 /// global tables inside dynamic memory, high memory and the dictionary at or
-/// above the static base, a printable serial, and a declared file length that
-/// does not exceed the bytes present.
+/// above the static base, a printable serial (in ASCII or high ASCII), and a
+/// declared file length that does not exceed the bytes present.
 ///
 /// The version floor of 3 is deliberate. `zvm` runs v3–v8, Infocom's Amiga
 /// releases span v3–v6, and admitting v1/v2 would let files that merely begin
@@ -305,8 +305,22 @@ fn looks_like_zcode(bytes: &[u8]) -> bool {
     if high < static_base || high > bytes.len() || dict < static_base || dict >= bytes.len() {
         return false;
     }
-    // Serial is six printable characters ("890323", or "------" on some builds).
-    if !bytes[0x12..0x18].iter().all(|c| (0x20..0x7f).contains(c)) {
+    // Serial is six printable characters ("890323", or "------" on some builds)
+    // — **in either ASCII or the high ASCII the Apple II wrote text in**, so
+    // bit 7 is masked before the test rather than being grounds for refusal.
+    //
+    // That last clause is not a loophole, it is a whole game. `LEATHRGODDESSES`
+    // on *The Lost Treasures of Infocom* volume `INFOCOM6` is a structurally
+    // valid Version 3 story — declared length `0xfbf3 * 2` == its 128998 bytes
+    // exactly — whose serial reads `C2 EC EF F7 EE A1`. Mask bit 7 off each and
+    // that is `42 6C 6F 77 6E 21`, "Blown!": a joke serial typed on a machine
+    // whose character set sets the high bit, not corruption. Demanding bit 7
+    // clear made Leather Goddesses of Phobos invisible on that volume (SQ-0856).
+    //
+    // The rejection this check exists for is unaffected, because it was never
+    // bit 7 that did the work: a saved game's `$12..$18` is binary, and binary
+    // is control bytes. `00`–`1F`, `7F`, `80`–`9F` and `FF` all still fail.
+    if !bytes[0x12..0x18].iter().all(|c| (0x20..0x7f).contains(&(c & 0x7f))) {
         return false;
     }
     // The declared length may under-run the file (release padding) but never
@@ -531,6 +545,60 @@ pub(crate) mod tests {
         icon[1] = 0x10;
         assert!(!looks_like_story(&icon), "a Workbench .info sidecar");
         assert!(!looks_like_story(&[0x00, 0x00, 0x03, 0xf3]), "a 68k HUNK executable");
+    }
+
+    /// **A serial written in the Apple II's high ASCII is still a serial**
+    /// (SQ-0856). `LEATHRGODDESSES` on *Lost Treasures* volume `INFOCOM6` carries
+    /// `C2 EC EF F7 EE A1` at `$12`, which is `42 6C 6F 77 6E 21` with bit 7 off:
+    /// "Blown!", a joke serial, not corruption. The rule masks the bit, so the
+    /// same six characters pass in either encoding.
+    ///
+    /// FALSIFICATION: drop the `& 0x7f` from the serial check and the second
+    /// assertion here fails, which is the reported symptom — the game invisible
+    /// on a volume that holds it.
+    #[test]
+    fn a_high_ascii_serial_is_still_an_ascii_serial() {
+        let mut plain = fake_story(4096);
+        plain[0x12..0x18].copy_from_slice(b"Blown!");
+        assert!(looks_like_story(&plain), "the same six characters in plain ASCII");
+
+        let mut high = fake_story(4096);
+        high[0x12..0x18].copy_from_slice(&[0xc2, 0xec, 0xef, 0xf7, 0xee, 0xa1]);
+        assert_eq!(
+            high[0x12..0x18].iter().map(|c| char::from(c & 0x7f)).collect::<String>(),
+            "Blown!",
+            "the bytes off INFOCOM6, read the way the Apple II wrote them"
+        );
+        assert!(looks_like_story(&high), "Leather Goddesses of Phobos, off INFOCOM6");
+
+        // A high-bit SPACE (`A0`) is the other thing that machine writes, and it
+        // is as printable as `20` is.
+        let mut padded = fake_story(4096);
+        padded[0x12..0x18].copy_from_slice(&[0xb8, 0xb9, 0xb0, 0xb3, 0xb2, 0xa0]);
+        assert!(looks_like_story(&padded), "high ASCII digits and a trailing space");
+    }
+
+    /// The masking above widens what a serial may be; it must widen nothing
+    /// else. **Control bytes are still control bytes with bit 7 either way** —
+    /// which is the whole reason a saved game does not pass, since its `$12..$18`
+    /// is binary rather than text.
+    #[test]
+    fn a_binary_serial_is_still_rejected_with_bit_seven_masked() {
+        // The exact serial fields of the real saved games in `stories/`:
+        // `LURK1.SAV` and friends are all-zero there, and `Story.Save` on the
+        // Zork III floppy is `24 6D 07 39 2A 65` — printable but for the `07`.
+        for (serial, who) in [
+            ([0x00u8; 6], "an all-zero serial, as every .SAV on the corpus has"),
+            ([0x24, 0x6d, 0x07, 0x39, 0x2a, 0x65], "Zork III's `Story.Save`"),
+            ([0x80, 0x80, 0x80, 0x80, 0x80, 0x80], "high-bit NULs"),
+            ([0x9f, 0x9f, 0x9f, 0x9f, 0x9f, 0x9f], "high-bit C1 controls"),
+            ([0xff, 0xff, 0xff, 0xff, 0xff, 0xff], "high-bit DEL"),
+            ([b'8', b'9', 0x7f, b'3', b'2', b'3'], "one DEL in an otherwise fine serial"),
+        ] {
+            let mut b = fake_story(4096);
+            b[0x12..0x18].copy_from_slice(&serial);
+            assert!(!looks_like_story(&b), "{who}");
+        }
     }
 
     #[test]

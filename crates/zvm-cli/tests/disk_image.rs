@@ -399,6 +399,52 @@ fn a_real_apple_iigs_compilation_mounts_through_the_shared_table() {
     );
 }
 
+/// **Five games on `INFOCOM6`, and the fifth is the one that was invisible**
+/// (SQ-0856).
+///
+/// *Lost Treasures* volume 6 holds five stories, but `LEATHRGODDESSES` writes
+/// its header serial as `C2 EC EF F7 EE A1` — "Blown!" in the high ASCII the
+/// Apple II wrote text in — and the story recogniser demanded bit 7 clear, so
+/// the disk listed four. Nothing in this front-end knows any of that: it reads
+/// `blorb::medium`'s table, so the game arrived in the menu with the rule change
+/// and the CLI was not touched. That is what this case is here to prove, and
+/// then it plays the game to prove it is a game.
+///
+/// FALSIFICATION: drop the `& 0x7f` from the serial check in
+/// `blorb::adf::looks_like_zcode` and this fails at the first assertion with
+/// `holds 4 stories` — the reported symptom, off the reported disk.
+#[test]
+fn a_high_ascii_serial_does_not_hide_a_game_from_the_menu() {
+    let Some(image) =
+        story_path("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 6 of 7).2mg")
+    else {
+        return;
+    };
+    let err = stderr_of(&run(&image, &[], ""));
+    assert!(err.contains("holds 5 stories"), "all five are offered:\n{err}");
+    for line in [
+        "1) SHERLOCK  (v5 r21 s871214)",
+        "2) BORDERZONE  (v5 r9 s871008)",
+        "3) NORDANDBERT  (v4 r19 s870722)",
+        "4) LEATHRGODDESSES  (v3 r0 sBlown!)",
+        "5) PLUNDERED  (v3 r26 s870730)",
+    ] {
+        assert!(err.contains(line), "expected {line:?} in:\n{err}");
+    }
+
+    // …and it really is Leather Goddesses of Phobos. The game opens on its own
+    // content warning and waits for RETURN, so the script leads with a blank
+    // line before asking it to identify itself.
+    let out = run(&image, &["--story", "leathr"], "\nversion\nquit\ny\n");
+    let text = stdout_of(&out);
+    assert!(text.contains("Opening 4) LEATHRGODDESSES"), "says which it opened:\n{text}");
+    assert!(
+        text.contains("LEATHER GODDESSES OF PHOBOS"),
+        "and the GAME says what it is:\n{text}"
+    );
+    assert!(text.contains("Joe's Bar"), "…and it reached its opening room:\n{text}");
+}
+
 /// The other half, and the finding behind it: `Journey.2mg` is the segmented
 /// Apple II press, so no whole story file comes off it. The disk must still
 /// MOUNT — the user is told what is on it and asked whether this is the boot

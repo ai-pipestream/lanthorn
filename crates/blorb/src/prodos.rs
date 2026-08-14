@@ -110,7 +110,7 @@
 //!   `SYSTEM/` tree, tool sets, and `BZ.SYS16`, an Apple **IIgs** application.
 //! * **The seven *Lost Treasures* volumes** — `INFOCOM1`…`INFOCOM7`. Volume 1 is
 //!   the GS/OS launcher and carries **no game at all**; volumes 2–7 carry
-//!   twenty-nine between them, v3 through v5.
+//!   thirty between them, v3 through v5.
 //! * **`Arthur Quest 4 Excalibur.2mg` and `Journey.2mg` carry no whole story
 //!   file.** They are the ProDOS **8** Apple II presses — `INFOCOM.SYSTEM`
 //!   beside `BASIC.SYSTEM` — and the game is split across `ARTHUR.D1`…`D5` /
@@ -1240,13 +1240,17 @@ pub(crate) mod tests {
     }
 
     /// **The whole *Lost Treasures* set, volume by volume.** Seven Apple IIgs
-    /// disks: one GS/OS launcher with no game on it at all, and twenty-nine games
+    /// disks: one GS/OS launcher with no game on it at all, and **thirty** games
     /// across the other six.
     ///
     /// The point of listing every game rather than only the one `story()` opens
     /// is the requirement itself — a compilation is a LIST, and a reader that
     /// found the first game and stopped would pass a single-story test.
-    /// One game as the header records it: name, version, release, serial.
+    /// One game as the header records it: name, version, release, serial —
+    /// with **bit 7 masked off** each serial byte, because one of them is written
+    /// in the Apple II's high ASCII and there is no other way to read it (see
+    /// `INFOCOM6` below). Every other serial in the set has bit 7 clear, so the
+    /// mask changes nothing anywhere else.
     type Game = (&'static str, u8, u16, &'static str);
     /// One volume: its ProDOS name, the files on it, and the games in disk order.
     type Volume = (&'static str, usize, &'static [Game]);
@@ -1285,18 +1289,23 @@ pub(crate) mod tests {
                 ("TRINITY", 4, 12, "860926"),
                 ("BUREAUCRACY", 4, 116, "870602"),
             ]),
-            // **`LEATHRGODDESSES` is on this disk and is not in this list**, and
-            // that is `looks_like_story`'s rule rather than this reader's: its
-            // header is structurally a valid v3 story, release 0, with a serial
-            // of `C2 EC EF F7 EE A1` — "Blown!" in the high ASCII the Apple II
-            // wrote everything in. The serial check demands six PRINTABLE bytes,
-            // which is what keeps a saved game from being offered as a game, and
-            // high-bit text does not pass it. Relaxing that is a cross-format
-            // change with its own risk and is not this quest's.
+            // **`LEATHRGODDESSES` is the reason this table masks bit 7**, and
+            // it was missing from this list until SQ-0856. Its header is a
+            // structurally valid v3 story — release 0, declared length
+            // `0xfbf3 * 2` == its 128998 bytes exactly — with a serial of
+            // `C2 EC EF F7 EE A1`, which is `42 6C 6F 77 6E 21` once bit 7 comes
+            // off: **"Blown!"**, a joke serial typed on a machine whose character
+            // set sets the high bit. `looks_like_story` demanded bit 7 clear, so
+            // Leather Goddesses of Phobos was simply invisible on this volume and
+            // it listed four games where it holds five. The serial check still
+            // does the job it exists for — a saved game's `$12..$18` is binary,
+            // and binary is control bytes — it just no longer mistakes the Apple
+            // II's own text encoding for corruption.
             ("INFOCOM6", 6, &[
                 ("SHERLOCK", 5, 21, "871214"),
                 ("BORDERZONE", 5, 9, "871008"),
                 ("NORDANDBERT", 4, 19, "870722"),
+                ("LEATHRGODDESSES", 3, 0, "Blown!"),
                 ("PLUNDERED", 3, 26, "870730"),
             ]),
             ("INFOCOM7", 4, &[
@@ -1324,7 +1333,7 @@ pub(crate) mod tests {
                         p,
                         b[0],
                         u16::from_be_bytes([b[2], b[3]]),
-                        String::from_utf8_lossy(&b[0x12..0x18]).into_owned(),
+                        b[0x12..0x18].iter().map(|c| char::from(c & 0x7f)).collect(),
                     )
                 })
                 .collect();

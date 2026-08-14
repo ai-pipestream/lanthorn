@@ -147,10 +147,23 @@ story file at all: the game is split across `ARTHUR.D1`–`D5` and
 `JOURNEY.D1`–`D4`, none of which begins with a Z-machine header, so the disks
 mount, list their files and tell you there is no game on them rather than
 pretending. And *Lost Treasures* volume 1 is the GS/OS launcher — fifty-three
-files of system software and not one game. Volumes 2–7 carry twenty-nine games
+files of system software and not one game. Volumes 2–7 carry thirty games
 between them, and since no ProDOS release uses a conventional story name, opening
 one of those disks gives you the largest game on it while the picker and
 `--story` offer the whole list.
+
+The thirtieth of those games took an extra quest to find. Deciding what is a
+story means reading a Z-machine header, and one of the things a header carries is
+a six-character serial — `871214`, or `------` on some builds — which is a fine
+sanity check right up until you meet a disk written on a machine that sets the
+high bit on every character it stores. `LEATHRGODDESSES` on volume `INFOCOM6` is
+a perfectly good Version 3 story whose serial reads `C2 EC EF F7 EE A1`; take bit
+7 off and it spells **`Blown!`**, somebody's joke, not damage. babelmap now masks
+that bit before it judges a serial, so *Leather Goddesses of Phobos* is on the
+list where it always belonged — and the check keeps doing the job it was there
+for, because what it is really guarding against is the saved games sitting beside
+the games on these disks, whose serial field is binary rather than text either
+way.
 
 Disk images are first-class in the library too: point babelmap at a directory of
 them and the picker's TYPE column names the container alongside the format —

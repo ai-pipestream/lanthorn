@@ -40,12 +40,18 @@ impl Candidate {
     /// actually tells two candidates apart: the corpus holds three different
     /// releases of *Hitchhiker's* alone (v3 r56 s841221, v3 r58 s851002,
     /// v5 r31 s871119).
+    ///
+    /// **Bit 7 comes off each serial byte**, exactly as
+    /// `blorb::adf::looks_like_story` and `cli_host::storage::DiskBuild` mask it
+    /// (SQ-0856), so a story `blorb` offers is a story this menu can label:
+    /// `LEATHRGODDESSES` on *Lost Treasures* `INFOCOM6` writes its serial in the
+    /// Apple II's high ASCII and reads `Blown!` with the bit off.
     pub fn header(&self) -> Option<String> {
         let b = &self.bytes;
         if b.len() < 0x18 || !(3..=8).contains(&b[0]) {
             return None;
         }
-        let serial: String = b[0x12..0x18].iter().map(|c| char::from(*c)).collect();
+        let serial: String = b[0x12..0x18].iter().map(|c| char::from(c & 0x7f)).collect();
         if !serial.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
             return None;
         }
@@ -267,6 +273,18 @@ mod tests {
         let c = cand("Story.data", 3, 88, "840726");
         assert_eq!(c.header().as_deref(), Some("v3 r88 s840726"));
         assert_eq!(c.label(), "Story.data  (v3 r88 s840726)");
+    }
+
+    /// A serial in the Apple II's high ASCII labels as the text it is, so the
+    /// game `blorb` newly offers off `INFOCOM6` is not the one row in the menu
+    /// with no identity on it (SQ-0856).
+    #[test]
+    fn a_high_ascii_serial_labels_as_the_text_it_is() {
+        let mut bytes = story(3, 0, "......");
+        bytes[0x12..0x18].copy_from_slice(&[0xc2, 0xec, 0xef, 0xf7, 0xee, 0xa1]);
+        let c = Candidate { name: "LEATHRGODDESSES".into(), bytes };
+        assert_eq!(c.header().as_deref(), Some("v3 r0 sBlown!"));
+        assert_eq!(c.label(), "LEATHRGODDESSES  (v3 r0 sBlown!)");
     }
 
     /// Nothing to read a header out of (a Blorb, say) still gets a usable line.

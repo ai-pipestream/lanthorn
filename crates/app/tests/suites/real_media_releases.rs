@@ -152,7 +152,7 @@ const MEDIA: &[Medium] = &[
     Medium { title: "Beyond Zork (Apple IIgs)", file: "Beyond Zork (1988)(Infocom).2mg", image: Some(DiskImage::ProDos), version: 5, release: 57, serial: "871221" },
     // *The Lost Treasures of Infocom* (1993, Big Red Computer Club) is seven
     // Apple IIgs volumes. Volume 1 is the GS/OS launcher and carries no game at
-    // all, so it is absent here; volumes 2–7 carry twenty-nine between them and
+    // all, so it is absent here; volumes 2–7 carry thirty between them and
     // each row below is the one that OPENS — no ProDOS release has a
     // conventional story name, so the largest wins (`blorb::prodos` pins the
     // full inventory of all seven).
