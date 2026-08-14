@@ -192,7 +192,10 @@ const INTERPRETER: &[Row] = &[
     d(
         "honor_game_colours",
         "true",
-        &["Honour game-set colours. Set false to use only the configured theme."],
+        &[
+            "Honour game-set colours. Set false to use only the configured theme.",
+            "Override for a single run with `babelmap --no-game-colours`.",
+        ],
     ),
     d(
         "honor_timed_input",

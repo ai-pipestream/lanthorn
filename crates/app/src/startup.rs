@@ -847,6 +847,10 @@ pub(crate) fn boot_story(
     // SQ-0318: remember the global honor base so reload_style can recompute the
     // per-game > garglk > global precedence (and `auto` can fall back here).
     state.honor_game_colours_base = honor_game_colours_base;
+    // SQ-0855: and whether a flag put it there, which the base alone cannot say —
+    // the post-IFID `reload_style` below re-reads both per-story sources from disk
+    // and would otherwise let either of them overrule the flag.
+    state.no_game_colours_cli = cli.no_game_colours;
     state.config = cfg;
 
     // Debug trace (trace feature): start a fresh log for this run and arm the

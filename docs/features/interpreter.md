@@ -865,9 +865,18 @@ upper-window grid. **Glulx/Glk** games get the same treatment —
 `stylehint_TextColor`/`BackColor`/`ReverseColor` render at full 24-bit fidelity.
 
 It all sits under one switch, `honor_game_colours` (default **on**): flip it in the
-F2 settings screen to let your theme own every colour instead. `zvm-cli` and
-`gvm-cli` render the same colours as ANSI SGR and both accept `--no-game-colours`
-to opt out, as does setting `NO_COLOR` to a non-empty value.
+F2 settings screen to let your theme own every colour instead, per game with
+`/set-game-colours on|off|auto`, or for a single launch with **`--no-game-colours`** —
+one spelling across all three players, since `zvm-cli` and `gvm-cli` render the same
+colours as ANSI SGR and have always accepted it (they also honour `NO_COLOR` set to
+a non-empty value).
+
+The flag is an instruction for the launch you typed it on, so it outranks the two
+things that otherwise speak for a story — a `garglk.ini` sitting beside it, and an
+`honor` key in the game's own sidecar — exactly as `--interpreter` outranks that
+same sidecar. Nothing is written back to your config: probing one game with colours
+off cannot leave every later launch monochrome. And it is not a lock — a
+`/set-game-colours` while you play is you overriding your own flag, and wins.
 
 One thing turns it off for you. A game drawing **two-colour (CGA) artwork** is
 told the interpreter has no colours, because it has none — that artwork is a

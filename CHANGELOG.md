@@ -62,6 +62,21 @@ identifies which beta it is without reading its git hash.
 
 ### Changed
 
+- **`--interpreter-number` is now just `--interpreter`.** `zvm-cli` has always
+  called this `-I`/`--interpreter`, and one concept under two names across two
+  binaries is a thing you have to remember rather than know. Beta, so the old
+  spelling is simply gone — no alias. The `interpreter_number` config key is
+  untouched; only the command line moved. An audit of every argument the four
+  binaries share turned up no other pair like it.
+- **`--no-game-colours`, for babelmap too.** `zvm-cli` and `gvm-cli` both had it
+  and the TUI did not, despite owning the `honor_game_colours` setting that backs
+  them. It does what the others do — tell the story the interpreter has no
+  colours, and let your theme paint everything — for one launch, never written
+  back to your config. It outranks a `garglk.ini` beside the story and the game's
+  own sidecar, because a flag is an instruction for the launch you typed it on
+  and a file sitting beside a story is not; a `/set-game-colours` while you play
+  still wins over both, since that is you overriding your own flag.
+
 - **`peel-layer` and `merge-layer` are retired** in favour of the single
   `move-region` above. They were never inverses — one was region-granular and the
   other layer-granular — so a peel that grabbed one room too many could only be

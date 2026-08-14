@@ -488,6 +488,12 @@ pub(crate) fn dispatch_slash_outcome(
             // and `auto` falls back to garglk/global.
             match app::styles::write_per_game_honor(game_dir, opt) {
                 Ok(()) => {
+                    // SQ-0855: an explicit choice here ends a `--no-game-colours`
+                    // launch's hold — the user is overriding their own flag, which
+                    // is the same event as a settings-panel edit ending
+                    // `--interpreter`'s (SQ-0646). Without this the command would
+                    // report success and change nothing.
+                    state.no_game_colours_cli = false;
                     let _ = app::reload::reload_style(state);
                     // Follow through to the running Z-machine: future set_colour
                     // ops and the Flags1 colour capability track the new setting.

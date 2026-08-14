@@ -3173,6 +3173,120 @@ use_defaults = false
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SQ-0855. Every flag `babelmap` accepts, parsed through the real clap surface —
+    /// the test that catches a flag renamed in its doc comment and nowhere else, or
+    /// renamed in the arg table and left stale in the docs that name it.
+    ///
+    /// `--interpreter` is the spelling, not `--interpreter-number`: `zvm-cli` has
+    /// always called this `-I`/`--interpreter` and one concept under two names across
+    /// two binaries is the whole defect. Pre-release, so there is deliberately no
+    /// alias — the old spelling must be REJECTED, or nothing would ever have moved.
+    #[test]
+    fn every_flag_babelmap_accepts_parses_and_the_old_spelling_is_gone() {
+        use clap::Parser;
+        for flag in [
+            "--no-accel", "--no-sound", "--no-images", "--no-game-colours", "--debug",
+        ] {
+            let cli = Cli::try_parse_from(["babelmap", flag, "g.z5"])
+                .unwrap_or_else(|e| panic!("{flag} should parse: {e}"));
+            assert_eq!(
+                cli.story.as_deref(),
+                Some(std::path::Path::new("g.z5")),
+                "{flag} should leave the story path alone"
+            );
+        }
+        // Value-taking flags: the value must be consumed, not read as the story.
+        for (flag, value) in [
+            ("--interpreter", "6"),
+            ("--user-dir", "/tmp/x"),
+            ("--data-dir", "/tmp/x"),
+            ("--config", "/tmp/x.toml"),
+            ("--image-protocol", "kitty"),
+            ("--trace", "screen"),
+            ("--pictures", "g.mg1"),
+        ] {
+            let cli = Cli::try_parse_from(["babelmap", flag, value, "g.z5"])
+                .unwrap_or_else(|e| panic!("{flag} {value} should parse: {e}"));
+            assert_eq!(
+                cli.story.as_deref(),
+                Some(std::path::Path::new("g.z5")),
+                "{flag} {value} swallowed the story path"
+            );
+        }
+        // The flag sets the field the config key is named after — the FIELD keeps the
+        // key's name because that is what it sets; only the spelling on the command
+        // line moved.
+        let cli = Cli::try_parse_from(["babelmap", "--interpreter", "4", "g.z5"]).unwrap();
+        assert_eq!(cli.interpreter_number, Some(4), "--interpreter sets interpreter_number");
+        assert!(!cli.no_game_colours, "and is nothing to do with colours");
+
+        assert!(
+            Cli::try_parse_from(["babelmap", "--interpreter-number", "6", "g.z5"]).is_err(),
+            "the old spelling is gone outright — no deprecated alias before release"
+        );
+        // And the help text a user reads names the new spelling, not the old one.
+        let help = <Cli as clap::CommandFactory>::command().render_long_help().to_string();
+        assert!(help.contains("--interpreter <N>"), "help offers --interpreter: {help}");
+        assert!(!help.contains("--interpreter-number"), "and never the old name: {help}");
+        assert!(help.contains("--no-game-colours"), "help offers --no-game-colours: {help}");
+    }
+
+    /// SQ-0855: `--no-game-colours` is an instruction for one launch, exactly as
+    /// `--no-sound` and `--interpreter` are. It must reach the LIVE
+    /// `honor_game_colours` every render site gates on — a flag that set some separate
+    /// field would look right at launch and drift the moment `/set-game-colours`
+    /// toggled it — and must never be written back to config.toml.
+    ///
+    /// Both modes of the key are pinned, per the project's colour-render convention:
+    /// `true` is the shipped default and the primary baseline, and a file that already
+    /// says `false` must not be turned ON by the flag's absence.
+    #[test]
+    fn no_game_colours_flag_forces_colours_off_for_one_run_only() {
+        let dir = std::env::temp_dir().join(format!("bm-nogamecolours-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        // The key is PRESENT and at its default — the case `put` rewrites either way.
+        std::fs::write(&cfg_path, "# mine\nhonor_game_colours = true\n").unwrap();
+
+        // Without the flag, the shipped default stands.
+        let base = cli_with_config(&cfg_path, None);
+        assert!(resolve(&base).honor_game_colours, "the file's true loads untouched");
+
+        // With it, the live value every render site reads is off.
+        let mut cfg = resolve(&Cli { no_game_colours: true, ..cli_with_config(&cfg_path, None) });
+        assert!(!cfg.honor_game_colours, "the flag declares the interpreter colourless");
+
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            toml::from_str::<Config>(&back).unwrap().honor_game_colours,
+            "--no-game-colours is for one run; the FILE must still say true: {back}"
+        );
+        assert!(back.contains("# mine"), "and the user's comment survives: {back}");
+
+        // The settings panel turning them off IS a decision, and it persists.
+        cfg.one_run.release(keys::HONOR_GAME_COLOURS);
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !toml::from_str::<Config>(&back).unwrap().honor_game_colours,
+            "an explicit off persists: {back}"
+        );
+
+        // The other mode: a config that already says false stays false, and the
+        // flag's ABSENCE must not turn colours back on (the one-way rule --no-sound
+        // follows).
+        std::fs::write(&cfg_path, "honor_game_colours = false\n").unwrap();
+        assert!(!resolve(&base).honor_game_colours, "an off config is left off");
+        assert!(
+            !resolve(&Cli { no_game_colours: true, ..cli_with_config(&cfg_path, None) })
+                .honor_game_colours,
+            "and the flag agrees with it rather than fighting it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// SQ-0646: "default" in the settings panel is `None`, and `None` has to REMOVE
     /// the key. Leaving it meant the reset held for exactly as long as the session —
     /// the panel reported success, and the next launch read the old number back.
