@@ -192,7 +192,15 @@ The map is a place you can move through, not just a picture.
   the point of flagging it was to keep the whole maze together.
   The offer itself is a small modal: what it noticed, which rooms would travel, and the
   destinations on offer as a list you arrow or `Tab` through — `Enter` accepts wherever the
-  focus is resting, because landing on a choice already selects it. Three buttons, and they
+  focus is resting, because landing on a choice already selects it. It says what it noticed
+  the way round it noticed it, spelling the passage out: *"You came UP out of Cellar"* when
+  you were caught leaving, *"You came DOWN from Living Room"* when you were caught inside —
+  and then, of both, the one thing the region walk actually proves, which is that no compass
+  passage reaches those rooms. The rooms themselves are a bulleted list, one to a row under a
+  count, so the modal grows **taller** for a big region rather than eliding names into a line
+  too narrow to hold them. Past eight names it stops naming and starts counting — *"…and 12
+  more"* — and on a terminal too short for all of it the list is what gives up rows, never the
+  choices or the buttons. Three buttons, and they
   are the three answers: **Separate** does it, **Not now** re-arms the seam for your next
   crossing, **Never** silences that passage for good. `Esc` means *not now* — declining to
   answer is not the same as saying no, which is why there is no Cancel. And it waits its

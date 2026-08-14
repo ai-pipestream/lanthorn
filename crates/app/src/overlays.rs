@@ -862,7 +862,7 @@ mod tests {
             },
             title: "Where do these rooms go?".into(),
             body: vec!["More than one layer could take them.".into()],
-            rooms: "2 rooms: B, C".into(),
+            rooms: vec!["B".into(), "C".into()],
             options: vec![
                 RegionOption::Dest { label: "a new layer".into(), target: MoveTarget::New },
                 RegionOption::Dest { label: "Main".into(), target: MoveTarget::Existing(MAIN_LAYER) },

@@ -3726,19 +3726,17 @@ fn room_label(graph: &mapper::graph::MapGraph, id: mapper::graph::RoomId) -> Str
     graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id}"))
 }
 
-/// The rooms a region holds, named, elided after a few — the dim line under the question.
-fn region_rooms_line(graph: &mapper::graph::MapGraph, region: &mapper::layer::Region) -> String {
-    const SHOWN: usize = 4;
-    let names: Vec<String> =
-        region.rooms.iter().take(SHOWN).map(|&id| room_label(graph, id)).collect();
-    let rest = region.rooms.len().saturating_sub(names.len());
-    let n = region.rooms.len();
-    let s = if n == 1 { "" } else { "s" };
-    if rest == 0 {
-        format!("{n} room{s}: {}", names.join(", "))
-    } else {
-        format!("{n} room{s}: {}, and {rest} more", names.join(", "))
-    }
+/// Every room a region holds, named, in region order — the bulleted list under the question.
+///
+/// No eliding here (SQ-0858). This once returned one comma-joined line cut off after four names,
+/// which the modal then drew at whatever width the BODY happened to need, so real room names ran
+/// off the edge. Handing over the whole list lets the renderer decide how many rows it can spare
+/// and say honestly how many it left out.
+fn region_rooms_lines(
+    graph: &mapper::graph::MapGraph,
+    region: &mapper::layer::Region,
+) -> Vec<String> {
+    region.rooms.iter().map(|&id| room_label(graph, id)).collect()
 }
 
 /// Turn a destination list into prompt options, in the order it was ranked.
@@ -3792,15 +3790,33 @@ pub fn open_layer_suggestion(
     use crate::state::{RegionPrompt, RegionPromptKind};
     use mapper::suggest::Trigger;
     let from = room_label(graph, suggestion.seam.from);
-    let d = mapper::direction::short_label(suggestion.seam.dir);
+    // Spelled out, and upper case so the passage stands apart from the Title Case room name beside
+    // it. NEVER `short_label` (SQ-0858): that is `SeamKey`'s persisted ordering key, and printing
+    // it produced "You came d out of Living Room."
+    let d = mapper::direction::long_label(suggestion.seam.dir).to_uppercase();
     let n = suggestion.region.rooms.len();
+    // One trigger, two shapes, and the seam says which (SQ-0858). A structural suggestion is
+    // reported the same way whether it was noticed on the way OUT of a region or from inside one
+    // there is no way out of, so asking the trigger cannot tell them apart — but the seam's outside
+    // end can: it is one of the rooms that would move only when it is the way out. Reading it from
+    // the data rather than growing a second label means the sentence cannot drift away from
+    // whichever trigger fired, nor need editing when a third moment is found to notice one at.
+    let leaving = suggestion.region.rooms.contains(&suggestion.seam.from);
     let (title, body) = match suggestion.trigger {
-        // The seam is the way OUT, walked just now, and `from` is inside the region.
         Trigger::Structural => (
             "Give these rooms their own layer?".to_string(),
             vec![
-                format!("You came {d} out of {from}."),
-                format!("Those {n} rooms have no other way in."),
+                if leaving {
+                    // The way OUT, walked just now: `from` is the room inside you have just left.
+                    format!("You came {d} out of {from}.")
+                } else {
+                    // The way IN, and you are still down there: `from` is the room above.
+                    format!("You came {d} from {from}.")
+                },
+                // What `planar_region` actually guarantees, and all it guarantees: no compass edge
+                // crosses the boundary. The old line claimed "no other way in", which a cellar with
+                // a second trapdoor makes false in either reading.
+                format!("No compass passage reaches those {n} rooms."),
             ],
         ),
         // The seam is the way IN, and the region is the maze side of it.
@@ -3824,7 +3840,7 @@ pub fn open_layer_suggestion(
         },
         title,
         body,
-        rooms: region_rooms_line(graph, &suggestion.region),
+        rooms: region_rooms_lines(graph, &suggestion.region),
         options,
         choice: 0,
     });
@@ -3869,7 +3885,7 @@ fn open_seam_prompt(
         ],
         // Deliberately blank: the rooms are not settled until a passage is, and each option
         // carries its own count.
-        rooms: String::new(),
+        rooms: Vec::new(),
         options,
         choice: 0,
     });
@@ -3889,7 +3905,7 @@ fn open_dest_prompt(
     if options.is_empty() {
         return;
     }
-    let rooms = region_rooms_line(graph, &region);
+    let rooms = region_rooms_lines(graph, &region);
     open_region_prompt(state, RegionPrompt {
         kind: RegionPromptKind::PickDest { region, cut },
         title: "Where do these rooms go?".to_string(),
@@ -9489,7 +9505,7 @@ mod tests {
             .collect();
         assert!(labels.contains(&"a new layer"), "lists the fresh layer: {labels:?}");
         assert!(labels.contains(&"Attic"), "and every layer that could take them: {labels:?}");
-        assert!(p.rooms.contains("3 rooms"), "and says how many rooms travel: {:?}", p.rooms);
+        assert_eq!(p.rooms.len(), 3, "and hands over every room that travels: {:?}", p.rooms);
     }
 
     /// Choosing from the destination picker completes the move the command started.
@@ -9547,6 +9563,36 @@ mod tests {
         m
     }
 
+    /// Zork I's shape, walked to the moment the descent trigger speaks (SQ-0853): five surface
+    /// rooms, a trapdoor that bars itself behind you, and four rooms below it with no way back up.
+    /// The seam is `Living Room -down-> Cellar`, and the Living Room STAYS PUT — which is the whole
+    /// difference between this reading and [`manor`]'s.
+    fn barred_trapdoor() -> Mapper {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(2, "North of House", Some(Direction::N));
+        m.observe(3, "Behind House", Some(Direction::E));
+        m.observe(4, "Kitchen", Some(Direction::W));
+        m.observe(5, "Living Room", Some(Direction::W));
+        m.observe(6, "Cellar", Some(Direction::Down));
+        m.observe(7, "East of Chasm", Some(Direction::S));
+        m.observe(8, "Gallery", Some(Direction::E));
+        m.observe(9, "Studio", Some(Direction::N));
+        m
+    }
+
+    /// Draw whatever prompt is open into an 80x24 terminal and hand back the screen as one string.
+    fn drawn(state: &AppState) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::render::region_prompt::draw_region_prompt(state, f.area(), f.buffer_mut());
+            })
+            .unwrap();
+        terminal.backend().buffer().content().iter().flat_map(|c| c.symbol().chars()).collect()
+    }
+
     /// A hall with a maze through its south door — the semantic trigger's shape. Stops one step
     /// short so the caller walks in.
     fn maze_doorway() -> Mapper {
@@ -9575,14 +9621,132 @@ mod tests {
         assert_eq!(*trigger, mapper::suggest::Trigger::Structural);
         assert_eq!(seam.from, 3);
         assert_eq!(region.rooms.iter().copied().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
-        assert!(p.rooms.contains("4 rooms"), "it says how many travel: {:?}", p.rooms);
-        assert!(p.rooms.contains("Cellar"), "and names them: {:?}", p.rooms);
+        assert_eq!(
+            p.rooms,
+            ["Cellar", "Wine Cellar", "Vault", "Crypt"],
+            "every room that travels, named and in region order"
+        );
         assert_eq!(
             p.options,
             vec![RegionOption::Dest { label: "a new layer".into(), target: MoveTarget::New }],
             "with Main un-emptiable, a fresh layer is the only place they can go"
         );
         assert_eq!(m.graph.layers().len(), 1, "and nothing has moved: it only suggests");
+    }
+
+    // ── SQ-0858: the sentence, spelled out and pointed the right way round ────
+
+    /// The reported defect, and the headline of it: the prompt read **"You came d out of Living
+    /// Room."** — a `SeamKey` ordering tag printed at the player. The direction is a WORD now, and
+    /// it reaches the screen.
+    #[test]
+    fn the_prompt_spells_the_direction_out_instead_of_printing_its_key() {
+        let mut s = AppState::default();
+        let mut m = barred_trapdoor();
+        offer_layer_suggestion(&mut s, &mut m);
+        let screen = drawn(&s);
+        assert!(screen.contains("DOWN"), "the passage is spelled out: {screen:?}");
+        assert!(
+            !screen.contains("You came d "),
+            "and never as its short tag — that was the report: {screen:?}"
+        );
+    }
+
+    /// The DESCENT reading. `Trigger::Structural` fires here from inside a region there is no way
+    /// out of, so the seam is the way IN and the Living Room is the room ABOVE — it is not one of
+    /// the rooms that would move, and the sentence has to say so.
+    #[test]
+    fn a_descent_prompt_reads_as_coming_down_from_the_room_above() {
+        use crate::state::RegionPromptKind;
+        let mut s = AppState::default();
+        let mut m = barred_trapdoor();
+        offer_layer_suggestion(&mut s, &mut m);
+
+        let p = s.overlays.region_prompt.as_ref().expect("the fourth cellar room speaks");
+        let RegionPromptKind::Suggest { seam, region, trigger } = &p.kind else {
+            panic!("a structural suggestion: {:?}", p.kind)
+        };
+        assert_eq!(*trigger, mapper::suggest::Trigger::Structural);
+        assert_eq!(seam.from, 5, "the trapdoor's OUTSIDE end, the Living Room");
+        assert!(!region.rooms.contains(&seam.from), "which does not travel with the region");
+        assert_eq!(p.rooms, ["Cellar", "East of Chasm", "Gallery", "Studio"]);
+
+        let screen = drawn(&s);
+        assert!(
+            screen.contains("You came DOWN from Living Room."),
+            "the descent reading: you are still down there, having come in that way: {screen:?}"
+        );
+        assert!(
+            !screen.contains("out of"),
+            "and NOT the return reading, which is what it used to say: {screen:?}"
+        );
+    }
+
+    /// The RETURN reading, from the very same `Trigger::Structural`. Here the seam is the way OUT
+    /// and the Cellar is INSIDE the region — one of the rooms that would move — so the sentence
+    /// points the other way. Two shapes, one trigger, and the seam is what tells them apart.
+    #[test]
+    fn a_climb_out_prompt_reads_as_coming_up_out_of_the_room_below() {
+        use crate::state::RegionPromptKind;
+        let mut s = AppState::default();
+        let mut m = manor();
+        m.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s, &mut m);
+
+        let p = s.overlays.region_prompt.as_ref().expect("climbing out speaks");
+        let RegionPromptKind::Suggest { seam, region, .. } = &p.kind else {
+            panic!("a structural suggestion: {:?}", p.kind)
+        };
+        assert!(region.rooms.contains(&seam.from), "the seam's end is one of the rooms that move");
+
+        let screen = drawn(&s);
+        assert!(
+            screen.contains("You came UP out of Cellar."),
+            "the return reading: you have just left the region by that passage: {screen:?}"
+        );
+        assert!(!screen.contains("from Cellar"), "not the descent reading: {screen:?}");
+    }
+
+    /// Both readings then say the same true thing about the rooms. The line this replaced —
+    /// "Those 4 rooms have no other way in" — is false of any cellar with a second trapdoor;
+    /// what `planar_region` actually promises is that no COMPASS passage crosses the boundary.
+    #[test]
+    fn both_structural_readings_claim_only_what_the_region_walk_proves() {
+        let mut s = AppState::default();
+        let mut m = barred_trapdoor();
+        offer_layer_suggestion(&mut s, &mut m);
+        let descent = drawn(&s);
+
+        let mut s2 = AppState::default();
+        let mut m2 = manor();
+        m2.observe(1, "Hall", Some(Direction::Up));
+        offer_layer_suggestion(&mut s2, &mut m2);
+        let ret = drawn(&s2);
+
+        for screen in [&descent, &ret] {
+            assert!(
+                screen.contains("No compass passage reaches those 4 rooms."),
+                "the claim the walk supports: {screen:?}"
+            );
+            assert!(
+                !screen.contains("no other way in"),
+                "and not the one it does not: {screen:?}"
+            );
+        }
+    }
+
+    /// The rooms reach the screen as BULLETS, one to a row, under a count header — the list the
+    /// report said was cut off.
+    #[test]
+    fn a_suggestion_lists_its_rooms_as_bullets_on_screen() {
+        let mut s = AppState::default();
+        let mut m = barred_trapdoor();
+        offer_layer_suggestion(&mut s, &mut m);
+        let screen = drawn(&s);
+        assert!(screen.contains("4 rooms:"), "the count: {screen:?}");
+        for room in ["Cellar", "East of Chasm", "Gallery", "Studio"] {
+            assert!(screen.contains(&format!("• {room}")), "{room} is bulleted: {screen:?}");
+        }
     }
 
     /// Accepting a NAME-triggered suggestion also flags the layer as a maze — the player confirmed

@@ -25,8 +25,23 @@ use crate::state::{AppState, RegionOption, RegionPrompt, RegionPromptAct, Region
 const MIN_W: u16 = 34;
 const MIN_H: u16 = 8;
 
-/// Widest the modal grows, however long a layer name is. Room names are elided into it.
+/// Widest the modal grows, however long a layer name is. Longer lines are clipped into it.
 const MAX_W: u16 = 72;
+
+/// The bullet each room in the list is marked with (SQ-0858).
+const ROOM_BULLET: char = '•';
+
+/// How many rooms the list names before it starts counting instead (SQ-0858).
+///
+/// The modal grows TALLER for a big region, not wider — one name per row — but not without bound,
+/// and truncating is the right end rather than scrolling: this dialog is answered with a radio ring
+/// and three buttons, and a scrollable pane would add a fourth thing for `Tab` to mean in a modal
+/// whose whole point is a quick separate / not now / never.
+///
+/// Eight is twice `mapper::suggest::STRUCTURAL_FLOOR`, so every region small enough to have only
+/// just triggered a suggestion is listed in full, and a mature underground is summarised instead.
+/// The count header always states the true total, so a truncated list never misreports the region.
+const ROOMS_SHOWN: usize = 8;
 
 // ── RegionPromptRects ─────────────────────────────────────────────────────────
 
@@ -75,21 +90,60 @@ fn option_line(opt: &RegionOption, chosen: bool) -> String {
     format!("({mark}) {label}")
 }
 
+/// The room block as it is drawn: a count header, up to [`ROOMS_SHOWN`] bulleted names, and an
+/// "…and N more" tail when the region runs past what is shown (SQ-0858).
+///
+/// `budget` is the rows the block may occupy — what is left of the modal once the body, the
+/// options, the buttons and the two blanks have been paid for. The room list is what YIELDS on a
+/// short terminal, because the options are the answer and the buttons are how it is given; below
+/// three rows it is dropped entirely rather than degenerating into a header and a count.
+///
+/// The `bool` is "this line is a room name", so the caller can style names apart from the two count
+/// lines without either of them having to guess which rows are which.
+fn room_lines(rooms: &[String], budget: usize) -> Vec<(String, bool)> {
+    if rooms.is_empty() || budget < 3 {
+        return Vec::new();
+    }
+    let n = rooms.len();
+    let mut shown = ROOMS_SHOWN.min(n).min(budget - 1);
+    if shown < n && shown + 2 > budget {
+        shown -= 1; // the "…and N more" tail wants a row of its own
+    }
+    let s = if n == 1 { "" } else { "s" };
+    let mut out = Vec::with_capacity(shown + 2);
+    out.push((format!("{n} room{s}:"), false));
+    out.extend(rooms.iter().take(shown).map(|r| (format!("  {ROOM_BULLET} {r}"), true)));
+    if shown < n {
+        out.push((format!("  …and {} more", n - shown), false));
+    }
+    out
+}
+
 // ── draw_region_prompt ────────────────────────────────────────────────────────
 
 /// Draw the region prompt centered over `area`, or `None` when it is closed or will not fit.
 pub fn draw_region_prompt(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<RegionPromptRects> {
     let prompt = state.overlays.region_prompt.as_ref()?;
 
-    // Content rows: the body lines, the room list, a blank, then one row per option. The button
-    // row and the two border rows are on top of that.
-    let rooms_rows = u16::from(!prompt.rooms.is_empty());
-    let content_rows = prompt.body.len() as u16 + rooms_rows + 1 + prompt.options.len() as u16;
+    // Content rows: the body lines, the room list, a blank, one row per option, and a second blank
+    // so the answers never sit flush against the buttons (SQ-0858). The button row and the two
+    // border rows are on top of that.
+    //
+    // Everything except the room list is fixed, so the list gets whatever the modal can still
+    // afford — which is what keeps a big region from pushing the options off a short terminal.
+    let fixed = 2 + 1 + 1 + prompt.body.len() as u16 + 1 + prompt.options.len() as u16;
+    let budget = area.height.saturating_sub(2).saturating_sub(fixed);
+    let rooms = room_lines(&prompt.rooms, budget as usize);
+
+    let content_rows = prompt.body.len() as u16 + rooms.len() as u16 + 1 + prompt.options.len() as u16 + 1;
     let want_h = (content_rows + 3).max(MIN_H);
+    // The room names count towards the width too: leaving them out is what let real room names run
+    // off the edge of a modal sized for its body alone (SQ-0858).
     let widest = prompt
         .body
         .iter()
         .map(|s| s.chars().count())
+        .chain(rooms.iter().map(|(s, _)| s.chars().count()))
         .chain(prompt.options.iter().map(|o| option_line(o, true).chars().count()))
         .max()
         .unwrap_or(0) as u16;
@@ -119,6 +173,7 @@ pub fn draw_region_prompt(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
 
     let body_style = state.colors.theme.get("dialog.region_prompt.body").style;
     let rooms_style = state.colors.theme.get("dialog.region_prompt.rooms").style;
+    let room_style = state.colors.theme.get("dialog.region_prompt.room").style;
     let option_style = state.colors.theme.get("dialog.region_prompt.option").style;
     let chosen_style = state.colors.theme.get("dialog.region_prompt.option:chosen").style;
 
@@ -132,8 +187,8 @@ pub fn draw_region_prompt(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         put(buf, line, body_style, y);
         y += 1;
     }
-    if !prompt.rooms.is_empty() {
-        put(buf, &prompt.rooms, rooms_style, y);
+    for (line, is_name) in &rooms {
+        put(buf, line, if *is_name { room_style } else { rooms_style }, y);
         y += 1;
     }
     y += 1; // a blank row between what is being asked and the answers
@@ -152,6 +207,11 @@ pub fn draw_region_prompt(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         });
         y += 1;
     }
+
+    // …and the row `content_rows` reserved past the last option is left as it was drawn: blank,
+    // directly above the button row (SQ-0858). It is also the first thing a terminal too short for
+    // the whole modal takes back, which is the right order — the buttons and the options matter
+    // more than the gap between them.
 
     let find = |id: ButtonId| rects.buttons.iter().find(|(b, _)| *b == id).map(|(_, r)| *r);
     Some(RegionPromptRects {
@@ -204,6 +264,38 @@ mod tests {
     use mapper::suggest::{SeamKey, Trigger};
     use std::collections::BTreeSet;
 
+    /// Draw `prompt` into a `w`x`h` terminal and hand back the rects and the screen, row by row.
+    fn render(prompt: RegionPrompt, w: u16, h: u16) -> (Option<RegionPromptRects>, Vec<String>) {
+        render_themed(prompt, w, h, AppState::default())
+    }
+
+    /// …and the same with a state the caller has already themed.
+    fn render_themed(
+        prompt: RegionPrompt,
+        w: u16,
+        h: u16,
+        mut state: AppState,
+    ) -> (Option<RegionPromptRects>, Vec<String>) {
+        use ratatui::{backend::TestBackend, Terminal};
+        state.overlays.region_prompt = Some(prompt);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut rects = None;
+        terminal.draw(|f| { rects = draw_region_prompt(&state, f.area(), f.buffer_mut()); }).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows = (0..h)
+            .map(|y| (0..w).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect())
+            .collect();
+        (rects, rows)
+    }
+
+    /// The one row of a render that holds `needle`, or a panic naming what was on screen instead.
+    fn row_with(rows: &[String], needle: &str) -> usize {
+        let hits: Vec<usize> =
+            rows.iter().enumerate().filter(|(_, r)| r.contains(needle)).map(|(i, _)| i).collect();
+        assert_eq!(hits.len(), 1, "{needle:?} should be on exactly one row, screen was:\n{}", rows.join("\n"));
+        hits[0]
+    }
+
     fn suggestion_prompt() -> RegionPrompt {
         RegionPrompt {
             kind: RegionPromptKind::Suggest {
@@ -213,7 +305,7 @@ mod tests {
             },
             title: "Give these rooms a layer?".to_string(),
             body: vec!["Four rooms sit behind a portal.".to_string()],
-            rooms: "Cellar, Wine Cellar, Vault, Crypt".to_string(),
+            rooms: ["Cellar", "Wine Cellar", "Vault", "Crypt"].map(String::from).to_vec(),
             options: vec![
                 RegionOption::Dest { label: "a new layer".to_string(), target: MoveTarget::New },
                 RegionOption::Dest {
@@ -233,7 +325,7 @@ mod tests {
             },
             title: "Where do these rooms go?".to_string(),
             body: vec!["Two rooms could go to either layer.".to_string()],
-            rooms: String::new(),
+            rooms: Vec::new(),
             options: vec![
                 RegionOption::Dest { label: "a new layer".to_string(), target: MoveTarget::New }
             ],
@@ -260,7 +352,10 @@ mod tests {
             terminal.backend().buffer().content().iter().flat_map(|c| c.symbol().chars()).collect();
         assert!(all.contains("Give these rooms a layer?"), "title");
         assert!(all.contains("Four rooms sit behind a portal."), "body");
-        assert!(all.contains("Cellar, Wine Cellar, Vault, Crypt"), "the rooms that would move");
+        assert!(all.contains("4 rooms:"), "how many would move");
+        for room in ["Cellar", "Wine Cellar", "Vault", "Crypt"] {
+            assert!(all.contains(&format!("• {room}")), "{room} is a bullet in the list");
+        }
         assert!(all.contains("(•) a new layer"), "the chosen option is marked");
         assert!(all.contains("( ) Main"), "the unchosen one is not");
         assert!(all.contains("Separate") && all.contains("Not now") && all.contains("Never"));
@@ -279,6 +374,117 @@ mod tests {
         let r = rects.expect("an open prompt draws");
         assert!(r.accept.is_some() && r.cancel.is_some());
         assert!(r.later.is_none() && r.never.is_none(), "nothing is remembered about a pick");
+    }
+
+    // ── SQ-0858: the list the player complained was cut off ───────────────────
+
+    /// The rooms are a BULLETED LIST, one per row, under a count header — not a comma-joined line
+    /// truncated at four names. The reported symptom was that line running off the modal's edge.
+    #[test]
+    fn the_room_list_is_bulleted_one_room_to_a_row() {
+        let (r, rows) = render(suggestion_prompt(), 80, 24);
+        r.expect("an open prompt draws");
+        let header = row_with(&rows, "4 rooms:");
+        let names = ["Cellar", "Wine Cellar", "Vault", "Crypt"];
+        let mut at: Vec<usize> = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let y = row_with(&rows, &format!("• {name}"));
+            assert_eq!(y, header + 1 + i, "{name} is the {i}th bullet under the header");
+            at.push(y);
+        }
+        at.dedup();
+        assert_eq!(at.len(), names.len(), "each room gets a row of its own");
+        assert!(
+            !rows.iter().any(|r| r.contains("Cellar, Wine Cellar")),
+            "and nothing is comma-joined into one line any more"
+        );
+    }
+
+    /// The room names decide the modal's WIDTH too. The old sizing looked only at the body and the
+    /// options, so a long room name simply ran off the edge — which is what was reported.
+    #[test]
+    fn a_long_room_name_widens_the_modal_rather_than_being_cut_off() {
+        let mut p = suggestion_prompt();
+        p.rooms = vec!["At West End of Long Hall of Mists".to_string()];
+        let (r, rows) = render(p, 80, 24);
+        let r = r.expect("an open prompt draws");
+        row_with(&rows, "• At West End of Long Hall of Mists");
+        assert!(
+            r.area.width >= "  • At West End of Long Hall of Mists".chars().count() as u16 + 4,
+            "the modal grew to hold the name: {}",
+            r.area.width
+        );
+    }
+
+    /// Past a sensible height the list stops naming and starts counting: eight rooms, then how many
+    /// were left out. It never grows without bound and it never misreports the region — the header
+    /// still says 20.
+    #[test]
+    fn a_big_region_names_eight_rooms_and_counts_the_rest() {
+        let mut p = suggestion_prompt();
+        p.rooms = (1..=20).map(|i| format!("Room {i}")).collect();
+        let (r, rows) = render(p, 80, 40);
+        let r = r.expect("an open prompt draws");
+        row_with(&rows, "20 rooms:");
+        for i in 1..=ROOMS_SHOWN {
+            row_with(&rows, &format!("• Room {i} "));
+        }
+        assert!(
+            !rows.iter().any(|row| row.contains(&format!("• Room {} ", ROOMS_SHOWN + 1))),
+            "the ninth room is counted, not named"
+        );
+        let more = row_with(&rows, "…and 12 more");
+        assert_eq!(more, row_with(&rows, &format!("• Room {ROOMS_SHOWN} ")) + 1, "and it is the tail");
+        assert!(r.accept.is_some() && r.later.is_some() && r.never.is_some(), "all three still fit");
+    }
+
+    /// On a terminal too short for all of it, the ROOM LIST is what gives up rows — the options are
+    /// the answer and the buttons are how it is given, so neither may be squeezed out first.
+    #[test]
+    fn a_short_terminal_takes_rows_from_the_room_list_not_the_options() {
+        let mut p = suggestion_prompt();
+        p.rooms = (1..=20).map(|i| format!("Room {i}")).collect();
+        let (r, rows) = render(p, 80, 16);
+        let r = r.expect("it still draws");
+        assert_eq!(r.options.len(), 2, "both destinations are still offered");
+        for opt in &r.options {
+            assert!(opt.height > 0, "…and neither was clipped away: {:?}", r.options);
+        }
+        assert!(r.accept.is_some() && r.later.is_some() && r.never.is_some());
+        row_with(&rows, "20 rooms:");
+        assert!(
+            rows.iter().any(|row| row.contains("more")),
+            "the list said how much it left out:\n{}",
+            rows.join("\n")
+        );
+        assert!(r.area.height <= 16, "and the modal stayed inside the terminal: {}", r.area.height);
+    }
+
+    /// A blank row between the answers and the buttons, which is what the report asked for: the
+    /// last option sits two rows above the button row, not one.
+    #[test]
+    fn a_blank_row_separates_the_options_from_the_buttons() {
+        for (what, p) in [("a suggestion", suggestion_prompt()), ("a pick", pick_prompt())] {
+            let (r, rows) = render(p, 80, 24);
+            let r = r.expect("an open prompt draws");
+            let last = r.options.last().expect("every prompt has options").y;
+            let buttons = r.accept.expect("every prompt has a confirm button").y;
+            // At LEAST one clear row. A prompt short enough to be padded up to `MIN_H` gets more,
+            // and that is slack rather than a second rule.
+            assert!(
+                buttons >= last + 2,
+                "{what}: the buttons sit flush against the options ({last} then {buttons})"
+            );
+            let inside: String = rows[(last + 1) as usize]
+                .chars()
+                .skip(r.area.x as usize + 1)
+                .take(r.area.width as usize - 2)
+                .collect();
+            assert!(
+                inside.trim().is_empty(),
+                "…and that row is genuinely blank: {inside:?}"
+            );
+        }
     }
 
     /// Esc means "not now" on a suggestion — the answer that re-arms — and a plain close on a
@@ -341,6 +547,61 @@ mod tests {
                 Some(Color::Blue),
                 "an unchosen row uses region_prompt.option (honor_game_colours={honor})"
             );
+        }
+    }
+
+    /// Where `needle` starts on screen. The modal draws single-width symbols, so a byte offset into
+    /// a row is a column count away from a column.
+    fn locate(buf: &Buffer, needle: &str) -> (u16, u16) {
+        let a = *buf.area();
+        for y in a.y..a.bottom() {
+            let row: String =
+                (a.x..a.right()).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect();
+            if let Some(i) = row.find(needle) {
+                return (a.x + row[..i].chars().count() as u16, y);
+            }
+        }
+        panic!("{needle:?} is nowhere on screen");
+    }
+
+    /// The room list is themed like everything else here (SQ-0858): the named rooms carry their own
+    /// selector, and the two count lines around them keep the old one — so the names can be lit
+    /// apart from the arithmetic, and neither is hard-coded.
+    #[test]
+    fn the_room_list_takes_its_style_from_style_toml() {
+        use ratatui::style::Color;
+        use ratatui::{backend::TestBackend, Terminal};
+        // First with both selectors set, then with only the old one — which must still reach the
+        // bullets, because `room` inherits `rooms` and an existing theme knows nothing of it.
+        for (toml, bullet) in [
+            ("\"region_prompt.rooms\" = { fg = \"blue\" }\n\"region_prompt.room\" = { fg = \"green\" }\n",
+             Color::Green),
+            ("\"region_prompt.rooms\" = { fg = \"blue\" }\n", Color::Blue),
+        ] {
+            for honor in [true, false] {
+                let mut state = AppState::default();
+                state.config.honor_game_colours = honor;
+                let parsed =
+                    crate::theme::toml_schema::parse(&format!("[dialog]\n{toml}")).unwrap();
+                state.colors.theme = crate::theme::resolve::resolve_theme(
+                    &crate::colors::GhosttyScheme::default(),
+                    &parsed,
+                );
+                let mut p = suggestion_prompt();
+                p.rooms = (1..=20).map(|i| format!("Room {i}")).collect();
+                state.overlays.region_prompt = Some(p);
+                let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+                terminal.draw(|f| { draw_region_prompt(&state, f.area(), f.buffer_mut()); }).unwrap();
+                let buf = terminal.backend().buffer();
+                let fg = |needle: &str| buf.cell(locate(buf, needle)).unwrap().style().fg;
+                assert_eq!(
+                    fg("• Room 1"),
+                    Some(bullet),
+                    "a named room uses region_prompt.room (honor_game_colours={honor}, {toml:?})"
+                );
+                assert_eq!(fg("20 rooms:"), Some(Color::Blue), "the count header");
+                assert_eq!(fg("…and 12 more"), Some(Color::Blue), "and the tail that counts too");
+            }
         }
     }
 }
