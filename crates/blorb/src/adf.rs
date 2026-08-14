@@ -301,8 +301,27 @@ fn looks_like_zcode(bytes: &[u8]) -> bool {
     if !(64..static_base).contains(&objects) || !(64..static_base).contains(&globals) {
         return false;
     }
-    // High memory begins at or after static memory; the dictionary is in static.
-    if high < static_base || high > bytes.len() || dict < static_base || dict >= bytes.len() {
+    // The dictionary is in static memory, and high memory is somewhere in the
+    // file.
+    //
+    // **High memory is NOT required to begin at or after static memory**, and it
+    // was until SQ-0869 found a release where it does not. Infocom's Commodore
+    // *Trinity* — release 12, serial 860926, on `TRINITY1.D64`/`TRINITY2.D64` —
+    // declares a static base of 37,726 and a high-memory mark of **22,527**,
+    // where the identical build in `stories/trinity-r12-s860926.z4` declares
+    // 63,423. The two files are byte-identical from `$40` to the end of all
+    // 262,064 of them; only `$04` and two other bytes below the checksum's own
+    // floor differ.
+    //
+    // That is a press for a 64 KB machine carrying a 256 KB story: almost all of
+    // it has to be pageable, so the resident region is a third of what the
+    // reference build declares, and `$04` is inside the region ZMSD §11.1.6
+    // deliberately leaves out of the header checksum so that an interpreter may
+    // write it. Demanding the usual ordering made a real, checksum-verified game
+    // invisible — the same shape of defect as the high-ASCII serial two clauses
+    // below (SQ-0856), and fixed the same way: widen the clause that was
+    // assuming, keep every clause that was checking.
+    if !(64..=bytes.len()).contains(&high) || dict < static_base || dict >= bytes.len() {
         return false;
     }
     // Serial is six printable characters ("890323", or "------" on some builds)

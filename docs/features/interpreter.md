@@ -59,8 +59,15 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   checksum — which is an oracle a wrong guess cannot pass. `stories/`'s
   *Planetfall* retail disk is release 29, serial 840118, 426 sectors starting at
   track 3.
+- **Commodore 1541 disk images** — `.d64`, 174,848 bytes of 35-track floppy, and
+  the first medium here whose game is on **two of them**. Commodore DOS is on all
+  three disks in `stories/` and used by none: *Trinity* writes its story straight
+  over its own directory sector, and *Hitchhiker's* keeps a decorative directory
+  whose only file is a BASIC loader. So the story is raw sectors again — and laid
+  out differently by different presses, so babelmap tries each layout and keeps
+  the one that verifies against the story's own checksum.
 
-Those last six are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
+Those last seven are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
 titles circulate in their native form. Hand babelmap one — `babelmap "Zork
 Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem (both OFS and FFS),
@@ -363,6 +370,54 @@ became a defect the instant a third arrived: the launch dialog enumerated a PC
 floppy's `ZORK0.EG1` through the table and offered it, and the loader had no arm
 that could open it. Offered, picked, nothing drawn. It goes through the one table
 now, which is exactly the failure mode the table exists to make impossible.
+
+### The Commodore disks, where both of those problems arrive together
+
+The 1541 press is the raw-sectors problem and the multi-disk problem in one
+medium, and neither of them the way the Apple posed it.
+
+Commodore DOS is present on all three `.d64`s in `stories/` and is a decoration
+on every one. *Trinity*'s directory sector holds story data — the game is written
+straight across it — and its Block Availability Map cheerfully reports the entire
+disk free while 387 sectors are written. *Hitchhiker's* keeps a directory whose
+one file, `THE HITCHHIKER'S`, is three blocks of BASIC loader, and stamps its DOS
+version bytes `TG` instead of the standard `2A`. So there is again nothing to
+enumerate, and the story has to be found rather than opened.
+
+The new part is that the two presses do not agree on where to put it. The 1984
+*Hitchhiker's* spends **sixteen** of each track's twenty-one sectors and leaves
+the other five formatted-blank, skipping the loader and directory tracks whole;
+the 1986 *Trinity* spends every sector it can reach and skips only the BAM.
+babelmap does not guess between them: it tries each, and keeps the one whose
+reassembly verifies against the story's own header checksum. Where a press stops
+on a disk needs no table either, because a 1541 `FORMAT` leaves every block as
+`$4B` and then 255 × `$01` — so the reader simply stops where the disk stops
+having been written to, and moves to the next floppy.
+
+Which it has to, because *Trinity* is on two. This is arithmetic rather than
+packaging: Version 4 counts its length field in units of four, so *Trinity* is
+262,064 bytes, and a 1541 floppy holds 174,848 including the interpreter. Side 1
+carries the header and 344 sectors; side 2 carries the other 680 and no header at
+all — it cannot say what game it is, what release, or even that it is Infocom.
+The set model from the Apple II work joined them the day `.d64` became a spelling
+the table claimed, and open either side and the whole game comes up.
+
+The checksum settled *which* sectors, and — as the Apple disks had already taught
+— a byte sum cannot settle what **order** they go in. So the layout was pinned
+three more ways: the dictionary at each header's own pointer decodes as a textbook
+one (`, . "` with 7-byte entries and 969 words for *Hitchhiker's*; `. , " ! ?`
+with 9-byte entries and 2,120 for *Trinity*), a fingerprint over every sector in
+order is recorded so a later change cannot move it quietly, and — best of all —
+*Trinity*'s Commodore press is release 12 serial 860926, the same build as the
+`trinity-r12-s860926.z4` beside it. What comes off the two floppies is
+byte-identical to that file from `$40` to the end.
+
+Three bytes below `$40` are not identical, and they are the nicest detail on the
+disk. This press declares its high-memory mark at 22,527 where the reference
+build says 63,423 — a third as much resident — because it was pressed for a
+machine with 64 KB of RAM and a 256 KB story to page through it. The header
+checksum starts at `$40` precisely so the interpreter-facing head of the header
+may differ, and all three bytes are inside that exemption.
 
 ### A floppy is a different release
 
@@ -807,6 +862,34 @@ Amiga floppy or anywhere else.
   cell run-time state, which is the same refactor the Macintosh's real 7×15 cell
   was declined for. There is also nothing yet for it to size: *Arthur*'s and
   *Journey*'s pictures live inside a segmented container that has no reader.
+
+  **Commodore 128** is the sixth, and it is deliberately the thinnest of them:
+  the number, and an explicit "not established" on everything else. It exists
+  because the number would otherwise be dropped on the floor — `blorb`'s `.d64`
+  row answers 7, `zvm-cli` takes that straight off the medium, and a profile is
+  how the TUI takes it, so a Commodore disk with no profile would have the two
+  front-ends disagreeing about which machine the player is on.
+
+  Choosing 7 over 8 is the ProDOS argument with better evidence. A `.d64` is a
+  1541 image and §11.1.3 numbers two Commodores — 7 the 128, 8 the 64 — so the
+  geometry cannot say which. The **disks** can, though, and they disagree with
+  each other: *Hitchhiker's* boots from a Commodore 64 BASIC stub, `SYS(2063)`,
+  while *Trinity* opens with `CBM`, the Commodore 128's autoboot signature, and
+  runs an interpreter that touches the C128's own memory-management register
+  `$FF00` forty times — a register a 64 does not have. It could not boot on a 64
+  even if it wanted to, since its directory sector is full of story. And byte
+  `0x1E` means nothing before Version 4, so the Version 3 *Hitchhiker's* is
+  exactly the disk with no opinion: the only Commodore story here that **reads**
+  the byte is on the 128 disk. Declining is not the neutral option — it lands a
+  Commodore story on the DECSystem-20 — and `--interpreter 8` still names the 64.
+
+  What it does *not* claim is the rest of a machine. No standard window, because
+  Infocom never wrote a Version 6 interpreter for the Commodore at all; no
+  palette and no default colour pair, because none has been read out of Infocom's
+  Commodore interpreter, and the C64's sixteen famous hardware colours are the
+  machine's reputation rather than the interpreter's evidence — the same call the
+  ST's profile makes about its 512 colours and the Apple's about double hi-res.
+  Filling those in wants a source, not an afternoon.
 
   The Apple is also the profile whose *number* had to be argued rather than read
   — the Amiga, the Macintosh and the ST each write one byte and mean it, while

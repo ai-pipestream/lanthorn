@@ -64,6 +64,7 @@
 //! stale the moment a format arrived (SQ-0849).
 
 use crate::adf::{Adf, looks_like_story};
+use crate::d64::D64;
 use crate::fat12::Fat12;
 use crate::hfs::Hfs;
 use crate::infocom_boot::InfocomBoot;
@@ -179,6 +180,55 @@ pub const ATARI_ST_INTERPRETER_NUMBER: u8 = 5;
 /// is the top of the family.
 pub const APPLE_IIGS_INTERPRETER_NUMBER: u8 = 10;
 
+/// Commodore 128, from the same §11.1.3 table — *"… 6 IBM PC, **7 Commodore
+/// 128**, 8 Commodore 64 …"* — read from the standard rather than recalled
+/// (SQ-0869).
+///
+/// **Like ProDOS, the medium names a FAMILY**: a `.d64` is a 1541 image and a
+/// 1541 hangs off a VIC-20, a C64, a C128 and a Plus/4 alike, so the geometry
+/// cannot say which machine a disk was pressed for. Unlike ProDOS, the two
+/// candidates here are distinguishable **on the disk**, and the corpus holds one
+/// of each:
+///
+/// ```text
+///   Hitchhiker's 1984   track 17 sector 0 is a BASIC stub, `SYS(2063)`      → C64
+///   TRINITY1.D64 1986   track  1 sector 0 opens `CBM`, the C128 autoboot    → C128
+/// ```
+///
+/// *Trinity*'s is not a near thing. Its boot sector reads `43 42 4D` — the
+/// Commodore 128's autoboot signature, which a C64 does not look for — and then
+/// `A5 D7 C9 80 F0 03 20 5F FF`, testing the C128's 40/80-column flag at `$D7`
+/// and calling `$FF5F`, the C128 Kernal's SWAPPER. The interpreter behind it
+/// references **`$FF00`, the C128's MMU configuration register, forty times**,
+/// along with the `$D500` MMU block. None of those addresses is a register on a
+/// Commodore 64. And the disk could not boot on one even if it wanted to: its
+/// directory sector holds story data, so there is no file for a C64's
+/// `LOAD"*",8,1` to find.
+///
+/// **Which is why the row answers 7 and not 8.** Byte `$1E` carries no meaning
+/// before Version 4 — see [`ATARI_ST_INTERPRETER_NUMBER`], where Infocom's own
+/// Version 3 build leaves it zero and comments it "(UNUSED)" — so the Version 3
+/// *Hitchhiker's* cannot notice what it is told, and the C64 press in the corpus
+/// is exactly the disk with no opinion. The one Commodore story here that reads
+/// the byte is on a Commodore 128 disk. Answering 8 would be fitting the row to
+/// the fixture that provably ignores it.
+///
+/// **And declining is not available**, on SQ-0857's finding: `None` falls through
+/// to 1, the DECSystem-20, so it does not leave the machine unnamed, it names it
+/// something else. Measured on *Trinity* itself — release 12 serial 860926,
+/// assembled off both floppies — the number changes exactly one thing, the
+/// VERSION block, which prints `Interpreter 7 Version A` where the fall-through
+/// prints `Interpreter 1 Version A`. The rest of the transcript is byte-identical
+/// under 1, 7 and 8.
+///
+/// So no [`crate::medium`] caller ships a Commodore *profile*: nothing here
+/// establishes a screen, a palette or a colour pair, nothing in the corpus
+/// behaves differently, and Infocom pressed no Version 6 game for the machine at
+/// all. A profile would be a bundle with no measurement behind it, which is the
+/// rule the ST and Apple rows were held to in the other direction. `--interpreter
+/// 8` reaches the Commodore 64 by naming it, as every front-end pins.
+pub const COMMODORE_128_INTERPRETER_NUMBER: u8 = 7;
+
 /// Which release medium a story was mounted out of, when it was one at all.
 ///
 /// The variant is the mount's own answer — every one of them is decided by the
@@ -224,6 +274,18 @@ pub enum DiskImage {
     /// disjoint from [`DiskImage::ProDos`]'s when the two share a size, a sector
     /// order and a spelling.
     InfocomBootDisk,
+    /// A **Commodore 1541 disk** — 35 tracks, 174,848 bytes, conventionally
+    /// `.d64` (SQ-0869).
+    ///
+    /// The second format here whose bytes are not a volume, and the first whose
+    /// story is **not on one disk**. Commodore DOS is present on all three images
+    /// in the corpus and used by none of them: *Trinity* writes its story over
+    /// its own directory sector, and *Hitchhiker's* keeps a decorative one whose
+    /// only file is a BASIC loader. The story is raw sectors, laid out
+    /// differently by the 1984 and 1986 presses, and *Trinity* is a Version 4
+    /// game of 262,064 bytes that no single 174,848-byte floppy could hold. See
+    /// [`crate::d64`].
+    CommodoreD64,
 }
 
 impl DiskImage {
@@ -597,6 +659,34 @@ const FORMATS: &[Format] = &[
         looks_like: <InfocomBoot as Volume>::looks_like,
         mount: mount_boxed::<InfocomBoot>,
     },
+    Format {
+        image: DiskImage::CommodoreD64,
+        // The machine, not the filesystem — because there is no filesystem in
+        // use. "CBM" is what Commodore calls itself on its own disks, in the DOS
+        // byte at `$02` of every BAM here and in the C128 autoboot signature at
+        // track 1 sector 0 of `TRINITY1.D64`.
+        label: "CBM",
+        // **7, the Commodore 128**, argued in full at
+        // [`COMMODORE_128_INTERPRETER_NUMBER`]. The short of it: `.d64` names the
+        // 1541 and therefore a family, the corpus holds one C64 press and one
+        // C128 press, and the C64 one is Version 3 and cannot read the byte —
+        // so the only Commodore story here that reads it is on a C128 disk,
+        // which boots through the C128 autoboot sector into an interpreter that
+        // touches the C128 MMU forty times. Declining would land it on 1, the
+        // DECSystem-20 (SQ-0857). `--interpreter 8` names the Commodore 64.
+        interpreter_number: Some(COMMODORE_128_INTERPRETER_NUMBER),
+        // `.d64` is the universal spelling for a 1541 dump and what all three
+        // images in `stories/` wear — two of them shouting, which costs nothing:
+        // the census is matched case-insensitively by every scan that uses it.
+        //
+        // **Not `.d71`, `.d81` or the 40-track `.d64`**: those are the 1571, the
+        // 1581 and an extension, all different geometries, and nothing in the
+        // corpus is one. A row claiming a spelling this reader would refuse is
+        // the half-wiring the extensions column exists to end.
+        extensions: &["d64"],
+        looks_like: <D64 as Volume>::looks_like,
+        mount: mount_boxed::<D64>,
+    },
 ];
 
 /// The row whose sniff claims `raw`, if any. The single point at which bytes
@@ -963,6 +1053,60 @@ impl Volume for InfocomBoot {
     }
 }
 
+/// **The second impl here that is not a filesystem reader, and the first whose
+/// disk may hold only part of a game** (SQ-0869). See [`crate::d64`].
+impl Volume for D64 {
+    fn looks_like(raw: &[u8]) -> bool {
+        D64::looks_like_d64(raw)
+    }
+
+    fn mount(raw: Vec<u8>) -> Option<D64> {
+        D64::mount(raw).ok()
+    }
+
+    fn volume_name(&self) -> Option<&str> {
+        // Commodore DOS names every disk, and these three use it for something
+        // a person would recognise: `TRINITY`, `SIDE 2`, `HITCHHIKER GUIDE`.
+        D64::volume_name(self)
+    }
+
+    fn file_count(&self) -> usize {
+        D64::file_count(self)
+    }
+
+    fn contents(&self) -> Vec<(String, Vec<u8>)> {
+        D64::contents(self)
+    }
+
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        // Case-insensitive on either name this medium has: the disk's own, and
+        // where the story is.
+        D64::read_named(self, name)
+    }
+
+    fn story(&self) -> Option<DiskStory> {
+        D64::story(self).map(DiskStory::from)
+    }
+
+    fn pictures(&self) -> Option<DiskArt> {
+        D64::pictures(self).map(DiskArt::from)
+    }
+
+    /// **Overridden, uniquely here**, because the provided implementation would
+    /// be asking the wrong question of the wrong bytes.
+    ///
+    /// [`Volume::stories`] identifies a story by testing each of `contents()`
+    /// with [`looks_like_story`], and this format's `contents()` is the sector
+    /// image itself (see [`crate::d64::D64::contents`] for why it has to be) —
+    /// which is not a story and must not be reported as one. What this reader
+    /// has instead is far stronger than the structural test: it has reassembled
+    /// a story and checked it against the story's **own header checksum**, so
+    /// there is nothing left for a heuristic to add.
+    fn stories(&self) -> Vec<DiskStory> {
+        Volume::story(self).into_iter().collect()
+    }
+}
+
 // ── A mounted disk ────────────────────────────────────────────────────────────
 
 /// An open release disk, whatever format it turned out to be.
@@ -979,6 +1123,16 @@ pub struct MountedDisk {
     /// ordinary mount, which is nearly all of them; see
     /// [`MountedDisk::mount_set`].
     across: Vec<(String, Vec<u8>)>,
+    /// The set's volumes as whole IMAGES, this one first — for the container
+    /// whose segments are not files (SQ-0869).
+    ///
+    /// The Apple II's packed volume pages a story across `.D1`…`.D5`, which are
+    /// ordinary files and arrive in `across` above. A Commodore release pages one
+    /// across raw sectors, so what its assembler needs is the sides themselves;
+    /// a `D64` side of a two-disk game lists no files at all, and a listing is
+    /// exactly what it cannot be asked for. Empty for every ordinary mount, on
+    /// the same condition as `across`.
+    sides: Vec<Vec<u8>>,
 }
 
 impl MountedDisk {
@@ -1018,18 +1172,28 @@ impl MountedDisk {
         companions: impl FnOnce() -> Vec<Vec<u8>>,
     ) -> Result<MountedDisk, MountError> {
         let format = format_of(&raw).ok_or(MountError::NotADiskImage)?;
+        // Cloned before the mount consumes it, and dropped again a few lines
+        // below unless this volume turns out to have no story of its own. A
+        // format whose segments are not files needs the image and cannot ask the
+        // mounted volume for it; the copy is one floppy, transient, and only on
+        // the path that was already about to read every other floppy in the set.
+        let mine = raw.clone();
         let volume = (format.mount)(raw).ok_or(MountError::Unreadable(format.image))?;
-        let across = if volume.stories().is_empty() {
-            companions()
-                .into_iter()
-                .filter(|raw| (format.looks_like)(raw))
-                .filter_map(|raw| (format.mount)(raw))
+        let (across, sides) = if volume.stories().is_empty() {
+            let others: Vec<Vec<u8>> =
+                companions().into_iter().filter(|raw| (format.looks_like)(raw)).collect();
+            let across = others
+                .iter()
+                .filter_map(|raw| (format.mount)(raw.clone()))
                 .flat_map(|v| v.contents())
-                .collect()
+                .collect();
+            let mut sides = vec![mine];
+            sides.extend(others);
+            (across, sides)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        Ok(MountedDisk { image: format.image, volume, across })
+        Ok(MountedDisk { image: format.image, volume, across, sides })
     }
 
     /// The story this release keeps across its volumes, reassembled out of all
@@ -1043,12 +1207,23 @@ impl MountedDisk {
     /// [`crate::infocom_packed`], so a set that does not belong together is
     /// refused rather than handed over as plausible-looking Z-code.
     fn story_across_the_set(&self) -> Option<DiskStory> {
-        if self.across.is_empty() {
+        // `sides` rather than `across`, because a set whose members list no files
+        // at all is exactly the Commodore case and has an empty `across`.
+        if self.sides.len() < 2 {
             return None;
         }
         let mut all = self.volume.contents();
         all.extend(self.across.iter().cloned());
-        crate::infocom_packed::story(&all).map(DiskStory::from)
+        // Two containers, asked in turn, and both are verified against the
+        // story's own header checksum so neither can answer with plausible
+        // rubbish. The Apple II's packed volume pages a story across `.D1`…`.D5`
+        // segments that ARE files; the Commodore's pages one across raw sector
+        // images that are not (SQ-0869). A third would be a third line here, and
+        // that is the whole of what "a story that is on no single disk" costs a
+        // format — nothing, unless it has one.
+        crate::infocom_packed::story(&all)
+            .or_else(|| crate::d64::story_across(&self.sides))
+            .map(DiskStory::from)
     }
 
     /// Which format this turned out to be.
@@ -1234,17 +1409,35 @@ mod tests {
 
     /// A structurally valid v6 story, so `looks_like_story` finds it and every
     /// format's sample carries the same payload.
+    ///
+    /// It carries a **correct header checksum**, and since SQ-0869 that is not
+    /// decoration. A filesystem's reader finds a story by finding a file; a
+    /// raw-sector reader has no file to find and identifies a run of sectors by
+    /// checksumming it, so a sample declaring `0000` — which
+    /// [`crate::infocom_packed::verified`] reads as "not recorded" and skips —
+    /// would be a sample [`DiskImage::CommodoreD64`] could not honestly claim.
     fn fake_story() -> Vec<u8> {
         let mut b = vec![0u8; 4096];
         b[0] = 6;
         let mut word = |o: usize, v: u16| b[o..o + 2].copy_from_slice(&v.to_be_bytes());
         word(0x04, 0x0400); // high memory
+        word(0x06, 0x0500); // initial program counter
         word(0x08, 0x0300); // dictionary
         word(0x0a, 0x0100); // objects
         word(0x0c, 0x0200); // globals
         word(0x0e, 0x0280); // static memory base
         word(0x1a, (4096 / 8) as u16); // file length, v6 unit
         b[0x12..0x18].copy_from_slice(b"890323");
+        // A body, so the checksum below is a number rather than zero. An
+        // all-zero story sums to `0000`, which `verified` reads as "not
+        // recorded" and skips — the one value that would let a raw-sector
+        // reader accept any run of sectors at all.
+        for (i, byte) in b.iter_mut().enumerate().skip(64) {
+            *byte = (i % 251) as u8;
+        }
+        // Last, over `$40..` of everything above it.
+        let sum = b[64..].iter().fold(0u16, |a, &x| a.wrapping_add(u16::from(x)));
+        b[0x1c..0x1e].copy_from_slice(&sum.to_be_bytes());
         b
     }
 
@@ -1276,6 +1469,9 @@ mod tests {
             // self-booting disk has no directory at all. See
             // [`sample_entries`] for what the tests below do about that.
             DiskImage::InfocomBootDisk => crate::infocom_boot::tests::sample_disk(&story),
+            // No `files` either, and for the same reason: a Commodore press
+            // keeps its story in raw sectors outside the filesystem.
+            DiskImage::CommodoreD64 => crate::d64::tests::sample_disk(&story),
         }
     }
 
@@ -1303,6 +1499,9 @@ mod tests {
             // Where the story is, which is the only thing this medium knows
             // about it. `crate::infocom_boot::InfocomBoot::entry_name`.
             DiskImage::InfocomBootDisk => ("T3/S0", &[]),
+            // The same, and the same reason — and the sample keeps its story at
+            // track 3 sector 0 because that is where *Trinity* keeps its own.
+            DiskImage::CommodoreD64 => ("T3/S0", &[]),
         }
     }
 
@@ -1322,6 +1521,7 @@ mod tests {
             DiskImage::Fat12AtariSt,
             DiskImage::ProDos,
             DiskImage::InfocomBootDisk,
+            DiskImage::CommodoreD64,
         ];
         for image in census {
             let (label, interpreter) = match image {
@@ -1351,6 +1551,13 @@ mod tests {
                 // property of the disk, which is exactly what SQ-0857 disproved
                 // out of Infocom's own YZIP. Argued in full at the row.
                 DiskImage::InfocomBootDisk => ("Boot", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
+                // …and the Commodore press names a family too, like ProDOS —
+                // but unlike ProDOS the two candidates are told apart ON the
+                // disk, and the corpus holds one of each. The C64 press is
+                // Version 3 and cannot read `$1E` at all, so the only Commodore
+                // story here that reads it is on a Commodore 128 disk. Argued in
+                // full at [`COMMODORE_128_INTERPRETER_NUMBER`].
+                DiskImage::CommodoreD64 => ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER)),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
@@ -1575,7 +1782,17 @@ mod tests {
             seen += 1;
             assert_eq!(DiskImage::detect(&raw), Some(image), "{name}");
             let disk = MountedDisk::mount(raw).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert!(disk.file_count() > 0, "{name}: mounted but empty");
+            // A mounted disk normally lists something. The one exception in the
+            // corpus is a **side** of a multi-disk Commodore release (SQ-0869):
+            // `TRINITY1.D64` and `TRINITY2.D64` each hold part of one game and
+            // no whole file, so mounting either alone — which is what this walk
+            // does — correctly finds nothing. Said as a narrowing of the claim
+            // rather than as a `continue`, so it stays a property of the corpus
+            // and not a hole in the test.
+            if disk.file_count() == 0 {
+                assert_eq!(image, DiskImage::CommodoreD64, "{name}: mounted but empty");
+                assert!(disk.story().is_none(), "{name}: no files, and no game either");
+            }
         }
         if seen == 0 {
             eprintln!("SKIP: no release media present");
@@ -1639,6 +1856,19 @@ mod tests {
                     // exclusion is a claim this test checks and not a hole in it.
                     let blank = vec![0u8; crate::dos_order::DOS_ORDER_LEN];
                     assert_eq!(DiskImage::detect(&blank), None, "no story, no boot disk");
+                    continue;
+                }
+                // Excluded for the same reason, and asserted the same way: a
+                // Commodore press keeps no files, so "files and no game" cannot
+                // be built. A 1541 image with a readable, empty directory and
+                // nothing outside it is refused rather than mounted empty.
+                //
+                // The mounted-but-gameless case DOES exist on this format — it
+                // is either side of *Trinity* — but that is a disk with no files
+                // AND no game, which `crate::d64` covers directly.
+                DiskImage::CommodoreD64 => {
+                    let blank = vec![0u8; crate::d64::D64_LEN];
+                    assert_eq!(DiskImage::detect(&blank), None, "no story, no Commodore disk");
                     continue;
                 }
             };
@@ -1721,6 +1951,18 @@ mod tests {
                 // is instead. *Planetfall* release 29, serial 840118.
                 DiskImage::InfocomBootDisk => {
                     ("Planetfall r29 (clean copy from retail disk).dsk", "T3/S0", 3, false)
+                }
+                // **The only single-disk Commodore press in the corpus**
+                // (SQ-0869) — *Hitchhiker's* release 47, serial 840914, off the
+                // 1984 C64 floppy, whose story is 16 sectors of every track from
+                // track 5. Named here rather than *Trinity*, because *Trinity*
+                // is on TWO disks and this test mounts one: `MountedDisk::mount`
+                // is `mount_set` with no companions, so it correctly finds no
+                // game on either side. That pair is exercised through
+                // `mount_set` in `crate::d64` and end to end in the app's
+                // `real_media_releases`.
+                DiskImage::CommodoreD64 => {
+                    ("Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64", "T5/S0", 3, false)
                 }
             };
             let path =

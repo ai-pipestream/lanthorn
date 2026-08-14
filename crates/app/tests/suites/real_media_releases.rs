@@ -260,6 +260,38 @@ const MEDIA: &[Medium] = &[
     // Measured through `app::hints::load_mounted_story` on 2026-08-14, like
     // every row above.
     Medium { title: "Planetfall (Apple II, self-booting)", file: "Planetfall r29 (clean copy from retail disk).dsk", image: Some(DiskImage::InfocomBootDisk), version: 3, release: 29, serial: "840118" },
+    // ── The Commodore 1541 press (SQ-0869) ───────────────────────────────────
+    //
+    // Two machines, two presses, two layouts, and a story that is on two disks.
+    // `blorb::d64` has the measurement; what these rows pin is that all of it
+    // arrives through `app::hints::load_mounted_story` like every medium above.
+    //
+    // *Hitchhiker's* is the 1984 Commodore 64 floppy — a BASIC `SYS(2063)` stub
+    // on track 17 and a story written 16 sectors to a track from track 5. It is
+    // a **fourth** Hitchhiker's: v3 r47 s840914 against the DOS 360K's v3 r58
+    // s851002, the Lost Treasures v5 r31 s871119 and the Atari ST's v3 r56, so
+    // the project's "a disk image is a different release" rule now holds across
+    // four media for this one game.
+    Medium { title: "Hitchhiker's (Commodore 64)", file: "Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64", image: Some(DiskImage::CommodoreD64), version: 3, release: 47, serial: "840914" },
+    // *Trinity* is the 1986 Commodore **128** press — a `CBM` autoboot sector
+    // and an interpreter that touches the C128 MMU at `$FF00` forty times — and
+    // it is the first medium in this table whose story is on **no single disk**
+    // for an arithmetical reason rather than a packaging one: Version 4 counts
+    // its length in fours (ZMSD §11.1.6), so 262,064 bytes cannot fit on a
+    // 174,848-byte floppy. `MountedDisk::mount_set` joins the two sides and
+    // verifies the join against the story's own checksum.
+    //
+    // **And it is the same build as two other rows** — v4 r12 s860926, exactly
+    // the *Trinity (Apple IIgs)* row above, which for once makes a Commodore
+    // finding transferable. (The Atari ST's *Trinity* is r11 s860509 and is
+    // not.)
+    //
+    // Both sides are listed, because opening EITHER must give the whole game:
+    // side 2 carries no header at all, so the set has to work backwards from a
+    // volume that cannot identify itself. Measured through
+    // `app::hints::load_mounted_story` on 2026-08-14, like every row above.
+    Medium { title: "Trinity (Commodore 128)", file: "TRINITY1.D64", image: Some(DiskImage::CommodoreD64), version: 4, release: 12, serial: "860926" },
+    Medium { title: "Trinity (Commodore 128, side 2)", file: "TRINITY2.D64", image: Some(DiskImage::CommodoreD64), version: 4, release: 12, serial: "860926" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -420,6 +452,33 @@ const NARRATED: &[(&str, &[&str])] = &[
     // names release 29 / serial 840118 — the story's own word for the build that
     // came off 426 sectors nothing but the interleave and the checksum located.
     ("Planetfall r29 (clean copy from retail disk).dsk", &["Release 29 / Serial number 840118"]),
+    // **And the Commodore press opens and plays** (SQ-0869), on both machines
+    // and — the part that is new to this table — off a game that is on **two**
+    // floppies.
+    //
+    // *Hitchhiker's* is the single-disk Commodore 64 press: it boots off 440
+    // sectors that nothing but the 16-per-track plan and the checksum located,
+    // and names release 47 / serial 840914.
+    ("Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64", &["Release 47 / Serial number 840914"]),
+    // *Trinity* is the pair, and these two lines are the whole quest in one
+    // assertion each. The story is 262,064 bytes and neither floppy holds
+    // 174,849 of them, so **every character of this banner came off both disks**
+    // — 344 sectors from side 1 and 680 from side 2, joined and checked against
+    // the story's own `$16AB`.
+    //
+    // `Interpreter 7 ` is the second half. Read it against the Atari ST line
+    // above, which SQ-0835 left here to be changed for exactly this reason:
+    // Trinity is Version 4, so it genuinely reads `$1E`, and it now reports the
+    // Commodore 128 rather than the DECSystem-20 the fall-through would have
+    // told it it was. The same game, three media, three answers — 5 off the ST,
+    // 7 off the Commodore, and the IIgs line above prints no number at all
+    // because that row asks for the release and not the machine.
+    ("TRINITY1.D64", &["Release 12 / Serial Number 860926", "Interpreter 7 "]),
+    // …and opening the OTHER side gives the same game, which is the property a
+    // set exists for. Side 2 has no Z-machine header anywhere on it: it cannot
+    // say what game it is, what release, or even that it is Infocom. It is
+    // joined to side 1 by the checksum and by nothing else.
+    ("TRINITY2.D64", &["Release 12 / Serial Number 860926", "Interpreter 7 "]),
 ];
 
 /// The resource Blorbs shipped beside these stories, and whether each declares
@@ -470,6 +529,7 @@ fn ctx(m: &Medium) -> String {
             Some(DiskImage::Fat12AtariSt) => "Atari ST floppy",
             Some(DiskImage::ProDos) => "Apple ProDOS floppy",
             Some(DiskImage::InfocomBootDisk) => "Apple self-booting floppy",
+            Some(DiskImage::CommodoreD64) => "Commodore 1541 floppy",
             None => "story file",
         },
         m.release,
@@ -946,6 +1006,20 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // `$1E` means nothing before Version 4 and *Planetfall* is v3 — which
             // is why the row is argued as consistency rather than as a claim.
             Some(DiskImage::InfocomBootDisk) => InterpreterProfile::AppleIIgs,
+            // **A third machine that names a family, and the first told apart
+            // ON the disk** (SQ-0869). `.d64` is a 1541 image and ZMSD §11.1.3
+            // numbers two Commodores in it — 7 the 128, 8 the 64 — but unlike
+            // ProDOS the corpus can say which each disk is: `TRINITY1.D64` opens
+            // with the C128 `CBM` autoboot sector, `Hitchhikers_…d64` with a C64
+            // BASIC `SYS(2063)` stub. The row answers 7 because the C64 press is
+            // Version 3 and `$1E` means nothing before Version 4, so the only
+            // Commodore story here that READS the byte is on the C128 disk.
+            //
+            // The profile behind it is deliberately the thinnest in the enum:
+            // the number, and an explicit decline on the standard window, the
+            // palette and the default colour pair, none of which anything here
+            // establishes. Argued at `InterpreterProfile::Commodore128`.
+            Some(DiskImage::CommodoreD64) => InterpreterProfile::Commodore128,
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(

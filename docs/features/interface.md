@@ -412,8 +412,8 @@ the type label rather than a separate badge.)
 The container is part of that label, so a story you're playing off its original
 release floppy reads `Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh
 one, `Z6 (DOS)` off a PC floppy, `Z4 (ST)` off an Atari ST one or
-`Z5 (ProDOS)` off an Apple II disk, or `Z3 (Boot)` off one of Infocom's raw
-self-booting Apple floppies, and is never
+`Z5 (ProDOS)` off an Apple II disk, `Z3 (Boot)` off one of Infocom's raw
+self-booting Apple floppies, or `Z4 (CBM)` off a Commodore 1541 disk, and is never
 mistaken for a loose story file. The disk says so, not the
 filename: the suffix comes from the mount that found the story inside the image,
 so a floppy named anything at all is labelled for the filesystem it actually
@@ -422,7 +422,7 @@ at all.
 
 **Every release medium babelmap can mount, the picker offers.** The scan decides
 which files are worth opening from the same format table the mount reads, so a
-shelf of `.ima`, `.img`, `.st`, `.2mg` and `.dsk` floppies lists beside the
+shelf of `.ima`, `.img`, `.st`, `.2mg`, `.dsk` and `.d64` floppies lists beside the
 `.adf`s and the `.z5`s rather than being playable only by name. That is a pre-filter and nothing
 more — a `.img` that turns out to be a holiday photo is opened, found not to be a
 disk at all, and never shown.
@@ -452,6 +452,15 @@ loader reads off known tracks. It is a fourth `.dsk` row, `Z3 (Boot)`, and one
 game on one disk rather than a set: the extension census is a union the scan
 pre-filters on and the *bytes* decide which format they are, so a spelling two
 formats share costs the list nothing.
+
+**And both of those at once.** Infocom's Commodore *Trinity* is `Z4 (CBM)`, and
+it is on two 1541 floppies because it has to be — a Version 4 story counts its
+length in fours, so 262,064 bytes will not go on a 174,848-byte disk however
+neatly you pack it. `TRINITY1.D64` carries the header and a third of the game;
+`TRINITY2.D64` carries the rest and nothing that says what it is, not even that
+it is Infocom. Name either and the browser shows one row, one game. The
+*Hitchhiker's* Commodore disk beside them is one game on one disk and is not
+mistaken for the start of a set, even though its filename carries a `1984`.
 
 **And a row is a game, not a file.** An Amiga release came one story to a disk,
 but a compilation does not: `Infocom Compilation 1` carries six, `floppy2.ima`
