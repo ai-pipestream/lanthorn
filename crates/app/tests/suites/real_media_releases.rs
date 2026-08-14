@@ -185,6 +185,32 @@ const MEDIA: &[Medium] = &[
     // pages are not on the image and `blorb::infocom_packed` refuses it rather
     // than handing back a truncated game. `blorb::prodos` pins that refusal.
     Medium { title: "Arthur (Apple II, packed)", file: "Arthur Quest 4 Excalibur.2mg", image: Some(DiskImage::ProDos), version: 6, release: 63, serial: "890622" },
+    // ── The Apple II 5.25-inch press (SQ-0864) ───────────────────────────────
+    //
+    // **The two rows whose story is on no single file.** *Shogun* was pressed
+    // on five 5.25-inch floppies and *Zork Zero* on four, and each carries only
+    // its own quarter or fifth of the game — `shogun_s1.dsk` alone mounts as
+    // ProDOS volume `SHOGUN.1` and honestly reports that it holds no story.
+    // What loads them is `blorb::medium::MountedDisk::mount_set`, which is
+    // handed the other volumes of the release (named by `app::disk_set`) and
+    // asks `blorb::infocom_packed` the question no one disk can answer.
+    //
+    // They are ProDOS rows like the `.2mg`s above, and that is the finding
+    // rather than a shortcut: a `.dsk` is the same filesystem with its sectors
+    // in the 5.25-inch drive's order (`blorb::dos_order`), so it wears the same
+    // row and announces the same Apple IIgs.
+    //
+    // A FIFTH Shogun and a FOURTH Zork Zero: r311/890510 against the Amiga's
+    // r295/890321 and the bare file's r322/890706; r383/890602 against the
+    // Macintosh's r296/881019, the Amiga's r366/890323 and the bare file's
+    // r393/890714. The project's "a disk image is a different release" rule has
+    // no counterexample left worth looking for.
+    //
+    // Measured through `app::hints::load_mounted_story` on 2026-08-14, like
+    // every row above, and each reassembly is checked against the story's own
+    // ZMSD §11.1.6 header checksum — `$E200` and `$6F7F` — by the reader.
+    Medium { title: "Shogun (Apple II 5.25)", file: "shogun_s1.dsk", image: Some(DiskImage::ProDos), version: 6, release: 311, serial: "890510" },
+    Medium { title: "Zork Zero (Apple II 5.25)", file: "zork_zero_1.dsk", image: Some(DiskImage::ProDos), version: 6, release: 383, serial: "890602" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -584,13 +610,15 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     let _ = std::fs::remove_dir_all(&data_base);
 
     /// Every story on `path`, as the mount itself reports them.
+    ///
+    /// Through `app::hints::mounted_stories`, which is the seam the picker uses
+    /// — so a release whose story is on no single volume (SQ-0864's 5.25-inch
+    /// presses) is counted here exactly as the browser counts it, and this
+    /// helper cannot quietly disagree with the list it is checking.
     fn stories_on(path: &Path) -> Vec<Vec<u8>> {
-        let Ok(raw) = std::fs::read(path) else { return Vec::new() };
-        if blorb::medium::DiskImage::detect(&raw).is_none() {
-            return Vec::new();
-        }
-        let Ok(disk) = blorb::medium::MountedDisk::mount(raw) else { return Vec::new() };
-        disk.stories().into_iter().map(|s| s.bytes).collect()
+        app::hints::mounted_stories(path)
+            .map(|(_, s)| s.into_iter().map(|s| s.bytes).collect())
+            .unwrap_or_default()
     }
 
     let mut ran = 0;
@@ -621,17 +649,33 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     }
     assert!(ran > 0 || !any_real_media_present(), "media are present but none were scanned");
 
-    // The one format with no reader yet stays out of the list, however many of
-    // them sit in the directory: Apple II 5.25" `.dsk` (SQ-0852) arrives with
-    // the code that opens it, not before.
-    let queued = "dsk";
-    assert!(
-        !listed.iter().any(|p| {
-            p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case(queued))
+    // **And `.dsk` crossed the same line in SQ-0864.** It sat in the paragraph
+    // below as the format with no reader, listed nowhere however many of them
+    // were in the directory. Nine are, and they are two RELEASES rather than
+    // nine disks — so what the browser must show is exactly two rows, one per
+    // game, reached by naming the first volume of each. Five Shogun floppies
+    // that each report the same reassembled build are five rows before
+    // `dedupe_within_sets` and one after (SQ-0844), which is the set model
+    // paying for itself.
+    let listed_dsk: Vec<&std::ffi::OsStr> = listed
+        .iter()
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("dsk"))
                 == Some(true)
-        }),
-        "a .{queued} was listed, but nothing in blorb can mount one"
-    );
+        })
+        .filter_map(|p| p.file_name())
+        .collect();
+    let dir_has_dsk = std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|e| {
+        e.path().extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("dsk"))
+            == Some(true)
+    });
+    if dir_has_dsk {
+        assert_eq!(
+            listed_dsk,
+            ["shogun_s1.dsk", "zork_zero_1.dsk"],
+            "two releases, one row each, and the lowest disk number keeps it"
+        );
+    }
 
     // …and `.2mg` moved from that list to this one in the same commit as its
     // reader (SQ-0836), which is the whole point of the extension column.

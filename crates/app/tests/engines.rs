@@ -10,6 +10,8 @@
 
 #[path = "suites/adf_disk_image.rs"]
 mod adf_disk_image;
+#[path = "suites/apple_disk_set_release.rs"]
+mod apple_disk_set_release;
 #[path = "suites/disk_set_rows.rs"]
 mod disk_set_rows;
 #[path = "suites/disk_story_rows.rs"]
