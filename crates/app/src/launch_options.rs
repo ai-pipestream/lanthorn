@@ -589,6 +589,16 @@ pub struct LaunchOptionsState {
     pub z_version: Option<u8>,
     /// The release disk image the story was mounted out of, if any.
     pub disk_image: Option<crate::hints::DiskImage>,
+    /// **Which** story on that image, when it holds several (SQ-0859): the name
+    /// the volume stores it under. Carried because the path alone cannot say —
+    /// a dialog opened on *Leather Goddesses* and one opened on *Sherlock* hold
+    /// the same `INFOCOM6` path, and Play must start the one the player was
+    /// looking at, not the largest file on the disk.
+    ///
+    /// `None` for every loose file and every single-story image, which is the
+    /// unchanged path. Set by [`LaunchOptionsState::on_disk_entry`] so the
+    /// constructor stays the six arguments it was.
+    pub disk_entry: Option<String>,
 }
 
 /// What a key did to the dialog.
@@ -637,7 +647,14 @@ impl LaunchOptionsState {
             baseline_interpreter: inherited_interpreter,
             z_version,
             disk_image,
+            disk_entry: None,
         }
+    }
+
+    /// Bind this dialog to one story on a multi-story disk image (SQ-0859).
+    pub fn on_disk_entry(mut self, disk_entry: Option<&str>) -> LaunchOptionsState {
+        self.disk_entry = disk_entry.map(str::to_string);
+        self
     }
 
     /// The chosen archive, or `None` for "inherit".

@@ -36,6 +36,10 @@ pub enum HintDlOutcome {
 pub struct HintDlResult {
     /// The story the hint belongs to — how the picker finds the row to badge.
     pub story: PathBuf,
+    /// Which story on `story`, when it is a disk image holding several
+    /// (SQ-0859): one compilation is several rows, and the path alone would
+    /// badge whichever of them sorted first.
+    pub disk_entry: Option<String>,
     /// Where the file was (or would have been) saved, beside the story.
     pub dest: PathBuf,
     /// The story's display title, for the status line.
@@ -65,7 +69,14 @@ impl HintDownloader {
     /// Begin downloading `url` to `dest` (the hint file for `story`, named after
     /// the story `title`). Returns immediately; the result arrives via
     /// [`drain`](Self::drain).
-    pub fn start(&mut self, url: String, dest: PathBuf, story: PathBuf, title: String) {
+    pub fn start(
+        &mut self,
+        url: String,
+        dest: PathBuf,
+        story: PathBuf,
+        disk_entry: Option<String>,
+        title: String,
+    ) {
         self.inflight += 1;
         let tx = self.tx.clone();
         thread::spawn(move || {
@@ -73,7 +84,7 @@ impl HintDownloader {
                 Ok(bytes) => finalize_download(&bytes, &dest),
                 Err(e) => HintDlOutcome::Failed(e),
             };
-            let _ = tx.send(HintDlResult { story, dest, title, outcome });
+            let _ = tx.send(HintDlResult { story, disk_entry, dest, title, outcome });
         });
     }
 

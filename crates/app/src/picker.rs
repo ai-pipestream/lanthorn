@@ -67,6 +67,17 @@ pub struct StoryMeta {
     /// Decided by the mount, from the disk's own filesystem — never from the
     /// filename.
     pub disk_image: Option<crate::hints::DiskImage>,
+    /// **Which** story on that image this row is: the name the volume stores it
+    /// under (`LEATHRGODDESSES`, `HITCHHIK.DAT`, `HITCHHIK/STORY.DAT` on the one
+    /// format with directories), as [`crate::hints::mounted_stories`] listed it
+    /// (SQ-0859).
+    ///
+    /// `None` for every loose story file, and for a disk image holding exactly
+    /// one story — there is nothing to choose there, so that row opens by path
+    /// exactly as it always did. `Some` is what the launch carries back to
+    /// [`crate::hints::load_mounted_story_from`], and it is the only thing that
+    /// tells two rows off one compilation apart at open time.
+    pub disk_entry: Option<String>,
     /// Resolved per `resolve`'s precedence: IFmd > fetched sidecar. No TSV/stem
     /// source for these (title-only), so absent means genuinely unknown.
     pub author: Option<String>,
@@ -114,6 +125,53 @@ pub struct StoryEntry {
     /// it during the scan (SQ-0443). The sidecar entry is hidden from the list;
     /// its presence lights the hint badge and names the file in the info panel.
     pub hint_sidecar: Option<std::path::PathBuf>,
+}
+
+impl StoryEntry {
+    /// **What identifies a row.** The container's path, plus which story on it
+    /// when the container is a disk image holding several (SQ-0859).
+    ///
+    /// The path alone stopped being an identity the moment one image could
+    /// contribute six rows: `stories.iter().find(|e| e.path == p)` would find
+    /// whichever of the six sorted first, and hand a fetch result, a hint
+    /// sidecar or a cursor position to the wrong game.
+    pub fn is(&self, path: &Path, disk_entry: Option<&str>) -> bool {
+        self.path == path && self.meta.disk_entry.as_deref() == disk_entry
+    }
+
+    /// Whether this row and `other` are the same story.
+    pub fn same_story(&self, other: &StoryEntry) -> bool {
+        self.is(&other.path, other.meta.disk_entry.as_deref())
+    }
+
+    /// This story's per-game directory token — its build when it came off a disk
+    /// image, its basename when it is a loose file (SQ-0850). Free: the scan
+    /// already read the header.
+    pub fn story_key(&self) -> String {
+        crate::storage::story_key_for(&self.path, self.meta.disk_build().as_ref())
+    }
+
+    /// Where this story's saves, sidecars and fetched metadata live.
+    pub fn game_dir(&self, data_base: &Path) -> PathBuf {
+        crate::storage::game_dir(data_base, &self.story_key())
+    }
+
+    /// The key this row's cover art is cached under — and the file the decoder
+    /// reads it from.
+    ///
+    /// A loose story is its own path, because a blorb's `Fspc` frontispiece
+    /// lives inside the file and outranks anything fetched. A story off a disk
+    /// image is its **game directory** instead: five rows off `INFOCOM6` share
+    /// one path, so keying by path would paint the first row's jacket onto all
+    /// five, and a disk image is never a blorb — there is no frontispiece in
+    /// there to lose. The fetched `cover.png` sits in that same directory, so
+    /// the key doubles as the source.
+    pub fn cover_key(&self, data_base: &Path) -> PathBuf {
+        match self.meta.disk_entry {
+            Some(_) => self.game_dir(data_base),
+            None => self.path.clone(),
+        }
+    }
 }
 
 /// Candidate **bare** story-file extensions (matched case-insensitively).
@@ -696,9 +754,26 @@ fn container_ifmd(path: &Path) -> Option<crate::ifiction::IFiction> {
 /// literally [`resolved_title`], shared with [`resolve`], so the list and the
 /// pane cannot name the same game differently.
 pub fn metadata_title(path: &Path, data_base: &Path, ifid: &str, is_scott: bool) -> Option<String> {
-    let ifmd = container_ifmd(path);
     let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key_at(path));
-    let fetched = crate::story_info::load(&game_dir, ifid).and_then(|i| i.fetched);
+    metadata_title_in(path, &game_dir, ifid, is_scott)
+}
+
+/// [`metadata_title`] for a caller that already knows which per-game directory
+/// this story's sidecar lives in.
+///
+/// The path cannot always work it out: one disk image holds several games and
+/// [`crate::storage::story_key_at`] answers with the format's tiebreak, so a
+/// story chosen off a compilation would be handed its disk-mate's fetched
+/// metadata (SQ-0859). Whoever mounted the story has the right directory in
+/// hand; this takes it.
+pub fn metadata_title_in(
+    path: &Path,
+    game_dir: &Path,
+    ifid: &str,
+    is_scott: bool,
+) -> Option<String> {
+    let ifmd = container_ifmd(path);
+    let fetched = crate::story_info::load(game_dir, ifid).and_then(|i| i.fetched);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
     resolved_title(ifmd.as_ref(), fetched.as_ref(), bundled_title(stem, ifid, is_scott))
 }
@@ -783,9 +858,7 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
         if !path.is_file() || !has_story_ext(&path) {
             continue;
         }
-        if let Some(entry) = resolve_entry(&path, data_base) {
-            out.push(entry);
-        }
+        out.extend(resolve_entries(&path, data_base));
     }
     associate_hint_sidecars(&mut out);
     sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
@@ -849,7 +922,57 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
 /// story right after its sidecar is (re)written so a completed fetch's title/
 /// author/year land in the list without a full re-scan.
 pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
-    let (loaded, disk_image) = crate::hints::load_mounted_story(path).ok()?;
+    resolve_entry_from(path, None, data_base)
+}
+
+/// [`resolve_entry`] for one **named** story off a disk image that holds several
+/// (SQ-0859). `None` is the format's own tiebreak, i.e. exactly
+/// [`resolve_entry`].
+pub fn resolve_entry_from(
+    path: &Path,
+    disk_entry: Option<&str>,
+    data_base: &Path,
+) -> Option<StoryEntry> {
+    let (loaded, disk_image) = crate::hints::load_mounted_story_from(path, disk_entry).ok()?;
+    entry_from_loaded(path, disk_entry, loaded, disk_image, data_base)
+}
+
+/// **Every** launchable story `path` offers, as its own row.
+///
+/// One for an ordinary story file, and one *per game* for a compilation disk —
+/// the fix for the browser listing `INFOCOM6` once and opening whichever story
+/// the format's tiebreak preferred, leaving the other four unreachable however
+/// long you looked at the list (SQ-0859).
+///
+/// The image is mounted **once** and every row is built from that one mount, so
+/// a six-game disk costs the read it always cost. A disk holding one story takes
+/// the plain path with no selector at all: nothing about a single-game floppy
+/// changes, which is most of the corpus.
+pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
+    let Some((disk_image, stories)) = crate::hints::mounted_stories(path) else {
+        return resolve_entry(path, data_base).into_iter().collect();
+    };
+    if stories.len() < 2 {
+        return resolve_entry(path, data_base).into_iter().collect();
+    }
+    stories
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            let loaded = crate::hints::extract_story(bytes).ok()?;
+            entry_from_loaded(path, Some(&name), loaded, Some(disk_image), data_base)
+        })
+        .collect()
+}
+
+/// The body both doors share: build one row out of a story that is already
+/// loaded, whichever door loaded it.
+fn entry_from_loaded(
+    path: &Path,
+    disk_entry: Option<&str>,
+    loaded: crate::hints::LoadedStory,
+    disk_image: Option<crate::hints::DiskImage>,
+    data_base: &Path,
+) -> Option<StoryEntry> {
     // Only list stories babelmap can actually launch: Z-code via the
     // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
     // Glulx loader, Scott Adams via the Scott database parser.
@@ -915,10 +1038,20 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     // Scott stories have no IFID-keyed table; resolve their title (and, for the
     // homebrew games with no IFDB record, author/description) from the filename
     // stem via the bundled filename->metadata table instead.
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&filename);
+    //
+    // A story chosen off a compilation answers to the name the DISK gives it
+    // instead (SQ-0859): the image's stem names the box, so five rows off
+    // `INFOCOM6` would every one of them fall back to *Lost Treasures of Infocom
+    // (Disk 6 of 7)*. `LEATHRGODDESSES` is the row that needs it — its header
+    // reads release 0 serial `Blown!`, which no title table answers to, so the
+    // last resort is all it has. (A disk story is never Scott — every mountable
+    // format here is Infocom Z-code — so the Scott lookups below are unaffected
+    // by the substitution.)
+    let stem = disk_entry.unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&filename)
+    });
     let is_scott = matches!(loaded, crate::hints::LoadedStory::Scott(_));
     let tsv_title = bundled_title(stem, &ifid, is_scott);
     let tsv_author = is_scott.then(|| scott_author(stem)).flatten();
@@ -976,6 +1109,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         features,
         self_blorb,
         disk_image,
+        disk_entry: disk_entry.map(str::to_string),
         author: resolved.author,
         year: resolved.year,
         genre: resolved.genre,
@@ -1413,6 +1547,7 @@ mod tests {
                 features: Features::default(),
                 self_blorb: None,
                 disk_image: None,
+                disk_entry: None,
                 author: author.map(|s| s.to_string()),
                 year: year.map(|s| s.to_string()),
                 genre: None,
@@ -2114,7 +2249,7 @@ mod tests {
                 size_bytes: 1, story_bytes: 1, modified: None, engine: Engine::ZCode,
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
-                features: Features::default(), self_blorb, disk_image: None,
+                features: Features::default(), self_blorb, disk_image: None, disk_entry: None,
                 author: None, year: None, genre: None, language: None, description: None,
                 ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None,
                 fetch_not_found: false,

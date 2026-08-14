@@ -25,11 +25,31 @@ use crate::ifdb::{FetchError, FetchOutcome, MetadataSource};
 use crate::ifiction::IFiction;
 use crate::story_info::{self, FetchedMeta, StoryInfo};
 
-/// A batch of stories to fetch: `(story path, IFID)` pairs. `forced` (`f`)
-/// ignores the sidecar cache entirely; unset (`r`) skips a story already at
-/// `FETCH_VERSION`.
+/// One story in an order — which is not the same as one *file* since a disk
+/// image can hold six games (SQ-0859): the container's path, which story on it
+/// (`None` for a loose file or a single-story image), and its IFID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchTarget {
+    pub path: PathBuf,
+    pub disk_entry: Option<String>,
+    pub ifid: String,
+}
+
+impl FetchTarget {
+    /// The target one browser row stands for.
+    pub fn row(entry: &crate::picker::StoryEntry) -> FetchTarget {
+        FetchTarget {
+            path: entry.path.clone(),
+            disk_entry: entry.meta.disk_entry.clone(),
+            ifid: entry.meta.ifid.clone(),
+        }
+    }
+}
+
+/// A batch of stories to fetch. `forced` (`f`) ignores the sidecar cache
+/// entirely; unset (`r`) skips a story already at `FETCH_VERSION`.
 pub struct FetchOrder {
-    pub stories: Vec<(PathBuf, String)>,
+    pub stories: Vec<FetchTarget>,
     pub forced: bool,
     /// Manual override (SQ-0371): when set, each story is fetched by this IFDB
     /// page id (tuid) instead of its IFID — for a story the user pointed at an
@@ -62,6 +82,10 @@ pub struct FetchProgress {
     pub done: usize,
     pub total: usize,
     pub path: PathBuf,
+    /// Which story on `path` this result is for, when the path is a disk image
+    /// holding several (SQ-0859) — without it the browser cannot tell which of
+    /// six rows off one compilation just finished.
+    pub disk_entry: Option<String>,
     pub title: String,
     pub outcome: Outcome,
 }
@@ -90,12 +114,12 @@ impl Fetcher {
             while let Ok(order) = req_rx.recv() {
                 let total = order.stories.len();
                 let id_override = order.id_override;
-                for (i, (path, ifid)) in order.stories.into_iter().enumerate() {
+                for (i, target) in order.stories.into_iter().enumerate() {
                     if worker_cancel.load(Ordering::Relaxed) {
                         break;
                     }
                     let progress = fetch_one(
-                        source.as_ref(), &data_base, path, ifid, order.forced,
+                        source.as_ref(), &data_base, target, order.forced,
                         id_override.as_deref(), delay, i, total,
                     );
                     if res_tx.send(progress).is_err() {
@@ -157,15 +181,21 @@ fn scott_ifdb_id(path: &Path) -> Option<String> {
 fn fetch_one(
     source: &dyn MetadataSource,
     data_base: &Path,
-    path: PathBuf,
-    ifid: String,
+    target: FetchTarget,
     forced: bool,
     id_override: Option<&str>,
     delay: Duration,
     index: usize,
     total: usize,
 ) -> FetchProgress {
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key_at(&path));
+    let FetchTarget { path, disk_entry, ifid } = target;
+    // The story's OWN directory, not the one the image's tiebreak would name:
+    // fetching *Leather Goddesses* off `INFOCOM6` must not write its metadata
+    // (and its cover) into *Sherlock*'s directory (SQ-0859).
+    let game_dir = crate::storage::game_dir(
+        data_base,
+        &crate::storage::story_key_at_from(&path, disk_entry.as_deref()),
+    );
     let existing = story_info::load(&game_dir, &ifid);
 
     // A manual IFDB-id fetch (SQ-0371) always runs and always fetches by that
@@ -203,7 +233,7 @@ fn fetch_one(
         result
     };
 
-    FetchProgress { done: index + 1, total, path, title, outcome }
+    FetchProgress { done: index + 1, total, path, disk_entry, title, outcome }
 }
 
 /// Load the sidecar (or start a fresh one), set `.fetched`, and save —
@@ -496,7 +526,7 @@ mod tests {
         let fake = Fake::new(HashMap::new());
         let calls = Arc::clone(&fake.calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid)], forced: false , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid }], forced: false , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress.len(), 1);
@@ -522,7 +552,7 @@ mod tests {
         let fake = Fake::new(responses);
         let calls = Arc::clone(&fake.calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress.len(), 1);
@@ -547,7 +577,7 @@ mod tests {
         responses.insert(ifid.clone(), FakeResp::NotFound);
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: false , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: false , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress[0].outcome, Outcome::NotFound);
@@ -576,7 +606,7 @@ mod tests {
         responses.insert(ifid.clone(), FakeResp::Err("connection reset".into()));
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: false , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: false , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress[0].outcome, Outcome::Failed("connection reset".into()));
@@ -606,7 +636,7 @@ mod tests {
         let calls = Arc::clone(&fake.calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
         fetcher.request(FetchOrder {
-            stories: vec![(path, ifid.clone())],
+            stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }],
             forced: false,
             id_override: Some(tuid.clone()),
         });
@@ -650,9 +680,9 @@ mod tests {
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
         fetcher.request(FetchOrder {
             stories: vec![
-                (path1, ifid1.clone()),
-                (path2, ifid2.clone()),
-                (path3, ifid3.clone()),
+                FetchTarget { path: path1, disk_entry: None, ifid: ifid1.clone() },
+                FetchTarget { path: path2, disk_entry: None, ifid: ifid2.clone() },
+                FetchTarget { path: path3, disk_entry: None, ifid: ifid3.clone() },
             ],
             forced: true,
             id_override: None,
@@ -683,16 +713,21 @@ mod tests {
     #[test]
     fn progress_done_total_count_every_story_including_skips() {
         let data_base = tmp();
-        let skip1 = (data_base.join("skip1.z5"), "ZCODE-1-200001".to_string());
-        let skip2 = (data_base.join("skip2.z5"), "ZCODE-1-200002".to_string());
-        let fetched = (data_base.join("fetch3.z5"), "ZCODE-1-200003".to_string());
-        for (path, ifid) in [&skip1, &skip2] {
-            let dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(path));
-            story_info::save(&dir, &stub_info(ifid, Some(up_to_date_meta()))).unwrap();
+        let target = |name: &str, ifid: &str| FetchTarget {
+            path: data_base.join(name),
+            disk_entry: None,
+            ifid: ifid.to_string(),
+        };
+        let skip1 = target("skip1.z5", "ZCODE-1-200001");
+        let skip2 = target("skip2.z5", "ZCODE-1-200002");
+        let fetched = target("fetch3.z5", "ZCODE-1-200003");
+        for t in [&skip1, &skip2] {
+            let dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&t.path));
+            story_info::save(&dir, &stub_info(&t.ifid, Some(up_to_date_meta()))).unwrap();
         }
 
         let mut responses = HashMap::new();
-        responses.insert(fetched.1.clone(), FakeResp::NotFound);
+        responses.insert(fetched.ifid.clone(), FakeResp::NotFound);
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
         fetcher.request(FetchOrder {
@@ -732,7 +767,7 @@ mod tests {
         );
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
         wait_for(&fetcher, 1);
 
         let reloaded = story_info::load(&game_dir, &ifid).unwrap();
@@ -768,7 +803,7 @@ mod tests {
         let fake = Fake::new(responses);
         let cover_calls = Arc::clone(&fake.cover_calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
         wait_for(&fetcher, 1);
 
         assert_eq!(cover_calls.lock().unwrap().len(), 1, "the cover must be fetched exactly once");
@@ -815,7 +850,7 @@ mod tests {
         let mut fake = Fake::new(responses);
         fake.cover_bytes = b"<html><body>503 Service Unavailable</body></html>".to_vec();
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: true, id_override: None });
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true, id_override: None });
         wait_for(&fetcher, 1);
 
         assert!(!game_dir.join("cover.png").exists(), "junk must never become cover.png");
@@ -860,7 +895,7 @@ mod tests {
         let fake = Fake::new(responses);
         let cover_calls = Arc::clone(&fake.cover_calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
         wait_for(&fetcher, 1);
 
         assert!(cover_calls.lock().unwrap().is_empty(), "a story with its own frontispiece needs no fetch");
