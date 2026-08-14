@@ -7,7 +7,10 @@
 //!
 //! Two independent triggers, one prompt, one memory:
 //!
-//! * **Structural** — you climbed out of somewhere that can only be reached by climbing back in.
+//! * **Structural** — a set of rooms that hangs off one portal and nothing else. There are two
+//!   moments it can be noticed at, because there are two shapes of region: on the way back OUT of
+//!   it ([`structural_trigger`]), or, when there is no way back out, while the player is still
+//!   down there and the region has just grown into a floor plan ([`descent_trigger`], SQ-0853).
 //! * **Semantic** — you just walked into a room called "Maze".
 //!
 //! And a memory that keeps a declined suggestion declined, because a prompt that reappears on the
@@ -27,9 +30,11 @@ pub const STRUCTURAL_FLOOR: usize = 4;
 
 /// The passage a suggestion was about, and the key its answer is remembered under.
 ///
-/// It is the passage AS CROSSED at the moment the prompt fired — the way out for the structural
-/// trigger, the way in for the semantic one — because that is the crossing the player will make
-/// again, and re-arming has to hit the same key that firing did.
+/// It is always the crossing the player will make AGAIN, because re-arming has to hit the same key
+/// that firing did — which is the way OUT for [`structural_trigger`] (it fires as you leave), and
+/// the way IN for [`name_trigger`] and [`descent_trigger`] (they fire while you are still inside).
+/// For a descent that is the portal the region hangs off, not whatever step happened to be walked
+/// when the region grew big enough to mention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeamKey {
     pub from: RoomId,
@@ -76,7 +81,8 @@ pub enum SeamDecision {
 /// while a structural one sets nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
-    /// A region reachable only through portals, noticed on the way back out.
+    /// A region reachable only through portals — noticed on the way back out, or while still being
+    /// explored when there is no way back out.
     Structural,
     /// A room whose name contains the word "maze", noticed on the way in.
     Name,
@@ -185,9 +191,17 @@ pub fn destinations(graph: &MapGraph, region: &Region) -> Vec<MoveTarget> {
 
 /// Look at the move the player just made and decide whether the map has anything to say about it.
 ///
-/// `from -dir-> to` is the crossing as walked. Both triggers are evaluated here and the semantic
-/// one wins, because it is the stronger evidence: a room called "Maze" says what it is on first
-/// contact, while structural evidence is only ever circumstantial.
+/// `from -dir-> to` is the crossing as walked, and `newly_seen` says whether `to` is a room the map
+/// had never seen before this move. Only the caller knows that: the graph has already been updated
+/// by the time this runs, and "the newest room in the graph" is not the same thing — walk into a
+/// dead end and back out and the dead end is still the newest room, several moves later. It is what
+/// [`descent_trigger`] fires on, so getting it from the graph instead would re-fire on every step
+/// back and forth inside a region (SQ-0853).
+///
+/// All three triggers are evaluated here and the semantic one wins, because it is the stronger
+/// evidence: a room called "Maze" says what it is on first contact, while structural evidence is
+/// only ever circumstantial. The two structural ones cannot both fire — one wants a step back in
+/// discovery order and the other a step forward — so their order between themselves says nothing.
 ///
 /// Cheap tests come first on purpose — this runs on the interpreter's turn, once per move, and
 /// everything expensive is behind either "the passage was a portal" or "the room is called maze".
@@ -196,6 +210,7 @@ pub fn on_arrival(
     from: RoomId,
     dir: Direction,
     to: RoomId,
+    newly_seen: bool,
 ) -> Option<LayerSuggestion> {
     let seam = SeamKey { from, dir };
     if graph.seam_decision(seam) == SeamDecision::Ignored {
@@ -208,6 +223,7 @@ pub fn on_arrival(
     }
     name_trigger(graph, from, dir, to, seam)
         .or_else(|| structural_trigger(graph, from, dir, to, seam))
+        .or_else(|| descent_trigger(graph, from, dir, to, newly_seen))
 }
 
 /// The semantic trigger: the room just entered is called "maze" and the room left is not.
@@ -255,6 +271,11 @@ fn name_trigger(
 ///
 /// A layer the player has already flagged as a maze is exempt outright — the point of flagging it
 /// was to keep the whole maze together.
+///
+/// The step-back rule is why this trigger alone is not enough (SQ-0853): Zork's trapdoor is barred
+/// behind you, so the return crossing it waits for never happens, and the player explores the whole
+/// underground in silence. [`descent_trigger`] is the other half — the same evidence, read from
+/// inside the region instead of from the doorway on the way out.
 fn structural_trigger(
     graph: &MapGraph,
     from: RoomId,
@@ -270,6 +291,91 @@ fn structural_trigger(
     }
     let region = planar_region(graph, from);
     if region.rooms.contains(&to) || region.rooms.len() < STRUCTURAL_FLOOR {
+        return None;
+    }
+    finish(Trigger::Structural, seam, region, graph)
+}
+
+/// The portal a region HANGS OFF, and the key a suggestion about it is remembered under (SQ-0853).
+///
+/// The region's oldest room is the one the map saw first, so it is the room the region was entered
+/// at; the seam is then a portal into it from a room OUTSIDE the region that is older still. That
+/// last clause is the whole safety of firing forwards, and it is the same evidence the return
+/// crossing used, asked of the region instead of of the step: a region whose every room postdates
+/// the room it hangs off is an appendage of that room, whichever way the player happens to be
+/// walking. The starting room predates everything, so no region containing it can ever have an
+/// entry seam, and the starting town can never be what a suggestion offers to peel.
+///
+/// Ties break on the OLDEST outside room, which is the one choice that cannot change as the map
+/// grows: a portal found later can only have a higher `seq`, so a key once chosen stays chosen —
+/// and a memory whose key drifted would silently lose the player's answer.
+///
+/// Portals only ([`is_portal`]), matching [`structural_trigger`]: an `Unknown` edge is a cut for
+/// [`planar_region`]'s purposes but it is not a passage anyone can point at.
+fn entry_seam(graph: &MapGraph, region: &Region) -> Option<SeamKey> {
+    let layer = graph.layer_of(region.anchor);
+    let entry = *region.rooms.iter().min_by_key(|&&id| graph.room(id).map_or(u64::MAX, |r| r.seq))?;
+    let entry_seq = graph.room(entry)?.seq;
+    graph
+        .connections()
+        .iter()
+        .filter(|c| {
+            c.dest == entry
+                && is_portal(c.dir)
+                && !region.rooms.contains(&c.origin)
+                && graph.layer_of(c.origin) == layer
+                && graph.room(c.origin).is_some_and(|r| r.seq < entry_seq)
+        })
+        .min_by_key(|c| {
+            (graph.room(c.origin).map_or(u64::MAX, |r| r.seq), crate::direction::short_label(c.dir))
+        })
+        .map(|c| SeamKey { from: c.origin, dir: c.dir })
+}
+
+/// The structural trigger read forwards: a region behind a portal, noticed while the player is
+/// still inside it (SQ-0853).
+///
+/// [`structural_trigger`] waits for the way back out, and Zork I is the game that never provides
+/// one — the trapdoor is barred behind you, so a player can explore the entire underground and
+/// never be asked anything. This fires instead from within, and the reason it can do so safely is
+/// that it never looks at the region BEHIND the player: [`planar_region`] is walked from the room
+/// arrived in, so the rooms on offer are always the ones beyond the seam.
+///
+/// Two moments, and only two:
+///
+/// * **The region crosses the floor.** `to` is a room the map has never seen, so it brought exactly
+///   one room with it and `== STRUCTURAL_FLOOR` is the step that turned a cupboard into a floor
+///   plan. Firing on `>=` instead would ask again for every room added after it, which is the nag
+///   the whole design exists to avoid; the map says its piece once and then lets the player explore.
+/// * **The seam is crossed again.** That is what [`SeamDecision::Deferred`] means — "ask me next
+///   time I come through" — so the way IN has to be able to re-raise it, exactly as the way out
+///   does for a region you can walk out of.
+///
+/// A layer already flagged as a maze is exempt, for the same reason as in [`structural_trigger`].
+fn descent_trigger(
+    graph: &MapGraph,
+    from: RoomId,
+    dir: Direction,
+    to: RoomId,
+    newly_seen: bool,
+) -> Option<LayerSuggestion> {
+    if graph.layer_is_maze(graph.layer_of(to)) {
+        return None;
+    }
+    // The ARRIVAL side, always. `region_at_arrival` cannot serve here: the crossing that grows a
+    // region is usually an ordinary passage inside it, and cutting there names a handful of rooms
+    // rather than the region the portal bounds.
+    let region = planar_region(graph, to);
+    let seam = entry_seam(graph, &region)?;
+    if graph.seam_decision(seam) == SeamDecision::Ignored {
+        return None;
+    }
+    let fires = if newly_seen {
+        region.rooms.len() == STRUCTURAL_FLOOR
+    } else {
+        seam == SeamKey { from, dir } && region.rooms.len() >= STRUCTURAL_FLOOR
+    };
+    if !fires {
         return None;
     }
     finish(Trigger::Structural, seam, region, graph)
@@ -298,6 +404,9 @@ mod tests {
     /// Cellar(4) —E— Vault(5) —E— Crypt(6). The player ends up in the Crypt.
     ///
     /// Discovery order is the observe order, which is exactly what the timing rule reads.
+    ///
+    /// The Crypt is the cellar's fourth room, so the descent trigger has already spoken by the time
+    /// this returns (SQ-0853); every caller either walks on — which clears it — or takes it.
     fn manor() -> Mapper {
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);
@@ -405,6 +514,211 @@ mod tests {
             None,
             "the upstairs was on the map before the cellar, so it is not the appendage"
         );
+    }
+
+    // ── SQ-0853: the descent trigger — a one-way region noticed from inside ──
+
+    /// Zork I's shape, which is the whole of the report: five surface rooms, a trapdoor that bars
+    /// itself behind you, and four rooms below with no way back up. [`structural_trigger`] waits
+    /// for a return crossing that never comes, so before this the player explored the entire
+    /// underground in silence.
+    ///
+    /// Stops one step short of the cellar so each test below walks its own way down.
+    fn barred_trapdoor() -> Mapper {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(2, "North of House", Some(Direction::N));
+        m.observe(3, "Behind House", Some(Direction::E));
+        m.observe(4, "Kitchen", Some(Direction::W));
+        m.observe(5, "Living Room", Some(Direction::W));
+        m
+    }
+
+    /// Walk the cellar as the player did, one room at a time, and the map says its piece on the
+    /// fourth — while they are still down there, with no way back up to be noticed on.
+    #[test]
+    fn a_one_way_descent_suggests_once_the_region_becomes_a_floor_plan() {
+        let mut m = barred_trapdoor();
+        m.observe(6, "Cellar", Some(Direction::Down));
+        assert_eq!(m.take_suggestion(), None, "one room is a doorway, not a floor plan");
+        m.observe(7, "East of Chasm", Some(Direction::S));
+        assert_eq!(m.take_suggestion(), None, "two");
+        m.observe(8, "Gallery", Some(Direction::E));
+        assert_eq!(m.take_suggestion(), None, "three, still under the floor");
+
+        m.observe(9, "Studio", Some(Direction::N));
+        let s = m.take_suggestion().expect("the fourth room is when the cellar is worth a layer");
+        assert_eq!(s.trigger, Trigger::Structural);
+        assert_eq!(
+            s.seam,
+            SeamKey { from: 5, dir: Direction::Down },
+            "remembered under the trapdoor the region hangs off, not the step that grew it"
+        );
+        assert_eq!(s.region.rooms, [6, 7, 8, 9].into_iter().collect());
+        assert_eq!(s.destinations, vec![MoveTarget::New]);
+    }
+
+    /// **The guard the forward direction exists to earn.** On the way down, the region BEHIND the
+    /// player is the whole of the map they came from, and offering to peel that is the naive
+    /// heuristic's worst failure. The rooms named are the ones beyond the seam, always.
+    #[test]
+    fn a_descent_never_offers_the_world_above() {
+        let mut m = barred_trapdoor();
+        assert_eq!(
+            planar_region(&m.graph, 1).rooms.len(),
+            5,
+            "the surface is big enough and portal-bounded enough to be offered by mistake"
+        );
+        for (id, name, dir) in [
+            (6, "Cellar", Direction::Down),
+            (7, "East of Chasm", Direction::S),
+            (8, "Gallery", Direction::E),
+            (9, "Studio", Direction::N),
+        ] {
+            m.observe(id, name, Some(dir));
+            if let Some(s) = m.take_suggestion() {
+                for above in [1, 2, 3, 4, 5] {
+                    assert!(
+                        !s.region.rooms.contains(&above),
+                        "the surface must never be what is offered: {:?}",
+                        s.region.rooms
+                    );
+                }
+                assert_eq!(s.region.rooms, [6, 7, 8, 9].into_iter().collect());
+            }
+        }
+    }
+
+    /// The same guard from the other side, and the case that decides how a seam is chosen: a
+    /// portal that leads INTO the starting room from somewhere discovered later is not a way in to
+    /// the town, it is a way out of it. Without the discovery-order test on the seam's outside end,
+    /// the fourth street would offer to peel the town off its own cellar.
+    #[test]
+    fn a_portal_into_an_older_room_never_makes_it_a_region() {
+        let mut m = Mapper::default();
+        m.observe(1, "Town Square", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        m.observe(1, "Town Square", Some(Direction::Up)); // `2 -Up-> 1`: a portal INTO the start
+        m.observe(3, "North Road", Some(Direction::N));
+        m.observe(4, "East Road", Some(Direction::E));
+        m.observe(5, "South Road", Some(Direction::S));
+
+        assert_eq!(planar_region(&m.graph, 1).rooms.len(), STRUCTURAL_FLOOR, "big enough to fire");
+        assert_eq!(
+            m.take_suggestion(),
+            None,
+            "the town predates the cellar, so it is not the cellar's appendage"
+        );
+        assert_eq!(entry_seam(&m.graph, &planar_region(&m.graph, 1)), None, "…and has no seam");
+    }
+
+    /// The FLOOR, forwards. A two-room cupboard behind a door is not a floor plan, whichever way
+    /// the player is walking when it is counted.
+    #[test]
+    fn a_two_room_cupboard_behind_a_door_never_suggests_on_the_way_in() {
+        let mut m = barred_trapdoor();
+        m.observe(6, "Cupboard", Some(Direction::In));
+        assert_eq!(m.take_suggestion(), None);
+        m.observe(7, "Shelf", Some(Direction::N));
+        assert_eq!(m.take_suggestion(), None, "two rooms is a cupboard, and it stays quiet");
+        assert_eq!(planar_region(&m.graph, 6).rooms.len(), 2);
+    }
+
+    /// It must not NAG. The map says its piece once, on the step that turned the region into a
+    /// floor plan, and then lets the player explore: walking about says nothing, and neither does
+    /// every room found after it.
+    #[test]
+    fn a_descent_suggestion_is_made_once_and_then_stays_quiet() {
+        let mut m = barred_trapdoor();
+        m.observe(6, "Cellar", Some(Direction::Down));
+        m.observe(7, "East of Chasm", Some(Direction::S));
+        m.observe(8, "Gallery", Some(Direction::E));
+        m.observe(9, "Studio", Some(Direction::N));
+        m.take_suggestion().expect("it fires exactly here");
+
+        m.observe(8, "Gallery", Some(Direction::S));
+        assert_eq!(m.take_suggestion(), None, "walking back over known ground says nothing");
+        m.observe(9, "Studio", Some(Direction::N));
+        assert_eq!(m.take_suggestion(), None, "…and neither does walking forward over it again");
+        m.observe(10, "Gallery Annexe", Some(Direction::E));
+        assert_eq!(m.take_suggestion(), None, "a fifth room does not re-open a settled question");
+        m.observe(11, "Cold Store", Some(Direction::E));
+        assert_eq!(m.take_suggestion(), None, "nor a sixth");
+    }
+
+    /// "Not now" means "ask me next time I come through", and for a region entered by a portal the
+    /// crossing the player makes again is the way IN. So the descent has to be able to re-raise it.
+    #[test]
+    fn a_deferred_descent_asks_again_on_the_way_back_in() {
+        let mut m = manor();
+        let seam = SeamKey { from: 1, dir: Direction::Down };
+        let s = m.take_suggestion().expect("the manor's fourth cellar room speaks on the way down");
+        assert_eq!(s.seam, seam, "the trapdoor, not the passage that happened to grow the region");
+        m.graph.set_seam_decision(seam, SeamDecision::Deferred);
+
+        back_to_the_stairs(&mut m);
+        m.observe(1, "Hall", Some(Direction::Up));
+        m.take_suggestion(); // the climb out has its own trigger; not what this is about
+        m.observe(3, "Cellar", Some(Direction::Down));
+        let s = m.take_suggestion().expect("a deferred trapdoor asks again on the next descent");
+        assert_eq!(s.seam, seam);
+        assert_eq!(s.region.rooms, [3, 4, 5, 6].into_iter().collect(), "still the rooms below");
+    }
+
+    /// …and "never" silences that descent for good.
+    #[test]
+    fn an_ignored_descent_stays_silent_on_the_way_back_in() {
+        let mut m = manor();
+        m.graph.set_seam_decision(SeamKey { from: 1, dir: Direction::Down }, SeamDecision::Ignored);
+        back_to_the_stairs(&mut m);
+        m.observe(1, "Hall", Some(Direction::Up));
+        m.take_suggestion();
+        m.observe(3, "Cellar", Some(Direction::Down));
+        assert_eq!(m.take_suggestion(), None, "declined for good means declined for good");
+    }
+
+    /// The name still wins where both could fire: the fourth room of a portal-bounded region is
+    /// also called "Maze", and the prompt that comes up is the one that can say why.
+    #[test]
+    fn the_name_trigger_still_wins_over_a_descent() {
+        let mut m = barred_trapdoor();
+        m.observe(6, "Cellar", Some(Direction::Down));
+        m.observe(7, "East of Chasm", Some(Direction::S));
+        m.observe(8, "Gallery", Some(Direction::E));
+        m.observe(9, "Maze", Some(Direction::N));
+        let s = m.take_suggestion().expect("both could fire here");
+        assert_eq!(s.trigger, Trigger::Name, "the name is the stronger evidence");
+        assert_eq!(s.seam, SeamKey { from: 8, dir: Direction::N }, "keyed on the way into the maze");
+        assert_eq!(s.region.rooms, [9].into_iter().collect(), "and it takes the maze, not the cellar");
+    }
+
+    /// The EXEMPTION holds forwards too: a layer the player has flagged as a maze is kept whole.
+    #[test]
+    fn a_maze_flagged_layer_gets_no_descent_suggestion() {
+        let mut m = barred_trapdoor();
+        m.observe(6, "Cellar", Some(Direction::Down));
+        m.observe(7, "East of Chasm", Some(Direction::S));
+        m.observe(8, "Gallery", Some(Direction::E));
+        m.graph.set_layer_maze(MAIN_LAYER, true);
+        m.observe(9, "Studio", Some(Direction::N));
+        assert_eq!(m.take_suggestion(), None, "the maze flag exempts the layer outright");
+    }
+
+    /// A descent answer survives the map file, exactly as a climb-out answer does — and the
+    /// crossing after the reload is the test, not the reload.
+    #[test]
+    fn an_ignored_descent_is_still_ignored_after_a_save_and_reload() {
+        let mut m = manor();
+        let seam = SeamKey { from: 1, dir: Direction::Down };
+        m.graph.set_seam_decision(seam, SeamDecision::Ignored);
+        back_to_the_stairs(&mut m);
+
+        let mut m2 = crate::persist::from_json(&crate::persist::to_json(&m)).unwrap();
+        assert_eq!(m2.graph.seam_decision(seam), SeamDecision::Ignored);
+        m2.observe(1, "Hall", Some(Direction::Up));
+        m2.take_suggestion();
+        m2.observe(3, "Cellar", Some(Direction::Down));
+        assert_eq!(m2.take_suggestion(), None, "a restore does not un-decline a descent");
     }
 
     /// The EXEMPTION. Once the player has said a layer is a maze, we keep the entire maze together

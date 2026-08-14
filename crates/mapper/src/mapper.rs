@@ -61,6 +61,10 @@ impl Mapper {
     }
 
     fn observe_inner(&mut self, location: RoomId, name: &str, via: Option<Direction>, moved: bool) {
+        // Asked BEFORE the upsert, because after it every room is a room the map knows. Only this
+        // moment can answer it, and the detector needs it: a region that grew by one room is worth
+        // mentioning once, while walking back into a room already on the map is not (SQ-0853).
+        let newly_seen = self.graph.room(location).is_none();
         self.graph.upsert_room(location, name.to_string());
         // Whatever the last move had to say is about the last move; this one answers for itself.
         self.pending_suggestion = None;
@@ -93,8 +97,13 @@ impl Mapper {
                     place_incremental(&mut self.graph, prev_id, location, edge_dir);
                     // Only now, with the passage minted and both rooms placed, does the map have
                     // enough to judge the crossing by (SQ-0439).
-                    self.pending_suggestion =
-                        crate::suggest::on_arrival(&self.graph, prev_id, edge_dir, location);
+                    self.pending_suggestion = crate::suggest::on_arrival(
+                        &self.graph,
+                        prev_id,
+                        edge_dir,
+                        location,
+                        newly_seen,
+                    );
                 } else if let (true, Some(d)) = (moved, via) {
                     // The player walked `d` and came out where they went in: a self-loop
                     // (SQ-0666). No placement and no `collapse_unknown_edges` — the edge carries

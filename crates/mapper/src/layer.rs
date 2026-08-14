@@ -406,8 +406,9 @@ pub fn move_region(
 /// Mark every passage across `region`'s boundary as ignored, so the auto-suggest never proposes
 /// re-opening a boundary the player has just folded shut (SQ-0439).
 ///
-/// Both orientations of a reciprocal pair are recorded, because the two triggers key on opposite
-/// ends of the same passage — the structural one on the way out, the semantic one on the way in.
+/// Both orientations of a reciprocal pair are recorded, because the triggers key on opposite ends
+/// of the same passage — the way out when a region is noticed on the way out of it, the way in when
+/// it is noticed from inside.
 fn silence_boundary_seams(graph: &mut MapGraph, region: &Region) {
     let keys: Vec<crate::suggest::SeamKey> = graph
         .connections()
