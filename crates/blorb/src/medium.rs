@@ -410,6 +410,21 @@ struct Format {
     looks_like: fn(&[u8]) -> bool,
     /// The mount — [`Volume::mount`], boxed so the table can be one type.
     mount: fn(Vec<u8>) -> Option<Box<dyn Volume>>,
+    /// Whether this format's multi-disk assembler needs the volumes as whole
+    /// IMAGES rather than as files — see [`MountedDisk::sides`].
+    ///
+    /// True only for a format that pages a story across raw sectors, which is
+    /// the Commodore's case and nobody else's: the Apple's packed volume pages
+    /// across `.D1`…`.D5`, which are files and arrive in `across`. It is a row
+    /// here rather than a `match` in `mount_set` for the reason the whole table
+    /// exists — no front-end and no reader should know a format's name.
+    ///
+    /// It is load-bearing for COST, not just correctness. `mount_set` must copy
+    /// the image before the mount consumes it, and it cannot know whether the
+    /// volume has a story of its own until after. Cloning unconditionally made
+    /// every ordinary mount pay for a copy it dropped — 354 MB on a hybrid CD
+    /// (SQ-0875).
+    pages_across_images: bool,
 }
 
 /// **Every disk format babelmap reads.** Adding one is a row here plus the
@@ -455,6 +470,7 @@ const FORMATS: &[Format] = &[
         extensions: &["adf"],
         looks_like: <Adf as Volume>::looks_like,
         mount: mount_boxed::<Adf>,
+        pages_across_images: false,
     },
     Format {
         image: DiskImage::Hfs,
@@ -485,6 +501,7 @@ const FORMATS: &[Format] = &[
         extensions: &["image", "bin"],
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
+        pages_across_images: false,
     },
     // ── One filesystem, two machines (SQ-0833, SQ-0835) ──────────────────────
     //
@@ -516,6 +533,7 @@ const FORMATS: &[Format] = &[
         extensions: &["ima", "img"],
         looks_like: crate::fat12::looks_like_dos,
         mount: mount_boxed::<Fat12>,
+        pages_across_images: false,
     },
     Format {
         image: DiskImage::Fat12AtariSt,
@@ -550,6 +568,7 @@ const FORMATS: &[Format] = &[
         extensions: &["st"],
         looks_like: crate::fat12::looks_like_atari_st,
         mount: mount_boxed::<Fat12>,
+        pages_across_images: false,
     },
     Format {
         image: DiskImage::ProDos,
@@ -634,6 +653,7 @@ const FORMATS: &[Format] = &[
         extensions: &["2mg", "dsk", "po"],
         looks_like: <ProDos as Volume>::looks_like,
         mount: mount_boxed::<ProDos>,
+        pages_across_images: false,
     },
     Format {
         image: DiskImage::InfocomBootDisk,
@@ -673,6 +693,7 @@ const FORMATS: &[Format] = &[
         extensions: &["dsk"],
         looks_like: <InfocomBoot as Volume>::looks_like,
         mount: mount_boxed::<InfocomBoot>,
+        pages_across_images: false,
     },
     Format {
         image: DiskImage::CommodoreD64,
@@ -701,6 +722,7 @@ const FORMATS: &[Format] = &[
         extensions: &["d64"],
         looks_like: <D64 as Volume>::looks_like,
         mount: mount_boxed::<D64>,
+        pages_across_images: true,
     },
 ];
 
@@ -1146,8 +1168,15 @@ pub struct MountedDisk {
     /// across raw sectors, so what its assembler needs is the sides themselves;
     /// a `D64` side of a two-disk game lists no files at all, and a listing is
     /// exactly what it cannot be asked for. Empty for every ordinary mount, on
-    /// the same condition as `across`.
+    /// the same condition as `across` — and now also empty for a format whose
+    /// assembler reads files instead, which is why `volumes` below exists.
     sides: Vec<Vec<u8>>,
+    /// How many volumes this release turned out to have, this one included.
+    ///
+    /// `sides.len()` used to answer this, which silently required EVERY format
+    /// to keep whole images just so the packed-Apple path could count them
+    /// (SQ-0875). One is an ordinary mount.
+    volumes: usize,
 }
 
 impl MountedDisk {
@@ -1187,14 +1216,15 @@ impl MountedDisk {
         companions: impl FnOnce() -> Vec<Vec<u8>>,
     ) -> Result<MountedDisk, MountError> {
         let format = format_of(&raw).ok_or(MountError::NotADiskImage)?;
-        // Cloned before the mount consumes it, and dropped again a few lines
-        // below unless this volume turns out to have no story of its own. A
-        // format whose segments are not files needs the image and cannot ask the
-        // mounted volume for it; the copy is one floppy, transient, and only on
-        // the path that was already about to read every other floppy in the set.
-        let mine = raw.clone();
+        // The mount consumes `raw`, and whether this volume has a story of its
+        // own is only knowable after it. So a format whose assembler needs whole
+        // images must be copied FIRST — but only that format: cloning
+        // unconditionally made every ordinary mount pay for a copy it dropped,
+        // which is 354 MB on a hybrid CD and 12 MB on a Macintosh volume
+        // (SQ-0875). The row says which formats care.
+        let mine = format.pages_across_images.then(|| raw.clone());
         let volume = (format.mount)(raw).ok_or(MountError::Unreadable(format.image))?;
-        let (across, sides) = if volume.stories().is_empty() {
+        let (across, sides, volumes) = if volume.stories().is_empty() {
             let others: Vec<Vec<u8>> =
                 companions().into_iter().filter(|raw| (format.looks_like)(raw)).collect();
             let across = others
@@ -1202,13 +1232,22 @@ impl MountedDisk {
                 .filter_map(|raw| (format.mount)(raw.clone()))
                 .flat_map(|v| v.contents())
                 .collect();
-            let mut sides = vec![mine];
-            sides.extend(others);
-            (across, sides)
+            let volumes = 1 + others.len();
+            // `mine` is `Some` exactly when the row said so, so this keeps the
+            // Commodore's images and drops everyone else's.
+            let sides = match mine {
+                Some(mine) => {
+                    let mut sides = vec![mine];
+                    sides.extend(others);
+                    sides
+                }
+                None => Vec::new(),
+            };
+            (across, sides, volumes)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), 1)
         };
-        Ok(MountedDisk { image: format.image, volume, across, sides })
+        Ok(MountedDisk { image: format.image, volume, across, sides, volumes })
     }
 
     /// The story this release keeps across its volumes, reassembled out of all
@@ -1222,9 +1261,11 @@ impl MountedDisk {
     /// [`crate::infocom_packed`], so a set that does not belong together is
     /// refused rather than handed over as plausible-looking Z-code.
     fn story_across_the_set(&self) -> Option<DiskStory> {
-        // `sides` rather than `across`, because a set whose members list no files
-        // at all is exactly the Commodore case and has an empty `across`.
-        if self.sides.len() < 2 {
+        // `volumes` rather than `across.len()`, because a set whose members list
+        // no files at all is exactly the Commodore case and has an empty
+        // `across` — and rather than `sides.len()`, which is now empty for the
+        // formats whose assembler reads files (SQ-0875).
+        if self.volumes < 2 {
             return None;
         }
         let mut all = self.volume.contents();
@@ -1927,6 +1968,55 @@ mod tests {
     /// an Atari ST compilation, because **no ST v6 release exists in this
     /// corpus** — all thirty-eight ST stories are v3, v4 or v5, and none of the
     /// nine disks carries artwork at all.
+    /// SQ-0875: `mount_set` must not copy an image it will never read.
+    ///
+    /// The clone has to happen BEFORE the mount consumes `raw`, and whether this
+    /// volume has a story of its own is only knowable after — so the decision
+    /// cannot be made from the volume. It is made from the row instead, and only
+    /// a format that pages a story across raw SECTORS ever needs the images: the
+    /// Apple's packed volume pages across `.D1`…`.D5`, which are files.
+    ///
+    /// Cloning unconditionally cost a copy of the whole image on every ordinary
+    /// mount, dropped again a few lines later — 354 MB on the hybrid CD, 12 MB on
+    /// a Macintosh volume. `sides` staying EMPTY is what proves it was not paid.
+    ///
+    /// FALSIFICATION: make `mine` unconditional (`Some(raw.clone())`) and the
+    /// `sides.is_empty()` assertion below fails on every fixture; keep the clone
+    /// conditional but count volumes with `sides.len()` again and the
+    /// multi-volume tests fail instead, which is the pair this split exists for.
+    #[test]
+    fn a_format_that_reads_files_keeps_no_copy_of_the_image() {
+        // Exactly one row wants whole images, and it is the Commodore's.
+        let paging: Vec<DiskImage> =
+            FORMATS.iter().filter(|f| f.pages_across_images).map(|f| f.image).collect();
+        assert_eq!(paging, vec![DiskImage::CommodoreD64], "only a raw-sector set needs the images");
+
+        let mut ran = 0;
+        for (fixture, image) in [
+            ("Zork Zero Disk.image", DiskImage::Hfs),
+            ("Zork Zero - The Revenge of Megaboz.adf", DiskImage::Adf),
+            ("floppy5.ima", DiskImage::Fat12Dos),
+            // A member of a real multi-volume release, so the set path is the one
+            // being measured — not merely a disk that answered for itself.
+            ("shogun_s1.dsk", DiskImage::ProDos),
+        ] {
+            let Ok(raw) = std::fs::read(stories_dir().join(fixture)) else { continue };
+            ran += 1;
+            // Shogun's story is on none of its five floppies, so its set path
+            // really runs; the others answer for themselves and never ask.
+            let companions =
+                if fixture == "shogun_s1.dsk" { read_set(&SHOGUN_SET).unwrap_or_default() } else { Vec::new() };
+            let disk = MountedDisk::mount_set(raw, || companions)
+                .unwrap_or_else(|e| panic!("{fixture}: should mount: {e:?}"));
+            assert_eq!(disk.format(), image, "{fixture}");
+            assert!(
+                disk.sides.is_empty(),
+                "{fixture}: a format whose assembler reads files must keep no image copy"
+            );
+        }
+        assert!(ran > 0 || !stories_dir().is_dir(), "media are present but none were read");
+    }
+
     #[test]
     fn real_release_disks_of_every_format_mount_through_one_path() {
         for image in DiskImage::all() {
