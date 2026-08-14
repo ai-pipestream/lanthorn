@@ -44,6 +44,14 @@ const IMAGES: &[&str] = &[
     "floppy2.ima",
     "floppy5.ima",
     "disk3.img",
+    // An Apple IIgs ProDOS compilation (SQ-0836) — and specifically the volume
+    // whose fifth game only became visible when `looks_like_story` learned to
+    // read a high-ASCII serial (SQ-0856). `LEATHRGODDESSES` is the corpus's one
+    // story whose serial is not six ASCII digits, so it is the only real medium
+    // that can catch `DiskBuild::of` disagreeing with `blorb` about what a
+    // serial is — a disagreement that lands it on the basename fallback, which
+    // is what the case below forbids.
+    "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 6 of 7).2mg",
     // Single-title release floppies, one game each.
     "Zork I - The Great Underground Empire.adf",
     "Zork Zero - The Revenge of Megaboz.adf",
@@ -101,8 +109,17 @@ fn every_story_on_every_image_keys_on_a_build() {
                 story_key_for(&path, None),
                 "{image}: {name} must not key on the image's own filename",
             );
+            // `disk_story_key` writes the serial with everything non-alphanumeric
+            // turned into `_`, because it is a directory name. That was invisible
+            // while every serial in the corpus was six digits; `LEATHRGODDESSES`
+            // off `INFOCOM6` is `Blown!` and keys as `sBlown_` (SQ-0856).
+            let serial: String = build
+                .serial
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
             assert!(
-                key.ends_with(&format!("-r{}-s{}", build.release, build.serial)),
+                key.ends_with(&format!("-r{}-s{serial}", build.release)),
                 "{image}: {name} -> {key}",
             );
         }

@@ -39,7 +39,8 @@ use std::path::{Path, PathBuf};
 pub struct DiskBuild {
     /// Header `$02`, big-endian.
     pub release: u16,
-    /// Header `$12..$18`, six ASCII bytes (`840726`).
+    /// Header `$12..$18`, six ASCII bytes (`840726`), with bit 7 masked off —
+    /// see [`DiskBuild::of`].
     pub serial: String,
 }
 
@@ -50,11 +51,20 @@ impl DiskBuild {
     /// The version-byte and serial checks are the ones `zvm-cli`'s disk menu
     /// already applies to the same bytes, so a candidate the menu can label is
     /// exactly a candidate this can key.
+    ///
+    /// **Bit 7 comes off each serial byte before it is read**, for the same
+    /// reason `blorb::adf::looks_like_story` masks it (SQ-0856): the Apple II
+    /// wrote text with the high bit set, and `LEATHRGODDESSES` on *Lost
+    /// Treasures* volume `INFOCOM6` spells its serial `C2 EC EF F7 EE A1` —
+    /// "Blown!". `blorb` offers that story, so this must be able to key it;
+    /// a `None` here would send it to the basename fallback and back in with
+    /// its disk-mates, which is the defect this whole module exists to fix.
+    /// Every other serial in the corpus has bit 7 clear, so nothing else moves.
     pub fn of(bytes: &[u8]) -> Option<DiskBuild> {
         if bytes.len() < 0x18 || !(3..=8).contains(&bytes[0]) {
             return None;
         }
-        let serial: String = bytes[0x12..0x18].iter().map(|c| char::from(*c)).collect();
+        let serial: String = bytes[0x12..0x18].iter().map(|c| char::from(c & 0x7f)).collect();
         if !serial.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
             return None;
         }
@@ -382,6 +392,25 @@ mod tests {
             Some(build(88, "840726")),
             "and a real v3 header reads",
         );
+    }
+
+    /// **A high-ASCII serial still keys** (SQ-0856). `LEATHRGODDESSES` off
+    /// *Lost Treasures* `INFOCOM6` writes `C2 EC EF F7 EE A1` at `$12`, which is
+    /// "Blown!" with bit 7 off. `blorb` offers that story now, so a `None` here
+    /// would drop it into the basename fallback and back in with its disk-mates
+    /// — guard 2's failure mode exactly.
+    #[test]
+    fn a_high_ascii_serial_still_keys_on_its_build() {
+        let mut bytes = header(3, 0, "......");
+        bytes[0x12..0x18].copy_from_slice(&[0xc2, 0xec, 0xef, 0xf7, 0xee, 0xa1]);
+        assert_eq!(DiskBuild::of(&bytes), Some(build(0, "Blown!")));
+        // No title in the table answers to release 0, so it slugs as `story`,
+        // and `!` is not a directory character.
+        assert_eq!(disk_story_key(&build(0, "Blown!")), "story-r0-sBlown_");
+        // Binary is still binary with the bit masked: a saved game does not key.
+        let mut save = header(3, 0, "......");
+        save[0x12..0x18].copy_from_slice(&[0x00; 6]);
+        assert_eq!(DiskBuild::of(&save), None, "an all-zero serial is not text");
     }
 
     /// `--story` can pick any game off a compilation, so `zvm-cli` works out the
