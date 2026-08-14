@@ -422,7 +422,8 @@ at all.
 
 **Every release medium babelmap can mount, the picker offers.** The scan decides
 which files are worth opening from the same format table the mount reads, so a
-shelf of `.ima`, `.img`, `.st`, `.2mg`, `.dsk` and `.d64` floppies lists beside the
+shelf of `.ima`, `.img`, `.st`, `.2mg`, `.dsk`, `.d64` and `.bin` floppies — and
+CDs — lists beside the
 `.adf`s and the `.z5`s rather than being playable only by name. That is a pre-filter and nothing
 more — a `.img` that turns out to be a holiday photo is opened, found not to be a
 disk at all, and never shown.

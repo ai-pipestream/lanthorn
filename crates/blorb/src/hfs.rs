@@ -226,11 +226,21 @@ impl Hfs {
     /// the other way round. A Z-machine, Glulx, Blorb, Scott or AmigaDOS image
     /// can never collide: none of them has `BD` a kilobyte in.
     pub fn looks_like_hfs(bytes: &[u8]) -> bool {
-        volume_offset(bytes).is_some()
+        volume_offset(bytes).is_some() || raw_disc_volume(bytes)
     }
 
     /// Mount an image and enumerate its files.
+    ///
+    /// A raw CD dump is the one case that cannot be read in place — its user
+    /// data is interrupted by a frame header every 2048 bytes — so the
+    /// partition is gathered first and the disc's own bytes are dropped. Every
+    /// other container, a partitioned `.iso` included, is an offset into the
+    /// image as given.
     pub fn mount(image: Vec<u8>) -> Result<Hfs, HfsError> {
+        let image = match volume_offset(&image) {
+            Some(_) => image,
+            None => crate::cd::hfs_partition(&image).ok_or(HfsError::NotHfs)?.extract(),
+        };
         let volume = volume_offset(&image).ok_or(HfsError::NotHfs)?;
         let mdb = &image[volume + MDB_OFFSET..volume + MDB_OFFSET + MDB_LEN];
         let mut hfs = Hfs {
@@ -397,14 +407,39 @@ impl Hfs {
 }
 
 /// Where the HFS volume starts inside `bytes` — 0 for a bare volume, 84 inside a
-/// DiskCopy 4.2 wrapper — or `None` when neither placement holds one.
+/// DiskCopy 4.2 wrapper, or a partition's own offset on an Apple-partitioned
+/// medium — or `None` when no placement holds one.
+///
+/// Every arm here reads the volume **in place**. The one container that cannot
+/// be — a raw CD dump, whose user data is not contiguous — is
+/// [`raw_disc_volume`]'s, and [`Hfs::mount`] gathers it before asking this.
 fn volume_offset(bytes: &[u8]) -> Option<usize> {
     if let Some(len) = diskcopy_volume_len(bytes) {
-        if volume_is_sane(&bytes[DISKCOPY_HEADER..DISKCOPY_HEADER + len]) {
+        if volume_is_sane(&bytes[DISKCOPY_HEADER..DISKCOPY_HEADER + len], len) {
             return Some(DISKCOPY_HEADER);
         }
     }
-    volume_is_sane(bytes).then_some(0)
+    // An Apple Partition Map, which a cooked `.iso` of a hybrid disc carries
+    // exactly as the raw dump does — and a partitioned hard-disk image too. It
+    // costs a few block reads and no copying at all (SQ-0870).
+    if let Some(at) = crate::cd::hfs_partition(bytes).and_then(|p| p.contiguous_at()) {
+        let present = bytes.len() - at;
+        if volume_is_sane(&bytes[at..], present) {
+            return Some(at);
+        }
+    }
+    volume_is_sane(bytes, bytes.len()).then_some(0)
+}
+
+/// Does `bytes` hold a Macintosh volume inside a **raw** CD dump — the one
+/// container whose bytes have to be gathered rather than indexed?
+///
+/// The sniff still copies nothing but a volume header, so a directory scan may
+/// ask it of a 354 MB file.
+fn raw_disc_volume(bytes: &[u8]) -> bool {
+    crate::cd::hfs_partition(bytes)
+        .filter(|p| p.contiguous_at().is_none())
+        .is_some_and(|p| volume_is_sane(&p.head(MDB_OFFSET + MDB_LEN), p.len()))
 }
 
 /// The volume length a DiskCopy 4.2 header declares, when `bytes` carries one.
@@ -422,12 +457,46 @@ fn diskcopy_volume_len(bytes: &[u8]) -> Option<usize> {
 
 /// Does `volume` open with a Master Directory Block that describes it?
 ///
+/// `volume` is the volume's leading bytes — at least the MDB — and `available`
+/// is how many of the volume's bytes are actually here, which is not always
+/// `volume.len()`: the caller may be holding a header copied out of a raw disc.
+///
 /// The signature alone is two bytes and would fire on noise; the geometry is
 /// what makes this safe. An allocation block is a whole number of logical
-/// blocks, there is at least one of them, and the last one has to be inside the
-/// volume — which a wrapper's 84-byte offset breaks, so the two placements
-/// cannot both pass.
-fn volume_is_sane(volume: &[u8]) -> bool {
+/// blocks, there is at least one of them, the allocation blocks start past the
+/// boot blocks and the MDB and the first of them is inside the image — and then
+/// **the blocks the mount is about to follow have to be here**, which is the two
+/// B*-trees the MDB itself points at.
+///
+/// # What this checks instead of the volume's nominal size (SQ-0870)
+///
+/// It used to require the last allocation block the MDB *claims* to be inside
+/// the image: `start * BLOCK + count * alloc_size <= volume.len()`. That is the
+/// wrong quantity for any HFS volume that does not fill its container, and on a
+/// **hybrid CD that is the normal case** — the Apple_HFS partition is sized for
+/// the disc and shares it with the ISO9660 side. Measured on the *Masterpieces*
+/// disc's `Masterpieces` volume:
+///
+/// ```text
+///   drNmAlBlks 64,998 x drAlBlkSiz 10,240 = 665,589,248 claimed
+///   drFreeBks  34,958                     = 357,969,920 free, and absent
+///   the partition holds                     307,992,064
+/// ```
+///
+/// A map claiming 634.8 MB of a disc whose whole payload is 308 MB is not a sign
+/// of damage; it is a partition table describing the medium. Every allocated
+/// block is present and only the free tail is missing, so the volume mounts and
+/// reads — and the old bound declined it, which is what left `zvm-cli` answering
+/// `Z-machine version 0 is not supported` for a perfectly good disc.
+///
+/// **A genuinely truncated volume is still refused, one layer down and more
+/// precisely than here.** [`Hfs::alloc_block`] answers `None` for a block past
+/// the end of the image and [`Hfs::read_fork`] refuses a fork whose chain runs
+/// short of the length its catalog declares, so a cut-off volume yields *no*
+/// story rather than half of one, and a cut-off catalog fails the mount
+/// outright. That is the check this one is the cheap prefix of: what a reader
+/// FOLLOWS must be present, and a missing tail nobody follows costs nothing.
+fn volume_is_sane(volume: &[u8], available: usize) -> bool {
     if volume.len() < MDB_OFFSET + MDB_LEN || be16(volume, MDB_OFFSET) != HFS_SIGNATURE {
         return false;
     }
@@ -438,7 +507,36 @@ fn volume_is_sane(volume: &[u8]) -> bool {
     if alloc_size == 0 || !alloc_size.is_multiple_of(BLOCK) || count == 0 || start < 3 {
         return false;
     }
-    start * BLOCK + count * alloc_size <= volume.len()
+    // The allocation blocks have to START inside the image, whatever the MDB
+    // says about where they end. This is the whole of what remains of a
+    // length check, and it is what a volume of noise fails.
+    // (`u64` throughout, because `drAlBlkSiz` is a 32-bit field and a corrupt
+    // one must not overflow a 32-bit `usize` on the way to being refused.)
+    if (start as u64) * (BLOCK as u64) + (alloc_size as u64) > available as u64 {
+        return false;
+    }
+    // Then the catalog and the extents overflow file, whose extents the MDB
+    // carries because nothing else could. The mount reads both immediately, so
+    // a volume whose B*-trees are outside the image is not one this reader can
+    // open — and a plausible pointer INTO the volume is what keeps a two-byte
+    // signature from firing on noise now that the nominal size no longer does.
+    let present = |extents: ExtentRecord, size: u32| -> bool {
+        // A file the MDB declares empty points nowhere and is followed nowhere.
+        // The overflow file is legitimately empty on a volume with no fragmented
+        // fork; a catalog is not, but an all-zero MDB is refused by the geometry
+        // above and a *malformed* one is the mount's business rather than the
+        // sniff's — declining it here would turn "this disk holds no story" into
+        // "this is not a disk", which is a worse answer to the same file.
+        if size == 0 {
+            return true;
+        }
+        let (first, run) = extents[0];
+        let last = u64::from(first) + u64::from(run);
+        let end = (start as u64) * (BLOCK as u64) + last * (alloc_size as u64);
+        run > 0 && last <= count as u64 && end <= available as u64
+    };
+    present(extent_record(mdb, MDB_CT_EXT_REC), be32(mdb, MDB_CT_FL_SIZE))
+        && present(extent_record(mdb, MDB_XT_EXT_REC), be32(mdb, MDB_XT_FL_SIZE))
 }
 
 /// The three extents at `off`.
@@ -676,6 +774,14 @@ pub(crate) mod tests {
             self.catalog.push(rec);
         }
 
+        /// One past the last byte of volume any file uses — everything beyond
+        /// it is free space, which is exactly what a hybrid disc's partition
+        /// does not carry (SQ-0870). Blocks are handed out from the front, so
+        /// this is where the next one would go.
+        fn used_end(&self) -> usize {
+            (ALLOC_START + self.next) * BLOCK
+        }
+
         /// Lay the MDB and both B*-trees down and hand back the volume.
         fn finish(mut self) -> Vec<u8> {
             let catalog = btree(&self.catalog);
@@ -728,12 +834,19 @@ pub(crate) mod tests {
     /// volume of every format and cannot reach a builder that is private to
     /// this module.
     pub(crate) fn sample_disk(files: &[(&str, &[u8])]) -> Vec<u8> {
+        diskcopy(&sample_volume(files))
+    }
+
+    /// The same volume with no wrapper at all — what a partition holds, and
+    /// therefore what [`crate::cd`]'s tests lay out inside a disc.
+    pub(crate) fn sample_volume(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut b = VolumeBuilder::new();
         for (name, data) in files {
             b.add_file(name, b"INdf", data, 1);
         }
-        diskcopy(&b.finish())
+        b.finish()
     }
+
 
     fn pad_extents(exts: &[Extent]) -> ExtentRecord {
         let mut out: ExtentRecord = [(0, 0); 3];
@@ -977,6 +1090,158 @@ pub(crate) mod tests {
         assert_eq!(hfs.files()[1].size, 0, "an application is all resource fork");
     }
 
+    /// **A volume that does not fill its container mounts** (SQ-0870).
+    ///
+    /// The MDB describes a 800 KB disk; what is here stops just past the last
+    /// block any file uses, which is the shape of every Apple_HFS partition on a
+    /// hybrid CD — the map sizes the partition for the medium and the free tail
+    /// was never written. Nothing a reader follows is missing, so nothing is
+    /// wrong.
+    ///
+    /// FALSIFICATION: restore the old bound in [`volume_is_sane`] —
+    /// `start * BLOCK + count * alloc_size <= volume.len()` — and this fails at
+    /// the `looks_like_hfs` assertion, with the volume declined and its story
+    /// unreachable, which is the reported symptom exactly.
+    #[test]
+    fn a_volume_whose_free_tail_is_absent_still_mounts() {
+        let story = fake_story(4096);
+        let mut b = VolumeBuilder::new();
+        b.add_file("Story.data", b"INdf", &story, 1);
+        b.add_file("Pic.data", b"INdf", &fake_pics(false), 1);
+        let used = b.used_end();
+        let whole = b.finish();
+        let trimmed = whole[..used].to_vec();
+        assert!(trimmed.len() < whole.len() / 4, "most of the volume is free space and absent");
+
+        assert!(Hfs::looks_like_hfs(&trimmed), "a volume shorter than its own geometry claims");
+        let hfs = Hfs::mount(trimmed).expect("it mounts");
+        assert_eq!(hfs.volume_name(), "Test Disk");
+        assert_eq!(hfs.files().len(), 2);
+        assert_eq!(hfs.story().expect("and the story reads whole").1, story);
+        assert!(hfs.pictures().is_some(), "and so does the artwork");
+    }
+
+    /// **…and a volume that is genuinely truncated is still refused** — the
+    /// guard the fix above must not break (SQ-0870).
+    ///
+    /// The distinction is what is MISSING. Free space nobody follows costs
+    /// nothing; a file's own extents running past the end of the image is
+    /// damage, and the answer to it is no story rather than the front half of
+    /// one. Cut the catalog itself off and the volume does not open at all.
+    #[test]
+    fn a_truncated_volume_yields_no_story_rather_than_half_of_one() {
+        let story = fake_story(8 * BLOCK);
+        let mut b = VolumeBuilder::new();
+        b.add_file("Story.data", b"INdf", &story, 1);
+        let used = b.used_end();
+        let whole = b.finish();
+
+        // Cut through the story's data: its catalog record still promises 4096
+        // bytes and the blocks holding the tail of them are gone.
+        let cut = whole[..used - 3 * BLOCK].to_vec();
+        let hfs = Hfs::mount(cut).expect("the catalog is intact, so the volume opens");
+        assert_eq!(hfs.files().len(), 1, "the file is still catalogued");
+        assert_eq!(hfs.read_named("Story.data"), None, "but it does not read short");
+        assert_eq!(hfs.story(), None, "so the disk offers no story at all");
+        assert_eq!(crate::medium::Volume::stories(&hfs).len(), 0);
+
+        // Cut the catalog off instead and there is nothing to mount.
+        let gutted = whole[..(ALLOC_START + 4) * BLOCK].to_vec();
+        assert!(!Hfs::looks_like_hfs(&gutted), "a volume with no catalogue is not one");
+        assert_eq!(Hfs::mount(gutted).unwrap_err(), HfsError::NotHfs);
+    }
+
+    /// **The hybrid CD, read where it lies** (SQ-0870): a raw MODE1/2352 dump
+    /// whose third Apple partition is the Macintosh volume.
+    ///
+    /// The property is that reading the disc gives *exactly* what dd'ing the
+    /// partition out by hand gives — same catalogue, same stories — so the
+    /// extraction step this quest removes was never adding anything.
+    ///
+    /// FALSIFICATION: break the raw-sector unwrap (return `Sectors::Cooked`
+    /// unconditionally from `Sectors::of`) and the `.bin` stops mounting.
+    ///
+    /// Outside the repo, so it skips vacuously; CI has no `masterpieces/`.
+    #[test]
+    fn real_masterpieces_cd_reads_the_same_volume_as_its_extracted_partition() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../masterpieces");
+        let media = [
+            ("the raw CD", "Classic Text Adventure Masterpieces of Infocom (USA).bin"),
+            ("the partition, extracted by hand", "Masterpieces-HFS.img"),
+        ];
+        let mut listings: Vec<(String, Vec<(String, usize)>)> = Vec::new();
+        for (what, file) in media {
+            let Ok(bytes) = std::fs::read(dir.join(file)) else {
+                eprintln!("SKIP: {what} is absent at {}", dir.join(file).display());
+                continue;
+            };
+            assert!(Hfs::looks_like_hfs(&bytes), "{what} is a Macintosh volume");
+            let hfs = Hfs::mount(bytes).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            assert_eq!(hfs.volume_name(), "Masterpieces", "{what}");
+            assert_eq!(hfs.files().len(), 770, "{what}: the whole catalogue");
+
+            // The Macintosh build of Zork I, which is not the `ZORK1.DAT` the
+            // PC side of the same disc carries: same release, different file.
+            let stories = crate::medium::Volume::stories(&hfs);
+            assert_eq!(stories.len(), 83, "{what}");
+            let zork = stories
+                .iter()
+                .find(|s| s.name == "ZORK I")
+                .unwrap_or_else(|| panic!("{what}: the Macintosh Zork I"));
+            let release = u16::from_be_bytes([zork.bytes[2], zork.bytes[3]]);
+            assert_eq!(zork.bytes[0], 3, "{what}: v3");
+            assert_eq!(release, 88, "{what}: release 88");
+            assert_eq!(&zork.bytes[0x12..0x18], b"840726", "{what}");
+            assert_eq!(zork.bytes.len(), 84_992, "{what}");
+            // …and the Macintosh *Journey* the note on this quest points at:
+            // release 26, serial 890316, which no other medium here carries
+            // except `stories/InfocomMasterpieces.img`.
+            assert!(
+                stories.iter().any(|s| s.bytes[0] == 6 && &s.bytes[0x12..0x18] == b"890316"),
+                "{what}: the r26 Macintosh Journey"
+            );
+            listings.push((
+                what.to_string(),
+                hfs.files().iter().map(|e| (e.name.clone(), e.size)).collect(),
+            ));
+        }
+        if let [(a, one), (b, two)] = &listings[..] {
+            assert_eq!(one, two, "{a} and {b} are the same volume");
+        }
+        assert!(
+            listings.len() == media.len() || !dir.is_dir(),
+            "the CD is here and something did not read: {} of {}",
+            listings.len(),
+            media.len()
+        );
+    }
+
+    /// **The intact control** (SQ-0870): the 12 MB Macintosh compilation in
+    /// `stories/`, which fills its container and always mounted, still mounts
+    /// and still offers all 33 games.
+    ///
+    /// This is the volume the relaxed bound must not change. It is the same
+    /// collection as the CD's Macintosh partition at a twentieth of the size —
+    /// including the r26/s890316 *Journey* — so a regression that made the new
+    /// medium work by loosening something the old one relied on shows up here.
+    #[test]
+    fn the_intact_macintosh_compilation_still_offers_its_thirty_three_stories() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/InfocomMasterpieces.img");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: the Macintosh compilation is absent at {}", path.display());
+            return;
+        };
+        assert!(Hfs::looks_like_hfs(&bytes));
+        let hfs = Hfs::mount(bytes).expect("it mounts");
+        let stories = crate::medium::Volume::stories(&hfs);
+        assert_eq!(stories.len(), 33, "the whole shelf");
+        assert!(
+            stories.iter().any(|s| s.bytes[0] == 6 && &s.bytes[0x12..0x18] == b"890316"),
+            "including the r26 Macintosh Journey"
+        );
+    }
+
     /// Real media: the user's Macintosh Zork Zero, if they have it. It lives
     /// outside the repo, so this skips vacuously.
     #[test]
@@ -1033,3 +1298,4 @@ pub(crate) mod tests {
         assert_eq!(mono.decode(1).unwrap().indices.len(), 480 * 300);
     }
 }
+

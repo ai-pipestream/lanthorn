@@ -7,6 +7,11 @@
 
 # Local-only project files
 /stories/
+# The same, for media too large to sit beside the shelf: `masterpieces/` holds
+# the 354 MB hybrid CD (SQ-0870). Tests read it and skip vacuously without it.
+# No trailing slash, so this also covers the SYMLINK a worktree carries — a
+# pattern ending in `/` matches a directory and would let the link through.
+/masterpieces
 
 # Glulx/Glk conformance test story binaries (fetched, never committed — see
 # unit_tests/README.md for the manifest + re-fetch recipe)
