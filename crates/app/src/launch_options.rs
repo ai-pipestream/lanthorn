@@ -29,8 +29,9 @@
 //!
 //! # The one thing this module enumerates, and the line it must not cross
 //!
-//! [`discover_art_candidates`] lists the native archives beside a story that
-//! carry *this story's name*. SQ-0734 rejected exactly that enumeration as an
+//! [`discover_art_candidates`] lists the native archives a story can use: those
+//! beside it that carry *this story's name*, and those on the disk image it came
+//! out of. SQ-0734 rejected exactly that enumeration as an
 //! input to *resolution*, and that rejection stands: the format carries no
 //! release number and no serial, every Infocom Amiga release names its archive
 //! `Pic.data`, and a wrong pairing is invisible — Arthur's plates drawn into Zork
@@ -85,15 +86,19 @@ impl LaunchOverrides {
 
 // ── ArtCandidate ──────────────────────────────────────────────────────────────
 
-/// One native picture archive found beside a story, described well enough to
-/// choose by: what wrote it, how many pictures it holds, and which part of a
-/// multi-part set it is.
+/// One native picture archive a story can use, described well enough to choose
+/// by: what wrote it, how many pictures it holds, and which part of a multi-part
+/// set it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtCandidate {
-    /// Full path on disk.
+    /// The file to open: the archive itself when it is loose, and the disk image
+    /// when the archive is **on** a volume — the archive inside has no path of
+    /// its own on this machine. See [`on_medium`](ArtCandidate::on_medium).
     pub path: PathBuf,
-    /// Bare filename — what goes into `pictures = "…"`, since the key resolves
-    /// relative to the story's own directory.
+    /// Bare filename — what goes into `pictures = "…"`. The key resolves a bare
+    /// name against the story's own directory first and, failing that, against
+    /// the volume the story was mounted out of, so one name reaches both
+    /// (`crate::graphics::read_off_the_medium`).
     pub filename: String,
     /// Which platform's codec read it.
     pub flavour: Flavour,
@@ -107,8 +112,16 @@ pub struct ArtCandidate {
     /// How many files this candidate is: 2 for `arthur.eg1`, which carries
     /// `arthur.eg2` with it, and 1 for everything else (SQ-0798).
     pub parts: u8,
-    /// The width of the picture space its coordinates use: 320 or 640.
+    /// The width of the picture space its coordinates use: 320, 480 or 640.
     pub space_width: u16,
+    /// Is this archive INSIDE the disk image at [`path`](ArtCandidate::path)
+    /// rather than a loose file beside the story (SQ-0843)?
+    ///
+    /// Shown, because a person looking at `CPic.data` in a folder that plainly
+    /// does not contain one deserves to be told where it is. Not otherwise
+    /// consumed: picking it writes the same bare `filename`, and the two doors
+    /// meet in `PictureOverride::resolve_with_session`.
+    pub on_medium: bool,
 }
 
 impl ArtCandidate {
@@ -163,9 +176,24 @@ impl ArtCandidate {
 /// rule could never pair one automatically.
 const ART_EXTS: &[&str] = &["pic", "mg1", "mg2", "eg1", "eg2", "cg1", "cg2", "data"];
 
-/// The native picture archives beside `story_path` that carry **this story's
-/// name**, in a stable order (by filename), each one actually parsed so the list
-/// can state its flavour, picture count and part number rather than guess.
+/// The native picture archives `story_path` can use, in a stable order (by
+/// filename), each one actually parsed so the list can state its flavour,
+/// picture count and part number rather than guess.
+///
+/// Two sources, unioned by [`crate::assets::files`] and filtered here: the loose
+/// files beside the story that carry **this story's name**, and — when the story
+/// came out of a disk image — the archives **on that volume** (SQ-0843). This
+/// function is the one place that answers "what artwork can this story use?",
+/// and it is the seam that knows disks exist so that no caller has to.
+///
+/// The medium arm is why the Macintosh disk is pickable at all. `stories/Zork
+/// Zero Disk.image` carries a colour `CPic.data` and a monochrome `Pic.data`,
+/// neither of which exists on the host filesystem; a `read_dir` could not see
+/// either, so the dialog offered no way to choose the two-colour art and
+/// `--pictures Pic.data` was the only door. `blorb::medium::MountedDisk::pictures`
+/// is not enough on its own here — it answers with THE archive by the format's
+/// own tiebreak, which is deliberately the colour one — so this walks
+/// `contents()` and identifies every file by parsing it.
 ///
 /// **This is display-only.** See the module header: enumerating candidates is
 /// safe because a person picks; nothing may consume this list automatically.
@@ -194,55 +222,79 @@ const ART_EXTS: &[&str] = &["pic", "mg1", "mg2", "eg1", "eg2", "cg1", "cg2", "da
 /// other file this list declines to show, for anyone who genuinely wants only
 /// disk two.
 pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
-    let dir = match story_path.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
     let story_stem = story_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let mut out: Vec<ArtCandidate> = Vec::new();
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    for file in crate::assets::files(story_path) {
+        // **The name filter is the LOOSE source's, and only its.** A file beside
+        // the story proves nothing by sitting there — `stories/` holds Arthur,
+        // Journey, Shogun and Zork Zero side by side — so it must carry this
+        // story's name to be shown. A file on the volume needs no such test: it
+        // shipped on the disk the story was mounted out of, which is the one
+        // pairing the medium itself asserts (`blorb::medium::DiskArt`).
+        //
+        // Name first, bytes second on that arm: an archive is megabytes, and a
+        // flat library holds a dozen of them. Deciding on the name before
+        // reading keeps this cheap enough for the browser's info panel to ask
+        // per story.
+        if !file.is_on_medium() {
+            if !looks_like_art_name(&file.name) {
+                continue;
+            }
+            let stem = Path::new(&file.name).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if !belongs_to_story(story_stem, stem, &file.name) {
+                continue;
+            }
         }
-        let Some(filename) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
-            continue;
-        };
-        if !looks_like_art_name(&filename) {
-            continue;
-        }
-        // Name first, bytes second: an archive is megabytes, and a flat library
-        // holds a dozen of them. Deciding on the name before reading keeps this
-        // cheap enough for the browser's info panel to ask per story.
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if !belongs_to_story(story_stem, stem, &filename) {
-            continue;
-        }
-        let Ok(raw) = std::fs::read(&path) else { continue };
+        let filename = file.name.clone();
+        let path = file.path.clone();
+        let on_medium = file.is_on_medium();
+        let Some(raw) = file.into_bytes() else { continue };
+        // **Identified by parsing, for both sources alike** — the same
+        // content-first rule `adf.rs` and `hfs.rs` apply file by file inside a
+        // volume, and it has to be the same one here or a directory's files
+        // would be classified by a different test from a disk's. It matters most
+        // on the Macintosh, whose two archives are called `CPic.data` and
+        // `Pic.data` and whose names say nothing about which is which.
         let Ok(mut pics) = InfocomPics::parse(raw) else { continue };
-        // A continuation whose earlier part is here is not a choice — it is the
-        // back half of the row above it, and that row already carries it.
-        if crate::graphics::part_path(&path, pics.part().saturating_sub(1))
-            .is_some_and(|prev| prev.is_file())
-        {
+        // A container with no pixels anywhere is not artwork, whatever it parsed
+        // as. On a volume that is the guard against a `Story.data` or a desktop
+        // database that happens to satisfy the header; beside the story it has
+        // never excluded anything, and the real-media test says so.
+        if !pics.entries().iter().any(|e| e.has_pixels()) {
             continue;
         }
-        // Whatever this file continues into is part of what picking it gets you,
-        // so the count has to say so. A refused continuation is not reported here
-        // (this list is display-only and silent by design — see above); the loud
-        // version is `PictureOverride::warning`, on the archive actually chosen.
-        crate::graphics::absorb_continuations(&mut pics, &path);
+        if !on_medium {
+            // A continuation whose earlier part is here is not a choice — it is
+            // the back half of the row above it, and that row already carries it.
+            if crate::graphics::part_path(&path, pics.part().saturating_sub(1))
+                .is_some_and(|prev| prev.is_file())
+            {
+                continue;
+            }
+            // Whatever this file continues into is part of what picking it gets
+            // you, so the count has to say so. A refused continuation is not
+            // reported here (this list is display-only and silent by design —
+            // see above); the loud version is `PictureOverride::warning`, on the
+            // archive actually chosen.
+            crate::graphics::absorb_continuations(&mut pics, &path);
+        }
+        // Deliberately NOT on the medium arm: `part_path` names a sibling of
+        // `path`, which for a volume's file is the disk image, so it would look
+        // for `<image dir>/FOO.EG2` — a file on the host, next to the wrong
+        // thing. No disk babelmap mounts ships a multi-part native archive (both
+        // that do are DOS releases, whose FAT12 mount is queued as SQ-0833), so
+        // the honest move is to leave the walk off rather than aim it wrongly;
+        // the part number below still reports what the archive says it is.
         let space_width = pics.picture_space_width();
+        let mono = pics.is_monochrome();
         out.push(ArtCandidate {
-            rendition: rendition_label(pics.flavour(), space_width, &filename),
+            rendition: rendition_label(pics.flavour(), space_width, &filename, mono),
             flavour: pics.flavour(),
             pictures: pics.entries().len(),
             part: pics.part(),
             parts: pics.parts(),
             space_width,
+            on_medium,
             filename,
             path,
         });
@@ -340,14 +392,39 @@ pub fn parts_note(c: &ArtCandidate) -> String {
 
 /// The rendition a human recognises.
 ///
-/// The codec and the picture-space width are read from the file, so those two
-/// are facts. Splitting the 640-wide PC case into EGA and CGA is *not* — the two
-/// write the same container, and only Infocom's DOS 8.3 naming tells them apart.
-/// That is a display label, never an input to anything, so leaning on the
-/// extension here costs nothing; a 640-wide PC archive under some other name
-/// says "EGA/CGA" and stays honest.
-fn rendition_label(flavour: Flavour, space_width: u16, filename: &str) -> &'static str {
+/// The codec, the picture-space width and the two-colour flag are read from the
+/// file, so those three are facts. Splitting the 640-wide PC case into EGA and
+/// CGA is *not* — the two write the same container, and only Infocom's DOS 8.3
+/// naming tells them apart. That is a display label, never an input to anything,
+/// so leaning on the extension here costs nothing; a 640-wide PC archive under
+/// some other name says "EGA/CGA" and stays honest.
+///
+/// # Why the two-colour Amiga/Mac archive says "Mac B&W"
+///
+/// The Macintosh release disk carries **two** archives and both are
+/// [`Flavour::AmigaMac`], so without a second axis the dialog would offer
+/// `CPic.data` and `Pic.data` as two identical-looking rows — the state SQ-0843
+/// was reported from, one step on. `monochrome` is the honest discriminator,
+/// and it is not a guess about the file: it is
+/// [`blorb::infocom_pics::InfocomPics::is_monochrome`], off the archive's own
+/// `EF_MONO` flags, the same test that decides the two-colour hardware palette.
+///
+/// Naming the MACHINE on it is the part that needs an argument, since the codec
+/// cannot tell an Amiga from a Mac in general (SQ-0838). Two independent things
+/// say Macintosh here and nothing says Amiga: Spatterlight's bocfel reclassifies
+/// a monochrome `Pic.data` as the B&W Mac on exactly this flag, and the archive
+/// is drawn in the 480×300 picture space that is Infocom's own `GFXMAC_X` /
+/// `GFXMAC_Y` — "1.5 x Amiga sizes", a screen the Amiga never had. A *colour*
+/// AmigaMac archive still says plain "Amiga", because there the ambiguity is
+/// real and unresolved.
+fn rendition_label(
+    flavour: Flavour,
+    space_width: u16,
+    filename: &str,
+    monochrome: bool,
+) -> &'static str {
     match flavour {
+        Flavour::AmigaMac if monochrome => "Mac B&W",
         Flavour::AmigaMac => "Amiga",
         Flavour::Pc if space_width == 320 => "MCGA",
         Flavour::Pc => {
@@ -442,10 +519,24 @@ pub fn derived_interpreter(
     }
     let version = z_version?;
     if let Some(c) = art {
+        // The archive's own answer, refined by the medium where the codec cannot
+        // tell an Amiga from a Macintosh — through the very function
+        // `InterpreterProfile::resolve` uses at boot, so the number the dialog
+        // advertises and the number the story is handed cannot disagree.
+        let profile =
+            crate::interpreter::InterpreterProfile::for_art_flavour_on(c.flavour, disk_image);
         // A profile that answers `None` is the IBM PC, which defers to zvm's own
         // rule rather than pinning a number — the same deferral, reported.
-        let n = c.profile().interpreter_number().unwrap_or(if version == 6 { 6 } else { 1 });
-        return Some((n, InterpreterSource::Artwork));
+        let n = profile.interpreter_number().unwrap_or(if version == 6 { 6 } else { 1 });
+        // …and when the disk was what settled it, say the disk. An art row that
+        // claimed "from the artwork" over a number the artwork did not choose is
+        // the provenance line telling a small lie.
+        let source = if profile == c.profile() {
+            InterpreterSource::Artwork
+        } else {
+            InterpreterSource::DiskImage
+        };
+        return Some((n, source));
     }
     // The medium's own answer, asked of the one place that knows it
     // (`blorb::medium`, SQ-0839) rather than restated here — a second copy of
@@ -771,6 +862,24 @@ mod tests {
         assert!(belongs_to_story("anything", "CPIC", "CPIC.DATA"));
     }
 
+    /// The Macintosh disk carries two `Flavour::AmigaMac` archives, so the label
+    /// is the only thing that can tell them apart in a list (SQ-0843). The
+    /// two-colour one names the machine bocfel's `0x0e` heuristic names, and the
+    /// colour one stays honestly ambiguous because there the codec really cannot
+    /// say. A two-colour PC archive is a `.cg1` and is unaffected.
+    #[test]
+    fn the_two_colour_amiga_mac_archive_is_labelled_as_the_macintoshs() {
+        assert_eq!(rendition_label(Flavour::AmigaMac, 480, "Pic.data", true), "Mac B&W");
+        assert_eq!(rendition_label(Flavour::AmigaMac, 320, "CPic.data", false), "Amiga");
+        assert_eq!(rendition_label(Flavour::AmigaMac, 320, "zork0.pic", false), "Amiga");
+        // The PC arm reads its extension exactly as before; CGA is two-colour
+        // too and must not be relabelled by the new axis.
+        assert_eq!(rendition_label(Flavour::Pc, 640, "zork0.cg1", true), "CGA");
+        assert_eq!(rendition_label(Flavour::Pc, 640, "zork0.eg1", false), "EGA");
+        assert_eq!(rendition_label(Flavour::Pc, 320, "zork0.mg1", false), "MCGA");
+        assert_eq!(rendition_label(Flavour::Pc, 640, "mystery.dat", false), "EGA/CGA");
+    }
+
     #[test]
     fn a_name_shaped_file_that_is_not_an_archive_is_not_a_candidate() {
         // Display-only discovery must not offer something that cannot be used:
@@ -901,6 +1010,7 @@ mod tests {
             part: 1,
             parts: 1,
             space_width: 320,
+            on_medium: false,
         };
         let pc = ArtCandidate { flavour: Flavour::Pc, rendition: "MCGA", ..amiga.clone() };
         assert_eq!(

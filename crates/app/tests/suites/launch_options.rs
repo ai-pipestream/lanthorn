@@ -588,3 +588,300 @@ fn the_dialog_renders_its_list_its_derived_number_and_its_checkbox() {
     assert!(!frame.contains("⚠"), "no rendition warns about anything today: {frame}");
     assert!(frame.contains("[x] Save as this game's default"), "the checkbox, ticked");
 }
+
+
+// ── The artwork INSIDE the medium (SQ-0843) ──────────────────────────────────
+//
+// Reported by the user against the browser: *"the story list dialog box doesn't
+// allow me to choose the b/w mac format."* The enumeration was a `read_dir` of
+// the story's own directory, written before babelmap could open a disk at all,
+// so a story mounted out of `stories/Zork Zero Disk.image` could be offered
+// neither of the two archives that disk carries. `--pictures Pic.data` and the
+// per-game `pictures` key were the only doors to the Macintosh's two-colour art.
+//
+// The list now unions both sources through `app::assets::files` — loose files
+// beside the story, and the files on the volume when the story came off one —
+// and everything below is that union seen from the dialog.
+
+/// The Macintosh disk offers **both** of its archives, told apart by the only
+/// thing that distinguishes them.
+///
+/// `CPic.data` and `Pic.data` are one codec (`Flavour::AmigaMac`), one picture
+/// count (483) and two names that say nothing, so the row a person reads has to
+/// carry the discriminator: `is_monochrome`, off the archive's own `EF_MONO`
+/// flags, and the 480×300 picture space Infocom's own Macintosh interpreter
+/// calls `GFXMAC_X`/`GFXMAC_Y`.
+///
+/// FALSIFIED by dropping the medium arm from `assets::files`: the Mac disk's
+/// candidate list collapses to the one loose `zorkzero.mg1` that happens to
+/// carry its name, and there is no way to choose the b/w Mac format — the
+/// reported symptom, exactly.
+#[test]
+fn both_macintosh_archives_are_offered_from_inside_the_disk_image() {
+    let image = stories_dir().join("Zork Zero Disk.image");
+    if !image.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium missing");
+        return;
+    }
+    let found = discover_art_candidates(&image);
+    let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
+
+    let colour = found
+        .iter()
+        .find(|c| c.filename == "CPic.data")
+        .unwrap_or_else(|| panic!("the disk's colour archive must be offered; got {names:?}"));
+    let mono = found
+        .iter()
+        .find(|c| c.filename == "Pic.data")
+        .unwrap_or_else(|| panic!("the disk's two-colour archive must be offered; got {names:?}"));
+
+    assert!(colour.on_medium && mono.on_medium, "both live on the volume, not beside the story");
+    assert_eq!(colour.path, image, "…and the only path either has is the image itself");
+    assert_eq!(mono.path, image);
+
+    // The labels a human reads, which is the whole point of listing two rows.
+    assert_eq!(colour.rendition, "Amiga", "a colour AmigaMac archive stays honestly ambiguous");
+    assert_eq!(mono.rendition, "Mac B&W", "the two-colour one is the standard Macintosh's");
+    assert_ne!(colour.rendition, mono.rendition, "two rows a person cannot tell apart is the bug");
+
+    // …and the facts under the labels, read off each file rather than its name.
+    assert_eq!(colour.space_width, 320, "CPic.data is the big Mac's doubled 320×200");
+    assert_eq!(mono.space_width, 480, "Pic.data is GFXMAC_X — '1.5 x Amiga sizes'");
+    assert_eq!(colour.pictures, 483, "one directory, both archives");
+    assert_eq!(mono.pictures, 483);
+    assert_eq!((colour.parts, mono.parts), (1, 1), "neither is a multi-part set");
+
+    // Nothing else on that volume is artwork: the story, the application and the
+    // desktop database are all present in `contents()` and all decline to parse.
+    let on_disk: Vec<&str> = found.iter().filter(|c| c.on_medium).map(|c| c.filename.as_str()).collect();
+    assert_eq!(on_disk, ["CPic.data", "Pic.data"], "identified by parsing, not by name");
+    assert!(
+        !names.iter().any(|n| n.eq_ignore_ascii_case("Story.data")),
+        "a story is not artwork however it parses: {names:?}"
+    );
+}
+
+/// The Amiga floppy gains the same door from the same code — a door, not a
+/// policy. Its `Pic.data` was always loaded automatically (tier 2); now it can
+/// also be chosen, which is what makes "inherit" and "pick the disk's own art"
+/// two ways of saying one thing rather than one working and one missing.
+#[test]
+fn an_amiga_floppy_offers_its_own_archive_through_the_same_seam() {
+    let adf = stories_dir().join("Zork Zero - The Revenge of Megaboz.adf");
+    if !adf.is_file() {
+        eprintln!("SKIP: gitignored Amiga medium missing");
+        return;
+    }
+    let found = discover_art_candidates(&adf);
+    let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
+    let pic = found
+        .iter()
+        .find(|c| c.filename.eq_ignore_ascii_case("Pic.data"))
+        .unwrap_or_else(|| panic!("the floppy's own archive must be offered; got {names:?}"));
+    assert!(pic.on_medium);
+    assert_eq!(pic.rendition, "Amiga");
+    assert_eq!(pic.space_width, 320);
+    assert!(pic.pictures > 100, "a real archive holds many pictures, got {}", pic.pictures);
+}
+
+/// **Picking it must LOAD it.** The dialog writes a bare filename into
+/// `pictures = "…"`, and that name exists nowhere on the host filesystem — so
+/// the two halves only meet if `PictureOverride` looks inside the medium
+/// (SQ-0838). This drives the whole chain the dialog does: choose the row, take
+/// the override it produces, resolve it, and ask the resulting picture source
+/// what it actually is.
+#[test]
+fn picking_the_monochrome_row_loads_the_monochrome_art() {
+    let image = stories_dir().join("Zork Zero Disk.image");
+    if !image.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium missing");
+        return;
+    }
+    let empty = tmp("mac-pick");
+    let base = LaunchOptionsState::new(
+        "Zork Zero",
+        &image,
+        None,
+        None,
+        Some(6),
+        Some(blorb::medium::DiskImage::Hfs),
+    );
+    // The name really is absent from the story's directory: this is the case a
+    // host-filesystem-only override would report as `Missing`.
+    assert!(!stories_dir().join("Pic.data").exists(), "the archive is on the volume, not beside it");
+
+    for (filename, want_mono, want_space) in
+        [("Pic.data", true, (480u16, 300u16)), ("CPic.data", false, (320, 200))]
+    {
+        let mut st = base.clone();
+        let i = st
+            .candidates
+            .iter()
+            .position(|c| c.filename == filename)
+            .unwrap_or_else(|| panic!("{filename} must be a candidate"));
+        st.art = i + 1;
+
+        // What the dialog hands the launch: one override, one bare name.
+        let ov = st.overrides();
+        assert_eq!(ov.pictures.as_deref(), Some(filename));
+        assert_eq!(ov.interpreter_number, None, "an untouched interpreter row overrides nothing");
+
+        // …and what that name resolves to, off the medium.
+        let over = app::graphics::PictureOverride::resolve_with_session(
+            &image,
+            &empty,
+            ov.pictures.as_deref(),
+        );
+        assert!(
+            matches!(over, app::graphics::PictureOverride::Loaded { .. }),
+            "{filename} was offered and did not load: {over:?}"
+        );
+        assert_eq!(over.warning(), None, "{filename}: a row that was offered must load quietly");
+        assert_eq!(over.std_window(), Some(want_space), "{filename}");
+        let src = app::graphics::PictSource::resolve_with_override(&image, over);
+        assert_eq!(src.is_monochrome(), want_mono, "{filename}: the art actually drawn");
+        assert_eq!(src.native_std_window(), Some(want_space), "{filename}");
+    }
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// The provenance line must not contradict the row above it.
+///
+/// `Flavour::AmigaMac` is one container written by two machines, so the archive
+/// names a codec and not a machine — and until SQ-0843 the named-archive step of
+/// `InterpreterProfile::resolve` returned before the medium was ever consulted.
+/// Picking `CPic.data`, the very archive the story loads on its own, therefore
+/// demoted a Macintosh to an Amiga, and the dialog printed "header 0x1E = 4
+/// (Amiga) — from the artwork" two lines under a row labelled `Mac B&W`.
+///
+/// Both surfaces are checked, because a dialog that reports one number while
+/// boot applies another is worse than either alone.
+#[test]
+fn choosing_a_macintosh_archive_leaves_the_machine_a_macintosh() {
+    let image = stories_dir().join("Zork Zero Disk.image");
+    if !image.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium missing");
+        return;
+    }
+    let empty = tmp("mac-machine");
+    let mut st = LaunchOptionsState::new(
+        "Zork Zero",
+        &image,
+        None,
+        None,
+        Some(6),
+        Some(blorb::medium::DiskImage::Hfs),
+    );
+    // Inherit: the medium's own answer, ZMSD §11.1.3's 3.
+    assert_eq!(st.derived(), Some((3, InterpreterSource::DiskImage)));
+
+    for filename in ["CPic.data", "Pic.data"] {
+        let i = st.candidates.iter().position(|c| c.filename == filename).expect("a candidate");
+        st.art = i + 1;
+        assert_eq!(
+            st.derived(),
+            Some((3, InterpreterSource::DiskImage)),
+            "{filename}: the disk settled it, and the line says the disk"
+        );
+        // The same answer boot reaches, through the same function.
+        let over = app::graphics::PictureOverride::resolve_with_session(&image, &empty, Some(filename));
+        let profile = app::interpreter::InterpreterProfile::resolve(&image, None, over.flavour());
+        assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "{filename}");
+        assert_eq!(profile.interpreter_number(), Some(3), "{filename}");
+    }
+
+    // An UNAMBIGUOUS flavour still beats the medium outright, which is what
+    // keeps naming an archive an instruction: the loose MCGA archive on the host
+    // asks for the IBM PC and gets it, on a Macintosh disk like anywhere else.
+    if let Some(i) = st.candidates.iter().position(|c| c.filename.eq_ignore_ascii_case("zorkzero.mg1")) {
+        st.art = i + 1;
+        assert_eq!(st.derived(), Some((6, InterpreterSource::Artwork)));
+    }
+    // …and an explicit number beats everything, as always.
+    st.interpreter = Some(4);
+    assert_eq!(st.derived(), Some((4, InterpreterSource::Explicit)));
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// **The loose-file path is unmoved.** The medium arm is additive: a story that
+/// is not release media mounts nothing, and one that is keeps every loose
+/// candidate it had. Pinned as an exact list, because "still contains" would not
+/// notice a row that appeared.
+#[test]
+fn adding_the_medium_arm_moved_nothing_beside_the_story() {
+    for (story, want) in [
+        ("zork0-r393-s890714.z6", &["zork0.cg1", "zork0.eg1", "zork0.mg1", "zork0.pic"][..]),
+        // Arthur's `.eg2` is absorbed into the `.eg1` row and never listed —
+        // the SQ-0798 rule, unchanged by any of this.
+        ("arthur-r74-s890714.z6", &["arthur.cg1", "arthur.eg1", "arthur.mg1", "arthur.pic"]),
+    ] {
+        let path = stories_dir().join(story);
+        if !path.is_file() {
+            continue; // gitignored fixtures
+        }
+        let found = discover_art_candidates(&path);
+        let names: Vec<String> = found.iter().map(|c| c.filename.to_lowercase()).collect();
+        assert_eq!(names, want, "{story}");
+        assert!(found.iter().all(|c| !c.on_medium), "{story} is not release media");
+        assert!(
+            found.iter().all(|c| c.path.is_file() && c.path != path),
+            "{story}: a loose candidate is its own file on disk"
+        );
+    }
+}
+
+/// **The dialog the user is judging this by.** The frame is printed, so the row
+/// a person reads can be read here too (`cargo nextest run -p app
+/// both_macintosh -- --nocapture`).
+#[test]
+fn the_dialog_shows_the_disks_own_archives_and_says_where_they_live() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let image = stories_dir().join("Zork Zero Disk.image");
+    if !image.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium missing");
+        return;
+    }
+    let mut st = LaunchOptionsState::new(
+        "Zork Zero",
+        &image,
+        None,
+        None,
+        Some(6),
+        Some(blorb::medium::DiskImage::Hfs),
+    );
+    let i = st.candidates.iter().position(|c| c.filename == "Pic.data").expect("a candidate");
+    st.art = i + 1;
+    st.cursor = app::launch_options::Row::Art(i + 1);
+
+    let cs = app::colors::ColorScheme::terminal_default();
+    let mut term = Terminal::new(TestBackend::new(100, 26)).unwrap();
+    term.draw(|f| {
+        app::render::launch_options_dialog::draw_launch_options(&st, f.area(), &cs, f.buffer_mut());
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let mut frame = String::new();
+    for y in 0..buf.area().height {
+        for x in 0..buf.area().width {
+            frame.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        frame.push('\n');
+    }
+    println!("{frame}");
+
+    // Both rows, both labels, and the marker that explains a filename the
+    // story's own folder plainly does not contain.
+    assert!(frame.contains("CPic.data"), "the colour archive is offered: {frame}");
+    assert!(frame.contains("Pic.data"), "…and the two-colour one: {frame}");
+    assert!(frame.contains("Mac B&W"), "labelled so a person can tell them apart: {frame}");
+    assert!(frame.contains("on disk"), "and told where they live: {frame}");
+    // The provenance line must agree with the row selected above it: this disk
+    // is a Macintosh whichever of its two archives you pick (SQ-0843).
+    assert!(
+        frame.contains("header 0x1E = 3 (Macintosh)"),
+        "picking the Mac's own art must not demote the machine: {frame}"
+    );
+    assert!(frame.contains("from the disk image"), "and the line names what settled it: {frame}");
+    assert!(!frame.contains("(Amiga)"), "nothing on this disk is an Amiga: {frame}");
+}

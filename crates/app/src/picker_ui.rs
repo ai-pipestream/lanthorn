@@ -2435,6 +2435,12 @@ fn draw_info_panel(
             if !note.is_empty() {
                 row.push_str(&format!(" · {}", note.trim_start()));
             }
+            // An archive on the volume the story was mounted out of has no path
+            // of its own; saying so keeps the panel from listing a file the
+            // folder plainly does not hold (SQ-0843).
+            if c.on_medium {
+                row.push_str(" · on disk");
+            }
             if in_use {
                 row.push_str("  ← in use");
             }
