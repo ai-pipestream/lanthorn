@@ -72,6 +72,20 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
+/// Whether any ST floppy this suite knows about is on disk at all.
+///
+/// `stories/` is gitignored, so CI and a worktree without the symlink have NO
+/// media and every case here must skip vacuously (CLAUDE.md's rule). A bare
+/// `assert!(ran > 0)` broke that and failed CI on all three platforms. The guard
+/// still earns its keep where it can: with the media present, "nothing ran"
+/// means a filename drifted, and that must fail loudly rather than pass empty.
+/// Same idiom as `real_media_releases::any_real_media_present`.
+fn any_st_disk_present() -> bool {
+    [BEYOND_ZORK_DISK, V3_DISK, "Infocom Compilation 8 (19xx)(-).st"]
+        .iter()
+        .any(|n| stories_dir().join(n).is_file())
+}
+
 fn disk(name: &str) -> Option<PathBuf> {
     let p = stories_dir().join(name);
     if p.is_file() {
@@ -223,7 +237,7 @@ fn an_atari_st_floppy_tells_its_story_it_is_an_atari_st() {
             );
         }
     }
-    assert!(ran > 0, "no ST compilation was present");
+    assert!(ran > 0 || !any_st_disk_present(), "ST media are present but none were read");
 }
 
 // ── What Beyond Zork does about it ───────────────────────────────────────────

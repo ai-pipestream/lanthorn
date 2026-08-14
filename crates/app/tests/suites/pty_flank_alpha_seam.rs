@@ -33,11 +33,22 @@
 //! against a future fix that trades one mode for the other, which is what pinning both
 //! modes is for. `stories/` is gitignored, so both skip vacuously without the floppy.
 
+#[cfg(not(unix))]
+#[test]
+fn the_flank_seam_test_is_unix_only() {
+    eprintln!("SKIP: driving a real terminal needs a pty, which this platform does not have");
+}
+
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
 // Declared once by the group binary (`tests/pty.rs`) and shared by every pty suite
-// in it.
+// in it. `driver` is unix-only — it is a pty — so everything that reaches it is
+// gated, exactly as the three sibling pty suites already do. Ungated, this file
+// failed to COMPILE on Windows and took the whole `pty` test binary with it.
+#[cfg(unix)]
 use super::pty_stream::{self, driver, oracle};
 
 /// The Amiga floppy, and the build the report was made on.
@@ -62,6 +73,7 @@ const SLACK: i32 = 4;
 /// edge itself; two cells of margin catch it wherever the rounding puts it.
 const WINDOW_CELLS: u32 = 2;
 
+#[cfg(unix)]
 fn out_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/pty-capture");
     let _ = std::fs::create_dir_all(&dir);
@@ -70,6 +82,7 @@ fn out_dir() -> PathBuf {
 
 /// The colour of screen column `x` over rows `y0..y1`, when every pixel of it is the
 /// same — a column that varies is text or art, and says nothing about a seam.
+#[cfg(unix)]
 fn uniform_column(screen: &image::RgbaImage, x: u32, y0: u32, y1: u32) -> Option<[u8; 3]> {
     let first = screen.get_pixel(x, y0).0;
     (y0..y1)
@@ -79,6 +92,7 @@ fn uniform_column(screen: &image::RgbaImage, x: u32, y0: u32, y1: u32) -> Option
 
 /// A one-pixel column, uniform down the flank, darker than the uniform columns either
 /// side of it: the reported line, stated as it was measured. Returns the first one.
+#[cfg(unix)]
 fn dark_seam_column(screen: &image::RgbaImage, xs: std::ops::Range<u32>, y0: u32, y1: u32) -> Option<String> {
     for x in xs {
         let (Some(here), Some(before), Some(after)) = (
@@ -105,6 +119,7 @@ fn dark_seam_column(screen: &image::RgbaImage, xs: std::ops::Range<u32>, y0: u32
 }
 
 /// One capture at one colour policy.
+#[cfg(unix)]
 fn no_one_pixel_line_at_the_flank_seam(honor: bool) {
     let story = driver::stories_dir().join(STORY);
     if !story.is_file() {
@@ -190,11 +205,13 @@ fn no_one_pixel_line_at_the_flank_seam(honor: bool) {
     assert!(failures.is_empty(), "honor={honor}: {}", failures.join("\n"));
 }
 
+#[cfg(unix)]
 #[test]
 fn no_line_down_the_amiga_story_panes_edges() {
     no_one_pixel_line_at_the_flank_seam(true);
 }
 
+#[cfg(unix)]
 #[test]
 fn no_line_down_the_amiga_story_panes_edges_with_the_games_colours_declined() {
     no_one_pixel_line_at_the_flank_seam(false);
