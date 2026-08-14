@@ -5,6 +5,7 @@ pub mod adf;
 pub mod bpal;
 pub mod fat12;
 pub mod hfs;
+pub mod infocom_packed;
 pub mod infocom_pics;
 pub mod medium;
 pub mod prodos;

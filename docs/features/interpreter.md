@@ -144,9 +144,9 @@ since it carries three different files called `FINDER.DATA`.
 Two of these disks are worth knowing about before you open them. *Arthur* and
 *Journey* on the Apple II are the ProDOS **8** press, and they do not contain a
 story file at all: the game is split across `ARTHUR.D1`–`D5` and
-`JOURNEY.D1`–`D4`, none of which begins with a Z-machine header, so the disks
-mount, list their files and tell you there is no game on them rather than
-pretending. And *Lost Treasures* volume 1 is the GS/OS launcher — fifty-three
+`JOURNEY.D1`–`D4`, none of which begins with a Z-machine header. babelmap reads
+them anyway — see [The packed Apple volume](#the-packed-apple-volume) below. And
+*Lost Treasures* volume 1 is the GS/OS launcher — fifty-three
 files of system software and not one game. Volumes 2–7 carry thirty games
 between them, and since no ProDOS release uses a conventional story name, opening
 one of those disks gives you the largest game on it while the picker and
@@ -164,6 +164,49 @@ list where it always belonged — and the check keeps doing the job it was there
 for, because what it is really guarding against is the saved games sitting beside
 the games on these disks, whose serial field is binary rather than text either
 way.
+
+### The packed Apple volume
+
+*Arthur* and *Journey* on the Apple II are the awkward case, and they are awkward
+for an interesting reason: the ProDOS volume they sit on is not where the game
+lives. Those `.D1`–`.D5` segments are not chapters, not chunks, not a split
+archive. They are a **second container with its own block space**, and the story
+is a paging image scattered across all of them — page 34 can be on the fourth
+floppy while page 35 is back on the first. Infocom did that because a 5.25" disk
+holds 140 KB and *Arthur* is 265 KB, and because an interpreter that pages by
+block does not care where a block is as long as something tells it.
+
+Something does. Block 0 of the first segment is an index: how many floppies the
+release was pressed on, and then, per floppy, a list of runs saying "story pages
+*first* through *last* live here, starting at block *n*". Put the runs in page
+order and the game comes back. The runs tile the story exactly — every page named
+once, no gaps — which is also the check that keeps a `.D1` full of something else
+from being mistaken for one.
+
+Reassembly is not something to be confident about by eye, though: the pages are
+opaque, and a wrong map produces a file that looks every bit as much like Z-code
+as a right one. So babelmap does not trust its own work. It assembles, then
+checks the story's own header checksum — the sum of every byte from `$40` to the
+declared length, which Infocom put there for exactly this kind of doubt — and
+hands back nothing that fails. *Arthur* release 63, serial 890622, 271,304 bytes,
+checksum `$45EB`: that is a game, and you can play it.
+
+*Journey* is the one that cannot be. Its index declares five segments and
+`Journey.2mg` carries four, so ninety-two of its five hundred and fifty-two pages
+are not on the image at all. Nothing is wrong with the reader and nothing is
+wrong with the disk's ProDOS filesystem; the pressing is simply incomplete. The
+honest answer to four fifths of a game is no game, so babelmap mounts the volume,
+lists its files and declines to offer a story — the same answer it gave before,
+now for a reason it can state.
+
+The artwork on those disks is a separate matter and is not read yet. It is in
+there — four picture archives on *Arthur*, in the space the story pages leave
+free at the end of each segment, with the familiar Infocom header and a directory
+of 140×192 and 62×72 pictures at the Apple II's own hi-res dimensions. But the
+Apple wrote a directory record eight bytes wide where the Amiga, Macintosh and PC
+wrote twelve, fourteen or sixteen, and it packs pixels the way Apple hi-res packs
+them, which is like nothing else in this crate. That is a codec, not a container,
+and it is its own piece of work.
 
 Disk images are first-class in the library too: point babelmap at a directory of
 them and the picker's TYPE column names the container alongside the format —
@@ -192,8 +235,21 @@ arrives everywhere at once, and DOS and the Atari ST proved it: they landed as
 two rows and one reader, and the picker, the CLI menu and the launch dialog all
 gained them without a line changed. Apple ProDOS then landed on exactly those
 terms — one row, one new reader, and not a line of the picker, the launch dialog
-or the command-line player touched. Apple II 5.25" `.dsk` media is next, and will
-arrive the same way.
+or the command-line player touched.
+
+The packed Apple volume above landed on gentler terms still — no row at all,
+because it is not a disk format. It is a container that happens to live on one,
+so it plugged into the seam's "every story on the volume" answer and *Arthur*
+appeared in the picker, in the launch dialog and in `zvm-cli`'s menu without any
+of them being told a thing.
+
+Apple II 5.25" `.dsk` media is next, and it is the one format that will *not*
+arrive the same way, because a row cannot express it: a `.dsk` is one 140 KB
+floppy, and *Shogun* is five of them. The container is decoded — both sets
+reassemble and verify against their own checksums, *Shogun* release 311 serial
+890510 and *Zork Zero* release 383 serial 890602 — but a `Volume` is mounted from
+one file's bytes, and no story comes out of one of these files alone. What that
+format needs first is a mount that takes a *set*.
 
 The proof was not free, mind. One function had been missed — the one that reads
 an archive you name *inside* a disk, which predated the table and still carried a

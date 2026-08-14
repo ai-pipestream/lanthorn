@@ -426,6 +426,17 @@ the `.z5`s rather than being playable only by name. That is a pre-filter and not
 more — a `.img` that turns out to be a holiday photo is opened, found not to be a
 disk at all, and never shown.
 
+**And a row need not be a file.** *Arthur*'s Apple II press stores no story file
+anywhere on its disk — the game is a paging image scattered by block across five
+opaque segments — so the volume mounted, listed eleven files and offered nothing
+for as long as babelmap looked for a story file. It is an ordinary row now,
+`Z6 (ProDOS)` like any other Apple disk, because the mount reassembles the
+segments and proves the result against the game's own checksum before offering
+it. (*Journey*'s Apple press stays absent, and correctly: its image is missing
+one of the five floppies the game was pressed on, so there is no whole game on it
+to offer.) See
+[The packed Apple volume](interpreter.md#the-packed-apple-volume).
+
 **And a row is a game, not a file.** An Amiga release came one story to a disk,
 but a compilation does not: `Infocom Compilation 1` carries six, `floppy2.ima`
 six more, and the *Lost Treasures* Apple II volumes four or five apiece. Each of
