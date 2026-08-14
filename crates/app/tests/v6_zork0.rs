@@ -8,6 +8,8 @@
 
 #![allow(dead_code, unused_imports)]
 
+#[path = "suites/honor_colours_artwork_pin.rs"]
+mod honor_colours_artwork_pin;
 #[path = "suites/v6_band_tiling.rs"]
 mod v6_band_tiling;
 #[path = "suites/v6_ega_dither_blend.rs"]

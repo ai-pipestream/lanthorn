@@ -2929,6 +2929,18 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 // SQ-0318 base in sync so a later reload_style doesn't revert it
                 // (a per-game override, if any, still wins on the next reload).
                 state.honor_game_colours_base = state.config.honor_game_colours;
+                // SQ-0860: the base alone is not enough when a one-run source is
+                // holding this key, because `reload_style` only falls back to the
+                // base when nothing per-story is speaking. Editing the row calls
+                // `one_run.release` (see `one_run_key_for_row`), so a missing pin
+                // on a key that had one IS the deliberate edit — end the holds that
+                // live on `AppState` too, or the next style reload recomputes the
+                // user's own choice straight back off. Untouched rows keep their
+                // pin, so saving some unrelated setting changes nothing here.
+                if !state.config.one_run.holds(crate::config::keys::HONOR_GAME_COLOURS) {
+                    state.no_game_colours_cli = false;
+                    state.artwork_declines_colours = false;
+                }
                 if let Some(b) = state.audio.as_mut() {
                     b.set_volume(state.config.volume);
                 } else if state.config.enable_sound {
@@ -5162,6 +5174,60 @@ mod tests {
             !toml::from_str::<crate::config::Config>(&back).unwrap().enable_sound,
             "the user's own off must persist even though it matches the flag: {back}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0860: the same rule, one layer further out. A one-run hold on
+    /// `honor_game_colours` also lives on `AppState` — the artwork's force-off and
+    /// `--no-game-colours` — and `reload_style` re-applies those on every reload,
+    /// so releasing the `one_run` pin alone would let the next style reload
+    /// recompute the user's deliberate choice straight back off. Editing the row
+    /// must end both holds; saving with the row untouched must end neither.
+    #[test]
+    fn editing_the_honour_row_ends_the_artworks_hold_too() {
+        let dir = std::env::temp_dir().join(format!("bm-honour-row-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("style.toml"), "[colors]\n\"transcript\" = { fg = \"white\" }\n")
+            .unwrap();
+        let honour_row = 8;
+
+        // What a boot on a two-colour archive leaves behind (SQ-0806/SQ-0846).
+        let seed = |dir: &std::path::Path| {
+            let mut s = AppState::default();
+            s.config.user_dir = dir.to_path_buf();
+            s.config.style = Some(dir.join("style.toml").to_string_lossy().to_string());
+            s.honor_game_colours_base = true;
+            s.artwork_declines_colours = true;
+            s.config.honor_game_colours = false;
+            s.config.one_run.pin(crate::config::keys::HONOR_GAME_COLOURS, false);
+            s
+        };
+
+        let mut s = seed(&dir);
+        let mut m = Mapper::default();
+        apply_action(Action::OpenConfig, &mut s, &mut m);
+        if let Some(cs) = &mut s.overlays.config_screen {
+            config_cycle(&mut cs.working, honour_row, 1);
+            assert!(cs.working.honor_game_colours, "the row turns the game's colours on");
+        }
+        apply_action(Action::ConfigSave, &mut s, &mut m);
+        assert!(!s.artwork_declines_colours, "a deliberate edit outranks a guess about a machine");
+        assert!(s.config.honor_game_colours);
+        crate::reload::reload_style(&mut s);
+        assert!(s.config.honor_game_colours, "and the next style reload does not undo it");
+
+        // The same save with the row untouched changes nothing: the artwork's
+        // force-off is still in force for this run.
+        let mut s = seed(&dir);
+        apply_action(Action::OpenConfig, &mut s, &mut m);
+        if let Some(cs) = &mut s.overlays.config_screen {
+            config_cycle(&mut cs.working, 5, 1); // show_room_numbers — an unrelated row
+        }
+        apply_action(Action::ConfigSave, &mut s, &mut m);
+        assert!(s.artwork_declines_colours, "saving some other setting is not a choice about this one");
+        crate::reload::reload_style(&mut s);
+        assert!(!s.config.honor_game_colours, "so the archive still has the last word");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -799,6 +799,14 @@ impl OneRunOverrides {
         self.0.remove(key);
     }
 
+    /// Is `key` still pinned? (SQ-0860: the settings panel's row edit calls
+    /// [`Self::release`], so "the pin is gone" is how the ConfigSave handler
+    /// recognises a deliberate edit of that row and ends the holds that live on
+    /// `AppState` rather than in here.)
+    pub fn holds(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
     /// The integer a one-run source pinned on `key`, if any. (The `interpreter_number`
     /// resolution order in `boot_story` needs to tell a CLI value apart from the
     /// global config's, and both live in the same field.)

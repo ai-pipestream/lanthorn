@@ -494,6 +494,11 @@ pub(crate) fn dispatch_slash_outcome(
                     // `--interpreter`'s (SQ-0646). Without this the command would
                     // report success and change nothing.
                     state.no_game_colours_cli = false;
+                    // SQ-0860: and the artwork's force-off, for the same reason and
+                    // then some — the archive's half of `declines_game_colours` is
+                    // expressly a GUESS about a machine, and a player who typed this
+                    // command has just settled the question by hand.
+                    state.artwork_declines_colours = false;
                     let _ = app::reload::reload_style(state);
                     // Follow through to the running Z-machine: future set_colour
                     // ops and the Flags1 colour capability track the new setting.

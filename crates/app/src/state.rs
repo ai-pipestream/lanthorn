@@ -2437,6 +2437,31 @@ pub struct AppState {
     /// `--interpreter` follows (SQ-0646).
     pub no_game_colours_cli: bool,
 
+    /// True when the artwork this launch loaded has no colours to give, so
+    /// `startup.rs` declared the interpreter colourless (SQ-0806/SQ-0846, see
+    /// [`crate::graphics::PictSource::declines_game_colours`]).
+    ///
+    /// Recorded here for exactly the reason `no_game_colours_cli` above is: the
+    /// force-off happens on `Config` before the engine is built, and the boot
+    /// `reload_style` that runs a few lines later recomputes the key from the two
+    /// per-story FILES and lands on the global base — which was captured *before*
+    /// the force-off. Without this the whole thing is undone the moment it is
+    /// done: the honour flag reads `true` again from the boot reload onward, so
+    /// `poll_zvm_default_colours` starts writing header $2C/$2D that §8.3.2 says
+    /// to leave alone, and an `@restart` rebuilds the session honouring the very
+    /// colours that paint a two-colour stencil out (SQ-0860).
+    ///
+    /// A launch-wide fact about the artwork, like the flag above is a launch-wide
+    /// fact about the command line, so it sits beside it and is folded into the
+    /// same per-story answer rather than lowering the base — which is what keeps
+    /// the value PINNED and out of the user's global `config.toml`.
+    ///
+    /// Cleared by the same events that clear the flag: `/set-game-colours` and a
+    /// settings-panel edit of the row. The archive's half of
+    /// `declines_game_colours` is expressly a *guess* about a machine, and a
+    /// deliberate choice outranks a guess.
+    pub artwork_declines_colours: bool,
+
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
@@ -2739,6 +2764,7 @@ impl Default for AppState {
             garglk_overlay: None,
             honor_game_colours_base: true,
             no_game_colours_cli: false,
+            artwork_declines_colours: false,
             transcript_scroll: 0,
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,

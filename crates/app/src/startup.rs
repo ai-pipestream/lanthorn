@@ -488,6 +488,13 @@ pub(crate) fn boot_story(
     // there, and a game's initialisation is exactly where the shuffling is done.
     let random_seed = cfg.effective_random_seed();
 
+    // SQ-0860: whether the artwork this launch loaded declared the interpreter
+    // colourless, escaped from the Z-code arm below so it can be handed to
+    // `AppState`. The force-off there mutates `cfg` before the engine is built,
+    // and the post-IFID `reload_style` recomputes the same key from the two
+    // per-story files — so the fact has to travel with the state, not just the
+    // value. Always `false` for a non-Z-code engine: no Infocom archive is in play.
+    let mut artwork_declines_colours = false;
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
@@ -561,7 +568,14 @@ pub(crate) fn boot_story(
             // nothing else to reason from; where the medium named the machine and
             // that machine's own interpreter named its colours, the guess is
             // overruled by the fact. See `PictSource::declines_game_colours`.
+            //
+            // SQ-0860: recorded on `AppState` too (`artwork_declines_colours`),
+            // because the post-IFID `reload_style` re-derives this key from the
+            // per-story FILES and would otherwise land back on the global base —
+            // captured above, BEFORE this ran — undoing both the value and the pin
+            // a few lines after they were set.
             if picts.declines_game_colours(cfg.interpreter_profile) && cfg.honor_game_colours {
+                artwork_declines_colours = true;
                 cfg.honor_game_colours = false;
                 cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, false);
             }
@@ -851,6 +865,10 @@ pub(crate) fn boot_story(
     // the post-IFID `reload_style` below re-reads both per-story sources from disk
     // and would otherwise let either of them overrule the flag.
     state.no_game_colours_cli = cli.no_game_colours;
+    // SQ-0860: and whether the artwork declared the interpreter colourless, for the
+    // same reason — the reload below re-reads the per-story files, and neither of
+    // them knows what archive was loaded.
+    state.artwork_declines_colours = artwork_declines_colours;
     state.config = cfg;
 
     // Debug trace (trace feature): start a fresh log for this run and arm the
