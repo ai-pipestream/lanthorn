@@ -102,25 +102,40 @@ pub struct StoryEntry {
     pub hint_sidecar: Option<std::path::PathBuf>,
 }
 
-/// Candidate story-file extensions (matched case-insensitively). `.zblorb` /
-/// `.blorb` / zips are handled by `load_story_bytes`; `.dat` covers some
-/// Infocom releases; `.adf` is an Amiga release floppy and `.image` a Macintosh
-/// one, whose story `load_story` mounts out of the disk image (SQ-0719,
-/// SQ-0837).
+/// Candidate **bare** story-file extensions (matched case-insensitively).
+/// `.zblorb` / `.blorb` / zips are handled by `load_story_bytes`; `.dat` covers
+/// some Infocom releases.
 ///
-/// This list is only a pre-filter on what is worth opening — every candidate is
-/// then mounted and rejected unless a story actually comes out of it — which is
-/// what makes admitting a generic extension like `.image` safe.
+/// Release *disk images* are deliberately absent: their spellings belong to
+/// `blorb::medium`'s format table, and [`has_story_ext`] takes the union.
 const STORY_EXTS: &[&str] = &[
     "z3", "z4", "z5", "z6", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
-    "adf", "image",
 ];
 
+/// Is this file worth opening during a directory scan?
+///
+/// The bare story extensions above, unioned with every spelling
+/// `blorb::medium::image_extensions` names — an Amiga `.adf`, a Macintosh
+/// `.image`, a DOS `.ima`/`.img`, an Atari ST `.st` — whose story `load_story`
+/// mounts out of the disk image (SQ-0719, SQ-0837, SQ-0833, SQ-0835).
+///
+/// **Only a pre-filter on what is worth opening**: every candidate is then
+/// mounted and rejected unless a story actually comes out of it, which is what
+/// makes admitting a generic extension like `.image` or `.img` safe. Nothing
+/// here concludes a *format* from a name; that stays `DiskImage::detect`'s
+/// answer over the bytes.
+///
+/// The disk half used to be a second list written out here, and it went stale
+/// exactly as a duplicated census does: it knew `.adf` and `.image` and never
+/// heard about the DOS and ST formats two later quests had already taught
+/// babelmap to mount, so those floppies were absent from the story list while
+/// opening one by name worked fine (SQ-0849).
 pub(crate) fn has_story_ext(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| STORY_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    STORY_EXTS.contains(&ext.as_str()) || blorb::medium::image_extensions().any(|e| e == ext)
 }
 
 /// True for blorb-container extensions (case-insensitive).
@@ -1264,6 +1279,59 @@ mod tests {
     fn disk_images_are_listed_as_stories() {
         assert!(has_story_ext(Path::new("Zork Zero.adf")));
         assert!(has_story_ext(Path::new("DISK1.ADF")), "matched case-insensitively");
+    }
+
+    /// **Every format `blorb` mounts, the scan is willing to open** — the whole
+    /// of SQ-0849. The enumeration is the format table's, not a copy of it, so a
+    /// format added there arrives here in the same commit and cannot go missing
+    /// from the story list the way the DOS and ST presses did.
+    ///
+    /// FALSIFICATION: put the disk spellings back into `STORY_EXTS` by hand as
+    /// `"adf", "image"` and this fails on `ima` — the originally reported
+    /// symptom, that `.ima` and `.st` media are never offered.
+    #[test]
+    fn the_scan_admits_every_extension_the_format_table_names() {
+        for ext in blorb::medium::image_extensions() {
+            assert!(
+                has_story_ext(Path::new(&format!("release.{ext}"))),
+                "a .{ext} disk image is a format blorb mounts but the scan will not open"
+            );
+            assert!(
+                has_story_ext(Path::new(&format!("RELEASE.{}", ext.to_ascii_uppercase()))),
+                ".{ext} is matched case-insensitively, like every other candidate"
+            );
+        }
+        // The pre-existing bare-story behaviour is untouched by the union.
+        for ext in ["z3", "z5", "z8", "zblorb", "dat", "ulx", "blb"] {
+            assert!(has_story_ext(Path::new(&format!("game.{ext}"))), "{ext}");
+        }
+        // …and the union admits nothing beyond the two lists.
+        for ext in ["txt", "png", "qzl", "2mg", "dsk"] {
+            assert!(!has_story_ext(Path::new(&format!("thing.{ext}"))), "{ext}");
+        }
+    }
+
+    /// The union is safe **because content decides**: a `.img` that is not a
+    /// disk image is opened, refused and never listed (SQ-0849's guard).
+    ///
+    /// This is the property that lets the pre-filter be generous. Admitting
+    /// `.img` would be reckless if the extension were evidence of anything; it
+    /// is not, so the file is read, `DiskImage::detect` declines it, and the
+    /// scan drops it exactly as it drops a corrupt `.z5`.
+    #[test]
+    fn a_file_that_only_looks_like_a_disk_image_is_not_listed() {
+        let dir = temp_dir("notadisk");
+        std::fs::write(dir.join("holiday.img"), vec![0u8; 64 * 1024]).unwrap();
+        std::fs::write(dir.join("notes.ima"), b"this is not a floppy").unwrap();
+        std::fs::write(dir.join("archive.st"), vec![0x5au8; 8 * 1024]).unwrap();
+        // A real story beside them, so an empty list cannot pass by accident.
+        std::fs::write(dir.join("game.z5"), minimal_v3_story()).unwrap();
+
+        let stories = scan_stories(&dir, &dir);
+        let names: Vec<String> = stories.iter().map(|s| s.filename.clone()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(names, vec!["game.z5".to_string()], "only the real story is listed: {names:?}");
     }
 
     #[test]

@@ -473,6 +473,70 @@ fn a_floppy_and_the_story_file_beside_it_are_pinned_against_each_other() {
     assert!(ran > 0 || !any_real_media_present(), "media are present but no pair was compared");
 }
 
+/// **Every medium here is one the story picker actually OFFERS** (SQ-0849).
+///
+/// The report: *"i don't see any games with ima or st extensions in the story
+/// list."* They were not there. Mounting worked — every case above proves it —
+/// but the picker's directory scan pre-filtered on its own hand-written
+/// extension list, which knew `.adf` and `.image` and had never heard of the DOS
+/// and Atari ST rows SQ-0833 and SQ-0835 added. Those floppies were opened by
+/// name and invisible in the list, which is the only place most people look.
+///
+/// So this drives `picker::scan_stories` over the real story directory and
+/// insists that every medium in [`MEDIA`] that exists on disk comes back out of
+/// it. The pre-filter now derives from `blorb::medium`'s format table, so a
+/// format added there is offered here in the same commit.
+///
+/// `stories/` is gitignored, so this skips vacuously per missing file and the
+/// `ran > 0` guard is gated on [`any_real_media_present`], exactly like its
+/// neighbours — CI has no media at all and must not fail on their absence.
+///
+/// Measured on the local corpus, 2026-08-13: the scan listed **142** stories
+/// before and **163** after — 8 `.ima`, 4 `.img` and 9 `.st` that were mountable
+/// all along. The `.adf` count (9) and the `.image` count (1) did not move, and
+/// three `.ima` in the directory are still *not* listed, because no story comes
+/// out of them: the extension is a pre-filter, not a verdict.
+///
+/// FALSIFICATION: restore the disk spellings as a literal `"adf", "image"` in
+/// `picker::STORY_EXTS` and this fails naming `floppy5.ima` — the user's symptom,
+/// verbatim.
+#[test]
+fn every_release_medium_is_offered_by_the_story_picker() {
+    let dir = stories_dir();
+    let data_base = std::env::temp_dir().join(format!("babelmap-sq0849-{}", std::process::id()));
+    let listed: Vec<PathBuf> =
+        app::picker::scan_stories(&dir, &data_base).into_iter().map(|e| e.path).collect();
+    let _ = std::fs::remove_dir_all(&data_base);
+
+    let mut ran = 0;
+    for m in MEDIA {
+        let path = dir.join(m.file);
+        if !path.is_file() {
+            continue;
+        }
+        ran += 1;
+        assert!(
+            listed.contains(&path),
+            "{} is mountable but the picker never offered it",
+            ctx(m)
+        );
+    }
+    assert!(ran > 0 || !any_real_media_present(), "media are present but none were scanned");
+
+    // The two formats with no reader yet stay out of the list, however many of
+    // them sit in the directory: ProDOS `.2mg` (SQ-0836) and Apple II `.dsk`
+    // (SQ-0852) arrive with the code that opens them, not before.
+    for queued in ["2mg", "dsk"] {
+        assert!(
+            !listed.iter().any(|p| {
+                p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case(queued))
+                    == Some(true)
+            }),
+            "a .{queued} was listed, but nothing in blorb can mount one"
+        );
+    }
+}
+
 /// A `.blb` beside a story is artwork, never a third build — so "which release"
 /// is decided entirely by the file you open.
 #[test]

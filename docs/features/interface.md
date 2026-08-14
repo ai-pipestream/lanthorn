@@ -410,12 +410,20 @@ hint badge is uppercase (`H`) when a hint file is present locally and lowercase
 the type label rather than a separate badge.)
 
 The container is part of that label, so a story you're playing off its original
-release floppy reads `Z6 (ADF)` off an Amiga disk or `Z6 (HFS)` off a Macintosh
-one, and is never mistaken for a loose story file. The disk says so, not the
+release floppy reads `Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh
+one, `Z6 (DOS)` off a PC floppy or `Z4 (ST)` off an Atari ST one, and is never
+mistaken for a loose story file. The disk says so, not the
 filename: the suffix comes from the mount that found the story inside the image,
 so a floppy named anything at all is labelled for the filesystem it actually
 carries, and a plain story file that happens to be called `.adf` is not labelled
 at all.
+
+**Every release medium babelmap can mount, the picker offers.** The scan decides
+which files are worth opening from the same format table the mount reads, so a
+shelf of `.ima`, `.img` and `.st` floppies lists beside the `.adf`s and the
+`.z5`s rather than being playable only by name. That is a pre-filter and nothing
+more — a `.img` that turns out to be a holiday photo is opened, found not to be a
+disk at all, and never shown.
 
 When you launch from a directory this way, `/quit-to-library` drops the current
 story and returns you to the picker to choose another (honouring the usual

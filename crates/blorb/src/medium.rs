@@ -39,6 +39,13 @@
 //! negotiable: every Atari ST story is called `STORY.DAT`, five of nine Amiga
 //! floppies call theirs `Story.data`, `.ima` and `.img` are one format, and the
 //! ProDOS `2IMG` length field reads zero.
+//!
+//! A row does carry [`Format::extensions`], and that is not a crack in the rule:
+//! it is the census a front-end scanning a DIRECTORY needs to decide which files
+//! are worth OPENING, and what a file turns out to be is still
+//! [`DiskImage::detect`]'s answer over its bytes. See [`DiskImage::extensions`]
+//! for why it lives here and nowhere else — it lived in the TUI once, and went
+//! stale the moment a format arrived (SQ-0849).
 
 use crate::adf::{Adf, looks_like_story};
 use crate::fat12::Fat12;
@@ -166,6 +173,38 @@ impl DiskImage {
     pub fn interpreter_number(self) -> Option<u8> {
         self.row().interpreter_number
     }
+
+    /// The filename extensions this format is CONVENTIONALLY given — lowercase,
+    /// no leading dot.
+    ///
+    /// **A pre-filter, never evidence.** Nothing may conclude a format from a
+    /// name: a front-end walking a directory uses this to decide which files are
+    /// worth reading, and then asks [`DiskImage::detect`] what it actually got.
+    /// So a disk image under an unexpected name still mounts by every path that
+    /// sniffs content, and a `.img` full of holiday photos is opened, refused and
+    /// never listed.
+    ///
+    /// **Why it is a property of the row.** The TUI's story picker kept its own
+    /// extension list, and that list was the "nothing else anywhere" in
+    /// [`FORMATS`]' doc that turned out to exist. SQ-0833 and SQ-0835 added the
+    /// DOS and Atari ST rows; the picker never learned their names, so a shelf
+    /// full of `.ima` and `.st` floppies that mount perfectly well was simply
+    /// absent from the story list, silently, for two quests (SQ-0849). A census
+    /// the table owns cannot drift from the table.
+    pub fn extensions(self) -> &'static [&'static str] {
+        self.row().extensions
+    }
+}
+
+/// Every extension any format in [`FORMATS`] is conventionally given, in table
+/// order — the whole census, for a caller that has a filename and no bytes yet.
+///
+/// This is what a directory scan pre-filters on; see [`DiskImage::extensions`]
+/// for what it is and is not allowed to mean. The formats' sets are disjoint
+/// today, and a caller must not assume it: the union is what it wants, because
+/// which row claimed a spelling is [`DiskImage::detect`]'s business.
+pub fn image_extensions() -> impl Iterator<Item = &'static str> {
+    FORMATS.iter().flat_map(|f| f.extensions.iter().copied())
 }
 
 // ── The one table ─────────────────────────────────────────────────────────────
@@ -181,6 +220,10 @@ struct Format {
     label: &'static str,
     /// See [`DiskImage::interpreter_number`].
     interpreter_number: Option<u8>,
+    /// See [`DiskImage::extensions`]. Lowercase, no dot, at least one — a row
+    /// with none is a format a directory scan can never offer, and the census
+    /// test in this module says so.
+    extensions: &'static [&'static str],
     /// The content sniff — [`Volume::looks_like`] for the reader below.
     looks_like: fn(&[u8]) -> bool,
     /// The mount — [`Volume::mount`], boxed so the table can be one type.
@@ -189,16 +232,28 @@ struct Format {
 
 /// **Every disk format babelmap reads.** Adding one is a row here plus the
 /// `impl Volume` it names, and nothing else anywhere: `detect`, `mount`,
-/// `label`, `interpreter_number`, the TUI's story loading and picture
-/// resolution, and `zvm-cli`'s disk menu all read this table and none of them
-/// knows a format's name.
+/// `label`, `interpreter_number`, **the extensions a directory scan
+/// pre-filters on**, the TUI's story loading and picture resolution, and
+/// `zvm-cli`'s disk menu all read this table and none of them knows a format's
+/// name.
 ///
-/// Queued: ProDOS (SQ-0836).
+/// The extensions column is the newest of those, and it is here because the one
+/// front-end that needed it kept its own copy instead: `picker::STORY_EXTS`
+/// listed `adf` and `image` and never heard about `ima`, `img` or `st`, so two
+/// shipped formats were unreachable from the story list. That is exactly the
+/// half-wiring the table exists to make impossible, one column late (SQ-0849).
+///
+/// Queued: ProDOS (SQ-0836), Apple II DOS 3.3 (SQ-0852). Neither has a reader,
+/// so neither has a row **or an extension** — `.2mg` and `.dsk` arrive with the
+/// code that opens them, in one commit, which is the whole point of the table.
 const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::Adf,
         label: "ADF",
         interpreter_number: Some(AMIGA_INTERPRETER_NUMBER),
+        // Every Amiga floppy in the corpus is `.adf`; the format has no second
+        // customary spelling.
+        extensions: &["adf"],
         looks_like: <Adf as Volume>::looks_like,
         mount: mount_boxed::<Adf>,
     },
@@ -206,6 +261,13 @@ const FORMATS: &[Format] = &[
         image: DiskImage::Hfs,
         label: "HFS",
         interpreter_number: Some(MACINTOSH_INTERPRETER_NUMBER),
+        // `.image` is DiskCopy 4.2's own name and what the corpus uses (`Zork
+        // Zero Disk.image`). Macintosh volumes also circulate as `.img` and
+        // `.dsk`; the first is already admitted by the DOS row below and the
+        // union is what a scan pre-filters on, so an HFS `.img` is opened and
+        // mounts. `.dsk` is deliberately absent — it is overwhelmingly Apple II
+        // media, which has no reader yet (SQ-0852).
+        extensions: &["image"],
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
     },
@@ -233,6 +295,10 @@ const FORMATS: &[Format] = &[
         // rendering change on real media that nothing in this lane establishes,
         // and it belongs to whoever can look at it.
         interpreter_number: None,
+        // Two spellings of one thing, as this module's header already says:
+        // `floppy1.ima` and `disk1.img` are the same raw sector dump and the
+        // same reader opens both.
+        extensions: &["ima", "img"],
         looks_like: crate::fat12::looks_like_dos,
         mount: mount_boxed::<Fat12>,
     },
@@ -259,6 +325,14 @@ const FORMATS: &[Format] = &[
         // and it declines the one member nothing establishes: the ST never had a
         // YZIP, so it has no Version 6 art geometry to state.
         interpreter_number: Some(ATARI_ST_INTERPRETER_NUMBER),
+        // `.st` is the raw ST sector dump, which is what this reader opens and
+        // what all nine compilations in the corpus are. **Not `.msa`**: Magic
+        // Shadow Archiver images are RLE-compressed with their own header, not
+        // FAT12 at offset zero, so `looks_like_atari_st` refuses one and a row
+        // claiming the name would be advertising a format with no reader — the
+        // same half-wiring the extensions column was added to end. It arrives
+        // with a decompressor or not at all.
+        extensions: &["st"],
         looks_like: crate::fat12::looks_like_atari_st,
         mount: mount_boxed::<Fat12>,
     },
@@ -746,6 +820,75 @@ mod tests {
             census.len(),
             "FORMATS and DiskImage have drifted apart — every format is one row and one variant"
         );
+    }
+
+    /// The extensions census: every format offers at least one spelling, and
+    /// [`image_extensions`] is exactly the union of the rows'.
+    ///
+    /// The "at least one" is the guard that matters. A row with no extension is
+    /// a format a directory scan can never *offer* — it mounts perfectly when
+    /// you name the file, and is invisible in the story list — which is the
+    /// precise shape of the defect SQ-0849 was filed for, arrived at from the
+    /// other side. Spelling rules (lowercase, no dot, no duplicates) are pinned
+    /// too, because `has_story_ext` lowercases the candidate's extension and
+    /// compares it as-is, so a row shouting `"ADF"` would silently match
+    /// nothing.
+    #[test]
+    fn every_format_offers_at_least_one_extension_and_the_census_is_their_union() {
+        let mut union: Vec<&str> = Vec::new();
+        for image in DiskImage::all() {
+            let exts = image.extensions();
+            assert!(
+                !exts.is_empty(),
+                "{image:?} names no extension — a directory scan can never offer it"
+            );
+            for e in exts {
+                assert!(
+                    !e.is_empty() && !e.starts_with('.') && *e == e.to_ascii_lowercase(),
+                    "{image:?}: {e:?} must be lowercase and dotless"
+                );
+                assert!(!union.contains(e), "{image:?}: {e:?} is claimed by two rows");
+                union.push(e);
+            }
+        }
+        assert_eq!(
+            image_extensions().collect::<Vec<_>>(),
+            union,
+            "the census is the rows' extensions and nothing else"
+        );
+        // The four spellings the corpus in `stories/` actually uses, named
+        // outright so a row losing one fails here rather than in the picker.
+        for want in ["adf", "image", "ima", "img", "st"] {
+            assert!(image_extensions().any(|e| e == want), "no row claims {want:?}");
+        }
+        // …and the two queued formats do NOT get a name before they get a
+        // reader (SQ-0836 ProDOS, SQ-0852 Apple II DOS 3.3).
+        for queued in ["2mg", "dsk"] {
+            assert!(
+                !image_extensions().any(|e| e == queued),
+                "{queued:?} is claimed by a row, but nothing here can open one"
+            );
+        }
+    }
+
+    /// A name is a pre-filter, never evidence — stated as a test so the
+    /// extensions column cannot quietly become a recogniser.
+    ///
+    /// Both halves of this module's header rule, on the new column: bytes that
+    /// ARE a disk are one whatever they are called, and bytes that are not stay
+    /// not one however suggestively they are named.
+    #[test]
+    fn the_extension_census_decides_nothing_about_what_bytes_are() {
+        for image in DiskImage::all() {
+            // A real image is recognised, and no extension was consulted to do
+            // it — `detect` never sees a filename at all.
+            assert_eq!(DiskImage::detect(&sample_of(image)), Some(image), "{image:?}");
+        }
+        // An ordinary story file is not a disk image, and would not become one
+        // if it were called `zork.ima`.
+        assert_eq!(DiskImage::detect(&fake_story()), None);
+        // Nor is a file of nonsense that happens to carry a claimed extension.
+        assert_eq!(DiskImage::detect(&vec![0u8; 720 * 1024]), None);
     }
 
     /// **The property this quest exists for**: whatever `detect` claims, `mount`
