@@ -3,7 +3,7 @@
 //! `.MG1`/`.EG1`/`.EG2`/`.CG1` files shipped on the PC releases of the same
 //! games.
 //!
-//! # One container, two codecs
+//! # One container, three codecs
 //!
 //! Every flavour shares a 16-byte header and a directory of fixed-size records;
 //! Infocom's own interpreter sources spell that layout out field by field
@@ -42,6 +42,18 @@
 //! pixels. There is **no** run-length stage and **no** per-line XOR: the LZW
 //! output *is* the picture. See [`InfocomPics::parse`] for how the two are told
 //! apart, and [`Flavour`] for what the published sources do and do not settle.
+//!
+//! **Apple II** is big-endian like the Amiga, spends 8 bytes on a record where
+//! the others spend 12 to 16, and runs the Amiga's codec with its third stage
+//! switched off: run-length and per-line XOR, no Huffman. It is the only
+//! flavour whose every part — container, codec and colour table — comes out of
+//! Infocom's own published sources rather than out of a second implementation:
+//! `apple/yzip/rel.15/zip.equ` for the header and the record,
+//! `apple/yzip/rel.15/pic.asm` for the decoder, and
+//! `apple/yzip/apl2iff/apple.pal` for the sixteen colours. Its archives are not
+//! files — each lives in the free tail of a packed volume's segment — so it
+//! parses through [`InfocomPics::parse_apple`], which takes the segment and the
+//! offset the volume's own index gives for it. SQ-0863.
 //!
 //! There is no magic number, and the header carries no release number and no
 //! serial — nothing that could tie an archive to a story. So a caller must
@@ -88,6 +100,15 @@ pub enum Flavour {
     /// The PC archives — `.MG1` (MCGA), `.EG1`/`.EG2` (EGA), `.CG1` (CGA):
     /// little-endian, GIF-style LZW, no XOR.
     Pc,
+    /// The Apple II archives, carried inside the `.D2`…`.D5` segments of a
+    /// packed volume: big-endian, 8-byte records, and the Amiga's RLE +
+    /// per-line XOR **without** the Huffman stage. See
+    /// [`InfocomPics::parse_apple`] and [`InfocomPics::decode_apple`].
+    ///
+    /// Unlike the other two this flavour is authoritative from Infocom's own
+    /// sources end to end: `apple/yzip/rel.15/zip.equ` gives every field of the
+    /// header and of the record, and `pic.asm` is the decoder itself.
+    Apple,
 }
 
 /// Errors that can arise while reading a native Infocom picture archive.
@@ -181,6 +202,81 @@ const ENTRY_SIZE_NO_PAL: usize = 12;
 /// MCGA archives use it — MCGA could pick its 16 colours freely, so it had to
 /// carry them.
 const PC_ENTRY_SIZE_PAL: usize = ENTRY_SIZE;
+
+/// The Apple II record — `PLDSIZE` in `apple/yzip/rel.15/zip.equ`, and the
+/// fourth entry length the format uses.
+///
+/// The other three flavours spend 2 bytes each on width, height and flags; the
+/// Apple spends **one**, and drops the palette pointer entirely. `zip.equ` lays
+/// the whole record out and computes the size from it, so the 8 is derived
+/// rather than asserted:
+///
+/// ```text
+/// PLDID   EQU 0           ; Picture ID
+/// PLDWID  EQU PLDID+2     ; Picture Width
+/// PLDHGHT EQU PLDWID+1    ; Picture Height
+/// PLDFLG  EQU PLDHGHT+1   ; Flags
+/// PLDPTR  EQU PLDFLG+1    ; Pointer to picture data
+/// PLDSIZE EQU PLDPTR+3    ; size of local directory entry
+/// ```
+///
+/// One byte each caps a picture at 255×255, which the Apple's own picture space
+/// (140×192 — `apple.equ`'s `MAXWIDTH EQU 140 ; 560 / 4` and `MAXHEIGHT EQU
+/// 192`) never comes close to.
+const APPLE_ENTRY_SIZE: usize = 8;
+
+/// Bytes of length prefix in front of an Apple picture's RLE stream. `pic.asm`
+/// steps over them before decoding — "`lda #3 ; 3 bytes of width data start
+/// it`" — and they hold the compressed length, which is what makes them an
+/// independent check on the decoder (see [`InfocomPics::decode_apple`]).
+const APPLE_PREFIX: usize = 3;
+
+/// `PLDFLG` bit 0: the picture has a transparent colour. `pic.asm`:
+///
+/// ```text
+/// lda PICINFO+PLDFLG      ; get flag byte
+/// and #1                  ; is there a transparent color?
+/// bne ZDSP11              ; ayyup
+/// lda #$FF                ; make TRANSCLR be $FF
+/// ```
+///
+/// Which colour is the flag byte's **top nibble** — the same idea as the other
+/// flavours' `flags >> 12`, one byte narrower because `PLDFLG` is one byte
+/// wide. `pic.asm` shifts it down four bits, calling the byte "hi byte of flag
+/// word", which is exactly what it is: the other machines' 16-bit `eFlags` with
+/// the always-zero low half dropped.
+///
+/// ```text
+/// ZDSP11:
+///     lda PICINFO+PLDFLG  ; get hi byte of flag word
+///     lsr A               ; put in lower byte
+///     lsr A               ; put in lower byte
+///     lsr A               ; put in lower byte
+///     lsr A               ; put in lower byte
+/// ZDSP12:
+///     sta TRANSCLR        ; save transparent color
+/// ```
+const APPLE_EF_TRANS: u16 = 1;
+
+/// Header flag `PHFPAL` — `zip.equ`, "No pallette information".
+///
+/// The Apple's header flags are its own set and only partly line up with the
+/// Amiga's `HF_*`. `zip.equ` names four:
+///
+/// ```text
+/// PHFGD    EQU $1     ; data has global directory
+/// PHFHUFF  EQU $2     ; Huffman encoded pictures
+/// PHFHUFF1 EQU $4     ; All pictures use same Huff tree
+/// PHFPAL   EQU $8     ; No pallette information
+/// ```
+///
+/// `$2` and `$4` are the same two bits [`HF_EHUFF`] and [`HF_GHUFF`] name, with
+/// the same meaning, which is why one tree test serves every flavour. `$8` is
+/// **not** the PC's picture-space-width bit — it says the file stores no
+/// palettes, which is the same thing the 8-byte record says by having no room
+/// for a palette pointer. Every Arthur archive reads `0x08`: no global
+/// directory in the file itself, no Huffman, no palettes.
+const PHFPAL: u8 = 8;
 
 /// GIF-style LZW, as the PC archives use it. Minimum code size 8, so the two
 /// reserved codes land at 256 and 257 and the first assignable code at 258;
@@ -361,6 +457,52 @@ pub const CGA_PALETTE: [Rgb; 16] = [
     [0, 0, 0],
     [0, 0, 0],
     [0, 0, 0],
+];
+
+/// The Apple II double-hi-res sixteen, which an Apple archive's pixel indices
+/// name directly — the analogue of [`EGA_PALETTE`], and needed for the same
+/// reason: the record has no palette pointer because the colours were in the
+/// hardware, not in the file.
+///
+/// **This is Infocom's own table.** `apple/yzip/apl2iff/apple.pal` in the
+/// published tree is the palette their `apl2iff` tool expanded these very
+/// archives through, and its 48 bytes of RGB are transcribed here entry for
+/// entry:
+///
+/// ```text
+/// 0f0f0f cc0077 999911 ff1111 33cc99 bbbbcc 44ff44 ffdd00
+/// 0044cc ee66ff 99cc99 ff99aa 11ccee aaddff aaffaa ffffff
+/// ```
+///
+/// The order is the Apple II DHGR order, and that is the corroboration: black,
+/// deep red, brown, orange, dark green, grey, green, yellow, dark blue, violet,
+/// grey, pink, medium blue, light blue, aqua, white — the sixteen in the
+/// sequence the hardware's four-bit nibble produces them, which is what
+/// `applebit.c` reads out of a Dazzle Draw screen ("Each pixel is four bits")
+/// and what `pic.asm`'s `PIC2SCR` writes back ("`lda #4 ; 4 bits per pixel`").
+///
+/// Note index 0 is `0f0f0f` and not pure black, and the two greys at 5 and 10
+/// are deliberately unequal (`bbbbcc` and `99cc99`) where the hardware makes
+/// them the same colour. Both are Infocom's values and are kept rather than
+/// "corrected": the file is the authority for what these indices meant to the
+/// people who drew the art.
+pub const APPLE_DHGR_PALETTE: [Rgb; 16] = [
+    [0x0f, 0x0f, 0x0f],
+    [0xcc, 0x00, 0x77],
+    [0x99, 0x99, 0x11],
+    [0xff, 0x11, 0x11],
+    [0x33, 0xcc, 0x99],
+    [0xbb, 0xbb, 0xcc],
+    [0x44, 0xff, 0x44],
+    [0xff, 0xdd, 0x00],
+    [0x00, 0x44, 0xcc],
+    [0xee, 0x66, 0xff],
+    [0x99, 0xcc, 0x99],
+    [0xff, 0x99, 0xaa],
+    [0x11, 0xcc, 0xee],
+    [0xaa, 0xdd, 0xff],
+    [0xaa, 0xff, 0xaa],
+    [0xff, 0xff, 0xff],
 ];
 
 /// Colour index at which a picture's own palette starts. Indices 0 and 1 are
@@ -576,8 +718,20 @@ impl InfocomPics {
         // No tree named anywhere means the Huffman codec cannot be in play, and
         // a zero word reads zero whichever end it is written from — so this one
         // test picks the flavour without first having to know the byte order.
+        //
+        // Which of the two TREELESS flavours it is, is then settled by the
+        // record size, and unambiguously: the Apple spends 8 (`PLDSIZE`) and the
+        // PC 12 or 14, and no length is legal for both. The tree word keeps
+        // doing all the work it did before — it still separates Huffman from
+        // not-Huffman, and nothing Huffman-coded reaches this line — so the
+        // discriminator is not weakened, only refined on the side of it that
+        // already held more than one rendition.
         if !per_entry_huff && be16(&data, 2) == 0 {
-            return Self::parse_pc(data);
+            return if usize::from(data[8]) == APPLE_ENTRY_SIZE {
+                Self::parse_apple(data, 0)
+            } else {
+                Self::parse_pc(data)
+            };
         }
         // 16 exactly when the records carry their own trees; otherwise 14, or 12
         // when the pictures are monochrome and have no palette to point at.
@@ -721,10 +875,125 @@ impl InfocomPics {
         })
     }
 
+    /// Parse an Apple II archive out of the segment that carries it.
+    ///
+    /// # Why this one takes a base, when the others do not
+    ///
+    /// An Apple archive is not a file. It lives in the free tail of a packed
+    /// volume's segment — `ARTHUR.D2`…`ARTHUR.D5` — **behind** that segment's
+    /// story pages, and its `PLDPTR` offsets are positions in the SEGMENT, not
+    /// in the archive. `pic.asm` seeks the segment file directly with them:
+    ///
+    /// ```text
+    /// lda PICINFO+PLDPTR      ; MSB of offset
+    /// sta PFSEEK+SM_FPOS+2    ; MSB of seek
+    /// lda PICINFO+PLDPTR+1    ; Middle
+    /// and #$FE                ; seek only to 512byte boundary
+    /// sta PFSEEK+SM_FPOS+1
+    /// SET_MARK PFSEEK         ; go to pic data
+    /// ```
+    ///
+    /// So `data` is the whole segment and `base` is where its header starts.
+    /// Slicing the archive out on its own would strand every offset by exactly
+    /// `base`, which is why there is no such thing as a loose Apple archive to
+    /// hand to [`parse`](InfocomPics::parse).
+    ///
+    /// # Finding `base`
+    ///
+    /// The caller does not have to search for it: the packed volume's own index
+    /// says where it is, one entry per segment. `zip.equ` names the field —
+    ///
+    /// ```text
+    /// SGTCHKS  EQU 0  ; check sum for file
+    /// SGTPICOF EQU 2  ; picture data offset
+    /// SGTNSEG  EQU 4  ; # of segments in this list
+    /// SGTGPOF  EQU 6  ; Global Directory Offset
+    /// ```
+    ///
+    /// — and `READ_IN_PDATA` turns it into a file position by shifting it left
+    /// nine, i.e. it is a **block number**, with zero meaning the segment has no
+    /// artwork. See `infocom_packed::PackedVolume::picture_offsets`.
+    ///
+    /// # The header, and how it differs
+    ///
+    /// The same 16 bytes as every flavour, read big-endian. `pic.asm` says so of
+    /// the one field it would otherwise be guesswork for, because the 6502 would
+    /// naturally read a word the other way and this one does not:
+    ///
+    /// ```text
+    /// lda PIC_DIR+PHNLD       ; get # of entries
+    /// lda PIC_DIR+PHNLD+1     ; it's in reverse order
+    /// ```
+    ///
+    /// The record is [`APPLE_ENTRY_SIZE`] bytes: `PLDID` (2, big-endian),
+    /// `PLDWID` (1), `PLDHGHT` (1), `PLDFLG` (1), `PLDPTR` (3, big-endian).
+    /// There is no palette pointer and no per-entry tree, so both offsets are
+    /// fixed at zero — the file stores no palettes at all, which is what the
+    /// header's [`PHFPAL`] bit states independently.
+    ///
+    /// Validation is the same shape as the other two: the directory must fit,
+    /// ids must ascend, and every data offset must land past the directory and
+    /// inside the segment. A zero offset is a size-only placeholder, as
+    /// everywhere else.
+    pub fn parse_apple(data: Vec<u8>, base: usize) -> Result<InfocomPics, PicError> {
+        if base + 16 > data.len() {
+            return Err(PicError::Truncated);
+        }
+        if usize::from(data[base + 8]) != APPLE_ENTRY_SIZE {
+            return Err(PicError::UnsupportedContainer);
+        }
+        // `PHFPAL` and the 8-byte record are two statements of one fact — the
+        // file stores no palettes — so they are required to agree. A record with
+        // no palette pointer in a file that claims to have palettes is not a
+        // rendition that exists; it is arbitrary bytes that happened to read 8.
+        if data[base + 1] & PHFPAL == 0 {
+            return Err(PicError::UnsupportedContainer);
+        }
+        let count = usize::from(be16(&data, base + 4));
+        let dir_end = base + 16 + count * APPLE_ENTRY_SIZE;
+        if count == 0 || dir_end > data.len() {
+            return Err(PicError::UnsupportedContainer);
+        }
+        let in_range = |off: usize| off == 0 || (dir_end..data.len()).contains(&off);
+
+        let mut entries: Vec<PicEntry> = Vec::with_capacity(count);
+        for i in 0..count {
+            let o = base + 16 + i * APPLE_ENTRY_SIZE;
+            let e = PicEntry {
+                id: be16(&data, o),
+                // One byte each. `PLDWID`, `PLDHGHT`.
+                width: u16::from(data[o + 2]),
+                height: u16::from(data[o + 3]),
+                // One byte, and it is the TOP half of the other flavours' word —
+                // see `APPLE_EF_TRANS`. Kept unshifted so the flag bit stays
+                // bit 0; `decode` knows which flavour it is reading.
+                flags: u16::from(data[o + 4]),
+                data: be24(&data, o + 5),
+                // No `palOff` and no per-entry tree: the record has no room for
+                // either, and `PHFPAL` says the file has no palettes to point at.
+                palette: 0,
+                huff: 0,
+            };
+            if !in_range(e.data) {
+                return Err(PicError::UnsupportedContainer);
+            }
+            if entries.last().is_some_and(|p| p.id >= e.id) {
+                return Err(PicError::UnsupportedContainer);
+            }
+            entries.push(e);
+        }
+        let part = data[base];
+        Ok(InfocomPics { data, entries, part, parts: 1, flavour: Flavour::Apple })
+    }
+
     /// The archive's part number. Multi-part sets number their files 1, 2, …
     ///
     /// Arthur and Journey split their EGA artwork in two: `.EG1` reads 1 and
     /// `.EG2` reads 2, and a complete EGA set for either game means both.
+    ///
+    /// The Apple numbers by **floppy**: `PHFID` is the disk the segment came
+    /// from, so Arthur's four archives read 2, 3, 4 and 5 and a complete set
+    /// starts at 2 rather than at 1.
     pub fn part(&self) -> u8 {
         self.part
     }
@@ -844,12 +1113,21 @@ impl InfocomPics {
     /// the colour `CPic.data` beside it tops out at 320.
     ///
     /// An Amiga/Mac COLOUR archive still answers 320, as every one in hand is.
+    ///
+    /// **The Apple is 140**, and it is the one rendition whose flag bit 3 must
+    /// NOT be read as a width: that bit is [`PHFPAL`] there, not the PC's
+    /// picture-space selector, so the PC rule would call every Arthur archive
+    /// 640 and be wrong by more than four. The number comes from the machine
+    /// instead — `apple.equ`'s `MAXWIDTH EQU 140 ; 560 / 4`, i.e. the
+    /// double-hi-res screen's 560 dots at four bits a pixel — and the directory
+    /// agrees, topping out at exactly 140 across all four of Arthur's archives.
     pub fn picture_space_width(&self) -> u16 {
         match self.flavour {
             Flavour::AmigaMac if self.is_monochrome() => 480,
             Flavour::AmigaMac => 320,
             Flavour::Pc if self.data[1] & 0x08 != 0 => 640,
             Flavour::Pc => 320,
+            Flavour::Apple => 140,
         }
     }
 
@@ -867,11 +1145,15 @@ impl InfocomPics {
     /// double onto a 640×400 unit screen — see `app`'s `PictSource::art_scale`,
     /// where every other rendition's vertical factor works out to 2 and this
     /// one's to 1.
+    ///
+    /// The Apple's is **192** — `apple.equ`'s `MAXHEIGHT EQU 192`, the
+    /// double-hi-res screen's line count — and the directory agrees, its
+    /// full-screen plates being exactly 140×192.
     pub fn picture_space_height(&self) -> u16 {
-        if self.flavour == Flavour::AmigaMac && self.is_monochrome() {
-            300
-        } else {
-            200
+        match self.flavour {
+            Flavour::AmigaMac if self.is_monochrome() => 300,
+            Flavour::Apple => 192,
+            _ => 200,
         }
     }
 
@@ -938,6 +1220,13 @@ impl InfocomPics {
         if self.entries.iter().any(|e| e.has_own_palette()) {
             return None;
         }
+        // The Apple's hardware fixed sixteen, and its flag byte is a different
+        // set of bits — `EF_MONO` is not among them (`zip.equ` defines bit 0 and
+        // the top nibble and nothing else), so the two-colour test below must
+        // not be asked of it.
+        if self.flavour == Flavour::Apple {
+            return self.entries.iter().any(|e| e.has_pixels()).then_some(APPLE_DHGR_PALETTE);
+        }
         let mut with_pixels = 0usize;
         let mut mono = 0usize;
         for e in self.entries.iter().filter(|e| e.has_pixels()) {
@@ -996,6 +1285,7 @@ impl InfocomPics {
         let indices = match self.flavour {
             Flavour::AmigaMac => self.decode_huffed(&e)?,
             Flavour::Pc => self.decode_lzw(&e)?,
+            Flavour::Apple => self.decode_apple(&e)?,
         };
         Ok(Picture {
             width: e.width,
@@ -1012,7 +1302,17 @@ impl InfocomPics {
             // nibble zero throughout, which is the same thing `amiga/gfx.c`
             // describes in prose ("picture uses color 0"); the PC EGA archives
             // really do use it, naming colours 1, 2, 3, 7, 8 and 9.
-            transparent: (e.flags & EF_TRANS != 0).then_some((e.flags >> 12) as u8),
+            //
+            // The Apple stores the same nibble in the same place of a field one
+            // byte wide instead of two, so the shift is 4 and not 12 — see
+            // `APPLE_EF_TRANS` for `pic.asm`'s own four `lsr A`s. Arthur uses
+            // it, naming colours 1, 2, 3 and 4.
+            transparent: match self.flavour {
+                Flavour::Apple => {
+                    (e.flags & APPLE_EF_TRANS != 0).then_some((e.flags >> 4) as u8)
+                }
+                _ => (e.flags & EF_TRANS != 0).then_some((e.flags >> 12) as u8),
+            },
         })
     }
 
@@ -1076,6 +1376,117 @@ impl InfocomPics {
             indices[i] ^= indices[i - w];
         }
         Ok(indices)
+    }
+
+    /// Apple II: run-length, then undo the per-line XOR. No Huffman stage.
+    ///
+    /// # The codec is the Amiga's, minus its third step
+    ///
+    /// `mac/gfx.c`'s prose spec (quoted in the module header) lists three stages
+    /// and calls the last one **optional**: "3. *Optionally*, the whole thing is
+    /// Huffman-coded". The Apple is where that option is declined. `PHFHUFF` is
+    /// clear in every Arthur archive and the header names no tree, so what is
+    /// left is stages 2 and 1 — the run-length encoding, then the per-line XOR —
+    /// and `pic.asm`'s `ZDECLP` is exactly those two, fused into one loop:
+    ///
+    /// ```text
+    /// ZDECLP:
+    ///     ldy P_IDX               ; get data index
+    ///     lda (L),Y               ; get data byte
+    ///     sta ARG8                ; save here
+    ///     iny                     ; point to next one
+    /// ZDCLP0:
+    ///     lda (L),Y               ; is this count or data?
+    ///     cmp #16                 ; if <= 15, previous one was data
+    ///     bcs ZDCL2               ; nope, must be compressed
+    ///     lda #15                 ; show 1 bytes
+    ///     bne ZDCL3               ; and count this one
+    /// ZDCL2:
+    ///     iny                     ; point to next byte
+    /// ZDCL3:
+    ///     sty P_IDX               ; save index
+    ///     sec                     ; get ready for sub
+    ///     sbc #14                 ; make good counter
+    ///     tax                     ; put count into x
+    /// ZDCLPC:
+    ///     ldy P_LOFF              ; get line offset
+    ///     lda ARG8                ; get data byte
+    ///     eor (J),Y               ; XOR with previous line
+    ///     sta (K),Y               ; and save away
+    /// ```
+    ///
+    /// A byte is a colour. The byte after it is a repeat count if it is 16 or
+    /// more, and `count = n - 14`; otherwise it is the next colour and the run is
+    /// one long (`15 - 14`). That is the Macintosh's rule stated as arithmetic
+    /// rather than in prose, and the two agree on the worked example the prose
+    /// gives — "3 occurrences of byte value 2 will turn into `2 17`" — since
+    /// `17 - 14 == 3`.
+    ///
+    /// `J` is the previous decoded line and `K` the current; `ZDLI` zero-fills
+    /// `J` before the first row, so row 0 XORs against zeros and comes through
+    /// unchanged, and `COPYPIC1` swaps the two buffers at every row end. Note
+    /// the run is of the **pre-XOR** value: each of a run's pixels is XORed
+    /// against a different pixel of the row above, so the run cannot be
+    /// expanded after the XOR.
+    ///
+    /// # The length prefix, which is also the oracle
+    ///
+    /// The pixel data does not start at `PLDPTR`; three bytes of header do, and
+    /// `pic.asm` steps over them (`lda #3 ; 3 bytes of width data start it`).
+    /// They are the compressed length, big-endian, and this decoder does not
+    /// need them — which is exactly what makes them worth checking, because they
+    /// are an independent statement of where the RLE stream ends. Across all 135
+    /// pixel-bearing pictures of Arthur release 63 (serial 890622,
+    /// `Arthur Quest 4 Excalibur.2mg`) the bytes this loop consumes equal the
+    /// declared length plus three, every time, and the pictures pack contiguously
+    /// with no gaps. A decoder that stopped in the wrong place could not do that
+    /// 135 times.
+    ///
+    /// Output is one byte per pixel, `width * height` long — the same shape
+    /// every other flavour lands in. The Apple's own four-bit screen packing
+    /// (`PIC2SCR`, "`lda #4 ; 4 bits per pixel`") is a step this decoder does not
+    /// take and must not: that is the interpreter writing to double-hi-res video
+    /// memory, downstream of the format.
+    fn decode_apple(&self, e: &PicEntry) -> Result<Vec<u8>, PicError> {
+        let w = usize::from(e.width);
+        let h = usize::from(e.height);
+        let want = w * h;
+        let mut p = e.data.checked_add(APPLE_PREFIX).ok_or(PicError::Truncated)?;
+        if p > self.data.len() {
+            return Err(PicError::Truncated);
+        }
+
+        let mut out = vec![0u8; want];
+        // `P_LOFF` walks the row; `filled` is how much of `out` is decoded, and
+        // the row above starts at `filled - w`. Writing straight into `out` and
+        // XORing against the row already there is the same thing `pic.asm` does
+        // with its two swapped line buffers, with `ZDLI`'s zero fill standing in
+        // for the row before row 0 (`out` starts zeroed, and row 0's XOR
+        // partner is the implicit zero row).
+        let mut filled = 0usize;
+        while filled < want {
+            let d = *self.data.get(p).ok_or(PicError::BadPixelData)?;
+            p += 1;
+            let n = *self.data.get(p).ok_or(PicError::BadPixelData)?;
+            let count = if n < 16 {
+                // Not a count — it is the next colour, so this run is one long.
+                1
+            } else {
+                p += 1;
+                usize::from(n) - 14
+            };
+            for _ in 0..count {
+                if filled == want {
+                    break;
+                }
+                // Row 0 has no row above it and `out` is zero-filled, so this is
+                // `d ^ 0 == d` there, exactly as `ZDLI` arranges.
+                let above = if filled >= w { out[filled - w] } else { 0 };
+                out[filled] = d ^ above;
+                filled += 1;
+            }
+        }
+        Ok(out)
     }
 
     /// PC: one bare LZW stream per picture, expanding straight to pixels.
@@ -2701,6 +3112,178 @@ mod tests {
             }
         }
         (pics.entries().len(), n, h)
+    }
+
+    /// Arthur's Apple press, or `None` (with a SKIP note) when the gitignored
+    /// image is not there.
+    ///
+    /// Through `ProDos::packed_pictures`, which is the door a host will use once
+    /// the picture-space question `ProDos::pictures` documents is settled. The
+    /// chain from a `.2mg` on disk to decoded pixels is otherwise complete, and
+    /// these tests walk all of it.
+    fn apple_arthur() -> Option<InfocomPics> {
+        let bytes = fixture("Arthur Quest 4 Excalibur.2mg")?;
+        let fs = crate::prodos::ProDos::mount(bytes).expect("the 2mg mounts");
+        let (name, pics) = fs.packed_pictures().expect("Arthur's Apple press carries artwork");
+        assert_eq!(name, "ARTHUR.1/ARTHUR.D1", "named for the segment carrying the index");
+        Some(pics)
+    }
+
+    /// SQ-0863, real media: *Arthur* release 63 / serial 890622, off
+    /// `Arthur Quest 4 Excalibur.2mg` — the Apple flavour, which this reader
+    /// used to refuse outright on its 8-byte record.
+    ///
+    /// `stories/` is gitignored, so this skips vacuously on CI.
+    #[test]
+    fn reads_the_apple_arthur_archives() {
+        let Some(pics) = apple_arthur() else { return };
+        assert_eq!(pics.flavour(), Flavour::Apple);
+        // Four floppies carry art; `PHFID` is the disk number, so the set starts
+        // at 2 rather than at 1.
+        assert_eq!(pics.part(), 2, "the first archive is disk 2's");
+        assert_eq!(pics.parts(), 4, "disks 2, 3, 4 and 5 all carry artwork");
+
+        // 51 + 26 + 53 + 38.
+        assert_eq!(pics.entries().len(), 168);
+        let with_pixels = pics.entries().iter().filter(|e| e.has_pixels()).count();
+        assert_eq!(with_pixels, 135, "the other 33 are size-only placeholders");
+
+        // The parts PARTITION the id space — unlike the PC's `.EG1`/`.EG2`
+        // split, where 55 of Arthur's ids are deliberately on both floppies.
+        // Nothing was dropped by the merge, so the totals add up exactly.
+        let mut ids: Vec<u16> = pics.entries().iter().map(|e| e.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 168, "no id appears in two parts");
+
+        // `apple.equ`: MAXWIDTH EQU 140 ; 560 / 4, MAXHEIGHT EQU 192.
+        assert_eq!(pics.picture_space_width(), 140);
+        assert_eq!(pics.picture_space_height(), 192);
+        let widest = pics.entries().iter().map(|e| e.width).max().unwrap();
+        let tallest = pics.entries().iter().map(|e| e.height).max().unwrap();
+        assert_eq!((widest, tallest), (140, 192), "the full-screen plates fill it exactly");
+
+        // No archive stores a palette (`PHFPAL`), so every picture is adaptive
+        // and the colours come from the hardware table.
+        assert!(pics.entries().iter().all(|e| !e.has_own_palette()));
+        assert_eq!(pics.hardware_palette(), Some(APPLE_DHGR_PALETTE));
+        assert!(!pics.is_monochrome(), "sixteen colours, not two");
+
+        // Every picture decodes to exactly its declared size, in range.
+        for e in pics.entries().iter().filter(|e| e.has_pixels()) {
+            let p = pics.decode(e.id).expect("a picture with pixels decodes");
+            assert_eq!(
+                p.indices.len(),
+                usize::from(e.width) * usize::from(e.height),
+                "picture {} decoded to the wrong size",
+                e.id
+            );
+            assert!(p.indices.iter().all(|&i| i < 16), "picture {} left the palette", e.id);
+        }
+        // One number over every pixel and every resolved colour.
+        assert_eq!(fingerprint(&pics), (168, 135, 0x826e_44f4_17af_3169));
+    }
+
+    /// SQ-0863: the three-byte length prefix is an oracle, and this is it.
+    ///
+    /// `decode_apple` steps over the prefix exactly as `pic.asm` does and never
+    /// reads it, so it is an independent statement of where each RLE stream
+    /// ends. The pictures pack contiguously from the byte after the directory,
+    /// which means `dataOff + 3 + declared` must land precisely on the next
+    /// picture's `dataOff` — 135 times, with nothing left over. A decoder that
+    /// stopped in the wrong place could not produce a gapless tiling.
+    #[test]
+    fn the_apple_length_prefix_tiles_every_archive_exactly() {
+        let Some(pics) = apple_arthur() else { return };
+        let mut offsets: Vec<usize> =
+            pics.entries().iter().filter(|e| e.has_pixels()).map(|e| e.data).collect();
+        offsets.sort_unstable();
+        assert_eq!(offsets.len(), 135);
+
+        let mut contiguous = 0;
+        let mut seams = 0;
+        for pair in offsets.windows(2) {
+            let (here, next) = (pair[0], pair[1]);
+            let declared = be24(&pics.data, here);
+            // A picture's declared length may never reach into the next one.
+            assert!(here + APPLE_PREFIX + declared <= next, "picture at {here:#x} overruns");
+            if here + APPLE_PREFIX + declared == next {
+                contiguous += 1;
+            } else {
+                seams += 1;
+            }
+        }
+        // Four archives were merged, so exactly three of the 134 gaps are seams
+        // between one part's last picture and the next part's first — every
+        // other pair is nose to tail with not one byte between them.
+        assert_eq!((contiguous, seams), (131, 3), "the declared lengths tile each archive");
+    }
+
+    /// SQ-0863: the transparent colour is the flag byte's TOP nibble.
+    ///
+    /// `pic.asm` tests bit 0 and then shifts the same byte right four
+    /// (`APPLE_EF_TRANS`). Getting the shift wrong is invisible in a
+    /// size-and-range check and shows up only as a hole in the wrong colour, so
+    /// it is pinned against the real directory: Arthur names colours 1, 2, 3
+    /// and 4, and 119 of its 135 pictures name none.
+    #[test]
+    fn the_apple_transparent_colour_is_the_flag_bytes_top_nibble() {
+        let Some(pics) = apple_arthur() else { return };
+        let mut named = std::collections::BTreeMap::<u8, usize>::new();
+        let mut opaque = 0usize;
+        for e in pics.entries().iter().filter(|e| e.has_pixels()) {
+            match pics.decode(e.id).unwrap().transparent {
+                Some(c) => {
+                    assert_eq!(u16::from(c), e.flags >> 4, "picture {}", e.id);
+                    assert_ne!(e.flags & APPLE_EF_TRANS, 0);
+                    *named.entry(c).or_default() += 1;
+                }
+                None => {
+                    assert_eq!(e.flags & APPLE_EF_TRANS, 0, "picture {}", e.id);
+                    opaque += 1;
+                }
+            }
+        }
+        assert_eq!(named, [(1, 3), (2, 8), (3, 4), (4, 1)].into_iter().collect());
+        assert_eq!(opaque, 119);
+        // A transparent index really does drop out of the RGBA expansion.
+        let (&colour, _) = named.iter().next().unwrap();
+        let id = pics
+            .entries()
+            .iter()
+            .find(|e| e.has_pixels() && e.flags & APPLE_EF_TRANS != 0 && e.flags >> 4 == 1)
+            .unwrap()
+            .id;
+        let pic = pics.decode(id).unwrap();
+        let rgba = pic.rgba();
+        for (i, &ix) in pic.indices.iter().enumerate() {
+            assert_eq!(rgba[i * 4 + 3], if ix == colour { 0 } else { 255 }, "pixel {i}");
+        }
+    }
+
+    /// SQ-0863: a segment is not an archive, and `parse` must keep saying so.
+    ///
+    /// An Apple archive's offsets are positions in the SEGMENT, so handing the
+    /// segment to `parse` — which looks for a header at byte 0 — has to fail:
+    /// byte 0 of `ARTHUR.D2` is story page data, not `PHFID`. This is the guard
+    /// that the new 8-byte branch did not turn `parse` into something that
+    /// accepts arbitrary story bytes.
+    #[test]
+    fn parse_still_refuses_a_bare_apple_segment() {
+        let Some(bytes) = fixture("Arthur Quest 4 Excalibur.2mg") else { return };
+        let disk = crate::medium::MountedDisk::mount(bytes).expect("the 2mg mounts");
+        let mut seen = 0;
+        for (name, seg) in disk.contents() {
+            if !name.to_ascii_uppercase().contains("ARTHUR.D") {
+                continue;
+            }
+            seen += 1;
+            assert!(
+                InfocomPics::parse(seg).is_err(),
+                "{name} parsed as an archive from byte 0, which it is not"
+            );
+        }
+        assert_eq!(seen, 5, "five segments");
     }
 
     /// SQ-0744, real media: Shogun's Amiga floppy, the 16-byte flavour.

@@ -264,10 +264,16 @@ impl InterpreterProfile {
     /// the disk is actually consulted — and until SQ-0843 nothing did it, so the
     /// claim was true of the design and false of the code. Call that one unless
     /// you genuinely have no medium to offer it.
+    ///
+    /// The Apple is the one flavour with no ambiguity to resolve: its codec, its
+    /// 8-byte record and its 140×192 picture space are peculiar to the Apple II
+    /// and no other machine shipped them, so the archive really does name the
+    /// machine here (SQ-0863).
     pub fn for_art_flavour(flavour: Flavour) -> Self {
         match flavour {
             Flavour::Pc => Self::IbmPc,
             Flavour::AmigaMac => Self::Amiga,
+            Flavour::Apple => Self::AppleIIgs,
         }
     }
 

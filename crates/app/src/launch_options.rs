@@ -563,6 +563,9 @@ fn rendition_label(
     match flavour {
         Flavour::AmigaMac if monochrome => "Mac B&W",
         Flavour::AmigaMac => "Amiga",
+        // Double hi-res, 140×192, sixteen hardware colours — one rendition, one
+        // machine, and no filename or flag needed to tell them apart (SQ-0863).
+        Flavour::Apple => "Apple II",
         Flavour::Pc if space_width == 320 => "MCGA",
         Flavour::Pc => {
             let lower = filename.to_lowercase();

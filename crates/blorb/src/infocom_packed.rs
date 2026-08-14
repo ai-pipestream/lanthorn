@@ -33,15 +33,49 @@
 //! and each entry is an 8-byte header followed by its runs:
 //!
 //! ```text
-//!   0..2   a 16-bit checksum: the sum of the bytes of every block this segment
-//!          contributes (see below — it is corroboration, not a key)
-//!   2..4   page count, give or take (Journey's second entry reads one high and
-//!          its first reads zero, so nothing depends on it)
-//!   4..6   number of runs
-//!   6..8   page count again on most entries, zero on others — likewise unused
-//!   8..    `runs` records of six bytes: FIRST logical page, LAST logical page,
-//!          FIRST physical block, all inclusive and all big-endian
+//!   0..2   SGTCHKS  a 16-bit checksum: the sum of the bytes of every block this
+//!                   segment contributes (see below — corroboration, not a key)
+//!   2..4   SGTPICOF the BLOCK this segment's picture archive starts at, or 0
+//!                   for a segment carrying no artwork
+//!   4..6   SGTNSEG  number of runs
+//!   6..8   SGTGPOF  the block of the global picture directory, or 0
+//!   8..    SGTSEG   `runs` records of six bytes: FIRST logical page, LAST
+//!                   logical page, FIRST physical block, inclusive, big-endian
 //! ```
+//!
+//! Those names are Infocom's, from `apple/yzip/rel.15/zip.equ`:
+//!
+//! ```text
+//! SGTCHKS  EQU 0  ; check sum for file
+//! SGTPICOF EQU 2  ; picture data offset
+//! SGTNSEG  EQU 4  ; # of segments in this list
+//! SGTGPOF  EQU 6  ; Global Directory Offset
+//! SGTSEG   EQU 8  ; start of segments
+//! ```
+//!
+//! Fields 2 and 6 were previously read here as page counts that "nothing
+//! depends on" — they are not counts at all, and correcting that is what let
+//! the artwork be found (SQ-0863). `pic.asm`'s `READ_IN_PDATA` turns `SGTPICOF`
+//! into a file position by shifting it left nine, which is what makes it a
+//! block number, and treats zero as "no picture data":
+//!
+//! ```text
+//! lda (DSEGS),Y           ; get MSB
+//! sta PFSEEK+SM_FPOS+2    ; Byte 2
+//! iny                     ; point to LSB
+//! ora (DSEGS),Y           ; is there any pic data?
+//! bne GTPD00              ; yes
+//! ...                     ; nope
+//! GTPD00:
+//! lda (DSEGS),Y           ; get it for shifting
+//! asl A                   ; *2
+//! sta PFSEEK+SM_FPOS+1    ; stash away
+//! rol PFSEEK+SM_FPOS+2    ; pick up carry
+//! ```
+//!
+//! *Arthur*'s five segments read 0, 209, 60, 67 and 38, and an archive header
+//! sits at exactly those blocks of segments 2..=5 — disk 1 carries the story
+//! preload and no art. See [`picture_offsets`] and [`pictures`].
 //!
 //! A run says "story pages `first..=last` live on this segment starting at
 //! block `physical`", so reading is a scatter-gather: walk every entry's runs,
@@ -88,6 +122,7 @@
 //! the header checksum disposes.
 
 use crate::adf::looks_like_story;
+use crate::infocom_pics::InfocomPics;
 
 /// The block size the container pages in. ProDOS's, and the unit every physical
 /// and logical number in the index counts.
@@ -114,10 +149,14 @@ struct Run {
     block: usize,
 }
 
-/// The parsed index: one list of runs per segment, in segment order.
+/// The parsed index: one list of runs per segment, in segment order, and where
+/// each segment keeps its artwork.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Index {
     segments: Vec<Vec<Run>>,
+    /// `SGTPICOF` per segment: the block its picture archive starts at, or 0 for
+    /// a segment that carries none. See [`picture_offsets`].
+    pic_blocks: Vec<usize>,
 }
 
 /// Parse the index at the start of `first`, or `None` when these bytes are not
@@ -144,11 +183,13 @@ fn parse_index(first: &[u8]) -> Option<Index> {
     }
     let mut at = 20;
     let mut segments = Vec::with_capacity(count);
+    let mut pic_blocks = Vec::with_capacity(count);
     for _ in 0..count {
         let runs = word(at + 4)?;
         if runs == 0 || runs > MAX_RUNS {
             return None;
         }
+        pic_blocks.push(word(at + 2)?);
         at += 8;
         let mut out = Vec::with_capacity(runs);
         for _ in 0..runs {
@@ -161,7 +202,7 @@ fn parse_index(first: &[u8]) -> Option<Index> {
         }
         segments.push(out);
     }
-    Some(Index { segments })
+    Some(Index { segments, pic_blocks })
 }
 
 /// The page table the index describes: for each story page, which segment and
@@ -215,6 +256,79 @@ fn sibling_of(first: &str, n: usize) -> Option<String> {
 /// so 92 of its 552 pages are simply not on the image.
 pub fn story(files: &[(String, Vec<u8>)]) -> Option<(String, Vec<u8>)> {
     files.iter().find_map(|(name, bytes)| assemble(name, bytes, files))
+}
+
+/// Where each segment of a packed volume keeps its picture archive: the byte
+/// offset of the archive's 16-byte header, or `None` for a segment carrying no
+/// artwork. Indexed by segment, so entry 0 is `…D1`.
+///
+/// `None` overall when `files` are not a packed volume. Unlike [`story`] this
+/// does not need every segment to be present — it reads the index and nothing
+/// else, so it answers for a volume that is missing a floppy.
+///
+/// The offsets come from `SGTPICOF`; see the module header for the source and
+/// for why a zero means "none" rather than "block zero".
+pub fn picture_offsets(files: &[(String, Vec<u8>)]) -> Option<(String, Vec<Option<usize>>)> {
+    files.iter().find_map(|(name, bytes)| {
+        let index = parse_index(bytes)?;
+        // The index alone is not proof; `story` leans on the page tiling for
+        // exactly this reason, and it costs nothing to demand it here too.
+        page_table(&index)?;
+        let offsets = index
+            .pic_blocks
+            .iter()
+            .map(|&b| (b != 0).then(|| b * BLOCK))
+            .collect::<Vec<_>>();
+        Some((name.clone(), offsets))
+    })
+}
+
+/// Every picture a packed Apple volume carries, merged into one archive.
+///
+/// The artwork is spread over the segments — *Arthur* keeps 51, 26, 53 and 38
+/// pictures on floppies 2 to 5 — and the parts partition the id space rather
+/// than overlapping it, so a caller wants all of them or none. Each part is
+/// parsed against the segment that carries it (its offsets are positions in the
+/// SEGMENT — see [`crate::infocom_pics::InfocomPics::parse_apple`]) and then
+/// folded together with `append_part`, which numbers Apple parts by floppy and
+/// so runs 2, 3, 4, 5.
+///
+/// `None` when these files are not a packed volume, when no segment carries
+/// artwork, or when a segment that should carry some is missing — a partial
+/// picture set would silently lose whole rooms.
+///
+/// The story's own artwork is NOT the same thing as the story: [`story`] will
+/// refuse a volume this accepts and vice versa, because they lean on different
+/// parts of the index. `stories/Journey.2mg` is the case in hand — four
+/// segments where the index declares five, so it yields no story, and its
+/// `SGTPICOF` fields are all zero, so it yields no artwork either.
+pub fn pictures(files: &[(String, Vec<u8>)]) -> Option<(String, InfocomPics)> {
+    let (first, offsets) = picture_offsets(files)?;
+    let mut set: Option<InfocomPics> = None;
+    for (n, offset) in offsets.iter().enumerate() {
+        let Some(offset) = *offset else { continue };
+        // Segment 1 is the file the index came off; the rest are its namesakes,
+        // paired exactly as `assemble` pairs them.
+        let bytes = if n == 0 {
+            files.iter().find(|(other, _)| *other == first).map(|(_, b)| b)?
+        } else {
+            let want = sibling_of(&first, n + 1)?;
+            files
+                .iter()
+                .find(|(other, _)| {
+                    other.rsplit('/').next().is_some_and(|b| b.eq_ignore_ascii_case(&want))
+                })
+                .map(|(_, b)| b)?
+        };
+        let part = InfocomPics::parse_apple(bytes.clone(), offset).ok()?;
+        match &mut set {
+            None => set = Some(part),
+            Some(held) => held.append_part(part).ok()?,
+        }
+    }
+    // Named for the segment carrying the index, exactly as `story` is: it is
+    // where the volume begins, and it is a name the caller was shown.
+    set.map(|pics| (first, pics))
 }
 
 /// Reassemble, taking `first` as the segment holding the index.
@@ -467,6 +581,87 @@ mod tests {
             "and only D2, D3 and D4 are on the volume"
         );
         assert_eq!(story(&files), None, "so no story is handed out at all");
+    }
+
+    /// SQ-0863: `SGTPICOF` names where each segment keeps its artwork.
+    ///
+    /// This field was read here as a page count "nothing depends on"; it is the
+    /// picture archive's block. The check is that an archive header really is at
+    /// each of the blocks it names — `PHFID` equal to the disk number, and the
+    /// 8-byte record `PLDSIZE` — which is a fact about the bytes, not about this
+    /// reader's arithmetic.
+    #[test]
+    fn real_arthur_names_a_picture_archive_on_four_of_its_five_segments() {
+        let Some(files) = volume_files("Arthur Quest 4 Excalibur.2mg") else { return };
+        let (name, offsets) = picture_offsets(&files).expect("the packed volume is read");
+        assert_eq!(name, "ARTHUR.1/ARTHUR.D1");
+        assert_eq!(
+            offsets,
+            vec![None, Some(209 * BLOCK), Some(60 * BLOCK), Some(67 * BLOCK), Some(38 * BLOCK)],
+            "disk 1 carries the story preload and no art"
+        );
+
+        for (n, offset) in offsets.iter().enumerate() {
+            let Some(offset) = *offset else { continue };
+            let want = sibling_of(name.as_str(), n + 1).unwrap();
+            let seg = files
+                .iter()
+                .find(|(o, _)| o.rsplit('/').next() == Some(want.as_str()))
+                .map(|(_, b)| b)
+                .unwrap();
+            assert_eq!(seg[offset], (n + 1) as u8, "{want}: PHFID is the disk number");
+            assert_eq!(seg[offset + 8], 8, "{want}: PLDSIZE, the 8-byte record");
+        }
+    }
+
+    /// SQ-0863: the four archives fold into one set of 168 pictures.
+    #[test]
+    fn real_arthur_merges_its_four_picture_archives() {
+        let Some(files) = volume_files("Arthur Quest 4 Excalibur.2mg") else { return };
+        let (name, pics) = pictures(&files).expect("the volume carries artwork");
+        assert_eq!(name, "ARTHUR.1/ARTHUR.D1", "named for the segment carrying the index");
+        assert_eq!(pics.flavour(), crate::infocom_pics::Flavour::Apple);
+        assert_eq!(pics.part(), 2, "numbered by floppy, so the set starts at 2");
+        assert_eq!(pics.parts(), 4);
+        assert_eq!(pics.entries().len(), 168);
+    }
+
+    /// SQ-0863: `Journey.2mg` gains no artwork, as it gains no story — and the
+    /// reason is worth pinning, because it is not that there is none.
+    ///
+    /// Its index names a picture archive on all four of segments 2..=5, and
+    /// three of those archives are really there, with valid headers. The fifth
+    /// segment is the one the pressing is missing, so a reader that took what it
+    /// could get would hand back a picture set with a floppy's worth of rooms
+    /// silently absent. This one hands back nothing, for the same reason
+    /// [`story`] does.
+    #[test]
+    fn real_journey_gains_no_artwork_because_a_segment_is_missing() {
+        let Some(files) = volume_files("Journey.2mg") else { return };
+        assert_eq!(story(&files), None, "still no story");
+
+        let (name, offsets) = picture_offsets(&files).expect("its index still parses");
+        assert_eq!(offsets[0], None, "disk 1 carries no art, as on Arthur");
+        assert_eq!(offsets.iter().filter(|o| o.is_some()).count(), 4, "disks 2..=5 all name one");
+
+        // Three of the four are present and really are archives; the fourth
+        // segment is not on the volume at all.
+        let mut present = 0;
+        let mut absent = 0;
+        for (n, offset) in offsets.iter().enumerate() {
+            let Some(offset) = *offset else { continue };
+            let want = sibling_of(name.as_str(), n + 1).unwrap();
+            match files.iter().find(|(o, _)| o.rsplit('/').next() == Some(want.as_str())) {
+                Some((_, seg)) => {
+                    assert_eq!(seg[offset], (n + 1) as u8, "{want}: PHFID is the disk number");
+                    assert_eq!(seg[offset + 8], 8, "{want}: PLDSIZE, the 8-byte record");
+                    present += 1;
+                }
+                None => absent += 1,
+            }
+        }
+        assert_eq!((present, absent), (3, 1), "D5 is the segment the pressing lacks");
+        assert!(pictures(&files).is_none(), "so no artwork is handed out at all");
     }
 
     /// Nothing else in the corpus is mistaken for a packed volume — including
