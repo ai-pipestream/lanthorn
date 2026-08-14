@@ -140,6 +140,32 @@ const MEDIA: &[Medium] = &[
     // `$1E` entirely or merely prints it; this one changes what it draws and
     // what it asks. `atari_st_profile.rs` is where that is measured.
     Medium { title: "Beyond Zork (Atari ST)", file: "Infocom Compilation 6 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 5, release: 49, serial: "870917" },
+    // ── The Apple II (SQ-0836) ───────────────────────────────────────────────
+    //
+    // ProDOS media, and the fifth filesystem babelmap mounts. Every row here was
+    // measured through `app::hints::load_mounted_story` on 2026-08-13, like the
+    // rest of the table.
+    //
+    // The standalone Apple IIgs *Beyond Zork* — a GS/OS boot disk with `BZ.DAT`
+    // on it — is the SAME build as the Amiga floppy and the bare `.z5` beside
+    // them, which makes it this corpus's clearest "sometimes they do agree".
+    Medium { title: "Beyond Zork (Apple IIgs)", file: "Beyond Zork (1988)(Infocom).2mg", image: Some(DiskImage::ProDos), version: 5, release: 57, serial: "871221" },
+    // *The Lost Treasures of Infocom* (1993, Big Red Computer Club) is seven
+    // Apple IIgs volumes. Volume 1 is the GS/OS launcher and carries no game at
+    // all, so it is absent here; volumes 2–7 carry twenty-nine between them and
+    // each row below is the one that OPENS — no ProDOS release has a
+    // conventional story name, so the largest wins (`blorb::prodos` pins the
+    // full inventory of all seven).
+    Medium { title: "Beyond Zork (Lost Treasures IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 2 of 7).2mg", image: Some(DiskImage::ProDos), version: 5, release: 57, serial: "871221" },
+    Medium { title: "Stationfall (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 3 of 7).2mg", image: Some(DiskImage::ProDos), version: 3, release: 107, serial: "870430" },
+    Medium { title: "The Lurking Horror (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 4 of 7).2mg", image: Some(DiskImage::ProDos), version: 3, release: 203, serial: "870506" },
+    // **The row that earns its place.** *Trinity* off the IIgs collection is v4
+    // r12 s860926; *Trinity* off `Infocom Compilation 8 (19xx)(-).st`, four rows
+    // up, is v4 r11 s860509. Same game, two media, two builds — the project's
+    // own rule on a third machine, and now pinned rather than assumed.
+    Medium { title: "Trinity (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 5 of 7).2mg", image: Some(DiskImage::ProDos), version: 4, release: 12, serial: "860926" },
+    Medium { title: "Sherlock (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 6 of 7).2mg", image: Some(DiskImage::ProDos), version: 5, release: 21, serial: "871214" },
+    Medium { title: "Wishbringer (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 7 of 7).2mg", image: Some(DiskImage::ProDos), version: 3, release: 69, serial: "850920" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -232,6 +258,17 @@ const NARRATED: &[(&str, &[&str])] = &[
     // zero and comments it "(UNUSED)". So this is a story that genuinely reads
     // the byte, and it reports the machine it is now correctly told it is on.
     ("Infocom Compilation 8 (19xx)(-).st", &["Release 11 / Serial Number 860509", "Interpreter 5 "]),
+    // **And the Apple II press opens and plays** (SQ-0836). Mounting a ProDOS
+    // volume, walking its directory tree and pulling a story out of a tree file
+    // is half a claim; this is the other half — the game boots off the disk
+    // image, reaches its prompt, and names the release the disk carries.
+    //
+    // Two of them, because the interesting pair is *Trinity*: the line below is
+    // r12 s860926 off the IIgs collection, where the Atari ST row above prints
+    // r11 s860509 for the same game. Same title, two floppies, two builds, and
+    // both are now the story's own word rather than a header we read.
+    ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 5 of 7).2mg", &["Release 12 / Serial Number 860926"]),
+    ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 7 of 7).2mg", &["Release 69 / Serial Number 850920"]),
 ];
 
 /// The resource Blorbs shipped beside these stories, and whether each declares
@@ -280,6 +317,7 @@ fn ctx(m: &Medium) -> String {
             Some(DiskImage::Hfs) => "Macintosh floppy",
             Some(DiskImage::Fat12Dos) => "DOS floppy",
             Some(DiskImage::Fat12AtariSt) => "Atari ST floppy",
+            Some(DiskImage::ProDos) => "Apple ProDOS floppy",
             None => "story file",
         },
         m.release,
@@ -523,16 +561,46 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     }
     assert!(ran > 0 || !any_real_media_present(), "media are present but none were scanned");
 
-    // The two formats with no reader yet stay out of the list, however many of
-    // them sit in the directory: ProDOS `.2mg` (SQ-0836) and Apple II `.dsk`
-    // (SQ-0852) arrive with the code that opens them, not before.
-    for queued in ["2mg", "dsk"] {
+    // The one format with no reader yet stays out of the list, however many of
+    // them sit in the directory: Apple II 5.25" `.dsk` (SQ-0852) arrives with
+    // the code that opens it, not before.
+    let queued = "dsk";
+    assert!(
+        !listed.iter().any(|p| {
+            p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case(queued))
+                == Some(true)
+        }),
+        "a .{queued} was listed, but nothing in blorb can mount one"
+    );
+
+    // …and `.2mg` moved from that list to this one in the same commit as its
+    // reader (SQ-0836), which is the whole point of the extension column. The
+    // two ProDOS images that are still absent are absent for the right reason:
+    // `Arthur Quest 4 Excalibur.2mg` and `Journey.2mg` are the segmented Apple
+    // II press and no whole story comes out of them, so the pre-filter opened
+    // them and the mount declined to offer one. The extension is a pre-filter,
+    // not a verdict.
+    let dir_has_2mg = std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|e| {
+        e.path().extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("2mg"))
+            == Some(true)
+    });
+    let listed_2mg: Vec<&std::ffi::OsStr> = listed
+        .iter()
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("2mg"))
+                == Some(true)
+        })
+        .filter_map(|p| p.file_name())
+        .collect();
+    assert_eq!(
+        !listed_2mg.is_empty(),
+        dir_has_2mg,
+        "ProDOS media are in the directory and the picker offered none of them"
+    );
+    for absent in ["Arthur Quest 4 Excalibur.2mg", "Journey.2mg"] {
         assert!(
-            !listed.iter().any(|p| {
-                p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case(queued))
-                    == Some(true)
-            }),
-            "a .{queued} was listed, but nothing in blorb can mount one"
+            !listed_2mg.iter().any(|n| *n == std::ffi::OsStr::new(absent)),
+            "{absent} carries no whole story file and must not be offered as one"
         );
     }
 }
@@ -606,6 +674,18 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // interpreter for the ST. Read this arm against the one above it —
             // same FAT12 filesystem, different machine, different answer.
             Some(DiskImage::Fat12AtariSt) => InterpreterProfile::AtariSt,
+            // **And a ProDOS volume is deliberately NOT its own machine**
+            // (SQ-0836). Read this arm against the Atari ST one directly above
+            // it: the ST answers 5 because Infocom's own ST interpreters write
+            // that byte and no other, while ProDOS names the Apple II *family*
+            // and ZMSD §11.1.3 numbers three machines in it (2 IIe, 9 IIc,
+            // 10 IIgs). The corpus holds both an 8-bit press (`Journey.2mg`,
+            // `Arthur Quest 4 Excalibur.2mg`, whose interpreter is ProDOS 8's
+            // `INFOCOM.SYSTEM`) and GS/OS ones, so the volume cannot choose.
+            // `blorb::medium`'s ProDOS row answers `None`, which lands here on
+            // the IBM PC bundle — the same "no opinion, the rule in force
+            // stands" a DOS floppy gets, and for a comparable reason.
+            Some(DiskImage::ProDos) => InterpreterProfile::IbmPc,
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(

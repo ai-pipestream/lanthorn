@@ -38,7 +38,7 @@
 //! rule the readers apply file-by-file inside a volume, where it is not
 //! negotiable: every Atari ST story is called `STORY.DAT`, five of nine Amiga
 //! floppies call theirs `Story.data`, `.ima` and `.img` are one format, and the
-//! ProDOS `2IMG` length field reads zero.
+//! ProDOS `2IMG` length field reads zero on every image in the corpus.
 //!
 //! A row does carry [`Format::extensions`], and that is not a crack in the rule:
 //! it is the census a front-end scanning a DIRECTORY needs to decide which files
@@ -51,6 +51,7 @@ use crate::adf::{Adf, looks_like_story};
 use crate::fat12::Fat12;
 use crate::hfs::Hfs;
 use crate::infocom_pics::InfocomPics;
+use crate::prodos::ProDos;
 
 /// Amiga, from the ZMSD §11.1.3 interpreter-number table (1 DECSystem-20,
 /// 2 Apple IIe, 3 Macintosh, **4 Amiga**, 5 Atari ST, 6 IBM PC, 7 Commodore 128,
@@ -121,6 +122,16 @@ pub enum DiskImage {
     /// the BPB, and a different machine; see [`crate::fat12`] for the
     /// discriminator.
     Fat12AtariSt,
+    /// An Apple II ProDOS volume, bare or inside a `2IMG` wrapper —
+    /// conventionally `.2mg` (SQ-0836).
+    ///
+    /// **The one format here that names a FAMILY rather than a machine.**
+    /// ProDOS is the Apple II's filesystem from the IIe on, and ZMSD §11.1.3
+    /// gives that family three interpreter numbers — 2 Apple IIe, 9 Apple IIc,
+    /// 10 Apple IIgs. The corpus contains both kinds of press, so the ambiguity
+    /// is live rather than theoretical; see this variant's row in [`FORMATS`],
+    /// where the consequence for [`DiskImage::interpreter_number`] is argued.
+    ProDos,
 }
 
 impl DiskImage {
@@ -243,9 +254,9 @@ struct Format {
 /// shipped formats were unreachable from the story list. That is exactly the
 /// half-wiring the table exists to make impossible, one column late (SQ-0849).
 ///
-/// Queued: ProDOS (SQ-0836), Apple II DOS 3.3 (SQ-0852). Neither has a reader,
-/// so neither has a row **or an extension** — `.2mg` and `.dsk` arrive with the
-/// code that opens them, in one commit, which is the whole point of the table.
+/// Queued: Apple II DOS 3.3 (SQ-0852). It has no reader, so it has no row **or
+/// an extension** — `.dsk` arrives with the code that opens it, in one commit,
+/// which is the whole point of the table.
 const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::Adf,
@@ -335,6 +346,53 @@ const FORMATS: &[Format] = &[
         extensions: &["st"],
         looks_like: crate::fat12::looks_like_atari_st,
         mount: mount_boxed::<Fat12>,
+    },
+    Format {
+        image: DiskImage::ProDos,
+        label: "ProDOS",
+        // **`None`, and it is the Apple II's answer rather than a gap** — the
+        // same shape as [`DiskImage::Fat12Dos`] above and for the same kind of
+        // reason: the honest number is not a constant.
+        //
+        // ZMSD §11.1.3, read from the standard: *"1 DECSystem-20, 2 Apple IIe,
+        // 3 Macintosh, 4 Amiga, 5 Atari ST, 6 IBM PC, 7 Commodore 128,
+        // 8 Commodore 64, 9 Apple IIc, 10 Apple IIgs, 11 Tandy Color"*. That is
+        // THREE numbers for one family, and ProDOS is the whole family's
+        // filesystem — a ProDOS volume says "an Apple II" and nothing finer.
+        //
+        // The corpus proves the ambiguity is live rather than pedantic. Eight of
+        // the ten images boot GS/OS and carry `SYS16` applications
+        // (`SYSTEM/START.GS.OS`, `SYSTEM/TOOLS/TOOL0xx`, `BZ.SYS16`,
+        // `LOST1.SYS16`), which is 16-bit Apple **IIgs** software and runs on
+        // nothing else. The other two — `Arthur Quest 4 Excalibur.2mg` and
+        // `Journey.2mg` — ship `INFOCOM.SYSTEM`, a ProDOS **8** `SYS` file
+        // beside `BASIC.SYSTEM`, which is the 8-bit press and runs on a IIe as
+        // readily as on a IIgs. One filesystem, two machines, and unlike the
+        // Atari ST there is no interpreter source in hand that writes a flat
+        // byte for either.
+        //
+        // Stating 10 anyway would also be **half-wiring**, which is the thing
+        // this table exists to prevent: `app::interpreter::InterpreterProfile`
+        // has no Apple arm, so `for_interpreter_number(10)` falls through to
+        // `IbmPc`, whose own number is `None` — the TUI would advertise zvm's
+        // default while `zvm-cli` and the launch dialog, which read this row
+        // directly, advertised 10. A number is only honest here once there is an
+        // Apple bundle to carry it, and this corpus makes that harder rather
+        // than easier: it holds *Arthur* and *Journey*, so unlike the ST there
+        // IS Version 6 artwork for a wrongly-claimed machine to disagree with.
+        //
+        // So `None` means "the rule already in force stands", which for a family
+        // whose own number cannot be named is exactly right.
+        interpreter_number: None,
+        // `.2mg` is the wrapper every image in the corpus wears. **Not `.po` or
+        // `.hdv`**, the conventional names for a BARE ProDOS volume: this reader
+        // opens one (see [`crate::prodos`]) but nothing in `stories/` is one, so
+        // claiming the spelling would be a census entry no medium here justifies.
+        // A bare volume under any name still mounts when it is opened directly —
+        // the extension is a directory scan's pre-filter, never the recogniser.
+        extensions: &["2mg"],
+        looks_like: <ProDos as Volume>::looks_like,
+        mount: mount_boxed::<ProDos>,
     },
 ];
 
@@ -609,6 +667,46 @@ impl Volume for Fat12 {
     }
 }
 
+impl Volume for ProDos {
+    fn looks_like(raw: &[u8]) -> bool {
+        ProDos::looks_like_prodos(raw)
+    }
+
+    fn mount(raw: Vec<u8>) -> Option<ProDos> {
+        ProDos::mount(raw).ok()
+    }
+
+    fn volume_name(&self) -> Option<&str> {
+        // Every ProDOS volume is named — the format has no unnamed one — but an
+        // empty name is `None` rather than a hole spliced into somebody's
+        // sentence, exactly as the HFS impl above.
+        Some(ProDos::volume_name(self)).filter(|n| !n.is_empty())
+    }
+
+    fn file_count(&self) -> usize {
+        self.files().len()
+    }
+
+    fn contents(&self) -> Vec<(String, Vec<u8>)> {
+        // Named by PATH, like FAT12: ProDOS nests, and the GS/OS disks put most
+        // of what they carry under `SYSTEM/`.
+        self.files().iter().filter_map(|e| self.read(e).map(|b| (e.path(), b))).collect()
+    }
+
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        // Case-insensitive on either the stored name or the full path.
+        ProDos::read_named(self, name)
+    }
+
+    fn story(&self) -> Option<DiskStory> {
+        ProDos::story(self).map(DiskStory::from)
+    }
+
+    fn pictures(&self) -> Option<DiskArt> {
+        ProDos::pictures(self).map(DiskArt::from)
+    }
+}
+
 // ── A mounted disk ────────────────────────────────────────────────────────────
 
 /// An open release disk, whatever format it turned out to be.
@@ -784,6 +882,7 @@ mod tests {
             DiskImage::Fat12AtariSt => {
                 crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
             }
+            DiskImage::ProDos => crate::prodos::tests::sample_disk(&files),
         }
     }
 
@@ -796,8 +895,13 @@ mod tests {
     /// SQ-0840 was filed for, one enum away from happening again.
     #[test]
     fn every_variant_the_enum_declares_has_a_row_in_the_one_table() {
-        let census =
-            [DiskImage::Adf, DiskImage::Hfs, DiskImage::Fat12Dos, DiskImage::Fat12AtariSt];
+        let census = [
+            DiskImage::Adf,
+            DiskImage::Hfs,
+            DiskImage::Fat12Dos,
+            DiskImage::Fat12AtariSt,
+            DiskImage::ProDos,
+        ];
         for image in census {
             let (label, interpreter) = match image {
                 DiskImage::Adf => ("ADF", Some(AMIGA_INTERPRETER_NUMBER)),
@@ -810,6 +914,12 @@ mod tests {
                 // ST interpreters; both are argued at their rows in `FORMATS`.
                 DiskImage::Fat12Dos => ("DOS", None),
                 DiskImage::Fat12AtariSt => ("ST", Some(ATARI_ST_INTERPRETER_NUMBER)),
+                // …and a third answer, which is the DOS one for a different
+                // reason: ProDOS names the Apple II FAMILY, and ZMSD §11.1.3
+                // gives that family three numbers (2 IIe, 9 IIc, 10 IIgs). The
+                // corpus holds both an 8-bit and a IIgs press, so nothing on a
+                // volume chooses. Argued at the row in `FORMATS`.
+                DiskImage::ProDos => ("ProDOS", None),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
@@ -856,17 +966,18 @@ mod tests {
             union,
             "the census is the rows' extensions and nothing else"
         );
-        // The four spellings the corpus in `stories/` actually uses, named
-        // outright so a row losing one fails here rather than in the picker.
-        for want in ["adf", "image", "ima", "img", "st"] {
+        // The spellings the corpus in `stories/` actually uses, named outright
+        // so a row losing one fails here rather than in the picker.
+        for want in ["adf", "image", "ima", "img", "st", "2mg"] {
             assert!(image_extensions().any(|e| e == want), "no row claims {want:?}");
         }
-        // …and the two queued formats do NOT get a name before they get a
-        // reader (SQ-0836 ProDOS, SQ-0852 Apple II DOS 3.3).
-        for queued in ["2mg", "dsk"] {
+        // …and the queued format does NOT get a name before it gets a reader
+        // (SQ-0852, Apple II DOS 3.3). Nor do the bare-ProDOS spellings, which
+        // this crate CAN open and no medium in the corpus wears.
+        for queued in ["dsk", "po", "hdv"] {
             assert!(
                 !image_extensions().any(|e| e == queued),
-                "{queued:?} is claimed by a row, but nothing here can open one"
+                "{queued:?} is claimed by a row, and no medium in the corpus justifies it"
             );
         }
     }
@@ -981,6 +1092,45 @@ mod tests {
         }
     }
 
+    /// **The table order is a formality rather than a precedence** — stated as a
+    /// test over the whole corpus rather than left to [`DiskImage::detect`]'s
+    /// doc comment.
+    ///
+    /// `detect` returns the FIRST row whose sniff fires, so two rows claiming
+    /// one file would make the table's order load-bearing and a format's
+    /// identity depend on where it was pasted in. This walks every file in
+    /// `stories/` — Amiga, Macintosh, DOS, Atari ST and ProDOS floppies, bare
+    /// story files, Blorbs, saved games and loose artwork — and insists that at
+    /// most one row ever claims one, and that whatever is claimed opens.
+    ///
+    /// SQ-0836 is why it exists: a fifth filesystem is the point at which "they
+    /// happen not to collide" stops being obvious.
+    #[test]
+    fn at_most_one_format_ever_claims_a_file() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("SKIP: no stories directory");
+            return;
+        };
+        let mut seen = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(raw) = std::fs::read(&path) else { continue };
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let claims: Vec<DiskImage> =
+                FORMATS.iter().filter(|f| (f.looks_like)(&raw)).map(|f| f.image).collect();
+            assert!(claims.len() <= 1, "{name}: claimed by {claims:?}");
+            let Some(image) = claims.first().copied() else { continue };
+            seen += 1;
+            assert_eq!(DiskImage::detect(&raw), Some(image), "{name}");
+            let disk = MountedDisk::mount(raw).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(disk.file_count() > 0, "{name}: mounted but empty");
+        }
+        if seen == 0 {
+            eprintln!("SKIP: no release media present");
+        }
+    }
+
     /// The same property on the real disk that motivated it: an ST compilation
     /// names its files by folder, and the folder has to survive the round trip
     /// or a picker offers `HITCHHIK/STORY.DAT` and opens nothing.
@@ -1025,6 +1175,7 @@ mod tests {
                 DiskImage::Fat12AtariSt => {
                     crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
                 }
+                DiskImage::ProDos => crate::prodos::tests::sample_disk(&files),
             };
             let disk = MountedDisk::mount(raw).expect("a boot disk still mounts");
             assert_eq!(disk.file_count(), 2, "{image:?}");
@@ -1085,6 +1236,20 @@ mod tests {
                 DiskImage::Fat12AtariSt => {
                     ("Infocom Compilation 9 (19xx)(-).st", "BUREAUCR.ACY/STORY.DAT", 4, false)
                 }
+                // The Apple IIgs, and its own truth again: *Lost Treasures*
+                // volume 2 holds five games with no conventional name between
+                // them, so the largest opens — *Beyond Zork*, v5, 261 388 bytes
+                // — and no ProDOS release in the corpus carries an Infocom
+                // picture archive at all. (The two that DO ship artwork,
+                // *Arthur* and *Journey*, keep it inside the same segmented
+                // container as their story and offer no whole story file; see
+                // `crate::prodos`.)
+                DiskImage::ProDos => (
+                    "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 2 of 7).2mg",
+                    "BEYOND.ZORK",
+                    5,
+                    false,
+                ),
             };
             let path =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(fixture);
@@ -1137,5 +1302,44 @@ mod tests {
             "LEATHER.GOD/STORY.DAT",
         ]);
         assert_eq!(disk.file_count(), 14, "…out of fourteen files, saves and interpreters included");
+    }
+
+    /// The same property on the Apple IIgs press (SQ-0836). *Lost Treasures*
+    /// volume 2 is the ProDOS analogue of the ST compilation above: five games
+    /// on one disk, four of somebody's saved games beside them, and a format
+    /// with no conventional story name at all — so the LIST is the answer and
+    /// `story()`'s largest-wins tiebreak is only the default.
+    ///
+    /// It also pins the medium's own number, which is the interesting one: a
+    /// ProDOS volume answers `None`, because ZMSD §11.1.3 gives the Apple II
+    /// family three numbers and nothing on a volume says which machine pressed
+    /// it. See the row in [`FORMATS`].
+    #[test]
+    fn a_real_apple_iigs_compilation_lists_every_game_and_no_saved_game() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../stories/Lost Treasures of Infocom, The (1993)\
+             (Big Red Computer Club)(Disk 2 of 7).2mg",
+        );
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored medium missing at {}", path.display());
+            return;
+        };
+        let disk = MountedDisk::mount(bytes).expect("the ProDOS disk mounts");
+        assert_eq!(disk.format(), DiskImage::ProDos);
+        assert_eq!(disk.label(), "ProDOS");
+        assert_eq!(disk.volume_name(), Some("INFOCOM2"));
+        assert_eq!(
+            disk.interpreter_number(),
+            None,
+            "ProDOS names the Apple II family, and ZMSD §11.1.3 numbers three machines in it",
+        );
+        let names: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["ZORK.III", "ZORK.II", "ZORK.I", "HITCHHIKER", "BEYOND.ZORK"]);
+        assert_eq!(disk.story().map(|s| s.name), Some("BEYOND.ZORK".to_string()), "the largest");
+        assert_eq!(disk.file_count(), 10, "…out of ten files, four saved games included");
+        // What a caller was shown it can ask for, on this format too.
+        for (name, bytes) in disk.contents() {
+            assert_eq!(disk.read_named(&name).as_ref(), Some(&bytes), "listed {name:?}");
+        }
     }
 }

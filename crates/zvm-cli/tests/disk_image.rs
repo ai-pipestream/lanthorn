@@ -355,6 +355,64 @@ fn a_real_atari_st_compilation_names_its_games_by_directory() {
     assert!(text.contains("Hardscrabble Island"), "…and Cutthroats really ran:\n{text}");
 }
 
+// ── the Apple II (SQ-0836) ───────────────────────────────────────────────────
+
+/// **A fifth filesystem, and this front-end needed no line of code for it.**
+///
+/// `blorb::medium` gained a ProDOS row; `zvm-cli` reads the table and nothing
+/// else, so a 2IMG-wrapped Apple IIgs volume mounts, its games are listed with
+/// their headers, and `--story` opens one — all of it through the same
+/// `looks_like_image` / `mount_and_pick` path an Amiga floppy takes. That is the
+/// property SQ-0840 built the table for, exercised on the first format added
+/// since.
+///
+/// *The Lost Treasures of Infocom* (1993, Big Red Computer Club) volume 7 is the
+/// smallest useful case: three games, three names, no directories.
+///
+/// FALSIFICATION: delete the `DiskImage::ProDos` row from `blorb::medium`'s
+/// `FORMATS` and this fails at the first assertion with
+/// `Error: Z-machine version 50 is not supported.` — `0x32`, the `2` of `2IMG`,
+/// read as a story header.
+#[test]
+fn a_real_apple_iigs_compilation_mounts_through_the_shared_table() {
+    let Some(image) =
+        story_path("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 7 of 7).2mg")
+    else {
+        return;
+    };
+    let err = stderr_of(&run(&image, &[], ""));
+    assert!(err.contains("holds 3 stories"), "the whole disk is offered:\n{err}");
+    for line in [
+        "1) HOLLYWOOD  (v3 r37 s861215)",
+        "2) CUTTTHROAT  (v3 r23 s840809)",
+        "3) WISHBRINGER  (v3 r69 s850920)",
+    ] {
+        assert!(err.contains(line), "expected {line:?} in:\n{err}");
+    }
+
+    let out = run(&image, &["--story", "wishbringer"], "quit\ny\n");
+    let text = stdout_of(&out);
+    assert!(text.contains("Opening 3) WISHBRINGER"), "says which it opened:\n{text}");
+    assert!(
+        text.contains("Release 69 / Serial Number 850920"),
+        "and the GAME says which release it is:\n{text}"
+    );
+}
+
+/// The other half, and the finding behind it: `Journey.2mg` is the segmented
+/// Apple II press, so no whole story file comes off it. The disk must still
+/// MOUNT — the user is told what is on it and asked whether this is the boot
+/// disk, rather than shown a corrupt-story error.
+#[test]
+fn a_real_prodos_disk_with_no_whole_story_reports_what_it_mounted() {
+    let Some(image) = story_path("Journey.2mg") else { return };
+    let err = stderr_of(&run(&image, &[], ""));
+    assert!(
+        err.contains("no story file on this disk image") && err.contains("mounted on JOURNEY"),
+        "the mount succeeded and named the volume:\n{err}"
+    );
+}
+
 // ── the medium picks the machine (SQ-0839) ────────────────────────────────────
 
 /// Write bytes to a temp file and return the path.
