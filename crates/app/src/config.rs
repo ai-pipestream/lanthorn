@@ -230,6 +230,17 @@ pub struct Cli {
     #[arg(long)]
     pub no_images: bool,
 
+    /// Ignore the colours the game asks for, and tell it the interpreter has none:
+    /// `set_colour` / true-colour output on the Z-machine, Glk stylehints on Glulx.
+    /// The theme's own colours still paint everything.
+    ///
+    /// Overrides the config's `honor_game_colours`, and outranks a `garglk.ini`
+    /// beside the story or this game's own sidecar — an instruction for the launch
+    /// you typed it on, exactly as `--interpreter` is. Never written back to
+    /// config.toml; `/set-game-colours on` still turns them back on mid-game.
+    #[arg(long)]
+    pub no_game_colours: bool,
+
     /// Interpreter number to advertise in the story header (0x1E).
     ///
     /// Games branch on it: Beyond Zork picks character graphics over colour on
@@ -245,7 +256,10 @@ pub struct Cli {
     ///
     /// Overrides `interpreter_number` in config.toml. With neither set, babelmap
     /// auto-selects per Frotz's rule: 6 (IBM PC) for v6, else 1 (DECSystem-20).
-    #[arg(long, value_name = "N", verbatim_doc_comment)]
+    //
+    // The flag is spelled `--interpreter`, matching `zvm-cli`'s `-I`/`--interpreter`
+    // (SQ-0855); the FIELD keeps the config key's name because that is what it sets.
+    #[arg(long = "interpreter", value_name = "N", verbatim_doc_comment)]
     pub interpreter_number: Option<u8>,
 
     /// Native Infocom picture archive to draw this story's art from.
@@ -257,7 +271,7 @@ pub struct Cli {
     /// config.toml. A file that is absent or will not decode says so and falls
     /// back to the Blorb; it never fails quietly.
     ///
-    /// The archive also picks the machine, unless --interpreter-number says
+    /// The archive also picks the machine, unless --interpreter says
     /// otherwise: a DOS .MG1/.EG1/.CG1 asks for the IBM PC, an Amiga Pic.data
     /// for the Amiga.
     ///
@@ -1131,7 +1145,7 @@ pub struct Config {
 
 impl Config {
     /// True while `interpreter_number` is still the one a one-run source pinned
-    /// — `--interpreter-number`, the launch-options dialog, or this game's own
+    /// — `--interpreter`, the launch-options dialog, or this game's own
     /// sidecar — and nothing has changed it (SQ-0646/0789). A convenience over
     /// [`OneRunOverrides`] for the callers that ask about this one key by name.
     pub fn interpreter_number_from_cli(&self) -> bool {
@@ -1158,7 +1172,7 @@ impl Config {
 
     /// Set `interpreter_number` as a deliberate user edit (the settings panel), which
     /// ends the one-run hold on the key — including the case where the user picks the
-    /// very number `--interpreter-number` supplied. `None` means "default" (the
+    /// very number `--interpreter` supplied. `None` means "default" (the
     /// per-version auto rule) and REMOVES the key on the next save.
     pub fn set_interpreter_number(&mut self, n: Option<u8>) {
         self.interpreter_number = n;
@@ -1362,7 +1376,21 @@ pub fn resolve(cli: &Cli) -> Config {
         cfg.one_run.pin(keys::ENABLE_SOUND, false);
     }
 
-    // `--interpreter-number N` beats the file's `interpreter_number`; absent, the
+    // One-way override, same shape as `--no-sound` above: `--no-game-colours`
+    // declares the interpreter colourless for this run, but its absence must not
+    // turn colours ON for a config that persisted `honor_game_colours = false`.
+    // Set on the LIVE value every render site reads, so a mid-game
+    // `/set-game-colours on` still wins — the pin releases the moment the value
+    // stops being ours, exactly as `--interpreter`'s does (SQ-0855).
+    //
+    // `boot_story` keeps the two per-game layers that come later — a `garglk.ini`
+    // beside the story, and this game's sidecar — from turning it back on.
+    if cli.no_game_colours {
+        cfg.honor_game_colours = false;
+        cfg.one_run.pin(keys::HONOR_GAME_COLOURS, false);
+    }
+
+    // `--interpreter N` beats the file's `interpreter_number`; absent, the
     // file's value (or the auto rule, when it too is unset) stands.
     if let Some(n) = cli.interpreter_number {
         cfg.interpreter_number = Some(n);
@@ -1584,11 +1612,11 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("enable_sound", cfg.enable_sound.into(), cfg.enable_sound == def.enable_sound);
     doc.put("volume", (cfg.volume as i64).into(), cfg.volume == def.volume);
     doc.put("undo_levels", (cfg.undo_levels as i64).into(), cfg.undo_levels == def.undo_levels);
-    // `--interpreter-number`, a launch-options choice and this game's sidecar all
+    // `--interpreter`, a launch-options choice and this game's sidecar all
     // pin this key for one run, and `put_or_remove` skips all three — but ONLY while
     // the value is still theirs. Once the settings panel changes it, it is the user's
     // choice and persists like anything else (SQ-0646); the old "from CLI" flag made
-    // a `--interpreter-number` session ignore panel edits forever, reporting success
+    // a `--interpreter` session ignore panel edits forever, reporting success
     // and saving nothing.
     doc.put_or_remove(
         "interpreter_number",
@@ -1918,7 +1946,7 @@ mod tests {
     use std::io::Write;
 
     /// A `Cli` that reads (and therefore saves to) `path`, optionally carrying an
-    /// `--interpreter-number`. Everything else is off/default.
+    /// `--interpreter`. Everything else is off/default.
     fn cli_with_config(path: &std::path::Path, interpreter_number: Option<u8>) -> Cli {
         Cli {
             story: Some(PathBuf::from("foo.z5")),
@@ -1929,6 +1957,7 @@ mod tests {
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number,
             pictures: None,
             trace: None,
@@ -2008,6 +2037,7 @@ mod tests {
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2030,6 +2060,7 @@ mod tests {
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2052,6 +2083,7 @@ mod tests {
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2622,6 +2654,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2642,6 +2675,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2672,6 +2706,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2694,6 +2729,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2717,6 +2753,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: true,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2775,6 +2812,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2826,6 +2864,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -2865,6 +2904,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -3049,6 +3089,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -3078,7 +3119,7 @@ use_defaults = false
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `--interpreter-number N` overrides the config file for ONE run, and must not
+    /// `--interpreter N` overrides the config file for ONE run, and must not
     /// be written back: a later settings save would otherwise make a throwaway
     /// experiment permanent (and pin one machine for every story, defeating the
     /// per-version auto rule). The header values themselves are ZMSD §11.1.3's table
@@ -3099,6 +3140,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            no_game_colours: false,
             interpreter_number: None,
             pictures: None,
             trace: None,
@@ -3121,7 +3163,7 @@ use_defaults = false
         assert_eq!(
             reread.interpreter_number,
             Some(4),
-            "a one-run --interpreter-number must not be persisted; file now: {back}"
+            "a one-run --interpreter must not be persisted; file now: {back}"
         );
 
         // A value that came from the file DOES persist (the settings panel path).
@@ -3157,7 +3199,7 @@ use_defaults = false
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// SQ-0646: `--interpreter-number` is sticky for the run, not for the user. Once
+    /// SQ-0646: `--interpreter` is sticky for the run, not for the user. Once
     /// the settings panel sets a value the CLI didn't, that value persists — the old
     /// `!from_cli` flag made such a session drop every panel edit on the floor while
     /// telling the user it had saved.
@@ -3169,7 +3211,7 @@ use_defaults = false
         let cfg_path = dir.join("config.toml");
         std::fs::write(&cfg_path, "interpreter_number = 4\n").unwrap();
 
-        // Launched with --interpreter-number 6.
+        // Launched with --interpreter 6.
         let cli = cli_with_config(&cfg_path, Some(6));
         let mut cfg = resolve(&cli);
         assert!(cfg.interpreter_number_from_cli(), "untouched, it is still the CLI's");

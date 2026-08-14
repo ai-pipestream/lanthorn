@@ -215,7 +215,7 @@ const INTERPRETER: &[Row] = &[
             "   6  IBM PC",
             "",
             "Unset auto-selects: 6 (IBM PC) for v6, else 1 (DECSystem-20). Override for",
-            "a single run with `babelmap --interpreter-number N`.",
+            "a single run with `babelmap --interpreter N`.",
         ],
     ),
     ex(

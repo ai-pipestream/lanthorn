@@ -473,7 +473,7 @@ Amiga floppy or anywhere else.
   most suitable for the machine it will run on."* Of the three machines that YZIP
   will start on at all — it refuses anything below an enhanced IIe outright — the
   one a modern terminal with colour and a large screen resembles is the IIgs. So
-  a ProDOS disk is now a **10**, and `--interpreter-number 2` or `9` still asks
+  a ProDOS disk is now a **10**, and `--interpreter 2` or `9` still asks
   for the other two.
 
   It is measured rather than asserted, the same way the ST's 5 was. All
@@ -488,9 +488,10 @@ Amiga floppy or anywhere else.
   This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
-  key, `babelmap --interpreter-number N`, or `zvm-cli -I N` / `--interpreter N` —
+  key, or `--interpreter N` — one spelling across `babelmap` and `zvm-cli` alike,
+  where it is also `-I N` —
   e.g. `6` selects the IBM PC path, which draws Beyond Zork's map box and cursor
-  arrows as CP437 character graphics instead of Font 3. The `--interpreter-number`
+  arrows as CP437 character graphics instead of Font 3. The `--interpreter`
   flag applies to one run only and is never written back to your config, so probing
   a game's behaviour can't quietly pin one machine for every story afterwards —
   unless you then set the value in the settings screen, which is a decision rather
@@ -523,7 +524,7 @@ Amiga floppy or anywhere else.
   reported as the interpreter's defaults, and the palette Infocom's own Amiga
   interpreter loaded — a slightly darker green and blue than the standard's, a
   warmer yellow, and its own three Version 6 greys. Whatever you name outright
-  still wins: a number set in config, `--interpreter-number`, or `-I` outranks
+  still wins: a number set in config, `--interpreter`, or `-I` outranks
   the medium every time, and only the *default* moves.
 
   **Macintosh** is the third, and it was the last one to arrive because it was
@@ -653,7 +654,7 @@ Amiga floppy or anywhere else.
   it came from*, lets you pin a different one for that launch, and will write
   `interpreter_number` into the game's own `config.toml` if you tick the box.
   Most specific first: the dialog's choice for this launch, then
-  `--interpreter-number`, then the game's sidecar, then the global config, then
+  `--interpreter`, then the game's sidecar, then the global config, then
   the inference above. It belongs in a *launch* dialog rather than the settings
   screen because header byte `$1E` is read by the story itself at boot — a game
   that has already started has already made decisions from it, so offering to

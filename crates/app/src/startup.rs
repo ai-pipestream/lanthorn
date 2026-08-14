@@ -413,7 +413,11 @@ pub(crate) fn boot_story(
     let garglk_overlay = app::garglk_ini::discover(&story_path);
     let garglk_line = garglk_overlay.as_ref().map(|ov| {
         let summary = ov.apply(&mut cs);
-        if let Some(h) = ov.honor_game_colours {
+        // …unless `--no-game-colours` was typed on this launch, which outranks both
+        // per-game layers for the same reason `--interpreter` outranks the sidecar:
+        // a flag is a deliberate instruction for the run, and a file beside the story
+        // is not (SQ-0855).
+        if let Some(h) = ov.honor_game_colours.filter(|_| !cli.no_game_colours) {
             // A garglk.ini found beside THIS story speaks for this story, so it is
             // pinned as one-run: the global config must not learn it (SQ-0807).
             cfg.honor_game_colours = h;
@@ -426,9 +430,10 @@ pub(crate) fn boot_story(
     // user's explicit choice in force. The IFID is computed here (from the raw
     // bytes) and reused for the map dir / identity below.
     let ifid = compute_ifid(&story_bytes);
-    if let Some(v) = app::styles::read_per_game_honor(&game_dir) {
+    if let Some(v) = app::styles::read_per_game_honor(&game_dir).filter(|_| !cli.no_game_colours) {
         // The sidecar's key is this game's, not the global default's — pinned for
-        // the same reason the garglk overlay above is (SQ-0807).
+        // the same reason the garglk overlay above is (SQ-0807). `--no-game-colours`
+        // outranks it, as above.
         cfg.honor_game_colours = v;
         cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, v);
     }

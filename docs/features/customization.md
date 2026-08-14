@@ -397,7 +397,7 @@ re-seed the new template, or hand-write the new shape from
   need in order to find the mistake is never overwritten. Fix the file (or move
   it aside and let babelmap seed a fresh one) and saving resumes.
 - **A choice for one run stays a choice for one run.** `--no-sound`, `--user-dir`
-  and `--interpreter-number` are instructions for the launch you typed them on,
+  and `--interpreter` are instructions for the launch you typed them on,
   and so are the things babelmap works out for itself: an interpreter number this
   game's own sidecar pins, a `garglk.ini` sitting beside the story, a `/game-colours`
   choice, or two-colour artwork that has no colours to give and so switches
