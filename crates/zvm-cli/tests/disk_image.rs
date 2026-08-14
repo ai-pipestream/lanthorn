@@ -459,6 +459,47 @@ fn a_real_prodos_disk_with_no_whole_story_reports_what_it_mounted() {
     );
 }
 
+/// **The first Apple II disk this front-end can actually PLAY** (SQ-0868).
+///
+/// Every Apple format babelmap reads could be mounted here and never played,
+/// because `zvm-cli` declines Version 6 by design and *Arthur*, *Journey*,
+/// *Shogun* and *Zork Zero* — the Apple releases in the corpus — are all v6. The
+/// two `.2mg` compilations above are the exception that proves it: they play
+/// because they are collections of v3/v5 games, not because Apple media works
+/// end to end.
+///
+/// `Planetfall r29 (clean copy from retail disk).dsk` is the first Apple disk in
+/// `stories/` carrying a single non-v6 game, and it is a **raw self-booting
+/// disk** with no filesystem at all — the story is 426 sectors located only by
+/// putting them into DOS 3.3 logical order and verifying them against the
+/// story's own header checksum (`blorb::infocom_boot`).
+///
+/// **Nothing in this front-end was touched to make this pass.** `zvm-cli` reads
+/// `blorb::medium`'s table, so the format arrived with the reader — which is the
+/// property SQ-0840 built the table for and this is its fourth demonstration.
+///
+/// FALSIFICATION: delete the `DiskImage::InfocomBootDisk` row from
+/// `blorb::medium`'s `FORMATS` and this fails at the first assertion with
+/// `Error: Z-machine version 1 is not supported.` — `0x01`, the first byte of
+/// the Apple II boot sector, read as a story header.
+#[test]
+fn a_raw_self_booting_apple_disk_plays_through_the_shared_table() {
+    let Some(image) = story_path("Planetfall r29 (clean copy from retail disk).dsk") else {
+        return;
+    };
+    let out = run(&image, &[], "look\nquit\ny\n");
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("PLANETFALL:  INTERLOGIC Science Fiction"),
+        "the game boots off the raw disk:\n{text}"
+    );
+    assert!(
+        text.contains("Release 29 / Serial number 840118"),
+        "and the GAME says which release came off those sectors:\n{text}"
+    );
+    assert!(text.contains("Deck Nine"), "…and it reached its opening room:\n{text}");
+}
+
 // ── the medium picks the machine (SQ-0839) ────────────────────────────────────
 
 /// Write bytes to a temp file and return the path.

@@ -412,7 +412,8 @@ the type label rather than a separate badge.)
 The container is part of that label, so a story you're playing off its original
 release floppy reads `Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh
 one, `Z6 (DOS)` off a PC floppy, `Z4 (ST)` off an Atari ST one or
-`Z5 (ProDOS)` off an Apple II disk, and is never
+`Z5 (ProDOS)` off an Apple II disk, or `Z3 (Boot)` off one of Infocom's raw
+self-booting Apple floppies, and is never
 mistaken for a loose story file. The disk says so, not the
 filename: the suffix comes from the mount that found the story inside the image,
 so a floppy named anything at all is labelled for the filesystem it actually
@@ -443,6 +444,14 @@ of them, so no single `.dsk` holds a story and opening one alone is honestly tol
 so. They are two rows now, one per game — the whole set is read whichever volume
 you name, and the other four are folded away rather than listed as four more
 copies of the same thing.
+
+**And a `.dsk` need not be the same thing as the `.dsk` beside it.** *Planetfall*'s
+retail Apple floppy is the same size and the same sector order as *Shogun*'s, and
+has no filesystem on it at all — the story is a run of sectors Infocom's own
+loader reads off known tracks. It is a fourth `.dsk` row, `Z3 (Boot)`, and one
+game on one disk rather than a set: the extension census is a union the scan
+pre-filters on and the *bytes* decide which format they are, so a spelling two
+formats share costs the list nothing.
 
 **And a row is a game, not a file.** An Amiga release came one story to a disk,
 but a compilation does not: `Infocom Compilation 1` carries six, `floppy2.ima`

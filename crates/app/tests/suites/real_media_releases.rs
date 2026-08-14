@@ -240,6 +240,26 @@ const MEDIA: &[Medium] = &[
     // the 3.5-inch consolidation of the four `zork_zero_*.dsk` floppies.
     Medium { title: "Arthur (Apple II 3.5)", file: "Arthur.po", image: Some(DiskImage::ProDos), version: 6, release: 63, serial: "890622" },
     Medium { title: "Zork Zero (Apple II 3.5)", file: "ZorkZero.po", image: Some(DiskImage::ProDos), version: 6, release: 383, serial: "890602" },
+    // ── The raw self-booting Apple II press (SQ-0868) ────────────────────────
+    //
+    // **The first non-v6 Apple disk in the corpus**, and the first medium here
+    // with no filesystem on it at all. Every `.dsk` above is a ProDOS volume
+    // whose sectors are in the drive's order; this one has no volume directory
+    // in any order and no DOS 3.3 VTOC either — Infocom's loader boots and reads
+    // the story off known tracks with its own RWTS. `blorb::infocom_boot` finds
+    // it by putting the sectors into DOS 3.3 *logical* order and verifying a run
+    // of them against the story's own ZMSD §11.1.6 checksum, `$842E`, which no
+    // other order produces.
+    //
+    // It matters beyond one game. `zvm-cli` declines v6 by design, so until this
+    // row every Apple format babelmap read could be mounted and never *played*
+    // through the CLI — Arthur, Journey, Shogun and Zork Zero are all v6. This
+    // is a Version 3 game on Apple II media, so the whole path is exercised end
+    // to end for the first time; the `NARRATED` entry below is that proof.
+    //
+    // Measured through `app::hints::load_mounted_story` on 2026-08-14, like
+    // every row above.
+    Medium { title: "Planetfall (Apple II, self-booting)", file: "Planetfall r29 (clean copy from retail disk).dsk", image: Some(DiskImage::InfocomBootDisk), version: 3, release: 29, serial: "840118" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -389,6 +409,17 @@ const NARRATED: &[(&str, &[&str])] = &[
     // both are now the story's own word rather than a header we read.
     ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 5 of 7).2mg", &["Release 12 / Serial Number 860926"]),
     ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 7 of 7).2mg", &["Release 69 / Serial Number 850920"]),
+    // **And the raw self-booting press opens and plays** (SQ-0868) — the line
+    // that closes the gap this quest was filed for.
+    //
+    // The two lines above are ProDOS volumes, and every ProDOS disk in the
+    // corpus that is *not* a compilation is a Version 6 game, which `zvm-cli`
+    // declines by design. So "babelmap reads Apple II media" had, until this
+    // row, never once meant "and plays a game off one through the CLI". This is
+    // a Version 3 story on Apple II media: it boots, prints its banner, and
+    // names release 29 / serial 840118 — the story's own word for the build that
+    // came off 426 sectors nothing but the interleave and the checksum located.
+    ("Planetfall r29 (clean copy from retail disk).dsk", &["Release 29 / Serial number 840118"]),
 ];
 
 /// The resource Blorbs shipped beside these stories, and whether each declares
@@ -438,6 +469,7 @@ fn ctx(m: &Medium) -> String {
             Some(DiskImage::Fat12Dos) => "DOS floppy",
             Some(DiskImage::Fat12AtariSt) => "Atari ST floppy",
             Some(DiskImage::ProDos) => "Apple ProDOS floppy",
+            Some(DiskImage::InfocomBootDisk) => "Apple self-booting floppy",
             None => "story file",
         },
         m.release,
@@ -726,6 +758,19 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     // floppies that each report the same reassembled build are five rows before
     // `dedupe_within_sets` and one after (SQ-0844), which is the set model
     // paying for itself.
+    //
+    // **Four rows since SQ-0868**, and the fourth is one disk rather than a set.
+    // `Planetfall r29 (clean copy from retail disk).dsk` is a RAW self-booting
+    // disk — no filesystem, a second format wearing the same `.dsk` spelling —
+    // and it appears here having required no change to the picker, the scan or
+    // the set model: the extension census is a union read off `blorb::medium`,
+    // so the row was listed the day the reader landed. That is this assertion's
+    // real subject, which is why it is a name list and not a count.
+    //
+    // It is also the set model's negative case (SQ-0844): its stem carries a
+    // digit run (`r29`) and it is still one row and not a set of one, because no
+    // sibling shares that stem. A set that folded it into Shogun's or Zork
+    // Zero's would show up here as a missing name.
     let listed_dsk: Vec<&std::ffi::OsStr> = listed
         .iter()
         .filter(|p| {
@@ -741,8 +786,13 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     if dir_has_dsk {
         assert_eq!(
             listed_dsk,
-            ["journey_s1.dsk", "shogun_s1.dsk", "zork_zero_1.dsk"],
-            "three releases, one row each, and the lowest disk number keeps it"
+            [
+                "journey_s1.dsk",
+                "Planetfall r29 (clean copy from retail disk).dsk",
+                "shogun_s1.dsk",
+                "zork_zero_1.dsk",
+            ],
+            "four releases, one row each, and the lowest disk number keeps it"
         );
     }
 
@@ -885,6 +935,17 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // the YZIP starts on, that is the IIgs. Argued in full at the row in
             // `blorb::medium`, with the thirty-story trace measurement behind it.
             Some(DiskImage::ProDos) => InterpreterProfile::AppleIIgs,
+            // **The same machine, off a disk with no filesystem** (SQ-0868).
+            // Read this arm against the one above it the way the two FAT12 arms
+            // read against each other — except that here the answer is the SAME,
+            // and that is the finding. §11.1.3's question is which machine the
+            // interpreter runs on, not which filesystem the disk has, so two
+            // Apple II rows disagreeing would be saying the number is a property
+            // of the medium; SQ-0857 disproved exactly that out of Infocom's own
+            // YZIP. Nothing observable rides on it on this disk either way —
+            // `$1E` means nothing before Version 4 and *Planetfall* is v3 — which
+            // is why the row is argued as consistency rather than as a claim.
+            Some(DiskImage::InfocomBootDisk) => InterpreterProfile::AppleIIgs,
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(

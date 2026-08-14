@@ -1,6 +1,7 @@
 //! The **DOS sector order** a 5.25-inch Apple II floppy is dumped in, and the
-//! one thing this module does about it: put the sectors back where ProDOS
-//! expects them (SQ-0864).
+//! two things this module does about it: put the sectors back where ProDOS
+//! expects them (SQ-0864), and put them back where DOS 3.3 numbered them
+//! (SQ-0868).
 //!
 //! # What it is, and why it is a wrapper rather than a format
 //!
@@ -35,8 +36,29 @@
 //! ```
 //!
 //! Sectors 0 and 15 stay put and the fourteen between them run backwards, which
-//! is the shape every published table of this mapping has. It is stated here as
-//! one flat array because that is how it is used.
+//! is the shape every published table of this mapping has.
+//!
+//! # One table, two traversals (SQ-0868)
+//!
+//! Read that same grid **row-wise** rather than column-wise and it is a
+//! different, older mapping: `0 13 11 9 7 5 3 1 14 12 10 8 6 4 2 15` is the
+//! physical sector holding DOS 3.3 **logical** sector 0, 1, 2, … — the software
+//! skew DOS 3.3 itself applies, and the order the sectors of a file are in on a
+//! disk that has no ProDOS on it at all.
+//!
+//! So the two orders are not two tables. [`PHYSICAL_OF`] is the one fact, and
+//! [`SECTOR_OF`] is derived from it by the relation the grid states: **ProDOS
+//! block `b` of a track is DOS logical sectors `b` and `b + 8`.** That is stated
+//! once, in the `const` block below, so the ProDOS order cannot drift from the
+//! logical one — and the existing tests that pin `SECTOR_OF`'s shape now pin the
+//! derivation too.
+//!
+//! The corroboration for the logical order is the same kind as for the ProDOS
+//! one, and just as unforgiving: `Planetfall r29 (clean copy from retail disk).dsk`
+//! is a raw self-booting disk with no filesystem of any kind, and the Version 3
+//! story sitting on it verifies against its own header checksum `$842E` **only**
+//! under this order. Physical order sums to `$529D` and ProDOS block order to
+//! `$97D5`. See [`crate::infocom_boot`], which is the reader that needs it.
 //!
 //! **Measured, not recalled.** The table is corroborated by the media itself,
 //! which is the only authority that matters for a byte layout: applying it to
@@ -68,9 +90,23 @@ const SECTOR: usize = 256;
 /// The one size a DOS-order 5.25-inch dump has: 35 × 16 × 256.
 pub const DOS_ORDER_LEN: usize = TRACKS * SECTORS * SECTOR;
 
+/// The PHYSICAL sector holding each DOS 3.3 **logical** sector of a track — the
+/// module header's grid read row-wise, and the one table this module states.
+const PHYSICAL_OF: [usize; SECTORS] = [0, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 15];
+
 /// The DOS sector holding each successive half-block of a track, in ProDOS block
-/// order. See the module header for the table this flattens.
-const SECTOR_OF: [usize; SECTORS] = [0, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 15];
+/// order — the same grid read column-wise, and therefore **derived** rather than
+/// restated: ProDOS block `b` is DOS logical sectors `b` and `b + 8`.
+const SECTOR_OF: [usize; SECTORS] = {
+    let mut half = [0usize; SECTORS];
+    let mut block = 0;
+    while block < SECTORS / 2 {
+        half[2 * block] = PHYSICAL_OF[block];
+        half[2 * block + 1] = PHYSICAL_OF[block + SECTORS / 2];
+        block += 1;
+    }
+    half
+};
 
 /// `raw` with its sectors put back into ProDOS block order, or `None` when it is
 /// not a 5.25-inch DOS-order dump at all.
@@ -79,13 +115,54 @@ const SECTOR_OF: [usize; SECTORS] = [0, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
 /// [`crate::prodos`]'s question, and a dump of a DOS 3.3 or Pascal disk comes
 /// through here just as happily and is then declined by the volume sniff.
 pub fn prodos_order(raw: &[u8]) -> Option<Vec<u8>> {
+    reorder(raw, &SECTOR_OF)
+}
+
+/// `raw` with its sectors put back into DOS 3.3 **logical** order, or `None`
+/// when it is not a 5.25-inch DOS-order dump at all.
+///
+/// [`prodos_order`]'s sibling and its equal in reticence: this says nothing
+/// about what the re-ordered bytes hold either. A raw self-booting Infocom disk
+/// keeps its story in this order ([`crate::infocom_boot`]); so does an ordinary
+/// DOS 3.3 disk, which has a VTOC and a catalog this crate reads nothing of.
+pub fn logical_order(raw: &[u8]) -> Option<Vec<u8>> {
+    reorder(raw, &PHYSICAL_OF)
+}
+
+/// A dump of a disk whose sectors are in DOS 3.3 logical order — the inverse of
+/// [`logical_order`], and the only function here that goes that way.
+///
+/// It exists so a test can BUILD one of these disks rather than only take one
+/// apart: every fixture in the corpus is already interleaved, so without this a
+/// synthetic sample would have to restate the table and could restate it wrong.
+/// Test-only for exactly that reason — nothing in the shipped path ever writes a
+/// floppy.
+#[cfg(test)]
+pub(crate) fn dos_order_dump(logical: &[u8]) -> Option<Vec<u8>> {
+    if logical.len() != DOS_ORDER_LEN {
+        return None;
+    }
+    let mut out = vec![0u8; DOS_ORDER_LEN];
+    for track in 0..TRACKS {
+        let base = track * SECTORS * SECTOR;
+        for (slot, &sector) in PHYSICAL_OF.iter().enumerate() {
+            let (from, to) = (base + slot * SECTOR, base + sector * SECTOR);
+            out[to..to + SECTOR].copy_from_slice(&logical[from..from + SECTOR]);
+        }
+    }
+    Some(out)
+}
+
+/// The de-interleave both orders are: gather each track's sectors in the order
+/// `table` names them.
+fn reorder(raw: &[u8], table: &[usize; SECTORS]) -> Option<Vec<u8>> {
     if raw.len() != DOS_ORDER_LEN {
         return None;
     }
     let mut out = Vec::with_capacity(DOS_ORDER_LEN);
     for track in 0..TRACKS {
         let base = track * SECTORS * SECTOR;
-        for sector in SECTOR_OF {
+        for &sector in table {
             let at = base + sector * SECTOR;
             out.extend_from_slice(&raw[at..at + SECTOR]);
         }
@@ -98,12 +175,69 @@ mod tests {
     use super::*;
 
     /// The mapping is a permutation of a track — every sector used exactly once,
-    /// which is the one thing a transcription error would break.
+    /// which is the one thing a transcription error would break. Both orders,
+    /// because [`SECTOR_OF`] is now derived and a derivation can drop a sector as
+    /// easily as a typist can.
     #[test]
     fn the_interleave_is_a_permutation_of_a_track() {
-        let mut seen = SECTOR_OF;
-        seen.sort_unstable();
-        assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        for mut seen in [SECTOR_OF, PHYSICAL_OF] {
+            seen.sort_unstable();
+            assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        }
+    }
+
+    /// **The derivation, pinned by its result** (SQ-0868). `SECTOR_OF` was a
+    /// literal until the logical order arrived and showed the two to be one grid
+    /// read two ways; this is the literal it used to be, so a change to
+    /// [`PHYSICAL_OF`] that would move every ProDOS volume in the corpus fails
+    /// here and not fourteen fixtures later.
+    #[test]
+    fn the_prodos_order_is_still_the_table_it_was_written_as() {
+        assert_eq!(SECTOR_OF, [0, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 15]);
+    }
+
+    /// The relation the module header states, said once more as an assertion:
+    /// ProDOS block `b` of a track is DOS logical sectors `b` and `b + 8`.
+    #[test]
+    fn a_prodos_block_is_two_logical_sectors_eight_apart() {
+        for block in 0..SECTORS / 2 {
+            assert_eq!(SECTOR_OF[2 * block], PHYSICAL_OF[block], "block {block} first half");
+            assert_eq!(SECTOR_OF[2 * block + 1], PHYSICAL_OF[block + 8], "block {block} second");
+        }
+    }
+
+    /// The logical order's own shape: sectors 0 and 15 stay put, and the fourteen
+    /// between them step by two with a wrap — the classic DOS 3.3 software skew.
+    #[test]
+    fn the_logical_order_is_the_dos_three_three_skew() {
+        assert_eq!(PHYSICAL_OF[0], 0);
+        assert_eq!(PHYSICAL_OF[15], 15);
+        for (logical, &physical) in PHYSICAL_OF.iter().enumerate().take(15).skip(1) {
+            assert_eq!(physical, (logical * 13) % 15, "logical sector {logical}");
+        }
+    }
+
+    /// [`dos_order_dump`] really is [`logical_order`] backwards — the property
+    /// every synthetic boot-disk fixture rests on.
+    #[test]
+    fn a_dump_and_the_logical_order_undo_each_other() {
+        let logical: Vec<u8> = (0..DOS_ORDER_LEN).map(|i| (i / SECTOR) as u8).collect();
+        let dump = dos_order_dump(&logical).expect("the 5.25-inch geometry");
+        assert_ne!(dump, logical, "the sectors really move");
+        assert_eq!(logical_order(&dump).expect("the geometry"), logical);
+        assert_eq!(dos_order_dump(&[]), None);
+    }
+
+    /// Both orders move whole sectors, and each is the other's disagreement:
+    /// applying one where the other belongs is a scramble, not a near miss.
+    #[test]
+    fn the_two_orders_are_not_the_same_order() {
+        let raw: Vec<u8> = (0..DOS_ORDER_LEN).map(|i| (i / SECTOR) as u8).collect();
+        let prodos = prodos_order(&raw).expect("the 5.25-inch geometry");
+        let logical = logical_order(&raw).expect("the 5.25-inch geometry");
+        assert_ne!(prodos, logical);
+        assert_eq!(logical_order(&[]), None);
+        assert_eq!(logical_order(&vec![0u8; DOS_ORDER_LEN - 1]), None);
     }
 
     /// Sector 0 opens the track and sector 15 closes it; the fourteen between

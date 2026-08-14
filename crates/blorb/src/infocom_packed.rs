@@ -480,7 +480,15 @@ fn assemble(name: &str, first: &[u8], files: &[(String, Vec<u8>)]) -> Option<(St
 ///
 /// The whole point of the module's strictness lands here; see the header for
 /// why nothing weaker will do.
-fn verified(mut story: Vec<u8>) -> Option<Vec<u8>> {
+///
+/// **Crate-visible** since SQ-0868, because the question it answers — *are these
+/// the story's own bytes, in the story's own order, all of them* — is the same
+/// question a raw self-booting disk has to answer about a run of sectors, and
+/// [`crate::infocom_boot`] must not have a second copy of the checksum rule to
+/// get subtly wrong. It takes a `Vec` because it truncates; callers scanning for
+/// a start offset should test [`looks_like_story`] on a borrow first and only
+/// pay for the copy on a structural hit.
+pub(crate) fn verified(mut story: Vec<u8>) -> Option<Vec<u8>> {
     if !looks_like_story(&story) {
         return None;
     }

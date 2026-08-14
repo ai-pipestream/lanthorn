@@ -490,4 +490,42 @@ mod tests {
     fn members_of_a_non_image_is_none() {
         assert!(members(Path::new("/stories/zork1.z5")).is_none());
     }
+
+    /// **A single raw disk is not a set of one** (SQ-0868), even sitting in a
+    /// directory full of `.dsk` volumes that are.
+    ///
+    /// `Planetfall r29 (clean copy from retail disk).dsk` is the corpus's first
+    /// `.dsk` that is a whole game on one disk, and its stem carries a digit run
+    /// (`r29`) — so the two things that could go wrong are that it forms a
+    /// degenerate set of its own, or that it is dragged into Shogun's or Zork
+    /// Zero's. Neither can: a set needs two files whose stems differ at ONE digit
+    /// run, and no other file in the corpus shares this stem at all.
+    ///
+    /// This matters more than a lone-volume test usually would, because the
+    /// consequence is not cosmetic. `MountedDisk::mount_set` consults a set's
+    /// companions, and `dedupe_within_sets` folds rows sharing an IFID *within a
+    /// set* — so a false set here is how a game silently disappears from the
+    /// browser.
+    #[test]
+    fn a_lone_raw_disk_forms_no_set_among_the_sets_beside_it() {
+        const RAW: &str = "Planetfall r29 (clean copy from retail disk).dsk";
+        let files = paths(&[
+            RAW,
+            "shogun_s1.dsk",
+            "shogun_s2.dsk",
+            "zork_zero_1.dsk",
+            "zork_zero_2.dsk",
+        ]);
+        let sets = group(&files);
+        assert_eq!(sets.len(), 2, "the two presses are sets and the raw disk is not");
+        for set in &sets {
+            assert!(
+                !names_of(set).iter().any(|n| n == RAW),
+                "the raw disk was folded into {:?}",
+                names_of(set)
+            );
+        }
+        // …and on its own it is still nothing, digit run notwithstanding.
+        assert!(group(&paths(&[RAW])).is_empty());
+    }
 }
