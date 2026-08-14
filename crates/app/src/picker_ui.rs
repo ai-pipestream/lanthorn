@@ -315,6 +315,90 @@ fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Columns the info panel indents a wrapped continuation row by, and the marker
+/// drawn in them (SQ-0861). Fixed at two cells because the indent arithmetic
+/// depends on the marker's width — it is themeable through the
+/// `story_info_continuation` selector, not swappable for a wider glyph.
+const PANEL_CONT_INDENT: usize = 2;
+const PANEL_CONT_MARK: &str = "↳ ";
+
+/// One DRAWN row of the info panel, after wrapping (SQ-0861).
+///
+/// The panel builds a flat list of logical lines and used to draw one row per
+/// line, so anything wider than the panel — a compilation's `…(Disk 6 of
+/// 7).2mg:LEATHRGODDESSES` file line, a UUID-form IFID, the `Saves · <dir>`
+/// header, a save row ending in a filename — was simply clipped at the edge.
+/// Wrapping turns one logical line into one or more of these; `src` is the
+/// logical line's index, so the link and resource tables (which are keyed by
+/// logical index) still resolve without remapping.
+struct PanelRow {
+    text: String,
+    style: ratatui::style::Style,
+    /// A wrapped continuation of the row above, drawn indented behind a marker.
+    cont: bool,
+    src: usize,
+}
+
+/// Break `s` into rows of at most `first_w` display CELLS for the first row and
+/// `cont_w` for every row after it (SQ-0861).
+///
+/// Width is measured in terminal columns via `textwidth::row_break`, not in
+/// bytes or chars, so a CJK title or a path carrying combining marks wraps where
+/// it actually reaches the panel edge and a double-width glyph is never split.
+/// Words stay whole where a space allows it; a token wider than the row — which
+/// is what a long filename is — is broken at the cell boundary rather than left
+/// for the renderer to clip, because clipping is the defect being fixed.
+///
+/// Always terminates: every iteration consumes at least one char, including the
+/// degenerate case of a double-width glyph in a one-column row (nothing "fits",
+/// so the glyph is taken anyway and overflows by one cell). A zero width is the
+/// one case that cannot make progress at all, and returns `s` unwrapped.
+fn wrap_panel_line(s: &str, first_w: usize, cont_w: usize) -> Vec<String> {
+    if first_w == 0 || cont_w == 0 {
+        return vec![s.to_string()];
+    }
+    let mut rows: Vec<String> = Vec::new();
+    let mut rest = s;
+    loop {
+        let w = if rows.is_empty() { first_w } else { cont_w };
+        let br = app::textwidth::row_break(rest, w);
+        let Some(overflow) = br.overflow else {
+            rows.push(rest.to_string());
+            break;
+        };
+        // Prefer the last space at or before the break so words stay whole. A
+        // space at offset 0 is not a break point — it would emit an empty row
+        // and re-present the same remainder forever.
+        let (take, mut skip, broke_on_space) = match br.last_space.filter(|b| *b > 0) {
+            Some(b) => (b, b + 1, true),
+            None if overflow > 0 => (overflow, overflow, false),
+            // Nothing fits at all: a glyph wider than the row. Take it whole so
+            // the scan advances; the renderer clips its overhanging cell.
+            None => {
+                let n = rest.chars().next().map_or(0, char::len_utf8);
+                (n, n, false)
+            }
+        };
+        if broke_on_space {
+            // The panel's own separators include double spaces (`… turn 42 ·
+            // 2026-06-30  save.babelmap`), so a break can land inside a RUN of
+            // them: none of that run belongs to either row.
+            rows.push(rest[..take].trim_end_matches(' ').to_string());
+            skip += rest[skip..].len() - rest[skip..].trim_start_matches(' ').len();
+        } else {
+            rows.push(rest[..take].to_string());
+        }
+        rest = &rest[skip..];
+        if rest.is_empty() {
+            break;
+        }
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
 /// Column header text plus whether it's the active sort column — the
 /// direction arrow is shown only on the active column.
 fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) -> (String, bool) {
@@ -2285,6 +2369,7 @@ fn draw_info_panel(
     let story_info_label = cs.theme.get("story_info_label").style;
     let story_info_blurb = cs.theme.get("story_info_blurb").style;
     let story_info_link = cs.theme.get("story_info_link").style;
+    let story_info_continuation = cs.theme.get("story_info_continuation").style;
     let story_info_cover = cs.theme.get("story_info_cover").style;
     let story_info_artwork = cs.theme.get("story_info_artwork").style;
     let story_info_artwork_active = cs.theme.get("story_info_artwork:active").style;
@@ -2634,25 +2719,69 @@ fn draw_info_panel(
         }
     }
 
+    // Wrap every logical line to the panel's content width (SQ-0861). One row
+    // per line clipped anything wider than the panel — the file line the report
+    // named, but equally the IFID, `Saves · <dir>`, `Sidecars:`, and every save,
+    // artwork and resource row that ends in a filename.
+    //
+    // Whether the scrollbar's gutter column is spent is itself a function of the
+    // wrapped row count, so it can't be known before wrapping. Wrap at the full
+    // width first; only if THAT already overflows is the narrower width used,
+    // and narrowing can only add rows, so the second pass cannot un-overflow.
+    // Two passes at most, and a panel that fits is laid out exactly as before.
+    let wrap_rows = |w: u16| -> Vec<PanelRow> {
+        let first_w = w as usize;
+        // Too narrow to spend two columns on an indent: wrap flush instead of
+        // refusing to wrap. `indent == 0` is also what suppresses the marker.
+        let indent = if first_w > PANEL_CONT_INDENT { PANEL_CONT_INDENT } else { 0 };
+        let mut out = Vec::with_capacity(lines.len());
+        for (li, (text, style)) in lines.iter().enumerate() {
+            for (ri, row) in wrap_panel_line(text, first_w, first_w - indent).into_iter().enumerate() {
+                out.push(PanelRow { text: row, style: *style, cont: ri > 0, src: li });
+            }
+        }
+        out
+    };
+    let mut rows = wrap_rows(inner.width);
     // Reserve a 1-col gutter for the scrollbar when content overflows.
-    let overflow = lines.len() as u16 > inner.height;
+    let overflow = rows.len() as u16 > inner.height;
     let text_area = if overflow {
         Rect::new(inner.x, inner.y, inner.width.saturating_sub(1), inner.height)
     } else {
         inner
     };
+    if overflow {
+        rows = wrap_rows(text_area.width);
+    }
+    let cont_indent = if text_area.width as usize > PANEL_CONT_INDENT { PANEL_CONT_INDENT as u16 } else { 0 };
     let content_height = inner.height as usize;
-    let max_scroll = lines.len().saturating_sub(content_height);
+    let max_scroll = rows.len().saturating_sub(content_height);
     let eff = scroll.min(max_scroll);
-    let end = (eff + content_height).min(lines.len());
-    for (vi, (text, style)) in lines[eff..end].iter().enumerate() {
-        let li = eff + vi;
+    let end = (eff + content_height).min(rows.len());
+    for (vi, row) in rows[eff..end].iter().enumerate() {
+        let (text, style) = (&row.text, &row.style);
+        let li = row.src;
         let y = inner.y + vi as u16;
+        // A continuation is set in from the panel edge behind its own marker, so
+        // a wrapped tail reads as more of the field above rather than as a new
+        // one. The marker carries `story_info_continuation`; the text keeps the
+        // style of the logical line it belongs to.
+        let row_area = if row.cont {
+            draw_str_clipped(buf, text_area.x, y, PANEL_CONT_MARK, story_info_continuation, text_area);
+            Rect::new(
+                text_area.x + cont_indent,
+                text_area.y,
+                text_area.width.saturating_sub(cont_indent),
+                text_area.height,
+            )
+        } else {
+            text_area
+        };
         if let Some((_, url)) = link_urls.iter().find(|(idx, _)| *idx == li) {
             // OSC 8 hyperlink (SQ-0367): the whole visible label is clickable and
             // opens the full URL, so a truncated URL still works. Degrades to
             // plain styled text on terminals without hyperlink support.
-            let rect = Rect::new(text_area.x, y, text_area.width, 1);
+            let rect = Rect::new(row_area.x, y, row_area.width, 1);
             let link = hyperrat::Link::new(text.as_str(), url.as_str()).style(*style);
             ratatui::widgets::Widget::render(link, rect, buf);
             // hyperrat packs the whole OSC 8 escape sequence into the first
@@ -2673,15 +2802,15 @@ fn draw_info_panel(
         if let Some((_, rref)) = resource_refs.iter().find(|(idx, _)| *idx == li) {
             // A previewable Pict/Snd row (SQ-0347): draw it, and record its rect
             // so a click can open the resource preview modal.
-            draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
-            resource_rects.push((Rect::new(text_area.x, y, text_area.width, 1), rref.clone()));
+            draw_str_clipped(buf, row_area.x, y, text, *style, row_area);
+            resource_rects.push((Rect::new(row_area.x, y, row_area.width, 1), rref.clone()));
             continue;
         }
-        draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
+        draw_str_clipped(buf, row_area.x, y, text, *style, row_area);
     }
     if overflow {
         let sb_area = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, eff, scrollbar);
+        app::render::scroll::draw_scrollbar(buf, sb_area, rows.len(), inner.height as usize, eff, scrollbar);
     }
     max_scroll
 }
@@ -3835,6 +3964,348 @@ mod tests {
         let saves_pos = text.find("Saves ·").expect("saves header present");
         let resources_pos = text.find("Resources").expect("resources header present");
         assert!(saves_pos < resources_pos, "Saves must render before Resources: saves@{saves_pos} resources@{resources_pos}");
+    }
+
+    // ───────────────────────── SQ-0861: info-panel wrapping ─────────────────
+    //
+    // The panel drew one row per logical line, so any value wider than it was
+    // clipped at the edge. These pin that long values now wrap, that the scroll
+    // arithmetic counts WRAPPED ROWS rather than logical lines, and that a panel
+    // too narrow to wrap into still terminates.
+
+    /// Collapse a string's whitespace runs to single spaces.
+    fn norm(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The info panel's content as ONE whitespace-normalised string: border
+    /// stripped, the continuation marker removed, rows joined.
+    ///
+    /// Word-wrap consumes the space it breaks on, so a wrapped line rejoins to
+    /// exactly its original text under this normalisation — and a CLIPPED line
+    /// cannot, because the clipped tail is nowhere in the buffer. Asserting here
+    /// rather than on the string vector is the point: the defect was on screen.
+    fn panel_text_flat(buf: &ratatui::buffer::Buffer, area: ratatui::layout::Rect) -> String {
+        let mut out = String::new();
+        for y in area.top() + 1..area.bottom().saturating_sub(1) {
+            let mut row = String::new();
+            for x in area.left() + 1..area.right().saturating_sub(1) {
+                if let Some(c) = buf.cell((x, y)) {
+                    row.push_str(c.symbol());
+                }
+            }
+            out.push(' ');
+            out.push_str(row.trim_start_matches(super::PANEL_CONT_MARK));
+        }
+        norm(&out)
+    }
+
+    /// The panel's text rows verbatim (border stripped, marker left in place).
+    fn panel_rows(buf: &ratatui::buffer::Buffer, area: ratatui::layout::Rect) -> Vec<String> {
+        (area.top() + 1..area.bottom().saturating_sub(1))
+            .map(|y| {
+                (area.left() + 1..area.right().saturating_sub(1))
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The reported compilation case, as `stories/` actually holds it.
+    fn compilation_meta() -> app::picker::StoryMeta {
+        app::picker::StoryMeta {
+            size_bytes: 819_200,
+            story_bytes: 178_432,
+            modified: Some("2026-08-14".into()),
+            engine: app::picker::Engine::ZCode,
+            format: "Z-code".into(),
+            version: Some("3".into()),
+            serial: Some("860730".into()),
+            release: Some(59),
+            // A UUID-form IFID: 36 chars behind a 5-char label is 41 columns,
+            // past a 38-column panel, so this line was clipped too.
+            ifid: "1D2E3F45-6789-4ABC-8DEF-0123456789AB".into(),
+            features: app::picker::Features::default(),
+            disk_image: None,
+            disk_entry: Some("LEATHRGODDESSES".into()),
+            self_blorb: None,
+            author: None, year: None, genre: None, language: None, description: None,
+            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+        }
+    }
+
+    const COMPILATION_FILE: &str =
+        "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 6 of 7).2mg";
+
+    /// SQ-0861 (the reported defect): a compilation row's file line —
+    /// `…(Disk 6 of 7).2mg:LEATHRGODDESSES` — is far wider than the panel and
+    /// used to stop dead at its edge, taking the `:LEATHRGODDESSES` suffix that
+    /// says WHICH of the five games this row is with it. Every character of it
+    /// must now be on screen, across as many rows as it takes.
+    #[test]
+    fn info_panel_wraps_a_long_compilation_file_line() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = compilation_meta();
+        // 40 columns is the info panel on a 120-column terminal (area.width / 3),
+        // i.e. 38 columns of content — less than half the file line.
+        let area = Rect::new(0, 0, 40, 30);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new(COMPILATION_FILE);
+        super::draw_info_panel(
+            "Leather Goddesses of Phobos", COMPILATION_FILE, &meta, None, 0, area, None,
+            &mut cover, entry_path, entry_path, false, None, &cs, &mut buf,
+            &mut Vec::new(), &mut Vec::new(),
+        );
+        let flat = panel_text_flat(&buf, area);
+        let expected = norm(&format!(
+            "{COMPILATION_FILE}:LEATHRGODDESSES · {} · story {} · 2026-08-14",
+            super::human_size(meta.size_bytes),
+            super::human_size(meta.story_bytes),
+        ));
+        assert!(flat.contains(&expected), "file line must render whole:\n  want {expected:?}\n  got  {flat:?}");
+        // The IFID was clipped by the same flat-line treatment.
+        assert!(
+            flat.contains("IFID 1D2E3F45-6789-4ABC-8DEF-0123456789AB"),
+            "IFID must render whole: {flat:?}"
+        );
+        // Nothing spills past the panel's content width.
+        for (i, row) in panel_rows(&buf, area).iter().enumerate() {
+            assert!(
+                app::textwidth::str_cells(row.trim_end()) <= (area.width - 2) as usize,
+                "row {i} exceeds the panel's content width: {row:?}"
+            );
+        }
+    }
+
+    /// SQ-0861: a continuation row is set in behind its own marker, so a wrapped
+    /// tail reads as more of the field above rather than as a new field — and
+    /// the wrapped text keeps the style of the line it came from.
+    #[test]
+    fn info_panel_marks_and_indents_a_wrapped_continuation() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = compilation_meta();
+        let area = Rect::new(0, 0, 40, 30);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new(COMPILATION_FILE);
+        super::draw_info_panel(
+            "Leather Goddesses of Phobos", COMPILATION_FILE, &meta, None, 0, area, None,
+            &mut cover, entry_path, entry_path, false, None, &cs, &mut buf,
+            &mut Vec::new(), &mut Vec::new(),
+        );
+        let rows = panel_rows(&buf, area);
+        // Row 0 is the title; row 1 opens the file line, rows 2+ continue it.
+        assert!(rows[1].starts_with("Lost Treasures"), "row 1: {:?}", rows[1]);
+        assert!(rows[2].starts_with(super::PANEL_CONT_MARK), "row 2 must be marked: {:?}", rows[2]);
+        assert!(!rows[1].starts_with(super::PANEL_CONT_MARK), "the first row of a field is not marked");
+        // The marker carries `story_info_continuation`; the text beside it keeps
+        // the file line's own `story_info_value`.
+        // Foregrounds only: the panel paints its own background under every row,
+        // so a cell's style is the selector's patched onto that fill.
+        let mark = cs.theme.get("story_info_continuation").style.fg;
+        let value = cs.theme.get("story_info_value").style.fg;
+        assert_ne!(mark, value, "the marker must be distinguishable from the text it precedes");
+        assert_eq!(buf.cell((area.x + 1, area.y + 3)).unwrap().fg, mark.unwrap(), "marker style");
+        assert_eq!(
+            buf.cell((area.x + 1 + super::PANEL_CONT_INDENT as u16, area.y + 3)).unwrap().fg,
+            value.unwrap(),
+            "wrapped text keeps its logical line's style",
+        );
+    }
+
+    /// SQ-0861 (guard 1): a panel whose values all fit is laid out exactly as it
+    /// was before wrapping existed — no continuation markers, no re-flow.
+    #[test]
+    fn info_panel_leaves_short_values_alone() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = app::picker::StoryMeta {
+            size_bytes: 92 * 1024, story_bytes: 92 * 1024,
+            modified: Some("2026-06-30".into()),
+            engine: app::picker::Engine::ZCode,
+            format: "Z-code".into(),
+            version: Some("3".into()),
+            serial: Some("840726".into()),
+            release: Some(88),
+            ifid: "ZCODE-88-840726".into(),
+            features: app::picker::Features::default(),
+            disk_image: None, disk_entry: None, self_blorb: None,
+            author: None, year: None, genre: None, language: None, description: None,
+            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+        };
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("zork1.z3");
+        let max_scroll = super::draw_info_panel(
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path,
+            entry_path, false, None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+        );
+        assert_eq!(max_scroll, 0, "content that fits must not become scrollable");
+        let rows = panel_rows(&buf, area);
+        assert!(
+            !rows.iter().any(|r| r.starts_with(super::PANEL_CONT_MARK)),
+            "no field should wrap at 60 columns: {rows:?}"
+        );
+        assert_eq!(rows[0].trim_end(), "Zork I");
+        assert_eq!(rows[1].trim_end(), "zork1.z3 · 92 KB · 2026-06-30");
+        assert_eq!(rows[2].trim_end(), "Z-code v3 · Release 88");
+    }
+
+    /// SQ-0861 (guard 3): with wrapped content present, `max_scroll` is measured
+    /// in WRAPPED ROWS, so scrolling reaches the true last row — and the
+    /// scrollbar agrees, its thumb landing on the track's bottom cell exactly
+    /// there. Counting logical lines instead leaves the tail unreachable.
+    #[test]
+    fn info_panel_scroll_reaches_the_last_wrapped_row() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let scrollbar = app::render::scroll::ScrollbarLook::from_theme(&cs.theme);
+        assert_ne!(scrollbar.thumb, scrollbar.track, "thumb and track must differ for this assertion to bite");
+        // Twelve resource rows, each long enough to wrap into three: 36 logical
+        // lines' worth of content occupying far more rows than that.
+        let chunks: Vec<app::picker::ChunkInfo> = (0..12)
+            .map(|i| app::picker::ChunkInfo {
+                usage: "Snd ".into(),
+                number: i,
+                chunk_type: "FORM".into(),
+                len: 128,
+                detail: Some(format!("sampled at 44.1 kHz · 16-bit · stereo · loop point {i} · 12.5s")),
+            })
+            .collect();
+        let mut meta = compilation_meta();
+        meta.self_blorb = Some(chunks);
+        let area = Rect::new(0, 0, 40, 12);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new(COMPILATION_FILE);
+        let mut render = |scroll: usize, buf: &mut Buffer| {
+            super::draw_info_panel(
+                "Leather Goddesses of Phobos", COMPILATION_FILE, &meta, None, scroll, area, None,
+                &mut cover, entry_path, entry_path, false, None, &cs, buf,
+                &mut Vec::new(), &mut Vec::new(),
+            )
+        };
+
+        let mut buf_top = Buffer::empty(area);
+        let max_scroll = render(0, &mut buf_top);
+        assert!(max_scroll > 0, "wrapped content must overflow a 12-row panel");
+        // The final resource's tail is the last thing the panel has to show.
+        let tail = "loop point 11 · 12.5s";
+        assert!(!panel_text_flat(&buf_top, area).contains(tail), "the tail must start offscreen");
+        // Scrollbar at the top: the track's bottom cell is not the thumb.
+        let sb_x = area.right() - 2;
+        let sb_bottom = area.bottom() - 2;
+        assert_eq!(buf_top.cell((sb_x, sb_bottom)).unwrap().bg, scrollbar.track, "thumb must not be at the bottom at scroll 0");
+
+        let mut buf_end = Buffer::empty(area);
+        assert_eq!(render(max_scroll, &mut buf_end), max_scroll, "max_scroll is stable across scroll positions");
+        let rows_end = panel_rows(&buf_end, area);
+        assert!(
+            panel_text_flat(&buf_end, area).contains(tail),
+            "the last wrapped row must be reachable: {rows_end:?}"
+        );
+        // At max_scroll the last row of content sits on the panel's bottom row —
+        // if max_scroll counted logical lines it would be too small and the
+        // bottom rows would still be blank here.
+        assert!(!rows_end.last().unwrap().trim().is_empty(), "no blank rows below the content at max_scroll: {rows_end:?}");
+        assert_eq!(buf_end.cell((sb_x, sb_bottom)).unwrap().bg, scrollbar.thumb, "the thumb must reach the track bottom at max_scroll");
+
+        // One row short of the end still hides the very last row.
+        let mut buf_near = Buffer::empty(area);
+        render(max_scroll - 1, &mut buf_near);
+        assert_ne!(
+            panel_rows(&buf_near, area).last().unwrap(),
+            rows_end.last().unwrap(),
+            "max_scroll must be the FIRST scroll that shows the last row"
+        );
+    }
+
+    /// SQ-0861: a link too wide for the panel wraps like any other value, and
+    /// every row it wraps onto stays a link to the WHOLE URL — a wrapped tail
+    /// must not become dead text the click path has no rect for.
+    #[test]
+    fn info_panel_keeps_a_wrapped_link_clickable_on_every_row() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let url = "https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro";
+        let mut meta = minimal_story_meta();
+        meta.ifdb_link = Some(url.into());
+        // 30 columns of content: `IFDB: ` + a 45-column URL cannot fit on one row.
+        let area = Rect::new(0, 0, 32, 20);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let mut links: Vec<(Rect, String)> = Vec::new();
+        super::draw_info_panel(
+            "Game", "game.z5", &meta, None, 0, area, None, &mut cover,
+            std::path::Path::new("game.z5"), std::path::Path::new("game.z5"),
+            false, None, &cs, &mut buf, &mut links, &mut Vec::new(),
+        );
+        assert!(links.len() > 1, "the link must wrap onto more than one row: {links:?}");
+        assert!(links.iter().all(|(_, u)| u == url), "every row opens the full URL: {links:?}");
+        // Consecutive rows of one field, the continuation set in behind the marker.
+        let (first, second) = (links[0].0, links[1].0);
+        assert_eq!(second.y, first.y + 1, "the rows are adjacent");
+        assert_eq!(second.x, first.x + super::PANEL_CONT_INDENT as u16, "the tail is indented");
+        assert_eq!(
+            panel_rows(&buf, area)[second.y as usize - 1].chars().next(),
+            super::PANEL_CONT_MARK.chars().next(),
+            "the wrapped link row carries the continuation marker",
+        );
+    }
+
+    /// SQ-0861 (guard 4): a panel with almost no content width must not panic or
+    /// spin. One column of content, and a content width narrower than the single
+    /// wide glyph it has to place, both have to terminate.
+    #[test]
+    fn info_panel_survives_a_degenerate_width() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = compilation_meta();
+        meta.serial = Some("見テ".into());
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new(COMPILATION_FILE);
+        // width 2 → 0 content columns; 3 → 1; 4 → 2 (too narrow for the indent).
+        for w in 2u16..=6 {
+            let area = Rect::new(0, 0, w, 6);
+            let mut buf = Buffer::empty(area);
+            super::draw_info_panel(
+                "宇宙船の物語", COMPILATION_FILE, &meta, None, 0, area, None, &mut cover,
+                entry_path, entry_path, false, None, &cs, &mut buf,
+                &mut Vec::new(), &mut Vec::new(),
+            );
+        }
+    }
+
+    /// SQ-0861: wrapping measures TERMINAL COLUMNS, not bytes or chars — a CJK
+    /// glyph is two cells and is never split in half — and every call advances,
+    /// including when nothing fits at all.
+    #[test]
+    fn wrap_panel_line_measures_columns_and_always_advances() {
+        // Pure ASCII, word-wrapped: the break space is consumed, words stay whole.
+        assert_eq!(super::wrap_panel_line("alpha beta gamma", 11, 11), vec!["alpha beta", "gamma"]);
+        // A token wider than the row is BROKEN, not left for the renderer to
+        // clip — clipping is the defect. Every character survives.
+        assert_eq!(super::wrap_panel_line("LEATHRGODDESSES", 6, 6), vec!["LEATHR", "GODDES", "SES"]);
+        // The continuation width is what rows after the first use.
+        assert_eq!(super::wrap_panel_line("abcdefghij", 6, 3), vec!["abcdef", "ghi", "j"]);
+        // CJK: two cells each, so four fit in a 9-column row, not nine, and the
+        // fifth moves whole rather than being split down the middle.
+        assert_eq!(super::wrap_panel_line("宇宙船の物語", 9, 9), vec!["宇宙船の", "物語"]);
+        // A run of spaces at a break point does not become a row of blanks (the
+        // panel's own save rows use double spaces as column separators).
+        assert_eq!(super::wrap_panel_line("turn 42  save.babelmap", 8, 8), vec!["turn 42", "save.bab", "elmap"]);
+        // Nothing fits at all: the glyph is taken anyway so the scan advances.
+        assert_eq!(super::wrap_panel_line("宇宙", 1, 1), vec!["宇", "宙"]);
+        // Zero width cannot make progress; the line comes back unwrapped.
+        assert_eq!(super::wrap_panel_line("anything", 0, 0), vec!["anything"]);
+        // Every character of the input survives, whatever the width.
+        for w in 1..12usize {
+            let joined: String = super::wrap_panel_line("宇宙船の物語 abc", w, w).concat();
+            assert_eq!(joined.replace(' ', ""), "宇宙船の物語abc", "width {w} lost characters");
+        }
     }
 
     #[test]

@@ -343,6 +343,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("story_info_blurb", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
     row("story_info_link", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
     row("story_info_cover", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // SQ-0861: the marker in the two-column indent of an info-panel row that is
+    // the wrapped tail of the line above it. Muted, because it is punctuation
+    // saying "still the same field" — the wrapped text itself keeps whatever
+    // style its logical line carries.
+    row("story_info_continuation", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     // SQ-0789: the info panel's read-only list of picture archives detected for
     // the selected story — the same list the launch-options dialog offers. Plain
     // value text, because it is inventory; the `:active` variant marks the one
@@ -593,6 +598,8 @@ mod tests {
         "story_info_blurb",
         "story_info_link",
         "story_info_cover",
+        // SQ-0861: the wrapped-continuation marker
+        "story_info_continuation",
         // SQ-0789: the info panel's detected-artwork block
         "story_info_artwork",
         "story_info_artwork:active",

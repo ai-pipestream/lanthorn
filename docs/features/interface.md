@@ -521,12 +521,19 @@ bundled resources, detected artwork, and saves. When the file on disk is a *cont
 floppy, a blorb, a zip — the size line names the game's own size beside the
 file's, because the container's length is not the game's: every `.adf` is 880 KB
 whether it holds Zork I or Shogun. Plain story files show one size, as before.
-It animates per the `animation` config, starts
+Nothing in the panel is cut off at its edge: a value too wide for the panel wraps
+onto as many rows as it needs, each continuation set in behind a small `↳` so a
+wrapped tail still reads as more of the field above rather than as a new one.
+That matters most for the compilation images, where a row names itself as the
+disk names it — `…(Disk 6 of 7).2mg:LEATHRGODDESSES`, comfortably twice a panel's
+width — but it applies equally to a UUID-form IFID, a long save directory, and a
+save line ending in a filename. It animates per the `animation` config, starts
 closed each launch, and refuses to open on terminals too narrow to hold both
-the list and the panel. When the panel is open and its content overflows
-(including a long, word-wrapped blurb), scroll it with the wheel over the panel
+the list and the panel. When the panel is open and its content overflows,
+scroll it with the wheel over the panel
 or `Shift`+`↑`/`↓`/PgUp/PgDn — plain arrows keep navigating the list — and the
-scroll resets whenever the highlighted story changes.
+scroll resets whenever the highlighted story changes. Scrolling counts wrapped
+rows, so the end of the panel is always the end of its content.
 
 An **Artwork** block lists the native picture archives detected for that story —
 `zork0.mg1  MCGA  503 pictures` — with an arrow against whichever one the game's
@@ -570,7 +577,8 @@ average and vote count in the RATING column), `story_no_metadata` (the
 cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
 `:cover`) style selectors. The Artwork block has its own pair —
 `story_info_artwork` for the detected archives and `story_info_artwork:active`
-for the one in use — and the launch-options dialog's warnings carry
+for the one in use — the `↳` marking a wrapped continuation row carries
+`story_info_continuation`, and the launch-options dialog's warnings carry
 `dialog.launch_caveat`.
 
 - **Search & download from IFDB.** Press `/` to open the **IFDB search** modal.
