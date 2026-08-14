@@ -445,6 +445,48 @@ own filename names the box and would read the same on every row. The info
 panel's file line names both — `…(Disk 6 of 7).2mg:LEATHRGODDESSES` — so it is
 always clear which game on which image you are looking at.
 
+### A multi-disk release is one collection
+
+Those compilations mostly came as *sets*: seven Apple II volumes for *The Lost
+Treasures of Infocom*, nine Atari ST floppies, `floppy1.ima` through
+`floppy5.ima`. babelmap treats a set as one shelf of games rather than as a pile
+of disks, and it works out which files belong together from their names — files
+in one directory, sharing a disk-image extension, with identical names except
+for one run of digits that counts 1, 2, 3…
+
+**Name any one volume and you get the whole release.** `babelmap disk1.img` opens
+the browser on all eleven games across `disk1`–`disk4`, not the single story that
+one image happens to hold. `babelmap "Lost Treasures … (Disk 1 of 7).2mg"` opens
+all thirty — and that one used to be an error, because the Apple II press puts a
+launcher on disk 1 and no story at all. Once you're in, it behaves like any
+library: pick a game, play it, `/quit-to-library` comes back to the same shelf.
+
+**And a game the set carries twice is listed once.** These collections overlap:
+`Infocom Compilation 5` stores its games as flat files and `Compilation 8` in
+per-game directories, and both carry the very same Trinity — release 11, serial
+860509. So do Lurking Horror, Moonmist, Stationfall, Cutthroats and Hitchhiker's.
+Listing every disk's contents gave 39 rows for 33 games; matching on the story's
+IFID gives you each game once, off the first disk that offers it, with all its
+saves and metadata intact.
+
+Folding is deliberately narrow. It happens **only within one release**, and only
+between rows that are the *same build* down to the release, serial and checksum.
+Zork Zero's release 296 on a Macintosh volume, 366 on an Amiga floppy and 393 on
+the DOS media are three different games as far as this is concerned, and stay
+three rows — as does that same 393 sitting on `floppy5.ima`, on the 360K DOS
+press and on a loose `.z6`, because those are four separate things you chose to
+keep. Nothing outside a set is ever merged.
+
+Recognition is cautious on purpose, since wrongly merging two collections is
+worse than not spotting one. `adv01.dat` … `adv13.dat` are thirteen separate
+Scott Adams games and stay that way — they aren't disk images. Zork Zero's 360K
+and 720K DOS presses both label their disks `(Disk 1)`, `(Disk 2)`, and remain
+two sets, because the run that differs between them is `360`/`720` — a capacity,
+not a disk number. `disk*.img` and `floppy*.ima` are two families and two sets.
+Years like `(1993)` are never mistaken for disk numbers, `Zork I`/`II`/`III` are
+words rather than digits, and a set whose first disk you don't have isn't
+detected at all — you'll still see every game, just listed disk by disk.
+
 When you launch from a directory this way, `/quit-to-library` drops the current
 story and returns you to the picker to choose another (honouring the usual
 save-on-quit prompt) — `/quit` still exits babelmap outright. Launched against a
