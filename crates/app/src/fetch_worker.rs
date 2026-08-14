@@ -526,7 +526,7 @@ mod tests {
         let fake = Fake::new(HashMap::new());
         let calls = Arc::clone(&fake.calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid }], forced: false , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid }], forced: false , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress.len(), 1);
@@ -552,7 +552,7 @@ mod tests {
         let fake = Fake::new(responses);
         let calls = Arc::clone(&fake.calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress.len(), 1);
@@ -577,7 +577,7 @@ mod tests {
         responses.insert(ifid.clone(), FakeResp::NotFound);
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: false , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }], forced: false , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress[0].outcome, Outcome::NotFound);
@@ -606,7 +606,7 @@ mod tests {
         responses.insert(ifid.clone(), FakeResp::Err("connection reset".into()));
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: false , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }], forced: false , id_override: None});
 
         let progress = wait_for(&fetcher, 1);
         assert_eq!(progress[0].outcome, Outcome::Failed("connection reset".into()));
@@ -636,7 +636,7 @@ mod tests {
         let calls = Arc::clone(&fake.calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
         fetcher.request(FetchOrder {
-            stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }],
+            stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }],
             forced: false,
             id_override: Some(tuid.clone()),
         });
@@ -767,7 +767,7 @@ mod tests {
         );
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
         wait_for(&fetcher, 1);
 
         let reloaded = story_info::load(&game_dir, &ifid).unwrap();
@@ -803,7 +803,7 @@ mod tests {
         let fake = Fake::new(responses);
         let cover_calls = Arc::clone(&fake.cover_calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
         wait_for(&fetcher, 1);
 
         assert_eq!(cover_calls.lock().unwrap().len(), 1, "the cover must be fetched exactly once");
@@ -850,7 +850,7 @@ mod tests {
         let mut fake = Fake::new(responses);
         fake.cover_bytes = b"<html><body>503 Service Unavailable</body></html>".to_vec();
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true, id_override: None });
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }], forced: true, id_override: None });
         wait_for(&fetcher, 1);
 
         assert!(!game_dir.join("cover.png").exists(), "junk must never become cover.png");
@@ -895,7 +895,7 @@ mod tests {
         let fake = Fake::new(responses);
         let cover_calls = Arc::clone(&fake.cover_calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
-        fetcher.request(FetchOrder { stories: vec![FetchTarget { path: path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
+        fetcher.request(FetchOrder { stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }], forced: true , id_override: None});
         wait_for(&fetcher, 1);
 
         assert!(cover_calls.lock().unwrap().is_empty(), "a story with its own frontispiece needs no fetch");

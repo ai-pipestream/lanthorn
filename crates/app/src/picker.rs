@@ -251,9 +251,21 @@ fn z_release(exec: &[u8]) -> Option<u16> {
 }
 
 /// Z-machine serial: 6 ASCII bytes at header offset 0x12..0x18.
+///
+/// **Bit 7 comes off each byte**, exactly as `cli_host::storage::DiskBuild::of`,
+/// `blorb::adf::looks_like_story` and `zvm-cli`'s disk menu read the same six
+/// bytes (SQ-0856): the Apple II wrote text with the high bit set, and
+/// `LEATHRGODDESSES` on *Lost Treasures* `INFOCOM6` spells its serial
+/// `C2 EC EF F7 EE A1` — `Blown!`. Unmasked, `from_utf8_lossy` turned that into
+/// six replacement characters, so the SERIAL column showed nothing readable and
+/// — the part that actually broke — the row's save key derived from it
+/// (`StoryMeta::disk_build`) disagreed with the key the launch computes, sending
+/// the game's saves to two different directories depending on which side of the
+/// list you were on (SQ-0859). Every other serial in the corpus has bit 7 clear,
+/// so nothing else moves.
 fn z_serial(exec: &[u8]) -> Option<String> {
     let s = exec.get(0x12..0x18)?;
-    Some(String::from_utf8_lossy(s).into_owned())
+    Some(s.iter().map(|c| char::from(c & 0x7f)).collect())
 }
 
 /// Z-machine Flags2: big-endian word at header offset 0x10.
@@ -957,9 +969,9 @@ pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
     }
     stories
         .into_iter()
-        .filter_map(|(name, bytes)| {
-            let loaded = crate::hints::extract_story(bytes).ok()?;
-            entry_from_loaded(path, Some(&name), loaded, Some(disk_image), data_base)
+        .filter_map(|story| {
+            let loaded = crate::hints::extract_story(story.bytes).ok()?;
+            entry_from_loaded(path, Some(&story.name), loaded, Some(disk_image), data_base)
         })
         .collect()
 }

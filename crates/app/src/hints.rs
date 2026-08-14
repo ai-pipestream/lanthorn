@@ -693,13 +693,12 @@ pub use blorb::medium::DiskImage;
 /// The names come back exactly as [`blorb::medium::MountedDisk::stories`] gives
 /// them — by path on the formats that have directories — which is what makes
 /// them usable as the selector [`load_mounted_story_from`] takes.
-pub fn mounted_stories(path: &Path) -> Option<(DiskImage, Vec<(String, Vec<u8>)>)> {
+pub fn mounted_stories(path: &Path) -> Option<(DiskImage, Vec<blorb::medium::DiskStory>)> {
     let raw = std::fs::read(path).ok()?;
     blorb::medium::DiskImage::detect(&raw)?;
     let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
     let format = disk.format();
-    let stories: Vec<(String, Vec<u8>)> =
-        disk.stories().into_iter().map(|s| (s.name, s.bytes)).collect();
+    let stories = disk.stories();
     (!stories.is_empty()).then_some((format, stories))
 }
 

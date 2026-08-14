@@ -426,6 +426,25 @@ the `.z5`s rather than being playable only by name. That is a pre-filter and not
 more — a `.img` that turns out to be a holiday photo is opened, found not to be a
 disk at all, and never shown.
 
+**And a row is a game, not a file.** An Amiga release came one story to a disk,
+but a compilation does not: `Infocom Compilation 1` carries six, `floppy2.ima`
+six more, and the *Lost Treasures* Apple II volumes four or five apiece. Each of
+them is its own row — its own title, its own `Z3 (ST)`/`Z5 (ProDOS)` type, its
+own release and serial, its own saves and its own cover — so you pick *Leather
+Goddesses of Phobos* the way you pick anything else in the list, by name, and
+Enter opens that game rather than whichever story on the disk happened to be the
+largest file. About thirty games across the six *Lost Treasures* volumes alone
+were unreachable from this screen before; sort, search and the info panel all
+work on them now because they are ordinary rows.
+
+A disk holding one story is untouched by any of this: one row, opened by path,
+exactly as before. Where the title tables know a build, the row is titled from
+it (*Sherlock: The Riddle of the Crown Jewels*); where they do not, the row takes
+the name the disk itself gives the file (`LEATHRGODDESSES`), because the image's
+own filename names the box and would read the same on every row. The info
+panel's file line names both — `…(Disk 6 of 7).2mg:LEATHRGODDESSES` — so it is
+always clear which game on which image you are looking at.
+
 When you launch from a directory this way, `/quit-to-library` drops the current
 story and returns you to the picker to choose another (honouring the usual
 save-on-quit prompt) — `/quit` still exits babelmap outright. Launched against a

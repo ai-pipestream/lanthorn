@@ -333,6 +333,15 @@ terminal that isn't there, `zvm-cli` lists the candidates and tells you to pass
 **`--story <n|name>`** — a menu number, or any part of a name that picks out one
 story.
 
+**The TUI asks the same question a different way** (SQ-0859). It has a list
+already, so a compilation contributes one *row per game* to the story browser
+rather than a menu: same mount, same enumeration, same names, and the row carries
+which story it stands for straight into the launch. A menu is what a front-end
+with nothing on screen needs; a browser that can already sort and search by title
+does better by putting the games in it. Both front-ends reach every story on
+every image, and — because the save key is the story's own release and serial —
+`--story 4` and the browser row land in the same directory.
+
 **And each of those six games gets its own saves** (SQ-0850). A per-game save
 directory used to be named after the story file, which was fine while one image
 meant one game and quietly catastrophic once it did not: all six stories on an ST
