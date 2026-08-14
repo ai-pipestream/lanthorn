@@ -752,3 +752,145 @@ fn with_game_colours_off_arthurs_notice_keeps_the_themes_own_system_style() {
         "{who}: no Amiga page may reach the cells with colours declined, got {styles:?}",
     );
 }
+
+// ── (d) The input echo stands on the same ground (SQ-0847) ───────────────────
+
+/// `render_with_transcript`, with a command either being TYPED at the live prompt
+/// or already COMMITTED onto the game's own `>` line — which is what `turn.rs`
+/// does with the echo in inline mode, the shipped default.
+#[allow(deprecated)]
+fn render_echo(s: &GameSession, lines: &[String], honor: bool, typed: &str, committed: bool) -> (Rect, Buffer) {
+    use app::engine::Engine;
+    let model = s.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker =
+        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.honor_game_colours = honor;
+    for line in lines {
+        state.push_transcript_kind(line, app::state::TranscriptKind::Story);
+    }
+    state.push_transcript_kind(">", app::state::TranscriptKind::Story);
+    if committed {
+        state.append_to_last_transcript_line(typed);
+    } else {
+        state.input.set(typed, true);
+    }
+    let area = Rect::new(0, 0, 115, 45);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    (area, buf)
+}
+
+/// Every cell of `needle` where it was drawn, as `(fg, bg, modifier)` strings so a
+/// failure prints what it measured.
+fn span_look(area: Rect, buf: &Buffer, needle: &str) -> Vec<(String, String, String)> {
+    for y in 0..area.height {
+        let text: String = (0..area.width)
+            .map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+            .collect();
+        if let Some(byte_at) = text.find(needle) {
+            let x0 = text[..byte_at].chars().count() as u16;
+            let x1 = (x0 + needle.chars().count() as u16).min(area.width - 1);
+            return (x0..=x1)
+                .map(|x| {
+                    let c = buf.cell((x, y)).expect("in-bounds cell");
+                    (format!("{:?}", c.fg), format!("{:?}", c.bg), format!("{:?}", c.modifier))
+                })
+                .collect();
+        }
+    }
+    panic!("{needle:?} was never drawn into the pane");
+}
+
+/// **The Amiga half of SQ-0847's non-regression.** The Macintosh is where a player
+/// saw it — white ink on a white page — but the defect was never about the
+/// Macintosh: the typed line resolved `input_text` over the transcript style, and
+/// that selector's ink is the `text` role's, so it overwrote whatever machine pair
+/// lay beneath. On the Amiga the same overwrite happened and merely *looked*
+/// right, because the role's ink is white and Infocom's `DEF_FORE` is white too —
+/// the theme's `White` and the machine's `Rgb(255, 255, 255)`, two different
+/// values agreeing by coincidence, which is exactly how a defect survives.
+///
+/// Arthur release 54 is the case: it never sets a colour anywhere, so its whole
+/// screen is the machine's `DEF_FORE 9` over `DEF_BACK 12`, and the two echo paths
+/// must land on that pair identically.
+///
+/// FALSIFY by reverting the machine-ground fallback in
+/// `render::screen::game_input_style`: the typed span comes back `White` on the
+/// machine's grey while the committed span stays `Rgb(255, 255, 255)`.
+#[test]
+fn the_amigas_typed_echo_stands_on_the_same_pair_as_its_committed_one() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((s, lines)) = arthur_at_the_church(true) else { return };
+    let who = ctx(&ARTHUR, InterpreterProfile::Amiga, true);
+    let (white, grey) = amiga_pair_rgb();
+
+    let (area, live) = render_echo(&s, &lines, true, "look", false);
+    let (_, done) = render_echo(&s, &lines, true, "look", true);
+    let live_span = span_look(area, &live, ">look");
+    assert_eq!(
+        live_span,
+        span_look(area, &done, ">look"),
+        "{who}: the echo and the committed text must render the same characters the same way",
+    );
+    for cell in &live_span[1..=4] {
+        assert_eq!(
+            (cell.0.clone(), cell.1.clone()),
+            (white.clone(), grey.clone()),
+            "{who}: a typed character must be the machine's ink on the machine's page, got {live_span:?}",
+        );
+    }
+
+    // …and the switch that declines game colours declines this too: no Amiga page
+    // reaches the typed line, and it keeps the theme's own input ink.
+    let (area, off) = render_echo(&s, &lines, false, "look", false);
+    let themed = span_look(area, &off, ">look");
+    let theme_ink = format!(
+        "{:?}",
+        app::colors::ColorScheme::terminal_default()
+            .theme
+            .get("input_text")
+            .style
+            .fg
+            .expect("the theme names an input ink")
+    );
+    for cell in &themed[1..=4] {
+        assert_eq!(cell.0, theme_ink, "{who} (colours declined): the theme owns the input line, got {themed:?}");
+        assert_ne!(cell.1, grey, "{who} (colours declined): no Amiga page may reach the typed line");
+    }
+}
+
+/// …and a game that ASKED for a pair still gets the one it asked for. Zork Zero
+/// release 366 sets `set_colour(2, 10)` from window 0, so the story window
+/// declares a pair of its own and the machine's default ground is never consulted
+/// — the SQ-0532 wave-6 path, unmoved by SQ-0847.
+#[test]
+fn a_game_that_named_its_own_pair_still_types_in_that_pair() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = boot(&ZORK_ZERO, InterpreterProfile::Amiga, true) else { return };
+    let who = ctx(&ZORK_ZERO, InterpreterProfile::Amiga, true);
+    let pairs = window_pairs(&s);
+    assert_eq!(
+        pairs[0],
+        (ZColour::Standard(2), ZColour::Standard(10)),
+        "{who}: premise — the story window named its own pair",
+    );
+    // Standard 2 and standard 10, resolved the way the prose resolves them — the
+    // Amiga palette is process-global here, so the greys must come through
+    // `zvm::screen::grey_rgb` rather than off a default palette table.
+    let (br, bg_, bb) = app::colors::standard_colour_rgb(2).expect("standard 2 is black");
+    let (gr, gg, gb) = zvm::screen::grey_rgb(10);
+    let (black, light_grey) = (format!("Rgb({br}, {bg_}, {bb})"), format!("Rgb({gr}, {gg}, {gb})"));
+
+    let (area, live) = render_echo(&s, &["Nothing happens.".to_string()], true, "look", false);
+    let span = span_look(area, &live, ">look");
+    for cell in &span[1..=4] {
+        assert_eq!(
+            (cell.0.clone(), cell.1.clone()),
+            (black.clone(), light_grey.clone()),
+            "{who}: the typed line must keep the pair the GAME set, got {span:?}",
+        );
+    }
+}

@@ -587,6 +587,20 @@ Amiga floppy or anywhere else.
   as §8.3 describes. This is only the ground beneath a window that asked for
   nothing, and `honor_game_colours = false` still hands it back to your theme.
 
+  **What you are typing stands on that page too.** The line you are composing is
+  drawn by babelmap rather than by the story, and it used to resolve its ink from
+  your theme alone — which on a machine page is a coin toss. On the Amiga it won
+  the toss, because the theme's body ink is white and so is `DEF_FORE`; on the
+  Macintosh it lost it completely, and typing into a white Mac page was typing in
+  white on white. You could not see a word until you pressed Enter, whereupon the
+  game echoed the command back as prose and it appeared, in black. So the live
+  echo now stands on the same ground the committed text does: the machine's own
+  pair, the same characters rendering the same way whether you have pressed Enter
+  or not. A game that *asks* for colours with `set_colour` still wins over the
+  machine's defaults, exactly as it always did — and so does a `style.toml` that
+  names `input_text` or `input_prompt` by hand, because the machine's page is a
+  default and anything you declare outranks a default.
+
   Two things the rule deliberately does *not* do. Colour **-1**, "the colour of the
   pixel under the cursor", names no colour, so it loads no pen — it stays a
   request to draw over what is already there, which is how *Zork Zero* prints its
