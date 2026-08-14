@@ -14,6 +14,8 @@ mod zork0_v6_gameplay;
 mod zork0_v6_persistence;
 #[path = "suites/zork0_v6_windows.rs"]
 mod zork0_v6_windows;
+#[path = "suites/zork1_cellar_suggestion.rs"]
+mod zork1_cellar_suggestion;
 #[path = "suites/zork1_here_column.rs"]
 mod zork1_here_column;
 #[path = "suites/zork1_inventory.rs"]

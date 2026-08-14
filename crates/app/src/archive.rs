@@ -1703,6 +1703,10 @@ mod tests {
     ///
     /// The restore itself is not the test. The CROSSING after it is: everything looks fine at the
     /// moment a map is loaded, and the seam only has anything to say the next time it is walked.
+    ///
+    /// Both ends of the trapdoor are exercised (SQ-0853), because a region can now be noticed on
+    /// the way IN as well as on the way out: `3 -Up-> 1` is the climb, `1 -Down-> 3` is the descent,
+    /// and an archive that carried only one of them would re-ask about the other.
     #[test]
     fn a_declined_layer_suggestion_survives_the_archive() {
         use mapper::layer::{move_region, planar_region, MoveTarget};
@@ -1727,7 +1731,9 @@ mod tests {
         mapper.observe(4, "Wine Cellar", Some(Direction::W));
         mapper.observe(3, "Cellar", Some(Direction::W));
         let seam = SeamKey { from: 3, dir: Direction::Up };
+        let descent = SeamKey { from: 1, dir: Direction::Down };
         mapper.graph.set_seam_decision(seam, SeamDecision::Ignored);
+        mapper.graph.set_seam_decision(descent, SeamDecision::Ignored);
 
         let path = temp_archive_path("seam-memory");
         save_archive_m(&path, &mapper, &dummy_machine(), &[], &[], &[], &[], &[])
@@ -1737,16 +1743,24 @@ mod tests {
 
         let mut restored = ac.mapper;
         assert_eq!(restored.graph.seam_decision(seam), SeamDecision::Ignored);
+        assert_eq!(restored.graph.seam_decision(descent), SeamDecision::Ignored);
 
-        // Perturb, THEN assert: climb the stairs the player already declined to split.
+        // Perturb, THEN assert: climb the stairs the player already declined to split, and walk
+        // back down them, which is the other moment the same region can be noticed at.
         restored.observe(1, "Hall", Some(Direction::Up));
         assert_eq!(
             restored.take_suggestion(),
             None,
             "a restored game does not re-ask about a seam already declined"
         );
+        restored.observe(3, "Cellar", Some(Direction::Down));
+        assert_eq!(
+            restored.take_suggestion(),
+            None,
+            "…and no more so on the way back in than on the way out"
+        );
 
-        // ...and the same climb on an otherwise identical map that never declined it does ask, so
+        // ...and the same walk on an otherwise identical map that never declined it does ask, so
         // the silence above is the memory and not the fixture.
         let mut fresh = mapper::persist::from_json(&to_json(&small_cellar_mapper())).unwrap();
         fresh.observe(1, "Hall", Some(Direction::Up));
@@ -1754,6 +1768,10 @@ mod tests {
         assert_eq!(s.seam, seam);
         assert_eq!(s.region.rooms, [3, 4, 5, 6].into_iter().collect());
         assert_eq!(s.destinations, vec![MoveTarget::New]);
+        fresh.observe(3, "Cellar", Some(Direction::Down));
+        let down = fresh.take_suggestion().expect("and so does the descent, keyed on the trapdoor");
+        assert_eq!(down.seam, descent);
+        assert_eq!(down.region.rooms, [3, 4, 5, 6].into_iter().collect());
         // And the region it names is the one an accepted move would take.
         let mut g = fresh.graph.clone();
         let region = planar_region(&g, 3);
@@ -1786,7 +1804,15 @@ mod tests {
         assert!(state.overlays.region_prompt.is_some(), "the prompt is what is being answered");
         apply_region_prompt(&mut state, &mut mapper, RegionPromptAct::Never);
 
+        // The same region is also noticed on the way IN, and that is a different passage with its
+        // own answer (SQ-0853). Press Never on that one too, so the archive has to carry both.
+        mapper.observe(3, "Cellar", Some(Direction::Down));
+        offer_layer_suggestion(&mut state, &mut mapper);
+        assert!(state.overlays.region_prompt.is_some(), "the descent asks its own question");
+        apply_region_prompt(&mut state, &mut mapper, RegionPromptAct::Never);
+
         let seam = SeamKey { from: 3, dir: Direction::Up };
+        let descent = SeamKey { from: 1, dir: Direction::Down };
         let path = temp_archive_path("prompt-never");
         save_archive_m(&path, &mapper, &dummy_machine(), &[], &[], &[], &[], &[])
             .expect("save_archive");
@@ -1795,6 +1821,7 @@ mod tests {
 
         let mut restored = ac.mapper;
         assert_eq!(restored.graph.seam_decision(seam), SeamDecision::Ignored);
+        assert_eq!(restored.graph.seam_decision(descent), SeamDecision::Ignored);
 
         // Perturb, THEN assert: walk back down and climb out again.
         let mut after = AppState::default();

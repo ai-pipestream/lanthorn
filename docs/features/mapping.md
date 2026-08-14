@@ -151,17 +151,23 @@ The map is a place you can move through, not just a picture.
 - **The map sometimes speaks first** — twice in a game, babelmap notices that a set of
   rooms wants to be a layer of its own, and says so. It never acts: layers still come
   only from a `move-region` you asked for. It **suggests**, and you decide.
-  The first case is structural. You climb down a trapdoor, wander four rooms of cellar,
-  and climb back up — and *that* is the moment the map has something to say, not while
-  you are still down there. Three things have to be true at once, and each one is a
-  prompt you would otherwise have got and not wanted. The cellar must be reachable
-  **only** through portals: a balcony you can also walk round to is not behind a
-  boundary at all, whatever the `up` says. It must be **four rooms or more**, because
-  a cupboard behind a door is not a floor plan and drawing it in place with a dotted
-  stub is the right answer. And you must be **stepping back** across the seam, not
-  outward through it — otherwise the same trapdoor would fire on the way *down* and
-  cheerfully offer to peel your starting town off the map. If you never come back, you
-  are never asked. That is deliberate.
+  The first case is structural: a set of rooms that hangs off one portal and nothing else.
+  Two things have to be true of it whichever way you are walking, and each one is a prompt
+  you would otherwise have got and not wanted. The cellar must be reachable **only**
+  through portals: a balcony you can also walk round to is not behind a boundary at all,
+  whatever the `up` says. And it must be **four rooms or more**, because a cupboard behind
+  a door is not a floor plan and drawing it in place with a dotted stub is the right answer.
+  There are then two moments it can be noticed at, because there are two shapes of cellar.
+  Climb down a trapdoor, wander four rooms, climb back up, and *that* is the moment: the
+  map has finished being drawn and you are the one who closed it. But Zork's trapdoor
+  crashes shut and is barred behind you, and a cellar with no way out would on that rule
+  never be mentioned at all — so when the rooms beyond a portal grow into a floor plan
+  while you are still down there, babelmap speaks on the room that makes it four, and then
+  goes quiet. One offer per region, not one per room you add to it.
+  What it offers is always the side you are **on**, never the side you came from — that is
+  the whole safety of asking on the way in. A region only counts as one when every room in
+  it was found *after* the room it hangs off, so your starting town, which predates
+  everything, can never be what a prompt proposes to peel away.
   The second case is the name. Walk into a room called **Maze** from a room that isn't
   one, and babelmap says so at the doorway — no four-room floor, no waiting for you to
   return, because the name *is* the evidence and it is there immediately. It fires on
@@ -175,7 +181,9 @@ The map is a place you can move through, not just a picture.
   layers in the first place, so the `down` you reached the cellar by must not be read as
   proof the cellar belongs upstairs. Grid position is not evidence either; the router
   derives it, so a suggestion built on it could change without the map changing.
-  And whatever you answer, babelmap remembers it, in the map file: **not now** re-arms
+  And whatever you answer, babelmap remembers it, in the map file, against the passage you
+  will cross again — the way out when you were noticed leaving, the trapdoor itself when
+  you were noticed inside. **Not now** re-arms
   the seam for your next crossing, **never** silences that passage for good, and folding
   a layer back into another silences every passage it just closed — you have already
   said those rooms belong together. A prompt that comes back on the very next step is
