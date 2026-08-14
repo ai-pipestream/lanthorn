@@ -11,6 +11,8 @@
 
 #[path = "suites/art_resample_policy.rs"]
 mod art_resample_policy;
+#[path = "suites/v6_archive_border_sweep.rs"]
+mod v6_archive_border_sweep;
 #[path = "suites/v6_amiga_global_colour_pair.rs"]
 mod v6_amiga_global_colour_pair;
 #[path = "suites/v6_amiga_shipped_interpreter.rs"]

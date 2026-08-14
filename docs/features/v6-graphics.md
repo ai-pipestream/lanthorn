@@ -1000,6 +1000,32 @@ session-only switch that never touches your saved config:
   from an unmodified copy of the art. A taller pane gets *more* rings rather than
   longer gaps — one at 40 rows, three at 64, four at 90 — which is the articulation
   a 480×300 window never had room to show.
+  **Every picture archive in the library is now swept for flank art, so the next
+  one cannot hide.** That ring was caught by eye, in one room, on one border set,
+  on the single format whose picture space does not divide by the text cell — and
+  the test it broke had never been wrong in its life, because every other
+  rendition divides exactly. But a flank's composition is a pure function of the
+  art and the height it has to fill, so the art no longer has to come off a screen
+  somebody walked to. Every archive is opened, every picture in it measured, and
+  the ones that can be a flank are composed at three pane heights and checked.
+  Nothing names a picture number anywhere: a border is found by *shape* — either a
+  plate covering the whole picture space, whose left and right crops are the very
+  flanks the renderer takes, or a full-width strip and a narrow column whose
+  heights tile that space exactly, which is how the PC renditions ship theirs and
+  is enough to turn up the castle, the underground and the jungle without knowing
+  that any of them exists. What is then asserted is what has to be true of *any*
+  composition: the band is painted to its last row, nothing below the art is
+  transparent, every row in the extension is a row the art itself has — so a
+  stretch or a shift cannot pass, while a mirrored tile can, because flipping a
+  strip does not move a single row's span — a layout that stamps a foot ends on
+  that foot, and, the one that would have caught the ring in the first place, four
+  pixels of cell rounding decide nothing: not which layout a flank is, and not one
+  pixel of what it composes to. Alongside runs a tally of which layout each
+  archive's art falls into, pinned, because that is the number which says a newly
+  supported format has arrived carrying art that no recipe handles. Arthur is the
+  one border the sweep cannot rebuild — his poles stop short of the bottom by
+  design and hang at a height the archive never states — so his flank stays pinned
+  where it always was, in a suite that boots him.
   The obvious escape from all of this — autocorrelate the flank down its own y
   axis, take the strongest period as the tile height, and never ask which scene is
   on screen — was measured across the corpus and **does not work**, for a reason
