@@ -3114,6 +3114,178 @@ mod tests {
         (pics.entries().len(), n, h)
     }
 
+    /// Arthur's Apple press, or `None` (with a SKIP note) when the gitignored
+    /// image is not there.
+    ///
+    /// Deliberately through `MountedDisk::pictures` — the same call a host makes
+    /// — rather than through `infocom_packed` directly, so these tests prove the
+    /// whole chain from a `.2mg` on disk to decoded pixels, and would catch the
+    /// artwork being decodable but unreachable.
+    fn apple_arthur() -> Option<InfocomPics> {
+        let bytes = fixture("Arthur Quest 4 Excalibur.2mg")?;
+        let disk = crate::medium::MountedDisk::mount(bytes).expect("the 2mg mounts");
+        let art = disk.pictures().expect("Arthur's Apple press carries artwork");
+        assert_eq!(art.name, "ARTHUR.1/ARTHUR.D1", "named for the segment carrying the index");
+        Some(art.pictures)
+    }
+
+    /// SQ-0863, real media: *Arthur* release 63 / serial 890622, off
+    /// `Arthur Quest 4 Excalibur.2mg` — the Apple flavour, which this reader
+    /// used to refuse outright on its 8-byte record.
+    ///
+    /// `stories/` is gitignored, so this skips vacuously on CI.
+    #[test]
+    fn reads_the_apple_arthur_archives() {
+        let Some(pics) = apple_arthur() else { return };
+        assert_eq!(pics.flavour(), Flavour::Apple);
+        // Four floppies carry art; `PHFID` is the disk number, so the set starts
+        // at 2 rather than at 1.
+        assert_eq!(pics.part(), 2, "the first archive is disk 2's");
+        assert_eq!(pics.parts(), 4, "disks 2, 3, 4 and 5 all carry artwork");
+
+        // 51 + 26 + 53 + 38.
+        assert_eq!(pics.entries().len(), 168);
+        let with_pixels = pics.entries().iter().filter(|e| e.has_pixels()).count();
+        assert_eq!(with_pixels, 135, "the other 33 are size-only placeholders");
+
+        // The parts PARTITION the id space — unlike the PC's `.EG1`/`.EG2`
+        // split, where 55 of Arthur's ids are deliberately on both floppies.
+        // Nothing was dropped by the merge, so the totals add up exactly.
+        let mut ids: Vec<u16> = pics.entries().iter().map(|e| e.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 168, "no id appears in two parts");
+
+        // `apple.equ`: MAXWIDTH EQU 140 ; 560 / 4, MAXHEIGHT EQU 192.
+        assert_eq!(pics.picture_space_width(), 140);
+        assert_eq!(pics.picture_space_height(), 192);
+        let widest = pics.entries().iter().map(|e| e.width).max().unwrap();
+        let tallest = pics.entries().iter().map(|e| e.height).max().unwrap();
+        assert_eq!((widest, tallest), (140, 192), "the full-screen plates fill it exactly");
+
+        // No archive stores a palette (`PHFPAL`), so every picture is adaptive
+        // and the colours come from the hardware table.
+        assert!(pics.entries().iter().all(|e| !e.has_own_palette()));
+        assert_eq!(pics.hardware_palette(), Some(APPLE_DHGR_PALETTE));
+        assert!(!pics.is_monochrome(), "sixteen colours, not two");
+
+        // Every picture decodes to exactly its declared size, in range.
+        for e in pics.entries().iter().filter(|e| e.has_pixels()) {
+            let p = pics.decode(e.id).expect("a picture with pixels decodes");
+            assert_eq!(
+                p.indices.len(),
+                usize::from(e.width) * usize::from(e.height),
+                "picture {} decoded to the wrong size",
+                e.id
+            );
+            assert!(p.indices.iter().all(|&i| i < 16), "picture {} left the palette", e.id);
+        }
+        // One number over every pixel and every resolved colour.
+        assert_eq!(fingerprint(&pics), (168, 135, 0x826e_44f4_17af_3169));
+    }
+
+    /// SQ-0863: the three-byte length prefix is an oracle, and this is it.
+    ///
+    /// `decode_apple` steps over the prefix exactly as `pic.asm` does and never
+    /// reads it, so it is an independent statement of where each RLE stream
+    /// ends. The pictures pack contiguously from the byte after the directory,
+    /// which means `dataOff + 3 + declared` must land precisely on the next
+    /// picture's `dataOff` — 135 times, with nothing left over. A decoder that
+    /// stopped in the wrong place could not produce a gapless tiling.
+    #[test]
+    fn the_apple_length_prefix_tiles_every_archive_exactly() {
+        let Some(pics) = apple_arthur() else { return };
+        let mut offsets: Vec<usize> =
+            pics.entries().iter().filter(|e| e.has_pixels()).map(|e| e.data).collect();
+        offsets.sort_unstable();
+        assert_eq!(offsets.len(), 135);
+
+        let mut contiguous = 0;
+        let mut seams = 0;
+        for pair in offsets.windows(2) {
+            let (here, next) = (pair[0], pair[1]);
+            let declared = be24(&pics.data, here);
+            // A picture's declared length may never reach into the next one.
+            assert!(here + APPLE_PREFIX + declared <= next, "picture at {here:#x} overruns");
+            if here + APPLE_PREFIX + declared == next {
+                contiguous += 1;
+            } else {
+                seams += 1;
+            }
+        }
+        // Four archives were merged, so exactly three of the 134 gaps are seams
+        // between one part's last picture and the next part's first — every
+        // other pair is nose to tail with not one byte between them.
+        assert_eq!((contiguous, seams), (131, 3), "the declared lengths tile each archive");
+    }
+
+    /// SQ-0863: the transparent colour is the flag byte's TOP nibble.
+    ///
+    /// `pic.asm` tests bit 0 and then shifts the same byte right four
+    /// (`APPLE_EF_TRANS`). Getting the shift wrong is invisible in a
+    /// size-and-range check and shows up only as a hole in the wrong colour, so
+    /// it is pinned against the real directory: Arthur names colours 1, 2, 3
+    /// and 4, and 119 of its 135 pictures name none.
+    #[test]
+    fn the_apple_transparent_colour_is_the_flag_bytes_top_nibble() {
+        let Some(pics) = apple_arthur() else { return };
+        let mut named = std::collections::BTreeMap::<u8, usize>::new();
+        let mut opaque = 0usize;
+        for e in pics.entries().iter().filter(|e| e.has_pixels()) {
+            match pics.decode(e.id).unwrap().transparent {
+                Some(c) => {
+                    assert_eq!(u16::from(c), e.flags >> 4, "picture {}", e.id);
+                    assert_ne!(e.flags & APPLE_EF_TRANS, 0);
+                    *named.entry(c).or_default() += 1;
+                }
+                None => {
+                    assert_eq!(e.flags & APPLE_EF_TRANS, 0, "picture {}", e.id);
+                    opaque += 1;
+                }
+            }
+        }
+        assert_eq!(named, [(1, 3), (2, 8), (3, 4), (4, 1)].into_iter().collect());
+        assert_eq!(opaque, 119);
+        // A transparent index really does drop out of the RGBA expansion.
+        let (&colour, _) = named.iter().next().unwrap();
+        let id = pics
+            .entries()
+            .iter()
+            .find(|e| e.has_pixels() && e.flags & APPLE_EF_TRANS != 0 && e.flags >> 4 == 1)
+            .unwrap()
+            .id;
+        let pic = pics.decode(id).unwrap();
+        let rgba = pic.rgba();
+        for (i, &ix) in pic.indices.iter().enumerate() {
+            assert_eq!(rgba[i * 4 + 3], if ix == colour { 0 } else { 255 }, "pixel {i}");
+        }
+    }
+
+    /// SQ-0863: a segment is not an archive, and `parse` must keep saying so.
+    ///
+    /// An Apple archive's offsets are positions in the SEGMENT, so handing the
+    /// segment to `parse` — which looks for a header at byte 0 — has to fail:
+    /// byte 0 of `ARTHUR.D2` is story page data, not `PHFID`. This is the guard
+    /// that the new 8-byte branch did not turn `parse` into something that
+    /// accepts arbitrary story bytes.
+    #[test]
+    fn parse_still_refuses_a_bare_apple_segment() {
+        let Some(bytes) = fixture("Arthur Quest 4 Excalibur.2mg") else { return };
+        let disk = crate::medium::MountedDisk::mount(bytes).expect("the 2mg mounts");
+        let mut seen = 0;
+        for (name, seg) in disk.contents() {
+            if !name.to_ascii_uppercase().contains("ARTHUR.D") {
+                continue;
+            }
+            seen += 1;
+            assert!(
+                InfocomPics::parse(seg).is_err(),
+                "{name} parsed as an archive from byte 0, which it is not"
+            );
+        }
+        assert_eq!(seen, 5, "five segments");
+    }
+
     /// SQ-0744, real media: Shogun's Amiga floppy, the 16-byte flavour.
     ///
     /// Before this reader learned the flavour, `parse` rejected the whole file

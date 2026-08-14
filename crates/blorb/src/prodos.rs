@@ -523,22 +523,24 @@ impl ProDos {
 
     /// The native Infocom picture archive on this volume, with its stored path.
     ///
-    /// Identified by parsing, exactly as [`crate::adf::Adf::pictures`] does.
-    /// Nothing in the ProDOS corpus answers, and the reason is worth stating
-    /// because it changed under SQ-0852: the two graphical releases here
-    /// (*Arthur* and *Journey*) keep their artwork inside the same segmented
-    /// `.D1`…`.D5` container as their story — not as a file, so no per-file
-    /// parse can reach it — and what is in there is an Infocom picture archive
-    /// of a **fourth flavour**. It wears the familiar 16-byte header, and then
-    /// spends **eight** bytes on a directory record where the Amiga, Macintosh
-    /// and PC spend twelve, fourteen or sixteen: id, width and height as single
-    /// bytes at the Apple's own hi-res dimensions (140×192, 62×72), a flag byte
-    /// and a three-byte offset which is relative to the SEGMENT rather than to
-    /// the archive. [`InfocomPics::parse`] refuses that record size, which is
-    /// the correct answer until a reader for it exists — the codec is not the
-    /// Huffman one and not the LZW one, and it is its own piece of work.
-    /// Asked and answered `None` is still the point — every format answers every
-    /// question.
+    /// Identified by parsing, exactly as [`crate::adf::Adf::pictures`] does —
+    /// and then, when no FILE is one, by asking the packed volume, exactly as
+    /// [`Self::story`] falls through to [`Self::packed_story`].
+    ///
+    /// That second half is the whole of SQ-0863, and the shape of the problem is
+    /// why it needs its own door. The two graphical releases here (*Arthur* and
+    /// *Journey*) keep their artwork inside the same segmented `.D1`…`.D5`
+    /// container as their story — not as a file, so no per-file parse can ever
+    /// reach it — and what is in there is an Infocom picture archive of a
+    /// **fourth flavour**, [`crate::infocom_pics::Flavour::Apple`]: an 8-byte
+    /// directory record where the Amiga, Macintosh and PC spend twelve, fourteen
+    /// or sixteen, and offsets relative to the SEGMENT rather than to the
+    /// archive. [`InfocomPics::parse`] still refuses it, and still should —
+    /// there is no header at byte 0 of a segment to find.
+    ///
+    /// *Arthur* answers with 168 pictures merged out of four floppies; *Journey*
+    /// still answers `None`, because its pressing is missing the segment that
+    /// carries a quarter of them.
     pub fn pictures(&self) -> Option<(String, InfocomPics)> {
         let mut cands: Vec<(String, InfocomPics)> = self
             .files
@@ -549,7 +551,20 @@ impl ProDos {
             .filter(|(_, p)| p.entries().iter().any(|e| e.has_pixels()))
             .collect();
         cands.sort_by_key(|(path, pics)| (std::cmp::Reverse(pics.entries().len()), path.clone()));
-        cands.into_iter().next()
+        cands.into_iter().next().or_else(|| self.packed_pictures())
+    }
+
+    /// The artwork held in a packed Apple volume on this disk, merged out of the
+    /// archives its segments carry — or `None` when the disk holds no such
+    /// container, when no segment carries art, or when a segment that should is
+    /// missing.
+    ///
+    /// The reader is [`crate::infocom_packed`]; this is only the door to it, and
+    /// it is a separate method for the same reason [`Self::packed_story`] is.
+    pub fn packed_pictures(&self) -> Option<(String, InfocomPics)> {
+        let files: Vec<(String, Vec<u8>)> =
+            self.files.iter().filter_map(|e| self.read(e).map(|b| (e.path(), b))).collect();
+        crate::infocom_packed::pictures(&files)
     }
 }
 
@@ -1247,7 +1262,10 @@ pub(crate) mod tests {
     /// measured), while `Journey.2mg` declares five segments and carries four,
     /// so 92 of its 552 pages are not on the image and it still answers `None`.
     /// **Two disks that look identical to every per-file test, and only one
-    /// holds a game.**
+    /// holds a game.** The artwork splits the same way and for the same reason
+    /// (SQ-0863): *Arthur* yields 168 pictures merged out of four floppies,
+    /// *Journey* yields none, because the segment it is missing carries a
+    /// quarter of them.
     #[test]
     fn real_apple_ii_segmented_releases_hold_no_story_file() {
         for (fixture, volume, files, segments, packed) in [
@@ -1288,9 +1306,21 @@ pub(crate) mod tests {
                 assert_eq!((story[0], u16::from_be_bytes([story[2], story[3]])), (6, 63));
                 assert_eq!(&story[0x12..0x18], b"890622");
             }
-            // The artwork is in that container too, and in a flavour
-            // `InfocomPics::parse` refuses — see `ProDos::pictures`.
-            assert!(fs.pictures().is_none(), "{fixture}");
+            // The artwork is in that container too (SQ-0863), and it follows the
+            // story exactly: *Arthur*'s four picture archives are all here, and
+            // *Journey*'s fifth segment is missing so its set is refused whole.
+            // No FILE on either volume is an archive, so this is the packed door
+            // answering, not a per-file parse.
+            assert_eq!(fs.packed_pictures().is_some(), packed, "{fixture}");
+            match fs.pictures() {
+                Some((name, pics)) => {
+                    assert!(packed, "{fixture}: artwork where none was expected");
+                    assert_eq!(name, "ARTHUR.1/ARTHUR.D1");
+                    assert_eq!(pics.entries().len(), 168);
+                    assert_eq!(pics.parts(), 4, "one archive per floppy, disks 2..=5");
+                }
+                None => assert!(!packed, "{fixture}: no artwork where some was expected"),
+            }
         }
     }
 
