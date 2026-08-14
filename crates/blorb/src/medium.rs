@@ -58,6 +58,41 @@ pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
 /// interpreter number in many ways"*.
 pub const MACINTOSH_INTERPRETER_NUMBER: u8 = 3;
 
+/// Atari ST, from the same §11.1.3 table — *"… 4 Amiga, **5 Atari ST**,
+/// 6 IBM PC …"* — and, unusually, corroborated by the machine's own
+/// interpreters rather than by the standard alone (SQ-0835).
+///
+/// Infocom's Atari ST sources write this byte themselves, and say so. Both the
+/// XZIP (Version 5) and the EZIP (Version 4) builds carry the identical pair of
+/// lines, at `PINTWD EQU 30` — decimal 30 is `$1E`:
+///
+/// ```text
+///   st/stx1.s:384   PINTWD  EQU     30      * INTERPRETER ID/VERSION
+///   st/stx1.s:422   INTWRD  DC.B    5       * MACHINE ID FOR ATARI ST
+///   st/stx1.s:731           MOVE.W  INTWRD,PINTWD(A2) * SET INTERPRETER ID/VERSION WORD
+/// ```
+///
+/// **It is a flat constant, not a version-dependent rule** — which is the
+/// question worth asking here, because the IBM PC's honest number *is*
+/// version-dependent and that is exactly why [`DiskImage::Fat12Dos`] answers
+/// `None`. The ST has no such rule. The one conditional in `st/stzip.s` is the
+/// Version 3 assembly, and it declines the byte rather than claiming a different
+/// machine:
+///
+/// ```text
+///   st/stzip.s:339      IFEQ EZIP
+///   st/stzip.s:340  INTWRD  DC.B    5       * MACHINE ID FOR ATARI ST
+///   st/stzip.s:344      IFEQ CZIP
+///   st/stzip.s:345  INTWRD  DC.B    0       * (UNUSED)
+/// ```
+///
+/// Byte `$1E` carries no meaning before Version 4, so the Version 3 build leaves
+/// it zero and comments it "(UNUSED)". Advertising 5 to a Version 3 story is
+/// therefore harmless rather than merely tolerable, and it is *measured* so:
+/// all thirty-two v3 stories in the nine-compilation ST corpus produce a
+/// byte-identical trace under 1 and under 5.
+pub const ATARI_ST_INTERPRETER_NUMBER: u8 = 5;
+
 /// Which release medium a story was mounted out of, when it was one at all.
 ///
 /// The variant is the mount's own answer — every one of them is decided by the
@@ -204,22 +239,26 @@ const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::Fat12AtariSt,
         label: "ST",
-        // **`None` on purpose**, exactly where `Hfs` stood before SQ-0838.
-        // ZMSD §11.1.3 numbers the Atari ST 5 and that much is not in doubt —
-        // but the number does not travel alone here: `InterpreterProfile`
-        // bundles it with default colours, a palette and a screen geometry, and
-        // NONE of those is established for the ST by anything in hand. SQ-0835's
-        // own corpus scan is why: all thirty-eight stories across the nine ST
-        // compilations are v3, v4 or v5, so there is **no ST v6 fixture** to
-        // verify a palette or an art path against, and this project's rules
-        // forbid deriving one from memory.
+        // **5, the Atari ST** (SQ-0835's profile half). This row answered `None`
+        // for one commit, on the argument that no ST press of a graphical v6
+        // title exists so the number would be "a byte with no verified machine
+        // behind it". That argument was wrong, and its own premise is why: the
+        // failure it guards against — a number that changes what games do while
+        // the artwork keeps another machine's scale — **cannot arise on a corpus
+        // with no artwork in it.** All thirty-nine stories across the nine ST
+        // compilations are v3, v4 or v5, so there is nothing for the number to
+        // disagree with.
         //
-        // The number is not inert either — a game reads header byte `$1E` and
-        // can take machine-specific paths — so announcing a machine we do not
-        // implement is a behaviour change nobody has evidence for. The container
-        // half of SQ-0835 is finished; the profile half stays open until an ST
-        // disk of Zork Zero, Arthur, Journey or Shogun turns up.
-        interpreter_number: None,
+        // What replaced the argument is evidence. Infocom's own ST interpreters
+        // write 5 into `$1E` unconditionally and label it "MACHINE ID FOR ATARI
+        // ST"; see [`ATARI_ST_INTERPRETER_NUMBER`], which quotes them and shows
+        // the byte is a flat constant rather than the version-dependent rule
+        // that keeps [`DiskImage::Fat12Dos`] at `None`.
+        //
+        // The rest of the bundle is in `app::interpreter::InterpreterProfile::AtariSt`,
+        // and it declines the one member nothing establishes: the ST never had a
+        // YZIP, so it has no Version 6 art geometry to state.
+        interpreter_number: Some(ATARI_ST_INTERPRETER_NUMBER),
         looks_like: crate::fat12::looks_like_atari_st,
         mount: mount_boxed::<Fat12>,
     },
@@ -689,12 +728,14 @@ mod tests {
             let (label, interpreter) = match image {
                 DiskImage::Adf => ("ADF", Some(AMIGA_INTERPRETER_NUMBER)),
                 DiskImage::Hfs => ("HFS", Some(MACINTOSH_INTERPRETER_NUMBER)),
-                // Both `None`, for two different reasons, both written out at
-                // their rows in `FORMATS`: the IBM PC's number is version-
-                // dependent and already in force, and the Atari ST has no
-                // profile to bring with a number.
+                // One FAT12 filesystem, two machines, two different answers —
+                // and the difference is the point. The IBM PC's honest number
+                // is version-dependent (6 for Version 6, else 1), so no single
+                // constant expresses it and its own rule is already in force.
+                // The Atari ST's is a flat 5, written as such by Infocom's own
+                // ST interpreters; both are argued at their rows in `FORMATS`.
                 DiskImage::Fat12Dos => ("DOS", None),
-                DiskImage::Fat12AtariSt => ("ST", None),
+                DiskImage::Fat12AtariSt => ("ST", Some(ATARI_ST_INTERPRETER_NUMBER)),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
@@ -939,7 +980,12 @@ mod tests {
         let disk = MountedDisk::mount(bytes).expect("the ST disk mounts");
         assert_eq!(disk.format(), DiskImage::Fat12AtariSt);
         assert_eq!(disk.label(), "ST");
-        assert_eq!(disk.interpreter_number(), None, "no ST profile to announce yet");
+        assert_eq!(
+            disk.interpreter_number(),
+            Some(ATARI_ST_INTERPRETER_NUMBER),
+            "an ST floppy announces the Atari ST — ZMSD §11.1.3, and the machine's own \
+             `INTWRD DC.B 5 * MACHINE ID FOR ATARI ST`",
+        );
         let names: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
         assert_eq!(names, [
             "HITCHHIK/STORY.DAT",

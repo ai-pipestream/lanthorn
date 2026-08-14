@@ -22,6 +22,8 @@ mod glulx_game_colours;
 mod glulx_garglk_style_sentinel;
 #[path = "suites/glulx_ingame_save_host_restore.rs"]
 mod glulx_ingame_save_host_restore;
+#[path = "suites/atari_st_profile.rs"]
+mod atari_st_profile;
 #[path = "suites/glulx_maze_identity.rs"]
 mod glulx_maze_identity;
 #[path = "suites/glulx_pending_io_host_restore.rs"]

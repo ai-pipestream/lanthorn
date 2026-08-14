@@ -24,6 +24,22 @@
 //!   Amiga media.
 //! - [`InterpreterProfile::Macintosh`] is the third, for stories that came off
 //!   an HFS volume (SQ-0838).
+//! - [`InterpreterProfile::AtariSt`] is the fourth, for stories that came off a
+//!   GEMDOS floppy (SQ-0835) — and the one that shows a profile may honestly
+//!   **decline** a member of the bundle. It states a number, a default page and
+//!   a palette, all read out of Infocom's own ST interpreters, and states no
+//!   standard window, because Infocom never wrote a Version 6 interpreter for
+//!   the ST and a standard window is a Version 6 art geometry.
+//!
+//!   That distinction is worth keeping straight, because it is the whole reason
+//!   this profile was blocked for one commit. The bundle argument above is a
+//!   warning against a number that **contradicts** the rest of the machine, and
+//!   the ST corpus is where that cannot happen: all thirty-nine stories on the
+//!   nine compilations are v3, v4 or v5, so there is no artwork for the number
+//!   to disagree with. "I cannot verify every member" is an argument for
+//!   declining the members you cannot verify, not for declining the ones you
+//!   can — [`InterpreterProfile::IbmPc`] has answered `None` from
+//!   [`default_colours`](InterpreterProfile::default_colours) all along.
 //!
 //! **Selection**, most specific first (SQ-0734):
 //!
@@ -47,7 +63,11 @@
 //!    definite one. Without it, picking `CPic.data` off `Zork Zero Disk.image`
 //!    (the archive that disk loads on its own) turned a Macintosh into an Amiga.
 //! 3. The medium: a story mounted out of an Amiga `.adf` release floppy is an
-//!    Amiga, and one mounted out of an HFS volume is a Macintosh. The
+//!    Amiga, one mounted out of an HFS volume is a Macintosh, and one mounted
+//!    out of an Atari ST GEMDOS floppy is an ST. (A DOS FAT12 floppy is the same
+//!    filesystem as that last one and still resolves to the IBM PC, whose number
+//!    is version-dependent and already in force — see [`blorb::medium`], where
+//!    the two rows are argued side by side.) The
 //!    medium→machine mapping itself is [`blorb::medium`]'s, not this module's,
 //!    because `zvm-cli` has to reach the same conclusion off the same bytes and
 //!    does not depend on `app` (SQ-0839).
@@ -106,6 +126,11 @@ pub enum InterpreterProfile {
     /// that is **whichever one the artwork in hand was drawn for** — see
     /// [`Self::std_window`], which is where the interesting part is.
     Macintosh,
+    /// An Atari ST: interpreter 5, black text on a white page, ZMSD §8.3.1's
+    /// palette, and **no standard window at all** — the one machine here that
+    /// declines a member of the bundle, because it never had a Version 6
+    /// interpreter for one to describe (SQ-0835). See [`Self::std_window`].
+    AtariSt,
 }
 
 impl InterpreterProfile {
@@ -221,6 +246,7 @@ impl InterpreterProfile {
         match n {
             AMIGA_INTERPRETER_NUMBER => Self::Amiga,
             MACINTOSH_INTERPRETER_NUMBER => Self::Macintosh,
+            ATARI_ST_INTERPRETER_NUMBER => Self::AtariSt,
             _ => Self::IbmPc,
         }
     }
@@ -258,6 +284,7 @@ impl InterpreterProfile {
             Self::IbmPc => None,
             Self::Amiga => Some(AMIGA_INTERPRETER_NUMBER),
             Self::Macintosh => Some(MACINTOSH_INTERPRETER_NUMBER),
+            Self::AtariSt => Some(ATARI_ST_INTERPRETER_NUMBER),
         }
     }
 
@@ -333,9 +360,33 @@ impl InterpreterProfile {
     /// this knob's to state: it arrives with the monochrome archive, from
     /// [`crate::graphics::PictSource::native_std_window`], exactly as it arrived
     /// with `Pic.Data` on the Mac. One decision there too.
+    ///
+    /// # The Atari ST has no answer, and that is a FACT about the machine
+    ///
+    /// [`Self::AtariSt`] returns `None`, and this is the one place in the bundle
+    /// where a profile declines. It is not a gap awaiting a fixture. **Infocom
+    /// never wrote a Version 6 interpreter for the Atari ST**: `st/` in
+    /// `infocom-zcode-terps` holds a ZIP (`stzip.s`) and an XZIP (`stx*.s`,
+    /// `xzip.c`) and no YZIP, where the repository lists one for the Apple and
+    /// the Macintosh. A standard window is a Version 6 ART geometry, so there is
+    /// no ST artwork for it to be the resolution *of* — which is the same fact
+    /// the corpus reports from the other end, all thirty-nine stories across the
+    /// nine ST compilations being v3, v4 or v5.
+    ///
+    /// The ST's own screen word is not this quantity in any case. `st/stx1.s`
+    /// fills `PSCRWD` from the live text display rather than from a constant:
+    ///
+    /// ```text
+    ///   st/stx1.s:615   MOVE.W  _columns,D1   * SIZE OF ATARI SCREEN DISPLAY (40 OR 80)
+    ///   st/stx1.s:735   MOVE.W  _rows,D0
+    ///   st/stx1.s:742   MOVE.W  D0,PSCRWD(A2) * SET SCREEN-PARAMETERS WORD
+    /// ```
+    ///
+    /// — rows and columns of whatever display is attached, which is already what
+    /// babelmap tells a story about its pane.
     pub fn std_window(self) -> Option<(u16, u16)> {
         match self {
-            Self::IbmPc => None,
+            Self::IbmPc | Self::AtariSt => None,
             Self::Amiga => Some(AMIGA_STD_WINDOW),
             Self::Macintosh => Some(MACINTOSH_STD_WINDOW),
         }
@@ -355,6 +406,7 @@ impl InterpreterProfile {
             Self::IbmPc => None,
             Self::Amiga => Some((AMIGA_DEFAULT_BACKGROUND, AMIGA_DEFAULT_FOREGROUND)),
             Self::Macintosh => Some((MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND)),
+            Self::AtariSt => Some((ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND)),
         }
     }
 
@@ -376,9 +428,43 @@ impl InterpreterProfile {
     /// Those eight are QuickDraw's original saturated planar constants, so the
     /// Macintosh named the standard colours and meant them — where the Amiga
     /// loaded a palette of its own, which is why only it needs one here.
+    ///
+    /// **The Atari ST answers `Standard` for the same kind of reason, read the
+    /// same way** (SQ-0835). `st/xzip.c`'s `color_table` is the ST's whole
+    /// palette, one row per Z-machine colour id and no others, and the ids run
+    /// 2..9 in ZMSD §8.3.1's order:
+    ///
+    /// ```text
+    ///   WORD color_table[8*RGBLEN] =        /* XZIP ST color settings */
+    ///       { 0x0000, 0x0000, 0x0000,       /* id 2 = black  (0.5 / 8) */
+    ///         0x03A9, 0x003E, 0x003E,       /* id 3 = red */
+    ///         0x003E, 0x032C, 0x003E,       /* id 4 = green */
+    ///         0x03A9, 0x03A9, 0x003E,       /* id 5 = yellow */
+    ///         0x003E, 0x003E, 0x03A9,       /* id 6 = blue */
+    ///         0x03A9, 0x003E, 0x03A9,       /* id 7 = magenta */
+    ///         0x003E, 0x03A9, 0x03A9,       /* id 8 = cyan */
+    ///         0x03A9, 0x03A9, 0x03A9 };     /* id 9 = white  (7.5 / 8) */
+    /// ```
+    ///
+    /// Those are GEM VDI intensities in the VDI's own 0–1000 range, and they are
+    /// the saturated primaries: `0x03A9` is 937 and `0x003E` is 62, which the
+    /// file's own comments gloss as 7.5/8 and 0.5/8. So the ST asked for §8.3.1's
+    /// eight colours and meant them, and the file adds that the hardware rounded
+    /// even that off — *"Realized settings are (currently) less detailed (8/8 and
+    /// 0/8)"*. Nothing here is a palette of the ST's own in the sense the Amiga's
+    /// is; the 512-colour hardware is not evidence, and is not consulted.
+    ///
+    /// What the ST could not do was show them all at once, and that is a display
+    /// limit rather than a palette. `st/color.note` (5/26/87): *"The color
+    /// function in the XZIP spec lists eight colors. The Atari ST, in 80-column
+    /// mode, can display at most four of them at any one time"*, with only one
+    /// background, always index 0. `st/xzip.c` recycles indices under an LRU to
+    /// fake the rest. A terminal has no such ceiling, so there is nothing to
+    /// express — this is noted so the absence reads as measured rather than
+    /// missed.
     pub fn palette(self) -> zvm::screen::Palette {
         match self {
-            Self::IbmPc | Self::Macintosh => zvm::screen::Palette::Standard,
+            Self::IbmPc | Self::Macintosh | Self::AtariSt => zvm::screen::Palette::Standard,
             Self::Amiga => zvm::screen::Palette::Amiga,
         }
     }
@@ -431,6 +517,50 @@ pub use blorb::medium::AMIGA_INTERPRETER_NUMBER;
 /// from the standard, not recalled: *"1 DECSystem-20, 2 Apple IIe, **3
 /// Macintosh**, 4 Amiga, 5 Atari ST, 6 IBM PC …"*.
 pub use blorb::medium::MACINTOSH_INTERPRETER_NUMBER;
+
+/// Atari ST, from the same §11.1.3 table and the same place (SQ-0835) — and the
+/// only one of the three the machine's own interpreters corroborate directly,
+/// `INTWRD DC.B 5 * MACHINE ID FOR ATARI ST`. [`blorb::medium`] quotes them, and
+/// shows the byte is a flat constant rather than a version-dependent rule.
+pub use blorb::medium::ATARI_ST_INTERPRETER_NUMBER;
+
+/// The Atari ST's default background: standard colour **9**, white.
+///
+/// Sourced exactly as the Macintosh's was, and it is the same `(back << 8) |
+/// fore` idiom a third time — `st/xzip.c`, the interface half of Infocom's ST
+/// XZIP, whose modification history ends "17 Sep 87 dbb … FROZEN Version A":
+///
+/// ```text
+///   #define USE_DEF  1     /* use default ST color */
+///   #define DEF_FORE 2     /* default ST foreground id = black */
+///   #define DEF_BACK 9     /* default ST background id = white */
+/// ```
+///
+/// The comments name the colours outright, so this needs no decoding, and
+/// `_op_color` says it twice more the way the Amiga's and the Mac's do — colour
+/// 1 means "the default" (ZMSD §8.3.1), so the file resolves it:
+///
+/// ```text
+///   if (id1 == USE_DEF) id1 = DEF_FORE;
+///   if (id2 == USE_DEF) id2 = DEF_BACK;
+///   …
+///   return ((DEF_BACK << 8) | DEF_FORE);   /* (used by 68K init) */
+/// ```
+///
+/// **XZIP is the right interpreter to have read**: it is Infocom's Version 5
+/// interpreter, so this is the program that actually painted *Beyond Zork* on an
+/// Atari ST — the one story in the ST corpus whose behaviour this profile moves.
+/// Its "Version A" is corroborated from inside the game, which answers VERSION
+/// with "Atari ST Color Version A" once it is told 5.
+///
+/// A white page, the same as the Macintosh's and the opposite of the Amiga's
+/// dark grey, so `honor_game_colours` is doing real work here too: turning it
+/// off returns the user's theme, as ever.
+pub const ST_DEFAULT_BACKGROUND: u8 = 9;
+
+/// The Atari ST's default foreground: standard colour 2, black. Same file, same
+/// three lines — see [`ST_DEFAULT_BACKGROUND`].
+pub const ST_DEFAULT_FOREGROUND: u8 = 2;
 
 /// The Macintosh Version 6 standard window: the **big colour** Mac's, 320×200
 /// art doubled onto a 640×400 window — the same numbers as the Amiga's, and
@@ -578,13 +708,67 @@ mod tests {
     }
 
     #[test]
+    fn atari_st_knobs_are_the_verified_constants() {
+        // Every one of these is quoted at its constant, from ZMSD §11.1.3 and
+        // from Infocom's own ST interpreters (`st/stx1.s`, `st/stzip.s`,
+        // `st/xzip.c`, `st/color.note`).
+        let p = InterpreterProfile::AtariSt;
+        assert_eq!(p.interpreter_number(), Some(5), "ZMSD §11.1.3: 5 = Atari ST");
+        assert_eq!(
+            p.default_colours(),
+            Some((9, 2)),
+            "st/xzip.c: DEF_BACK 9 = white, DEF_FORE 2 = black",
+        );
+        assert_eq!(p.palette(), zvm::screen::Palette::Standard, "color_table IS §8.3.1's eight");
+
+        // **The declined member, asserted as declined.** The ST never had a
+        // YZIP, so it has no Version 6 art geometry — this is the one knob in
+        // the bundle a profile other than the IBM PC answers `None` to, and it
+        // must stay `None` rather than drift to a plausible-looking pair.
+        assert_eq!(
+            p.std_window(),
+            None,
+            "Infocom wrote no Version 6 interpreter for the Atari ST — there is no ST art to size",
+        );
+
+        // The ST and the Macintosh agree on the page and disagree with the
+        // Amiga. Asserted as relations so a copied-and-edited tuple cannot pass.
+        let (st_bg, st_fg) = p.default_colours().expect("the ST states its defaults");
+        let (mac_bg, mac_fg) =
+            InterpreterProfile::Macintosh.default_colours().expect("so does the Mac");
+        assert_eq!((st_bg, st_fg), (mac_bg, mac_fg), "both machines default to black on white");
+        let (amiga_bg, _) = InterpreterProfile::Amiga.default_colours().expect("so does the Amiga");
+        assert_ne!(st_bg, amiga_bg, "white page against the Amiga's dark grey");
+    }
+
+    /// The ST's number is a **flat constant**, where the IBM PC's is a rule —
+    /// which is the whole reason one row in `blorb::medium::FORMATS` answers
+    /// `Some` and its filesystem-identical neighbour answers `None`.
+    #[test]
+    fn the_atari_st_states_one_number_where_the_ibm_pc_states_a_rule() {
+        assert_eq!(
+            InterpreterProfile::AtariSt.interpreter_number(),
+            Some(ATARI_ST_INTERPRETER_NUMBER),
+            "st/stx1.s: INTWRD DC.B 5 — no version arm, no condition",
+        );
+        assert_eq!(
+            InterpreterProfile::IbmPc.interpreter_number(),
+            None,
+            "the IBM PC's honest number is version-dependent, so zvm's own rule stays in force",
+        );
+    }
+
+    #[test]
     fn the_v6_cell_matches_what_zvm_advertises() {
         // Knob 6: stated for completeness, pinned so it cannot silently drift.
         // The Macintosh's real cell is 7×15 (Geneva 12) and is deliberately NOT
         // expressed — see `v6_font_cell`'s docs.
-        for p in
-            [InterpreterProfile::IbmPc, InterpreterProfile::Amiga, InterpreterProfile::Macintosh]
-        {
+        for p in [
+            InterpreterProfile::IbmPc,
+            InterpreterProfile::Amiga,
+            InterpreterProfile::Macintosh,
+            InterpreterProfile::AtariSt,
+        ] {
             assert_eq!(
                 p.v6_font_cell(),
                 (zvm::screen::V6_FONT_WIDTH, zvm::screen::V6_FONT_HEIGHT),
@@ -599,8 +783,9 @@ mod tests {
         // hit: asking for interpreter 4 asks for the Amiga, not just the byte.
         assert_eq!(InterpreterProfile::for_interpreter_number(4), InterpreterProfile::Amiga);
         assert_eq!(InterpreterProfile::for_interpreter_number(3), InterpreterProfile::Macintosh);
+        assert_eq!(InterpreterProfile::for_interpreter_number(5), InterpreterProfile::AtariSt);
         // Every other number is served by the IBM PC bundle, the historical default.
-        for n in [1u8, 2, 5, 6, 7, 8, 9, 10, 11] {
+        for n in [1u8, 2, 6, 7, 8, 9, 10, 11] {
             assert_eq!(
                 InterpreterProfile::for_interpreter_number(n),
                 InterpreterProfile::IbmPc,
