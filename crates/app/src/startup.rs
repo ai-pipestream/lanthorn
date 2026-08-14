@@ -30,7 +30,7 @@ use app::hints;
 use app::ifid::compute_ifid;
 use app::session::{apply_turn, GameSession, TurnResult};
 use app::state::AppState;
-use app::storage::{default_state_path, game_dir as story_game_dir, story_key};
+use app::storage::{DiskBuild, default_state_path, game_dir as story_game_dir, story_key_for};
 
 use crate::engine_helpers::{restore_error_msg, zvm_session_opt_mut};
 use crate::{
@@ -227,11 +227,16 @@ pub(crate) fn boot_story(
     let is_scott = matches!(loaded, hints::LoadedStory::Scott(_));
 
     // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>.save/`,
-    // keyed by the story filename. The PATH is needed this early because the
-    // per-game sidecar inside it carries the `pictures` key, and that key decides
-    // the machine below; the directory itself is created (and read from) further
-    // down, where it always was.
-    let game_dir = story_game_dir(&data_base, &story_key(&story_path));
+    // keyed by the story filename — or, for a story mounted out of a disk image,
+    // by that story's own release and serial, because one image holds several
+    // games and the filename cannot tell them apart (SQ-0850). Both inputs are
+    // already in hand from the mount just above, so this costs no second read.
+    // The PATH is needed this early because the per-game sidecar inside it
+    // carries the `pictures` key, and that key decides the machine below; the
+    // directory itself is created (and read from) further down, where it always
+    // was.
+    let disk_build = disk_image.and_then(|_| DiskBuild::of(&story_bytes));
+    let game_dir = story_game_dir(&data_base, &story_key_for(&story_path, disk_build.as_ref()));
     // SQ-0734 tier 3: has the user named a picture archive for this story? Read
     // and PARSED here, ahead of everything, because the flavour it turns out to
     // be is an input to the profile immediately below. The archive itself is

@@ -17,6 +17,10 @@ path = "src/main.rs"
 
 [dependencies]
 buildinfo = { path = "../buildinfo" }
+# SQ-0850: the per-game save-directory key and the canonical-title table the
+# readable half of it comes from. Shared with `zvm-cli` so the TUI and the CLI
+# cannot name one game's save directory two different ways.
+cli-host = { path = "../cli-host" }
 zvm = { path = "../zvm" }
 gvm = { path = "../gvm" }
 scott = { path = "../scott" }

@@ -165,7 +165,7 @@ fn fetch_one(
     index: usize,
     total: usize,
 ) -> FetchProgress {
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&path));
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key_at(&path));
     let existing = story_info::load(&game_dir, &ifid);
 
     // A manual IFDB-id fetch (SQ-0371) always runs and always fetches by that
@@ -490,7 +490,7 @@ mod tests {
         let data_base = tmp();
         let path = data_base.join("game.z5");
         let ifid = "ZCODE-1-000001".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         story_info::save(&game_dir, &stub_info(&ifid, Some(up_to_date_meta()))).unwrap();
 
         let fake = Fake::new(HashMap::new());
@@ -511,7 +511,7 @@ mod tests {
         let data_base = tmp();
         let path = data_base.join("game.z5");
         let ifid = "ZCODE-1-000002".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         story_info::save(&game_dir, &stub_info(&ifid, Some(up_to_date_meta()))).unwrap();
 
         let mut responses = HashMap::new();
@@ -541,7 +541,7 @@ mod tests {
         let data_base = tmp();
         let path = data_base.join("game.z5");
         let ifid = "ZCODE-1-000003".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
 
         let mut responses = HashMap::new();
         responses.insert(ifid.clone(), FakeResp::NotFound);
@@ -564,7 +564,7 @@ mod tests {
         let data_base = tmp();
         let path = data_base.join("game.z5");
         let ifid = "ZCODE-1-000004".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         // Pre-existing sidecar with only a probe block (never fetched) — must
         // survive byte-for-byte since a transport error writes nothing.
         let before = stub_info(&ifid, None);
@@ -616,7 +616,7 @@ mod tests {
         // Fetched by id, not by ifid.
         assert_eq!(calls.lock().unwrap().as_slice(), &[format!("id:{tuid}")]);
 
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&progress[0].path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&progress[0].path));
         let reloaded = story_info::load(&game_dir, &ifid).expect("sidecar keyed to the story IFID");
         assert_eq!(reloaded.fetched.unwrap().title.as_deref(), Some("Found By Hand"));
         let _ = std::fs::remove_dir_all(&data_base);
@@ -631,8 +631,8 @@ mod tests {
         let ifid1 = "ZCODE-1-100001".to_string();
         let ifid2 = "ZCODE-1-100002".to_string();
         let ifid3 = "ZCODE-1-100003".to_string();
-        let dir1 = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path1));
-        let dir2 = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path2));
+        let dir1 = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path1));
+        let dir2 = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path2));
 
         let mut responses = HashMap::new();
         for ifid in [&ifid1, &ifid2, &ifid3] {
@@ -687,7 +687,7 @@ mod tests {
         let skip2 = (data_base.join("skip2.z5"), "ZCODE-1-200002".to_string());
         let fetched = (data_base.join("fetch3.z5"), "ZCODE-1-200003".to_string());
         for (path, ifid) in [&skip1, &skip2] {
-            let dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(path));
+            let dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(path));
             story_info::save(&dir, &stub_info(ifid, Some(up_to_date_meta()))).unwrap();
         }
 
@@ -720,7 +720,7 @@ mod tests {
         let data_base = tmp();
         let path = data_base.join("game.z5");
         let ifid = "ZCODE-1-300001".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         let mut seed = stub_info(&ifid, None);
         seed.probe = Some(ProbeMeta { probed_at: Some("2026-01-01".into()) });
         story_info::save(&game_dir, &seed).unwrap();
@@ -750,7 +750,7 @@ mod tests {
         // frontispiece to defer to.
         std::fs::write(&path, b"not a blorb").unwrap();
         let ifid = "ZCODE-1-400001".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
 
         let iff = IFiction {
             title: Some("Covered".into()),
@@ -797,7 +797,7 @@ mod tests {
         let path = data_base.join("game.z5");
         std::fs::write(&path, b"not a blorb").unwrap();
         let ifid = "ZCODE-1-400003".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
 
         let iff = IFiction {
             title: Some("Broken Cover".into()),
@@ -842,7 +842,7 @@ mod tests {
         let path = data_base.join("game.gblorb");
         std::fs::write(&path, blorb_with_fspc_and_cover()).unwrap();
         let ifid = "ZCODE-1-400002".to_string();
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
 
         let iff = IFiction {
             title: Some("Already Covered".into()),

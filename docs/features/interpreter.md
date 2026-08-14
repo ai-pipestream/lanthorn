@@ -260,6 +260,19 @@ terminal that isn't there, `zvm-cli` lists the candidates and tells you to pass
 **`--story <n|name>`** — a menu number, or any part of a name that picks out one
 story.
 
+**And each of those six games gets its own saves** (SQ-0850). A per-game save
+directory used to be named after the story file, which was fine while one image
+meant one game and quietly catastrophic once it did not: all six stories on an ST
+compilation shared one `<image>.save/`, one `default.babelmap`, and whichever you
+played last owned it. A story taken off a disk image is now keyed by its own
+**release and serial** — `hitchhikers-guide-r56-s841221` — so two games on one
+disk cannot collide, renaming the image keeps your saves, and the Amiga, DOS and
+Atari ST presses of *Zork I* r88/840726 all reach the same directory because they
+are the same build. A loose story file still keys on its filename, exactly as
+before, so nothing you already have moves. `zvm-cli` and the TUI read one helper
+for this, which is why `--story 3` off a compilation and the same game opened in
+babelmap find each other's saves.
+
 And the floppy now tells the CLI which *machine* it is, not merely which story.
 A disk format is evidence, and evidence that only reaches one front-end is half
 an answer: for a while the TUI took an `.adf` for an Amiga while `zvm-cli`

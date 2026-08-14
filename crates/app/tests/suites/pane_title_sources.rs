@@ -55,7 +55,7 @@ fn identity(path: &Path) -> (String, bool, bool) {
 
 /// Write the fetched-IFDB sidecar the story browser reads, into `data_base`.
 fn seed_sidecar(data_base: &Path, path: &Path, ifid: &str, title: &str) {
-    let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(path));
+    let game_dir = app::storage::game_dir(data_base, &app::storage::story_key_at(path));
     let info = app::story_info::StoryInfo {
         format_version: app::story_info::FORMAT_VERSION,
         ifid: ifid.to_string(),

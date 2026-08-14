@@ -44,6 +44,8 @@ mod picture_override;
 mod real_media_releases;
 #[path = "suites/restart_reboots_in_place.rs"]
 mod restart_reboots_in_place;
+#[path = "suites/save_key_media.rs"]
+mod save_key_media;
 #[path = "suites/scott_mapper.rs"]
 mod scott_mapper;
 #[path = "suites/shogun_dict_words.rs"]

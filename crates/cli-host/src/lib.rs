@@ -28,6 +28,7 @@ pub mod pager;
 pub mod score;
 pub mod storage;
 pub mod term;
+pub mod titles;
 
 pub use args::{Matches, Opt, scan};
 pub use flags::{EXIT_USAGE, handled_common_flags, looks_like_flag, usage_error};
@@ -37,7 +38,11 @@ pub use menu::{Emission, MENU_COMMAND, MenuBlock, MenuTracker, NavKey, Typed, is
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
 pub use pager::{Pager, wait_for_keypress};
 pub use score::{ScoreWatch, score_in_status};
-pub use storage::{game_dir, resolve_save_input, story_key};
+pub use storage::{
+    DiskBuild, disk_story_key, game_dir, game_dir_with_key, resolve_save_input, story_key,
+    story_key_at, story_key_for,
+};
+pub use titles::known_title;
 pub use term::{
     TerminalGuard, cursor_reset, cursor_steady_block, end_raw_mode, osc_reset_bg, osc_set_bg,
     page_bg_escape, restore_and_exit, restore_terminal, rgb24,

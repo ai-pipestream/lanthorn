@@ -407,7 +407,7 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
         // a keystroke would put the transition in the capture we are measuring.
         let game_dir = app::storage::game_dir(
             &spec.user_dir.join("saves"),
-            &app::storage::story_key(&spec.story),
+            &app::storage::story_key_at(&spec.story),
         );
         std::fs::create_dir_all(&game_dir)?;
         std::fs::write(game_dir.join("config.toml"), "show_map = false\n")?;

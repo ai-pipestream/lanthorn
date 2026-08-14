@@ -87,6 +87,20 @@ pub struct StoryMeta {
     pub fetch_not_found: bool,
 }
 
+impl StoryMeta {
+    /// The build that names this story's save directory when it was mounted out
+    /// of a disk image, and `None` for a loose story file — the scan already
+    /// read the header, so a row can be keyed without touching the disk again
+    /// (SQ-0850). Feed to [`crate::storage::story_key_for`].
+    pub fn disk_build(&self) -> Option<crate::storage::DiskBuild> {
+        self.disk_image?;
+        Some(crate::storage::DiskBuild {
+            release: self.release?,
+            serial: self.serial.as_ref()?.clone(),
+        })
+    }
+}
+
 /// One selectable story in the picker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoryEntry {
@@ -249,7 +263,10 @@ pub fn resolve_aux(
         Some((b, src)) if src != entry.path => Some((src, chunks_of(&b))),
         _ => None,
     };
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&entry.path));
+    let game_dir = crate::storage::game_dir(
+        data_base,
+        &crate::storage::story_key_for(&entry.path, entry.meta.disk_build().as_ref()),
+    );
     let saves = crate::persist_files::list_saves(&game_dir);
     let hints_available = hint_index.get(&entry.meta.ifid).is_some();
     let qzl_saves = crate::persist_files::list_qzl(&game_dir);
@@ -680,7 +697,7 @@ fn container_ifmd(path: &Path) -> Option<crate::ifiction::IFiction> {
 /// pane cannot name the same game differently.
 pub fn metadata_title(path: &Path, data_base: &Path, ifid: &str, is_scott: bool) -> Option<String> {
     let ifmd = container_ifmd(path);
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(path));
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key_at(path));
     let fetched = crate::story_info::load(&game_dir, ifid).and_then(|i| i.fetched);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
     resolved_title(ifmd.as_ref(), fetched.as_ref(), bundled_title(stem, ifid, is_scott))
@@ -887,8 +904,13 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     };
 
     // Fetched IFDB sidecar: absent (never fetched, unreadable, malformed,
-    // wrong IFID) is simply no metadata, never a scan error.
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(path));
+    // wrong IFID) is simply no metadata, never a scan error. The mount is
+    // already done, so the disk-image save key (SQ-0850) costs nothing here.
+    let disk_build = disk_image.and_then(|_| crate::storage::DiskBuild::of(&bytes));
+    let game_dir = crate::storage::game_dir(
+        data_base,
+        &crate::storage::story_key_for(path, disk_build.as_ref()),
+    );
     let fetched = crate::story_info::load(&game_dir, &ifid).and_then(|info| info.fetched);
     // Scott stories have no IFID-keyed table; resolve their title (and, for the
     // homebrew games with no IFDB record, author/description) from the filename
@@ -1175,7 +1197,10 @@ pub fn compute_row_badges(
     hint_index: &hints::HintIndex,
 ) -> RowBadges {
     let ifid = &entry.meta.ifid;
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&entry.path));
+    let game_dir = crate::storage::game_dir(
+        data_base,
+        &crate::storage::story_key_for(&entry.path, entry.meta.disk_build().as_ref()),
+    );
     let hint = if hint_index.get(ifid).is_some() || entry.hint_sidecar.is_some() {
         HintBadge::Present
     } else {
@@ -2037,7 +2062,7 @@ mod tests {
         let ifid = crate::ifid::compute_ifid(&bytes);
 
         let data_base = dir.join("data");
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&dir.join("game.z5")));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&dir.join("game.z5")));
         let info = crate::story_info::StoryInfo {
             format_version: crate::story_info::FORMAT_VERSION,
             ifid: ifid.clone(),
@@ -2060,7 +2085,7 @@ mod tests {
         std::fs::write(dir.join("game.z5"), &bytes).unwrap();
 
         let data_base = dir.join("data");
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&dir.join("game.z5")));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&dir.join("game.z5")));
         let info = crate::story_info::StoryInfo {
             format_version: crate::story_info::FORMAT_VERSION,
             ifid: "WRONG-IFID".into(), // doesn't match the story's real IFID
@@ -2173,8 +2198,8 @@ mod tests {
         // Storage base with per-game dirs keyed by story filename (SQ-0284):
         // A has a default Save State, B a named `.qzl` game save, C nothing.
         let base = dir.join("data");
-        let a_dir = crate::storage::game_dir(&base, &crate::storage::story_key(&dir.join("a.z5")));
-        let b_dir = crate::storage::game_dir(&base, &crate::storage::story_key(&dir.join("b.z5")));
+        let a_dir = crate::storage::game_dir(&base, &crate::storage::story_key_at(&dir.join("a.z5")));
+        let b_dir = crate::storage::game_dir(&base, &crate::storage::story_key_at(&dir.join("b.z5")));
         std::fs::create_dir_all(&a_dir).unwrap();
         std::fs::create_dir_all(&b_dir).unwrap();
         std::fs::write(a_dir.join("default.babelmap"), b"x").unwrap();
@@ -2266,7 +2291,7 @@ mod tests {
         // A separate data base so the per-game dir doesn't collide with the
         // story file itself (SQ-0284 keys by filename).
         let base = dir.join("data");
-        let game_dir = crate::storage::game_dir(&base, &crate::storage::story_key(&entry.path));
+        let game_dir = crate::storage::game_dir(&base, &crate::storage::story_key_at(&entry.path));
         std::fs::create_dir_all(&game_dir).unwrap();
         std::fs::write(game_dir.join("default.babelmap"), b"x").unwrap();
         std::fs::write(game_dir.join("quick.qzl"), b"x").unwrap();

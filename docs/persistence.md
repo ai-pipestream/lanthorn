@@ -172,12 +172,12 @@ sessions.
   auxiliary-file mechanism (save/restore of a memory table to a named external
   file) persist to `<base>/<story-key>.save/default.aux` — in the app
   (`crates/app/src/aux_store.rs`) and in `zvm-cli` (`ZAUX` format,
-  `crates/zvm-cli/src/auxiliary.rs`), each keyed by the story filename, not IFID.
+  `crates/zvm-cli/src/auxiliary.rs`), each keyed by the story key, not IFID.
 - **Glulx — the Glk file VFS (new, SQ-0278).** Every file a Glulx game writes
   through Glk file streams now auto-persists to
   `<base>/<story-key>.save/default.glkvfs` — in the app
   (`crates/app/src/vfs_store.rs`) and in `gvm-cli`
-  (`crates/gvm-cli/src/main.rs`), both keyed by the story filename. The blob is
+  (`crates/gvm-cli/src/main.rs`), both keyed by the story key. The blob is
   the files-only `GVFS` codec (`gvm::glk::encode_files` / `decode_files`): magic
   `GVFS` + version `1` + length-prefixed name→bytes entries, big-endian, fully
   tolerant of a corrupt or foreign file (it just resets to empty, never panics).
@@ -212,12 +212,38 @@ that game side by side:
     config.toml         # per-game non-style overrides (honor/borders/map panel)
 ```
 
-`<story-key>` is the story's own **filename** (basename including extension,
-sanitized to filesystem-safe characters) — *not* the IFID. The same story
-file always maps to the same directory, and different files (even the same
-game shipped as `.z5` vs `.zblorb`) get separate directories. The IFID is
-still computed and used for the story's *title* and for interpreter-hint
-association, but it no longer keys any storage path.
+`<story-key>` has **two rules**, because one disk image is no longer one game
+(SQ-0850):
+
+- A **loose story file** keys on its own **filename** (basename including
+  extension, sanitized to filesystem-safe characters) — *not* the IFID. The
+  same story file always maps to the same directory, and different files (even
+  the same game shipped as `.z5` vs `.zblorb`) get separate directories.
+- A story **mounted out of a disk image** keys on that story's own **release
+  and serial** instead: `<slug>-r<release>-s<serial>`, e.g.
+  `hitchhikers-guide-r59-s851108`. The slug is the canonical title from
+  `cli_host::titles`, cut at its subtitle and truncated on a word boundary; it
+  is there to be read, and the release and serial are what identify the build.
+  A build the title table does not name slugs as `story`, which is still
+  unique.
+
+The image's filename cannot answer for a compilation: `Infocom Compilation 1
+(19xx)(-).st` carries six games and `floppy2.ima` six more, and under a
+filename key all of them shared one `default.babelmap` and overwrote each
+other in turn. Keying on the build gives three properties a filename never
+had — renaming the image keeps the saves, a game that moves between disks in a
+set keeps them, and two games on one disk cannot collide — and it is the same
+identity this project already uses to say that *a disk image is a different
+release*, not the same story on other media. So the Amiga, DOS and Atari ST
+presses of Zork I r88/840726 share one directory, while Zork Zero's r296, r366
+and r393 presses get three.
+
+One helper answers for every host — `cli_host::storage::story_key_for` /
+`story_key_at`, which `app` re-exports through `app::storage` — so the TUI and
+`zvm-cli` cannot name one game's directory two ways.
+
+The IFID is still computed and used for the story's *title* and for
+interpreter-hint association, but it no longer keys any storage path.
 
 The directory name carries a **`.save` suffix** (`<story-key>.save`, e.g.
 `Zork1.z5.save/`) so it can never collide with the story file itself — this
