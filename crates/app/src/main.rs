@@ -1478,7 +1478,24 @@ fn main() {
     // whether we launched from a directory (a story library) or a single file.
     // The first-use `default_story_dir` prompt lives here and runs exactly once.
     let ctx = startup::resolve_launch();
-    let launched_from_library = ctx.library_dir.is_some();
+
+    // What the launch argument means as a *source of stories* (SQ-0844). A
+    // directory is a library, as it always was. A single file is normally just
+    // itself — but naming one volume of a multi-disk release now opens the whole
+    // release, because a collection cut across seven disks is one shelf and the
+    // player named it. `StorySource::of` declines any file that is not a volume
+    // of a set offering two or more games, so every ordinary story file, every
+    // single-title floppy and every one-game set takes the path it always did.
+    let source = match &ctx.library_dir {
+        Some(dir) => Some(app::picker::StorySource::Library(dir.clone())),
+        None => ctx
+            .single_file
+            .as_ref()
+            .and_then(|p| app::picker::StorySource::of(p, &ctx.data_base)),
+    };
+    // A set browser is a library in every way that matters here: quitting it
+    // exits, finishing a game returns to it, and `/quit-to-library` is live.
+    let launched_from_library = source.is_some();
 
     // ── Picker → play loop ────────────────────────────────────────────────────
     loop {
@@ -1486,10 +1503,11 @@ fn main() {
         // the way in (SQ-0789/0791): the browser's launch-options dialog for a
         // library launch, `--pictures` for a single file. Both are empty for an
         // ordinary launch.
-        let (story_path, disk_entry, overrides) = if let Some(dir) = &ctx.library_dir {
-            // Library launch: run the picker on the normal screen (the previous
-            // game left its alt-screen). Quitting the picker (None) exits.
-            match picker_ui::run_story_picker(dir, &ctx.cfg, &ctx.data_base) {
+        let (story_path, disk_entry, overrides) = if let Some(source) = &source {
+            // Library (or multi-disk set) launch: run the picker on the normal
+            // screen (the previous game left its alt-screen). Quitting the
+            // picker (None) exits.
+            match picker_ui::run_story_picker(source.clone(), &ctx.cfg, &ctx.data_base) {
                 Some(p) => (p.path, p.disk_entry, p.overrides),
                 None => break,
             }
@@ -1515,9 +1533,10 @@ fn main() {
                 interpreter_number: None,
             };
             // A story file named on the command line opens itself; a disk image
-            // named there opens what it always did, the format's own tiebreak.
-            // Reaching the other games on a compilation is the browser's job
-            // (SQ-0859).
+            // that is not a volume of a multi-disk set opens what it always did,
+            // the format's own tiebreak. Reaching the other games on a *single*
+            // compilation disk is the browser's job (SQ-0859); a set named by
+            // one of its volumes never reaches here at all (SQ-0844).
             (path, None, overrides)
         };
 

@@ -28,7 +28,7 @@
 //! [`any_real_media_present`] so they cannot fire where the fixtures legitimately
 //! cannot exist.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use app::engine::Engine;
@@ -538,13 +538,35 @@ fn a_floppy_and_the_story_file_beside_it_are_pinned_against_each_other() {
 /// FALSIFICATION: restore the disk spellings as a literal `"adf", "image"` in
 /// `picker::STORY_EXTS` and this fails naming `floppy5.ima` — the user's symptom,
 /// verbatim.
+///
+/// **The one exemption** (SQ-0844): a volume every build of which an *earlier
+/// volume of its own multi-disk release* already offers contributes no rows, and
+/// that is the point of folding a set together rather than listing its disks.
+/// `Infocom Compilation 8` is exactly that — its Lurking Horror, Moonmist,
+/// Stationfall and Trinity are the same four builds as `Compilation 5`'s and
+/// `Compilation 1`'s, down to the IFID — so it is offered as nothing and every
+/// game on it is still one keypress away. The exemption is granted per story and
+/// only against the same *build*, so it cannot hide a game: an image whose
+/// stories are not all offered elsewhere still has to be in the list, which is
+/// what keeps the falsification above honest (`floppy5.ima`'s Zork Zero r393 is
+/// on no other volume of the `floppy*` set).
 #[test]
 fn every_release_medium_is_offered_by_the_story_picker() {
     let dir = stories_dir();
     let data_base = std::env::temp_dir().join(format!("babelmap-sq0849-{}", std::process::id()));
-    let listed: Vec<PathBuf> =
-        app::picker::scan_stories(&dir, &data_base).into_iter().map(|e| e.path).collect();
+    let rows = app::picker::scan_stories(&dir, &data_base);
+    let listed: Vec<PathBuf> = rows.iter().map(|e| e.path.clone()).collect();
     let _ = std::fs::remove_dir_all(&data_base);
+
+    /// Every story on `path`, as the mount itself reports them.
+    fn stories_on(path: &Path) -> Vec<Vec<u8>> {
+        let Ok(raw) = std::fs::read(path) else { return Vec::new() };
+        if blorb::medium::DiskImage::detect(&raw).is_none() {
+            return Vec::new();
+        }
+        let Ok(disk) = blorb::medium::MountedDisk::mount(raw) else { return Vec::new() };
+        disk.stories().into_iter().map(|s| s.bytes).collect()
+    }
 
     let mut ran = 0;
     for m in MEDIA {
@@ -553,10 +575,23 @@ fn every_release_medium_is_offered_by_the_story_picker() {
             continue;
         }
         ran += 1;
+        if listed.contains(&path) {
+            continue;
+        }
+        // Not listed: allowed only when this is a volume of a set and every
+        // build on it is offered by a *sibling volume of that same set*.
+        let siblings = app::disk_set::members(&path).unwrap_or_default();
+        let on_disk = stories_on(&path);
+        let all_folded = !on_disk.is_empty()
+            && on_disk.iter().all(|b| {
+                let ifid = app::ifid::compute_ifid(b);
+                rows.iter().any(|e| e.meta.ifid == ifid && siblings.contains(&e.path))
+            });
         assert!(
-            listed.contains(&path),
-            "{} is mountable but the picker never offered it",
-            ctx(m)
+            all_folded,
+            "{} is mountable but the picker never offered it, and its games are \
+             not all offered by another volume of its own release",
+            ctx(m),
         );
     }
     assert!(ran > 0 || !any_real_media_present(), "media are present but none were scanned");

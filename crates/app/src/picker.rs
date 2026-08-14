@@ -861,20 +861,162 @@ fn resolve(
 /// used to locate each story's per-game `info.json` sidecar (SQ-0348's fetched
 /// metadata) for precedence resolution.
 pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
-    let mut out: Vec<StoryEntry> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
+        return Vec::new();
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() || !has_story_ext(&path) {
+    let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+    // Read-dir order is the filesystem's business and differs between machines;
+    // the scan's own order must not. Sorting here is what makes "the first disk
+    // that offers a build is the one that keeps it" a rule rather than a
+    // coincidence (see `dedupe_within_sets`).
+    files.sort();
+
+    // Which of these files are volumes of one multi-disk release (SQ-0844).
+    // Decided before anything is opened, because the rule is entirely about
+    // names.
+    let sets = crate::disk_set::group(&files);
+
+    let mut out: Vec<StoryEntry> = Vec::new();
+    for path in &files {
+        if !has_story_ext(path) {
             continue;
         }
-        out.extend(resolve_entries(&path, data_base));
+        out.extend(resolve_entries(path, data_base));
     }
+    dedupe_within_sets(&mut out, &sets);
     associate_hint_sidecars(&mut out);
     sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
     out
+}
+
+/// **One collection, not several disks** (SQ-0844): drop a row whose build is
+/// already offered by an earlier volume of the *same* set.
+///
+/// The compilations really do repeat themselves. `Infocom Compilation 5` stores
+/// its games as flat files and `Infocom Compilation 8` in per-game directories,
+/// and both carry Trinity r11/860509 checksum `FAAE` — one IFID,
+/// `ZCODE-11-860509-FAAE`, two rows. Lurking Horror, Moonmist, Stationfall,
+/// Cutthroats and Hitchhiker's are duplicated the same way across that nine-disk
+/// shelf: 39 rows for 33 games.
+///
+/// Three properties this deliberately has:
+///
+/// - **Scoped to one set.** Two rows are folded together only when they are
+///   volumes of one release. The same Zork Zero build (`ZCODE-393-890714-791C`)
+///   sits on `floppy5.ima` and on both of the DOS 360K/720K presses; those are
+///   three separate sets and stay three rows, because they are three pieces of
+///   media the player deliberately keeps. Nothing outside a set is ever folded.
+/// - **Keyed on the IFID**, which for Z-code is release, serial and checksum —
+///   the identity of a *build*. Zork Zero's r296, r366 and r393 are three
+///   different builds and therefore three rows however they are reached, which
+///   is the same rule SQ-0850 keys their saves on.
+/// - **The lowest disk number wins.** `disk_set::group` returns its members in
+///   disk order and the scan walks a sorted file list, so which copy survives is
+///   fixed and reproducible rather than whatever `read_dir` happened to yield.
+fn dedupe_within_sets(out: &mut Vec<StoryEntry>, sets: &[Vec<PathBuf>]) {
+    // Rank every set member by its disk number; a file in no set gets no rank
+    // and is never a candidate for folding.
+    let mut rank: std::collections::HashMap<&Path, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (set_idx, members) in sets.iter().enumerate() {
+        for (disk_idx, m) in members.iter().enumerate() {
+            rank.insert(m.as_path(), (set_idx, disk_idx));
+        }
+    }
+    if rank.is_empty() {
+        return;
+    }
+    // Visit the set rows in (set, disk, position-on-disk) order and keep the
+    // first row per (set, IFID). `out` is already in sorted-file order, so the
+    // enumerate index is the within-disk order the mount reported.
+    let mut order: Vec<(usize, usize, usize, usize)> = out
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let &(set_idx, disk_idx) = rank.get(e.path.as_path())?;
+            Some((set_idx, disk_idx, i, i))
+        })
+        .collect();
+    order.sort();
+    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    let mut drop: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (set_idx, _disk, _pos, i) in order {
+        if !seen.insert((set_idx, out[i].meta.ifid.clone())) {
+            drop.insert(i);
+        }
+    }
+    if drop.is_empty() {
+        return;
+    }
+    let mut i = 0;
+    out.retain(|_| {
+        let keep = !drop.contains(&i);
+        i += 1;
+        keep
+    });
+}
+
+/// Where the browser's list comes from (SQ-0844).
+///
+/// Both arms produce the same thing — a list of *stories*, one row per game,
+/// exactly as SQ-0859 established — and differ only in which files they read.
+/// The picker takes one of these rather than a bare directory so that naming a
+/// single volume of a multi-disk release can open the whole shelf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorySource {
+    /// Every story in one directory: the ordinary library launch.
+    Library(PathBuf),
+    /// Every story on one multi-disk release, reached by naming any one of its
+    /// volumes. `dir` is the directory they share, which is still where a
+    /// downloaded story would land and still what the browser's header names.
+    DiskSet { dir: PathBuf, members: Vec<PathBuf> },
+}
+
+impl StorySource {
+    /// What `path` means as a launch argument: a directory is a library, a
+    /// volume of a multi-disk release is that release, and anything else is
+    /// neither.
+    ///
+    /// A set that offers **fewer than two games** is not one worth a menu, so it
+    /// reports `None` and the caller opens the file the way it always did: a
+    /// player naming Zork Zero's `(360K) (Disk 2)` wants Zork Zero, not a
+    /// one-row browser. The set is still *recognised* — this is only about
+    /// whether it is worth presenting.
+    pub fn of(path: &Path, data_base: &Path) -> Option<StorySource> {
+        if path.is_dir() {
+            return Some(StorySource::Library(path.to_path_buf()));
+        }
+        let members = crate::disk_set::members(path)?;
+        let dir = path.parent()?.to_path_buf();
+        let source = StorySource::DiskSet { dir, members };
+        (source.scan(data_base).len() >= 2).then_some(source)
+    }
+
+    /// The directory these stories live in — where a download lands and what the
+    /// browser's header shows.
+    pub fn dir(&self) -> &Path {
+        match self {
+            StorySource::Library(dir) => dir,
+            StorySource::DiskSet { dir, .. } => dir,
+        }
+    }
+
+    /// This source's stories, sorted by title, deduped within the set.
+    pub fn scan(&self, data_base: &Path) -> Vec<StoryEntry> {
+        match self {
+            StorySource::Library(dir) => scan_stories(dir, data_base),
+            StorySource::DiskSet { members, .. } => {
+                let mut out: Vec<StoryEntry> = Vec::new();
+                for m in members {
+                    out.extend(resolve_entries(m, data_base));
+                }
+                dedupe_within_sets(&mut out, std::slice::from_ref(members));
+                associate_hint_sidecars(&mut out);
+                sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
+                out
+            }
+        }
+    }
 }
 
 /// Second pass over a freshly-scanned list: attach each detected InvisiClues/

@@ -570,16 +570,19 @@ fn wheel_target(
     }
 }
 
-/// Run the pre-game story picker for a directory passed at launch. Returns the
-/// chosen story (with any launch-time overrides), or `None` if the user quit.
-/// Exits the process with a message when the directory contains no launchable
-/// stories.
+/// Run the pre-game story picker over a [`app::picker::StorySource`] — a
+/// directory passed at launch, or the multi-disk release one named volume
+/// belongs to (SQ-0844). Returns the chosen story (with any launch-time
+/// overrides), or `None` if the user quit. Exits the process with a message when
+/// the source offers no launchable stories.
 pub(crate) fn run_story_picker(
-    dir: &std::path::Path,
+    mut source: app::picker::StorySource,
     cfg: &app::config::Config,
     data_base: &std::path::Path,
 ) -> Option<PickedStory> {
-    let mut stories = app::picker::scan_stories(dir, data_base);
+    let dir = source.dir().to_path_buf();
+    let dir = dir.as_path();
+    let mut stories = source.scan(data_base);
     if stories.is_empty() {
         eprintln!("babelmap: no Z-machine story files found in '{}'", dir.display());
         std::process::exit(1);
@@ -1069,7 +1072,17 @@ pub(crate) fn run_story_picker(
                 let prev_row = stories
                     .get(list.selected)
                     .map(|e| (e.path.clone(), e.meta.disk_entry.clone()));
-                stories = app::picker::scan_stories(dir, data_base);
+                // A story downloaded into a *set* browser is not a volume of the
+                // release, so the set's own scan would never show it. Adopt it
+                // as one more path to read, which is all a member ever is —
+                // otherwise the download lands on disk and vanishes from the
+                // list that ordered it (SQ-0844).
+                if let app::picker::StorySource::DiskSet { members, .. } = &mut source {
+                    if !members.contains(new_path) {
+                        members.push(new_path.clone());
+                    }
+                }
+                stories = source.scan(data_base);
                 app::picker::resort_preserving_selection(&mut stories, 0, sort);
                 row_badges = stories
                     .iter()
