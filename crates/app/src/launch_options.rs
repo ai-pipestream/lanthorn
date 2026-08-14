@@ -673,8 +673,12 @@ pub fn derived_interpreter(
         let profile =
             crate::interpreter::InterpreterProfile::for_art_flavour_on(c.flavour, disk_image);
         // A profile that answers `None` is the IBM PC, which defers to zvm's own
-        // rule rather than pinning a number — the same deferral, reported.
-        let n = profile.interpreter_number().unwrap_or(if version == 6 { 6 } else { 1 });
+        // rule rather than pinning a number — the same deferral, reported. Asked
+        // of zvm rather than restated: this dialog open-coded Frotz's rule twice
+        // (SQ-0872), which is exactly the second copy that drifts.
+        let n = profile
+            .interpreter_number()
+            .unwrap_or_else(|| zvm::screen::default_interpreter_number(version));
         // …and when the disk was what settled it, say the disk. An art row that
         // claimed "from the artwork" over a number the artwork did not choose is
         // the provenance line telling a small lie.
@@ -694,7 +698,7 @@ pub fn derived_interpreter(
     if let Some(n) = disk_image.and_then(|d| d.interpreter_number()) {
         return Some((n, InterpreterSource::DiskImage));
     }
-    Some((if version == 6 { 6 } else { 1 }, InterpreterSource::Default))
+    Some((zvm::screen::default_interpreter_number(version), InterpreterSource::Default))
 }
 
 // ── LaunchOptionsState ────────────────────────────────────────────────────────

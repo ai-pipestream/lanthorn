@@ -577,10 +577,19 @@ fn the_tui_the_cli_and_the_launch_dialog_advertise_the_same_byte() {
 
         // 4. …and an explicit number still outranks the medium on every route
         // (SQ-0839, and guard 4 of this quest's brief).
+        // The number you name is the machine you get, and since SQ-0872 that is
+        // literally true for the IIe: 2 now carries the family's own bundle
+        // rather than falling through to the IBM PC. The volume still says IIgs
+        // and is still outranked.
         assert_eq!(
             InterpreterProfile::resolve(&path, Some(2), None),
-            InterpreterProfile::IbmPc,
-            "{name}: asking for the Apple IIe is still asking, even though 2 has no bundle yet",
+            InterpreterProfile::AppleIIe,
+            "{name}: asking for the Apple IIe on a IIgs volume must get the IIe",
+        );
+        assert_eq!(
+            InterpreterProfile::resolve(&path, Some(2), None).interpreter_number(),
+            Some(2),
+            "{name}: …and advertise 2, not the volume's 10",
         );
         assert_eq!(
             app::launch_options::derived_interpreter(

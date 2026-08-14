@@ -325,3 +325,94 @@ fn the_ibm_pc_profile_changes_nothing_it_touches() {
 
     let _ = std::fs::remove_file(&plain);
 }
+
+// ── the two tables that must not drift (SQ-0872) ──────────────────────────────
+
+/// `blorb::medium` and `zvm::interpreter` both name §11.1.3 interpreter numbers,
+/// and neither can see the other: `blorb` takes zero external dependencies, and
+/// `zvm` must not depend on it. That is the right shape — a NUMBER is a compact,
+/// published encoding that needs no shared type, which is exactly why it works as
+/// a lingua franca between two crates kept deliberately independent — but it
+/// means the values are stated twice, and a value stated twice can diverge.
+///
+/// So this is the seam, asserted. `blorb` answers *which machine a disk implies*;
+/// `zvm` answers *what that machine IS* — the colour pair, the palette, the §8.3
+/// screen rules. This crate is the only one that sees both, so the agreement is
+/// pinned here.
+///
+/// FALSIFICATION: change `blorb::medium::AMIGA_INTERPRETER_NUMBER` to 5 and the
+/// first row fails with `the Amiga's number: blorb says 5, zvm says 4`.
+#[test]
+fn blorb_and_zvm_agree_on_every_machine_they_both_name() {
+    for (label, from_blorb, from_zvm) in [
+        (
+            "the Amiga's number",
+            blorb::medium::AMIGA_INTERPRETER_NUMBER,
+            zvm::interpreter::AMIGA_INTERPRETER_NUMBER,
+        ),
+        (
+            "the Macintosh's number",
+            blorb::medium::MACINTOSH_INTERPRETER_NUMBER,
+            zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER,
+        ),
+        (
+            "the Atari ST's number",
+            blorb::medium::ATARI_ST_INTERPRETER_NUMBER,
+            zvm::interpreter::ATARI_ST_INTERPRETER_NUMBER,
+        ),
+        (
+            "the Apple IIgs's number",
+            blorb::medium::APPLE_IIGS_INTERPRETER_NUMBER,
+            zvm::interpreter::APPLE_IIGS_INTERPRETER_NUMBER,
+        ),
+        (
+            "the Commodore 128's number",
+            blorb::medium::COMMODORE_128_INTERPRETER_NUMBER,
+            zvm::interpreter::COMMODORE_128_INTERPRETER_NUMBER,
+        ),
+    ] {
+        assert_eq!(from_blorb, from_zvm, "{label}: blorb says {from_blorb}, zvm says {from_zvm}");
+    }
+
+    // …and every number any MEDIUM hands out must name a machine zvm models, or a
+    // disk launch would present the IBM PC's colours under another machine's byte
+    // — the exact half-wiring SQ-0872 exists to close, arriving from the medium
+    // instead of from the CLI.
+    for d in blorb::medium::DiskImage::all() {
+        let Some(n) = d.interpreter_number() else { continue };
+        assert!(
+            zvm::interpreter::machine(n).is_some(),
+            "{d:?} hands out interpreter {n}, which zvm models no machine for",
+        );
+        // …and the app's own bundle reaches that same machine off the same byte.
+        assert_eq!(
+            InterpreterProfile::for_interpreter_number(n).interpreter_number(),
+            Some(n),
+            "{d:?}: the profile for {n} must state {n} back",
+        );
+    }
+}
+
+/// The app's bundle and zvm's table are one machine seen from two crates, so
+/// every knob a STORY can read has to match — that is what makes the TUI and
+/// `zvm-cli` present the same machine off the same disk (SQ-0872).
+///
+/// FALSIFICATION: change the Macintosh row's `default_colours` in
+/// `zvm::interpreter` to `Some((2, 9))` and this fails at `Macintosh $2C/$2D`.
+#[test]
+fn the_profiles_bundle_is_the_zvm_tables_row() {
+    for (profile, number) in [
+        (InterpreterProfile::Macintosh, 3u8),
+        (InterpreterProfile::Amiga, 4),
+        (InterpreterProfile::AtariSt, 5),
+        (InterpreterProfile::Commodore128, 7),
+        (InterpreterProfile::AppleIIe, 2),
+        (InterpreterProfile::AppleIIc, 9),
+        (InterpreterProfile::AppleIIgs, 10),
+    ] {
+        let row = zvm::interpreter::machine(number).expect("modelled");
+        assert_eq!(profile.interpreter_number(), Some(number), "{profile:?} $1E");
+        assert_eq!(profile.default_colours(), row.default_colours, "{profile:?} $2C/$2D");
+        assert_eq!(profile.palette(), row.palette, "{profile:?} palette");
+    }
+}

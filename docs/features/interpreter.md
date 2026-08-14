@@ -922,6 +922,49 @@ Amiga floppy or anywhere else.
   ST's profile makes about its 512 colours and the Apple's about double hi-res.
   Filling those in wants a source, not an afternoon.
 
+  **Apple IIe** and **Apple IIc** are the seventh and eighth, and they cost
+  almost nothing to add because they are the Apple IIgs's bundle with a different
+  byte. Infocom's Apple II interpreter is one program for all three machines: it
+  seeds the black page and white ink first, then works out at boot which Apple it
+  is standing on and writes 2, 9 or 10 accordingly. A ProDOS *disk* still selects
+  the IIgs, because the medium genuinely cannot name the press — but a player who
+  names 2 or 9 outright now gets an Apple instead of an IBM PC wearing an Apple's
+  number, which is what the fallback used to hand them.
+
+  **Three numbers still have no profile, and each is a decline rather than a
+  gap**: 1 DECSystem-20 (what declining already falls through to — whether it
+  deserves a bundle of its own or is honestly "a terminal, the same as the IBM
+  PC" is a decision, not a datum), 8 Commodore 64 (no Infocom Commodore
+  interpreter has been read for either Commodore), and 11 Tandy Color (no
+  fixture, no sourced constant — better absent than invented). Naming one of them
+  still writes it into `0x1E`, because the story asked and §11.1.3 has an answer,
+  but everything else about the presentation is the IBM PC's — and `zvm-cli` now
+  **says so** on stderr rather than letting the substitution pass unremarked.
+
+- **One machine table, two front-ends.** Everything above that a *story* can read
+  — the interpreter number, the default page and ink in `$2C`/`$2D`, the palette
+  colour numbers resolve through, and the §8.3 screen rules a machine gets by
+  name — lives in one table inside `zvm`, keyed by the §11.1.3 number. Both
+  `babelmap` and `zvm-cli` read it, so opening the same disk in either presents
+  the same machine.
+
+  That is new, and it fixed a real half-wiring: `zvm-cli` used to set the
+  interpreter number and nothing else, so a story off a Macintosh or Atari ST
+  press was told which machine it was on and left to work out what that machine
+  looked like from the Z-machine's own generic default. The number and the page
+  disagreed. (The Apple presses were the one place it never showed, because the
+  Apple's black-page-white-ink pair happens to *be* that generic default.)
+
+  What stays in `babelmap` stays for a reason: reading a disk to work out which
+  machine pressed it is file I/O, which the VM core deliberately has none of; the
+  artwork-flavour preference needs the resource reader; and a standard window is
+  a Version 6 picture space stated by an *archive* rather than by a machine.
+
+  In a terminal, note that a machine's page is what the story is *told*, not
+  something painted over your theme. Where a game names no colour, `zvm-cli` and
+  `babelmap` both still show your terminal's own — a machine's colours reach the
+  screen only where the game actually asks for them.
+
   The Apple is also the profile whose *number* had to be argued rather than read
   — the Amiga, the Macintosh and the ST each write one byte and mean it, while
   the Apple II YZIP detects the machine at boot and writes 2, 9 or 10 accordingly.
