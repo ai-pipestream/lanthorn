@@ -205,6 +205,13 @@ honest answer to four fifths of a game is no game, so babelmap mounts the volume
 lists its files and declines to offer a story — the same answer it gave before,
 now for a reason it can state.
 
+It can state one more thing about it, though. Page 0 of the story is on
+`JOURNEY.D1`, which the image *does* have, and a Z-machine header is where a build
+writes its name: release 77, serial 890616. So this disk knows what it is even
+though it cannot be played, which is enough to keep the release 83 `Journey.blb`
+next to it from drawing another build's pictures into it — see
+[v6 graphics](v6-graphics.md).
+
 #### …and the same container, one floppy per disk
 
 *Shogun* and *Zork Zero* shipped the same way and did not get the convenience of
@@ -367,7 +374,7 @@ volume opens with:
 | *Lost Treasures* 6 (`INFOCOM6`) | Sherlock, v5 release 21, serial 871214 |
 | *Lost Treasures* 7 (`INFOCOM7`) | Wishbringer, v3 release 69, serial 850920 |
 | `Arthur Quest 4 Excalibur.2mg` | Arthur, v6 release 63, serial 890622 — packed |
-| `Journey.2mg` | — declares five segments, carries four; no game |
+| `Journey.2mg` | — declares five segments, carries four; no game (its header still says release 77, serial 890616) |
 | `shogun_s1.dsk`…`s5` (5.25") | Shogun, v6 release 311, serial 890510 — packed across five |
 | `zork_zero_1.dsk`…`_4` (5.25") | Zork Zero, v6 release 383, serial 890602 — packed across four |
 

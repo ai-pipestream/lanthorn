@@ -1190,16 +1190,14 @@ pub struct ResourceBlorb {
 ///   draws this line — a file on the medium "shipped in the box with the story…
 ///   which is exactly what a loose file's name has to be tested for".
 /// - **No story on the release could be identified.** Nothing to compare against,
-///   so nothing is proven, and the Blorb keeps drawing. Three media are here
-///   today, and all three are cases where a reader — not this rule — is what is
-///   missing: `Journey.2mg`, whose volume mounts but yields no story; and the
-///   five-volume `shogun_s*.dsk` and four-volume `zork_zero_*.dsk` Apple II
-///   presses, whose stories are paged across the whole set while
-///   [`release_builds`] can only ask each volume on its own (SQ-0864 taught
-///   babelmap to mount them; pulling a set-spanning story out of them is that
-///   lane's question, not this one's). The rule tightens by itself as those
-///   readers improve, rather than guessing now — and `zork_zero_*.dsk` is not
-///   exposed at all, because no Blorb in the corpus stem-matches it.
+///   so nothing is proven, and the Blorb keeps drawing. The rule tightens by
+///   itself as the readers improve, rather than guessing now, and SQ-0867 is that
+///   happening: [`release_builds`] could once only ask each volume on its own, so
+///   the Apple II presses that page a story across a whole SET — `Journey.2mg`
+///   and the five-volume `shogun_s*.dsk` — were unidentifiable however plainly
+///   they stated their build. Both are identified now, and `Shogun.blb`'s release
+///   322 against that press's release 311 is refused on the same evidence
+///   `Arthur.blb` was.
 ///
 /// # What it never touches
 ///
@@ -1250,17 +1248,63 @@ fn build_mismatch(
 /// and the one that costs nothing, because [`crate::assets::volumes`] refuses a
 /// story file before mounting anything.
 ///
-/// Also empty when the release mounts but babelmap cannot yet page a story out of
-/// it. Each volume is asked on its own, so a story spread across a *set* is
-/// invisible here even though every volume of it mounted — the Apple II
-/// `shogun_s*.dsk` press is exactly that. An empty answer is treated as "no
-/// evidence" by [`resource_blorb`] and never as "no match"; see its docs.
+/// Also empty when the release mounts and babelmap can identify nothing on it. An
+/// empty answer is treated as "no evidence" by [`resource_blorb`] and never as
+/// "no match"; see its docs.
+///
+/// # A story on no single volume (SQ-0867)
+///
+/// Asking each volume on its own is right for every release that puts a story
+/// FILE on a platter, and blind to the ones that do not. The Apple II presses of
+/// the graphical Version 6 games page one story across the whole set as opaque
+/// `.D1`…`.D5` segments — the five-volume `shogun_s*.dsk` is five floppies of
+/// which not one carries a story, and `Journey.2mg` is one image of the same
+/// shape — so every volume mounted, every volume answered "nothing here", and a
+/// release whose build is written plainly on it read as unidentifiable.
+///
+/// So when no volume speaks for itself, the release is asked as a whole.
+/// [`blorb::infocom_packed::story_header`] reads the segment index and the one
+/// page it names as page 0, which is where release, serial and checksum live;
+/// see that function for why one page is enough and what stands in for the
+/// checksum [`blorb::infocom_packed::story`] would have verified.
+///
+/// # Cost
+///
+/// The second arm runs only when the first found nothing, and in the release it
+/// is for it adds **no disk read at all**: [`crate::assets::volumes`] has already
+/// mounted every volume of the set — it has to, since SQ-0862, so that a sibling
+/// floppy's artwork can be found — and this reads their already-open contents.
+/// What it adds is one index parse and one 512-byte page.
+///
+/// Above it sits a stronger gate still: production reaches this only through
+/// [`build_mismatch`], which returns before asking when the Blorb states no build
+/// of its own. A release with no stem-matching Blorb, or one whose Blorb is
+/// silent, never pays even the mount.
 pub fn release_builds(story_path: &std::path::Path) -> Vec<blorb::GameIdentifier> {
-    crate::assets::volumes(story_path)
+    let volumes = crate::assets::volumes(story_path);
+    let on_a_volume: Vec<blorb::GameIdentifier> = volumes
         .iter()
         .flat_map(|v| v.disk.stories())
         .filter_map(|s| blorb::GameIdentifier::of_story(&s.bytes))
-        .collect()
+        .collect();
+    if !on_a_volume.is_empty() {
+        return on_a_volume;
+    }
+    packed_across_the_set(&volumes).into_iter().collect()
+}
+
+/// The build a release pages ACROSS its volumes states in its own header, or
+/// `None` when these volumes are not one of those releases (SQ-0867).
+fn packed_across_the_set(
+    volumes: &[crate::assets::MountedVolume],
+) -> Option<blorb::GameIdentifier> {
+    // The story's own volume first, so which floppy a person opened cannot
+    // change the answer — `blorb::medium`'s reassembly orders them the same way
+    // and for the same reason.
+    let files: Vec<(String, Vec<u8>)> =
+        volumes.iter().flat_map(|v| v.disk.contents()).collect();
+    let (_, header) = blorb::infocom_packed::story_header(&files)?;
+    blorb::GameIdentifier::of_story(&header)
 }
 
 /// Read a bare filename off the release `story_path` was mounted from, for a

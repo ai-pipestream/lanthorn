@@ -895,7 +895,20 @@ pub(crate) fn boot_story(
     // feature is off, there is no device, or sound is disabled in config).
     // The load line prints here, before the alternate screen is entered, so it
     // stays in the normal terminal scrollback for verification after exit.
-    state.sound_blorb = match blorb::resolve_resource_blorb(&story_path) {
+    // Through `graphics::resource_blorb`, not `blorb::resolve_resource_blorb`:
+    // the `IFhd` game identifier describes the CONTAINER, not its `Pict` chunks,
+    // and a Blorb built for another build numbers its sounds exactly as
+    // build-specifically as it numbers its pictures. Refusing it for one and
+    // trusting it for the other would also have said so on screen — a release
+    // whose artwork was just refused went on to print "loaded resources from
+    // Shogun.blb (sidecar) (0 sounds, 48 images)" one line later (SQ-0867).
+    //
+    // Inert on today's corpus, and deliberately so: no refused Blorb in it holds
+    // a single `Snd `, and the one real sound-path mismatch — `Lurking.blb`,
+    // release 221 / serial 870918 against a release 219 / serial 870912 story —
+    // sits beside a LOOSE story and is exempt under the rule's second arm, which
+    // is where a person's own filing is allowed to answer the question.
+    state.sound_blorb = match app::graphics::resource_blorb(&story_path).found {
         Some((b, path)) => {
             let count = |usage: &[u8; 4]| b.resources().iter().filter(|r| &r.usage == usage).count();
             let (sounds, images) = (count(b"Snd "), count(b"Pict"));
