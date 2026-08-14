@@ -65,6 +65,82 @@ pub enum SoundKind {
     Other,
 }
 
+/// Which build of a story a Blorb's resources were made for — the Blorb spec's
+/// optional `IFhd` **Game Identifier** chunk (SQ-0866).
+///
+/// The spec defers the layout: *"For Z-code, the contents of the game identifier
+/// chunk are defined in the common save file format specification, section 5."*
+/// Quetzal §5.4 spells that out as release number (story offset `$02`, 2 bytes),
+/// serial number (`$12`, 6 bytes), checksum (`$1C`, 2 bytes) and a 3-byte initial
+/// PC — 13 bytes in all. Blorb adds that the PC *"has no meaning for resource
+/// files. It should be set to zero"*, so it is not kept here.
+///
+/// # What it is for
+///
+/// The spec states the use outright: *"If it is present, and the interpreter is
+/// given a game file along with a resource file, the interpreter can check that
+/// the game matches the IFhd chunk. If they don't, the interpreter should display
+/// an error."* [`crate::Blorb::game_identifier`] is that check's left-hand side;
+/// the policy about what to do with a mismatch is `app`'s, in
+/// `app::graphics::resource_blorb`, because it turns on how the two files came to
+/// be considered together in the first place.
+///
+/// The chunk is **optional**, and most of the corpus omits it — every modern
+/// `.zblorb`, `advent.blb`, `Sherlock.blb`, all eleven Mysterious Adventures
+/// sidecars. An absent identifier is not a mismatch; it is a Blorb declining to
+/// say, and callers must treat the two differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameIdentifier {
+    /// Release number, story header `$02`.
+    pub release: u16,
+    /// Serial number, story header `$12` — six ASCII digits, conventionally
+    /// `YYMMDD`. Normalised: see [`GameIdentifier::of_story`].
+    pub serial: [u8; 6],
+    /// Checksum, story header `$1C`.
+    pub checksum: u16,
+}
+
+impl GameIdentifier {
+    /// The identifier a Z-machine story file's own header states, or `None` when
+    /// the bytes are too short to carry one.
+    ///
+    /// # Why the serial is masked
+    ///
+    /// Bit 7 is stripped from each serial byte. Apple II releases store their
+    /// header text in high ASCII, so the *same* serial reads as `890622` off a
+    /// `.z6` and as `b8b9b0b6b2b2` off the platter — a difference in character
+    /// encoding, not in identity. `cli_host::storage::DiskBuild::of` already
+    /// masks for exactly this reason (SQ-0856), and a comparison that did not
+    /// would report every Apple II story as a different build from itself.
+    ///
+    /// Applied on both sides, including a Blorb's own `IFhd`, so the two can
+    /// never be normalised differently. No Blorb in the corpus writes high ASCII,
+    /// which is precisely why masking it costs nothing.
+    pub fn of_story(story: &[u8]) -> Option<GameIdentifier> {
+        let s = story.get(..0x1e)?;
+        let mut serial = [0u8; 6];
+        for (dst, &src) in serial.iter_mut().zip(&s[0x12..0x18]) {
+            *dst = src & 0x7f;
+        }
+        Some(GameIdentifier {
+            release: u16::from_be_bytes([s[0x02], s[0x03]]),
+            serial,
+            checksum: u16::from_be_bytes([s[0x1c], s[0x1d]]),
+        })
+    }
+
+    /// The serial as text, for a message a person reads.
+    pub fn serial_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.serial)
+    }
+}
+
+impl std::fmt::Display for GameIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "release {}, serial {}", self.release, self.serial_str())
+    }
+}
+
 /// A parsed Blorb container: owns the file bytes and the resource index.
 #[derive(Debug)]
 pub struct Blorb {
@@ -74,6 +150,9 @@ pub struct Blorb {
     fspc: Option<u32>,
     /// `(start, len)` of the top-level `IFmd` chunk's data, if present.
     ifmd: Option<(usize, usize)>,
+    /// Which build these resources are for, from the top-level `IFhd` chunk.
+    /// `None` for the many containers that carry none — see [`GameIdentifier`].
+    ifhd: Option<GameIdentifier>,
     /// Standard window `(width, height)` in pixels from the top-level `Reso`
     /// (resolution) chunk — the display size the pictures were authored for.
     /// A v6 interpreter advertises this as the screen size so the game's
@@ -85,6 +164,26 @@ pub struct Blorb {
     /// Palette" (the palette of the most recently drawn non-adaptive picture)
     /// rather than its own. Empty when the container has no `APal` chunk.
     apal: Vec<u32>,
+}
+
+/// The identifier an `IFhd` chunk BODY states — Quetzal §5.4's packed layout
+/// (release, serial, checksum, then the initial PC), which is not the story
+/// header's spacing, so this cannot share [`GameIdentifier::of_story`].
+///
+/// Ten bytes are enough: the trailing PC is the one field Blorb declares
+/// meaningless in a resource file, so a writer that stops short of it has still
+/// said everything that identifies the build.
+fn ifhd_identifier(body: &[u8]) -> Option<GameIdentifier> {
+    let b = body.get(..10)?;
+    let mut serial = [0u8; 6];
+    for (dst, &src) in serial.iter_mut().zip(&b[2..8]) {
+        *dst = src & 0x7f;
+    }
+    Some(GameIdentifier {
+        release: u16::from_be_bytes([b[0], b[1]]),
+        serial,
+        checksum: u16::from_be_bytes([b[8], b[9]]),
+    })
 }
 
 fn be_u32(b: &[u8], off: usize) -> Result<u32, BlorbError> {
@@ -117,6 +216,7 @@ impl Blorb {
         let mut ridx: Option<(usize, usize, usize)> = None; // (entries_start, count, chunk_len)
         let mut fspc: Option<u32> = None;
         let mut ifmd: Option<(usize, usize)> = None;
+        let mut ifhd: Option<GameIdentifier> = None;
         let mut reso_std: Option<(u16, u16)> = None;
         let mut apal: Vec<u32> = Vec::new();
         let mut pos = 12;
@@ -134,6 +234,8 @@ impl Blorb {
                 fspc = be_u32(&bytes, data_start).ok();
             } else if &ctype == b"IFmd" {
                 ifmd = Some((data_start, clen));
+            } else if &ctype == b"IFhd" {
+                ifhd = ifhd_identifier(&bytes[data_start..data_start + clen]);
             } else if &ctype == b"Reso" && clen >= 8 {
                 // First two words are the standard window width/height (px);
                 // min/max and per-image ratios follow (ignored here).
@@ -187,7 +289,7 @@ impl Blorb {
             index.push(ResourceEntry { usage, number, start, chunk_type, len });
             p += 12;
         }
-        Ok(Blorb { bytes, index, fspc, ifmd, reso_std, apal })
+        Ok(Blorb { bytes, index, fspc, ifmd, ifhd, reso_std, apal })
     }
 
     /// The parsed resource index (for enumeration).
@@ -207,6 +309,15 @@ impl Blorb {
     /// Returned uninterpreted — parsing is a caller's concern.
     pub fn metadata(&self) -> Option<&[u8]> {
         self.ifmd.map(|(s, l)| &self.bytes[s..s + l])
+    }
+
+    /// Which build of a story these resources were made for, from the optional
+    /// top-level `IFhd` chunk — `None` when the container does not say.
+    ///
+    /// See [`GameIdentifier`] for the layout, the spec's own instruction to
+    /// check it, and why "does not say" must never be read as "does not match".
+    pub fn game_identifier(&self) -> Option<GameIdentifier> {
+        self.ifhd
     }
 
     /// The standard window `(width, height)` in pixels from the `Reso`
@@ -493,6 +604,81 @@ pub fn sibling_blorb_by_name(
 }
 
 #[cfg(test)]
+mod identifier_tests {
+    use super::*;
+
+    /// A Z-machine header stating `release` / `serial` / `checksum`.
+    fn story(release: u16, serial: &[u8; 6], checksum: u16) -> Vec<u8> {
+        let mut s = vec![0u8; 0x40];
+        s[0] = 6;
+        s[0x02..0x04].copy_from_slice(&release.to_be_bytes());
+        s[0x12..0x18].copy_from_slice(serial);
+        s[0x1c..0x1e].copy_from_slice(&checksum.to_be_bytes());
+        s
+    }
+
+    /// Quetzal §5.4's field offsets, read off a real story header.
+    #[test]
+    fn a_story_header_states_release_serial_and_checksum() {
+        let id = GameIdentifier::of_story(&story(63, b"890622", 0x45eb)).unwrap();
+        assert_eq!(id.release, 63);
+        assert_eq!(id.serial_str(), "890622");
+        assert_eq!(id.checksum, 0x45eb);
+        assert_eq!(id.to_string(), "release 63, serial 890622");
+        // Too short to carry one.
+        assert_eq!(GameIdentifier::of_story(&[0u8; 0x1d]), None);
+    }
+
+    /// Apple II releases store header text in high ASCII. The SAME serial must
+    /// not read as two different builds depending on the medium (SQ-0856's
+    /// masking, applied to identity).
+    #[test]
+    fn a_high_ascii_serial_is_the_same_build_as_its_plain_one() {
+        let plain = GameIdentifier::of_story(&story(63, b"890622", 0x45eb)).unwrap();
+        let high: [u8; 6] = [0xb8, 0xb9, 0xb0, 0xb6, 0xb2, 0xb2];
+        let apple = GameIdentifier::of_story(&story(63, &high, 0x45eb)).unwrap();
+        assert_eq!(apple, plain, "high ASCII is an encoding, not a different release");
+        assert_eq!(apple.serial_str(), "890622");
+    }
+
+    /// The `IFhd` chunk's own packing (release, serial, checksum, then the PC the
+    /// Blorb spec calls meaningless) is NOT the story header's spacing.
+    #[test]
+    fn a_blorbs_ifhd_states_which_build_its_resources_are_for() {
+        let mut ifhd = Vec::new();
+        ifhd.extend_from_slice(&74u16.to_be_bytes());
+        ifhd.extend_from_slice(b"890714");
+        ifhd.extend_from_slice(&0xd526u16.to_be_bytes());
+        ifhd.extend_from_slice(&[0, 0, 0]); // "should be set to zero"
+        assert_eq!(ifhd.len(), 13, "Quetzal §5.4.2");
+        let bytes = tests::build_blorb_with_top(
+            &[(b"Pict", 1, b"PNG ", &[1, 2, 3, 4])],
+            &[(b"IFhd", &ifhd)],
+        );
+        let id = Blorb::parse(bytes).unwrap().game_identifier().unwrap();
+        assert_eq!((id.release, id.serial_str().into_owned(), id.checksum), (74, "890714".into(), 0xd526));
+    }
+
+    /// The chunk is optional, and most of the corpus omits it. An absent
+    /// identifier must read as "does not say", never as a mismatch.
+    #[test]
+    fn a_blorb_without_the_chunk_states_no_build_at_all() {
+        let bytes = tests::build_blorb(&[(b"Pict", 1, b"PNG ", &[1, 2, 3, 4])]);
+        assert_eq!(Blorb::parse(bytes).unwrap().game_identifier(), None);
+    }
+
+    /// A truncated chunk says nothing rather than half a build, and never panics.
+    #[test]
+    fn a_short_ifhd_chunk_is_ignored_rather_than_half_read() {
+        let bytes = tests::build_blorb_with_top(
+            &[(b"Pict", 1, b"PNG ", &[1, 2, 3, 4])],
+            &[(b"IFhd", &[0, 74, b'8', b'9'])],
+        );
+        assert_eq!(Blorb::parse(bytes).unwrap().game_identifier(), None);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -510,14 +696,16 @@ mod tests {
 
     /// Build a Blorb with the given resources. Each resource is
     /// (usage, number, chunk_type, data). Returns the file bytes.
-    type BlorbRes<'a> = (&'a [u8; 4], u32, &'a [u8; 4], &'a [u8]);
-    fn build_blorb(res: &[BlorbRes]) -> Vec<u8> {
+    // `pub(super)`: `identifier_tests` above builds containers with the same two
+    // helpers rather than growing a second copy of the layout arithmetic.
+    pub(super) type BlorbRes<'a> = (&'a [u8; 4], u32, &'a [u8; 4], &'a [u8]);
+    pub(super) fn build_blorb(res: &[BlorbRes]) -> Vec<u8> {
         build_blorb_with_top(res, &[])
     }
 
     /// `top` = extra top-level chunks as (type, data), emitted after RIdx.
     /// Resource offsets must account for their size — hence the shared body layout.
-    fn build_blorb_with_top(res: &[BlorbRes], top: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    pub(super) fn build_blorb_with_top(res: &[BlorbRes], top: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
         // Lay out the resource chunks after the RIdx chunk (and any top-level
         // chunks) to compute offsets.
         let count = res.len() as u32;

@@ -244,6 +244,61 @@ the story belong together:
    disk's `ZORK0.EG1` while you are booted off the disk *next* to it, without
    unpacking anything first.
 
+#### A Blorb that belongs to another release is not used
+
+Tier 1's confidence has a limit, and the Apple IIgs *Arthur* found it. That disk
+is release 63 / serial 890622 and carries 168 pictures; babelmap cannot yet read
+its artwork off the platter, so it fell through to the resource Blorb beside the
+story — and `Arthur.blb` is the **DOS** press, release 74 / serial 890714, with
+**326**. The two games number their pictures differently, so *Arthur* asked for
+its own plates and got another build's. That is the corruption, and it came from
+a six-character filename match.
+
+Blorb has a chunk for exactly this: the optional `IFhd` **game identifier**, which
+records the release, serial and checksum the resources were made for, and which
+the spec says an interpreter *"can check… If they don't [match], the interpreter
+should display an error."* babelmap now checks it, and where the check fails it
+draws nothing and says why:
+
+```
+babelmap: warning: Arthur.blb is the artwork for release 74, serial 890714, but
+this disk is release 63, serial 890622 — a different build's pictures are not
+being drawn
+```
+
+The launch dialog agrees, because it asks the same question the boot does: its
+first row reads *Automatic — no artwork found*. *Arthur* is perfectly playable as
+text meanwhile, and that is better than nonsense.
+
+The rule is deliberately narrow, because most of the corpus pairs a story with a
+neighbouring file quite legitimately and all of it must keep working. A Blorb is
+only refused when it **contradicts** the story: it carries an `IFhd`, the story
+came off a disk image, and the identifier matches no build on that release. Three
+things are therefore *not* contradictions —
+
+- **A Blorb that says nothing.** `IFhd` is optional and most containers omit it —
+  every modern `.zblorb`, `Sherlock.blb`, `beyondzork.blb`, all eleven *Mysterious
+  Adventures* sidecars. Silence is not disagreement.
+- **A loose story file.** Its folder was assembled by a person, and that placement
+  *is* the pairing. *Frobozz Magic Video Poker* is the case that proves it: its
+  Blorb is a byte-for-byte copy of *Zork Zero*'s, so it claims to be release 393
+  while the game is release 60 — and its own readme tells you to do that, because
+  borrowing *Zork Zero*'s plates is the entire design of the game. babelmap does
+  not overrule someone who has already answered the question.
+- **A disk whose story babelmap cannot yet identify.** Nothing to compare, so
+  nothing is proven. The check simply gets sharper as the disk readers learn more
+  formats — the Apple II `shogun_s*.dsk` press mounts all five of its volumes but
+  pages its story across the set, so there is currently no build to check it
+  against.
+
+And note that a contradiction only ever *matters* for a disk carrying no artwork
+of its own. The Amiga *Arthur* and *Journey* floppies are contradicted by the same
+DOS Blorbs sitting beside them, and both draw their own `Pic.data` regardless,
+because the medium is consulted first and never reaches this question.
+
+Naming an archive yourself (tier 3, below) still wins outright, mismatch or not.
+That is the point of naming one.
+
 Tier 3 is how you *pick a rendition*, not just how you rescue a game. *Zork Zero*
 alone can be played four ways from the files that survive — the Amiga `zork0.pic`,
 the MCGA `zork0.mg1`, the EGA `zork0.eg1`, the CGA `zork0.cg1` — and they are

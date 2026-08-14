@@ -513,7 +513,14 @@ pub fn resolved_default_art(story_path: &Path) -> Option<DefaultArt> {
     // Tier 1. A Blorb is not a rendition of anything — it is the modern
     // container, with no video card behind it — so the column says what it is
     // rather than inventing a machine for it.
-    let (blorb, path) = blorb::resolve_resource_blorb(story_path)?;
+    //
+    // Through `graphics::resource_blorb`, not `blorb::resolve_resource_blorb`:
+    // that function is where a Blorb naming a DIFFERENT build is refused
+    // (SQ-0866), and a row that offered `Arthur.blb` for the Apple IIgs disk
+    // while the boot drew nothing would be exactly the untrustworthy row this
+    // function exists to prevent. The default row reads "no artwork found"
+    // instead, which is what the boot will do.
+    let (blorb, path) = crate::graphics::resource_blorb(story_path).found?;
     let pictures = blorb.resources().iter().filter(|r| &r.usage == b"Pict").count();
     if pictures == 0 {
         return None; // a sound-only sidecar draws nothing
