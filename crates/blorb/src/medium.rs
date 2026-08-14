@@ -101,6 +101,67 @@ pub const MACINTOSH_INTERPRETER_NUMBER: u8 = 3;
 /// byte-identical trace under 1 and under 5.
 pub const ATARI_ST_INTERPRETER_NUMBER: u8 = 5;
 
+/// Apple IIgs, from the same §11.1.3 table — *"… 9 Apple IIc, **10 Apple
+/// IIgs**, 11 Tandy Color"* — and, like the Atari ST's, corroborated by
+/// Infocom's own interpreter rather than by the standard alone (SQ-0857).
+///
+/// The corroboration here is unusually direct, because the interpreter is **on
+/// two of the disks in `stories/`**. `apple/yzip/rel.15/apple.equ` in
+/// `github.com/erkyrath/infocom-zcode-terps` — the Apple II YZIP, Infocom's
+/// Version 6 interpreter for the machine — names all three of the family's
+/// numbers as constants:
+///
+/// ```text
+///   apple/yzip/rel.15/apple.equ:136   IIeID   EQU  2   ; Apple ][e Yzip
+///   apple/yzip/rel.15/apple.equ:137   IIcID   EQU  9   ; ][c Yzip
+///   apple/yzip/rel.15/apple.equ:138   IIgsID  EQU  10  ; ][gs Yzip
+/// ```
+///
+/// and `zboot.asm` writes whichever one it settled on into header `$1E`
+/// (`ZINTWD EQU 30`, decimal 30 = `$1E`, in `zip.equ`):
+///
+/// ```text
+///   apple/yzip/rel.15/zboot.asm:7   lda  ARG2+LO         ; get machine id!
+///   apple/yzip/rel.15/zboot.asm:8   sta  ZBEGIN+ZINTWD   ; save before it gets zeroed
+/// ```
+///
+/// **And it is NOT a flat constant — it is detected at boot**, which is the
+/// question worth asking here because a version-dependent rule is exactly why
+/// [`DiskImage::Fat12Dos`] answers `None`. `bsubs.asm`'s `MACHINE:` reads
+/// ProDOS's own machine-ID bytes and picks one of the three:
+///
+/// ```text
+///   ; Make sure we are on a good machine, like a ][c or ][e+/][gs
+///   MACHINE:
+///       lda MACHID1 / cmp #6 / bne BADMACH   ; nothing below an enhanced ][e
+///       lda MACHID2 / bne MACH1
+///       lda #IIcID                            ; Apple ][c thank you
+///   MACH1:
+///       sec / jsr MACHCHK / bcs OLDMACH       ; check for 'new' machine
+///       lda #IIgsID                           ; this is a ][gs
+///   OLDMACH:
+///       lda #IIeID                            ; this is IIe
+///   MACH2:
+///       sta ARG2+LO                           ; save machine id
+/// ```
+///
+/// `apple/yzip/rel.13/boot.lst` assembles that routine to
+/// `AD B3 FB C9 06 D0 19 AD C0 FB D0 05 A9 09 4C CB 26 38 20 1F FE B0 04 A9 0A
+/// D0 02 A9 02 85 65 60`, and the same bytes — with the one `jmp MACH2` operand
+/// relocated by one, `4C CC 26` — occur **verbatim and byte-identical** in
+/// `INFOCOM.SYSTEM` on both `Journey.2mg` and `Arthur Quest 4 Excalibur.2mg`, at
+/// offset 1711 of each. Those are the ProDOS 8 launchers of the corpus's two
+/// Version 6 releases. (The 22,528-byte `INFOCOM` interpreter beside them
+/// differs between the two disks in exactly two bytes, so one interpreter serves
+/// both presses.)
+///
+/// So the number is a property of **the machine the interpreter is running on**
+/// and not of the disk, and §11.1.3 says as much: *"An interpreter should choose
+/// the interpreter number most suitable for the machine it will run on."* The
+/// row below is where babelmap answers that question; see it for why the answer
+/// is the top of the family.
+pub const APPLE_IIGS_INTERPRETER_NUMBER: u8 = 10;
+
 /// Which release medium a story was mounted out of, when it was one at all.
 ///
 /// The variant is the mount's own answer — every one of them is decided by the
@@ -128,9 +189,11 @@ pub enum DiskImage {
     /// **The one format here that names a FAMILY rather than a machine.**
     /// ProDOS is the Apple II's filesystem from the IIe on, and ZMSD §11.1.3
     /// gives that family three interpreter numbers — 2 Apple IIe, 9 Apple IIc,
-    /// 10 Apple IIgs. The corpus contains both kinds of press, so the ambiguity
-    /// is live rather than theoretical; see this variant's row in [`FORMATS`],
-    /// where the consequence for [`DiskImage::interpreter_number`] is argued.
+    /// 10 Apple IIgs. Infocom's own Apple interpreter settles which by *detecting
+    /// the machine at boot* rather than by pressing three disks, so the ambiguity
+    /// is a fact about the medium and not a gap in the evidence. See this
+    /// variant's row in [`FORMATS`] for why
+    /// [`DiskImage::interpreter_number`] nevertheless answers, and with what.
     ProDos,
 }
 
@@ -350,40 +413,58 @@ const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::ProDos,
         label: "ProDOS",
-        // **`None`, and it is the Apple II's answer rather than a gap** — the
-        // same shape as [`DiskImage::Fat12Dos`] above and for the same kind of
-        // reason: the honest number is not a constant.
+        // **10, the Apple IIgs** (SQ-0857). This row answered `None` from
+        // SQ-0836 until SQ-0857, and the argument then was the one immediately
+        // above at [`DiskImage::Fat12Dos`]: ProDOS names the Apple II FAMILY, not
+        // a machine, and ZMSD §11.1.3 numbers three of them (2 IIe, 9 IIc,
+        // 10 IIgs). That premise is not merely still true, it is now proven from
+        // Infocom's own code — see [`APPLE_IIGS_INTERPRETER_NUMBER`], where the
+        // Apple II YZIP's `MACHINE:` routine picks between all three at boot, and
+        // where those bytes are located on the two Version 6 disks in `stories/`.
         //
-        // ZMSD §11.1.3, read from the standard: *"1 DECSystem-20, 2 Apple IIe,
-        // 3 Macintosh, 4 Amiga, 5 Atari ST, 6 IBM PC, 7 Commodore 128,
-        // 8 Commodore 64, 9 Apple IIc, 10 Apple IIgs, 11 Tandy Color"*. That is
-        // THREE numbers for one family, and ProDOS is the whole family's
-        // filesystem — a ProDOS volume says "an Apple II" and nothing finer.
+        // **What changed is the realisation that `None` is not neutral here.**
+        // The `Fat12Dos` row can decline because zvm's own rule — Frotz's, 6 for
+        // Version 6 and 1 otherwise — *is* the IBM PC's rule, so declining leaves
+        // a DOS floppy describing itself correctly. On a ProDOS volume the same
+        // deferral lands on 1 (DECSystem-20) or, for Version 6, on 6 — the IBM
+        // PC, a machine on another continent, and the one value `zvm`'s `exec.rs`
+        // gates its CP437 remap on. Declining does not leave the Apple II
+        // unnamed; it names it something else.
         //
-        // The corpus proves the ambiguity is live rather than pedantic. Eight of
-        // the ten images boot GS/OS and carry `SYS16` applications
-        // (`SYSTEM/START.GS.OS`, `SYSTEM/TOOLS/TOOL0xx`, `BZ.SYS16`,
-        // `LOST1.SYS16`), which is 16-bit Apple **IIgs** software and runs on
-        // nothing else. The other two — `Arthur Quest 4 Excalibur.2mg` and
-        // `Journey.2mg` — ship `INFOCOM.SYSTEM`, a ProDOS **8** `SYS` file
-        // beside `BASIC.SYSTEM`, which is the 8-bit press and runs on a IIe as
-        // readily as on a IIgs. One filesystem, two machines, and unlike the
-        // Atari ST there is no interpreter source in hand that writes a flat
-        // byte for either.
+        // §11.1.3 asks the question this row actually has to answer: *"An
+        // interpreter should choose the interpreter number most suitable for the
+        // machine it will run on."* The number is a property of the machine in
+        // front of the player — which is precisely why Infocom detected it rather
+        // than pressing it — so the question is which Apple II babelmap is. Of
+        // the three the YZIP will run on at all (`cmp #6 / bne BADMACH` refuses
+        // anything below an enhanced IIe), the IIgs is the top, and it is the one
+        // a modern terminal with colour and a large screen actually resembles.
+        // The other two remain reachable by naming them: `--interpreter-number 2`
+        // or `9` outranks this row, as every front-end pins.
         //
-        // Stating 10 anyway would also be **half-wiring**, which is the thing
-        // this table exists to prevent: `app::interpreter::InterpreterProfile`
-        // has no Apple arm, so `for_interpreter_number(10)` falls through to
-        // `IbmPc`, whose own number is `None` — the TUI would advertise zvm's
-        // default while `zvm-cli` and the launch dialog, which read this row
-        // directly, advertised 10. A number is only honest here once there is an
-        // Apple bundle to carry it, and this corpus makes that harder rather
-        // than easier: it holds *Arthur* and *Journey*, so unlike the ST there
-        // IS Version 6 artwork for a wrongly-claimed machine to disagree with.
+        // **Measured, not assumed** — the same way SQ-0835 settled the ST's 5.
+        // All thirty-one stories on the ten `.2mg` images were traced under the
+        // default rule and under 10. Twenty-four are byte-identical (every
+        // Version 3 story, including the high-ASCII-serial *Leather Goddesses*
+        // SQ-0856 made visible, plus *A Mind Forever Voyaging* and *Bureaucracy*).
+        // Five print the number in their VERSION block and are otherwise
+        // unchanged (Hitchhiker's, Trinity, Sherlock, Border Zone, Nord and
+        // Bert). **One behaves differently, twice, and it is the right
+        // difference**: *Beyond Zork* r57 s871221 — on both the GS/OS `BZ.DAT`
+        // press and the Lost Treasures `BEYOND.ZORK` one — stops asking "Is this
+        // a VT220?" and goes straight to BEGIN/RESTORE/QUIT, because an Apple
+        // IIgs is not a terminal that might or might not have line-drawing
+        // characters. That is the identical finding SQ-0835 recorded for the ST,
+        // on the identical game. It also answers VERSION with **"Apple //gs
+        // Color Version A"** where it used to say "DEC-20" — the story naming
+        // the machine in Infocom's own spelling, which no part of this codebase
+        // supplied.
         //
-        // So `None` means "the rule already in force stands", which for a family
-        // whose own number cannot be named is exactly right.
-        interpreter_number: None,
+        // The rest of the bundle is `app::interpreter::InterpreterProfile::AppleIIgs`,
+        // and it declines the one member nothing here establishes: the Apple's
+        // Version 6 screen is 140x192 on a 3x9 cell, which is not a standard
+        // window in this codebase's sense at all. See that knob's docs.
+        interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
         // `.2mg` is the wrapper every image in the corpus wears. **Not `.po` or
         // `.hdv`**, the conventional names for a BARE ProDOS volume: this reader
         // opens one (see [`crate::prodos`]) but nothing in `stories/` is one, so
@@ -824,6 +905,25 @@ mod tests {
         assert_eq!(DiskImage::Hfs.label(), "HFS");
     }
 
+    /// SQ-0857 lifted this block too, and for the opposite reason to the
+    /// Macintosh's: the Apple II's number was never a constant — Infocom's own
+    /// YZIP picks between 2, 9 and 10 at boot — but declining left a ProDOS
+    /// story being told it was a DECSystem-20 or an IBM PC. Argued in full at
+    /// the row and at [`APPLE_IIGS_INTERPRETER_NUMBER`].
+    #[test]
+    fn a_prodos_volume_defaults_to_the_apple_iigs() {
+        assert_eq!(
+            DiskImage::ProDos.interpreter_number(),
+            Some(10),
+            "ZMSD §11.1.3: 10 = Apple IIgs, and `IIgsID EQU 10 ; ][gs Yzip`",
+        );
+        assert_eq!(DiskImage::ProDos.label(), "ProDOS");
+        // …and it is the ONE number, not one of the family's three: the row has
+        // to name a machine, and the other two stay reachable by asking for them.
+        assert_ne!(DiskImage::ProDos.interpreter_number(), Some(2), "the IIe is not the default");
+        assert_ne!(DiskImage::ProDos.interpreter_number(), Some(9), "nor is the IIc");
+    }
+
     /// Content, not extension — and an ordinary story file is not a medium, so
     /// it never moves the number.
     #[test]
@@ -914,12 +1014,15 @@ mod tests {
                 // ST interpreters; both are argued at their rows in `FORMATS`.
                 DiskImage::Fat12Dos => ("DOS", None),
                 DiskImage::Fat12AtariSt => ("ST", Some(ATARI_ST_INTERPRETER_NUMBER)),
-                // …and a third answer, which is the DOS one for a different
-                // reason: ProDOS names the Apple II FAMILY, and ZMSD §11.1.3
-                // gives that family three numbers (2 IIe, 9 IIc, 10 IIgs). The
-                // corpus holds both an 8-bit and a IIgs press, so nothing on a
-                // volume chooses. Argued at the row in `FORMATS`.
-                DiskImage::ProDos => ("ProDOS", None),
+                // …and the Apple II answers like the ST rather than like DOS,
+                // which is the reversal SQ-0857 argued at the row. ProDOS still
+                // names the FAMILY and §11.1.3 still numbers three machines in
+                // it — but declining lands a ProDOS story on 1 or 6, the
+                // DECSystem-20 or the IBM PC, so `None` names the wrong machine
+                // rather than no machine. 10 is the top of the family the Apple
+                // YZIP will run on, and `--interpreter-number` still reaches the
+                // other two.
+                DiskImage::ProDos => ("ProDOS", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
@@ -1311,9 +1414,12 @@ mod tests {
     /// `story()`'s largest-wins tiebreak is only the default.
     ///
     /// It also pins the medium's own number, which is the interesting one: a
-    /// ProDOS volume answers `None`, because ZMSD §11.1.3 gives the Apple II
-    /// family three numbers and nothing on a volume says which machine pressed
-    /// it. See the row in [`FORMATS`].
+    /// ProDOS volume answers **10, the Apple IIgs** (SQ-0857, reversing SQ-0836).
+    /// ZMSD §11.1.3 does give the Apple II family three numbers, and nothing on a
+    /// volume says which machine pressed it — Infocom's own Apple II YZIP settles
+    /// that by detecting the machine at boot. What makes 10 the answer anyway is
+    /// that declining names a machine too, and the one it names is the
+    /// DECSystem-20 or the IBM PC. See the row in [`FORMATS`].
     #[test]
     fn a_real_apple_iigs_compilation_lists_every_game_and_no_saved_game() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
@@ -1330,8 +1436,8 @@ mod tests {
         assert_eq!(disk.volume_name(), Some("INFOCOM2"));
         assert_eq!(
             disk.interpreter_number(),
-            None,
-            "ProDOS names the Apple II family, and ZMSD §11.1.3 numbers three machines in it",
+            Some(APPLE_IIGS_INTERPRETER_NUMBER),
+            "ProDOS names the Apple II family; 10 names the member babelmap presents as",
         );
         let names: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["ZORK.III", "ZORK.II", "ZORK.I", "HITCHHIKER", "BEYOND.ZORK"]);
