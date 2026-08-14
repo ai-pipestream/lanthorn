@@ -342,6 +342,30 @@ does better by putting the games in it. Both front-ends reach every story on
 every image, and — because the save key is the story's own release and serial —
 `--story 4` and the browser row land in the same directory.
 
+**And the browser goes one further: it reads the whole set** (SQ-0844). These
+collections were pressed as sets — seven Apple II volumes, nine Atari ST
+floppies, `floppy1.ima` through `floppy5.ima` — and a set is one shelf of games
+rather than a pile of disks. babelmap works out which files belong together from
+their names alone: one directory, one disk-image extension, identical but for a
+run of digits counting 1, 2, 3…. Name any single volume and the browser opens on
+the entire release, which is what finally makes *Lost Treasures* volume 1 useful
+— it is the GS/OS launcher with no game on it, so `babelmap "…(Disk 1 of 7).2mg"`
+used to be an error message and now lists all thirty games.
+
+That also settles the overlap these sets carry. `Infocom Compilation 5` and
+`Compilation 8` both hold *Trinity* release 11, serial 860509 — one stored flat
+as `TRINITY.T`, one as `TRINITY/STORY.DAT` — and the shelf repeats *Lurking
+Horror*, *Moonmist*, *Stationfall*, *Cutthroats* and *Hitchhiker's* the same way:
+39 rows for 33 games. Matching on the IFID lists each build once, off the first
+disk that offers it. The folding is narrow by construction — only within one
+release, and only between the *same build* — so *Zork Zero*'s 296, 366 and 393
+stay three rows, and that 393 stays one row per medium across `floppy5.ima`, the
+360K DOS press and the loose `.z6`, because those are three separate things
+rather than volumes of one release. What it refuses is in
+`crates/app/src/disk_set.rs`; the sharpest case is *Zork Zero*'s 360K and 720K
+DOS presses, which both spell their disks `(Disk 1)` and `(Disk 2)` and differ
+only at `360`/`720` — a capacity, not a disk number, and therefore two sets.
+
 **And each of those six games gets its own saves** (SQ-0850). A per-game save
 directory used to be named after the story file, which was fine while one image
 meant one game and quietly catastrophic once it did not: all six stories on an ST

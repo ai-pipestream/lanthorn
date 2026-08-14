@@ -127,10 +127,18 @@ fn a_single_story_floppy_is_one_unchanged_row() {
 // ── Guard: every game on a compilation is offered ────────────────────────────
 
 /// The defect, as a test. Every story the mount finds on a compilation must be
-/// its own row in the browser's list.
+/// **reachable** in the browser's list.
+///
+/// Reachable, rather than "a row for this image", is the contract since SQ-0844
+/// folded the duplicate builds a multi-disk release carries: `Infocom
+/// Compilation 9` stores Hitchhiker's and Cutthroats as second copies of the
+/// very builds `Compilation 1` and `Compilation 3` already offer — one IFID
+/// each — so the list shows them once, off the earlier disk. What must never
+/// happen is a game being absent, which is what SQ-0859 fixed, so the assertion
+/// is on the IFID: every build on the disk is somewhere in the list.
 ///
 /// FALSIFICATION (measured 2026-08-14, by making `scan_stories` call
-/// `resolve_entry` per file again, as it did before this change):
+/// `resolve_entry` per file again, as it did before SQ-0859):
 ///
 /// ```text
 /// thread 'disk_story_rows::every_game_on_a_compilation_is_its_own_row' panicked at
@@ -148,27 +156,38 @@ fn a_single_story_floppy_is_one_unchanged_row() {
 #[test]
 fn every_game_on_a_compilation_is_its_own_row() {
     let base = data_base("rows");
+    let listed = app::picker::scan_stories(&stories_dir(), &base);
     let mut ran = 0;
     for image in COMPILATIONS {
         let path = stories_dir().join(image);
-        let on_disk: Vec<String> = stories_on(&path).into_iter().map(|(n, _)| n).collect();
+        let on_disk = stories_on(&path);
         if on_disk.len() < 2 {
             continue; // absent, or not a compilation on this corpus
         }
         ran += 1;
-        let rows = rows_for(&path, &base);
-        let offered: Vec<String> =
-            rows.iter().filter_map(|e| e.meta.disk_entry.clone()).collect();
-        assert_eq!(
-            rows.len(),
-            on_disk.len(),
-            "{image}: the mount finds {} stories and the picker offers {} row(s) — named {offered:?} of {on_disk:?}",
-            on_disk.len(),
-            rows.len(),
-        );
-        for name in &on_disk {
-            assert!(offered.contains(name), "{image}: {name} is on the disk and not in the list");
+        let rows: Vec<&app::picker::StoryEntry> =
+            listed.iter().filter(|e| e.path == path).collect();
+        let offered: Vec<String> = rows.iter().filter_map(|e| e.meta.disk_entry.clone()).collect();
+        for (name, bytes) in &on_disk {
+            let ifid = app::ifid::compute_ifid(bytes);
+            // Either this image's own row…
+            if offered.contains(name) {
+                continue;
+            }
+            // …or the same build off an earlier volume of the same release,
+            // which is the only reason a row may be missing here.
+            assert!(
+                listed.iter().any(|e| e.meta.ifid == ifid),
+                "{image}: {name} ({ifid}) is on the disk and nowhere in the list — \
+                 offered {offered:?} of {:?}",
+                on_disk.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            );
         }
+        // And the rows this image does contribute are all genuinely its own.
+        assert!(
+            !rows.is_empty(),
+            "{image}: a compilation contributed no rows at all",
+        );
     }
     let _ = std::fs::remove_dir_all(&base);
     assert!(ran > 0 || !any_media_present(), "media are present but no compilation was scanned");
@@ -355,6 +374,10 @@ fn rows_off_one_image_carry_distinct_titles() {
 
 /// The browser's whole list grows by exactly the games that were hidden: no
 /// story is dropped, and the images that hold one game contribute one row each.
+///
+/// Counted in **builds**, not in rows, since SQ-0844: a disk contributes one row
+/// per story it holds *minus* the builds an earlier volume of its own release
+/// already offers. Every story on the disk still has to be somewhere.
 #[test]
 fn the_scan_gains_a_row_per_hidden_game_and_loses_none() {
     let dir = stories_dir();
@@ -369,13 +392,33 @@ fn the_scan_gains_a_row_per_hidden_game_and_loses_none() {
         if !path.is_file() {
             continue;
         }
-        let on_disk = stories_on(&path).len();
-        if on_disk == 0 {
+        let on_disk = stories_on(&path);
+        if on_disk.is_empty() {
             continue; // mountable but carrying nothing launchable
         }
         ran += 1;
         let rows = listed.iter().filter(|e| e.path == path).count();
-        assert_eq!(rows, on_disk, "{image}: {on_disk} stories on the disk, {rows} rows in the list");
+        let folded = on_disk
+            .iter()
+            .filter(|(_, b)| {
+                let ifid = app::ifid::compute_ifid(b);
+                !listed.iter().any(|e| e.path == path && e.meta.ifid == ifid)
+            })
+            .count();
+        assert_eq!(
+            rows + folded,
+            on_disk.len(),
+            "{image}: {} stories on the disk, {rows} rows in the list, {folded} folded",
+            on_disk.len(),
+        );
+        // Nothing may vanish: a folded build is offered by another volume.
+        for (name, bytes) in &on_disk {
+            let ifid = app::ifid::compute_ifid(bytes);
+            assert!(
+                listed.iter().any(|e| e.meta.ifid == ifid),
+                "{image}: {name} ({ifid}) left the list entirely",
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&base);
     assert!(ran > 0 || !any_media_present(), "media are present but none were counted");

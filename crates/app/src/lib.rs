@@ -20,6 +20,7 @@ pub mod config;
 pub mod config_template;
 pub mod cover;
 pub mod debug_panel;
+pub mod disk_set;
 pub mod engine;
 pub mod garglk_ini;
 pub mod glk_backend;
