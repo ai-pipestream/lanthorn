@@ -1578,15 +1578,44 @@ mod tests {
     /// the real one — pinned by release, serial and the story's own header
     /// checksum, which is the oracle that says the pages were reassembled in the
     /// right order rather than merely plausibly (ZMSD §11.1.6).
+    /// One 5.25-inch press: its volumes, and the build the whole set carries.
+    struct Press {
+        /// Every floppy of the release, in disk order.
+        set: &'static [&'static str],
+        /// The segment carrying the index, which names the reassembled story.
+        story_name: &'static str,
+        /// The story's declared length, header `$1A` in v6 units.
+        length: usize,
+        /// Header `$02`.
+        release: u16,
+        /// Header `$12..$18`.
+        serial: &'static str,
+        /// Header `$1C` — the oracle that says the pages went back in order.
+        checksum: u16,
+    }
+
     #[test]
     fn a_release_pressed_across_five_floppies_opens_from_any_one_of_them() {
-        // (set, the segment carrying the index, length, release, serial, $1C)
-        let releases: &[(&[&str], &str, usize, u16, &str, u16)] = &[
-            (&SHOGUN_SET, "SHOGUN.D1", 344_224, 311, "890510", 0xE200),
-            (&ZORK_ZERO_SET, "ZORK0.D1", 299_392, 383, "890602", 0x6F7F),
+        let releases = &[
+            Press {
+                set: &SHOGUN_SET,
+                story_name: "SHOGUN.D1",
+                length: 344_224,
+                release: 311,
+                serial: "890510",
+                checksum: 0xE200,
+            },
+            Press {
+                set: &ZORK_ZERO_SET,
+                story_name: "ZORK0.D1",
+                length: 299_392,
+                release: 383,
+                serial: "890602",
+                checksum: 0x6F7F,
+            },
         ];
         let mut ran = 0;
-        for (set, story_name, length, release, serial, checksum) in releases {
+        for Press { set, story_name, length, release, serial, checksum } in releases {
             let Some(images) = read_set(set) else {
                 eprintln!("SKIP: {} is not complete in stories/", set[0]);
                 continue;

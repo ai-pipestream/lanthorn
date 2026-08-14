@@ -31,17 +31,6 @@
 //!   textbook prefix-plus-index. `.dat` is not a disk-image extension, so they
 //!   are thirteen games and never a set. This is the case that makes the
 //!   extension test load-bearing rather than decorative.
-//! And what it accepts, once a format learns a spelling:
-//!
-//! - **`shogun_s1.dsk`…`s5`, `zork_zero_1.dsk`…`4`.** These were refused for one
-//!   reason only — `.dsk` was not a spelling [`blorb::medium`] claimed. SQ-0864
-//!   gave it to the ProDOS row (they are ProDOS volumes in 5.25-inch sector
-//!   order), and **this module needed no change at all**: the extension census
-//!   is read from the table, so the two sets became sets the same day the reader
-//!   landed. That is the whole argument for [`has_image_ext`] asking
-//!   `blorb::medium` rather than keeping a list, and it is now a measured one.
-//!   It matters more here than elsewhere, because those releases page ONE story
-//!   across every volume of the set: without the grouping there is no game.
 //! - **Zork Zero's `(360K)` and `(720K)` DOS presses.** Both spell their disks
 //!   `(Disk 1)`, `(Disk 2)`, so `360K (Disk 1)` and `720K (Disk 1)` differ at
 //!   exactly one digit run — and that run's values are `{360, 720}`, which
@@ -60,6 +49,23 @@
 //!   `floppy2.ima`…`floppy5.ima` with `floppy1.ima` deleted and it reports no
 //!   set. The games are all still listed by an ordinary directory scan; only the
 //!   dedupe and the launch-from-one-member menu are lost.
+//!
+//! # What it accepted the day a format learned a spelling
+//!
+//! **`shogun_s1.dsk`…`s5` and `zork_zero_1.dsk`…`4`.** These were refused for
+//! one reason only — `.dsk` was not a spelling [`blorb::medium`] claimed.
+//! SQ-0864 gave it to the ProDOS row (a 5.25-inch dump is a ProDOS volume with
+//! its sectors in the drive's order), and **this module needed no change at
+//! all**: the extension census is read off that table, so the two presses became
+//! sets the same day the reader landed. That is the whole argument for
+//! [`has_image_ext`] asking `blorb::medium` rather than keeping a list, and it
+//! is now a measured one rather than a stated one.
+//!
+//! It also matters more here than for any set before it. The compilations are a
+//! convenience — miss one and the games are still listed, disk by disk. These
+//! two releases page **one story across every volume of the set**, so a set that
+//! is not recognised is not an inconvenience; it is a game that cannot be
+//! opened at all.
 //!
 //! # Why the filename and not the volume label
 //!
