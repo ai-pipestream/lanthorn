@@ -21,8 +21,8 @@
 //!
 //! [`files`] answers *"which files can this story's assets be read from?"*, and
 //! it unions every SOURCE a story has: the host directory beside it, and the
-//! volume it was mounted out of when it came off a disk image. Callers filter
-//! that one list for the asset kind they want.
+//! volumes of the release it came off when it came off a disk image. Callers
+//! filter that one list for the asset kind they want.
 //!
 //! Three kinds of growth, and each costs exactly one edit:
 //!
@@ -31,6 +31,14 @@
 //! | a disk **format** | a row in `blorb::medium::FORMATS` (SQ-0840) |
 //! | an asset **source** | an arm in [`files`], below |
 //! | an asset **kind** | a filter over [`files`], written once |
+//!
+//! # The release, not the platter (SQ-0862)
+//!
+//! [`volumes`] is the one place that knows how far a story's assets reach, and
+//! every consumer of the medium goes through it: [`files`] for the enumeration,
+//! `graphics::PictSource::resolve` for the automatic pick, and
+//! `graphics::read_off_the_medium` for a name the user typed. See that
+//! function's docs for the rule and what it refuses.
 //!
 //! **No caller learns that disk images exist.** That is the whole point:
 //! `launch_options` asks this module what files there are and applies its own
@@ -69,6 +77,10 @@
 //! because [`blorb::medium::DiskImage::detect`] refuses it before anything is
 //! mounted.
 //!
+//! A story on a multi-disk release pays that mount once per volume, and [`volumes`]
+//! stops as soon as the release turns out to be a shelf rather than one game — so
+//! the twenty-game DOS `floppy1.ima`…`floppy5.ima` set costs two mounts, not five.
+//!
 //! The story browser's info panel asks once per highlight, into the `StoryAux`
 //! cache that already holds everything per-story that touches the disk, so none
 //! of this is per frame.
@@ -80,9 +92,15 @@ use std::path::{Path, PathBuf};
 pub enum AssetOrigin {
     /// A loose file in the story's own directory.
     BesideTheStory,
-    /// A file on the release disk image the story was mounted out of. Its
-    /// identity is guaranteed by the medium — it shipped with the story — which
-    /// is exactly what a loose file's name has to be tested for.
+    /// A file on a volume of the release the story was mounted out of. Its
+    /// identity is guaranteed by the medium — it shipped in the box with the
+    /// story — which is exactly what a loose file's name has to be tested for.
+    ///
+    /// Deliberately **not** split into "the story's own platter" and "a sibling
+    /// volume": [`volumes`] only offers a sibling when the release carries one
+    /// game, and at that point the two assertions are the same assertion. A
+    /// caller that wants to know which image a file came off reads
+    /// [`AssetFile::path`], which names it.
     OnTheMedium,
 }
 
@@ -129,7 +147,7 @@ impl AssetFile {
 }
 
 /// Every file `story_path`'s assets could be read from: the loose files beside
-/// it, then the files on the volume it was mounted out of.
+/// it, then the files on every volume of the release it was mounted out of.
 ///
 /// Loose files come first and in directory order; the caller sorts. Nothing is
 /// identified and nothing is filtered — see the module header.
@@ -158,7 +176,7 @@ fn beside_the_story(story_path: &Path) -> Vec<AssetFile> {
         .collect()
 }
 
-/// Source 2: the release disk image, when the story came out of one.
+/// Source 2: the release the story came out of, when it came off a disk image.
 ///
 /// Content, not extension, and one mount path for every format — the sniff and
 /// the open are both `blorb::medium`'s, so a format babelmap can detect is a
@@ -166,24 +184,117 @@ fn beside_the_story(story_path: &Path) -> Vec<AssetFile> {
 ///
 /// A story that is not an image costs the read and the sniff and stops.
 fn on_the_medium(story_path: &Path) -> Vec<AssetFile> {
-    let Ok(raw) = std::fs::read(story_path) else {
-        return Vec::new();
-    };
-    if blorb::medium::DiskImage::detect(&raw).is_none() {
-        return Vec::new();
-    }
-    let Ok(disk) = blorb::medium::MountedDisk::mount(raw) else {
-        return Vec::new();
-    };
-    disk.contents()
+    volumes(story_path)
         .into_iter()
-        .map(|(name, bytes)| AssetFile {
-            name,
-            path: story_path.to_path_buf(),
-            origin: AssetOrigin::OnTheMedium,
-            bytes: Some(bytes),
+        .flat_map(|v| {
+            v.disk.contents().into_iter().map(move |(name, bytes)| AssetFile {
+                name,
+                path: v.path.clone(),
+                origin: AssetOrigin::OnTheMedium,
+                bytes: Some(bytes),
+            })
         })
         .collect()
+}
+
+/// One mounted volume of a release, with the host path of the image that carries
+/// it — which is the file a person actually has, and the only one that exists on
+/// this machine.
+pub struct MountedVolume {
+    /// The disk image on the host filesystem.
+    pub path: PathBuf,
+    /// The open volume.
+    pub disk: blorb::medium::MountedDisk,
+}
+
+/// Every volume of the release `story_path` came off, **the story's own image
+/// first** and the rest in disk order. Empty when the story is not a disk image
+/// at all (SQ-0862).
+///
+/// # The defect this exists to end
+///
+/// The DOS press of Zork Zero splits the story from its artwork across disks.
+/// On the 360K press the story disk holds *no artwork whatever*: `ZORK0.ZIP` is
+/// alone on disk 2 with `ZORKZERO.EXE`, CGA's `ZORK0.CG1` is on disk 1 and EGA's
+/// `ZORK0.EG1` on disk 3. Mounting only the image the story came off therefore
+/// found nothing to draw with, and the launch dialog offered nothing to pick —
+/// which is exactly what the user reported. The 720K press shows the other half
+/// of it: MCGA shares the story's disk and was found, CGA on disk 2 was not.
+///
+/// A release is not a platter. `crate::disk_set` already computes which files
+/// are volumes of one release, from their names and without opening anything;
+/// this is that answer applied to assets.
+///
+/// # Why a sibling volume may speak for the story, and when it may not
+///
+/// `crate::graphics::PictureOverride`'s tier policy turns on the strength of the
+/// PAIRING evidence, and the medium's is the strongest thing short of a person
+/// saying so: the story and the archive shipped in one box. That argument covers
+/// disk 3 of a three-disk Zork Zero exactly as well as it covers the platter the
+/// story sits on — the box is the same box.
+///
+/// It stops covering it the moment the box holds more than one game. And the
+/// corpus has that case, sharply: DOS `floppy1.ima`…`floppy5.ima` is *The Lost
+/// Treasures of Infocom*, twenty stories across five disks, with Zork Zero's
+/// `ZORK0.CG1` on floppy 4 and its `ZORK0.EG1` on floppy 5. Widening across that
+/// set unconditionally would offer Zork Zero's plates to Zork I, which is
+/// precisely the invisible mis-pairing the tiers exist to prevent.
+///
+/// So: **a sibling contributes only when the release carries exactly one story.**
+/// That threshold is the mirror of `crate::picker::StorySource::of`'s, which
+/// declines to open a *menu* for a set offering fewer than two games, and between
+/// them they partition the space with no overlap and no gap — a set with two or
+/// more games gets a browser, a set with one gets its siblings' assets.
+///
+/// # What it never removes
+///
+/// The story's own volume is unconditional and always first. A single image, a
+/// story with loose art beside it, and every multi-game compilation resolve
+/// exactly as they did before this function existed; the widening can only ever
+/// add.
+///
+/// # Cost
+///
+/// One read and one mount per volume, and the story count is tallied as it goes
+/// so a shelf is abandoned as soon as its second game appears — `floppy5.ima`
+/// costs two mounts of its five, because floppy 1 carries four stories on its
+/// own. A story that is not a disk image pays the read and the sniff and stops,
+/// and `disk_set::members` is never even asked, because it wants a disk-image
+/// extension and answers `None` without touching the disk.
+pub fn volumes(story_path: &Path) -> Vec<MountedVolume> {
+    let Some(own) = mount(story_path) else {
+        return Vec::new();
+    };
+    let mut stories = own.disk.stories().len();
+    let mut out = vec![own];
+    if stories > 1 {
+        return out; // one volume of a compilation: its siblings are other games'
+    }
+    let Some(members) = crate::disk_set::members(story_path) else {
+        return out;
+    };
+    let mut siblings = Vec::new();
+    for m in members {
+        if m == story_path {
+            continue;
+        }
+        let Some(v) = mount(&m) else { continue };
+        stories += v.disk.stories().len();
+        if stories > 1 {
+            return out; // a shelf, not a release: the siblings contribute nothing
+        }
+        siblings.push(v);
+    }
+    out.extend(siblings);
+    out
+}
+
+/// Open one image, or `None` when the bytes are not a disk in any format.
+fn mount(path: &Path) -> Option<MountedVolume> {
+    let raw = std::fs::read(path).ok()?;
+    blorb::medium::DiskImage::detect(&raw)?;
+    let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
+    Some(MountedVolume { path: path.to_path_buf(), disk })
 }
 
 #[cfg(test)]
@@ -225,6 +336,22 @@ mod tests {
         let dir = tmp("nomedium");
         std::fs::write(dir.join("story.z6"), b"not a disk image").unwrap();
         assert!(files(&dir.join("story.z6")).iter().all(|f| !f.is_on_medium()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// …and it spans no volumes at all, so [`volumes`] never asks `disk_set` and
+    /// never opens a sibling. The widening is invisible to every story that is
+    /// not a disk image, which is most of them (SQ-0862).
+    #[test]
+    fn a_story_that_is_not_a_disk_image_spans_no_volumes() {
+        let dir = tmp("novolumes");
+        std::fs::write(dir.join("story.z6"), b"not a disk image").unwrap();
+        // A neighbour whose name WOULD form a set, to prove the extension and
+        // the sniff both have to agree before anything is mounted.
+        std::fs::write(dir.join("disk1.img"), b"also not a disk image").unwrap();
+        std::fs::write(dir.join("disk2.img"), b"nor this").unwrap();
+        assert!(volumes(&dir.join("story.z6")).is_empty());
+        assert!(volumes(&dir.join("disk1.img")).is_empty(), "the name is not the evidence");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

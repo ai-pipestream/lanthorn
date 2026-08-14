@@ -477,6 +477,15 @@ three rows — as does that same 393 sitting on `floppy5.ima`, on the 360K DOS
 press and on a loose `.z6`, because those are four separate things you chose to
 keep. Nothing outside a set is ever merged.
 
+A set that turns out to hold only **one** game gets the opposite treatment, and
+for the same reason: it doesn't need a menu, but its disks do belong to each
+other, so its artwork is shared across them. That is what the DOS presses of
+*Zork Zero* need — the 360K one puts the story alone on disk 2 with CGA on disk 1
+and EGA on disk 3, so booting the story disk drew nothing at all until babelmap
+learned to read the whole release. A set with two or more games gets the browser
+instead and keeps each disk's art on that disk; see
+[Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws).
+
 Recognition is cautious on purpose, since wrongly merging two collections is
 worse than not spotting one. `adv01.dat` … `adv13.dat` are thirteen separate
 Scott Adams games and stay that way — they aren't disk images. Zork Zero's 360K

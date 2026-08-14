@@ -30,8 +30,8 @@
 //! # The one thing this module enumerates, and the line it must not cross
 //!
 //! [`discover_art_candidates`] lists the native archives a story can use: those
-//! beside it that carry *this story's name*, and those on the disk image it came
-//! out of. SQ-0734 rejected exactly that enumeration as an
+//! beside it that carry *this story's name*, and those on the release it came out
+//! of. SQ-0734 rejected exactly that enumeration as an
 //! input to *resolution*, and that rejection stands: the format carries no
 //! release number and no serial, every Infocom Amiga release names its archive
 //! `Pic.data`, and a wrong pairing is invisible — Arthur's plates drawn into Zork
@@ -182,9 +182,16 @@ const ART_EXTS: &[&str] = &["pic", "mg1", "mg2", "eg1", "eg2", "cg1", "cg2", "da
 ///
 /// Two sources, unioned by [`crate::assets::files`] and filtered here: the loose
 /// files beside the story that carry **this story's name**, and — when the story
-/// came out of a disk image — the archives **on that volume** (SQ-0843). This
-/// function is the one place that answers "what artwork can this story use?",
-/// and it is the seam that knows disks exist so that no caller has to.
+/// came out of a disk image — the archives on every volume of **that release**
+/// (SQ-0843, widened by SQ-0862). This function is the one place that answers
+/// "what artwork can this story use?", and it is the seam that knows disks exist
+/// so that no caller has to.
+///
+/// The release rather than the platter is what makes the DOS presses of Zork Zero
+/// pickable. Its 360K press puts the story alone on disk 2 with CGA on disk 1 and
+/// EGA on disk 3, so a person booting the story disk was shown no artwork at all;
+/// `crate::assets::volumes` states the rule and, importantly, the case it refuses
+/// — a twenty-game compilation does not offer one game's plates to another.
 ///
 /// The medium arm is why the Macintosh disk is pickable at all. `stories/Zork
 /// Zero Disk.image` carries a colour `CPic.data` and a monochrome `Pic.data`,
@@ -228,9 +235,11 @@ pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
         // **The name filter is the LOOSE source's, and only its.** A file beside
         // the story proves nothing by sitting there — `stories/` holds Arthur,
         // Journey, Shogun and Zork Zero side by side — so it must carry this
-        // story's name to be shown. A file on the volume needs no such test: it
-        // shipped on the disk the story was mounted out of, which is the one
-        // pairing the medium itself asserts (`blorb::medium::DiskArt`).
+        // story's name to be shown. A file on the medium needs no such test: it
+        // shipped in the box the story was mounted out of, which is the one
+        // pairing the medium itself asserts (`blorb::medium::DiskArt`). That
+        // covers a sibling volume of a single-game release exactly as well —
+        // `crate::assets::volumes` offers no other kind.
         //
         // Name first, bytes second on that arm: an archive is megabytes, and a
         // flat library holds a dozen of them. Deciding on the name before

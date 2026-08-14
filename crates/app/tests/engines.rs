@@ -48,6 +48,8 @@ mod launch_options;
 mod picture_override;
 #[path = "suites/real_media_releases.rs"]
 mod real_media_releases;
+#[path = "suites/release_asset_span.rs"]
+mod release_asset_span;
 #[path = "suites/restart_reboots_in_place.rs"]
 mod restart_reboots_in_place;
 #[path = "suites/save_key_media.rs"]

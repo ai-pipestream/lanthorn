@@ -305,12 +305,16 @@ impl PictSource {
     /// The monochrome archive is reached by naming it — `--pictures Pic.data`,
     /// through [`PictureOverride`], which now looks inside the medium for a name
     /// that is not on the host filesystem.
+    ///
+    /// **The medium is the release, not the platter** (SQ-0862). A multi-disk
+    /// press can put the story on one disk and its artwork on another — the DOS
+    /// 360K Zork Zero puts CGA on disk 1, the story alone on disk 2 and EGA on
+    /// disk 3 — so this asks [`crate::assets::volumes`] rather than mounting one
+    /// image. See that function for which siblings are allowed to speak for a
+    /// story and which are not.
     pub fn resolve(story_path: &std::path::Path) -> PictSource {
-        if let Ok(raw) = std::fs::read(story_path) {
-            if let Some(art) = blorb::medium::MountedDisk::mount(raw).ok().and_then(|d| d.pictures())
-            {
-                return PictSource::from_native(art.pictures);
-            }
+        if let Some(pics) = release_art(story_path) {
+            return PictSource::from_native(pics);
         }
         PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b))
     }
@@ -1041,7 +1045,51 @@ pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf>
     Some(path.with_file_name(format!("{stem}.{ext}")))
 }
 
-/// Read a bare filename off the disk image `story_path` was mounted from, for a
+/// The artwork the release `story_path` came off supplies for it, or `None` when
+/// it supplies none (SQ-0862).
+///
+/// Tier 2 of the picture policy, widened from the platter to the release. Which
+/// volumes may answer at all is [`crate::assets::volumes`]'s question, and the
+/// interesting half of the argument is there; this only decides which of the
+/// answers to take when more than one volume has one.
+///
+/// # The order, and the one preference in it
+///
+/// **The story's own volume wins outright.** It is the strongest pairing on
+/// offer and it is what every single-image release already resolved to, so
+/// nothing that worked before this function existed moves — the 720K Zork Zero
+/// press keeps the `ZORK0.MG1` sharing its story's disk and does not start
+/// preferring disk 2's CGA.
+///
+/// Among the siblings, **colour beats monochrome**, and then the disk order the
+/// set is already in. `blorb`'s per-volume `pictures()` deliberately expresses no
+/// preference between video cards — and it never had to, because no image in the
+/// corpus carries two renditions. A release does: the DOS 360K press offers CGA
+/// on disk 1 and EGA on disk 3, and taking the earlier disk would hand a terminal
+/// with sixteen million colours a two-colour Zork Zero. CGA's two colours are a
+/// 1989 hardware constraint, not an authorial choice, so a rendition that kept
+/// its colour is the better default. It is only a default: every rendition on the
+/// release is listed in the launch dialog and reachable by name, which is where
+/// a person who wants the CGA plates says so.
+///
+/// Note what is NOT decided here — MCGA against EGA. Both are colour, both draw
+/// the same 503 pictures into the same geometry (`PictSource::art_scale`), and no
+/// release in the corpus puts the two on sibling volumes of one set, so ranking
+/// them would be a rule with no example. Disk order settles it if one ever does.
+fn release_art(story_path: &std::path::Path) -> Option<blorb::infocom_pics::InfocomPics> {
+    let volumes = crate::assets::volumes(story_path);
+    let (own, siblings) = volumes.split_first()?;
+    if let Some(art) = own.disk.pictures() {
+        return Some(art.pictures);
+    }
+    let mut found: Vec<blorb::infocom_pics::InfocomPics> =
+        siblings.iter().filter_map(|v| v.disk.pictures().map(|a| a.pictures)).collect();
+    // Stable, so disk order survives as the last tiebreak.
+    found.sort_by_key(|p| (p.is_monochrome(), std::cmp::Reverse(p.entries().len())));
+    found.into_iter().next()
+}
+
+/// Read a bare filename off the release `story_path` was mounted from, for a
 /// user naming an archive that lives INSIDE the medium (SQ-0838).
 ///
 /// The Macintosh release is the case that needs it: its disk carries a colour
@@ -1055,6 +1103,15 @@ pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf>
 /// wins, so nothing that worked before moves. The lookup is by name because that
 /// is what the user typed — the CONTENT tiers ([`PictSource::resolve`]) are what
 /// identify an archive nobody named.
+///
+/// # Every volume of the release, not just the story's own (SQ-0862)
+///
+/// A name the launch dialog showed must be a name this can find, and the dialog
+/// lists the whole release's artwork — booting the DOS 360K Zork Zero's disk 2
+/// offers `ZORK0.EG1`, which is on disk 3. Both doors ask
+/// [`crate::assets::volumes`] so they cannot answer differently; the story's own
+/// volume is searched first, so a name that resolved before still resolves to the
+/// same file.
 ///
 /// # One mount path, and why this had to become one (SQ-0833)
 ///
@@ -1086,8 +1143,7 @@ fn read_off_the_medium(story_path: &std::path::Path, named: &std::path::Path) ->
     let parts: Option<Vec<&str>> =
         named.components().map(|c| c.as_os_str().to_str()).collect();
     let name = parts?.join("/");
-    let raw = std::fs::read(story_path).ok()?;
-    blorb::medium::MountedDisk::mount(raw).ok()?.read_named(&name)
+    crate::assets::volumes(story_path).iter().find_map(|v| v.disk.read_named(&name))
 }
 
 /// Merge every continuation of `path` into `pics`, and return the complaint if
