@@ -320,19 +320,27 @@ Amiga floppy or anywhere else.
 - **Interpreter number** — the story header's interpreter number (byte `0x1E`)
   defaults to **1 (DECSystem-20)**, following Frotz's rule (6 / IBM PC only for
   v6) — unless you opened a release disk image, in which case the medium picks
-  the number instead (an `.adf` is an Amiga's 4, an HFS volume a Macintosh's 3),
-  in every front-end alike.
-  Two media deliberately do **not** move it. A DOS floppy is an IBM PC, and the
-  IBM PC's honest number is version-dependent — that *is* Frotz's rule — so it
-  is already in force and there is nothing for the disk to add; pinning a flat 6
-  would quietly flip *Beyond Zork* on the *Lost Treasures* disk over to CP437
-  character graphics, which is a rendering decision and not a container one. And
-  an Atari ST floppy stays on the default because the ST has no profile yet: the
-  standard numbers it 5, but a number here travels with a palette, a screen and a
-  set of default colours, and no ST press of a graphical v6 title exists in the
-  reference collection to verify any of them against. *Trinity* off an ST disk
-  therefore answers VERSION with *Interpreter 1*, and will keep doing so until
-  there is a real ST machine behind the byte.
+  the number instead (an `.adf` is an Amiga's 4, an HFS volume a Macintosh's 3,
+  a `.st` floppy an Atari ST's 5), in every front-end alike.
+  One medium deliberately does **not** move it. A DOS floppy is an IBM PC, and
+  the IBM PC's honest number is version-dependent — that *is* Frotz's rule — so
+  it is already in force and there is nothing for the disk to add; pinning a flat
+  6 would quietly flip *Beyond Zork* on the *Lost Treasures* disk over to CP437
+  character graphics, which is a rendering decision and not a container one.
+  The Atari ST used to be the second such abstention, and it is worth saying why
+  it no longer is, because the reasoning is the useful part. The worry was that a
+  number here travels with a palette, a screen and a set of default colours, and
+  that announcing a machine we could not fully describe would produce an
+  incoherent one. But the thing that goes wrong in that scenario is a number
+  *contradicting* the artwork — and there is no ST artwork to contradict. Infocom
+  never wrote a version-6 interpreter for the ST, so all thirty-nine stories
+  across the nine ST compilations are v3, v4 or v5, and the collision cannot
+  happen. Meanwhile the ST's own interpreters turned out to answer the rest of
+  the questions outright: `INTWRD DC.B 5 — MACHINE ID FOR ATARI ST`, a white page
+  under black text, and a colour table that is the standard's own eight colours.
+  So the ST profile states what it knows, declines the one thing it does not (a
+  version-6 screen, which the machine never had), and *Trinity* off an ST disk now
+  answers VERSION with *Interpreter 5*.
   This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
@@ -398,6 +406,41 @@ Amiga floppy or anywhere else.
   [the artwork's own page](v6-graphics.md#two-macintosh-screens) has the numbers.
   (512×342, the compact Mac's famous screen, is the *hardware* — the game window
   sits inside it under the menu bar, and the story is told about the window.)
+
+  **Atari ST** is the fourth, and it is the one that shows a profile is allowed
+  to say *"I don't know"* about part of itself. It answers interpreter number 5,
+  black ink on a white page, and the standard colour table — all of it read out
+  of Infocom's own ST interpreters, where `INTWRD DC.B 5` is labelled `MACHINE ID
+  FOR ATARI ST`, `DEF_BACK 9`/`DEF_FORE 2` are commented *"default ST background
+  id = white"* and *"foreground id = black"*, and the ST's colour table asks for
+  the standard's own eight colours at full saturation. It states **no standard
+  window at all**, and that absence is a fact rather than a gap: Infocom never
+  wrote a version-6 interpreter for the ST, so there is no ST artwork for a
+  standard window to be the resolution of. (The machine could show only four of
+  its eight colours at once in 80-column mode, one of them always the background
+  — a display ceiling a terminal does not have, so there is nothing to express.)
+
+  The ST is also the clearest demonstration that this byte is not decoration.
+  *Beyond Zork* on an ST compilation, told it was a DECSystem-20, opened by
+  asking **"Is this a VT220?"** — a question about a 1983 DEC terminal, put to
+  someone who has just inserted an Atari floppy — and a player who answered *no*
+  got a stripped-down screen: no box around the room description, the compass
+  rose drawn as `\` and `@-`, and *"use the UP and DOWN arrow keys"* spelled out
+  in words. Told it is an Atari ST, the game never asks, because an ST is not a
+  terminal that might or might not have line-drawing characters. It goes straight
+  to the boxed layout with its block-graphic compass and real `↑`/`↓` arrows —
+  the same screen the DEC-20 player only reached by answering *yes* — and it
+  signs itself *"Atari ST Color Version A"* where it used to say *"DEC-20"*. That
+  "Version A" is corroboration in its own right: Infocom's ST version-5
+  interpreter is stamped **FROZEN Version A** in its source.
+
+  Across the rest of that corpus the change is quiet, which is the point of
+  having measured it: of the thirty-nine stories on the nine ST compilations,
+  thirty-two behave identically, six merely print the new number in their VERSION
+  block, and only *Beyond Zork* does anything differently. The version-3 stories
+  cannot notice at all — byte `0x1E` has no meaning before version 4, which is
+  why the ST's own version-3 interpreter leaves it zero and comments it
+  *"(UNUSED)"*.
 
   The artwork can select the machine too, and it sits between the two. If you
   name a picture archive for a game — the `pictures` key described under

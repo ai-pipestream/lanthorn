@@ -132,6 +132,14 @@ const MEDIA: &[Medium] = &[
     // (Compilation 9's Bureaucracy opens on its licence form and never reaches
     // an ordinary prompt, which makes it a fine identity pin and a poor smoke.)
     Medium { title: "Trinity (Atari ST)", file: "Infocom Compilation 8 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 4, release: 11, serial: "860509" },
+    // **The one story in the ST corpus whose BEHAVIOUR the profile moves.**
+    // Compilation 7 in the survey's numbering, flat 8.3 names, and `BEYZORK.T`
+    // is by some distance the largest file on it (262144 bytes against ~85K for
+    // each Zork), so opening the disk gives you *Beyond Zork* — which is what
+    // makes it usable as a plain row here. Every other ST story either ignores
+    // `$1E` entirely or merely prints it; this one changes what it draws and
+    // what it asks. `atari_st_profile.rs` is where that is measured.
+    Medium { title: "Beyond Zork (Atari ST)", file: "Infocom Compilation 6 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 5, release: 49, serial: "870917" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -213,13 +221,17 @@ const NARRATED: &[(&str, &[&str])] = &[
     // reaches its prompt, and names the release the disk carries. Zork Zero's
     // DOS press draws its own EGA art off the same disk on the way.
     ("floppy5.ima", &["Release 393 / Pix 393 / Serial number 890714"]),
-    // Trinity off the ST floppy prints its interpreter number too, and it says
-    // **1** — not ZMSD §11.1.3's 5 for the Atari ST. That is SQ-0835's open half
-    // made audible: the container reads, and the machine is still the IBM PC
-    // default, because no ST v6 fixture exists in this corpus to verify an ST
-    // palette, screen or default colours against. When an ST press of a
-    // graphical title turns up, this line is where the change will show.
-    ("Infocom Compilation 8 (19xx)(-).st", &["Release 11 / Serial Number 860509", "Interpreter 1 "]),
+    // Trinity off the ST floppy prints its interpreter number too, and **this is
+    // the line SQ-0835 left here to be changed.** It read `Interpreter 1 ` for
+    // one commit, while the container read an ST floppy and then ran it as a
+    // DECSystem-20; it now reads 5, ZMSD §11.1.3's Atari ST, which is also what
+    // Infocom's own ST interpreters write into `$1E` (`INTWRD DC.B 5`).
+    //
+    // Trinity is a Version 4 story, which is the interesting half: byte `$1E`
+    // means nothing before Version 4, and the ST's own Version 3 build leaves it
+    // zero and comments it "(UNUSED)". So this is a story that genuinely reads
+    // the byte, and it reports the machine it is now correctly told it is on.
+    ("Infocom Compilation 8 (19xx)(-).st", &["Release 11 / Serial Number 860509", "Interpreter 5 "]),
 ];
 
 /// The resource Blorbs shipped beside these stories, and whether each declares
@@ -524,13 +536,12 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // arm and the fall-through below reach the same profile by design
             // rather than by accident.
             Some(DiskImage::Fat12Dos) => InterpreterProfile::IbmPc,
-            // And the Atari ST resolves to the IBM PC default **because it has
-            // no profile of its own yet** (SQ-0835): ZMSD §11.1.3 numbers the ST
-            // 5, but there is no ST v6 fixture in this corpus to verify a
-            // palette, a screen or default colours against, and a machine
-            // written from memory is what this project's rules forbid. The day
-            // an ST Zork Zero turns up, this arm is where it lands.
-            Some(DiskImage::Fat12AtariSt) => InterpreterProfile::IbmPc,
+            // **And the Atari ST is now its own machine** (SQ-0835's profile
+            // half): interpreter 5, black on white, §8.3.1's palette, and no
+            // standard window, because Infocom never wrote a Version 6
+            // interpreter for the ST. Read this arm against the one above it —
+            // same FAT12 filesystem, different machine, different answer.
+            Some(DiskImage::Fat12AtariSt) => InterpreterProfile::AtariSt,
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(
