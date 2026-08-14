@@ -34,7 +34,7 @@ pub(crate) fn try_blit_band_row(
 ) -> bool {
     if let Some(band) = &wr.band {
         if let Some(picker) = state.game_picker.as_ref() {
-            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, page_for(state.v6_story_page.get(), state.colors.theme.get("inline_image").style), buf);
+            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), buf);
         }
         return true;
     }
@@ -54,7 +54,7 @@ pub(crate) fn blit_float_row(
     buf: &mut Buffer,
 ) {
     if let Some(picker) = state.game_picker.as_ref() {
-        blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, page_for(state.v6_story_page.get(), state.colors.theme.get("inline_image").style), buf);
+        blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), buf);
     }
 }
 
@@ -158,27 +158,62 @@ pub(crate) fn flatten_onto(strip: &mut image::RgbaImage, page: image::Rgba<u8>) 
     }
 }
 
-/// The opaque page an inline image should be flattened onto.
+/// The ground THIS frame's inline story floats are flattened onto: the three
+/// layers of [`page_for`], resolved from the state the render published.
 ///
-/// It must be the STORY's page, not a theme colour — so `AppState::v6_story_page`
-/// (published by the render's Layered arm from the window the game declared) wins
-/// outright when set. The theme's `inline_image` style is only the fallback for a
-/// frame that declared none: flattening onto it by default would paint the icons
-/// with the very terminal-following colour the game overrode, since `transcript`
-/// and `upper_window` follow the terminal's own background as of SQ-0510.
+/// Public so a test can assert on the page the render actually resolved instead
+/// of re-deriving it, exactly as `render::screen::v6_host_pair` is.
+pub fn float_page(state: &AppState) -> Option<image::Rgba<u8>> {
+    page_for(
+        state.v6_story_page.get(),
+        crate::render::screen::v6_machine_page_rgba(state),
+        state.colors.theme.get("inline_image").style,
+    )
+}
+
+/// The opaque page an inline image should be flattened onto — three layers, most
+/// specific first.
+///
+/// 1. The STORY window's own page (`AppState::v6_story_page`, published by the
+///    render's Layered arm from the window the game declared with `set_colour`).
+///    A colour the game named for the very window the picture floats in wins
+///    outright.
+/// 2. The MACHINE's page (`AppState::v6_page_pair`, via
+///    [`crate::render::screen::v6_machine_page_rgba`]) — SQ-0848. Reported by eye
+///    on `stories/Zork Zero Disk.image`, **release 296 / serial 881019**, the
+///    Macintosh disk: *"the room icon background is terminal default, rather than
+///    the white story pane background"*. Zork Zero on the Macintosh **never calls
+///    `set_colour` at all** (measured — see `session::machine_screen_pair`), so
+///    layer 1 is `None` on every frame of it and the drop-caps and room icons fell
+///    straight through to the theme's `chrome` black while the pane around them
+///    was the machine's white. The machine's page is not a theme preference: it is
+///    the paper the prose beside the picture is being read on
+///    (`screen::v6_machine_page` lays the same pair under the transcript's cells),
+///    so the picture's ground and the prose's ground are one thing.
+/// 3. The theme's `inline_image` style, for a frame that declares neither.
+///    Flattening onto it any earlier would paint the icons with the very
+///    terminal-following colour the game overrode, since `transcript` and
+///    `upper_window` follow the terminal's own background as of SQ-0510.
 ///
 /// Deliberately NOT read back out of the destination cell. The band's cells hold
 /// whatever the previous frame drew there — including the picture itself — so
 /// sampling them feeds the image its own colours and mints a fresh cache entry
 /// every frame.
 ///
-/// `None` when neither names a background we can resolve (`Reset` is the
-/// terminal's own colour and `Indexed` has no canonical RGB here): there is then
-/// no page we could claim is right, so the alpha ships as before rather than
+/// `None` when none of the three names a background we can resolve (`Reset` is
+/// the terminal's own colour and `Indexed` has no canonical RGB here): there is
+/// then no page we could claim is right, so the alpha ships as before rather than
 /// being flattened onto a guess.
-pub(crate) fn page_for(story_page: Option<(u8, u8, u8)>, letterbox: Style) -> Option<image::Rgba<u8>> {
+pub(crate) fn page_for(
+    story_page: Option<(u8, u8, u8)>,
+    machine_page: Option<image::Rgba<u8>>,
+    letterbox: Style,
+) -> Option<image::Rgba<u8>> {
     if let Some((r, g, b)) = story_page {
         return Some(image::Rgba([r, g, b, 255]));
+    }
+    if let Some(p) = machine_page {
+        return Some(p);
     }
     match letterbox.bg {
         None | Some(Color::Reset) | Some(Color::Indexed(_)) => None,
@@ -372,11 +407,11 @@ mod tests {
     #[test]
     fn an_unresolvable_page_leaves_the_picture_unflattened() {
         let none = ratatui::style::Style::default();
-        assert_eq!(page_for(None, none), None, "no page published and no theme background");
-        assert_eq!(page_for(None, none.bg(Color::Reset)), None, "Reset is the terminal's own colour");
-        assert_eq!(page_for(None, none.bg(Color::Indexed(9))), None, "an indexed colour has no canonical RGB here");
+        assert_eq!(page_for(None, None, none), None, "no page published and no theme background");
+        assert_eq!(page_for(None, None, none.bg(Color::Reset)), None, "Reset is the terminal's own colour");
+        assert_eq!(page_for(None, None, none.bg(Color::Indexed(9))), None, "an indexed colour has no canonical RGB here");
         assert_eq!(
-            page_for(None, none.bg(Color::White)),
+            page_for(None, None, none.bg(Color::White)),
             Some(image::Rgba([255, 255, 255, 255])),
             "a named ANSI theme colour does resolve as the fallback"
         );
@@ -385,15 +420,48 @@ mod tests {
         // when the story window declared a page of its own.
         let themed = none.bg(Color::Rgb(26, 26, 26));
         assert_eq!(
-            page_for(Some((255, 255, 255)), themed),
+            page_for(Some((255, 255, 255)), None, themed),
             Some(image::Rgba([255, 255, 255, 255])),
             "the story window's declared page beats the theme"
         );
         assert_eq!(
-            page_for(None, themed),
+            page_for(None, None, themed),
             Some(image::Rgba([26, 26, 26, 255])),
             "with no declared page the theme is the fallback"
         );
+    }
+
+    /// SQ-0848: the MACHINE's page is the middle layer — under a window that
+    /// declared one, over the theme.
+    ///
+    /// A machine whose §8.3.3 defaults ARE its screen (the Macintosh's white page,
+    /// the Amiga's grey) is not stating a preference the theme may outvote: it is
+    /// the paper the prose beside the picture is read on. But it is still less
+    /// specific than a colour the game named for that very window, so it must not
+    /// displace layer 1.
+    #[test]
+    fn the_machines_page_sits_between_the_window_and_the_theme() {
+        let themed = ratatui::style::Style::default().bg(Color::Rgb(26, 26, 26));
+        let white = image::Rgba([255, 255, 255, 255]);
+        // The Macintosh case as reported: no window colour anywhere, a machine
+        // page of white, and a theme that would otherwise have supplied its own.
+        assert_eq!(
+            page_for(None, Some(white), themed),
+            Some(white),
+            "with no window page the machine's own beats the theme — SQ-0848",
+        );
+        // …and it is a layer, not an override: `zork0-r393-s890714.z6` boots
+        // `set_colour(fg=2 black, bg=9 white)` on window 0, and that must still win.
+        let grey = image::Rgba([66, 66, 66, 255]);
+        assert_eq!(
+            page_for(Some((255, 255, 255)), Some(grey), themed),
+            Some(white),
+            "an explicit window background still beats the machine's page",
+        );
+        // No machine pair (every profile but the Amiga and the Macintosh, and
+        // either of those with the game's colours declined) is byte-identical to
+        // the two-layer behaviour that shipped before.
+        assert_eq!(page_for(None, None, themed), Some(image::Rgba([26, 26, 26, 255])));
     }
 
     /// SQ-0704: a square picture must stay square in a cell box that is not.

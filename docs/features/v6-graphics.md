@@ -1298,6 +1298,22 @@ its own copies nothing and inherits exactly as before, which is why the IBM PC
 profile and both `honor_game_colours` settings render byte-for-byte what they
 always did.
 
+**So is the picture's own ground.** These are cut-out PNGs — an ornate letter and
+a little room icon, mostly holes — and the image protocol keeps that transparency
+and hands it to the *terminal* to resolve, which never consults the cells
+underneath. So babelmap resolves it first, against the page the picture is
+standing on, and the question is only which page that is. A window that named a
+background with `set_colour` has answered it; failing that, the **machine** has,
+if it is one of the two whose §8.3.3 defaults are its screen rather than advice
+about a terminal. Zork Zero off its Macintosh release disk never calls
+`set_colour` even once, so until babelmap asked the machine, every drop-cap and
+every room icon on that disk was cut out against the theme's own dark chrome
+while the page around it was the Mac's white — a black tile under each picture on
+a white sheet. The Amiga's grey page answers for Arthur, Shogun and Journey the
+same way. Everywhere else nothing has changed: no machine states a page, so the
+theme is still the last word, and declining the game's colours declines the
+machine's page with them.
+
 There is a second question, because clearing the screen also puts the cursor
 back at its top-left corner: **is there any room left beside the picture?** A
 float, by definition, has prose flowing next to it. A picture that spans window
