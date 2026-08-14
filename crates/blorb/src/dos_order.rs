@@ -40,9 +40,10 @@
 //!
 //! **Measured, not recalled.** The table is corroborated by the media itself,
 //! which is the only authority that matters for a byte layout: applying it to
-//! all nine 5.25-inch images in the corpus puts a valid ProDOS volume directory
-//! at block 2 of every one of them — `SHOGUN.1`…`SHOGUN.5` and `ZORK0.1`…
-//! `ZORK0.4` — each naming the segment files whose reassembly then verifies
+//! all fourteen 5.25-inch images in the corpus puts a valid ProDOS volume
+//! directory at block 2 of every one of them — `SHOGUN.1`…`SHOGUN.5`,
+//! `ZORK0.1`…`ZORK0.4` and (since SQ-0863) `JOURNEY.1`…`JOURNEY.5` — each
+//! naming the segment files whose reassembly then verifies
 //! against the story's own header checksum (see [`crate::infocom_packed`]). A
 //! wrong table produces no volume directory at all, so there is nothing here for
 //! a shared wrong assumption to hide behind.

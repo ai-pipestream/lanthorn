@@ -22,7 +22,14 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
-/// The two presses: every volume, and the build the whole set carries.
+/// The presses: every volume, and the build the whole set carries.
+///
+/// *Journey* joined them in SQ-0863, when its 5.25-inch set arrived. It is the
+/// same shape as the other two and it settles something they could not: the
+/// `Journey.2mg` in the corpus declares five segments and carries four, and
+/// until this set there was no way to tell a short IMAGE from a release babelmap
+/// could not read. Release 77 comes off all five floppies, so the `.2mg` is a
+/// short pressing and the reader was right to refuse it.
 const SETS: &[(&str, &[&str], u16, &str, usize)] = &[
     (
         "Shogun",
@@ -43,6 +50,19 @@ const SETS: &[(&str, &[&str], u16, &str, usize)] = &[
         383,
         "890602",
         299_392,
+    ),
+    (
+        "Journey",
+        &[
+            "journey_s1.dsk",
+            "journey_s2.dsk",
+            "journey_s3.dsk",
+            "journey_s4.dsk",
+            "journey_s5.dsk",
+        ],
+        77,
+        "890616",
+        282_176,
     ),
 ];
 
@@ -141,8 +161,14 @@ fn a_press_is_one_row_in_the_browser_and_the_first_volume_keeps_it() {
     for absent in ["shogun_s2.dsk", "shogun_s3.dsk", "shogun_s4.dsk", "shogun_s5.dsk"] {
         assert!(!dsk.contains(&absent.to_string()), "{absent} is a second row for one game");
     }
-    if complete(SETS[1].1).is_some() {
-        assert_eq!(dsk, ["shogun_s1.dsk", "zork_zero_1.dsk"], "two presses, two rows");
+    if SETS.iter().all(|(_, v, ..)| complete(v).is_some()) {
+        // Alphabetical, which is the scan's own order — three presses, three
+        // rows, and fourteen floppies folded into them.
+        assert_eq!(
+            dsk,
+            ["journey_s1.dsk", "shogun_s1.dsk", "zork_zero_1.dsk"],
+            "three presses, three rows"
+        );
     }
 }
 

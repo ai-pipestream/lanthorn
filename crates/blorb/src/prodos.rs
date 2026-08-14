@@ -40,11 +40,21 @@
 //!
 //! A **bare** ProDOS volume with no wrapper at all is read just the same, by
 //! trying both placements and letting the volume directory decide — the same
-//! shape [`crate::hfs`] uses for its DiskCopy wrapper. Nothing in `stories/` is
-//! bare (the conventional spellings, `.po` and `.hdv`, appear nowhere in the
-//! corpus), so the bare path is pinned by a synthetic volume rather than by a
-//! fixture, and no bare spelling is claimed in `blorb::medium`'s extension
-//! census. A bare image still mounts when it is opened by name.
+//! shape [`crate::hfs`] uses for its DiskCopy wrapper. That path was pinned by a
+//! synthetic volume until SQ-0863, when the corpus grew three real ones:
+//! `Arthur.po`, `Journey.po` and `ZorkZero.po`, the 3.5-inch consolidated
+//! pressings of the three graphical Version 6 games, each 819,200 bytes of
+//! volume with no header in front of it (`ARTHUR.3.5`, `JOURNEY.3.5`,
+//! `ZORK.ZERO.3.5`). They opened the day they arrived, and `.po` is claimed in
+//! [`crate::medium`]'s extension census now that a medium wears it.
+//!
+//! **`Shogun.po` is not one of them and its name is the point.** Despite the
+//! spelling it is a DiskCopy 4.2 image — 838,484 bytes, `06 "SHOGUN"`, with the
+//! volume 84 bytes in — and this reader does not unwrap that, so it is declined
+//! whatever it is called. [`crate::hfs`] has the unwrap for its Macintosh
+//! images and sharing it here is a small refactor nobody has done; the artwork
+//! it would reach is already reachable off `shogun_s1.dsk`…`s5`. A bare image
+//! still mounts when it is opened by name, and a misnamed one still does not.
 //!
 //! # Layer 1b — DOS sector order (SQ-0864)
 //!
@@ -53,10 +63,11 @@
 //! ProDOS numbers its blocks, so the volume directory of such an image is not at
 //! offset 1024 and the sniff above declines it — which is what this paragraph
 //! used to say was the end of the matter. It is not: those bytes are a ProDOS
-//! volume, merely shuffled, and [`crate::dos_order`] unshuffles them. The nine
-//! 5.25-inch images in the corpus — `shogun_s1.dsk`…`s5` and
-//! `zork_zero_1.dsk`…`_4` — are bare 143,360-byte dumps that mount here as
-//! `SHOGUN.1`…`SHOGUN.5` and `ZORK0.1`…`ZORK0.4` once they are.
+//! volume, merely shuffled, and [`crate::dos_order`] unshuffles them. The
+//! fourteen 5.25-inch images in the corpus — `shogun_s1.dsk`…`s5`,
+//! `zork_zero_1.dsk`…`_4` and `journey_s1.dsk`…`s5` — are bare 143,360-byte
+//! dumps that mount here as `SHOGUN.1`…`SHOGUN.5`, `ZORK0.1`…`ZORK0.4` and
+//! `JOURNEY.1`…`JOURNEY.5` once they are.
 //!
 //! It stays a wrapper rather than becoming a format for the same reason `2IMG`
 //! does: what comes out is ProDOS, read by this reader, answering to
@@ -553,29 +564,30 @@ impl ProDos {
     /// stored path. Identified by parsing, exactly as
     /// [`crate::adf::Adf::pictures`] does.
     ///
-    /// Nothing in the ProDOS corpus answers, and the reason changed under
-    /// SQ-0852: the two graphical releases here (*Arthur* and *Journey*) keep
-    /// their artwork inside the same segmented `.D1`…`.D5` container as their
-    /// story — not as a file, so no per-file parse can ever reach it.
+    /// No ProDOS volume in the corpus keeps its artwork as a *file*: the two
+    /// graphical releases here (*Arthur* and *Journey*) keep theirs inside the
+    /// same segmented `.D1`…`.D5` container as their story, so no per-file parse
+    /// can reach it. That is why this falls through to
+    /// [`Self::packed_pictures`], exactly as [`Self::story`] falls through to
+    /// [`Self::packed_story`] — the file tier is kept because a ProDOS volume
+    /// with a loose archive on it would be an ordinary volume, and the container
+    /// tier is what the corpus actually answers with.
     ///
-    /// # Why this does NOT fall through to [`Self::packed_pictures`]
+    /// **The fall-through moves the story's screen, and that is correct**
+    /// (SQ-0863). An archive states a picture space and the Apple's is 140×192
+    /// (`apple.equ`'s `MAXWIDTH`/`MAXHEIGHT`), which `app`'s
+    /// `PictSource::native_std_window` turns into a 560×384 story window where
+    /// *Arthur* release 63 used to be laid out on 640×400. The 640×400 was the
+    /// ARTLESS fallback — the profile's, reached only while nothing declared a
+    /// space — and an archive outranks a profile for the same reason the
+    /// standard Macintosh's monochrome `Pic.data` outranks `MACINTOSH_STD_WINDOW`
+    /// and lays Zork Zero out on 480×300 (SQ-0838). The Apple press is a
+    /// different build on a different machine and it is entitled to its own
+    /// screen.
     ///
-    /// [`Self::story`] falls through to [`Self::packed_story`], and the
-    /// symmetry is tempting, but the artwork is not ready to be handed over the
-    /// way the story is — and the obstacle is geometry, not decoding. SQ-0863
-    /// read the archives: 168 of *Arthur*'s pictures come out of the four
-    /// floppies, correct and pixel-exact. But an archive also STATES a picture
-    /// space, and the Apple's is 140×192 (`apple.equ`'s `MAXWIDTH`/`MAXHEIGHT`),
-    /// which `app`'s `PictSource::native_std_window` turns into a 560×384 story
-    /// window where release 63 is pinned at 640×400.
-    ///
-    /// That is the same question SQ-0857 met and deliberately left open when it
-    /// set `InterpreterProfile::AppleIIgs::std_window` to `None`: the Apple's
-    /// picture space cannot be honestly expressed while the v6 cell is a
-    /// compile-time 8×16. Wiring the art in without settling it would move
-    /// *Arthur*'s whole screen as a side effect of gaining pictures. So the
-    /// reader is landed and reachable — [`Self::packed_pictures`] — and this
-    /// door stays shut until the run-time-cell decision is made.
+    /// This does not reopen `InterpreterProfile::AppleIIgs::std_window`, which
+    /// SQ-0857 left `None` and which stays `None`: the archive supplies the
+    /// space, so the profile never has to.
     pub fn pictures(&self) -> Option<(String, InfocomPics)> {
         let mut cands: Vec<(String, InfocomPics)> = self
             .files
@@ -586,7 +598,7 @@ impl ProDos {
             .filter(|(_, p)| p.entries().iter().any(|e| e.has_pixels()))
             .collect();
         cands.sort_by_key(|(path, pics)| (std::cmp::Reverse(pics.entries().len()), path.clone()));
-        cands.into_iter().next()
+        cands.into_iter().next().or_else(|| self.packed_pictures())
     }
 
     /// The artwork held in a packed Apple volume on this disk, merged out of the
@@ -1353,20 +1365,27 @@ pub(crate) mod tests {
                 assert_eq!((story[0], u16::from_be_bytes([story[2], story[3]])), (6, 63));
                 assert_eq!(&story[0x12..0x18], b"890622");
             }
-            // No FILE on either volume is an archive, so the per-file door
-            // answers `None` for both — and deliberately still does, even though
-            // the packed door can now read the artwork. See `ProDos::pictures`
-            // for why the two are not yet joined up.
-            assert!(fs.pictures().is_none(), "{fixture}: no FILE here is an archive");
-            // The packed door reads it, and follows the story exactly (SQ-0863):
-            // *Arthur*'s four archives are all here; *Journey*'s fifth segment
-            // is missing, so its set is refused whole rather than served short.
+            // The packed door reads the artwork, and follows the story exactly
+            // (SQ-0863): *Arthur*'s four archives are all here; *Journey*'s
+            // fifth segment is missing, so its set is refused whole rather than
+            // served short.
             assert_eq!(fs.packed_pictures().is_some(), packed, "{fixture}");
+            // No FILE on either volume is an archive, so `pictures()` is the
+            // packed door's answer and nothing else — the fall-through SQ-0863
+            // opened, and the only reason either disk draws.
+            assert_eq!(
+                fs.pictures().map(|(n, p)| (n, p.entries().len())),
+                fs.packed_pictures().map(|(n, p)| (n, p.entries().len())),
+                "{fixture}: no FILE here is an archive, so the packed door is the answer"
+            );
             if packed {
                 let (name, pics) = fs.packed_pictures().expect("Arthur's artwork");
                 assert_eq!(name, "ARTHUR.1/ARTHUR.D1");
                 assert_eq!(pics.entries().len(), 168);
                 assert_eq!(pics.parts(), 4, "one archive per floppy, disks 2..=5");
+                // 140×192 is the Apple's picture space and it is what moves the
+                // story's screen; see `ProDos::pictures`.
+                assert_eq!((pics.picture_space_width(), pics.picture_space_height()), (140, 192));
             }
         }
     }
@@ -1558,49 +1577,167 @@ pub(crate) mod tests {
     /// DOS and Atari ST floppies beside bare story files is the strongest
     /// available statement of that.
     ///
-    /// **Both spellings, since SQ-0864.** The nine `.dsk` images are ProDOS
-    /// volumes too — 5.25-inch dumps whose sectors are in the drive's order —
-    /// and every one of them now opens here. The extension is still not what
-    /// decides: it is the expectation the loop is checked AGAINST, and the sniff
-    /// reaches its verdict from the volume directory it finds after the
-    /// de-interleave.
+    /// **All three spellings, since SQ-0863.** Fourteen `.dsk` images are ProDOS
+    /// volumes too — 5.25-inch dumps whose sectors are in the drive's order
+    /// (SQ-0864) — and three `.po` images are BARE volumes with no wrapper at
+    /// all. Every one of them opens here.
+    ///
+    /// # Why this is not written as "claimed if and only if it is spelled right"
+    ///
+    /// It used to be, and the corpus refuted it twice in one afternoon. The
+    /// spelling was never the claim — the module's rule is that recognition is by
+    /// CONTENT — and a directory that happened to contain only well-named files
+    /// let an extension test masquerade as a content test for two quests. So the
+    /// two directions are stated separately, and only one of them mentions a
+    /// name:
+    ///
+    /// - **Disjointness**, swept over everything: anything claimed here must be
+    ///   a ProDOS volume that mounts, and must not wear another format's
+    ///   spelling. That is what keeps the sniff off the Amiga, Macintosh, DOS and
+    ///   Atari ST floppies sitting beside these.
+    /// - **Coverage**, from [`PRODOS_MEDIA`]: every image we say is a ProDOS
+    ///   volume is claimed and opens. A reader that quietly stopped recognising
+    ///   the 5.25-inch press fails here rather than passing an emptier sweep.
+    ///
+    /// The two files that make the difference are worth naming. `Shogun.po` is a
+    /// DiskCopy 4.2 image wearing a ProDOS name — declined, because the bytes say
+    /// so and the name is not evidence. `Planetfall r29 (clean copy from retail
+    /// disk).dsk` is a 143,360-byte Apple II 5.25-inch dump that is **DOS 3.3**:
+    /// [`dos_ordered`] re-orders it as willingly as any other and then declines
+    /// it, because nothing but a ProDOS volume directory is allowed to make this
+    /// answer `Some`.
     #[test]
     fn only_the_prodos_images_in_the_corpus_look_like_prodos() {
         let Ok(dir) = std::fs::read_dir(stories_dir()) else {
             eprintln!("SKIP: no stories directory");
             return;
         };
-        let (mut seen, mut five_and_a_quarter) = (0, 0);
+        // Direction one: whatever is claimed really is one, and wears one of the
+        // three spellings the census names.
+        let mut seen = 0;
         for entry in dir.flatten() {
             let path = entry.path();
             let Ok(raw) = std::fs::read(&path) else { continue };
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            let claimed = ProDos::looks_like_prodos(&raw);
-            let lower = name.to_ascii_lowercase();
-            let (is_2mg, is_dsk) = (lower.ends_with(".2mg"), lower.ends_with(".dsk"));
-            assert_eq!(claimed, is_2mg || is_dsk, "{name}: looks_like_prodos = {claimed}");
-            if !claimed {
+            if !ProDos::looks_like_prodos(&raw) {
                 continue;
             }
             seen += 1;
-            if is_dsk {
-                five_and_a_quarter += 1;
-                assert_eq!(raw.len(), crate::dos_order::DOS_ORDER_LEN, "{name}: 35 × 16 × 256");
-            }
+            let lower = name.to_ascii_lowercase();
+            assert!(
+                [".2mg", ".dsk", ".po"].iter().any(|e| lower.ends_with(e)),
+                "{name}: claimed as ProDOS under a spelling no format row lists"
+            );
             let fs = ProDos::mount(raw).unwrap_or_else(|e| panic!("{name}: {e:?}"));
             assert!(!fs.files().is_empty(), "{name}: mounted but empty");
             assert!(!fs.volume_name().is_empty(), "{name}: no volume name");
         }
-        assert!(five_and_a_quarter == 9 || seen == 0, "expected nine 5.25-inch volumes");
-        if seen == 0 {
+
+        // Direction two: every image we NAME as one is claimed, at the geometry
+        // its wrapper implies.
+        let (mut five_and_a_quarter, mut bare, mut ran) = (0, 0, 0);
+        for (name, kind) in PRODOS_MEDIA {
+            let Ok(raw) = std::fs::read(stories_dir().join(name)) else { continue };
+            ran += 1;
+            assert!(ProDos::looks_like_prodos(&raw), "{name}: must be claimed as ProDOS");
+            match kind {
+                ProDosMedium::FiveAndAQuarter => {
+                    five_and_a_quarter += 1;
+                    assert_eq!(raw.len(), crate::dos_order::DOS_ORDER_LEN, "{name}: 35 × 16 × 256");
+                }
+                ProDosMedium::Bare => {
+                    bare += 1;
+                    // A bare volume is the whole file and nothing else — 1600
+                    // blocks of 3.5-inch media, with no header to skip.
+                    assert_eq!(raw.len(), 1600 * BLOCK, "{name}: 1600 × 512, bare");
+                }
+                ProDosMedium::TwoImg => {}
+            }
+        }
+        assert_eq!(ran, seen, "an image is claimed that PRODOS_MEDIA does not name");
+        assert!(
+            five_and_a_quarter == 14 || ran == 0,
+            "expected fourteen 5.25-inch volumes, got {five_and_a_quarter}"
+        );
+        assert!(bare == 3 || ran == 0, "expected three bare 3.5-inch volumes, got {bare}");
+        if ran == 0 {
             eprintln!("SKIP: no ProDOS media present");
+        }
+    }
+
+    /// How a ProDOS volume in the corpus is packaged: what has to be got past
+    /// before the volume directory is where this reader looks for it.
+    enum ProDosMedium {
+        /// A 2IMG header bolted onto an 800 KB volume.
+        TwoImg,
+        /// A 143,360-byte 5.25-inch dump in the drive's sector order.
+        FiveAndAQuarter,
+        /// An 800 KB volume and nothing else.
+        Bare,
+    }
+
+    /// Every ProDOS image in `stories/`, named. See the case above for why the
+    /// coverage half of that test reads a list rather than a directory.
+    const PRODOS_MEDIA: &[(&str, ProDosMedium)] = &[
+        ("Beyond Zork (1988)(Infocom).2mg", ProDosMedium::TwoImg),
+        ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 1 of 7).2mg", ProDosMedium::TwoImg),
+        ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 2 of 7).2mg", ProDosMedium::TwoImg),
+        ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 3 of 7).2mg", ProDosMedium::TwoImg),
+        ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 4 of 7).2mg", ProDosMedium::TwoImg),
+        ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 5 of 7).2mg", ProDosMedium::TwoImg),
+        ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 6 of 7).2mg", ProDosMedium::TwoImg),
+        ("Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 7 of 7).2mg", ProDosMedium::TwoImg),
+        ("Arthur Quest 4 Excalibur.2mg", ProDosMedium::TwoImg),
+        ("Journey.2mg", ProDosMedium::TwoImg),
+        ("Arthur.po", ProDosMedium::Bare),
+        ("Journey.po", ProDosMedium::Bare),
+        ("ZorkZero.po", ProDosMedium::Bare),
+        ("shogun_s1.dsk", ProDosMedium::FiveAndAQuarter),
+        ("shogun_s2.dsk", ProDosMedium::FiveAndAQuarter),
+        ("shogun_s3.dsk", ProDosMedium::FiveAndAQuarter),
+        ("shogun_s4.dsk", ProDosMedium::FiveAndAQuarter),
+        ("shogun_s5.dsk", ProDosMedium::FiveAndAQuarter),
+        ("zork_zero_1.dsk", ProDosMedium::FiveAndAQuarter),
+        ("zork_zero_2.dsk", ProDosMedium::FiveAndAQuarter),
+        ("zork_zero_3.dsk", ProDosMedium::FiveAndAQuarter),
+        ("zork_zero_4.dsk", ProDosMedium::FiveAndAQuarter),
+        ("journey_s1.dsk", ProDosMedium::FiveAndAQuarter),
+        ("journey_s2.dsk", ProDosMedium::FiveAndAQuarter),
+        ("journey_s3.dsk", ProDosMedium::FiveAndAQuarter),
+        ("journey_s4.dsk", ProDosMedium::FiveAndAQuarter),
+        ("journey_s5.dsk", ProDosMedium::FiveAndAQuarter),
+    ];
+
+    /// **The two files in the corpus whose NAME says ProDOS and whose bytes do
+    /// not**, declined for two different reasons (SQ-0863).
+    ///
+    /// The module's rule is that recognition is by content; a corpus of
+    /// well-named files cannot demonstrate that, and these two can.
+    #[test]
+    fn a_prodos_spelling_is_not_a_prodos_volume() {
+        // A DiskCopy 4.2 image under a ProDOS name — `06 "SHOGUN"`, with the
+        // volume 84 bytes in. `crate::hfs` has that unwrap for its Macintosh
+        // images and this reader does not share it yet; the artwork it would
+        // reach is on `shogun_s1.dsk`…`s5` regardless.
+        if let Ok(raw) = std::fs::read(stories_dir().join("Shogun.po")) {
+            assert!(!ProDos::looks_like_prodos(&raw), "a DiskCopy image is not a bare volume");
+            assert_eq!(&raw[..7], b"\x06SHOGUN", "the premise: a DiskCopy 4.2 name field");
+        }
+        // …and an Apple II 5.25-inch dump that is DOS 3.3 rather than ProDOS.
+        // `dos_ordered` re-orders it as willingly as any other and then declines
+        // it, which is the de-interleave being a wrapper and never a verdict.
+        let planetfall = "Planetfall r29 (clean copy from retail disk).dsk";
+        if let Ok(raw) = std::fs::read(stories_dir().join(planetfall)) {
+            assert_eq!(raw.len(), crate::dos_order::DOS_ORDER_LEN, "the 5.25-inch geometry");
+            assert!(crate::dos_order::prodos_order(&raw).is_some(), "it re-orders willingly");
+            assert!(!ProDos::looks_like_prodos(&raw), "and holds no ProDOS volume directory");
         }
     }
 
     /// **The 5.25-inch press, volume by volume** (SQ-0864).
     ///
     /// SQ-0852 read these images as bare packed volumes with no filesystem —
-    /// "there is no ProDOS volume directory on any of the nine". There is one on
+    /// "there is no ProDOS volume directory on any of them". There is one on
     /// every one of them; it is 1,024 bytes into the image only once the sectors
     /// are in ProDOS's order rather than the drive's. Each volume names itself
     /// and carries its segment as an ordinary ProDOS file, which is what makes

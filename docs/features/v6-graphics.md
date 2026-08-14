@@ -206,6 +206,53 @@ disks would work too.
 *Zork Zero* is unaffected: its 360K release gave EGA a whole disk, so `zork0.eg1`
 is complete on its own and stays at 396 pictures.
 
+#### Apple II artwork
+
+The Apple II press is the fourth machine, and the one that hides its artwork
+best. There is no archive *file* on any of these disks: the pictures live inside
+the same opaque `.D1`…`.D5` segments as the story, and the segment index says
+where — one block number per segment, zero for a segment carrying no art. Open
+any of these and babelmap merges what it finds into one archive:
+
+| release | opens from | pictures |
+|---|---|---|
+| *Arthur* r63 | `Arthur Quest 4 Excalibur.2mg`, `Arthur.po` | 168 |
+| *Journey* r77 | `Journey.po`, `journey_s1.dsk`…`s5` | 135 |
+| *Shogun* r311 | `shogun_s1.dsk`…`s5` | 55 |
+| *Zork Zero* r383 | `zork_zero_1.dsk`…`_4` | 496 |
+
+Three of those four are pressed on 5.25" floppies with the artwork spread across
+the whole set, so naming any one volume merges the plates off all of them —
+exactly the way naming any one volume opens the whole game. A set with a floppy
+missing draws nothing rather than a picture space with rooms knocked out of it,
+which is why `Journey.2mg` — an 800K image that genuinely shipped without its
+fifth segment — is the one Apple release in the corpus that still plays no art
+and, for the same absence, does not play at all.
+
+**And this is a different screen.** The Apple's picture space is 140×192, stated
+by Infocom's own Apple interpreter in the dots it is counted in: `MAXWIDTH EQU
+140 ; 560 / 4 = max "pixels"` and `MAXHEIGHT EQU 192 ; 192 screen lines`. One
+Apple picture pixel is four dots of the 560-dot double-hi-res display and one
+scan line tall, and on the 4:3 monitor the machine drove a scan line measures
+about 2.19 dots — so babelmap presents that art at (4, 2) and the story is told
+its screen is **560×384**. Not 640×400: that was what *Arthur* got while its
+artwork was unreadable and nothing declared a picture space, and an archive
+outranks a machine default for the same reason a Macintosh mono `Pic.data` lays
+*Zork Zero* out on 480×300. The Apple press of *Arthur* is a third build beside
+the Amiga's r54 and the DOS r74, and it is entitled to its own screen.
+
+| rendition | picture space | drawn at | the screen the story is told about |
+|---|---|---|---|
+| Amiga / Mac colour, MCGA | 320×200 | 2× | 640×400 |
+| EGA, CGA | 640×200 | 1× / 2× | 640×400 |
+| Macintosh mono | 480×300 | 1:1 | 480×300 |
+| Apple II | 140×192 | 4× / 2× | 560×384 |
+
+560×384 is exactly 70×24 of babelmap's 8×16 Version 6 cells, so nothing rounds.
+(The Apple's *own* character grid was 46×21 on a 3×9 cell, which is a screen
+model rather than a resolution and is a separate thing babelmap does not yet
+express — see [`interpreter.md`](interpreter.md).)
+
 ### Choosing which artwork a game draws
 
 Three sources, in decreasing order of how sure babelmap can be that the art and
@@ -322,10 +369,13 @@ guess at. The four-volume Apple II *Zork Zero* press became identifiable in the
 same breath (release 383 / serial 890602) and nothing about it moved, because no
 Blorb in the corpus stem-matches it.
 
-Both refused releases now draw no artwork rather than another build's, exactly as
-the Apple IIgs *Arthur* does. Their own plates *are* on their platters, inside the
-same packed segments; teaching babelmap to read those is a separate job from
-refusing to draw the wrong ones.
+Refusing the wrong plates left these releases drawing nothing at all, and that
+was always meant to be temporary: their own plates *are* on their platters,
+inside the same packed segments. babelmap reads them now — see [Apple II
+artwork](#apple-ii-artwork) below — so *Shogun*'s press draws its own 55, the
+`.2mg` *Arthur* its own 168, and the refusal costs a player nothing. The one
+release still dark is `Journey.2mg`, and for the same reason it cannot be played:
+the segment it is missing carries a quarter of its pictures.
 
 One more thing moved with it: `IFhd` describes the **container**, not its picture
 chunks, and a Blorb built for another build numbers its sounds every bit as

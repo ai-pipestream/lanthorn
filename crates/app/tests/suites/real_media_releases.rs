@@ -180,10 +180,13 @@ const MEDIA: &[Medium] = &[
     // rule holds on a fourth machine. Measured through
     // `app::hints::load_mounted_story` on 2026-08-14, like every row above.
     //
-    // *Journey*'s Apple press has no row because it has no story to pin:
-    // `Journey.2mg` declares five segments and carries four, so 92 of its 552
-    // pages are not on the image and `blorb::infocom_packed` refuses it rather
-    // than handing back a truncated game. `blorb::prodos` pins that refusal.
+    // `Journey.2mg` still has no row, and now for a reason the corpus can prove
+    // rather than assume: it declares five segments and carries four, so 92 of
+    // its 552 pages are not on the image and `blorb::infocom_packed` refuses it
+    // rather than handing back a truncated game. `blorb::prodos` pins that
+    // refusal. The two Journey rows below are the SAME release off pressings
+    // that are complete, which is what makes the `.2mg` a short image rather
+    // than an unreadable format.
     Medium { title: "Arthur (Apple II, packed)", file: "Arthur Quest 4 Excalibur.2mg", image: Some(DiskImage::ProDos), version: 6, release: 63, serial: "890622" },
     // ── The Apple II 5.25-inch press (SQ-0864) ───────────────────────────────
     //
@@ -211,6 +214,32 @@ const MEDIA: &[Medium] = &[
     // ZMSD §11.1.6 header checksum — `$E200` and `$6F7F` — by the reader.
     Medium { title: "Shogun (Apple II 5.25)", file: "shogun_s1.dsk", image: Some(DiskImage::ProDos), version: 6, release: 311, serial: "890510" },
     Medium { title: "Zork Zero (Apple II 5.25)", file: "zork_zero_1.dsk", image: Some(DiskImage::ProDos), version: 6, release: 383, serial: "890602" },
+    // ── The Apple II *Journey*, twice, and the short image beside them ───────
+    //
+    // **A SIXTH Journey**, and the release SQ-0867 read off `Journey.2mg`'s one
+    // surviving header page without being able to load it: r77 / 890616, against
+    // the Amiga floppy's r30 / 890322 and the bare file's r83 / 890706. Two
+    // complete pressings of it are here, and they are two different IMAGES of
+    // one build — the five-volume 5.25-inch set (`journey_s1.dsk`…`s5`, ProDOS
+    // volumes `JOURNEY.1`…`JOURNEY.5`) and the 3.5-inch consolidated `Journey.po`
+    // (volume `JOURNEY.3.5`, the same five segments in five subdirectories, which
+    // is *Arthur*'s layout). Both reassemble to release 77 with header checksum
+    // `$B136`.
+    //
+    // `Journey.po` is also the row that earns `.po` its place in
+    // `blorb::medium`'s extension census (SQ-0863): a bare ProDOS volume has
+    // always mounted, and until this file arrived nothing in `stories/` was one,
+    // so the picker's pre-filter had never heard of the spelling and the image
+    // was openable by name and invisible in the list.
+    Medium { title: "Journey (Apple II 5.25)", file: "journey_s1.dsk", image: Some(DiskImage::ProDos), version: 6, release: 77, serial: "890616" },
+    Medium { title: "Journey (Apple II 3.5)", file: "Journey.po", image: Some(DiskImage::ProDos), version: 6, release: 77, serial: "890616" },
+    // The other two bare volumes, for the same reason. `Arthur.po` is the SAME
+    // dump as the `.2mg` above down to the story bytes and the picture entries
+    // (`apple_release_artwork.rs` pins that agreement, which is what makes it a
+    // control on the reader rather than a fourteenth fixture); `ZorkZero.po` is
+    // the 3.5-inch consolidation of the four `zork_zero_*.dsk` floppies.
+    Medium { title: "Arthur (Apple II 3.5)", file: "Arthur.po", image: Some(DiskImage::ProDos), version: 6, release: 63, serial: "890622" },
+    Medium { title: "Zork Zero (Apple II 3.5)", file: "ZorkZero.po", image: Some(DiskImage::ProDos), version: 6, release: 383, serial: "890602" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -266,9 +295,49 @@ const V6_FRAMES: &[V6Frame] = &[
     // …and Arthur's PACKED Apple press, reassembled out of five segments. This
     // row is the real-game smoke for `blorb::infocom_packed`: a story whose
     // header checksum is exact could still be a story the app cannot drive, and
-    // twelve turns of a reassembled r63 laying out the same window its two
-    // siblings do is the answer to that (SQ-0852).
-    V6Frame { file: "Arthur Quest 4 Excalibur.2mg", turns: 12, prose_window: 0, box_px: (1, 1, 640, 400) },
+    // twelve turns of a reassembled r63 reaching a laid-out window is the answer
+    // to that (SQ-0852).
+    //
+    // **560×384, and the move is the finding** (SQ-0863). This row read
+    // (1, 1, 640, 400) for as long as the Apple's artwork was unreadable: with
+    // nothing declaring a picture space the screen fell back to the profile's,
+    // and 640×400 is what an ARTLESS v6 launch gets. The archive now speaks, and
+    // an archive outranks a profile — the same order that lays Zork Zero out on
+    // 480×300 off the standard Macintosh's monochrome plate (SQ-0838), and
+    // `reset.rs`'s own chain: Blorb `Reso`, then the archive, then the machine.
+    //
+    // The space is 140×192 and the scale is (4, 2), both off the machine rather
+    // than off what fits. `apple/yzip/rel.15/apple.equ` states the space in the
+    // same breath as the dots it is counted in — `MAXWIDTH EQU 140 ; 560 / 4 =
+    // max "pixels"` and `MAXHEIGHT EQU 192 ; 192 screen lines` — so one Apple
+    // picture pixel is four double-hi-res dots wide and one scan line tall, and
+    // 140×192 art covers all 560×192 dots the screen has. The vertical 2 is what
+    // a scan line MEASURES rather than what it counts: the Apple's 192 active
+    // lines fill the visible raster of a 4:3 monitor while its 560 dots fill the
+    // width, so a line is (3/4)·(560/192) = 2.19 dots tall and the shape-
+    // preserving vertical factor is 2. `PictSource::art_scale` carries the whole
+    // derivation. 560×384 is also exactly 70×24 whole 8×16 cells.
+    //
+    // Arthur's Apple press is a THIRD build beside r54 and r74 and is entitled
+    // to its own screen, exactly as Journey r30 narrates through a different
+    // window than r83 (SQ-0755). Nothing else in this table moves: every other
+    // medium's picture space is what it always was.
+    V6Frame { file: "Arthur Quest 4 Excalibur.2mg", turns: 12, prose_window: 0, box_px: (1, 1, 560, 384) },
+    // The 5.25-inch presses, on the same Apple screen and for the same reason
+    // (SQ-0863). Their artwork is on no single floppy either — `SGTPICOF` names
+    // an archive on five of Shogun's segments, four of Journey's and two of Zork
+    // Zero's — so these rows are the smoke for `MountedDisk::pictures`'s
+    // set-spanning arm as much as for the geometry: a release that draws nothing
+    // lays out on the profile's 640×400 and would fail here.
+    V6Frame { file: "shogun_s1.dsk", turns: 12, prose_window: 0, box_px: (1, 65, 560, 320) },
+    V6Frame { file: "zork_zero_1.dsk", turns: 12, prose_window: 0, box_px: (1, 1, 560, 384) },
+    // …and *Journey* r77, which is the row this table exists for. Its two
+    // siblings disagree about which window they narrate through — r30 uses
+    // window 2 and r83 window 0, the whole of SQ-0755 — so a third build of the
+    // same game is exactly the case where measuring one medium proves nothing
+    // about another. Measured: r77 sides with r83 and narrates through window 0,
+    // in a 304×288 box parked at the right of the Apple's 560×384 screen.
+    V6Frame { file: "journey_s1.dsk", turns: 40, prose_window: 0, box_px: (249, 1, 304, 288) },
 ];
 
 /// Media whose game narrates its own release, and the words it uses. The
@@ -651,10 +720,10 @@ fn every_release_medium_is_offered_by_the_story_picker() {
 
     // **And `.dsk` crossed the same line in SQ-0864.** It sat in the paragraph
     // below as the format with no reader, listed nowhere however many of them
-    // were in the directory. Nine are, and they are two RELEASES rather than
-    // nine disks — so what the browser must show is exactly two rows, one per
-    // game, reached by naming the first volume of each. Five Shogun floppies
-    // that each report the same reassembled build are five rows before
+    // were in the directory. Fourteen are, and they are three RELEASES rather
+    // than fourteen disks — so what the browser must show is exactly three rows,
+    // one per game, reached by naming the first volume of each. Five Shogun
+    // floppies that each report the same reassembled build are five rows before
     // `dedupe_within_sets` and one after (SQ-0844), which is the set model
     // paying for itself.
     let listed_dsk: Vec<&std::ffi::OsStr> = listed
@@ -672,8 +741,8 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     if dir_has_dsk {
         assert_eq!(
             listed_dsk,
-            ["shogun_s1.dsk", "zork_zero_1.dsk"],
-            "two releases, one row each, and the lowest disk number keeps it"
+            ["journey_s1.dsk", "shogun_s1.dsk", "zork_zero_1.dsk"],
+            "three releases, one row each, and the lowest disk number keeps it"
         );
     }
 
@@ -717,6 +786,21 @@ fn every_release_medium_is_offered_by_the_story_picker() {
         "Journey.2mg is missing its fifth segment, so no whole story comes out of it \
          and it must not be offered as if one did"
     );
+
+    // …and `.po` crossed the line in SQ-0863, which is the same paragraph a
+    // third time and the reason this case is written as a sweep. `Journey.po` is
+    // a BARE ProDOS volume — no 2IMG wrapper — and this reader has opened one
+    // since SQ-0836, so the image mounted, listed its story and offered its
+    // artwork the moment it appeared in the directory, and was still invisible
+    // in the list, because `.po` was in no format row's extensions. One spelling
+    // added; nothing else moved.
+    let po = stories_dir().join("Journey.po");
+    if po.is_file() {
+        assert!(
+            listed.contains(&po),
+            "a bare ProDOS volume mounts, so the picker must offer it: {listed:?}"
+        );
+    }
 }
 
 /// A `.blb` beside a story is artwork, never a third build — so "which release"

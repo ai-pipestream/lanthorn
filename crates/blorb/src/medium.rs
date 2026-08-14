@@ -507,13 +507,24 @@ const FORMATS: &[Format] = &[
         //
         // `.dsk` is also a Macintosh spelling, which costs nothing: the census
         // is a union a directory scan pre-filters on, and `looks_like_hfs`
-        // claims an HFS `.dsk` before this row is ever asked. **Not `.po` or
-        // `.hdv`**, the conventional names for a BARE ProDOS volume: this reader
-        // opens one (see [`crate::prodos`]) but nothing in `stories/` is one, so
-        // claiming the spelling would be a census entry no medium here justifies.
-        // A bare volume under any name still mounts when it is opened directly —
-        // the extension is a directory scan's pre-filter, never the recogniser.
-        extensions: &["2mg", "dsk"],
+        // claims an HFS `.dsk` before this row is ever asked.
+        //
+        // `.po` is the third, and it is the corpus that earned it (SQ-0863).
+        // SQ-0864 declined the spelling on the ground that nothing in `stories/`
+        // was a BARE ProDOS volume — this reader has always opened one, but a
+        // census entry no medium justifies is a guess. `Journey.po` is now here:
+        // the 3.5-inch consolidated pressing of *Journey*, volume `JOURNEY.3.5`,
+        // carrying all five `JOURNEY.1/`…`JOURNEY.5/` segments where the flat
+        // `Journey.2mg` beside it carries four. It mounted the day it arrived,
+        // because the reader falls back to a bare volume at offset 0 — and it
+        // was invisible in the story list, which is the only place most people
+        // look (SQ-0849's defect, exactly).
+        //
+        // **Not `.hdv`**, still: nothing in the corpus is one, and the argument
+        // above is the whole argument. A bare volume under any name still mounts
+        // when it is opened directly — the extension is a directory scan's
+        // pre-filter, never the recogniser.
+        extensions: &["2mg", "dsk", "po"],
         looks_like: <ProDos as Volume>::looks_like,
         mount: mount_boxed::<ProDos>,
     },
@@ -1003,9 +1014,43 @@ impl MountedDisk {
         self.volume.story().or_else(|| self.story_across_the_set())
     }
 
-    /// The disk's own artwork, if it carries a readable archive.
+    /// The artwork this release keeps across its volumes, merged out of all of
+    /// them — or `None` when no companions were offered, or they hold no such
+    /// container, or the artwork it holds is not all here.
+    ///
+    /// [`Self::story_across_the_set`]'s sibling, in the same shape and for the
+    /// same reason (SQ-0863/SQ-0867): the named volume's files come FIRST so the
+    /// container's "which segment carries the index" search does not depend on
+    /// which floppy a person opened, and [`crate::infocom_packed::pictures`]
+    /// refuses a partial set rather than handing back a picture space with whole
+    /// rooms missing.
+    ///
+    /// This is why *Shogun*'s and *Journey*'s five-volume 5.25-inch presses draw
+    /// and `Journey.2mg` does not, and the three of them are one rule seen from
+    /// both sides: Shogun's `SGTPICOF` fields name an archive on all five
+    /// segments and Journey's on four, and on the `.dsk` sets every segment is
+    /// on the shelf. `Journey.2mg` is a genuinely short pressing — it declares
+    /// five segments and holds four, and the missing `JOURNEY.D5` carries a
+    /// quarter of the artwork — so the merge refuses it whole rather than
+    /// serving a picture space with rooms missing, exactly as [`Self::story`]
+    /// refuses the story the same segment would have completed.
+    fn pictures_across_the_set(&self) -> Option<DiskArt> {
+        if self.across.is_empty() {
+            return None;
+        }
+        let mut all = self.volume.contents();
+        all.extend(self.across.iter().cloned());
+        crate::infocom_packed::pictures(&all).map(DiskArt::from)
+    }
+
+    /// The disk's own artwork, if it carries a readable archive — falling back
+    /// to the artwork the release pages across its volumes.
+    ///
+    /// The order is [`Self::story`]'s and is conservative for the same reason: a
+    /// volume that carries an archive of its own answers with it, always, and
+    /// only a volume with none reaches for the set.
     pub fn pictures(&self) -> Option<DiskArt> {
-        self.volume.pictures()
+        self.volume.pictures().or_else(|| self.pictures_across_the_set())
     }
 }
 
@@ -1204,22 +1249,25 @@ mod tests {
         );
         // The spellings the corpus in `stories/` actually uses, named outright
         // so a row losing one fails here rather than in the picker.
-        // `dsk` joined them in SQ-0864, on the ProDOS row: the nine 5.25-inch
-        // images in `stories/` are ProDOS volumes whose sectors are in the
-        // drive's order rather than the filesystem's, and they mount through
+        // `dsk` joined them in SQ-0864, on the ProDOS row: the fourteen
+        // 5.25-inch images in `stories/` are ProDOS volumes whose sectors are in
+        // the drive's order rather than the filesystem's, and they mount through
         // the same reader one de-interleave earlier.
-        for want in ["adf", "image", "ima", "img", "st", "2mg", "dsk"] {
+        // `po` joined them in SQ-0863, on the same row and by the same rule: the
+        // corpus acquired four bare ProDOS volumes (`Arthur.po`, `Journey.po`,
+        // `ZorkZero.po` and a `Shogun.po` that is really a DiskCopy wrapper), and
+        // three of them mount. A spelling is claimed when a medium wears it.
+        for want in ["adf", "image", "ima", "img", "st", "2mg", "dsk", "po"] {
             assert!(image_extensions().any(|e| e == want), "no row claims {want:?}");
         }
-        // …and a spelling still does NOT get a name before it gets a reader:
-        // the bare-ProDOS ones, which this crate CAN open and no medium in the
-        // corpus wears.
-        for queued in ["po", "hdv"] {
-            assert!(
-                !image_extensions().any(|e| e == queued),
-                "{queued:?} is claimed by a row, and no medium in the corpus justifies it"
-            );
-        }
+        // …and a spelling still does NOT get a name before a medium wears it:
+        // `hdv` is the other bare-ProDOS convention, this crate can open one,
+        // and nothing in the corpus is called that.
+        const QUEUED: &str = "hdv";
+        assert!(
+            !image_extensions().any(|e| e == QUEUED),
+            "{QUEUED:?} is claimed by a row, and no medium in the corpus justifies it"
+        );
     }
 
     /// A name is a pre-filter, never evidence — stated as a test so the

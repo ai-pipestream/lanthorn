@@ -466,12 +466,26 @@ impl InterpreterProfile {
     /// same refactor this bundle already declined for the Macintosh's real 7x15
     /// cell and for EGA's 8x8 — see [`Self::v6_font_cell`].
     ///
-    /// There is also nothing for it to size. Arthur's and Journey's pictures live
-    /// inside the segmented `ARTHUR.D1`-`.D5` / `JOURNEY.D1`-`.D4` container,
-    /// which has no reader (SQ-0852), and neither disk carries a separate archive
-    /// — `MountedDisk::pictures()` answers `None` for both. If that reader
-    /// arrives, the Apple's geometry becomes a live question and the cell is the
-    /// thing that has to move first.
+    /// **And there is now something for the ARCHIVE to size, which is why this
+    /// knob still declines** (SQ-0863). Arthur's, Journey's, Shogun's and Zork
+    /// Zero's Apple pictures live inside the segmented `ARTHUR.D1`-`.D5`
+    /// container rather than in a file, and `blorb::infocom_pics`'s Apple
+    /// flavour reads them: 168 pictures off `Arthur Quest 4 Excalibur.2mg`, 135
+    /// off the five-volume `journey_s*.dsk` press, 55 off `shogun_s*.dsk`, 496
+    /// off `zork_zero_*.dsk`. Every one of those archives states a 140x192
+    /// picture space, and `crate::graphics::PictSource::native_std_window`
+    /// carries it to the story ahead of this knob — so *Arthur* r63 lays out on
+    /// a 560x384 screen where it used to get the artless 640x400.
+    ///
+    /// That is the answer to "what sizes it", and it is not this knob's: an
+    /// archive outranks a profile here for the same reason the standard
+    /// Macintosh's monochrome `Pic.data` outranks [`MACINTOSH_STD_WINDOW`] and
+    /// lays Zork Zero out on 480x300 (SQ-0838). The run-time-cell question is
+    /// untouched and still open — the story is told 70x24 characters on an 8x16
+    /// cell where the Apple's own YZIP said 46x21 on a 3x9 — but it is no longer
+    /// in the way of the pictures, because the space the art needs and the
+    /// character grid the machine used are two different quantities and only the
+    /// first of them is a standard window.
     pub fn std_window(self) -> Option<(u16, u16)> {
         match self {
             Self::IbmPc | Self::AtariSt | Self::AppleIIgs => None,
@@ -623,11 +637,14 @@ impl InterpreterProfile {
     /// **The Apple IIgs differs further still, and is reported the same way**
     /// (SQ-0857). Its Version 6 cell is 3x9 — `MFONT_W EQU 3` and `FONT_H EQU 9`
     /// in `apple/yzip/rel.15/apple.equ`, handed to the story as `ZFWRD` — giving
-    /// 46x21 characters on the 140x192 screen where babelmap's 8x16 gives 80x25.
-    /// It is the same refactor declined twice above, and declining it is what
-    /// makes [`Self::std_window`] decline too: a 140x192 picture space is only
-    /// the Apple's screen when read through the Apple's cell, and this knob is
-    /// where that cell would have to live.
+    /// 46x21 characters on the 140x192 screen where babelmap's 8x16 gives 70x24
+    /// on the 560x384 the archive asks for (SQ-0863). It is the same refactor
+    /// declined twice above, and declining it is still what makes
+    /// [`Self::std_window`] decline: a 140x192 CHARACTER grid is only the
+    /// Apple's screen when read through the Apple's cell, and this knob is where
+    /// that cell would have to live. The 140x192 PICTURE space is a different
+    /// quantity, it needs no cell to be true, and the archive states it — which
+    /// is why the artwork did not have to wait for this.
     pub fn v6_font_cell(self) -> (u16, u16) {
         (8, 16)
     }

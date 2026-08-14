@@ -505,6 +505,7 @@ impl PictSource {
     /// | Amiga/Mac colour, MCGA `.MG1` | 320×200       | (2,2) | 640×400 |
     /// | EGA `.EG1`/`.EG2`, CGA `.CG1` | 640×200       | (1,2) | 640×400 |
     /// | Macintosh mono `Pic.data`     | 480×300       | (1,1) | 480×300 |
+    /// | Apple II `ARTHUR.D*`          | 140×192       | (4,2) | 560×384 |
     ///
     /// The first two rows are the corpus as it already stood: SQ-0790's reading
     /// that a 320-wide and a 640-wide rendition are *two drawings of one screen*
@@ -517,6 +518,15 @@ impl PictSource {
     /// old rendition the screen it already had and the new one the screen it
     /// asks for — see [`Self::art_scale`] and
     /// [`crate::interpreter::InterpreterProfile::std_window`].
+    ///
+    /// The fourth row is the Apple II's, and it is the same statement on a
+    /// fourth machine (SQ-0863). Its space is stated by Infocom in the dots it
+    /// is counted in — `apple/yzip/rel.15/apple.equ`'s `MAXWIDTH EQU 140 ; 560 /
+    /// 4 = max "pixels"` and `MAXHEIGHT EQU 192 ; 192 screen lines` — so 140×192
+    /// art fills all 560×192 dots of the double-hi-res display, and the screen it
+    /// asks for is the one that display has always been shown through. Nothing
+    /// here is a preference: the archive says 140 wide, the machine says a pixel
+    /// is four dots, and 560×384 is what the two of them multiply to.
     ///
     /// **A caveat this cannot hide**: 300 is not a multiple of the 16-pixel v6
     /// cell, so `session.rs` rounds the screen to 19 rows — 304 pixels, four
@@ -545,6 +555,7 @@ impl PictSource {
     /// | Amiga `Pic.data`, MCGA `.MG1`| 320×200       | (2, 2)|
     /// | EGA `.EG1`/`.EG2`, CGA `.CG1`| 640×200       | (1, 2)|
     /// | Macintosh mono `Pic.data`    | 480×300       | (1, 1)|
+    /// | Apple II `ARTHUR.D*`         | 140×192       | (4, 2)|
     ///
     /// The last row is why the vertical factor is derived rather than fixed at
     /// [`crate::session::V6_ART_SCALE`] (SQ-0838). Every rendition Infocom
@@ -571,6 +582,44 @@ impl PictSource {
     /// `zork0.mg1`/`zork0.eg1` for 446 of 503 (the remainder differ by a pixel
     /// or two because the two renditions are separately drawn artwork, not one
     /// scaled copy).
+    ///
+    /// # The Apple's (4, 2), sourced from the machine (SQ-0863)
+    ///
+    /// The last row is the widest factor in the table and the only one where the
+    /// derivation and the machine had to be checked against each other, because
+    /// 640/140 is 4.57 and an integer division landing on 4 is not an argument.
+    ///
+    /// **Horizontally it is Infocom's own number.** `apple/yzip/rel.15/apple.equ`
+    /// does not merely state the width, it states the arithmetic:
+    ///
+    /// ```text
+    ///   MAXWIDTH   EQU 140   ; 560 / 4 = max "pixels"
+    ///   MAXHEIGHT  EQU 192   ; 192 screen lines
+    /// ```
+    ///
+    /// The Apple II's double-hi-res screen is 560 dots across and a colour pixel
+    /// is four of them, so 140 art pixels cover the display exactly and the
+    /// horizontal factor is 4 by definition rather than by fit. The directory
+    /// agrees from the other end: the widest picture in all four of *Arthur*'s
+    /// archives is exactly 140, and the tallest exactly 192, so the artwork uses
+    /// every dot the machine had.
+    ///
+    /// **Vertically the machine states a count and not a size.** `MAXHEIGHT EQU
+    /// 192 ; 192 screen lines` is one art row per scan line, so the factor has to
+    /// come from what a scan line MEASURES, which is the display's business
+    /// rather than the archive's. The Apple II's 192 active lines fill the
+    /// visible raster of a 4:3 monitor while 560 dots fill its width, so one line
+    /// is (3/4)·(560/192) — 2.19 — dots tall. At a horizontal 4, the vertical
+    /// factor that preserves that shape is 2 to the nearest whole pixel. The
+    /// alternative, 1, would put 140×192 art on a 560×192 screen and squash the
+    /// picture to less than half its height.
+    ///
+    /// Two independent checks land on the same pair. 560×384 is exactly 70×24
+    /// whole [`crate::interpreter::InterpreterProfile::v6_font_cell`]s, where
+    /// 560×192 is 70×12 and would tell the story it has twelve rows; and the
+    /// uniform rule below — unit space divided by picture space — computes (4, 2)
+    /// unaided, so the Apple needs no special case in the arithmetic, only this
+    /// paragraph saying why the arithmetic is right here.
     pub fn art_scale(&self) -> Option<(u32, u32)> {
         let pics = self.native.as_ref()?;
         let space_w = u32::from(pics.picture_space_width()).max(1);
