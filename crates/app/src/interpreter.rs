@@ -40,6 +40,26 @@
 //!   declining the members you cannot verify, not for declining the ones you
 //!   can — [`InterpreterProfile::IbmPc`] has answered `None` from
 //!   [`default_colours`](InterpreterProfile::default_colours) all along.
+//! - [`InterpreterProfile::AppleIIgs`] is the fifth, for stories that came off a
+//!   ProDOS volume (SQ-0857), and it is the machine that makes "decline" a
+//!   *judgement* rather than a shortage. Its number, its black page and its
+//!   palette all come out of the Apple II YZIP — Infocom's own Version 6
+//!   interpreter for the machine, which is not merely in the source archive but
+//!   sitting on two of the disks in `stories/`. It states no standard window
+//!   even so, because the Apple's Version 6 screen is 140x192 on a 3x9 cell and
+//!   that is a different screen MODEL, not a resolution this knob can hold. See
+//!   [`InterpreterProfile::std_window`].
+//!
+//!   It is also the profile whose NUMBER had to be argued rather than read. The
+//!   Amiga, the Macintosh and the ST each write one byte and mean it; the Apple
+//!   II YZIP *detects the machine at boot* and writes 2, 9 or 10 accordingly, so
+//!   the medium genuinely cannot name the press. What settles it is that
+//!   declining is not neutral: zvm's own rule would tell an Apple II story it is
+//!   a DECSystem-20, or on Version 6 an IBM PC. §11.1.3 asks an interpreter to
+//!   "choose the interpreter number most suitable for the machine it will run
+//!   on", and of the three machines that YZIP will start on at all, the one a
+//!   modern terminal resembles is the IIgs. [`blorb::medium`] carries the whole
+//!   argument and the measurement behind it.
 //!
 //! **Selection**, most specific first (SQ-0734):
 //!
@@ -63,8 +83,9 @@
 //!    definite one. Without it, picking `CPic.data` off `Zork Zero Disk.image`
 //!    (the archive that disk loads on its own) turned a Macintosh into an Amiga.
 //! 3. The medium: a story mounted out of an Amiga `.adf` release floppy is an
-//!    Amiga, one mounted out of an HFS volume is a Macintosh, and one mounted
-//!    out of an Atari ST GEMDOS floppy is an ST. (A DOS FAT12 floppy is the same
+//!    Amiga, one mounted out of an HFS volume is a Macintosh, one mounted out of
+//!    an Atari ST GEMDOS floppy is an ST, and one mounted out of an Apple ProDOS
+//!    volume is an Apple IIgs. (A DOS FAT12 floppy is the same
 //!    filesystem as that last one and still resolves to the IBM PC, whose number
 //!    is version-dependent and already in force — see [`blorb::medium`], where
 //!    the two rows are argued side by side.) The
@@ -131,6 +152,17 @@ pub enum InterpreterProfile {
     /// declines a member of the bundle, because it never had a Version 6
     /// interpreter for one to describe (SQ-0835). See [`Self::std_window`].
     AtariSt,
+    /// An Apple IIgs: interpreter 10, **white text on a black page** — the only
+    /// dark page here that is genuinely black — ZMSD §8.3.1's palette, and no
+    /// standard window (SQ-0857).
+    ///
+    /// The second profile to decline a member, and for a quite different reason
+    /// to the Atari ST's. Infocom very much *did* write a Version 6 interpreter
+    /// for this machine — the Apple II YZIP, whose own `MACHINE:` routine sits
+    /// on `Journey.2mg` and `Arthur Quest 4 Excalibur.2mg` — so there is a real
+    /// Version 6 screen to describe. It is 140x192 on a 3x9 cell, which is not
+    /// the quantity [`Self::std_window`] holds. See that knob.
+    AppleIIgs,
 }
 
 impl InterpreterProfile {
@@ -247,6 +279,7 @@ impl InterpreterProfile {
             AMIGA_INTERPRETER_NUMBER => Self::Amiga,
             MACINTOSH_INTERPRETER_NUMBER => Self::Macintosh,
             ATARI_ST_INTERPRETER_NUMBER => Self::AtariSt,
+            APPLE_IIGS_INTERPRETER_NUMBER => Self::AppleIIgs,
             _ => Self::IbmPc,
         }
     }
@@ -285,6 +318,7 @@ impl InterpreterProfile {
             Self::Amiga => Some(AMIGA_INTERPRETER_NUMBER),
             Self::Macintosh => Some(MACINTOSH_INTERPRETER_NUMBER),
             Self::AtariSt => Some(ATARI_ST_INTERPRETER_NUMBER),
+            Self::AppleIIgs => Some(APPLE_IIGS_INTERPRETER_NUMBER),
         }
     }
 
@@ -384,9 +418,57 @@ impl InterpreterProfile {
     ///
     /// — rows and columns of whatever display is attached, which is already what
     /// babelmap tells a story about its pane.
+    ///
+    /// # The Apple IIgs HAS an answer, and it is not this quantity
+    ///
+    /// [`Self::AppleIIgs`] also returns `None`, and the reason is the opposite of
+    /// the Atari ST's (SQ-0857). Infocom wrote a Version 6 interpreter for this
+    /// machine and it is in hand twice over — `apple/yzip/rel.15/` in
+    /// `infocom-zcode-terps`, and its `MACHINE:` routine byte-for-byte on the two
+    /// Version 6 ProDOS disks in `stories/`. Its screen is stated outright, in
+    /// `apple/yzip/rel.15/apple.equ`:
+    ///
+    /// ```text
+    ///   MAXWIDTH   EQU 140   ; 560 / 4 = max "pixels"
+    ///   MAXHEIGHT  EQU 192   ; 192 screen lines
+    ///   FONT_H     EQU 9     ; font height
+    ///   MFONT_W    EQU 3     ; mono spaced font width, to game
+    /// ```
+    ///
+    /// and `zboot.asm` hands exactly those to the story, `ZHWRD`/`ZVWRD` being
+    /// header `$22`/`$24` and `ZSCRWD` the character grid at `$20`/`$21`:
+    ///
+    /// ```text
+    ///   lda #MAXWIDTH      / sta ZBEGIN+ZHWRD+1     ; 140 pixels across
+    ///   lda #MAXWIDTH/3    / sta ZBEGIN+ZSCRWD+1    ; 46 columns
+    ///   lda #MAXHEIGHT     / sta ZBEGIN+ZVWRD+1     ; 192 pixels down
+    ///   lda #MAXHEIGHT/FONT_H / sta ZBEGIN+ZSCRWD   ; 21 lines
+    ///   lda #FONT_H        / sta ZBEGIN+ZFWRD       ; 9 tall
+    ///   lda #3             / sta ZBEGIN+ZFWRD+1     ; 3 wide
+    /// ```
+    ///
+    /// So the machine's Version 6 screen is **140x192 on a 3x9 cell**, 46x21
+    /// characters — the 560-dot double hi-res display counted in four-dot colour
+    /// pixels. That is a different screen MODEL, not a different resolution, and
+    /// this knob cannot express it. What it holds is the art picture space that
+    /// [`crate::session::V6_ART_SCALE`] doubles onto the 640x400 unit screen,
+    /// which is then divided by [`Self::v6_font_cell`]'s fixed 8x16. Answering
+    /// `Some((140, 192))` would tell the story its screen is 280x384 and 35x24
+    /// characters — a machine that never existed, and further from the Apple's
+    /// own 46x21 than the 80x25 it gets by declining. Honouring 140x192 honestly
+    /// means making `V6_FONT_WIDTH`/`V6_FONT_HEIGHT` runtime state, which is the
+    /// same refactor this bundle already declined for the Macintosh's real 7x15
+    /// cell and for EGA's 8x8 — see [`Self::v6_font_cell`].
+    ///
+    /// There is also nothing for it to size. Arthur's and Journey's pictures live
+    /// inside the segmented `ARTHUR.D1`-`.D5` / `JOURNEY.D1`-`.D4` container,
+    /// which has no reader (SQ-0852), and neither disk carries a separate archive
+    /// — `MountedDisk::pictures()` answers `None` for both. If that reader
+    /// arrives, the Apple's geometry becomes a live question and the cell is the
+    /// thing that has to move first.
     pub fn std_window(self) -> Option<(u16, u16)> {
         match self {
-            Self::IbmPc | Self::AtariSt => None,
+            Self::IbmPc | Self::AtariSt | Self::AppleIIgs => None,
             Self::Amiga => Some(AMIGA_STD_WINDOW),
             Self::Macintosh => Some(MACINTOSH_STD_WINDOW),
         }
@@ -407,6 +489,7 @@ impl InterpreterProfile {
             Self::Amiga => Some((AMIGA_DEFAULT_BACKGROUND, AMIGA_DEFAULT_FOREGROUND)),
             Self::Macintosh => Some((MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND)),
             Self::AtariSt => Some((ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND)),
+            Self::AppleIIgs => Some((APPLE_DEFAULT_BACKGROUND, APPLE_DEFAULT_FOREGROUND)),
         }
     }
 
@@ -462,9 +545,36 @@ impl InterpreterProfile {
     /// fake the rest. A terminal has no such ceiling, so there is nothing to
     /// express — this is noted so the absence reads as measured rather than
     /// missed.
+    ///
+    /// **The Apple IIgs answers `Standard` on the same reading, and this time the
+    /// source proves itself** (SQ-0857). `apple/yzip/rel.15/tables.asm` carries
+    /// the map and its inverse on consecutive lines:
+    ///
+    /// ```text
+    ///   tables.asm:219  ZIPCOLOR: db 0,1,6,7,$C,$B,$E,$F
+    ///   tables.asm:220  APLCOLOR: db 2,3,$FF,$FF,$FF,$FF,4,5,$FF,$FF,$FF,7,$FF,$FF,8,9
+    /// ```
+    ///
+    /// `ZIPCOLOR` is indexed by Z-machine colour id zero-based from 2 —
+    /// `machine.asm`'s `ZCOLOR` does `dex ; lda ZIPCOLOR,X` — so it is one entry
+    /// per §8.3.1 colour, in §8.3.1's order, 2..9 and no others. `APLCOLOR` is
+    /// the exact inverse, indexed by the Apple's own 16-colour double hi-res
+    /// hardware value: 0 to 2, 1 to 3, 6 to 4, 7 to 5, $B to 7, $C to 6, $E to 8,
+    /// $F to 9, and `$FF` — "no Z-machine colour" — for the other eight. A round
+    /// trip that closes on exactly §8.3.1's eight is the machine saying it asked
+    /// for the standard colours and took the nearest of the sixteen it had.
+    ///
+    /// So there is no palette of the Apple's own in the sense the Amiga's is, and
+    /// the double hi-res hardware is not consulted: its RGB has no canonical
+    /// values (it is an artefact of NTSC colour fringing and differs by monitor
+    /// and by emulator), and nothing in Infocom's sources states any. Declining
+    /// to invent one is the same call [`Self::AtariSt`] makes about the ST's
+    /// 512-colour hardware, one paragraph up.
     pub fn palette(self) -> zvm::screen::Palette {
         match self {
-            Self::IbmPc | Self::Macintosh | Self::AtariSt => zvm::screen::Palette::Standard,
+            Self::IbmPc | Self::Macintosh | Self::AtariSt | Self::AppleIIgs => {
+                zvm::screen::Palette::Standard
+            }
             Self::Amiga => zvm::screen::Palette::Amiga,
         }
     }
@@ -503,6 +613,15 @@ impl InterpreterProfile {
     /// slightly larger typeface than a real Mac's and up to 4 pixels of vertical
     /// slack; see [`crate::graphics::PictSource::native_std_window`] for where
     /// that slack lands.
+    ///
+    /// **The Apple IIgs differs further still, and is reported the same way**
+    /// (SQ-0857). Its Version 6 cell is 3x9 — `MFONT_W EQU 3` and `FONT_H EQU 9`
+    /// in `apple/yzip/rel.15/apple.equ`, handed to the story as `ZFWRD` — giving
+    /// 46x21 characters on the 140x192 screen where babelmap's 8x16 gives 80x25.
+    /// It is the same refactor declined twice above, and declining it is what
+    /// makes [`Self::std_window`] decline too: a 140x192 picture space is only
+    /// the Apple's screen when read through the Apple's cell, and this knob is
+    /// where that cell would have to live.
     pub fn v6_font_cell(self) -> (u16, u16) {
         (8, 16)
     }
@@ -523,6 +642,59 @@ pub use blorb::medium::MACINTOSH_INTERPRETER_NUMBER;
 /// `INTWRD DC.B 5 * MACHINE ID FOR ATARI ST`. [`blorb::medium`] quotes them, and
 /// shows the byte is a flat constant rather than a version-dependent rule.
 pub use blorb::medium::ATARI_ST_INTERPRETER_NUMBER;
+
+/// Apple IIgs, from the same §11.1.3 table and the same place (SQ-0857) — and
+/// the second of the four the machine's own interpreter corroborates directly,
+/// `IIgsID EQU 10 ; ][gs Yzip`. [`blorb::medium`] quotes the Apple II YZIP in
+/// full, and shows the byte is neither a flat constant (as the ST's is) nor a
+/// version-dependent rule (as the IBM PC's is) but a **runtime machine
+/// detection** across the family's three numbers — which is why that row's
+/// argument is about which Apple II babelmap presents as, rather than about
+/// which one pressed the disk.
+pub use blorb::medium::APPLE_IIGS_INTERPRETER_NUMBER;
+
+/// The Apple IIgs's default background: standard colour **2, black**.
+///
+/// Sourced from Infocom's own Version 6 interpreter for the machine, the Apple
+/// II YZIP — `apple/yzip/rel.15/zboot.asm`, which seeds the header before the
+/// story can read it. `ZCLRWD EQU 44` is decimal 44, `$2C`, and ZMSD §8.3.3 puts
+/// the default BACKGROUND at `$2C` and the foreground at `$2D`:
+///
+/// ```text
+///   apple/yzip/rel.15/zboot.asm:54   lda #9   ; the color white is the foreground color
+///   apple/yzip/rel.15/zboot.asm:55   sta ZBEGIN+ZCLRWD+1   ; show Z game too
+///   apple/yzip/rel.15/zboot.asm:56   lda #2   ; black is the background color
+///   apple/yzip/rel.15/zboot.asm:57   sta ZBEGIN+ZCLRWD     ; tell game about it
+/// ```
+///
+/// The comments name the colours outright, so this needs no decoding — and
+/// `machine.asm`'s `ZCOLOR` says it twice more, the way the Amiga's, the Mac's
+/// and the ST's do, because colour 1 means "the default" (ZMSD §8.3.1) and the
+/// file has to resolve it:
+///
+/// ```text
+///   ; just do the background color - foreground is always white/black
+///   …
+///   ldx #1   ; use black as default back color
+///   …
+///   ldx #8   ; use white as default fore color
+/// ```
+///
+/// (Both are pre-`dex` indices into `ZIPCOLOR`, which is zero-based from colour
+/// 2: `#1` resolves to index 0, colour 2, and `#8` to index 7, colour 9.)
+///
+/// **A genuinely BLACK page, and it is the only one here.** The Amiga's dark
+/// grey (`$444`, see [`AMIGA_DEFAULT_BACKGROUND`]) is deliberately not black —
+/// that distinction carried SQ-0740's window-0 gate — while the Macintosh and
+/// the Atari ST both boot white. The Apple II's double hi-res display really is
+/// unlit black with white text on it, so this profile is the darkest of the
+/// four, and `honor_game_colours` is doing correspondingly real work: turning it
+/// off returns the user's theme, as ever.
+pub const APPLE_DEFAULT_BACKGROUND: u8 = 2;
+
+/// The Apple IIgs's default foreground: standard colour 9, white. Same four
+/// lines, same source — see [`APPLE_DEFAULT_BACKGROUND`].
+pub const APPLE_DEFAULT_FOREGROUND: u8 = 9;
 
 /// The Atari ST's default background: standard colour **9**, white.
 ///
@@ -741,6 +913,88 @@ mod tests {
         assert_ne!(st_bg, amiga_bg, "white page against the Amiga's dark grey");
     }
 
+    #[test]
+    fn apple_iigs_knobs_are_the_verified_constants() {
+        // Every one of these is quoted at its constant, from ZMSD §11.1.3 and
+        // from Infocom's own Apple II YZIP (`apple/yzip/rel.15/apple.equ`,
+        // `zboot.asm`, `machine.asm`, `tables.asm`, `bsubs.asm`).
+        let p = InterpreterProfile::AppleIIgs;
+        assert_eq!(p.interpreter_number(), Some(10), "ZMSD §11.1.3: 10 = Apple IIgs");
+        assert_eq!(
+            p.default_colours(),
+            Some((2, 9)),
+            "zboot.asm: `lda #2 ; black is the background color`, `lda #9 ; the color white is \
+             the foreground color` — and $2C is the BACKGROUND (ZMSD §8.3.3)",
+        );
+        assert_eq!(p.palette(), zvm::screen::Palette::Standard, "ZIPCOLOR IS §8.3.1's eight");
+
+        // **The declined member, asserted as declined** — and declined for a
+        // different reason to the ST's, which is the whole point of having both.
+        // The Apple's Version 6 screen exists and is 140x192 on a 3x9 cell; this
+        // knob holds a picture space that gets doubled onto 640x400 and cut into
+        // 8x16 cells, so 140x192 would state a 280x384 / 35x24 machine that never
+        // existed. See `std_window`'s docs.
+        assert_eq!(
+            p.std_window(),
+            None,
+            "the Apple's 140x192 on a 3x9 cell is a different screen model, not a std window",
+        );
+        assert_ne!(
+            p.std_window(),
+            Some((140, 192)),
+            "and specifically NOT the Apple's own screen numbers — this knob cannot hold them",
+        );
+
+        // **The page is genuinely black, and it is the only one that is.**
+        // Asserted as relations so a copied-and-edited tuple cannot pass: the
+        // Apple is the dark one against the Mac's and the ST's white, and it is
+        // darker than the Amiga's dark grey rather than equal to it (SQ-0740's
+        // window-0 gate turns on the Amiga NOT being black).
+        let (apple_bg, apple_fg) = p.default_colours().expect("the Apple states its defaults");
+        let (mac_bg, _) = InterpreterProfile::Macintosh.default_colours().expect("so does the Mac");
+        let (st_bg, _) = InterpreterProfile::AtariSt.default_colours().expect("so does the ST");
+        let (amiga_bg, amiga_fg) =
+            InterpreterProfile::Amiga.default_colours().expect("so does the Amiga");
+        assert_ne!(apple_bg, mac_bg, "black page against the Macintosh's white");
+        assert_ne!(apple_bg, st_bg, "black page against the Atari ST's white");
+        assert_ne!(apple_bg, amiga_bg, "black page against the Amiga's dark grey — 2 is not 12");
+        // …and white ink, which the Amiga agrees on and the other two do not.
+        assert_eq!(apple_fg, amiga_fg, "both machines write white on a dark page");
+    }
+
+    /// The Apple's number is a **runtime detection**, where the ST's is a flat
+    /// constant and the IBM PC's is a version rule — three different shapes, and
+    /// the reason this row was argued rather than read (SQ-0857).
+    ///
+    /// What makes 10 the honest answer is not that the medium names it: it is
+    /// that DECLINING names something else. zvm's own rule would hand an Apple II
+    /// story 1 or, on Version 6, 6 — the DECSystem-20 or the IBM PC. This pins
+    /// the fallback that would apply, so the argument cannot rot into "None is
+    /// harmless" without a test noticing.
+    #[test]
+    fn declining_the_apples_number_would_name_a_different_machine_entirely() {
+        assert_eq!(
+            InterpreterProfile::AppleIIgs.interpreter_number(),
+            Some(APPLE_IIGS_INTERPRETER_NUMBER),
+            "apple.equ: `IIgsID EQU 10 ; ][gs Yzip`",
+        );
+        // The profile a `None` would fall through to, and the numbers zvm's own
+        // Frotz rule then applies — 6 for Version 6, 1 otherwise. 6 is the IBM
+        // PC, which is also the value `zvm`'s `exec.rs` gates its CP437 remap on.
+        let fallback = InterpreterProfile::IbmPc;
+        assert_eq!(fallback.interpreter_number(), None);
+        assert_eq!(
+            InterpreterProfile::for_interpreter_number(6),
+            InterpreterProfile::IbmPc,
+            "a declined ProDOS row would land a Version 6 Apple story on the IBM PC",
+        );
+        assert_eq!(
+            InterpreterProfile::for_interpreter_number(1),
+            InterpreterProfile::IbmPc,
+            "…and every other Apple story on the DECSystem-20's number",
+        );
+    }
+
     /// The ST's number is a **flat constant**, where the IBM PC's is a rule —
     /// which is the whole reason one row in `blorb::medium::FORMATS` answers
     /// `Some` and its filesystem-identical neighbour answers `None`.
@@ -768,6 +1022,7 @@ mod tests {
             InterpreterProfile::Amiga,
             InterpreterProfile::Macintosh,
             InterpreterProfile::AtariSt,
+            InterpreterProfile::AppleIIgs,
         ] {
             assert_eq!(
                 p.v6_font_cell(),
@@ -784,8 +1039,15 @@ mod tests {
         assert_eq!(InterpreterProfile::for_interpreter_number(4), InterpreterProfile::Amiga);
         assert_eq!(InterpreterProfile::for_interpreter_number(3), InterpreterProfile::Macintosh);
         assert_eq!(InterpreterProfile::for_interpreter_number(5), InterpreterProfile::AtariSt);
-        // Every other number is served by the IBM PC bundle, the historical default.
-        for n in [1u8, 2, 6, 7, 8, 9, 10, 11] {
+        assert_eq!(InterpreterProfile::for_interpreter_number(10), InterpreterProfile::AppleIIgs);
+        // Every other number is served by the IBM PC bundle, the historical
+        // default. **2 and 9 are in this list on purpose**: they are the Apple
+        // IIe and IIc, the other two machines the Apple II YZIP runs on, and
+        // SQ-0857 scoped itself to the IIgs. Asking for one of them today gets
+        // the IBM PC bundle with that number in `$1E` — the same "no opinion"
+        // every unmapped number gets, and stated here so the gap is visible
+        // rather than assumed closed.
+        for n in [1u8, 2, 6, 7, 8, 9, 11] {
             assert_eq!(
                 InterpreterProfile::for_interpreter_number(n),
                 InterpreterProfile::IbmPc,

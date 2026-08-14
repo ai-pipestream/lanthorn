@@ -674,18 +674,19 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // interpreter for the ST. Read this arm against the one above it —
             // same FAT12 filesystem, different machine, different answer.
             Some(DiskImage::Fat12AtariSt) => InterpreterProfile::AtariSt,
-            // **And a ProDOS volume is deliberately NOT its own machine**
-            // (SQ-0836). Read this arm against the Atari ST one directly above
-            // it: the ST answers 5 because Infocom's own ST interpreters write
-            // that byte and no other, while ProDOS names the Apple II *family*
-            // and ZMSD §11.1.3 numbers three machines in it (2 IIe, 9 IIc,
-            // 10 IIgs). The corpus holds both an 8-bit press (`Journey.2mg`,
-            // `Arthur Quest 4 Excalibur.2mg`, whose interpreter is ProDOS 8's
-            // `INFOCOM.SYSTEM`) and GS/OS ones, so the volume cannot choose.
-            // `blorb::medium`'s ProDOS row answers `None`, which lands here on
-            // the IBM PC bundle — the same "no opinion, the rule in force
-            // stands" a DOS floppy gets, and for a comparable reason.
-            Some(DiskImage::ProDos) => InterpreterProfile::IbmPc,
+            // **And a ProDOS volume IS its own machine after all** (SQ-0857,
+            // reversing SQ-0836 — this is the one row this quest deliberately
+            // moved). ProDOS still names the Apple II *family*, and §11.1.3 still
+            // numbers three machines in it (2 IIe, 9 IIc, 10 IIgs) — Infocom's
+            // own Apple II YZIP picks between all three by DETECTING the machine
+            // at boot, and that routine is byte-for-byte on `Journey.2mg` and
+            // `Arthur Quest 4 Excalibur.2mg`. What reversed the conclusion is
+            // that declining is not neutral: it lands an Apple II story on zvm's
+            // Frotz rule, which names the DECSystem-20 or, on Version 6, the IBM
+            // PC. §11.1.3 asks for "the machine it will run on", and of the three
+            // the YZIP starts on, that is the IIgs. Argued in full at the row in
+            // `blorb::medium`, with the thirty-story trace measurement behind it.
+            Some(DiskImage::ProDos) => InterpreterProfile::AppleIIgs,
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(

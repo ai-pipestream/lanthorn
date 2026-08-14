@@ -407,7 +407,8 @@ Amiga floppy or anywhere else.
   defaults to **1 (DECSystem-20)**, following Frotz's rule (6 / IBM PC only for
   v6) — unless you opened a release disk image, in which case the medium picks
   the number instead (an `.adf` is an Amiga's 4, an HFS volume a Macintosh's 3,
-  a `.st` floppy an Atari ST's 5), in every front-end alike.
+  a `.st` floppy an Atari ST's 5, a `.2mg` ProDOS volume an Apple IIgs's 10), in
+  every front-end alike.
   One medium deliberately does **not** move it. A DOS floppy is an IBM PC, and
   the IBM PC's honest number is version-dependent — that *is* Frotz's rule — so
   it is already in force and there is nothing for the disk to add; pinning a flat
@@ -427,18 +428,54 @@ Amiga floppy or anywhere else.
   So the ST profile states what it knows, declines the one thing it does not (a
   version-6 screen, which the machine never had), and *Trinity* off an ST disk now
   answers VERSION with *Interpreter 5*.
-  **Apple ProDOS is the second abstention, and for a different reason again**: it
-  is the only medium here that names a *family* rather than a machine. ProDOS is
-  the Apple II's filesystem from the IIe onward, and §11.1.3 gives that family
-  three numbers — 2 Apple IIe, 9 Apple IIc, 10 Apple IIgs — with nothing on the
-  volume to choose between them. Nor is that pedantry: eight of the ten ProDOS
-  images in the reference collection boot GS/OS and carry 16-bit `SYS16`
-  applications, which is a IIgs and nothing else, while *Arthur* and *Journey*
-  ship `INFOCOM.SYSTEM` beside `BASIC.SYSTEM` — the 8-bit ProDOS 8 press, equally
-  at home on a IIe. And unlike the ST, this corpus does contain version-6 art for
-  a wrongly-claimed machine to disagree with. So a ProDOS disk leaves the rule
-  already in force exactly where it is, which for a family whose own number cannot
-  be named is the honest answer.
+  **Apple ProDOS was the second abstention, and is no longer one** — the
+  reasoning is worth keeping, because the premise survived and the conclusion did
+  not. ProDOS is the only medium here that names a *family* rather than a
+  machine: it is the Apple II's filesystem from the IIe onward, and §11.1.3 gives
+  that family three numbers — 2 Apple IIe, 9 Apple IIc, 10 Apple IIgs — with
+  nothing on the volume to choose between them. That is not pedantry, and
+  Infocom's own code proves it rather than merely permitting it. The Apple II
+  YZIP — their version-6 interpreter for the machine, and the program sitting on
+  the *Arthur* and *Journey* disks as `INFOCOM.SYSTEM` — picks between all three
+  *at boot*:
+
+  ```text
+    ; Make sure we are on a good machine, like a ][c or ][e+/][gs
+    MACHINE:  lda MACHID1 / cmp #6 / bne BADMACH
+              lda MACHID2 / bne MACH1
+              lda #IIcID              ; Apple ][c thank you
+    MACH1:    sec / jsr MACHCHK / bcs OLDMACH
+              lda #IIgsID             ; this is a ][gs
+    OLDMACH:  lda #IIeID              ; this is IIe
+  ```
+
+  and hands the result straight to the story (`lda ARG2+LO { get machine id! } /
+  sta ZBEGIN+ZINTWD`). One disk, pressed for the whole family, with the machine
+  identified at run time. So the volume genuinely cannot name the press.
+
+  What changed the answer is the realisation that **abstaining is not neutral
+  here**. The DOS floppy can abstain because Frotz's rule *is* the IBM PC's rule,
+  so a DOS disk describes itself correctly by saying nothing. On a ProDOS volume
+  that same silence lands on 1 — the DECSystem-20 — or, for version 6, on 6, the
+  IBM PC, which is also the one value that switches babelmap into CP437 character
+  graphics. Saying nothing does not leave the Apple II unnamed; it names it
+  something else, on another continent. And §11.1.3 asks for exactly the
+  judgement being ducked: *"an interpreter should choose the interpreter number
+  most suitable for the machine it will run on."* Of the three machines that YZIP
+  will start on at all — it refuses anything below an enhanced IIe outright — the
+  one a modern terminal with colour and a large screen resembles is the IIgs. So
+  a ProDOS disk is now a **10**, and `--interpreter-number 2` or `9` still asks
+  for the other two.
+
+  It is measured rather than asserted, the same way the ST's 5 was. All
+  thirty-one stories on the ten ProDOS images were traced under the old rule and
+  under 10: twenty-four are byte-identical, five simply print the new number in
+  their VERSION block, and one behaves differently — *Beyond Zork*, on both of
+  its ProDOS presses, stops asking whether the terminal is a VT220 and draws its
+  box-drawn interface unprompted, because an Apple IIgs is not a terminal that
+  might or might not have line-drawing characters. It also signs itself **"Apple
+  //gs Color Version A"** where it used to say *"DEC-20"* — Infocom's spelling,
+  not ours.
   This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
@@ -539,6 +576,38 @@ Amiga floppy or anywhere else.
   cannot notice at all — byte `0x1E` has no meaning before version 4, which is
   why the ST's own version-3 interpreter leaves it zero and comments it
   *"(UNUSED)"*.
+
+  **Apple IIgs** is the fifth, and it is the one where declining a member of the
+  bundle became a *judgement* rather than a shortage of evidence. Its number, its
+  page and its palette all come out of the Apple II YZIP — Infocom's version-6
+  interpreter for the machine, which is not merely in the leaked source archive
+  but sitting on two of the disks in the reference collection. It answers
+  interpreter number 10, white ink on a **black** page (the YZIP's own boot code:
+  *"black is the background color"*, *"the color white is the foreground
+  color"*), and the standard colour table — because the Apple's colour map and
+  its inverse, side by side in the interpreter's tables, close on exactly the
+  standard's eight colours and mark the machine's other eight *"no Z-machine
+  colour"*. That black page is the darkest of the five; the Amiga's is a dark
+  grey rather than black, and the Macintosh and the ST both boot white.
+
+  It states **no standard window**, and this is the interesting decline, because
+  unlike the ST the machine *has* a version-6 screen and babelmap can quote it:
+  140×192 on a 3×9 character cell, 46 columns by 21 lines, the 560-dot double
+  hi-res display counted in four-dot colour pixels. That is a different screen
+  *model*, not a different resolution — this knob holds a picture space that gets
+  doubled onto the 640×400 unit screen and cut into 8×16 cells, so claiming
+  140×192 would tell a game its screen was 280×384 and 35×24 characters, a
+  machine that never existed and further from the Apple's real 46×21 than the
+  80×25 it gets by declining. Honouring it properly means making the character
+  cell run-time state, which is the same refactor the Macintosh's real 7×15 cell
+  was declined for. There is also nothing yet for it to size: *Arthur*'s and
+  *Journey*'s pictures live inside a segmented container that has no reader.
+
+  The Apple is also the profile whose *number* had to be argued rather than read
+  — the Amiga, the Macintosh and the ST each write one byte and mean it, while
+  the Apple II YZIP detects the machine at boot and writes 2, 9 or 10 accordingly.
+  The **Interpreter number** entry above has that argument in full, and the
+  thirty-one-story trace behind it.
 
   The artwork can select the machine too, and it sits between the two. If you
   name a picture archive for a game — the `pictures` key described under
