@@ -2760,6 +2760,20 @@ pub fn v6_host_pair(state: &AppState) -> (image::Rgba<u8>, image::Rgba<u8>) {
     )
 }
 
+/// The MACHINE's own page alone, as an opaque colour, or `None` when this frame
+/// has no machine pair (SQ-0848).
+///
+/// [`v6_host_pair`]'s top layer without the host fallback under it, which is the
+/// distinction that matters to a caller who has a ground of its own to fall back
+/// to — `render::inline_image::float_page` layers this BETWEEN the story window's
+/// explicit page and the theme, and must not reach past a machine that published
+/// nothing into the terminal's default.
+pub(crate) fn v6_machine_page_rgba(state: &AppState) -> Option<image::Rgba<u8>> {
+    state.v6_page_pair.get().map(|(_, bg)| {
+        crate::render::v6_layout::packed_to_rgba(bg, RASTER_FALLBACK_PAGE, &state.colors)
+    })
+}
+
 /// `base`, with the MACHINE's own ink and page laid under it when this frame has
 /// one (SQ-0740) — the terminal-cell counterpart of [`v6_host_pair`], and the same
 /// pair.
