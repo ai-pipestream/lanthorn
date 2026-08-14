@@ -265,7 +265,20 @@ pub(crate) fn boot_story(
     // would be looking at the Blorb's. Said here, before the alternate screen is
     // entered, so it survives in the terminal's scrollback; also pushed into the
     // transcript as a warning line further down, where `state` exists.
-    let picture_warning = picture_override.warning();
+    //
+    // SQ-0866: and neither must a resource Blorb REFUSED for naming a different
+    // build. Drawing nothing is the honest outcome, but it is only honest if the
+    // player is told why their disk has no pictures — otherwise a silent screen
+    // reads as a defect in babelmap rather than as a Blorb that belongs to
+    // another release. Asked only for a story that came off a disk image, which
+    // is the only case the refusal can fire in, and only when no named archive
+    // has already won; every ordinary boot pays nothing for it.
+    let picture_warning = picture_override.warning().or_else(|| {
+        let unnamed = !matches!(picture_override, app::graphics::PictureOverride::Loaded { .. });
+        (cfg.images && disk_image.is_some() && unnamed)
+            .then(|| app::graphics::resource_blorb(&story_path).refused)
+            .flatten()
+    });
     if let Some(msg) = &picture_warning {
         eprintln!("babelmap: warning: {msg}");
     }

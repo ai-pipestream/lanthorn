@@ -605,7 +605,11 @@ That name is not a guess about what *ought* to happen; it comes from the very
 resolution the launch performs, so the row and the boot cannot disagree. For a
 story with a resource Blorb beside it, that is the Blorb — *Automatic — Zork0.blb
 (Blorb)* — which is the one thing babelmap can boot that the list of native
-archives will never show you. Inside the dialog, `↑`/`↓` move between choices,
+archives will never show you. When nothing can be shown to belong to the build
+you are booting, the row says so outright — *Automatic — no artwork found* — and
+the game plays without pictures rather than with another release's; see
+[v6 graphics](v6-graphics.md) for when that happens and why. Inside the dialog,
+`↑`/`↓` move between choices,
 `Space` picks the one under the cursor or flips a checkbox, `Tab`/`Shift-Tab`
 move between the buttons, `Enter` plays and `Esc` backs out. Its choices always
 fit the dialog, so a wheel notch over it has nothing to scroll — and it is eaten

@@ -312,11 +312,15 @@ impl PictSource {
     /// disk 3 — so this asks [`crate::assets::volumes`] rather than mounting one
     /// image. See that function for which siblings are allowed to speak for a
     /// story and which are not.
+    /// **A Blorb that names a different build does not speak for a disk-mounted
+    /// story** (SQ-0866). That is [`resource_blorb`]'s rule, and it is applied
+    /// here rather than in `blorb` because it turns on how the two files came to
+    /// be considered together, which is app policy.
     pub fn resolve(story_path: &std::path::Path) -> PictSource {
         if let Some(art) = release_art(story_path) {
             return PictSource::from_native(art.pictures);
         }
-        PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b))
+        PictSource::new(resource_blorb(story_path).found.map(|(b, _)| b))
     }
 
     /// Resolve the picture source across all three tiers (SQ-0734).
@@ -1123,6 +1127,140 @@ pub struct ReleaseArt {
     /// The disk number of the volume it came off, or `None` when the release is
     /// a single image. See [`crate::assets::MountedVolume::disk_number`].
     pub disk_number: Option<u64>,
+}
+
+/// The resource Blorb that may speak for `story_path`'s artwork, and the
+/// complaint when one was found and refused (SQ-0866).
+#[derive(Debug)]
+pub struct ResourceBlorb {
+    /// The Blorb to draw from, and where it was read. `None` when the story has
+    /// none — **or when the one it has was refused**, which is why the two
+    /// fields are not an either/or enum: a caller that only wants to draw reads
+    /// `found` and needs no arm for the refusal.
+    pub found: Option<(blorb::Blorb, std::path::PathBuf)>,
+    /// Why a Blorb that WAS found is not being used, in the words the host shows
+    /// the player. Always `None` when `found` is `Some`.
+    pub refused: Option<String>,
+}
+
+/// Tier 1 of the picture policy: the story's own resource Blorb, **unless it
+/// says it belongs to a different build** (SQ-0866).
+///
+/// # The defect this exists to end
+///
+/// `Arthur Quest 4 Excalibur.2mg` is the Apple IIgs press of *Arthur*, release
+/// 63 / serial 890622, and it carries 168 pictures. Its own volume offers
+/// babelmap no artwork it can read yet, so tier 1 ran, and
+/// [`blorb::resolve_resource_blorb`]'s directory scan matched `Arthur.blb` on a
+/// six-character stem prefix — a Blorb built for release 74 / serial 890714, the
+/// DOS press, holding **326** pictures. The game asked for its picture numbers
+/// and got another build's, which is the corruption the user reported.
+///
+/// # The rule, and where its line falls
+///
+/// A Blorb is refused when it **contradicts** the story: it carries the Blorb
+/// spec's optional `IFhd` Game Identifier, the story came off a disk image, and
+/// the identifier matches no build on that release. The spec asks for exactly
+/// this — *"the interpreter can check that the game matches the IFhd chunk. If
+/// they don't, the interpreter should display an error"* — and refusing is that
+/// error, made quiet on screen and loud in the message.
+///
+/// Three ways to escape it, and each is a deliberate *absence of contradiction*
+/// rather than an exception:
+///
+/// - **The Blorb states no build.** Most of the corpus: every modern `.zblorb`,
+///   `advent.blb`, `Sherlock.blb`, `beyondzork.blb`, all eleven Mysterious
+///   Adventures sidecars. There is nothing to contradict, and reading silence as
+///   disagreement would strip artwork from nearly every story that has any. "Does
+///   not say" and "says something else" are different facts and are kept so.
+/// - **The story is not on a medium.** A loose story file sits in a directory a
+///   *person* assembled, and that placement is itself the pairing assertion. The
+///   corpus states the case outright: `fmvpoker.blb` is a byte-for-byte copy of
+///   `Zork0.blb`, so its `IFhd` names Zork Zero while `fmvpoker.z6` is release 60
+///   / serial 001227 — and *Frobozz Magic Video Poker*'s own readme instructs the
+///   player to do that ("Obtain one of the Zork Zero graphics files… rename the
+///   graphics file to FMVPOKER"). Borrowing another game's plates is the whole
+///   design of that game. babelmap does not overrule a person who has already
+///   answered the question.
+///
+///   A disk image is the opposite case and that is the whole distinction: nobody
+///   put `Arthur.blb` *beside* `Arthur Quest 4 Excalibur.2mg`. Both are in a
+///   library folder next to two hundred unrelated files, and a shared stem is a
+///   coincidence of naming, not an act. `crate::assets::AssetOrigin` already
+///   draws this line — a file on the medium "shipped in the box with the story…
+///   which is exactly what a loose file's name has to be tested for".
+/// - **No story on the release could be identified.** Nothing to compare against,
+///   so nothing is proven, and the Blorb keeps drawing. Three media are here
+///   today, and all three are cases where a reader — not this rule — is what is
+///   missing: `Journey.2mg`, whose volume mounts but yields no story; and the
+///   five-volume `shogun_s*.dsk` and four-volume `zork_zero_*.dsk` Apple II
+///   presses, whose stories are paged across the whole set while
+///   [`release_builds`] can only ask each volume on its own (SQ-0864 taught
+///   babelmap to mount them; pulling a set-spanning story out of them is that
+///   lane's question, not this one's). The rule tightens by itself as those
+///   readers improve, rather than guessing now — and `zork_zero_*.dsk` is not
+///   exposed at all, because no Blorb in the corpus stem-matches it.
+///
+/// # What it never touches
+///
+/// The medium's own artwork ([`release_art`]) is resolved first and is never
+/// consulted here, so every disk that draws today keeps drawing from the same
+/// archive. A named archive (`--pictures`, the per-game `pictures` key) outranks
+/// this whole function — that is the user asserting the pairing, and a mismatch
+/// they asked for is theirs to make. And a Blorb that IS the story file is its
+/// own container by construction and is never tested.
+pub fn resource_blorb(story_path: &std::path::Path) -> ResourceBlorb {
+    let Some((blorb, path)) = blorb::resolve_resource_blorb(story_path) else {
+        return ResourceBlorb { found: None, refused: None };
+    };
+    match build_mismatch(story_path, &blorb, &path) {
+        Some(refused) => ResourceBlorb { found: None, refused: Some(refused) },
+        None => ResourceBlorb { found: Some((blorb, path)), refused: None },
+    }
+}
+
+/// Why the Blorb at `path` may not speak for `story_path`, or `None` when
+/// nothing contradicts it. The rule, and the argument for where its line falls,
+/// are [`resource_blorb`]'s.
+fn build_mismatch(
+    story_path: &std::path::Path,
+    blorb: &blorb::Blorb,
+    path: &std::path::Path,
+) -> Option<String> {
+    // A `.zblorb`/`.gblorb` holding its own story: tautologically its own build.
+    if path == story_path {
+        return None;
+    }
+    let stated = blorb.game_identifier()?; // states no build: nothing to contradict
+    let on_release = release_builds(story_path);
+    if on_release.is_empty() || on_release.contains(&stated) {
+        return None;
+    }
+    Some(format!(
+        "{} is the artwork for {stated}, but this disk is {} — \
+         a different build's pictures are not being drawn",
+        path.file_name().unwrap_or(path.as_os_str()).to_string_lossy(),
+        on_release.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", "),
+    ))
+}
+
+/// Every build the release `story_path` came off carries, in disk order.
+///
+/// Empty when the story is not a disk image at all — which is the ordinary case
+/// and the one that costs nothing, because [`crate::assets::volumes`] refuses a
+/// story file before mounting anything.
+///
+/// Also empty when the release mounts but babelmap cannot yet page a story out of
+/// it. Each volume is asked on its own, so a story spread across a *set* is
+/// invisible here even though every volume of it mounted — the Apple II
+/// `shogun_s*.dsk` press is exactly that. An empty answer is treated as "no
+/// evidence" by [`resource_blorb`] and never as "no match"; see its docs.
+pub fn release_builds(story_path: &std::path::Path) -> Vec<blorb::GameIdentifier> {
+    crate::assets::volumes(story_path)
+        .iter()
+        .flat_map(|v| v.disk.stories())
+        .filter_map(|s| blorb::GameIdentifier::of_story(&s.bytes))
+        .collect()
 }
 
 /// Read a bare filename off the release `story_path` was mounted from, for a
