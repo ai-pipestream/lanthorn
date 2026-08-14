@@ -163,6 +163,30 @@ pub enum InterpreterProfile {
     /// Version 6 screen to describe. It is 140x192 on a 3x9 cell, which is not
     /// the quantity [`Self::std_window`] holds. See that knob.
     AppleIIgs,
+    /// A Commodore 128: **interpreter 7, and nothing else** (SQ-0869).
+    ///
+    /// The thinnest profile here, deliberately. It exists because the number
+    /// would otherwise be dropped: `blorb`'s `.d64` row answers 7, `zvm-cli`
+    /// takes that answer straight off the medium, and this enum is how the TUI
+    /// takes it — so a Commodore medium with no variant here would have the two
+    /// front-ends disagreeing, which is the exact half-wiring `blorb::medium`
+    /// exists to make impossible.
+    ///
+    /// Every OTHER member is declined, and each for a stated reason rather than
+    /// for want of effort. There is no standard window because Infocom never
+    /// wrote a Version 6 interpreter for the machine — the same ground the
+    /// [`Self::AtariSt`] declines on. There is no palette of the Commodore's own
+    /// here because none has been read out of Infocom's Commodore interpreter;
+    /// the C64's sixteen hardware colours are famous and are not evidence, which
+    /// is the call [`Self::AtariSt`] makes about the ST's 512 and
+    /// [`Self::AppleIIgs`] about the Apple's double hi-res. And the default
+    /// colour pair is declined for the same reason, so a Commodore story is told
+    /// what the player's terminal actually looks like.
+    ///
+    /// **Filling those in is a separate piece of work**, wanted only if it can be
+    /// sourced the way the other three were: out of Infocom's own Commodore
+    /// interpreter, not out of the hardware's reputation.
+    Commodore128,
 }
 
 impl InterpreterProfile {
@@ -286,6 +310,7 @@ impl InterpreterProfile {
             MACINTOSH_INTERPRETER_NUMBER => Self::Macintosh,
             ATARI_ST_INTERPRETER_NUMBER => Self::AtariSt,
             APPLE_IIGS_INTERPRETER_NUMBER => Self::AppleIIgs,
+            COMMODORE_128_INTERPRETER_NUMBER => Self::Commodore128,
             _ => Self::IbmPc,
         }
     }
@@ -325,6 +350,7 @@ impl InterpreterProfile {
             Self::Macintosh => Some(MACINTOSH_INTERPRETER_NUMBER),
             Self::AtariSt => Some(ATARI_ST_INTERPRETER_NUMBER),
             Self::AppleIIgs => Some(APPLE_IIGS_INTERPRETER_NUMBER),
+            Self::Commodore128 => Some(COMMODORE_128_INTERPRETER_NUMBER),
         }
     }
 
@@ -488,7 +514,7 @@ impl InterpreterProfile {
     /// first of them is a standard window.
     pub fn std_window(self) -> Option<(u16, u16)> {
         match self {
-            Self::IbmPc | Self::AtariSt | Self::AppleIIgs => None,
+            Self::IbmPc | Self::AtariSt | Self::AppleIIgs | Self::Commodore128 => None,
             Self::Amiga => Some(AMIGA_STD_WINDOW),
             Self::Macintosh => Some(MACINTOSH_STD_WINDOW),
         }
@@ -510,6 +536,13 @@ impl InterpreterProfile {
             Self::Macintosh => Some((MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND)),
             Self::AtariSt => Some((ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND)),
             Self::AppleIIgs => Some((APPLE_DEFAULT_BACKGROUND, APPLE_DEFAULT_FOREGROUND)),
+            // **Declined, and it is a decline rather than a default.** Nothing
+            // in hand states the pair Infocom's Commodore interpreter reported
+            // in `$2C`/`$2D`, and the machine's famous light-blue-on-blue boot
+            // screen is the hardware's reputation rather than the interpreter's
+            // evidence. So a Commodore story is told what the player's terminal
+            // looks like, exactly as `Self::IbmPc` is (SQ-0869).
+            Self::Commodore128 => None,
         }
     }
 
@@ -592,9 +625,11 @@ impl InterpreterProfile {
     /// 512-colour hardware, one paragraph up.
     pub fn palette(self) -> zvm::screen::Palette {
         match self {
-            Self::IbmPc | Self::Macintosh | Self::AtariSt | Self::AppleIIgs => {
-                zvm::screen::Palette::Standard
-            }
+            Self::IbmPc
+            | Self::Macintosh
+            | Self::AtariSt
+            | Self::AppleIIgs
+            | Self::Commodore128 => zvm::screen::Palette::Standard,
             Self::Amiga => zvm::screen::Palette::Amiga,
         }
     }
@@ -675,6 +710,14 @@ pub use blorb::medium::ATARI_ST_INTERPRETER_NUMBER;
 /// argument is about which Apple II babelmap presents as, rather than about
 /// which one pressed the disk.
 pub use blorb::medium::APPLE_IIGS_INTERPRETER_NUMBER;
+
+/// Commodore 128, from the same §11.1.3 table (SQ-0869) — and the one of the
+/// five that is corroborated by the DISK rather than by an interpreter source
+/// tree. `TRINITY1.D64` opens with the Commodore 128's `CBM` autoboot signature
+/// and boots an interpreter that touches the C128's own MMU register `$FF00`
+/// forty times, which no Commodore 64 has. [`blorb::medium`] shows the evidence
+/// and argues why the row answers 7 where the family's other number is 8.
+pub use blorb::medium::COMMODORE_128_INTERPRETER_NUMBER;
 
 /// The Apple IIgs's default background: standard colour **2, black**.
 ///
@@ -1063,6 +1106,7 @@ mod tests {
         assert_eq!(InterpreterProfile::for_interpreter_number(3), InterpreterProfile::Macintosh);
         assert_eq!(InterpreterProfile::for_interpreter_number(5), InterpreterProfile::AtariSt);
         assert_eq!(InterpreterProfile::for_interpreter_number(10), InterpreterProfile::AppleIIgs);
+        assert_eq!(InterpreterProfile::for_interpreter_number(7), InterpreterProfile::Commodore128);
         // Every other number is served by the IBM PC bundle, the historical
         // default. **2 and 9 are in this list on purpose**: they are the Apple
         // IIe and IIc, the other two machines the Apple II YZIP runs on, and
@@ -1070,7 +1114,13 @@ mod tests {
         // the IBM PC bundle with that number in `$1E` — the same "no opinion"
         // every unmapped number gets, and stated here so the gap is visible
         // rather than assumed closed.
-        for n in [1u8, 2, 6, 7, 8, 9, 11] {
+        //
+        // **8 joined them for the same reason** (SQ-0869): it is the Commodore
+        // 64, the other machine a 1541 disk could have been pressed for, and
+        // that quest scoped itself to the 128 — the one press in the corpus
+        // whose story is new enough to read `$1E` at all. Asking for 8 gets the
+        // IBM PC bundle with 8 in the header.
+        for n in [1u8, 2, 6, 8, 9, 11] {
             assert_eq!(
                 InterpreterProfile::for_interpreter_number(n),
                 InterpreterProfile::IbmPc,

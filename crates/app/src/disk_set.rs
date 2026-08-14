@@ -401,12 +401,43 @@ mod tests {
         ]);
     }
 
+    /// **The free consequence, a second time** (SQ-0869) — and the first set in
+    /// the corpus whose members SHOUT their extension.
+    ///
+    /// `TRINITY1.D64` and `TRINITY2.D64` are the two sides of Infocom's
+    /// Commodore *Trinity*, a Version 4 story of 262,064 bytes on a pair of
+    /// 174,848-byte floppies. They became a set the moment `blorb::medium`
+    /// claimed `.d64`, with not a line of this module changed — including the
+    /// case-folding, since `parts` lowercases and the census is lowercase.
+    ///
+    /// **And the lone *Hitchhiker's* disk is not a set**, which is the other
+    /// half and the one worth asserting: its stem carries a four-digit year, so
+    /// a rule that grouped on "there is a number in the name" would have made a
+    /// one-member set out of it. `is_index_run` refuses a run of one and refuses
+    /// values that do not start at 1, and 1984 is both.
+    #[test]
+    fn the_two_sides_of_the_commodore_trinity_are_one_set_and_hitchhikers_is_none() {
+        let lone = "Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64";
+        let g = group(&paths(&["TRINITY1.D64", "TRINITY2.D64", lone]));
+        assert_eq!(g.len(), 1, "{:?}", g.iter().map(|x| names_of(x)).collect::<Vec<_>>());
+        assert_eq!(names_of(&g[0]), ["TRINITY1.D64", "TRINITY2.D64"], "in side order");
+        assert!(
+            !g[0].iter().any(|p| p.ends_with(lone)),
+            "a single disk with a year in its name is not a set"
+        );
+        // …and on its own it forms no group at all, rather than a group of one.
+        assert!(group(&paths(&[lone])).is_empty());
+    }
+
     /// …and the census is genuinely where that came from: nothing in this
-    /// module names a spelling, so `.dsk` had to arrive through the table.
+    /// module names a spelling, so `.dsk` and `.d64` had to arrive through the
+    /// table.
     #[test]
     fn the_extension_census_is_the_tables_and_not_this_modules() {
         assert!(has_image_ext(Path::new("/stories/shogun_s1.dsk")));
         assert!(blorb::medium::image_extensions().any(|e| e == "dsk"));
+        assert!(has_image_ext(Path::new("/stories/TRINITY1.D64")), "and case does not decide it");
+        assert!(blorb::medium::image_extensions().any(|e| e == "d64"));
         assert!(!has_image_ext(Path::new("/stories/adv01.dat")));
     }
 
