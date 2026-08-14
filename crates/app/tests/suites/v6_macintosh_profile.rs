@@ -193,6 +193,49 @@ fn zork_zero_off_the_macintosh_disk_says_it_is_on_a_macintosh() {
     );
 }
 
+/// **Naming one of the disk's own archives must not change what machine this
+/// is** (SQ-0843).
+///
+/// The launch-options dialog now lists both archives on this volume, so the
+/// once-theoretical case is a row a person clicks. Until SQ-0843,
+/// `InterpreterProfile::resolve` returned on the named archive's flavour before
+/// the medium was ever consulted — and `Flavour::AmigaMac` is one container
+/// written by two machines, so picking `CPic.data`, the very archive this disk
+/// loads on its own, made Zork Zero announce itself on an **Amiga**. The medium
+/// is what knows (`for_art_flavour`'s own doc comment said so all along), and
+/// this is the acceptance criterion in the game's own words.
+///
+/// Pinned in both `honor_game_colours` modes: header `$1E` is not a colour and
+/// must not move with one, and the two-colour archive turns the flag off at
+/// startup on its own, which is exactly the kind of interaction a single-mode
+/// suite has masked before.
+#[test]
+fn naming_either_of_the_disks_archives_still_boots_a_macintosh() {
+    if mac_disk().is_none() {
+        return;
+    }
+    for pictures in ["CPic.data", "Pic.data"] {
+        for honour in [true, false] {
+            let mut l = launch(Some(pictures), honour, None);
+            assert_eq!(
+                l.session.machine.mem.read_byte(0x1E),
+                3,
+                "--pictures {pictures} (honour={honour}) must leave header $1E a Macintosh",
+            );
+            let said = version_line(&mut l.session);
+            assert!(
+                said.contains("Macintosh Interpreter version"),
+                "picked {pictures} off the Macintosh disk and the game said {said:?}",
+            );
+            assert!(said.contains("Release 296 / Serial number 881019"), "{said:?}");
+        }
+    }
+    // …and the archive still decides the SCREEN, which is the other half: one
+    // disk, one machine, two screens (see the test below).
+    assert!(launch(Some("Pic.data"), true, None).monochrome);
+    assert!(!launch(Some("CPic.data"), true, None).monochrome);
+}
+
 /// The rest of the bundle reaches the header: a white page and black ink, which
 /// is the Macintosh's whole visual signature and the exact opposite of the
 /// Amiga's dark grey.

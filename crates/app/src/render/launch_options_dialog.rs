@@ -164,12 +164,16 @@ pub fn draw_launch_options(
             Some(i) => {
                 let c = &st.candidates[i];
                 let mark = if st.art == idx { "(•)" } else { "( )" };
+                // "on disk" says where an archive with no path of its own lives:
+                // `CPic.data` is not in the folder the story appears to be in,
+                // it is on the volume the story was mounted out of (SQ-0843).
                 let label = format!(
-                    "  {mark} {:<14} {:<8} {:>4} pictures{}",
+                    "  {mark} {:<14} {:<8} {:>4} pictures{}{}",
                     c.filename,
                     c.rendition,
                     c.pictures,
                     crate::launch_options::parts_note(c),
+                    if c.on_medium { "  on disk" } else { "" },
                 );
                 option_row(buf, idx, &label, &mut rows, &mut y);
             }

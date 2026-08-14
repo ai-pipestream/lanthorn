@@ -52,9 +52,15 @@ babelmap "Zork Zero Disk.image" --pictures Pic.data
 ```
 
 That name is looked up *on the volume*. A story mounted out of a disk image has
-no folder for a loose archive to sit beside it in, so `--pictures` now reaches
-into the medium when the name it was given is not on your filesystem — an Amiga
-`.adf` gets the same door by the same code.
+no folder for a loose archive to sit beside it in, so `--pictures` reaches into
+the medium when the name it was given is not on your filesystem — an Amiga `.adf`
+gets the same door by the same code.
+
+You do not have to know the name, either. **The launch-options dialog lists what
+is on the disk**, so opening *Zork Zero Disk.image* offers you both of its
+archives by name, with the two-colour one labelled `Mac B&W` and both marked *on
+disk* — because they are not in the folder you are looking at, they are inside
+the image. Pick a row and that is what the game draws.
 
 What comes back is not a recoloured copy of the colour art. It is a different
 screen: the mono archive's plates are **480×300** where the colour ones are
@@ -243,15 +249,29 @@ interpreter number your choices imply *and where that number came from*, because
 picking prettier art can quietly change the machine you're emulating and that is
 not a thing to discover later.
 
-"Detected for that story" means the name matches, in either direction, once both
-names are reduced to their letters and digits. That is enough to connect
-`zork0.mg1` to `zork0-r393-s890714.z6`, `beyondzo.mg1` to *Beyond Zork* under
-either of its filenames, and `shogun.*` to a floppy called *James Clavell's
-Shogun* — across every game in a real library it finds each one's art and nobody
-else's, so *Zork Zero*'s dialog offers four renditions rather than a folder. An
-archive under a name that resembles nothing simply isn't in the list; you reach
-it the way you always could, by naming it — `--pictures`, or the `pictures` key
-— and the dialog says so on its last line rather than leaving you to wonder.
+"Detected for that story" means two things, because a story's art can live in two
+places.
+
+**Beside it**, the name has to match — in either direction, once both names are
+reduced to their letters and digits. That is enough to connect `zork0.mg1` to
+`zork0-r393-s890714.z6`, `beyondzo.mg1` to *Beyond Zork* under either of its
+filenames, and `shogun.*` to a floppy called *James Clavell's Shogun* — across
+every game in a real library it finds each one's art and nobody else's, so *Zork
+Zero*'s dialog offers four renditions rather than a folder. An archive under a
+name that resembles nothing simply isn't in the list; you reach it the way you
+always could, by naming it — `--pictures`, or the `pictures` key — and the dialog
+says so on its last line rather than leaving you to wonder.
+
+**Inside it**, when you launched a disk image, no name test applies at all: every
+archive on that volume is offered, marked *on disk*, because the disk itself is
+the pairing. There is nothing to guess — the story and the art came off one
+floppy. This is what makes the Macintosh's two archives pickable: a directory
+scan cannot see inside a disk image, so before this the dialog could offer a Mac
+disk nothing at all, and its black-and-white artwork could only be reached by
+typing `--pictures Pic.data`. Every archive is identified by *parsing* it rather
+than by its name, which matters here more than anywhere: `CPic.data` and
+`Pic.data` are one codec under two names that tell you nothing, and only the
+file's own two-colour flag says which is which.
 
 The same list appears, read-only, in the browser's **info panel**, so you can see
 what a game has without opening anything: each detected archive with its flavour
@@ -303,6 +323,13 @@ for the Amiga, colours and all — see
 out which from the file's *contents*, never its extension, because the two codecs
 are structurally different and a filename can lie. An explicit
 `interpreter_number` still overrules it.
+
+With one honest caveat: the Amiga and the Macintosh wrote the *same* container,
+so an archive of that flavour names a codec and not a machine. When the story
+came off a disk, the disk settles it — pick either archive on a Macintosh volume
+and you are still on a Macintosh, which is what the dialog's provenance line says
+while you are choosing. A rendition that *is* unambiguous still wins outright: an
+`.mg1` asks for the IBM PC and gets it, whatever it is sitting on.
 
 Native archives carry no `Reso` chunk — the format has no such concept — so the
 archive states the picture space its own coordinates use, and the screen is that

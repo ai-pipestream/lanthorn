@@ -414,6 +414,18 @@ impl MountedDisk {
         self.volume.file_count()
     }
 
+    /// Every file that reads, in disk order, as `(name, bytes)`.
+    ///
+    /// The unfiltered listing, for a caller that identifies files by its own
+    /// test rather than by this crate's. `app`'s asset discovery needs it
+    /// because [`MountedDisk::pictures`] answers with THE archive by the
+    /// format's own tiebreak, and a Macintosh disk carries two — a colour
+    /// `CPic.data` and a monochrome `Pic.data` — both of which a person must be
+    /// able to choose between (SQ-0843).
+    pub fn contents(&self) -> Vec<(String, Vec<u8>)> {
+        self.volume.contents()
+    }
+
     /// Every story on the disk, in disk order.
     pub fn stories(&self) -> Vec<DiskStory> {
         self.volume.stories()
@@ -569,6 +581,28 @@ mod tests {
             // answerable at all, on every format, without a panic or a chain.
             assert!(disk.pictures().is_none(), "{image:?}");
             let _ = disk.volume_name();
+        }
+    }
+
+    /// The unfiltered listing every format hands back, and the reason it is on
+    /// [`MountedDisk`] at all: `pictures()` answers with ONE archive by the
+    /// format's own tiebreak, so a caller offering a person a choice between a
+    /// disk's two archives has to see all its files (SQ-0843).
+    #[test]
+    fn a_mounted_disk_lists_every_file_it_holds() {
+        for image in DiskImage::all() {
+            let disk = MountedDisk::mount(sample_of(image)).expect("mounts");
+            let contents = disk.contents();
+            let names: Vec<&str> = contents.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names.len(), disk.file_count(), "{image:?} lists what it counted");
+            assert!(names.contains(&"Readme"), "{image:?}: {names:?}");
+            assert!(names.contains(&"Story.data"), "{image:?}: {names:?}");
+            // Bytes, not just names — this is what a caller identifies by.
+            let readme = contents.iter().find(|(n, _)| n == "Readme").expect("present");
+            assert_eq!(readme.1, b"just a text file", "{image:?}");
+            // …and the story is in the listing too, unfiltered: deciding what a
+            // file IS belongs to the caller, not to the mount.
+            assert!(contents.iter().any(|(_, b)| *b == fake_story()), "{image:?}");
         }
     }
 

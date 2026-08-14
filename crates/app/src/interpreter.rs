@@ -37,6 +37,15 @@
 //!    the Amiga. The flavour comes from the archive's CONTENT — the two codecs
 //!    are structurally distinguishable — not from its extension, which a rename
 //!    can make a lie.
+//!
+//!    **A codec that names two machines is refined by step 3, not settled by
+//!    step 2** (SQ-0843). [`Flavour::AmigaMac`] is one container written by both
+//!    the Amiga and the Macintosh, so an archive of that flavour states a codec;
+//!    when the story also came off a disk, the medium states the machine and
+//!    wins. That is not a reordering — [`Flavour::Pc`] is unambiguous and still
+//!    beats the medium outright — it is one ambiguous answer resolved by a
+//!    definite one. Without it, picking `CPic.data` off `Zork Zero Disk.image`
+//!    (the archive that disk loads on its own) turned a Macintosh into an Amiga.
 //! 3. The medium: a story mounted out of an Amiga `.adf` release floppy is an
 //!    Amiga, and one mounted out of an HFS volume is a Macintosh. The
 //!    medium→machine mapping itself is [`blorb::medium`]'s, not this module's,
@@ -121,12 +130,49 @@ impl InterpreterProfile {
             return Self::for_interpreter_number(n);
         }
         if let Some(flavour) = named_art {
-            return Self::for_art_flavour(flavour);
+            return Self::for_art_flavour_on(flavour, Self::medium(story_path));
         }
         if let Some(n) = Self::medium_interpreter_number(story_path) {
             return Self::for_interpreter_number(n);
         }
         Self::IbmPc
+    }
+
+    /// The machine implied by an archive of `flavour` **found on `medium`** —
+    /// [`Self::for_art_flavour`] with the one ambiguity its codec cannot settle
+    /// resolved by the disk under it (SQ-0843).
+    ///
+    /// [`Flavour::AmigaMac`] is one container written by two machines, so naming
+    /// such an archive states a codec and not a machine. When the story came out
+    /// of a disk image, the medium states the machine — HFS is Apple's
+    /// filesystem and nothing else wrote one — and a fact beats an ambiguity.
+    /// [`Flavour::Pc`] is unambiguous and still beats the medium outright, which
+    /// is what keeps "naming an archive is an instruction" true: an `.mg1` named
+    /// on a Macintosh disk asks for the IBM PC and gets it.
+    ///
+    /// **This is what [`Self::for_art_flavour`] already documented and did not
+    /// do.** Its own text says "a `Pic.data` on the Mac disk gets the Macintosh
+    /// anyway, from the disk under it", and until SQ-0843 the named-archive step
+    /// simply returned before the medium was ever consulted. The gap was
+    /// invisible while `--pictures Pic.data` was the only door to a Macintosh
+    /// archive; the launch-options dialog now lists both of that disk's archives,
+    /// so picking `CPic.data` — the very archive the story loads on its own —
+    /// would have demoted a Macintosh to an Amiga, and said so on screen two
+    /// lines below the row that did it.
+    ///
+    /// A medium that implies neither Amiga nor Macintosh cannot refine an
+    /// Amiga/Mac archive and does not try; the archive's own answer stands.
+    pub fn for_art_flavour_on(flavour: Flavour, medium: Option<blorb::medium::DiskImage>) -> Self {
+        if flavour == Flavour::AmigaMac {
+            let refined = medium
+                .and_then(|d| d.interpreter_number())
+                .map(Self::for_interpreter_number)
+                .filter(|p| matches!(p, Self::Amiga | Self::Macintosh));
+            if let Some(profile) = refined {
+                return profile;
+            }
+        }
+        Self::for_art_flavour(flavour)
     }
 
     /// The machine implied by the flavour of a picture archive.
@@ -156,6 +202,11 @@ impl InterpreterProfile {
     /// archive by hand therefore still asks for the machine the *codec* implies,
     /// and a `Pic.data` on the Mac disk gets the Macintosh anyway, from the disk
     /// under it.
+    ///
+    /// That last sentence describes [`Self::for_art_flavour_on`], which is where
+    /// the disk is actually consulted — and until SQ-0843 nothing did it, so the
+    /// claim was true of the design and false of the code. Call that one unless
+    /// you genuinely have no medium to offer it.
     pub fn for_art_flavour(flavour: Flavour) -> Self {
         match flavour {
             Flavour::Pc => Self::IbmPc,
@@ -184,8 +235,15 @@ impl InterpreterProfile {
     /// reaches the same conclusion off the same bytes (SQ-0839) — this only
     /// supplies the file.
     fn medium_interpreter_number(path: &Path) -> Option<u8> {
+        Self::medium(path)?.interpreter_number()
+    }
+
+    /// The release medium at `path`, or `None` when it is not one. The single
+    /// read this module does; see [`Self::medium_interpreter_number`] for why it
+    /// is content and not extension.
+    fn medium(path: &Path) -> Option<blorb::medium::DiskImage> {
         let raw = std::fs::read(path).ok()?;
-        blorb::medium::DiskImage::detect(&raw)?.interpreter_number()
+        blorb::medium::DiskImage::detect(&raw)
     }
 
     /// The interpreter number to advertise in header `$1E`, or `None` to leave
@@ -582,6 +640,39 @@ mod tests {
             InterpreterProfile::resolve(plain, Some(6), Some(Flavour::AmigaMac)),
             InterpreterProfile::IbmPc,
         );
+    }
+
+    /// The one ambiguity a codec cannot settle, settled by the disk under it
+    /// (SQ-0843). `Flavour::AmigaMac` is one container written by two machines,
+    /// so on release media the medium answers; `Flavour::Pc` is unambiguous and
+    /// still beats the medium outright, which is what keeps naming an archive an
+    /// instruction rather than a hint.
+    #[test]
+    fn the_medium_settles_which_machine_an_amiga_mac_archive_belongs_to() {
+        use blorb::medium::DiskImage;
+        assert_eq!(
+            InterpreterProfile::for_art_flavour_on(Flavour::AmigaMac, Some(DiskImage::Hfs)),
+            InterpreterProfile::Macintosh,
+            "an Amiga/Mac archive on an Apple filesystem is the Macintosh's",
+        );
+        assert_eq!(
+            InterpreterProfile::for_art_flavour_on(Flavour::AmigaMac, Some(DiskImage::Adf)),
+            InterpreterProfile::Amiga,
+        );
+        // No medium: the archive's own answer, exactly as before.
+        assert_eq!(
+            InterpreterProfile::for_art_flavour_on(Flavour::AmigaMac, None),
+            InterpreterProfile::Amiga,
+        );
+        // An unambiguous flavour is never refined — an `.mg1` named on a
+        // Macintosh disk asks for the IBM PC and gets it.
+        for medium in [None, Some(DiskImage::Hfs), Some(DiskImage::Adf)] {
+            assert_eq!(
+                InterpreterProfile::for_art_flavour_on(Flavour::Pc, medium),
+                InterpreterProfile::IbmPc,
+                "{medium:?}",
+            );
+        }
     }
 
     #[test]
