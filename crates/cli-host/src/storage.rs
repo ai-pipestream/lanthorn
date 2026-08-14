@@ -184,17 +184,36 @@ pub fn story_key_for(story_path: &Path, build: Option<&DiskBuild>) -> String {
 /// (the picker has its release and serial in hand) should call [`story_key_for`]
 /// instead. An unreadable file is simply not a disk image.
 pub fn story_key_at(story_path: &Path) -> String {
-    story_key_for(story_path, mounted_build(story_path).as_ref())
+    story_key_at_from(story_path, None)
+}
+
+/// [`story_key_at`] for one **named** story off a disk image that holds several
+/// (SQ-0859) — the game a front-end actually chose, rather than the tiebreak a
+/// bare path resolves to.
+///
+/// `None` is exactly [`story_key_at`], which is what every loose story file and
+/// every single-game floppy passes.
+pub fn story_key_at_from(story_path: &Path, disk_entry: Option<&str>) -> String {
+    story_key_for(story_path, mounted_build(story_path, disk_entry).as_ref())
 }
 
 /// The build `story_path` would open if it is a disk image, else `None`.
-fn mounted_build(story_path: &Path) -> Option<DiskBuild> {
+/// `disk_entry` names which story when the image holds several; without one the
+/// format's own tiebreak decides, as it always did.
+fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuild> {
     let raw = std::fs::read(story_path).ok()?;
     // `detect` first: `mount` consumes the bytes, and the overwhelming majority
     // of calls are about an ordinary story file.
     blorb::medium::DiskImage::detect(&raw)?;
     let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
-    DiskBuild::of(&disk.story()?.bytes)
+    let chosen = match disk_entry {
+        Some(want) => disk
+            .stories()
+            .into_iter()
+            .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))?,
+        None => disk.story()?,
+    };
+    DiskBuild::of(&chosen.bytes)
 }
 
 /// The directory holding this story's saves and sidecars.

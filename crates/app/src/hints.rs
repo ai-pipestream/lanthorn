@@ -681,6 +681,27 @@ impl LoadedStory {
 /// spelling keeps working.
 pub use blorb::medium::DiskImage;
 
+/// Every story a disk image holds, in disk order — the name the volume stores
+/// each one under, and its bytes — or `None` when `path` is not a disk image (or
+/// will not mount, or holds no story at all).
+///
+/// This is the enumeration the picker lists one row per (SQ-0859). It is
+/// deliberately the SAME question `zvm-cli`'s `--story` menu asks, of the same
+/// `blorb::medium` seam, so the two front-ends cannot end up with different
+/// ideas of what is on a disk: what the menu offers, the browser offers.
+///
+/// The names come back exactly as [`blorb::medium::MountedDisk::stories`] gives
+/// them — by path on the formats that have directories — which is what makes
+/// them usable as the selector [`load_mounted_story_from`] takes.
+pub fn mounted_stories(path: &Path) -> Option<(DiskImage, Vec<blorb::medium::DiskStory>)> {
+    let raw = std::fs::read(path).ok()?;
+    blorb::medium::DiskImage::detect(&raw)?;
+    let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
+    let format = disk.format();
+    let stories = disk.stories();
+    (!stories.is_empty()).then_some((format, stories))
+}
+
 /// Read a story file's executable bytes, transparently unwrapping a ZIP whose
 /// first `.z3/.z5/.z8` entry is the story, or a release disk image — Amiga or
 /// Macintosh — whose filesystem holds one. Does not classify the engine — see
@@ -689,7 +710,12 @@ pub use blorb::medium::DiskImage;
 /// The flag says the bytes were mounted out of a disk image rather than read as
 /// a plain file, and which kind, so callers can name the container the story
 /// came off (SQ-0737).
-fn read_story_file(path: &Path) -> io::Result<(Vec<u8>, Option<DiskImage>)> {
+///
+/// `want` names which story to take off a disk image that holds several
+/// (SQ-0859), by the name [`mounted_stories`] listed it under. `None` is the
+/// format's own tiebreak — what a bare path has always opened, and what every
+/// single-story disk means whatever is passed.
+fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Option<DiskImage>)> {
     let raw = std::fs::read(path)?;
     // An original release floppy, whichever machine pressed it (SQ-0719,
     // SQ-0837, SQ-0840). One mount path answers for every format: take the file
@@ -702,6 +728,24 @@ fn read_story_file(path: &Path) -> io::Result<(Vec<u8>, Option<DiskImage>)> {
     if blorb::medium::DiskImage::detect(&raw).is_some() {
         let disk = blorb::medium::MountedDisk::mount(raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        // A named story is the browser's row (SQ-0859): the picker listed every
+        // story on the image and this is the one the player chose, so it is
+        // looked up by that same name and NOT quietly replaced by the tiebreak
+        // if it has gone — an image edited between the scan and the launch must
+        // say so rather than open a different game.
+        if let Some(want) = want {
+            let found = disk
+                .stories()
+                .into_iter()
+                .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want));
+            return match found {
+                Some(story) => Ok((story.bytes, Some(disk.format()))),
+                None => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no story named '{want}' on the disk image {}", path.display()),
+                )),
+            };
+        }
         return match disk.story() {
             Some(story) => Ok((story.bytes, Some(disk.format()))),
             None => Err(io::Error::new(
@@ -751,7 +795,20 @@ pub fn load_story(path: &Path) -> io::Result<LoadedStory> {
 /// never by its name — so a disk image with any extension is reported as one and
 /// a mis-named ordinary story file is not.
 pub fn load_mounted_story(path: &Path) -> io::Result<(LoadedStory, Option<DiskImage>)> {
-    let (bytes, disk_image) = read_story_file(path)?;
+    load_mounted_story_from(path, None)
+}
+
+/// [`load_mounted_story`] for one named story off a disk image that holds
+/// several (SQ-0859) — the browser row's own game, rather than the format's
+/// tiebreak.
+///
+/// `None` is exactly [`load_mounted_story`], so every loose file, every ZIP and
+/// every single-story floppy takes the byte-for-byte path it always did.
+pub fn load_mounted_story_from(
+    path: &Path,
+    disk_entry: Option<&str>,
+) -> io::Result<(LoadedStory, Option<DiskImage>)> {
+    let (bytes, disk_image) = read_story_file(path, disk_entry)?;
     Ok((extract_story(bytes)?, disk_image))
 }
 

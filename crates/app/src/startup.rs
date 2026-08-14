@@ -207,13 +207,17 @@ fn pre_boot_host_screen(
 pub(crate) fn boot_story(
     ctx: &LaunchCtx,
     story_path: std::path::PathBuf,
+    disk_entry: Option<&str>,
     overrides: &app::launch_options::LaunchOverrides,
 ) -> BootResult {
     let cli = &ctx.cli;
     let mut cfg = ctx.cfg.clone();
     let data_base = ctx.data_base.clone();
 
-    let (loaded, disk_image) = match hints::load_mounted_story(&story_path) {
+    // `disk_entry` is which story on the image the browser row stood for
+    // (SQ-0859) — `None` for every loose file and every single-story floppy, and
+    // then this is byte-for-byte the load it always was.
+    let (loaded, disk_image) = match hints::load_mounted_story_from(&story_path, disk_entry) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("babelmap: cannot read '{}': {}", story_path.display(), e);
@@ -908,7 +912,7 @@ pub(crate) fn boot_story(
     // chunk, the fetched IFDB sidecar, then the bundled tables — so the pane
     // names the game the way the list does. The banner heuristic is the tier
     // below it, and the filename stem is the last resort it was meant to be.
-    let meta_title = app::picker::metadata_title(&story_path, &data_base, &ifid, is_scott);
+    let meta_title = app::picker::metadata_title_in(&story_path, &game_dir, &ifid, is_scott);
     state.title =
         app::session::resolve_title(None, meta_title.as_deref(), banner_title.as_deref(), &story_path);
     let story_filename = story_path.file_name().and_then(|n| n.to_str()).unwrap_or("");

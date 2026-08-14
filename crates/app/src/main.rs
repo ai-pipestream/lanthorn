@@ -1486,11 +1486,11 @@ fn main() {
         // the way in (SQ-0789/0791): the browser's launch-options dialog for a
         // library launch, `--pictures` for a single file. Both are empty for an
         // ordinary launch.
-        let (story_path, overrides) = if let Some(dir) = &ctx.library_dir {
+        let (story_path, disk_entry, overrides) = if let Some(dir) = &ctx.library_dir {
             // Library launch: run the picker on the normal screen (the previous
             // game left its alt-screen). Quitting the picker (None) exits.
             match picker_ui::run_story_picker(dir, &ctx.cfg, &ctx.data_base) {
-                Some(p) => (p.path, p.overrides),
+                Some(p) => (p.path, p.disk_entry, p.overrides),
                 None => break,
             }
         } else {
@@ -1514,11 +1514,15 @@ fn main() {
                 }),
                 interpreter_number: None,
             };
-            (path, overrides)
+            // A story file named on the command line opens itself; a disk image
+            // named there opens what it always did, the format's own tiebreak.
+            // Reaching the other games on a compilation is the browser's job
+            // (SQ-0859).
+            (path, None, overrides)
         };
 
         // Per-story build (enters the game alt-screen fresh), then run the loop.
-        let boot = startup::boot_story(&ctx, story_path, &overrides);
+        let boot = startup::boot_story(&ctx, story_path, disk_entry.as_deref(), &overrides);
         match run_event_loop(boot, launched_from_library) {
             RunOutcome::Exit => break,
             // Return-to-library only loops when a library exists; a single-file

@@ -14,7 +14,7 @@
 //! cannot name the same game's directory two ways. IFID is retained elsewhere
 //! for title/hint lookup only.
 
-pub use cli_host::storage::{DiskBuild, story_key_at, story_key_for};
+pub use cli_host::storage::{DiskBuild, story_key_at, story_key_at_from, story_key_for};
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
