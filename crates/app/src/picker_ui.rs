@@ -496,7 +496,10 @@ fn open_launch_options(
     cfg: &app::config::Config,
     data_base: &std::path::Path,
 ) -> app::launch_options::LaunchOptionsState {
-    let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&entry.path));
+    let game_dir = app::storage::game_dir(
+        data_base,
+        &app::storage::story_key_for(&entry.path, entry.meta.disk_build().as_ref()),
+    );
     // What this story already inherits, which is what every "did the user change
     // it?" comparison is against.
     let inherited_pictures = app::styles::read_per_game_pictures(&game_dir);
@@ -918,7 +921,7 @@ pub(crate) fn run_story_picker(
                 sel_changed_at.elapsed(),
                 COVER_DEBOUNCE,
             ) {
-                let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&sel));
+                let game_dir = app::storage::game_dir(data_base, &app::storage::story_key_at(&sel));
                 decoder.request(sel.clone(), game_dir);
                 requested.insert(sel);
             }
@@ -931,7 +934,7 @@ pub(crate) fn run_story_picker(
                 if let Some(entry) = stories.get(idx) {
                     let p = entry.path.clone();
                     if !cover.has(&p) && !requested.contains(&p) {
-                        let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&p));
+                        let game_dir = app::storage::game_dir(data_base, &app::storage::story_key_at(&p));
                         decoder.request(p.clone(), game_dir);
                         requested.insert(p);
                     }
@@ -1138,7 +1141,7 @@ pub(crate) fn run_story_picker(
                             if lo.persist {
                                 let game_dir = app::storage::game_dir(
                                     data_base,
-                                    &app::storage::story_key(&lo.story_path),
+                                    &app::storage::story_key_at(&lo.story_path),
                                 );
                                 if let Err(e) = lo.persist_to(&game_dir) {
                                     // Said after the alternate screen is torn
@@ -1530,7 +1533,7 @@ pub(crate) fn run_story_picker(
                             if lo.persist {
                                 let game_dir = app::storage::game_dir(
                                     data_base,
-                                    &app::storage::story_key(&lo.story_path),
+                                    &app::storage::story_key_at(&lo.story_path),
                                 );
                                 if let Err(e) = lo.persist_to(&game_dir) {
                                     // Said after the alternate screen is torn

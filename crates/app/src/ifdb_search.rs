@@ -827,7 +827,7 @@ fn persist_metadata_and_cover(
         [only] => only.clone(),
         _ => crate::ifid::compute_ifid(&bytes),
     };
-    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(story_path));
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key_at(story_path));
     let cover = crate::fetch_worker::maybe_fetch_cover(covers, &game_dir, story_path, iff);
     crate::fetch_worker::write_fetched(&game_dir, &ifid, crate::fetch_worker::found_meta(iff, cover));
 }
@@ -1330,7 +1330,7 @@ mod tests {
         };
 
         let ifid = crate::ifid::compute_ifid(&std::fs::read(&path).unwrap());
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         let info = crate::story_info::load(&game_dir, &ifid).expect("sidecar written");
         let fetched = info.fetched.expect("a fetched block was written");
         assert_eq!(fetched.title.as_deref(), Some("Deep Space Drifter"));
@@ -1369,7 +1369,7 @@ mod tests {
         };
 
         let ifid = crate::ifid::compute_ifid(&std::fs::read(&path).unwrap());
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         let fetched =
             crate::story_info::load(&game_dir, &ifid).and_then(|i| i.fetched).expect("sidecar written");
         assert_eq!(fetched.title.as_deref(), Some("No Cover Game"));
@@ -1409,7 +1409,7 @@ mod tests {
 
         let computed = crate::ifid::compute_ifid(&std::fs::read(&path).unwrap());
         assert!(!["ZCODE-1-000001", "ZCODE-2-000002"].contains(&computed.as_str()));
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         assert!(
             crate::story_info::load(&game_dir, &computed).and_then(|i| i.fetched).is_some(),
             "sidecar keyed by the computed IFID, which is what resolve_entry will look up"
@@ -1446,7 +1446,7 @@ mod tests {
             _ => panic!("expected Downloaded"),
         };
 
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         assert!(
             crate::story_info::load(&game_dir, "ZCODE-9-999999-ABCD").and_then(|i| i.fetched).is_some(),
             "the sole record IFID is used directly"
@@ -1473,7 +1473,7 @@ mod tests {
             _ => panic!("expected Downloaded"),
         };
 
-        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
         assert!(!game_dir.join("info.json").exists());
         assert!(cover_calls.lock().unwrap().is_empty());
 

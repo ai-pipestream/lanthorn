@@ -5,4 +5,8 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+# SQ-0850: the per-game save key of a story mounted out of a disk image is its
+# release and serial, which means mounting the image to read them. `blorb` takes
+# no external dependencies of its own, so this costs the CLIs nothing.
+blorb = { path = "../blorb" }
 crossterm = "0.29"

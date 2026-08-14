@@ -1075,18 +1075,26 @@ fn maybe_resize(
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+/// The help text, with its two disk-media facts still to be filled in — see
+/// [`help`]. Everything else here is prose about this front-end and belongs in
+/// this file.
 const HELP: &str = "\
 zvm-cli — DOS-style Z-machine player (no map)
 
 Usage: zvm-cli [OPTIONS] <story-file>
 
 Arguments:
-  <story-file>          Z-code story (.z3/.z5/.z8 …, or a .zblorb container),
-                        or an original Amiga release floppy (.adf), whose story
-                        is mounted straight off the disk — and which also sets
-                        the interpreter number to the Amiga's 4 unless -I says
-                        otherwise. Graphical v6 stories are not supported — play
-                        those with babelmap.
+  <story-file>          Z-code story (.z3/.z5/.z8 …, or a .zblorb container), or
+                        an original release floppy — recognised by its contents,
+                        never by its name — whose story is mounted straight off
+                        the disk. Conventionally spelt:
+                          {DISK_EXTENSIONS}
+                        The medium also sets the interpreter number its machine
+                        implies, unless -I says otherwise:
+                          {DISK_MACHINES}
+                        A compilation disk holds several stories; pick one with
+                        --story, and each of them keeps its own saves. Graphical
+                        v6 stories are not supported — play those with babelmap.
 
 Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
@@ -1135,17 +1143,55 @@ Options:
   -h, --help            Print this help and exit
 ";
 
+/// [`HELP`] with its disk-media facts filled in **from `blorb::medium`'s table**
+/// rather than typed out here.
+///
+/// The hand-written version said "an original Amiga release floppy (.adf) …
+/// sets the interpreter number to the Amiga's 4", and had been wrong since
+/// SQ-0833 and SQ-0835 added the DOS and Atari ST rows: the mount had opened
+/// Macintosh, DOS and ST disks for months while the help still promised one
+/// machine. That is the same defect SQ-0849 had just fixed on the TUI's side —
+/// a second list of formats, kept by hand, going quietly stale — so this one is
+/// generated. A new row in `FORMATS` reaches this text with no edit here.
+///
+/// The two substitutions are placed on lines of their own so a longer list
+/// cannot ruin the paragraph's wrapping.
+fn help() -> String {
+    use blorb::medium::DiskImage;
+    /// The indent the two substituted blocks sit at in [`HELP`].
+    const INDENT: &str = "                          ";
+    let exts: Vec<String> = blorb::medium::image_extensions().map(|e| format!(".{e}")).collect();
+    // A machine's number is a DEFAULT the row states; a row may honestly have
+    // none — the IBM PC's is version-dependent (6 for Version 6, 1 otherwise),
+    // so `Fat12Dos` states nothing and the rule already in force stands.
+    let numbered: Vec<String> = DiskImage::all()
+        .filter_map(|d| d.interpreter_number().map(|n| format!("{} {n}", d.label())))
+        .collect();
+    let unnumbered: Vec<&str> =
+        DiskImage::all().filter(|d| d.interpreter_number().is_none()).map(|d| d.label()).collect();
+    let mut machines = numbered.join(", ");
+    if !unnumbered.is_empty() {
+        // Its own line: the clause is long, and one more format must not push
+        // the paragraph past the terminal's width.
+        machines.push_str(&format!(
+            "\n{INDENT}{} states none — whatever default is in force stands",
+            unnumbered.join(", "),
+        ));
+    }
+    HELP.replace("{DISK_EXTENSIONS}", &exts.join(", ")).replace("{DISK_MACHINES}", &machines)
+}
+
 fn main() {
     let argv: Vec<String> = env::args().collect();
-    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
+    if cli_host::handled_common_flags(&argv, &help(), env!("CARGO_PKG_NAME"), buildinfo::LONG) {
         return;
     }
     let args = match parse_args(&argv) {
         Ok(a) => a,
-        Err(e) => cli_host::usage_error(env!("CARGO_PKG_NAME"), &e, HELP),
+        Err(e) => cli_host::usage_error(env!("CARGO_PKG_NAME"), &e, &help()),
     };
     let Some(story_arg) = args.story.clone() else {
-        cli_host::usage_error(env!("CARGO_PKG_NAME"), "no story file given", HELP);
+        cli_host::usage_error(env!("CARGO_PKG_NAME"), "no story file given", &help());
     };
     let story_path = std::path::PathBuf::from(&story_arg);
 
@@ -1199,7 +1245,18 @@ fn main() {
     // Keep the original bytes for Restart.
     let original_bytes = story_bytes.clone();
 
-    let game_dir = cli_host::game_dir(&story_path, args.data_dir.as_deref());
+    // Where this game's saves and sidecars go (SQ-0850). A plain story file is
+    // keyed by its filename as it always was; a story taken off a disk image is
+    // keyed by its OWN release and serial, because `--story` can pick any of the
+    // six games on an ST compilation and the image's filename says nothing about
+    // which. The rule is `cli_host`'s, shared with the TUI, so opening the same
+    // game in either front-end reaches the same directory.
+    let disk_build = medium.and_then(|_| cli_host::DiskBuild::of(&story_bytes));
+    let game_dir = cli_host::game_dir_with_key(
+        &story_path,
+        args.data_dir.as_deref(),
+        &cli_host::story_key_for(&story_path, disk_build.as_ref()),
+    );
     let aux_file = auxiliary::aux_path(&game_dir);
 
     // Restores the terminal on every way out of `main`, including a panic. The

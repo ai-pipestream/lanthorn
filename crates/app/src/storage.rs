@@ -1,26 +1,24 @@
 //! Per-game storage layout (SQ-0284). Saves and sidecars live in a flat
-//! per-game directory `<base>/<story-key>.save/`, keyed by the story's
-//! *filename* (not its IFID). The `.save` suffix keeps the directory from
-//! colliding with the story file when `base` is the story's own directory.
-//! Inside it: `default.aux`, `default.glkvfs`,
+//! per-game directory `<base>/<story-key>.save/`. The `.save` suffix keeps the
+//! directory from colliding with the story file when `base` is the story's own
+//! directory. Inside it: `default.aux`, `default.glkvfs`,
 //! `default.babelmap` (auto/singleton), plus `<slug>.babelmap` / `<slug>.qzl`
 //! (named), and the per-game `style.toml` / `config.toml` overrides (SQ-0346).
-//! IFID is retained elsewhere for title/hint lookup only.
+//!
+//! **The key is the story's filename, unless the story came off a disk image, in
+//! which case it is that story's own release and serial** (SQ-0850). One image
+//! held one game until the corpus grew compilations — `Infocom Compilation 1
+//! (19xx)(-).st` alone carries six — and a filename key gave all six of them one
+//! `default.babelmap` to overwrite in turn. The rule and its reasoning live in
+//! [`cli_host::storage`], which `zvm-cli` reads from too, so the TUI and the CLI
+//! cannot name the same game's directory two ways. IFID is retained elsewhere
+//! for title/hint lookup only.
+
+pub use cli_host::storage::{DiskBuild, story_key_at, story_key_for};
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Per-game directory name: the story file's basename (incl. extension),
-/// sanitized to a filesystem-safe token. Empty -> "game".
-pub fn story_key(story_path: &Path) -> String {
-    let name = story_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let s: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
-        .collect();
-    if s.is_empty() { "game".to_string() } else { s }
-}
 
 /// The per-game directory: `<base>/<story-key>.save/`. The `.save` suffix
 /// keeps the directory from colliding with the story file itself when `base`
@@ -179,12 +177,17 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
+    /// A loose story file — anything that is not a disk image — keys on its
+    /// basename, exactly as it did before SQ-0850. Nobody's saves move.
     #[test]
     fn key_keeps_ext_and_sanitizes() {
-        assert_eq!(story_key(Path::new("/g/Zork1.z5")), "Zork1.z5");
-        assert_ne!(story_key(Path::new("/g/z.z5")), story_key(Path::new("/g/z.gblorb")));
-        assert_eq!(story_key(Path::new("/g/a b?.z5")), "a_b_.z5");
-        assert_eq!(story_key(Path::new("")), "game");
+        assert_eq!(story_key_for(Path::new("/g/Zork1.z5"), None), "Zork1.z5");
+        assert_ne!(
+            story_key_for(Path::new("/g/z.z5"), None),
+            story_key_for(Path::new("/g/z.gblorb"), None)
+        );
+        assert_eq!(story_key_for(Path::new("/g/a b?.z5"), None), "a_b_.z5");
+        assert_eq!(story_key_for(Path::new(""), None), "game");
     }
 
     #[test]
@@ -216,7 +219,7 @@ mod tests {
         let story_path = tmp.join("game.gblorb");
         std::fs::write(&story_path, b"x").unwrap(); // a FILE named game.gblorb
 
-        let dir = game_dir(&tmp, &story_key(&story_path));
+        let dir = game_dir(&tmp, &story_key_at(&story_path));
         assert_eq!(dir, tmp.join("game.gblorb.save"));
         std::fs::create_dir_all(&dir).expect("must not collide with the story file");
         assert!(dir.is_dir());
