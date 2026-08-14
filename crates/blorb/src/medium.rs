@@ -317,9 +317,26 @@ struct Format {
 /// shipped formats were unreachable from the story list. That is exactly the
 /// half-wiring the table exists to make impossible, one column late (SQ-0849).
 ///
-/// Queued: Apple II DOS 3.3 (SQ-0852). It has no reader, so it has no row **or
-/// an extension** — `.dsk` arrives with the code that opens it, in one commit,
-/// which is the whole point of the table.
+/// Queued: the Apple II 5.25-inch press — `shogun_s1..s5.dsk`,
+/// `zork_zero_1..4.dsk`. It has no row **or an extension**, which is the table's
+/// own rule: `.dsk` arrives with the code that opens it, in one commit.
+///
+/// SQ-0852 established what that code would have to be, and it is not a
+/// filesystem reader. There is no DOS 3.3 VTOC and no ProDOS volume directory on
+/// any of the nine images; each is a bare 143,360-byte sector dump in DOS order
+/// carrying the same packed volume [`crate::infocom_packed`] reads off the
+/// `.2mg` presses, reached by de-interleaving to ProDOS block order and then
+/// through a per-disk block map (a ProDOS-style index block: 256 low bytes then
+/// 256 high). Both sets reassemble and verify against their own header
+/// checksums — *Shogun* r311/890510 `$E200`, *Zork Zero* r383/890602 `$6F7F`.
+///
+/// **What blocks the row is this trait, not the format.** [`Volume::mount`]
+/// takes ONE image's bytes, and a 140 KB floppy holds a fifth of *Shogun*: the
+/// index on disk 1 names pages that are physically on the other four files, and
+/// nothing in this API can ask for them. A row today would advertise a format
+/// that mounts nine images and yields nine refusals. What it needs first is a
+/// mount over a SET, which is a change to the seam and belongs to whoever makes
+/// it.
 const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::Adf,
@@ -615,12 +632,23 @@ pub trait Volume: std::fmt::Debug {
     ///
     /// Provided, not required: identifying a story by its bytes is this crate's
     /// policy and there is one copy of it.
+    ///
+    /// **A story need not be a file.** *Arthur* and *Journey* page theirs out of
+    /// a packed Apple volume spread over the disk's `.D1`…`.D5` segments, none
+    /// of which is a story on its own, so no per-file test can find it. That
+    /// container is asked for here rather than in one format's impl because it
+    /// is not a property of any filesystem — the same index addresses the raw
+    /// 5.25-inch pressings, which have no filesystem at all (SQ-0852).
     fn stories(&self) -> Vec<DiskStory> {
-        self.contents()
-            .into_iter()
+        let contents = self.contents();
+        let mut found: Vec<DiskStory> = contents
+            .iter()
             .filter(|(_, bytes)| looks_like_story(bytes))
+            .cloned()
             .map(DiskStory::from)
-            .collect()
+            .collect();
+        found.extend(crate::infocom_packed::story(&contents).map(DiskStory::from));
+        found
     }
 }
 
@@ -1075,7 +1103,9 @@ mod tests {
             assert!(image_extensions().any(|e| e == want), "no row claims {want:?}");
         }
         // …and the queued format does NOT get a name before it gets a reader
-        // (SQ-0852, Apple II DOS 3.3). Nor do the bare-ProDOS spellings, which
+        // (SQ-0852, the Apple II 5.25-inch press — whose container is decoded
+        // and whose row is blocked by `Volume::mount` taking one image at a
+        // time; see [`FORMATS`]). Nor do the bare-ProDOS spellings, which
         // this crate CAN open and no medium in the corpus wears.
         for queued in ["dsk", "po", "hdv"] {
             assert!(

@@ -491,6 +491,12 @@ impl ProDos {
     /// so the largest candidate wins and disk order settles an exact tie, which
     /// is deterministic rather than directory-order luck. A compilation wants
     /// [`ProDos::files`] and a chooser, not this.
+    ///
+    /// **A ProDOS release can hold a story without storing it as a file**, and
+    /// two in this corpus do: *Arthur* and *Journey* page theirs out of the
+    /// segmented `.D1`…`.D5` container, which no per-file test can see. So when
+    /// nothing on the volume IS a story, the volume is asked whether it holds
+    /// one — see [`crate::infocom_packed`], and [`ProDos::packed_story`].
     pub fn story(&self) -> Option<(String, Vec<u8>)> {
         let mut cands: Vec<(String, Vec<u8>)> = self
             .files
@@ -499,17 +505,40 @@ impl ProDos {
             .filter(|(_, b)| looks_like_story(b))
             .collect();
         cands.sort_by_key(|(_, bytes)| std::cmp::Reverse(bytes.len()));
-        cands.into_iter().next()
+        cands.into_iter().next().or_else(|| self.packed_story())
+    }
+
+    /// The story held in a packed Apple volume on this disk, reassembled out of
+    /// its segments — or `None` when the disk carries no such container, or
+    /// carries one whose segments are not all here.
+    ///
+    /// The reader is [`crate::infocom_packed`]; this is only the door to it, and
+    /// it is a separate method because the container is a separate thing. A
+    /// ProDOS volume with a `.D1` on it is still an ordinary ProDOS volume.
+    pub fn packed_story(&self) -> Option<(String, Vec<u8>)> {
+        let files: Vec<(String, Vec<u8>)> =
+            self.files.iter().filter_map(|e| self.read(e).map(|b| (e.path(), b))).collect();
+        crate::infocom_packed::story(&files)
     }
 
     /// The native Infocom picture archive on this volume, with its stored path.
     ///
     /// Identified by parsing, exactly as [`crate::adf::Adf::pictures`] does.
-    /// Nothing in the ProDOS corpus answers: the two graphical releases in it
+    /// Nothing in the ProDOS corpus answers, and the reason is worth stating
+    /// because it changed under SQ-0852: the two graphical releases here
     /// (*Arthur* and *Journey*) keep their artwork inside the same segmented
-    /// `.D1`…`.D5` container as their story, which is not an Infocom picture
-    /// archive. Asked and answered `None` is still the point — every format
-    /// answers every question.
+    /// `.D1`…`.D5` container as their story — not as a file, so no per-file
+    /// parse can reach it — and what is in there is an Infocom picture archive
+    /// of a **fourth flavour**. It wears the familiar 16-byte header, and then
+    /// spends **eight** bytes on a directory record where the Amiga, Macintosh
+    /// and PC spend twelve, fourteen or sixteen: id, width and height as single
+    /// bytes at the Apple's own hi-res dimensions (140×192, 62×72), a flag byte
+    /// and a three-byte offset which is relative to the SEGMENT rather than to
+    /// the archive. [`InfocomPics::parse`] refuses that record size, which is
+    /// the correct answer until a reader for it exists — the codec is not the
+    /// Huffman one and not the LZW one, and it is its own piece of work.
+    /// Asked and answered `None` is still the point — every format answers every
+    /// question.
     pub fn pictures(&self) -> Option<(String, InfocomPics)> {
         let mut cands: Vec<(String, InfocomPics)> = self
             .files
@@ -1209,14 +1238,21 @@ pub(crate) mod tests {
     ///
     /// Both are the ProDOS **8** Apple II press — `INFOCOM.SYSTEM` beside
     /// `BASIC.SYSTEM` — and the game is split across `ARTHUR.D1`…`D5` /
-    /// `JOURNEY.D1`…`D4`, none of which begins with a Z-machine header. So the
-    /// disks mount, list their files, and offer no game, which is exactly what
-    /// lets a caller say "this is the wrong disk".
+    /// `JOURNEY.D1`…`D4`, none of which begins with a Z-machine header. So no
+    /// FILE on either disk is a story, which is what this case pins.
+    ///
+    /// What comes back differs, and SQ-0852 is the difference: *Arthur*'s five
+    /// segments are all here and reassemble into release 63 (see
+    /// [`ProDos::packed_story`] and [`crate::infocom_packed`], where that is
+    /// measured), while `Journey.2mg` declares five segments and carries four,
+    /// so 92 of its 552 pages are not on the image and it still answers `None`.
+    /// **Two disks that look identical to every per-file test, and only one
+    /// holds a game.**
     #[test]
-    fn real_apple_ii_segmented_releases_mount_and_offer_no_game() {
-        for (fixture, volume, files, segments) in [
-            ("Arthur Quest 4 Excalibur.2mg", "ARTHUR.3.5", 11, &["ARTHUR.1/ARTHUR.D1"][..]),
-            ("Journey.2mg", "JOURNEY", 9, &["JOURNEY.D1", "JOURNEY.D4"][..]),
+    fn real_apple_ii_segmented_releases_hold_no_story_file() {
+        for (fixture, volume, files, segments, packed) in [
+            ("Arthur Quest 4 Excalibur.2mg", "ARTHUR.3.5", 11, &["ARTHUR.1/ARTHUR.D1"][..], true),
+            ("Journey.2mg", "JOURNEY", 9, &["JOURNEY.D1", "JOURNEY.D4"][..], false),
         ] {
             let Some(bytes) = read_fixture(fixture) else { continue };
             assert!(ProDos::looks_like_prodos(&bytes), "{fixture}");
@@ -1234,7 +1270,26 @@ pub(crate) mod tests {
                     "{fixture}: {segment} is a segment of a container, not a story image"
                 );
             }
-            assert_eq!(fs.story(), None, "{fixture}: no whole story file on it");
+            assert!(
+                fs.files().iter().filter_map(|e| fs.read(e)).all(|b| !looks_like_story(&b)),
+                "{fixture}: no file on this volume is a story"
+            );
+            assert_eq!(
+                fs.packed_story().is_some(),
+                packed,
+                "{fixture}: the packed volume reassembles = {packed}"
+            );
+            // `story()` therefore answers with the packed volume or with nothing,
+            // and never with a file.
+            assert_eq!(fs.story().is_some(), packed, "{fixture}");
+            if packed {
+                let (name, story) = fs.story().expect("Arthur reassembles");
+                assert_eq!(name, "ARTHUR.1/ARTHUR.D1");
+                assert_eq!((story[0], u16::from_be_bytes([story[2], story[3]])), (6, 63));
+                assert_eq!(&story[0x12..0x18], b"890622");
+            }
+            // The artwork is in that container too, and in a flavour
+            // `InfocomPics::parse` refuses — see `ProDos::pictures`.
             assert!(fs.pictures().is_none(), "{fixture}");
         }
     }

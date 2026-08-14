@@ -166,6 +166,25 @@ const MEDIA: &[Medium] = &[
     Medium { title: "Trinity (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 5 of 7).2mg", image: Some(DiskImage::ProDos), version: 4, release: 12, serial: "860926" },
     Medium { title: "Sherlock (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 6 of 7).2mg", image: Some(DiskImage::ProDos), version: 5, release: 21, serial: "871214" },
     Medium { title: "Wishbringer (Apple IIgs)", file: "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 7 of 7).2mg", image: Some(DiskImage::ProDos), version: 3, release: 69, serial: "850920" },
+    // ── The packed Apple volume (SQ-0852) ────────────────────────────────────
+    //
+    // **The one row whose story is not a file.** *Arthur*'s Apple press pages
+    // its story out of five opaque segments (`ARTHUR.1/ARTHUR.D1` …
+    // `ARTHUR.5/ARTHUR.D5`) by 512-byte block; no file on the volume IS a story
+    // and the reassembly is `blorb::infocom_packed`'s. That it lands here, in
+    // the table every other medium is pinned in, is the point — a packed volume
+    // is a medium like any other once it is read.
+    //
+    // r63/890622, a THIRD Arthur: the Amiga floppy is r54/890606 and the bare
+    // file r74/890714, so the project's "a disk image is a different release"
+    // rule holds on a fourth machine. Measured through
+    // `app::hints::load_mounted_story` on 2026-08-14, like every row above.
+    //
+    // *Journey*'s Apple press has no row because it has no story to pin:
+    // `Journey.2mg` declares five segments and carries four, so 92 of its 552
+    // pages are not on the image and `blorb::infocom_packed` refuses it rather
+    // than handing back a truncated game. `blorb::prodos` pins that refusal.
+    Medium { title: "Arthur (Apple II, packed)", file: "Arthur Quest 4 Excalibur.2mg", image: Some(DiskImage::ProDos), version: 6, release: 63, serial: "890622" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -218,6 +237,12 @@ const V6_FRAMES: &[V6Frame] = &[
     V6Frame { file: "shogun-r322-s890706.z6", turns: 12, prose_window: 0, box_px: (47, 33, 548, 368) },
     V6Frame { file: "Arthur - The Quest for Excalibur.adf", turns: 12, prose_window: 0, box_px: (1, 1, 640, 400) },
     V6Frame { file: "arthur-r74-s890714.z6", turns: 12, prose_window: 0, box_px: (1, 1, 640, 400) },
+    // …and Arthur's PACKED Apple press, reassembled out of five segments. This
+    // row is the real-game smoke for `blorb::infocom_packed`: a story whose
+    // header checksum is exact could still be a story the app cannot drive, and
+    // twelve turns of a reassembled r63 laying out the same window its two
+    // siblings do is the answer to that (SQ-0852).
+    V6Frame { file: "Arthur Quest 4 Excalibur.2mg", turns: 12, prose_window: 0, box_px: (1, 1, 640, 400) },
 ];
 
 /// Media whose game narrates its own release, and the words it uses. The
@@ -609,12 +634,16 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     );
 
     // …and `.2mg` moved from that list to this one in the same commit as its
-    // reader (SQ-0836), which is the whole point of the extension column. The
-    // two ProDOS images that are still absent are absent for the right reason:
-    // `Arthur Quest 4 Excalibur.2mg` and `Journey.2mg` are the segmented Apple
-    // II press and no whole story comes out of them, so the pre-filter opened
-    // them and the mount declined to offer one. The extension is a pre-filter,
-    // not a verdict.
+    // reader (SQ-0836), which is the whole point of the extension column.
+    //
+    // The two segmented Apple presses were BOTH absent from the picker until
+    // SQ-0852, because no file on either volume is a story. One of them is here
+    // now and the other still is not, and the difference is the finding: *Arthur*
+    // reassembles out of its five segments and is offered like any other medium,
+    // while `Journey.2mg` declares five segments and carries four, so 92 of its
+    // 552 pages are not on the image and `blorb::infocom_packed` refuses it
+    // rather than offering four fifths of a game. The extension is a pre-filter,
+    // not a verdict — and neither is the mount's silence.
     let dir_has_2mg = std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|e| {
         e.path().extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("2mg"))
             == Some(true)
@@ -632,12 +661,18 @@ fn every_release_medium_is_offered_by_the_story_picker() {
         dir_has_2mg,
         "ProDOS media are in the directory and the picker offered none of them"
     );
-    for absent in ["Arthur Quest 4 Excalibur.2mg", "Journey.2mg"] {
+    let named = |n: &str| listed_2mg.iter().any(|l| *l == std::ffi::OsStr::new(n));
+    if dir_has_2mg && stories_dir().join("Arthur Quest 4 Excalibur.2mg").exists() {
         assert!(
-            !listed_2mg.iter().any(|n| *n == std::ffi::OsStr::new(absent)),
-            "{absent} carries no whole story file and must not be offered as one"
+            named("Arthur Quest 4 Excalibur.2mg"),
+            "the packed Apple volume reassembles into a story and must be offered as one"
         );
     }
+    assert!(
+        !named("Journey.2mg"),
+        "Journey.2mg is missing its fifth segment, so no whole story comes out of it \
+         and it must not be offered as if one did"
+    );
 }
 
 /// A `.blb` beside a story is artwork, never a third build — so "which release"
