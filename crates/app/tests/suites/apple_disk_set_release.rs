@@ -162,12 +162,26 @@ fn a_press_is_one_row_in_the_browser_and_the_first_volume_keeps_it() {
         assert!(!dsk.contains(&absent.to_string()), "{absent} is a second row for one game");
     }
     if SETS.iter().all(|(_, v, ..)| complete(v).is_some()) {
-        // Alphabetical, which is the scan's own order — three presses, three
-        // rows, and fourteen floppies folded into them.
+        // By title, which is the scan's own order — three presses, three rows,
+        // and fourteen floppies folded into them.
+        //
+        // …and one row that is not a press at all (SQ-0868). *Planetfall*'s
+        // retail disk is a RAW self-booting `.dsk` — one whole game on one
+        // floppy, no filesystem, a second format wearing this spelling — so it
+        // is a fourth row and must never be a fifteenth floppy folded into
+        // somebody else's set. Its stem carries a digit run (`r29`), which is
+        // exactly what would make a careless set rule swallow it;
+        // `app::disk_set`'s unit tests pin the refusal and this pins the
+        // consequence a person would actually see.
         assert_eq!(
             dsk,
-            ["journey_s1.dsk", "shogun_s1.dsk", "zork_zero_1.dsk"],
-            "three presses, three rows"
+            [
+                "journey_s1.dsk",
+                "Planetfall r29 (clean copy from retail disk).dsk",
+                "shogun_s1.dsk",
+                "zork_zero_1.dsk",
+            ],
+            "three presses and one lone raw disk, four rows"
         );
     }
 }

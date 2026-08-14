@@ -66,6 +66,7 @@
 use crate::adf::{Adf, looks_like_story};
 use crate::fat12::Fat12;
 use crate::hfs::Hfs;
+use crate::infocom_boot::InfocomBoot;
 use crate::infocom_pics::InfocomPics;
 use crate::prodos::ProDos;
 
@@ -211,6 +212,18 @@ pub enum DiskImage {
     /// variant's row in [`FORMATS`] for why
     /// [`DiskImage::interpreter_number`] nevertheless answers, and with what.
     ProDos,
+    /// A **raw self-booting Apple II 5.25-inch disk** — no filesystem at all,
+    /// story sectors in DOS 3.3 logical order, conventionally `.dsk` like the
+    /// ProDOS press it sits beside (SQ-0868).
+    ///
+    /// The one format here whose bytes are **not a volume**. Every other row
+    /// names a filesystem and delegates to a reader for it; this one has nothing
+    /// to enumerate, and the story is found by de-interleaving the image and
+    /// verifying a run of sectors against the story's own header checksum. See
+    /// [`crate::infocom_boot`] for the measurement, and for what keeps this sniff
+    /// disjoint from [`DiskImage::ProDos`]'s when the two share a size, a sector
+    /// order and a spelling.
+    InfocomBootDisk,
 }
 
 impl DiskImage {
@@ -220,6 +233,15 @@ impl DiskImage {
     /// `DOS` boot block and HFS by a volume signature at a fixed offset (bare, or
     /// past a DiskCopy 4.2 header) — so the order of [`FORMATS`] is a formality
     /// rather than a precedence.
+    ///
+    /// **That promise survived a second format arriving on the same medium**
+    /// (SQ-0868). [`DiskImage::ProDos`] and [`DiskImage::InfocomBootDisk`] are
+    /// both 143,360-byte Apple II 5.25-inch dumps in the drive's sector order,
+    /// both spelled `.dsk`, and the difference between them is entirely in what
+    /// is inside — so "a fixed offset" was not available to keep them apart.
+    /// They are kept apart by the boot-disk sniff declining a ProDOS volume
+    /// outright, which is a construction and not an ordering: swap the two rows
+    /// and every image in the corpus still gets the same answer.
     ///
     /// Whatever this recognises, [`MountedDisk::mount`] opens: both walk the same
     /// table, so the two cannot drift apart.
@@ -290,9 +312,17 @@ impl DiskImage {
 /// order — the whole census, for a caller that has a filename and no bytes yet.
 ///
 /// This is what a directory scan pre-filters on; see [`DiskImage::extensions`]
-/// for what it is and is not allowed to mean. The formats' sets are disjoint
-/// today, and a caller must not assume it: the union is what it wants, because
-/// which row claimed a spelling is [`DiskImage::detect`]'s business.
+/// for what it is and is not allowed to mean. The union is what a caller wants,
+/// because which row claimed a spelling is [`DiskImage::detect`]'s business.
+///
+/// **The rows' sets are not disjoint, and since SQ-0868 the corpus proves it.**
+/// `.dsk` is claimed by [`DiskImage::ProDos`] and by
+/// [`DiskImage::InfocomBootDisk`], because the Apple II 5.25-inch press wears
+/// one spelling and is two different formats underneath — *Shogun*'s floppies
+/// are ProDOS volumes and *Planetfall*'s retail disk has no filesystem on it at
+/// all. This function therefore repeats a spelling, which costs a pre-filter
+/// nothing (it is a membership test) and would cost a name-to-format lookup
+/// everything — which is why there is no such lookup.
 pub fn image_extensions() -> impl Iterator<Item = &'static str> {
     FORMATS.iter().flat_map(|f| f.extensions.iter().copied())
 }
@@ -527,6 +557,45 @@ const FORMATS: &[Format] = &[
         extensions: &["2mg", "dsk", "po"],
         looks_like: <ProDos as Volume>::looks_like,
         mount: mount_boxed::<ProDos>,
+    },
+    Format {
+        image: DiskImage::InfocomBootDisk,
+        // "Boot", because self-booting is exactly what distinguishes it: the row
+        // above is a disk you mount, this is a disk you start. Not "DOS 3.3" —
+        // the sector ORDER is DOS 3.3's and there is no DOS 3.3 filesystem
+        // anywhere on it, and naming it after a filesystem it does not have is
+        // wrong in the one way that matters here.
+        label: "Boot",
+        // **10, the Apple IIgs — the same answer as the ProDOS row above, and
+        // for the reason that row gives.** SQ-0857 settled that declining is not
+        // neutral on an Apple II: `None` lands on 1 (DECSystem-20), so it does
+        // not leave the machine unnamed, it names it something else. That
+        // argument does not care which filesystem the disk has, and neither does
+        // ZMSD §11.1.3's question — *"An interpreter should choose the
+        // interpreter number most suitable for the machine it will run on"* — so
+        // two Apple II rows answering two different numbers would be saying the
+        // number is a property of the DISK, which is precisely the reading
+        // SQ-0857 rejected out of Infocom's own YZIP (it detects the machine at
+        // boot; see [`APPLE_IIGS_INTERPRETER_NUMBER`]).
+        //
+        // **Nothing observable rides on it here**, and that is worth stating
+        // plainly rather than leaning on. Byte `$1E` carries no meaning before
+        // Version 4 — the same fact that has Infocom's own Version 3 Atari ST
+        // build leave it zero and comment it "(UNUSED)", quoted at
+        // [`ATARI_ST_INTERPRETER_NUMBER`] — and the one disk of this kind in the
+        // corpus is *Planetfall*, a Version 3 game. So this row is consistency
+        // with its neighbour, not a claim about *Planetfall*; a Version 4 or 5
+        // raw disk arriving later inherits the Apple II answer already argued
+        // rather than a fresh guess.
+        interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
+        // The same spelling as the ProDOS row, which the census handles by being
+        // a UNION: a directory scan pre-filters on `.dsk` and
+        // [`DiskImage::detect`] then says which of the two formats the bytes are.
+        // The two Apple II 5.25-inch presses in `stories/` are both `.dsk` and
+        // are different formats, so this is the case that column was built for.
+        extensions: &["dsk"],
+        looks_like: <InfocomBoot as Volume>::looks_like,
+        mount: mount_boxed::<InfocomBoot>,
     },
 ];
 
@@ -852,6 +921,48 @@ impl Volume for ProDos {
     }
 }
 
+/// **The one impl here that is not a filesystem reader** (SQ-0868). A raw
+/// self-booting disk has no volume, so most of this trait's questions have a
+/// short answer — but they all have one, which is the point of the trait: the
+/// front-ends ask a disk what it holds and never ask what kind of disk it is.
+impl Volume for InfocomBoot {
+    fn looks_like(raw: &[u8]) -> bool {
+        InfocomBoot::looks_like_boot_disk(raw)
+    }
+
+    fn mount(raw: Vec<u8>) -> Option<InfocomBoot> {
+        InfocomBoot::mount(raw).ok()
+    }
+
+    fn volume_name(&self) -> Option<&str> {
+        // There is no volume, so there is no volume name. `None` and not an
+        // invented one — the same rule the AmigaDOS impl above follows for a name
+        // its reader does not report.
+        None
+    }
+
+    fn file_count(&self) -> usize {
+        InfocomBoot::file_count(self)
+    }
+
+    fn contents(&self) -> Vec<(String, Vec<u8>)> {
+        InfocomBoot::contents(self)
+    }
+
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        // Case-insensitive on the only name this medium has: where the story is.
+        InfocomBoot::read_named(self, name)
+    }
+
+    fn story(&self) -> Option<DiskStory> {
+        InfocomBoot::story(self).map(DiskStory::from)
+    }
+
+    fn pictures(&self) -> Option<DiskArt> {
+        InfocomBoot::pictures(self).map(DiskArt::from)
+    }
+}
+
 // ── A mounted disk ────────────────────────────────────────────────────────────
 
 /// An open release disk, whatever format it turned out to be.
@@ -1161,6 +1272,37 @@ mod tests {
                 crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
             }
             DiskImage::ProDos => crate::prodos::tests::sample_disk(&files),
+            // No `files`, because there is nowhere to put them: a raw
+            // self-booting disk has no directory at all. See
+            // [`sample_entries`] for what the tests below do about that.
+            DiskImage::InfocomBootDisk => crate::infocom_boot::tests::sample_disk(&story),
+        }
+    }
+
+    /// What [`sample_of`]'s disk holds: the name its format gives the story, and
+    /// the other files beside it.
+    ///
+    /// **Exhaustive on purpose, like [`sample_of`]** — and it exists because
+    /// SQ-0868 added the first format that is not a filesystem. Every row before
+    /// it names files, so the tests below could simply assume a `Readme` and a
+    /// `STORY.DAT`; [`DiskImage::InfocomBootDisk`] has no directory to hold
+    /// either, and the honest thing is for the census to say so once rather than
+    /// for a `if image != …` to appear in four tests.
+    ///
+    /// What is NOT weakened by this: every format is still detected, mounted,
+    /// asked for its label, its interpreter number, its stories, its artwork and
+    /// its listing, and every name it lists is still read back. Only the
+    /// *contents of the sample* differ, because only they can.
+    fn sample_entries(image: DiskImage) -> (&'static str, &'static [&'static str]) {
+        match image {
+            DiskImage::Adf
+            | DiskImage::Hfs
+            | DiskImage::Fat12Dos
+            | DiskImage::Fat12AtariSt
+            | DiskImage::ProDos => ("STORY.DAT", &["Readme"]),
+            // Where the story is, which is the only thing this medium knows
+            // about it. `crate::infocom_boot::InfocomBoot::entry_name`.
+            DiskImage::InfocomBootDisk => ("T3/S0", &[]),
         }
     }
 
@@ -1179,6 +1321,7 @@ mod tests {
             DiskImage::Fat12Dos,
             DiskImage::Fat12AtariSt,
             DiskImage::ProDos,
+            DiskImage::InfocomBootDisk,
         ];
         for image in census {
             let (label, interpreter) = match image {
@@ -1201,6 +1344,13 @@ mod tests {
                 // YZIP will run on, and `--interpreter` still reaches the
                 // other two.
                 DiskImage::ProDos => ("ProDOS", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
+                // …and the raw self-booting press answers **the same number as
+                // the ProDOS row**, because §11.1.3's question is which machine
+                // the interpreter runs on and not which filesystem the disk has.
+                // Two Apple II rows disagreeing would say the number is a
+                // property of the disk, which is exactly what SQ-0857 disproved
+                // out of Infocom's own YZIP. Argued in full at the row.
+                DiskImage::InfocomBootDisk => ("Boot", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
@@ -1238,7 +1388,6 @@ mod tests {
                     !e.is_empty() && !e.starts_with('.') && *e == e.to_ascii_lowercase(),
                     "{image:?}: {e:?} must be lowercase and dotless"
                 );
-                assert!(!union.contains(e), "{image:?}: {e:?} is claimed by two rows");
                 union.push(e);
             }
         }
@@ -1247,6 +1396,16 @@ mod tests {
             union,
             "the census is the rows' extensions and nothing else"
         );
+        // **A spelling MAY be claimed by more than one row**, and exactly one is
+        // (SQ-0868): `.dsk` is the Apple II 5.25-inch press, and that press is a
+        // ProDOS volume on nine disks in `stories/` and a raw self-booting disk
+        // on the tenth. This assertion used to forbid the overlap outright; what
+        // it forbids now is an *unnoticed* one, because a second shared spelling
+        // is a claim about the corpus that wants writing down.
+        let mut shared: Vec<&str> =
+            union.iter().filter(|e| union.iter().filter(|o| o == e).count() > 1).copied().collect();
+        shared.dedup();
+        assert_eq!(shared, ["dsk"], "an extension is shared by two rows and undocumented");
         // The spellings the corpus in `stories/` actually uses, named outright
         // so a row losing one fails here rather than in the picker.
         // `dsk` joined them in SQ-0864, on the ProDOS row: the fourteen
@@ -1309,13 +1468,14 @@ mod tests {
             assert_eq!(disk.format(), image);
             assert_eq!(disk.label(), image.label());
             assert_eq!(disk.interpreter_number(), image.interpreter_number());
-            assert_eq!(disk.file_count(), 2, "{image:?} lists what it mounted");
+            let (story_name, others) = sample_entries(image);
+            assert_eq!(disk.file_count(), 1 + others.len(), "{image:?} lists what it mounted");
 
             // Identified by CONTENT: `Readme` is not a story and `STORY.DAT`
             // is, and no format is allowed to decide that by name.
             let stories = disk.stories();
             assert_eq!(stories.len(), 1, "{image:?} found {stories:?}");
-            assert_eq!(stories[0].name, "STORY.DAT", "{image:?}");
+            assert_eq!(stories[0].name, story_name, "{image:?}");
             assert_eq!(stories[0].bytes, fake_story(), "{image:?} reads it byte-exact");
             assert_eq!(disk.story().map(|s| s.bytes), Some(fake_story()), "{image:?}");
 
@@ -1337,11 +1497,14 @@ mod tests {
             let contents = disk.contents();
             let names: Vec<&str> = contents.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(names.len(), disk.file_count(), "{image:?} lists what it counted");
-            assert!(names.contains(&"Readme"), "{image:?}: {names:?}");
-            assert!(names.contains(&"STORY.DAT"), "{image:?}: {names:?}");
-            // Bytes, not just names — this is what a caller identifies by.
-            let readme = contents.iter().find(|(n, _)| n == "Readme").expect("present");
-            assert_eq!(readme.1, b"just a text file", "{image:?}");
+            let (story_name, others) = sample_entries(image);
+            assert!(names.contains(&story_name), "{image:?}: {names:?}");
+            for other in others {
+                assert!(names.contains(other), "{image:?}: {names:?}");
+                // Bytes, not just names — this is what a caller identifies by.
+                let file = contents.iter().find(|(n, _)| n == other).expect("present");
+                assert_eq!(file.1, b"just a text file", "{image:?}");
+            }
             // …and the story is in the listing too, unfiltered: deciding what a
             // file IS belongs to the caller, not to the mount.
             assert!(contents.iter().any(|(_, b)| *b == fake_story()), "{image:?}");
@@ -1446,9 +1609,16 @@ mod tests {
         assert!(disk.read_named("STORY.DAT").is_some());
     }
 
-    /// A boot disk carries files and no game, on any format. The mount succeeds
-    /// — that is what lets a caller say "is this the boot disk?" instead of
-    /// "corrupt story file".
+    /// A boot disk carries files and no game, on any format that has files. The
+    /// mount succeeds — that is what lets a caller say "is this the boot disk?"
+    /// instead of "corrupt story file".
+    ///
+    /// **[`DiskImage::InfocomBootDisk`] is excluded, and it is the case the test
+    /// is named after** (SQ-0868). A raw self-booting disk has no filesystem, so
+    /// its identity IS the story on it: "a disk of this format with files and no
+    /// game" is not a thing that can be constructed, because without the game
+    /// there is nothing left to recognise. It is refused as not-a-disk-image
+    /// rather than mounted empty, which is the right answer and a different one.
     #[test]
     fn a_disk_with_no_game_mounts_and_offers_nothing() {
         for image in DiskImage::all() {
@@ -1464,6 +1634,13 @@ mod tests {
                     crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
                 }
                 DiskImage::ProDos => crate::prodos::tests::sample_disk(&files),
+                DiskImage::InfocomBootDisk => {
+                    // Said as an assertion rather than as a `continue`, so the
+                    // exclusion is a claim this test checks and not a hole in it.
+                    let blank = vec![0u8; crate::dos_order::DOS_ORDER_LEN];
+                    assert_eq!(DiskImage::detect(&blank), None, "no story, no boot disk");
+                    continue;
+                }
             };
             let disk = MountedDisk::mount(raw).expect("a boot disk still mounts");
             assert_eq!(disk.file_count(), 2, "{image:?}");
@@ -1538,6 +1715,13 @@ mod tests {
                     5,
                     false,
                 ),
+                // **The first non-v6 Apple disk in the corpus** (SQ-0868), and
+                // the only one here whose story has no stored name at all — the
+                // medium has no directory, so the mount reports where the story
+                // is instead. *Planetfall* release 29, serial 840118.
+                DiskImage::InfocomBootDisk => {
+                    ("Planetfall r29 (clean copy from retail disk).dsk", "T3/S0", 3, false)
+                }
             };
             let path =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(fixture);

@@ -50,8 +50,17 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   babelmap any one of *Shogun*'s five floppies, *Journey*'s five or *Zork Zero*'s
   four and the whole game opens, because a release is not a platter. And `.po`,
   the same 800 KB volume with no wrapper at all.
+- **Apple II raw self-booting disks** — also `.dsk`, also 143,360 bytes, and not
+  a filesystem at all. Infocom's earlier retail floppies boot their own loader
+  and read the story off known tracks with their own RWTS: no ProDOS volume
+  directory in any sector order, no DOS 3.3 VTOC, nothing to enumerate. babelmap
+  finds the game by putting the sectors into DOS 3.3 *logical* order and then
+  looking for a run of them that verifies against the story's own header
+  checksum — which is an oracle a wrong guess cannot pass. `stories/`'s
+  *Planetfall* retail disk is release 29, serial 840118, 426 sectors starting at
+  track 3.
 
-Those last five are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
+Those last six are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
 titles circulate in their native form. Hand babelmap one — `babelmap "Zork
 Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem (both OFS and FFS),
@@ -311,6 +320,28 @@ uses the same reader and announces the same Apple IIgs. `.dsk` became a spelling
 that row claims, and the picker, the launch dialog and the CLI's menu gained it
 with nothing edited anywhere.
 
+And then a `.dsk` turned up that really did need a row. *Planetfall*'s retail
+disk is the same 143,360 bytes in the same sector order, and there is no
+filesystem under it in any order — no ProDOS volume directory, no DOS 3.3 VTOC,
+just Infocom's own loader and 426 sectors of Z-code it reads with its own RWTS.
+Nothing comes out the other side of a de-interleave here the way a ProDOS volume
+does, so this one is a format of its own, and it is the only one babelmap reads
+whose bytes are not a volume at all. What finds the game is the **story's own
+header checksum**: put the sectors into DOS 3.3 logical order, walk every sector
+boundary, and take the run that verifies. Under the two wrong orders the same
+disk yields a story that is right about its version, its release and its serial
+and wrong about its checksum — `$529D` and `$97D5` against the `$842E` the header
+declares — which is exactly the trap a signature-matching reader walks into and a
+checksum cannot.
+
+Two rows now claim `.dsk`, and they stay apart by construction rather than by
+table order: a raw disk is one only when the image is *not* a ProDOS volume. And
+the format matters past one game. `zvm-cli` declines Version 6 by design, and
+every Apple release above — Arthur, Journey, Shogun, Zork Zero — is v6, so until
+this disk arrived, "babelmap reads Apple II media" had never once meant "and
+plays a single-game Apple disk from the command line". *Planetfall* is v3. It
+boots, prints its banner and names release 29.
+
 What was genuinely missing was not a format but a **set**. The story is paged
 across every floppy in the release and no single one carries a game, so opening a
 disk had to become a question a release could answer. It did, format-neutrally:
@@ -403,6 +434,7 @@ volume opens with:
 | `Shogun.po` | — a DiskCopy 4.2 image under a ProDOS name; declined, and its game is on the five floppies above |
 | `zork_zero_1.dsk`…`_4` (5.25") | Zork Zero, v6 release 383, serial 890602 — packed across four |
 | `ZorkZero.po` (bare, 3.5") | Zork Zero, v6 release 383, serial 890602 — packed across four subdirectories |
+| `Planetfall r29 …dsk` (5.25", raw) | Planetfall, v3 release 29, serial 840118 — no filesystem; 426 sectors from track 3 |
 
 Each of volumes 2–7 carries three to seven games; the one listed is the largest,
 which is what opening the disk gives you when nothing on it wears a conventional
