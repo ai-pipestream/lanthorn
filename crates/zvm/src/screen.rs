@@ -956,18 +956,12 @@ impl Default for ScreenState {
 /// > not wish to handle this behaviour at all should avoid using the Amiga
 /// > interpreter number when running Infocom's Version 6 games."
 ///
-/// Every term of the test is read back out of the HEADER rather than held as a
-/// field, which is what makes it survive a `@restart`, a Quetzal `@restore` and
-/// a host Save State without anybody carrying it:
-///
-/// - **Version 6** — the rule is scoped to a "Version 6 interpreter", and below
-///   v6 there is one screen pair anyway.
-/// - **Interpreter number 4** ($1E) — ZMSD §11.1.3's Amiga. This is the byte the
-///   story reads to decide it is on an Amiga, so it is exactly the condition the
-///   standard names.
-/// - **Colours available** (Flags 1 bit 0, §8.3.2/§8.3.3) — with
-///   `honor_game_colours` off babelmap declares itself colourless, the host theme
-///   owns the screen, and there is no pair for the windows to share.
+/// The test is [`machine_rule`] asked of
+/// [`MachineProfile::global_colour_pens`](crate::interpreter::MachineProfile::global_colour_pens),
+/// which the Amiga row sets and no other does — Version 6, colours available,
+/// and `$1E` naming the machine, every term read back out of the HEADER so the
+/// rule survives a `@restart`, a `@restore` and a host Save State without anybody
+/// carrying it.
 ///
 /// **"When running Infocom's games."** §8.3.1.1 asks the same question of the
 /// palette knob — an interpreter may substitute its own colour values "if and
@@ -982,15 +976,33 @@ impl Default for ScreenState {
 /// escape hatch it offers is to "avoid using the Amiga interpreter number", so
 /// choosing it *is* the opt-in.
 pub fn amiga_global_colour_pair(mem: &Memory) -> bool {
-    mem.version() == 6
-        && mem.read_byte(0x1E) == AMIGA_INTERPRETER_NUMBER
-        && mem.read_byte(0x01) & 0x01 != 0
+    machine_rule(mem, |m| m.global_colour_pens)
 }
 
-/// ZMSD §11.1.3's interpreter number for the Amiga. (The app's
-/// `InterpreterProfile` names the same constant for the header it writes; this
-/// one is what the screen model tests the header against.)
-pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
+/// The shared shape of every per-machine v6 screen rule: Version 6, colours
+/// available, and the machine header `$1E` names claims the rule (SQ-0872).
+///
+/// Each term is read back out of the HEADER rather than held as a field, which
+/// is what makes the rules survive a `@restart`, a Quetzal `@restore` and a host
+/// Save State without anybody carrying them:
+///
+/// - **Version 6** — every rule here is scoped to a Version 6 screen, and below
+///   v6 there is one screen pair anyway.
+/// - **The machine** ($1E) — the byte the story reads to decide what it is
+///   running on, so it is exactly the condition the standard names. `claims`
+///   picks which member of [`crate::interpreter::MachineProfile`] is being asked
+///   about; a number no row models answers `false`, never a substitute.
+/// - **Colours available** (Flags 1 bit 0, §8.3.2/§8.3.3) — with
+///   `honor_game_colours` off babelmap declares itself colourless, the host theme
+///   owns the screen, and there is no pair for the windows to share.
+fn machine_rule(mem: &Memory, claims: fn(&crate::interpreter::MachineProfile) -> bool) -> bool {
+    mem.version() == 6
+        && mem.read_byte(0x01) & 0x01 != 0
+        && crate::interpreter::machine_of(mem).is_some_and(claims)
+}
+
+/// ZMSD §11.1.3's interpreter number for the Amiga, from the machine table.
+pub use crate::interpreter::AMIGA_INTERPRETER_NUMBER;
 
 /// The pair of pens the whole screen is painted with under
 /// [`amiga_global_colour_pair`], as `(foreground, background)`; `None` when the
@@ -998,10 +1010,10 @@ pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
 ///
 /// This is the pair the machine BOOTS with, and — because Infocom's window-0 gate
 /// means Journey's only `set_colour` never lands — the pair Journey is played on:
-/// header bytes `$2D`/`$2C`, which under [`InterpreterProfile::Amiga`] carry
-/// `DEF_FORE 9` (white) over `DEF_BACK 12` (**dark** grey `$444`), read out of the
-/// release floppies' own interpreters rather than out of `amiga/yzip.h` — see
-/// `app::interpreter::AMIGA_DEFAULT_BACKGROUND` for the disassembly (SQ-0822).
+/// header bytes `$2D`/`$2C`, which under the Amiga row carry `DEF_FORE 9` (white)
+/// over `DEF_BACK 12` (**dark** grey `$444`), read out of the release floppies'
+/// own interpreters rather than out of `amiga/yzip.h` — see
+/// [`crate::interpreter::AMIGA_DEFAULT_BACKGROUND`] for the disassembly (SQ-0822).
 ///
 /// **Why the host needs it, and why §8.3.3 alone was not enough.** Those two
 /// bytes are what §8.3.3 tells the *story* about the interpreter's defaults, and
@@ -1016,8 +1028,51 @@ pub const AMIGA_INTERPRETER_NUMBER: u8 = 4;
 /// moves the pens, and the model carries the moved pair on the window itself
 /// (Zork Zero's black-on-light-grey page). This is the ground beneath that.
 pub fn amiga_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
-    amiga_global_colour_pair(mem)
-        .then(|| (ZColour::Standard(mem.read_byte(0x2D)), ZColour::Standard(mem.read_byte(0x2C))))
+    amiga_global_colour_pair(mem).then(|| crate::interpreter::header_pair(mem))
+}
+
+/// The MACHINE's own screen pair for a Version 6 frame, `(foreground,
+/// background)` — the ground every window that names no colour of its own is read
+/// on — or `None` on a machine that has no such thing (SQ-0846, SQ-0872).
+///
+/// Two machines answer, and they answer for the same reason: their §8.3.3 default
+/// colours are not advice about a terminal, they are the screen.
+/// [`MachineProfile::v6_screen_page`](crate::interpreter::MachineProfile::v6_screen_page)
+/// is the flag, and both pairs arrive here the same way — through header bytes
+/// `$2D`/`$2C`, which is where §8.3.3 already had the interpreter publishing them
+/// to the story.
+///
+/// - The **Amiga** (interpreter 4), for §8.3's own reason: one pair of pens for
+///   the whole screen, shared and unmoving. [`amiga_screen_pair`] carries the full
+///   rule, because on that machine the pens also govern `set_colour`; this is the
+///   strictly weaker half, and the Amiga answers both.
+/// - The **Macintosh** (interpreter 3), for a plainer one: a white page under
+///   black ink was what a Mac window WAS, and `mac/xzip.lst` states it outright
+///   (`SetColor := (zWHITE*256) + zBLACK; { Mac defaults: white under black }`).
+///   Nothing about the pens is claimed — a Mac `set_colour` behaves exactly as it
+///   did — only the ground beneath a window that asked for nothing.
+///
+/// **This is the function that used to be two.** The Amiga's half lived here and
+/// the Macintosh's in `app::session::machine_screen_pair`, gated on a constant
+/// `blorb` happened to carry — one concept in two crates, and the reason `zvm-cli`
+/// could see one machine's rule and not the other's (SQ-0872). Which machines
+/// answer is now a column of the table rather than a chain of `if`s, so adding a
+/// third is a `true` and not a new function.
+///
+/// **This is what SQ-0846 was reported as**, on `stories/Zork Zero Disk.image`
+/// (release 296, serial 881019): the status banner's location and score text came
+/// out grey on the white artwork and read as missing. Zork Zero on the Macintosh
+/// **never calls `set_colour` at all**, so with nothing painting `$2C`/`$2D` the
+/// ink fell all the way through to the host theme's grey, while the white it sat
+/// on was the game's own two-colour plate. That is SQ-0740's Amiga finding
+/// exactly, one machine later.
+///
+/// The colour bit (`$01` bit 0) gates every arm, which is what makes
+/// `honor_game_colours = false` a no-op here: a colourless interpreter is never
+/// given the machine's pair to publish, and the header then carries zvm's own
+/// §8.3.2 seed, which is nobody's machine.
+pub fn machine_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
+    machine_rule(mem, |m| m.v6_screen_page).then(|| crate::interpreter::header_pair(mem))
 }
 
 impl ScreenState {

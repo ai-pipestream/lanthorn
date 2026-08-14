@@ -515,6 +515,28 @@ fn build_machine(
         hold_prompt,
     )));
     machine.set_interpreter_number(interpreter_number);
+    // …and the REST of that machine (SQ-0872). Setting `$1E` alone told the story
+    // which machine it was on and left it to work out what that machine looked
+    // like from zvm's own §8.3.2 seed, which is nobody's machine — so off a
+    // ProDOS disk *Beyond Zork* was an Apple IIgs advertising black-on-white.
+    // `zvm::interpreter` is the table both front-ends read, so the CLI and the
+    // TUI now present the same machine off the same bytes.
+    //
+    // The palette is process-wide and set unconditionally: it governs how a
+    // colour NUMBER resolves to an actual colour, so it must agree with the
+    // number in `$1E` whether or not the game's colours are being honoured.
+    // The `$2C`/`$2D` pair is gated on `honor_game_colours`, exactly as the TUI
+    // gates it (`startup`'s `host_default_colours`): with colours declined the
+    // interpreter has told the story it is colourless (§8.3.2) and has no page
+    // of its own to advertise.
+    if let Some(m) = interpreter_number.and_then(zvm::interpreter::machine) {
+        zvm::screen::set_palette(m.palette);
+        if honor_game_colours {
+            if let Some((bg, fg)) = m.default_colours {
+                machine.set_default_colours(bg, fg);
+            }
+        }
+    }
     machine.init_caps();
     // Report the real terminal size to the game. init_caps seeds a generous
     // 80×24 default; without this override the game centres and wraps against
@@ -1306,6 +1328,18 @@ fn main() {
     // Frotz's 6-for-v6, 1 otherwise). Same order the TUI's
     // `InterpreterProfile::resolve` applies; only the default moves.
     let interpreter = args.interpreter.or_else(|| medium.and_then(|m| m.interpreter_number()));
+    // SQ-0872: a number naming a machine `zvm::interpreter` does not model still
+    // reaches `$1E` — that is the honest fallback, since the story asked and the
+    // standard has an answer — but everything else about the presentation is then
+    // the IBM PC's, and a silent substitution is what this quest exists to stop.
+    // Say it once, on the explicit route only: the medium's own answers are all
+    // modelled, so a disk launch stays quiet.
+    if let Some(n) = args.interpreter.filter(|n| zvm::interpreter::machine(*n).is_none()) {
+        eprintln!(
+            "zvm: warning: interpreter {n} names a machine zvm does not model; \
+             header $1E says {n}, but its default colours and palette are the IBM PC's"
+        );
+    }
 
     let mut machine = match build_machine(
         story_bytes,

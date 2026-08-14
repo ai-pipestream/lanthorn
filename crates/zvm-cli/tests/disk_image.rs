@@ -704,3 +704,177 @@ fn a_disk_with_no_story_says_what_it_mounted() {
     assert!(err.contains("1 file mounted"), "says what it did find:\n{err}");
     let _ = std::fs::remove_file(&image);
 }
+
+// ── the machine, not just its number (SQ-0872) ────────────────────────────────
+
+/// A Version 5 story that prints header `$1E`, `$2C` and `$2D` as `[n/bg/fg/]`.
+///
+/// Version 5 because `$2C`/`$2D` are colour bytes from V5 on — below that
+/// `write_default_colours` correctly declines — and because `zvm-cli` refuses
+/// Version 6 outright, so v5 is the highest machine this front-end can be asked
+/// about.
+fn machine_reporting_story() -> Vec<u8> {
+    let mut b = quitting_story(5, 88, "840726");
+    let mut code: Vec<u8> = vec![0xE5, 0x7F, 0x5B]; // print_char '['
+    for addr in [0x1E_u8, 0x2C, 0x2D] {
+        code.extend_from_slice(&[
+            0x10, 0x00, addr, 0x00, // loadb 0 addr -> sp
+            0xE6, 0xBF, 0x00, // print_num sp
+            0xE5, 0x7F, 0x2F, // print_char '/'
+        ]);
+    }
+    code.extend_from_slice(&[0xE5, 0x7F, 0x5D, 0xBA]); // print_char ']' ; quit
+    b[0x40..0x40 + code.len()].copy_from_slice(&code);
+    b
+}
+
+/// **The defect this quest was filed for.** `zvm-cli` set header `$1E` and
+/// nothing else, so a story off release media was told WHICH machine it was on
+/// and left to work out what that machine LOOKED like from zvm's own §8.3.2 seed
+/// — the interpreter's number and the interpreter's page disagreeing, which is
+/// the half-wired state SQ-0836 refused to ship.
+///
+/// The pairs are `zvm::interpreter`'s, each sourced out of Infocom's own
+/// interpreter for that machine, and the app reads the very same table — so the
+/// two front-ends cannot present different machines off the same bytes.
+///
+/// FALSIFICATION: delete the `zvm::interpreter::machine` block from `main.rs`'s
+/// `build_machine` and every non-Apple row here fails with the machine's pair
+/// absent, verbatim:
+///
+/// ```text
+/// --interpreter 3 (Macintosh) must report its own $2C/$2D
+///   left: "[3/2/9/]"
+///  right: "[3/9/2/]"
+/// ```
+///
+/// — `2/9`, zvm's own §8.3.2 seed, under a byte that says Macintosh.
+#[test]
+fn an_explicit_machine_brings_its_default_colours_with_it() {
+    let story = write_temp("machine.z5", &machine_reporting_story());
+
+    for (n, name, want) in [
+        (3u8, "Macintosh", "[3/9/2/]"),
+        (5, "Atari ST", "[5/9/2/]"),
+        (10, "Apple IIgs", "[10/2/9/]"),
+    ] {
+        let text = stdout_of(&run(&story, &["-I", &n.to_string()], ""));
+        assert!(
+            text.contains(want),
+            "--interpreter {n} ({name}) must report its own $2C/$2D\n  want: {want}\n   got: {text}"
+        );
+    }
+
+    // **A decline is a decline, not a default.** The Commodore 128 states no pair
+    // (SQ-0869 read no Commodore interpreter), so the story is told what zvm's own
+    // §8.3.2 seed says — the same answer an IBM PC gets, which is the point.
+    let cbm = stdout_of(&run(&story, &["-I", "7"], ""));
+    let pc = stdout_of(&run(&story, &["-I", "6"], ""));
+    assert!(cbm.contains("[7/2/9/]"), "the Commodore declines its pair:\n{cbm}");
+    assert!(pc.contains("[6/2/9/]"), "…which is the IBM PC's answer too:\n{pc}");
+
+    // The override contract (SQ-0839/SQ-0855): `--no-game-colours` declares the
+    // interpreter COLOURLESS (§8.3.2), so no machine's page is advertised even
+    // when one is asked for by name. The number still lands — that is not a
+    // colour — and the pair falls back to the seed.
+    let mono = stdout_of(&run(&story, &["-I", "3", "--no-game-colours"], ""));
+    assert!(
+        mono.contains("[3/2/9/]"),
+        "a colourless interpreter advertises no machine page:\n{mono}"
+    );
+
+    // And the Amiga is the one machine whose page a v5 story cannot be told:
+    // colour 12 is a Version 6 grey (§8.3.1), so `clamp_default_colour` folds it
+    // back to black. Stated so the clamp reads as measured rather than missed —
+    // `zvm-cli` refuses Version 6, so the Amiga's dark grey never reaches it.
+    let amiga = stdout_of(&run(&story, &["-I", "4"], ""));
+    assert!(amiga.contains("[4/2/9/]"), "12 is a v6-only grey and clamps here:\n{amiga}");
+
+    let _ = std::fs::remove_file(&story);
+}
+
+/// …and the MEDIUM route, which is the one a player actually takes: no flags at
+/// all, just a disk. The number and the page arrive together off the same bytes.
+#[test]
+fn a_story_off_a_floppy_is_told_the_whole_machine() {
+    let mut f = Floppy::new();
+    f.add_file("Story.data", &machine_reporting_story());
+    let image = f.write("machine-colours.adf");
+
+    // An Amiga floppy: interpreter 4, and its pair clamped as above.
+    let text = stdout_of(&run(&image, &[], ""));
+    assert!(text.contains("[4/"), "the medium still picks the machine:\n{text}");
+    // …and `-I` still outranks it, bringing the named machine's page with it —
+    // the number you name is the machine you asked for, whole.
+    let text = stdout_of(&run(&image, &["-I", "3"], ""));
+    assert!(text.contains("[3/9/2/]"), "-I brings the Macintosh's page too:\n{text}");
+
+    let _ = std::fs::remove_file(&image);
+}
+
+/// A number naming a machine `zvm::interpreter` does not model still reaches
+/// `$1E` — the story asked and §11.1.3 has an answer — but everything else about
+/// the presentation is then the IBM PC's, and SQ-0872 exists because a silent
+/// substitution is indistinguishable from a supported machine.
+///
+/// 8 is the Commodore 64, 11 the Tandy Color, 1 the DECSystem-20: each absent
+/// for a stated reason (see `zvm::interpreter::MACHINES`), and each announced.
+#[test]
+fn an_unmodelled_machine_says_so_instead_of_quietly_becoming_an_ibm_pc() {
+    let story = write_temp("unmodelled.z5", &machine_reporting_story());
+
+    for n in [1u8, 8, 11] {
+        let out = run(&story, &["-I", &n.to_string()], "");
+        let err = stderr_of(&out);
+        assert!(
+            err.contains(&format!("interpreter {n} names a machine zvm does not model")),
+            "-I {n} must announce the gap:\n{err}"
+        );
+        // …and the byte still lands, because declining it would name a DIFFERENT
+        // machine rather than none — zvm's own rule would answer 1 here.
+        assert!(stdout_of(&out).contains(&format!("[{n}/")), "…and $1E still says {n}");
+    }
+
+    // A machine we DO model is not announced — the warning has to mean something.
+    for n in [3u8, 4, 5, 6, 7, 10] {
+        let err = stderr_of(&run(&story, &["-I", &n.to_string()], ""));
+        assert!(!err.contains("does not model"), "-I {n} is modelled and must stay quiet:\n{err}");
+    }
+
+    // Nor is a plain disk launch ever announced: every number a medium hands out
+    // is modelled, and `interpreter_profile`'s agreement test pins that.
+    let mut f = Floppy::new();
+    f.add_file("Story.data", &machine_reporting_story());
+    let image = f.write("quiet.adf");
+    assert!(!stderr_of(&run(&image, &[], "")).contains("does not model"), "a disk stays quiet");
+
+    let _ = std::fs::remove_file(&image);
+    let _ = std::fs::remove_file(&story);
+}
+
+/// The real-media proof, on the disk the quest was reported against: *Beyond
+/// Zork* off its Apple IIgs ProDOS press (`Beyond Zork (1988)(Infocom).2mg`,
+/// release 57 / serial 871221). The game names the machine in its own banner.
+///
+/// **And it is the medium on which the old defect was INVISIBLE**, which is worth
+/// pinning rather than glossing: the Apple's page is standard colour 2 over ink 9
+/// (`zboot.asm`), and zvm's own §8.3.2 seed is 2 over 9 as well — so the byte and
+/// the page happened to agree here all along, while a Macintosh or an Atari ST
+/// press was being handed a machine that said one thing and looked like another.
+/// A regression that put the seed back would pass this test's colour assertion
+/// and fail `an_explicit_machine_brings_its_default_colours_with_it`, which is
+/// why both exist.
+#[test]
+fn the_prodos_press_names_its_machine_and_reports_that_machines_page() {
+    let Some(image) = story_path("Beyond Zork (1988)(Infocom).2mg") else { return };
+
+    let text = stdout_of(&run(&image, &["--no-more"], "begin\n\n\n\n\nversion\nquit\ny\n"));
+    assert!(
+        text.contains("Release 57 / Serial Number 871221"),
+        "this is the build the ProDOS press carries:\n{text}"
+    );
+    assert!(
+        text.contains("Apple //gs"),
+        "and the GAME names the machine it was told it is running on:\n{text}"
+    );
+}

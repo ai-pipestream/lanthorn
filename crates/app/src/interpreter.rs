@@ -187,6 +187,24 @@ pub enum InterpreterProfile {
     /// sourced the way the other three were: out of Infocom's own Commodore
     /// interpreter, not out of the hardware's reputation.
     Commodore128,
+    /// An Apple IIe: **interpreter 2, and otherwise the [`Self::AppleIIgs`]
+    /// bundle exactly** (SQ-0872).
+    ///
+    /// SQ-0857 established that the Apple II YZIP is one program for three
+    /// machines — `bsubs.asm`'s `MACHINE:` picks between `IIeID 2`, `IIcID 9` and
+    /// `IIgsID 10` at boot, *after* `zboot.asm` has already seeded the same black
+    /// page and white ink — so the only thing that distinguishes the family is the
+    /// byte. That quest scoped itself to the IIgs because the medium cannot name
+    /// the press; this variant exists for the other route, a player naming 2
+    /// outright, which until now got an IBM PC wearing an Apple's number.
+    ///
+    /// No standard window, for the reason [`Self::AppleIIgs`] states at length:
+    /// the Apple's Version 6 screen is 140x192 on a 3x9 cell, which is a different
+    /// screen MODEL rather than a resolution this knob can hold.
+    AppleIIe,
+    /// An Apple IIc: **interpreter 9**, and the same bundle again — see
+    /// [`Self::AppleIIe`], which shares every value and every argument.
+    AppleIIc,
 }
 
 impl InterpreterProfile {
@@ -301,18 +319,50 @@ impl InterpreterProfile {
         }
     }
 
-    /// The profile a story header byte `$1E` value implies. The Amiga and the
-    /// Macintosh have profiles of their own; every other machine is served by
-    /// the IBM PC bundle, which is also the historical default.
+    /// The profile a story header byte `$1E` value implies, falling back to the
+    /// IBM PC bundle — the historical default — for a machine babelmap does not
+    /// model.
+    ///
+    /// **The fallback is the honest answer and it is also a silent one**, which is
+    /// why [`Self::try_for_interpreter_number`] exists beside it: asking for a
+    /// machine with no profile gets that number in `$1E` and an IBM PC everywhere
+    /// else, and a caller that can say so should.
     pub fn for_interpreter_number(n: u8) -> Self {
+        Self::try_for_interpreter_number(n).unwrap_or(Self::IbmPc)
+    }
+
+    /// The profile `n` names, or `None` when babelmap models no such machine.
+    ///
+    /// The set is [`zvm::interpreter::MACHINES`]'s, which is where the gaps and
+    /// the reason for each are argued: 1 (DECSystem-20) is a decision rather than
+    /// a datum, 8 (Commodore 64) has no interpreter read for it, 11 (Tandy Color)
+    /// has no fixture and no sourced constant. Answering `None` rather than
+    /// [`Self::IbmPc`] is what lets a front-end report "I do not model that
+    /// machine" instead of quietly substituting another (SQ-0872).
+    pub fn try_for_interpreter_number(n: u8) -> Option<Self> {
         match n {
-            AMIGA_INTERPRETER_NUMBER => Self::Amiga,
-            MACINTOSH_INTERPRETER_NUMBER => Self::Macintosh,
-            ATARI_ST_INTERPRETER_NUMBER => Self::AtariSt,
-            APPLE_IIGS_INTERPRETER_NUMBER => Self::AppleIIgs,
-            COMMODORE_128_INTERPRETER_NUMBER => Self::Commodore128,
-            _ => Self::IbmPc,
+            APPLE_IIE_INTERPRETER_NUMBER => Some(Self::AppleIIe),
+            MACINTOSH_INTERPRETER_NUMBER => Some(Self::Macintosh),
+            AMIGA_INTERPRETER_NUMBER => Some(Self::Amiga),
+            ATARI_ST_INTERPRETER_NUMBER => Some(Self::AtariSt),
+            IBM_PC_INTERPRETER_NUMBER => Some(Self::IbmPc),
+            COMMODORE_128_INTERPRETER_NUMBER => Some(Self::Commodore128),
+            APPLE_IIC_INTERPRETER_NUMBER => Some(Self::AppleIIc),
+            APPLE_IIGS_INTERPRETER_NUMBER => Some(Self::AppleIIgs),
+            _ => None,
         }
+    }
+
+    /// The `zvm` machine table row behind this profile — the number, the `$2C`/
+    /// `$2D` pair, the palette and the §8.3 screen rules — or `None` for
+    /// [`Self::IbmPc`], whose number is a rule rather than a constant and which
+    /// therefore states no row to look up (SQ-0872).
+    ///
+    /// This is the single place the app's bundle and the CLI's meet: everything
+    /// below that a story can READ comes through here, so the two front-ends
+    /// cannot drift into presenting different machines.
+    fn machine(self) -> Option<&'static zvm::interpreter::MachineProfile> {
+        zvm::interpreter::machine(self.interpreter_number()?)
     }
 
     /// The interpreter number the medium at `path` defaults to, or `None` when
@@ -351,6 +401,8 @@ impl InterpreterProfile {
             Self::AtariSt => Some(ATARI_ST_INTERPRETER_NUMBER),
             Self::AppleIIgs => Some(APPLE_IIGS_INTERPRETER_NUMBER),
             Self::Commodore128 => Some(COMMODORE_128_INTERPRETER_NUMBER),
+            Self::AppleIIe => Some(APPLE_IIE_INTERPRETER_NUMBER),
+            Self::AppleIIc => Some(APPLE_IIC_INTERPRETER_NUMBER),
         }
     }
 
@@ -514,7 +566,12 @@ impl InterpreterProfile {
     /// first of them is a standard window.
     pub fn std_window(self) -> Option<(u16, u16)> {
         match self {
-            Self::IbmPc | Self::AtariSt | Self::AppleIIgs | Self::Commodore128 => None,
+            Self::IbmPc
+            | Self::AtariSt
+            | Self::AppleIIe
+            | Self::AppleIIc
+            | Self::AppleIIgs
+            | Self::Commodore128 => None,
             Self::Amiga => Some(AMIGA_STD_WINDOW),
             Self::Macintosh => Some(MACINTOSH_STD_WINDOW),
         }
@@ -529,21 +586,16 @@ impl InterpreterProfile {
     /// looks like, so "default" means what the player sees. A profile whose
     /// entire purpose is to present as an Amiga should not be describing the
     /// user's terminal, so [`Self::Amiga`] answers with the Amiga's own pair.
+    ///
+    /// **The pairs themselves are [`zvm::interpreter`]'s** (SQ-0872), which is
+    /// where each is sourced out of Infocom's own interpreter for that machine —
+    /// and which is why `zvm-cli` can now paint the same page babelmap does. The
+    /// Commodore 128's `None` is a *decline* rather than a default and is argued
+    /// on the row: nothing in hand states the pair Infocom's Commodore
+    /// interpreter reported, and the machine's famous light-blue-on-blue boot
+    /// screen is the hardware's reputation, not evidence (SQ-0869).
     pub fn default_colours(self) -> Option<(u8, u8)> {
-        match self {
-            Self::IbmPc => None,
-            Self::Amiga => Some((AMIGA_DEFAULT_BACKGROUND, AMIGA_DEFAULT_FOREGROUND)),
-            Self::Macintosh => Some((MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND)),
-            Self::AtariSt => Some((ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND)),
-            Self::AppleIIgs => Some((APPLE_DEFAULT_BACKGROUND, APPLE_DEFAULT_FOREGROUND)),
-            // **Declined, and it is a decline rather than a default.** Nothing
-            // in hand states the pair Infocom's Commodore interpreter reported
-            // in `$2C`/`$2D`, and the machine's famous light-blue-on-blue boot
-            // screen is the hardware's reputation rather than the interpreter's
-            // evidence. So a Commodore story is told what the player's terminal
-            // looks like, exactly as `Self::IbmPc` is (SQ-0869).
-            Self::Commodore128 => None,
-        }
+        self.machine()?.default_colours
     }
 
     /// The palette the story's colour NUMBERS resolve through.
@@ -623,15 +675,12 @@ impl InterpreterProfile {
     /// and by emulator), and nothing in Infocom's sources states any. Declining
     /// to invent one is the same call [`Self::AtariSt`] makes about the ST's
     /// 512-colour hardware, one paragraph up.
+    ///
+    /// **The table is [`zvm::interpreter`]'s** (SQ-0872): only the Amiga loaded a
+    /// palette of its own, and every other row answers
+    /// [`zvm::screen::Palette::Standard`] on the readings quoted above.
     pub fn palette(self) -> zvm::screen::Palette {
-        match self {
-            Self::IbmPc
-            | Self::Macintosh
-            | Self::AtariSt
-            | Self::AppleIIgs
-            | Self::Commodore128 => zvm::screen::Palette::Standard,
-            Self::Amiga => zvm::screen::Palette::Amiga,
-        }
+        self.machine().map_or(zvm::screen::Palette::Standard, |m| m.palette)
     }
 
     /// The Version 6 character cell in native pixels, `(width, height)`.
@@ -685,120 +734,34 @@ impl InterpreterProfile {
     }
 }
 
-/// Amiga, from the ZMSD §11.1.3 interpreter-number table. Defined by
-/// [`blorb::medium`] and re-exported here: it is the number the medium→machine
-/// mapping hands out, and `zvm-cli` hands out the same one (SQ-0839).
-pub use blorb::medium::AMIGA_INTERPRETER_NUMBER;
+/// The §11.1.3 interpreter numbers, from [`zvm::interpreter`] — the machine
+/// table, which is where each is sourced and where the colour pair, palette and
+/// screen rules that go with it live (SQ-0872).
+///
+/// Re-exported rather than restated so the app names exactly the constant `zvm`
+/// writes into `$1E` and `zvm-cli` reads back. `blorb::medium` states the same
+/// values for a different question — which machine a DISK implies — because it
+/// takes zero external dependencies and so cannot see this table; the two are
+/// pinned against each other by `interpreter_profile`'s agreement test, and a
+/// future divergence fails there rather than in a game.
+pub use zvm::interpreter::{
+    AMIGA_INTERPRETER_NUMBER, APPLE_IIC_INTERPRETER_NUMBER, APPLE_IIE_INTERPRETER_NUMBER,
+    APPLE_IIGS_INTERPRETER_NUMBER, ATARI_ST_INTERPRETER_NUMBER, COMMODORE_128_INTERPRETER_NUMBER,
+    IBM_PC_INTERPRETER_NUMBER, MACINTOSH_INTERPRETER_NUMBER,
+};
 
-/// Macintosh, from the same §11.1.3 table and the same place (SQ-0838). Read
-/// from the standard, not recalled: *"1 DECSystem-20, 2 Apple IIe, **3
-/// Macintosh**, 4 Amiga, 5 Atari ST, 6 IBM PC …"*.
-pub use blorb::medium::MACINTOSH_INTERPRETER_NUMBER;
-
-/// Atari ST, from the same §11.1.3 table and the same place (SQ-0835) — and the
-/// only one of the three the machine's own interpreters corroborate directly,
-/// `INTWRD DC.B 5 * MACHINE ID FOR ATARI ST`. [`blorb::medium`] quotes them, and
-/// shows the byte is a flat constant rather than a version-dependent rule.
-pub use blorb::medium::ATARI_ST_INTERPRETER_NUMBER;
-
-/// Apple IIgs, from the same §11.1.3 table and the same place (SQ-0857) — and
-/// the second of the four the machine's own interpreter corroborates directly,
-/// `IIgsID EQU 10 ; ][gs Yzip`. [`blorb::medium`] quotes the Apple II YZIP in
-/// full, and shows the byte is neither a flat constant (as the ST's is) nor a
-/// version-dependent rule (as the IBM PC's is) but a **runtime machine
-/// detection** across the family's three numbers — which is why that row's
-/// argument is about which Apple II babelmap presents as, rather than about
-/// which one pressed the disk.
-pub use blorb::medium::APPLE_IIGS_INTERPRETER_NUMBER;
-
-/// Commodore 128, from the same §11.1.3 table (SQ-0869) — and the one of the
-/// five that is corroborated by the DISK rather than by an interpreter source
-/// tree. `TRINITY1.D64` opens with the Commodore 128's `CBM` autoboot signature
-/// and boots an interpreter that touches the C128's own MMU register `$FF00`
-/// forty times, which no Commodore 64 has. [`blorb::medium`] shows the evidence
-/// and argues why the row answers 7 where the family's other number is 8.
-pub use blorb::medium::COMMODORE_128_INTERPRETER_NUMBER;
-
-/// The Apple IIgs's default background: standard colour **2, black**.
+/// The §8.3.3 default colour pairs, from [`zvm::interpreter`] — each quoted at
+/// its constant out of Infocom's own interpreter for that machine (SQ-0872).
 ///
-/// Sourced from Infocom's own Version 6 interpreter for the machine, the Apple
-/// II YZIP — `apple/yzip/rel.15/zboot.asm`, which seeds the header before the
-/// story can read it. `ZCLRWD EQU 44` is decimal 44, `$2C`, and ZMSD §8.3.3 puts
-/// the default BACKGROUND at `$2C` and the foreground at `$2D`:
-///
-/// ```text
-///   apple/yzip/rel.15/zboot.asm:54   lda #9   ; the color white is the foreground color
-///   apple/yzip/rel.15/zboot.asm:55   sta ZBEGIN+ZCLRWD+1   ; show Z game too
-///   apple/yzip/rel.15/zboot.asm:56   lda #2   ; black is the background color
-///   apple/yzip/rel.15/zboot.asm:57   sta ZBEGIN+ZCLRWD     ; tell game about it
-/// ```
-///
-/// The comments name the colours outright, so this needs no decoding — and
-/// `machine.asm`'s `ZCOLOR` says it twice more, the way the Amiga's, the Mac's
-/// and the ST's do, because colour 1 means "the default" (ZMSD §8.3.1) and the
-/// file has to resolve it:
-///
-/// ```text
-///   ; just do the background color - foreground is always white/black
-///   …
-///   ldx #1   ; use black as default back color
-///   …
-///   ldx #8   ; use white as default fore color
-/// ```
-///
-/// (Both are pre-`dex` indices into `ZIPCOLOR`, which is zero-based from colour
-/// 2: `#1` resolves to index 0, colour 2, and `#8` to index 7, colour 9.)
-///
-/// **A genuinely BLACK page, and it is the only one here.** The Amiga's dark
-/// grey (`$444`, see [`AMIGA_DEFAULT_BACKGROUND`]) is deliberately not black —
-/// that distinction carried SQ-0740's window-0 gate — while the Macintosh and
-/// the Atari ST both boot white. The Apple II's double hi-res display really is
-/// unlit black with white text on it, so this profile is the darkest of the
-/// four, and `honor_game_colours` is doing correspondingly real work: turning it
-/// off returns the user's theme, as ever.
-pub const APPLE_DEFAULT_BACKGROUND: u8 = 2;
-
-/// The Apple IIgs's default foreground: standard colour 9, white. Same four
-/// lines, same source — see [`APPLE_DEFAULT_BACKGROUND`].
-pub const APPLE_DEFAULT_FOREGROUND: u8 = 9;
-
-/// The Atari ST's default background: standard colour **9**, white.
-///
-/// Sourced exactly as the Macintosh's was, and it is the same `(back << 8) |
-/// fore` idiom a third time — `st/xzip.c`, the interface half of Infocom's ST
-/// XZIP, whose modification history ends "17 Sep 87 dbb … FROZEN Version A":
-///
-/// ```text
-///   #define USE_DEF  1     /* use default ST color */
-///   #define DEF_FORE 2     /* default ST foreground id = black */
-///   #define DEF_BACK 9     /* default ST background id = white */
-/// ```
-///
-/// The comments name the colours outright, so this needs no decoding, and
-/// `_op_color` says it twice more the way the Amiga's and the Mac's do — colour
-/// 1 means "the default" (ZMSD §8.3.1), so the file resolves it:
-///
-/// ```text
-///   if (id1 == USE_DEF) id1 = DEF_FORE;
-///   if (id2 == USE_DEF) id2 = DEF_BACK;
-///   …
-///   return ((DEF_BACK << 8) | DEF_FORE);   /* (used by 68K init) */
-/// ```
-///
-/// **XZIP is the right interpreter to have read**: it is Infocom's Version 5
-/// interpreter, so this is the program that actually painted *Beyond Zork* on an
-/// Atari ST — the one story in the ST corpus whose behaviour this profile moves.
-/// Its "Version A" is corroborated from inside the game, which answers VERSION
-/// with "Atari ST Color Version A" once it is told 5.
-///
-/// A white page, the same as the Macintosh's and the opposite of the Amiga's
-/// dark grey, so `honor_game_colours` is doing real work here too: turning it
-/// off returns the user's theme, as ever.
-pub const ST_DEFAULT_BACKGROUND: u8 = 9;
-
-/// The Atari ST's default foreground: standard colour 2, black. Same file, same
-/// three lines — see [`ST_DEFAULT_BACKGROUND`].
-pub const ST_DEFAULT_FOREGROUND: u8 = 2;
+/// These moved out of this module so `zvm-cli` could reach them: the app was
+/// seeding header `$2C`/`$2D` from a profile the CLI could not depend on, so a
+/// story off a release disk was told which machine it was on by both front-ends
+/// and what that machine looked like by only one.
+pub use zvm::interpreter::{
+    AMIGA_DEFAULT_BACKGROUND, AMIGA_DEFAULT_FOREGROUND, APPLE_DEFAULT_BACKGROUND,
+    APPLE_DEFAULT_FOREGROUND, MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND,
+    ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND,
+};
 
 /// The Macintosh Version 6 standard window: the **big colour** Mac's, 320×200
 /// art doubled onto a 640×400 window — the same numbers as the Amiga's, and
@@ -810,34 +773,12 @@ pub const ST_DEFAULT_FOREGROUND: u8 = 2;
 /// The standard Macintosh's other window — 480×300, `GFXMAC_X`/`GFXMAC_Y`,
 /// "1.5 x Amiga sizes" — belongs to the monochrome archive and arrives with it.
 /// See [`InterpreterProfile::std_window`], which quotes the whole decision.
+///
+/// **A standard window stays in the app**, where the rest of the bundle went to
+/// `zvm`: it is a Version 6 picture space stated by an ARCHIVE, resolved against
+/// `crate::graphics::PictSource`, and zvm has no business reading resource files
+/// (SQ-0872).
 pub const MACINTOSH_STD_WINDOW: (u16, u16) = (320, 200);
-
-/// The Macintosh's default background: standard colour **9**, white.
-///
-/// One line of `mac/xzip.lst` settles both this and [`MAC_DEFAULT_FOREGROUND`],
-/// and it is the same `(back << 8) | fore` idiom the Amiga interpreter uses
-/// (see [`AMIGA_DEFAULT_BACKGROUND`], where the sources had to be weighed):
-///
-/// ```text
-///   FUNCTION SetColor (fore, back: INTEGER): INTEGER;  { return back/fore defaults }
-///   BEGIN
-///     SetColor := (zWHITE*256) + zBLACK;   { Mac defaults: white under black }
-/// ```
-///
-/// with `zWHITE = 9` and `zBLACK = 2` declared eleven lines above it. The same
-/// function's fallbacks say it twice more — `IF fore = 1 THEN mcid :=
-/// blackColor { default }` and `IF back = 1 THEN mcid := whiteColor` — because
-/// colour 1 means "the default" (ZMSD §8.3.1), so asking for the default
-/// foreground gets black and the default background white.
-///
-/// A white page is the Macintosh's whole visual signature and the opposite of
-/// the Amiga's dark grey, so `honor_game_colours` is doing real work on this
-/// profile: turning it off returns the user's theme, as ever.
-pub const MAC_DEFAULT_BACKGROUND: u8 = 9;
-
-/// The Macintosh's default foreground: standard colour 2, black. Same line,
-/// same source — see [`MAC_DEFAULT_BACKGROUND`].
-pub const MAC_DEFAULT_FOREGROUND: u8 = 2;
 
 /// The Amiga Version 6 standard window: 320×200 art, doubled onto the 640×400
 /// hi-res interlaced screen the games lay themselves out on. This is the same
@@ -845,54 +786,6 @@ pub const MAC_DEFAULT_FOREGROUND: u8 = 2;
 /// Amiga conversions — which is why asserting it here restores exactly the
 /// scaling a Blorb-sourced copy of the same game already gets.
 pub const AMIGA_STD_WINDOW: (u16, u16) = (320, 200);
-
-/// The Amiga's default background: standard colour **12**, dark grey (`$444`).
-///
-/// **Do not "correct" this back to 11 on the strength of `amiga/yzip.h`** — that
-/// file is a development snapshot, its own `#define DEF_BACK 11 /*6*/` carries the
-/// scar of a previous edit, and the value that shipped is 12 (SQ-0822).
-///
-/// The authority is the interpreter on the release floppy, which is the program
-/// that painted the screen. `set_back()` in `amiga/yzip3.c` opens
-/// `if (id == 1) id = DEF_BACK;` — "colour 1 means the default" — and `set_fore()`
-/// opens with the same line on `DEF_FORE`. Both compile to a `cmpi.w #1` and a
-/// `moveq`, and both appear, once each and in that order, in every Amiga Version 6
-/// interpreter in `stories/`:
-///
-/// ```text
-///   0c 47 00 01   cmpi.w #1,d7      0c 47 00 01   cmpi.w #1,d7
-///   66 02         bne.s  .+2        66 02         bne.s  .+2
-///   7e 09         moveq  #9,d7      7e 0c         moveq  #12,d7
-///   … set_fore: DEF_FORE = 9        … set_back: DEF_BACK = 12
-/// ```
-///
-/// and `set_color()`'s `return ((DEF_BACK << 8) | DEF_FORE)` assembles to
-/// `30 3c 0c 09` — `move.w #$0C09,d0` — in all four. `$0B09` occurs in none of
-/// them. Offsets, per interpreter binary extracted from its floppy: Arthur
-/// (release 54) 18958/19094/18742, Journey (release 30) 17816/17952/17792,
-/// Zork Zero (release 366) and Shogun (release 295) 17820/17956/17796.
-///
-/// It is also what the screen shows. Real Amiga captures of Journey release 30
-/// (lemonamiga.com's gallery, 640×512) tally 173,994 pixels of `#444444` under
-/// 25,878 of `#FFFFFF`, and MobyGames' Arthur church capture is `#444444` page,
-/// `#FFFFFF` ink, with the status bar reversed to `#444444` ON `#FFFFFF` — which
-/// is pen 0 and pen 1 swapped, so the page really is the text background register
-/// and not artwork. `$444` is Infocom's colour 12; `$777`, colour 11, appears in
-/// neither. [`crate::colors`] resolves 12 through the Amiga palette to `(66,66,66)`
-/// — two units off `#444444` only because a 4-bit Amiga channel has to pass
-/// through the Z-machine's 5-bit true-colour word on the way.
-///
-/// This does not disturb SQ-0740's window-0 gate: the evidence for that was that
-/// Journey is *not black*, and a dark-grey page is not a black one.
-pub const AMIGA_DEFAULT_BACKGROUND: u8 = 12;
-
-/// The Amiga's default foreground: standard colour 9, white.
-///
-/// Source: `set_fore()`'s `if (id == 1) id = DEF_FORE;` in the interpreter on every
-/// Infocom Amiga release floppy — `moveq #9` — agreeing with
-/// `#define DEF_FORE 9  /* default Amiga foreground = white */` in `amiga/yzip.h`.
-/// See [`AMIGA_DEFAULT_BACKGROUND`], where the two sources do *not* agree.
-pub const AMIGA_DEFAULT_FOREGROUND: u8 = 9;
 
 #[cfg(test)]
 mod tests {
@@ -1107,25 +1000,84 @@ mod tests {
         assert_eq!(InterpreterProfile::for_interpreter_number(5), InterpreterProfile::AtariSt);
         assert_eq!(InterpreterProfile::for_interpreter_number(10), InterpreterProfile::AppleIIgs);
         assert_eq!(InterpreterProfile::for_interpreter_number(7), InterpreterProfile::Commodore128);
+        // **2 and 9 joined the list** (SQ-0872). They are the Apple IIe and IIc,
+        // the other two machines the Apple II YZIP runs on, and SQ-0857 scoped
+        // itself to the IIgs — so asking for one of them used to get an IBM PC
+        // wearing an Apple's number. They were nearly free: `bsubs.asm`'s
+        // `MACHINE:` picks between the family's three numbers at boot, *after*
+        // `zboot.asm` has seeded the one page all three share.
+        assert_eq!(InterpreterProfile::for_interpreter_number(2), InterpreterProfile::AppleIIe);
+        assert_eq!(InterpreterProfile::for_interpreter_number(9), InterpreterProfile::AppleIIc);
         // Every other number is served by the IBM PC bundle, the historical
-        // default. **2 and 9 are in this list on purpose**: they are the Apple
-        // IIe and IIc, the other two machines the Apple II YZIP runs on, and
-        // SQ-0857 scoped itself to the IIgs. Asking for one of them today gets
-        // the IBM PC bundle with that number in `$1E` — the same "no opinion"
-        // every unmapped number gets, and stated here so the gap is visible
-        // rather than assumed closed.
-        //
-        // **8 joined them for the same reason** (SQ-0869): it is the Commodore
-        // 64, the other machine a 1541 disk could have been pressed for, and
-        // that quest scoped itself to the 128 — the one press in the corpus
-        // whose story is new enough to read `$1E` at all. Asking for 8 gets the
-        // IBM PC bundle with 8 in the header.
-        for n in [1u8, 2, 6, 8, 9, 11] {
+        // default: 1 the DECSystem-20, 8 the Commodore 64, 11 the Tandy Color.
+        // Each is absent for a stated reason — see `zvm::interpreter::MACHINES`
+        // — and each is stated here so the gap is visible rather than assumed
+        // closed.
+        for n in [1u8, 8, 11] {
             assert_eq!(
                 InterpreterProfile::for_interpreter_number(n),
                 InterpreterProfile::IbmPc,
                 "interpreter {n}",
             );
+            // …and the fallback is no longer SILENT: the profile can say it does
+            // not model the machine, which is what `zvm-cli` warns on.
+            assert_eq!(
+                InterpreterProfile::try_for_interpreter_number(n),
+                None,
+                "interpreter {n} must report the gap rather than answer IbmPc",
+            );
+        }
+        // 6 is the IBM PC itself, so it is MODELLED and answers rather than
+        // falling through — the distinction the two functions exist to make.
+        assert_eq!(
+            InterpreterProfile::try_for_interpreter_number(6),
+            Some(InterpreterProfile::IbmPc),
+        );
+    }
+
+    /// The Apple family is one bundle with three numbers (SQ-0872): everything a
+    /// story can read is identical but `$1E`, because `zboot.asm` seeds the page
+    /// before `bsubs.asm`'s `MACHINE:` picks the number.
+    #[test]
+    fn the_two_new_apples_are_the_iigs_bundle_with_a_different_number() {
+        let gs = InterpreterProfile::AppleIIgs;
+        for (p, n) in [(InterpreterProfile::AppleIIe, 2u8), (InterpreterProfile::AppleIIc, 9)] {
+            assert_eq!(p.interpreter_number(), Some(n), "bsubs.asm MACHINE: IIeID 2 / IIcID 9");
+            assert_eq!(p.default_colours(), gs.default_colours(), "zboot.asm seeds one page");
+            assert_eq!(p.default_colours(), Some((2, 9)), "black page, white ink");
+            assert_eq!(p.palette(), gs.palette(), "ZIPCOLOR IS §8.3.1's eight");
+            assert_eq!(p.std_window(), None, "140x192 on a 3x9 cell is a different screen model");
+            assert_eq!(p.v6_font_cell(), gs.v6_font_cell());
+            assert_ne!(p.interpreter_number(), gs.interpreter_number(), "…but not the number");
+        }
+    }
+
+    /// Every knob a story can READ comes off `zvm`'s table, which is the whole
+    /// point of SQ-0872 — so the two must agree for every profile that states a
+    /// number, or the CLI and the TUI would present different machines.
+    #[test]
+    fn every_profile_agrees_with_the_zvm_machine_table() {
+        for p in [
+            InterpreterProfile::IbmPc,
+            InterpreterProfile::Amiga,
+            InterpreterProfile::Macintosh,
+            InterpreterProfile::AtariSt,
+            InterpreterProfile::AppleIIgs,
+            InterpreterProfile::AppleIIe,
+            InterpreterProfile::AppleIIc,
+            InterpreterProfile::Commodore128,
+        ] {
+            let Some(n) = p.interpreter_number() else {
+                // Only the IBM PC declines a number, and it does so because its
+                // number is a version RULE rather than a constant.
+                assert_eq!(p, InterpreterProfile::IbmPc);
+                continue;
+            };
+            let row = zvm::interpreter::machine(n)
+                .unwrap_or_else(|| panic!("{p:?} states {n} but zvm models no such machine"));
+            assert_eq!(p.default_colours(), row.default_colours, "{p:?} $2C/$2D");
+            assert_eq!(p.palette(), row.palette, "{p:?} palette");
+            assert_eq!(InterpreterProfile::for_interpreter_number(n), p, "{p:?} round trip");
         }
     }
 

@@ -3197,46 +3197,19 @@ impl GameSession {
 /// background)` — the ground every window that names no colour of its own is
 /// read on — or `None` on a machine that has no such thing.
 ///
-/// Two machines answer, and they answer for the same reason: their §8.3.3
-/// default colours are not advice about a terminal, they are the screen.
-/// [`crate::interpreter::InterpreterProfile::default_colours`] is where each
-/// pair is sourced, and both arrive here the same way — through header bytes
-/// `$2D`/`$2C`, which is where §8.3.3 already had babelmap publishing them to
-/// the story.
+/// **This is [`zvm::screen::machine_screen_pair`] and nothing else** (SQ-0872).
+/// It used to be half a rule: the Amiga's arm was in `zvm`, this one was the
+/// Macintosh's, gated on a constant `blorb` happened to carry, and `zvm-cli`
+/// could reach only the first of them. Both are now columns of `zvm`'s machine
+/// table, so the two front-ends cannot present different machines. The whole
+/// argument — why these two machines and not the Apple's equally real black page
+/// — lives at the zvm function.
 ///
-/// - The **Amiga** (interpreter 4), for §8.3's own reason: one pair of pens for
-///   the whole screen, shared and unmoving. [`zvm::screen::amiga_screen_pair`]
-///   carries the full rule, because the pens also govern `set_colour`.
-/// - The **Macintosh** (interpreter 3), for a plainer one: a white page under
-///   black ink was what a Mac window WAS, and `mac/xzip.lst` states it outright
-///   (`SetColor := (zWHITE*256) + zBLACK; { Mac defaults: white under black }`).
-///   Nothing about the pens is claimed here — a Mac `set_colour` behaves exactly
-///   as it did — only the ground beneath a window that asked for nothing.
-///
-/// **This is what SQ-0846 was reported as**, on `stories/Zork Zero Disk.image`
-/// (release 296, serial 881019): the status banner's location and score text
-/// came out grey on the white artwork and read as missing. Zork Zero on the
-/// Macintosh **never calls `set_colour` at all** — measured, on both of the
-/// disk's archives and in both colour modes, every window stays
-/// [`ZColour::Default`] — so with nothing painting `$2C`/`$2D` the ink fell all
-/// the way through to the host theme's grey, while the white it sat on was the
-/// game's own two-colour plate. That is SQ-0740's Amiga finding exactly, one
-/// machine later: *"nothing ever PAINTED them, so a v6 window left at Default
-/// rendered in the host terminal's theme and an Amiga looked exactly like an IBM
-/// PC"*.
-///
-/// The colour bit (`$01` bit 0) gates both arms, which is what makes
-/// `honor_game_colours = false` a no-op here: a colourless interpreter is never
-/// given the profile's pair to publish (`startup`'s `host_default_colours`), and
-/// the header then carries zvm's own §8.3.2 seed, which is nobody's machine.
+/// Kept as a named wrapper because the call site above is a paragraph of prose
+/// about what `ScreenModel.bg`/`fg` mean, and it reads better pointing at a local
+/// name than at a path.
 fn machine_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
-    if let Some(pair) = zvm::screen::amiga_screen_pair(mem) {
-        return Some(pair);
-    }
-    (mem.version() == 6
-        && mem.read_byte(0x1E) == blorb::medium::MACINTOSH_INTERPRETER_NUMBER
-        && mem.read_byte(0x01) & 0x01 != 0)
-        .then(|| (ZColour::Standard(mem.read_byte(0x2D)), ZColour::Standard(mem.read_byte(0x2C))))
+    zvm::screen::machine_screen_pair(mem)
 }
 
 /// Convert a detected `Location` into the `ObjectSnapshot` used as a room id.
