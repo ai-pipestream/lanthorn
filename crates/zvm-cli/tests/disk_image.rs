@@ -580,6 +580,116 @@ fn a_real_release_floppy_tells_the_game_which_machine_it_is() {
     assert!(text.contains("Interpreter 6 "), "-I outranks the floppy:\n{text}");
 }
 
+// ── a release that is on no single disk (SQ-0874) ────────────────────────────
+
+/// Every multi-volume release in the corpus, named by a volume that carries no
+/// whole story of its own. `v6` marks the ones this front-end will mount and then
+/// decline, which is a pass: the refusal is about the GAME, so it proves the
+/// mount reached one.
+const ACROSS_THE_SET: &[(&str, bool)] = &[
+    ("TRINITY1.D64", false),
+    ("TRINITY2.D64", false),
+    ("shogun_s1.dsk", true),
+    ("journey_s1.dsk", true),
+    ("zork_zero_1.dsk", true),
+];
+
+fn any_set_volume_present() -> bool {
+    ACROSS_THE_SET.iter().any(|(n, _)| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("stories").join(n).exists()
+    })
+}
+
+/// **The defect this quest was filed for.** `zvm-cli` mounted with
+/// `MountedDisk::mount` — `mount_set` with no companions — so a release whose
+/// story is paged across its volumes was unreachable here while the TUI opened it
+/// perfectly well.
+///
+/// The rule for which files are one release lives in `cli_host::disk_set` now, so
+/// both front-ends ask one implementation, and the mount goes through
+/// `cli_host::disk_set::mount_at`.
+///
+/// FALSIFICATION: put `MountedDisk::mount(raw)` back in `media::story_candidates`
+/// and every row here fails with the symptom as reported. Verbatim, off
+/// *Trinity*, whose game is on both sides and on neither:
+///
+/// ```text
+/// TRINITY1.D64: the set was never consulted:
+/// Error: no story file on this disk image (0 files mounted on TRINITY; is this the boot disk?)
+/// ```
+#[test]
+fn a_release_paged_across_its_volumes_opens_from_any_one_of_them() {
+    let mut ran = 0;
+    for (name, v6) in ACROSS_THE_SET {
+        let Some(image) = story_path(name) else { continue };
+        ran += 1;
+        let out = run(&image, &["--no-more"], "\nversion\nquit\ny\n");
+        let err = stderr_of(&out);
+        assert!(
+            !err.contains("no story file on this disk image"),
+            "{name}: the set was never consulted:\n{err}"
+        );
+        if *v6 {
+            // Mounted, then declined for what it is — this front-end renders no
+            // v6 graphics. A disk error here would mean the mount failed.
+            assert!(err.contains("v6 graphical games are not supported"), "{name}: {err}");
+            assert!(!err.contains("disk image"), "{name}: not a disk error:\n{err}");
+        } else {
+            let text = stdout_of(&out);
+            assert!(
+                text.contains("Release 12 / Serial Number 860926"),
+                "{name}: the reassembled Trinity did not run:\n{text}"
+            );
+            assert!(text.contains("Kensington Gardens"), "{name}: no opening room:\n{text}");
+        }
+    }
+    assert!(ran > 0 || !any_set_volume_present(), "set media are present but nothing ran");
+}
+
+/// The Apple II presses name the story the set carries, and its release — which
+/// is what `--story` picks by, and the proof the reassembly is the real build
+/// (*Shogun* release 311 / serial 890510) rather than plausible-looking Z-code.
+///
+/// A set volume offers exactly ONE candidate: the story the release keeps across
+/// it. So `--story 1` is the whole range, `--story <name>` matches that one
+/// story's name, and nothing is ever ambiguous — the menu never appears, because
+/// there is no choice to make.
+///
+/// FALSIFICATION: the same revert as above, and this fails with
+/// `Error: no story file on this disk image (4 files mounted on SHOGUN.1; is
+/// this the boot disk?)` — four segments of a story and not a story.
+#[test]
+fn a_set_offers_exactly_the_one_story_the_release_carries() {
+    let Some(image) = story_path("shogun_s1.dsk") else { return };
+    // Out of range says what the range is, which is how the name gets shown
+    // without the v6 refusal cutting the run short.
+    let err = stderr_of(&run(&image, &["--story", "2"], ""));
+    assert!(err.contains("pick 1 to 1"), "one story, so one choice:\n{err}");
+    assert!(err.contains("1) SHOGUN.D1  (v6 r311 s890510)"), "the build it reassembled:\n{err}");
+
+    // …and the name really does select it: this reaches the v6 refusal, which
+    // only a story that was found can be refused for.
+    let err = stderr_of(&run(&image, &["--story", "shogun"], ""));
+    assert!(err.contains("v6 graphical games are not supported"), "--story picked it:\n{err}");
+}
+
+/// **The other half: a lone volume is still a lone volume.** *Hitchhiker's* is a
+/// single Commodore floppy sitting in the same directory as *Trinity*'s two
+/// sides, on the same `.d64` spelling — it must open exactly as it always did,
+/// with no sibling consulted and nothing folded into it.
+#[test]
+fn a_single_volume_release_is_unaffected_by_the_sets_beside_it() {
+    let Some(image) = story_path("Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64") else {
+        return;
+    };
+    let text = stdout_of(&run(&image, &["--no-more"], "quit\ny\n"));
+    assert!(
+        text.contains("Release 47 / Serial number 840914"),
+        "the lone floppy's own build, not a set's:\n{text}"
+    );
+    assert!(!text.contains("Which one?"), "one story is not a choice:\n{text}");
+}
+
 /// A disk with no story on it — an AmigaDOS boot disk, say — says so, rather
 /// than failing later as if the image were a corrupt story file.
 #[test]

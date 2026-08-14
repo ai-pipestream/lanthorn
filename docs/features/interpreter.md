@@ -588,7 +588,7 @@ release, and only between the *same build* — so *Zork Zero*'s 296, 366 and 393
 stay three rows, and that 393 stays one row per medium across `floppy5.ima`, the
 360K DOS press and the loose `.z6`, because those are three separate things
 rather than volumes of one release. What it refuses is in
-`crates/app/src/disk_set.rs`; the sharpest case is *Zork Zero*'s 360K and 720K
+`crates/cli-host/src/disk_set.rs`; the sharpest case is *Zork Zero*'s 360K and 720K
 DOS presses, which both spell their disks `(Disk 1)` and `(Disk 2)` and differ
 only at `360`/`720` — a capacity, not a disk number, and therefore two sets.
 

@@ -607,6 +607,83 @@ fn loose_story_files_are_untouched() {
     assert!(ran > 0 || !dir.join("zork1.z5").exists());
 }
 
+// ── One rule, one place (SQ-0874) ────────────────────────────────────────────
+
+/// **The two front-ends agree about every set in the corpus**, because they are
+/// asking the same function.
+///
+/// The rule lived in `app` until `zvm-cli` needed it, and a CLI cannot depend on
+/// `app` — so the choice was to move it down to `cli-host` (which both already
+/// link) or to copy it sideways. A copy is how two front-ends end up with two
+/// ideas of what a release is, and the disagreement is invisible until a game
+/// goes missing from one of them.
+///
+/// This walks every disk image in `stories/` and asserts the answers are
+/// identical, member for member and in the same order — the browser's shelves
+/// and the CLI's mount are the same sets.
+#[test]
+fn the_browser_and_the_cli_group_the_corpus_identically() {
+    let dir = stories_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut ran = 0;
+    let mut sets = 0;
+    for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_file()) {
+        ran += 1;
+        let via_app = app::disk_set::members(&path);
+        let via_cli = cli_host::disk_set::members(&path);
+        assert_eq!(via_app, via_cli, "{}: the two front-ends disagree", path.display());
+        if via_app.is_some() {
+            sets += 1;
+        }
+    }
+    assert!(ran > 0 || !any_media_present(), "media are present but nothing was compared");
+    // …and the comparison had real sets in it, rather than agreeing on `None`
+    // for everything: the Apple II presses and the Commodore *Trinity* are here.
+    assert!(sets > 0 || !any_media_present(), "no set in the corpus was compared at all");
+}
+
+/// …and "the same function" is a fact about the source, not a hope.
+///
+/// `app::disk_set` is a re-export, so the equality above could never fail — which
+/// is exactly the point, and this is what stops someone restoring the second copy
+/// that would make it able to. Exactly one file in the workspace implements the
+/// rule; the census is over `is_index_run`, the clause that decides whether a
+/// digit run is a disk number.
+///
+/// Needs no fixture, so it never skips: CI has no `stories/` and this is the half
+/// of the guard that still runs there.
+#[test]
+fn exactly_one_file_in_the_workspace_implements_the_rule() {
+    // Spelt in two halves so this file is not itself a hit: the census walks
+    // every `.rs` in the workspace, including this one.
+    let needle = concat!("fn ", "is_index_run");
+    let crates = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+    let mut carriers: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![crates.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs")
+                && std::fs::read_to_string(&p).is_ok_and(|s| s.contains(needle))
+            {
+                carriers.push(p);
+            }
+        }
+    }
+    assert_eq!(carriers.len(), 1, "the multi-disk rule is implemented in {carriers:?}");
+    assert!(
+        carriers[0].ends_with("cli-host/src/disk_set.rs"),
+        "the rule must live where both front-ends reach it, not in {:?}",
+        carriers[0]
+    );
+}
+
 /// The whole scan, counted: folding a set never removes a *game*, only a second
 /// copy of one. Every build on every mountable image in the directory is
 /// somewhere in the list.
