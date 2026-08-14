@@ -110,6 +110,24 @@ fn is_simple(model: &ScreenModel) -> bool {
 /// prose beside it (coloured per-run from its `TextAttrs`) is black. Cell-side,
 /// so the packed colours resolve through `resolve_zcolour` exactly as the prose
 /// runs in `draw_str_runs` do. (SQ-0532 wave-6)
+///
+/// **And under that, the MACHINE's own pair** (SQ-0847). A window that declares
+/// nothing is not a window with no colours — on the two machines whose §8.3.3
+/// defaults ARE the screen it is a window standing on the machine's page, which
+/// `session::machine_screen_pair` publishes as the v6 model's `fg`/`bg` and
+/// [`v6_machine_page`] already lays under the prose. The input line had no such
+/// layer: it resolved `input_text` over the transcript style, and that selector
+/// derives from the `text` role, whose shipped ink is **white**. On the
+/// Macintosh's white page — release 296 off `stories/Zork Zero Disk.image`, which
+/// never calls `set_colour` at all — that is white on white, and the player could
+/// not see what he was typing until he pressed Enter and the game's own echo
+/// re-drew it as prose in the machine's black.
+///
+/// The machine's pair is a DEFAULT, though, and a `style.toml` that names the
+/// input line's colours outranks a default — hence [`input_line_is_themed`].
+/// `set_colour` is the other case entirely and is untouched: there the story
+/// asked for a colour, and an honoured game colour has always beaten the theme's
+/// input fields.
 fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::style::Style> {
     if !state.config.honor_game_colours {
         return None;
@@ -118,7 +136,14 @@ fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::st
         WinNode::Layered(items) => {
             let story = crate::render::v6_layout::classify_windows(items).story;
             let (f, b) = crate::render::v6_layout::story_pair_packed(story);
-            (crate::state::unpack_zcolour(f), crate::state::unpack_zcolour(b))
+            let (f, b) = (crate::state::unpack_zcolour(f), crate::state::unpack_zcolour(b));
+            let declared_none = matches!(f, zvm::screen::ZColour::Default)
+                && matches!(b, zvm::screen::ZColour::Default);
+            if declared_none && !input_line_is_themed(&state.colors) {
+                (crate::state::unpack_zcolour(model.fg), crate::state::unpack_zcolour(model.bg))
+            } else {
+                (f, b)
+            }
         }
         _ => (crate::state::unpack_zcolour(model.fg), crate::state::unpack_zcolour(model.bg)),
     };
@@ -133,6 +158,20 @@ fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::st
         s = s.bg(crate::render::resolve_zcolour(bg, &state.colors));
     }
     Some(s)
+}
+
+/// Has the player named the input line's own ink in `style.toml`? (SQ-0847)
+///
+/// The two selectors the typed line and its `>` are drawn through. Registry
+/// default means nobody claimed the channel, and an unclaimed channel is the
+/// machine's to fill; anything above it — global `style.toml`, a discovered
+/// `garglk.ini`, the per-game sidecar — is a choice, and a choice outranks a
+/// default. Per-SELECTOR, matching the resolver's own stamp (`Provenance` is not
+/// per-channel; see `theme::resolve`).
+fn input_line_is_themed(colors: &ColorScheme) -> bool {
+    ["input_text", "input_prompt"]
+        .iter()
+        .any(|sel| colors.theme.get(sel).provenance != crate::theme::resolve::Provenance::Default)
 }
 
 /// The colour scheme to draw the grid (upper/status) window with. When the game
