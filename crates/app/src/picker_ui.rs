@@ -2986,10 +2986,17 @@ mod tests {
         };
         assert_eq!(super::interp_label(&meta(Some(DiskImage::Adf)), false), "Z6 (ADF)");
         assert_eq!(super::interp_label(&meta(Some(DiskImage::Hfs)), false), "Z6 (HFS)");
+        // …and SQ-0833/SQ-0835: the PC and the Atari ST, which share a
+        // filesystem and must still be named apart, because they are different
+        // machines and the column is the only place a player is told which.
+        assert_eq!(super::interp_label(&meta(Some(DiskImage::Fat12Dos)), false), "Z6 (DOS)");
+        assert_eq!(super::interp_label(&meta(Some(DiskImage::Fat12AtariSt)), false), "Z6 (ST)");
         // Not a disk image: exactly what it rendered before.
         assert_eq!(super::interp_label(&meta(None), false), "Z6");
         assert_eq!(super::interp_label(&meta(None), true), "Z6 (blorb)");
-        for image in [DiskImage::Adf, DiskImage::Hfs] {
+        // Every format, so a new one cannot arrive with a label that overflows
+        // the column — the enumeration is the table's, not a copy of it.
+        for image in DiskImage::all() {
             assert!(
                 super::interp_label(&meta(Some(image)), false).len() <= super::INTERP_COL_W as usize
             );

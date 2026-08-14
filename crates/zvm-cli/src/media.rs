@@ -21,10 +21,12 @@ use blorb::medium::{DiskImage, MountedDisk};
 
 /// One story found on a mounted disk image.
 pub struct Candidate {
-    /// The best name the medium gives this story: a directory name where the
-    /// format has one, else the stored filename. AmigaDOS release floppies name
-    /// every story `Story.data`, so on today's media this rarely distinguishes
-    /// anything — which is why the menu also shows [`Candidate::header`].
+    /// The best name the medium gives this story: the stored filename, prefixed
+    /// by its directory on a format that has them (`HITCHHIK/STORY.DAT`).
+    /// AmigaDOS release floppies name every story `Story.data` and Atari ST
+    /// compilations name every one `STORY.DAT`, so on a flat disk this rarely
+    /// distinguishes anything — which is why the menu also shows
+    /// [`Candidate::header`].
     pub name: String,
     /// The story bytes, read off the image.
     pub bytes: Vec<u8>,

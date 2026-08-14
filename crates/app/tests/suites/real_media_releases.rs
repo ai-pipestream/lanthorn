@@ -65,12 +65,15 @@ struct Medium {
     serial: &'static str,
 }
 
-/// Every medium in `stories/` for a title that ships on an Amiga floppy, with
-/// the build each one carries. **Measured**, 2026-08-10, by mounting each file
-/// through `app::hints::load_mounted_story` and reading its header.
+/// Every medium in `stories/` worth pinning a build against, with the build each
+/// one carries. **Measured**, 2026-08-10 and extended 2026-08-13 for the DOS and
+/// Atari ST presses, by mounting each file through
+/// `app::hints::load_mounted_story` and reading its header.
 ///
 /// Read the pairs: four of the five titles that ship both ways ship *different
-/// builds*, and the four v3/v5 pairs ship the same one.
+/// builds*, and the four v3/v5 pairs ship the same one. Then read the
+/// Hitchhiker's trio at the bottom, which is the same lesson at three media and
+/// two Z-machine versions.
 const MEDIA: &[Medium] = &[
     // Journey — the pair that started this. Different builds, and they differ
     // in which window they narrate through (see `V6_FRAMES`).
@@ -102,6 +105,33 @@ const MEDIA: &[Medium] = &[
     Medium { title: "Zork III", file: "zork3-r17-s840727.z3", image: None, version: 3, release: 17, serial: "840727" },
     // Zork: The Undiscovered Underground ships on a floppy only.
     Medium { title: "ZTUU", file: "Zork - The Undiscovered Underground.adf", image: Some(DiskImage::Adf), version: 5, release: 16, serial: "970828" },
+    // ── The PC and the Atari ST (SQ-0833, SQ-0835) ───────────────────────────
+    //
+    // Zork Zero's DOS press, on the disk its STORY is actually on: *The Lost
+    // Treasures of Infocom* I, floppy5 — with its EGA art beside it, while its
+    // CGA art sits on floppy4 and is unreachable from here. r393/890714, the
+    // same build as the bare `zork0-r393-s890714.z6`, byte for byte.
+    Medium { title: "Zork Zero (DOS)", file: "floppy5.ima", image: Some(DiskImage::Fat12Dos), version: 6, release: 393, serial: "890714" },
+    // **Three media, three Hitchhiker's, two Z-machine versions.** This is the
+    // project's "a disk image is a different release" rule at its most extreme,
+    // and now it is pinned rather than asserted: the standalone DOS disk is v3
+    // r58, the Lost Treasures collection ships the later Solid Gold v5 r31, and
+    // the Atari ST press is v3 r56. A finding about "Hitchhiker's" that does not
+    // name its medium describes none of them.
+    Medium { title: "Hitchhiker's (DOS 360K)", file: "Hitchhiker's Guide to the Galaxy, The (1987) (r58, Serial 851002) (Infocom, Inc.) (360K) [!].ima", image: Some(DiskImage::Fat12Dos), version: 3, release: 58, serial: "851002" },
+    Medium { title: "Hitchhiker's (Lost Treasures)", file: "floppy2.ima", image: Some(DiskImage::Fat12Dos), version: 5, release: 31, serial: "871119" },
+    // An Atari ST compilation: four games in four folders, every one of them
+    // called `STORY.DAT`, so the conventional-name tiebreak cannot separate them
+    // and the largest is what opening the disk gives you — *Bureaucracy* v4 r86.
+    // (The other three are Hitchhiker's v3 r56 s841221, Cutthroats v3 r23
+    // s840809 and Leather Goddesses v3 r59 s860730; `blorb::medium`'s own suite
+    // pins the whole list.)
+    Medium { title: "Bureaucracy (Atari ST)", file: "Infocom Compilation 9 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 4, release: 86, serial: "870212" },
+    // The other directoried ST compilation, and the one that gets to PLAY below:
+    // four folders again, four more `STORY.DAT`s, and the largest is *Trinity*.
+    // (Compilation 9's Bureaucracy opens on its licence form and never reaches
+    // an ordinary prompt, which makes it a fine identity pin and a poor smoke.)
+    Medium { title: "Trinity (Atari ST)", file: "Infocom Compilation 8 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 4, release: 11, serial: "860509" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -178,6 +208,18 @@ const NARRATED: &[(&str, &[&str])] = &[
     // floppy is the Amiga's 4 (ZMSD §11.1.3). One line proving both halves of
     // "the medium picks the machine".
     ("Zork - The Undiscovered Underground.adf", &["Release 16 / Serial number 970828", "Interpreter 4 "]),
+    // **The PC and the Atari ST open and play** (SQ-0833, SQ-0835). Mounting is
+    // half a claim; this is the other half — the game boots off the floppy,
+    // reaches its prompt, and names the release the disk carries. Zork Zero's
+    // DOS press draws its own EGA art off the same disk on the way.
+    ("floppy5.ima", &["Release 393 / Pix 393 / Serial number 890714"]),
+    // Trinity off the ST floppy prints its interpreter number too, and it says
+    // **1** — not ZMSD §11.1.3's 5 for the Atari ST. That is SQ-0835's open half
+    // made audible: the container reads, and the machine is still the IBM PC
+    // default, because no ST v6 fixture exists in this corpus to verify an ST
+    // palette, screen or default colours against. When an ST press of a
+    // graphical title turns up, this line is where the change will show.
+    ("Infocom Compilation 8 (19xx)(-).st", &["Release 11 / Serial Number 860509", "Interpreter 1 "]),
 ];
 
 /// The resource Blorbs shipped beside these stories, and whether each declares
@@ -224,6 +266,8 @@ fn ctx(m: &Medium) -> String {
         match m.image {
             Some(DiskImage::Adf) => "Amiga floppy",
             Some(DiskImage::Hfs) => "Macintosh floppy",
+            Some(DiskImage::Fat12Dos) => "DOS floppy",
+            Some(DiskImage::Fat12AtariSt) => "Atari ST floppy",
             None => "story file",
         },
         m.release,
@@ -475,7 +519,19 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
         let expected = match m.image {
             Some(DiskImage::Adf) => InterpreterProfile::Amiga,
             Some(DiskImage::Hfs) => InterpreterProfile::Macintosh,
-            _ => InterpreterProfile::IbmPc,
+            // A DOS floppy IS the IBM PC, and the IBM PC bundle is the one that
+            // deliberately announces no number of its own (SQ-0833) — so this
+            // arm and the fall-through below reach the same profile by design
+            // rather than by accident.
+            Some(DiskImage::Fat12Dos) => InterpreterProfile::IbmPc,
+            // And the Atari ST resolves to the IBM PC default **because it has
+            // no profile of its own yet** (SQ-0835): ZMSD §11.1.3 numbers the ST
+            // 5, but there is no ST v6 fixture in this corpus to verify a
+            // palette, a screen or default colours against, and a machine
+            // written from memory is what this project's rules forbid. The day
+            // an ST Zork Zero turns up, this arm is where it lands.
+            Some(DiskImage::Fat12AtariSt) => InterpreterProfile::IbmPc,
+            None => InterpreterProfile::IbmPc,
         };
         assert_eq!(
             InterpreterProfile::resolve(&path, None, None),
@@ -561,6 +617,101 @@ fn a_game_that_names_its_release_names_the_one_the_medium_carries() {
         }
     }
     assert!(ran > 0 || !any_real_media_present(), "media are present but no game was asked");
+}
+
+/// A copy of a release floppy in a directory of its own, deleted when it drops.
+///
+/// **The isolation is the point, not tidiness.** `stories/` already holds loose
+/// `zork0.eg1`, `zork0.cg1` and `zork0.mg1` fixtures that came off these very
+/// disks, and `PictureOverride` tries the host filesystem before the medium — so
+/// a test that names `ZORK0.EG1` beside them proves nothing about the medium at
+/// all, and on a case-insensitive filesystem does not even fail loudly. It
+/// passed under a deliberately broken mount before this struct existed.
+struct FloppyAlone {
+    dir: PathBuf,
+    image: PathBuf,
+}
+
+impl Drop for FloppyAlone {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn floppy_alone(tag: &str) -> Option<FloppyAlone> {
+    let src = stories_dir().join("floppy5.ima");
+    if !src.is_file() {
+        eprintln!("SKIP: gitignored medium missing at {}", src.display());
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("babelmap-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a directory of its own");
+    let image = dir.join("floppy5.ima");
+    std::fs::copy(&src, &image).expect("the floppy is copied");
+    Some(FloppyAlone { dir, image })
+}
+
+/// A release floppy supplies its own artwork, on **every** machine that pressed
+/// one — and the PC's is a different codec from the Amiga's and the Mac's
+/// (SQ-0833).
+///
+/// This is the pairing the medium guarantees and no configuration has to: open
+/// `floppy5.ima` and *Zork Zero*'s story and its EGA art come off the same disk,
+/// through the same mount, with nothing named by hand. `ZORK0.EG1` is the
+/// LZW-coded PC archive where the Amiga and Macintosh floppies hand back the
+/// big-endian Huffman one — `blorb::fat12` pins the flavour, and this pins that
+/// the app reaches it and can draw from it.
+///
+/// It is also where the one-image limit is visible: this disk carries the EGA
+/// rendition and *Zork Zero*'s CGA rendition is on floppy4, which this mount
+/// cannot reach. A set model would; see the module docs of `blorb::fat12`.
+#[test]
+fn a_dos_release_floppy_supplies_its_own_pc_artwork() {
+    let Some(disk) = floppy_alone("dos-art") else { return };
+    let mut picts = PictSource::resolve(&disk.image);
+    let dims = picts.all_pict_dims();
+    assert!(dims.len() > 100, "the disk's own archive, {} pictures", dims.len());
+    assert!(
+        picts.image(1).is_some(),
+        "picture 1 decodes straight off the floppy, with no extraction step"
+    );
+}
+
+/// **Offered and openable, which are two claims** (SQ-0833 + SQ-0843).
+///
+/// The launch dialog enumerates a disk's files through `assets::files`, which
+/// asks `blorb::medium` and therefore gained FAT12 for free; the `--pictures`
+/// door then loads the chosen one through `PictureOverride`. Those were two
+/// different code paths, and the second one still carried a hand-written
+/// `looks_like_adf … else if looks_like_hfs` chain — so a DOS disk's `ZORK0.EG1`
+/// would have appeared in the list and drawn nothing when picked.
+///
+/// FALSIFICATION: restore that chain in `graphics::read_off_the_medium` and this
+/// fails at the `Loaded` assertion with `Missing` — the file the same disk had
+/// just listed.
+#[test]
+fn artwork_on_a_dos_floppy_is_both_listed_and_loadable() {
+    let Some(disk) = floppy_alone("dos-listed") else { return };
+    let listed: Vec<String> = app::assets::files(&disk.image)
+        .into_iter()
+        .filter(app::assets::AssetFile::is_on_medium)
+        .map(|f| f.name)
+        .collect();
+    assert_eq!(listed, ["ZORK0.EG1", "ZORK0.ZIP"], "the disk's own files, in disk order");
+
+    // Every name the dialog can show has to be a name the door accepts.
+    let over =
+        app::graphics::PictureOverride::resolve_with_session(&disk.image, &disk.dir, Some("ZORK0.EG1"));
+    assert!(
+        matches!(over, app::graphics::PictureOverride::Loaded { .. }),
+        "naming the disk's own archive loads it: {over:?}"
+    );
+    assert_eq!(
+        over.flavour(),
+        Some(blorb::infocom_pics::Flavour::Pc),
+        "…and it is the PC's LZW archive, so the machine stays the IBM PC"
+    );
 }
 
 /// …and the other half of the rule, on the same real floppy: an explicitly

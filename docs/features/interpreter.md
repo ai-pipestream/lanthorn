@@ -39,8 +39,12 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
 - **Amiga `.adf` disk images** — the original release floppy, played as it shipped.
 - **Macintosh disk images** — a DiskCopy 4.2 `.image` (or a bare HFS volume), the
   Mac release floppy, likewise played as it shipped.
+- **DOS floppy images** — `.ima`, `.img`, or any name at all: the PC release disk,
+  from a single-game 360 KB floppy to a *Lost Treasures* collection.
+- **Atari ST floppy images** — `.st`, the GEMDOS press, which turns out to be the
+  same filesystem one machine over.
 
-Those last two are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
+Those last four are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
 titles circulate in their native form. Hand babelmap one — `babelmap "Zork
 Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem (both OFS and FFS),
@@ -79,11 +83,47 @@ the colour screen and one for the black-and-white one. babelmap draws the colour
 archive; the monochrome one packs its directory differently and is not yet
 decoded.
 
+The PC and the Atari ST are one paragraph, not two, and that is the interesting
+part. GEMDOS put its BIOS Parameter Block at **exactly** the DOS offsets — bytes
+per sector at `0x0B`, sectors per cluster at `0x0D`, and so on down the block —
+so a plain FAT12 reader opens an Atari compilation with no Atari-specific code in
+it whatsoever. What differs is the machine, and the machine is a question for the
+boot sector: DOS's own load protocol requires the sector to begin with an x86
+jump over the BPB (`EB xx 90`, or `E9 xx xx`), because the BIOS executes it from
+offset 0. TOS has no such rule. Across all twenty-four floppies in the reference
+collection the test is unanimous — fifteen DOS images open with that jump under
+four *different* OEM strings, and nine Atari ones open with `00 00 4E` or three
+zeros and an OEM field that is blank. Nothing else was usable: the extension is
+worthless (`.ima` and `.img` are one format), the OEM string names a formatter
+rather than a machine, and the `55 AA` at the end of the sector is a boot
+signature on one machine and a checksum word on the other.
+
+These disks push the content-first rule harder than any other medium, because
+their filenames give up entirely. Every story on an Atari ST compilation is
+called `STORY.DAT` — four of them, on four different games — so the *directory*
+is what names the game, and babelmap lists them as `HITCHHIK/STORY.DAT` and
+`BUREAUCR.ACY/STORY.DAT`. Subdirectories are not optional here: a root-only walk
+would find nothing at all on that disk, and would miss the `DEMO` folder on the
+standalone DOS *Hitchhiker's*. Beside the games sit somebody's 1996 saved
+positions (`BILL1.SAV`, `STEVE1.SAV`) and a pile of `.COM`, `.EXE`, `.PRG` and
+`.SYS` files, and the header check throws out every one of them. One more piece
+of Infocom trivia falls out for free: `ZORK0.ZIP` is **not** a PKZIP archive but
+Infocom's DOS name for a bare Z-machine story — byte-identical to the loose
+`zork0.z6` — so it needs no unwrapping and never did.
+
+The one thing a PC disk cannot do is be a whole release by itself. *Zork Zero*'s
+story lives on *Lost Treasures* floppy 5 with its EGA artwork, while its CGA
+artwork is one disk over on floppy 4; the standalone 360 KB release spreads
+installer, story and EGA art across three floppies. babelmap mounts **one image**
+and offers what that image holds, so pick the disk with the game on it. Joining
+several disks into one release is a set model that does not exist yet.
+
 Disk images are first-class in the library too: point babelmap at a directory of
 them and the picker's TYPE column names the container alongside the format —
-`Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh one — from the same
-content-based identification, so a floppy is never listed as a bare story file,
-and one machine's media is never labelled as another's. See
+`Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh one, `Z6 (DOS)` off a PC
+floppy and `Z3 (ST)` off an Atari one — from the same content-based
+identification, so a floppy is never listed as a bare story file, and one
+machine's media is never labelled as another's. See
 [Story picker](interface.md#story-picker).
 
 ### One road in, whatever the disk is
@@ -101,8 +141,17 @@ everything that touches a disk — the picker, story loading, artwork, the CLI's
 menu, the interpreter number the medium implies — asks that table rather than
 naming a filesystem. **Whatever babelmap can recognise as a disk, it can open**,
 because recognising and opening are the same lookup. A format added to the table
-arrives everywhere at once, which is the point: DOS/Atari ST FAT12 and Apple
-ProDOS are next, and neither will need a line changed in any front-end.
+arrives everywhere at once, and DOS and the Atari ST proved it: they landed as
+two rows and one reader, and the picker, the CLI menu and the launch dialog all
+gained them without a line changed. Apple ProDOS is next, on the same terms.
+
+The proof was not free, mind. One function had been missed — the one that reads
+an archive you name *inside* a disk, which predated the table and still carried a
+hand-written two-reader chain. It was merely stale while two formats existed, and
+became a defect the instant a third arrived: the launch dialog enumerated a PC
+floppy's `ZORK0.EG1` through the table and offered it, and the loader had no arm
+that could open it. Offered, picked, nothing drawn. It goes through the one table
+now, which is exactly the failure mode the table exists to make impossible.
 
 ### A floppy is a different release
 
@@ -135,6 +184,26 @@ that build and no other. It will also tell you which machine it thinks it is on
 if you ask — `version` off that disk answers *"Macintosh Interpreter version
 6.65"*, which is the game reading header byte `0x1E` back to you.
 
+And *Hitchhiker's* takes the rule to its limit, now that the PC and Atari presses
+are readable. Three media, three releases, and **two different Z-machine
+versions**:
+
+| Medium | Release |
+| --- | --- |
+| Atari ST compilation (`STORY.DAT`) | v3, release 56, serial 841221 |
+| DOS standalone 360 KB floppy | v3, release 58, serial 851002 |
+| DOS *Lost Treasures* collection | **v5**, release 31, serial 871119 |
+
+The collection ships the later "Solid Gold" edition — a different engine version,
+45 KB more story, and built-in hints the other two do not have. A result measured
+on one of those describes exactly one of them.
+
+The PC disks add a smaller trap worth naming: *the same release can be a
+different file size on different media*. `LURKING` is 153,600 bytes on one Atari
+compilation and 129,024 on another, and both are v3 release 203 serial 870506 —
+identical builds with different trailing padding. Size is never a release
+identifier. Read the header.
+
 Every graphical title ships a *different* build on its floppy; the v3/v5 ones
 ship the same build on both media. A resource `.blb` beside a story is never a
 third build — it holds artwork and no executable, so the release you play is
@@ -165,22 +234,24 @@ worked and only the renderer is missing.
 One thing the CLI needs that a single-game floppy never asks for: **which one**.
 Amiga releases came one game to a disk, but the compilations did not — an Atari
 ST or PC collection carries four to six stories on a single image — so when more
-than one turns up you get a menu:
+than one turns up you get a menu. Here is a real Atari one:
 
 ```
 This disk holds 4 stories:
-  1) Story.data  (v3 r59 s851108)
-  2) Zork1.Data  (v3 r88 s840726)
-  3) Planet.Data  (v3 r37 s851003)
-  4) Trinity.Data  (v4 r12 s860926)
+  1) HITCHHIK/STORY.DAT  (v3 r56 s841221)
+  2) BUREAUCR.ACY/STORY.DAT  (v4 r86 s870212)
+  3) CUTHROAT/STORY.DAT  (v3 r23 s840809)
+  4) LEATHER.GOD/STORY.DAT  (v3 r59 s860730)
 Which one? [1-4] 3
-Opening 3) Planet.Data  (v3 r37 s851003)
+Opening 3) CUTHROAT/STORY.DAT  (v3 r23 s840809)
 ```
 
-Every line carries its Z-machine version, release and serial, and that is not
-decoration: a collection disk names its stories `STORY.DAT` four times over, and
-the corpus holds three different builds of *Hitchhiker's* alone. The header is
-what tells them apart when the filename refuses to.
+That is the naming rule doing visible work. All four files are called
+`STORY.DAT`; without the folder in front of them the menu would be four identical
+lines, and `--story cuthroat` would have nothing to match. And every line carries
+its Z-machine version, release and serial, which is not decoration either — the
+collection holds three different builds of *Hitchhiker's* alone. The header tells
+them apart when the filename refuses to.
 
 A disk with one story opens straight into it and asks nothing. A disk with none
 says what it mounted instead of failing later as a corrupt story file. And
@@ -251,6 +322,17 @@ Amiga floppy or anywhere else.
   v6) — unless you opened a release disk image, in which case the medium picks
   the number instead (an `.adf` is an Amiga's 4, an HFS volume a Macintosh's 3),
   in every front-end alike.
+  Two media deliberately do **not** move it. A DOS floppy is an IBM PC, and the
+  IBM PC's honest number is version-dependent — that *is* Frotz's rule — so it
+  is already in force and there is nothing for the disk to add; pinning a flat 6
+  would quietly flip *Beyond Zork* on the *Lost Treasures* disk over to CP437
+  character graphics, which is a rendering decision and not a container one. And
+  an Atari ST floppy stays on the default because the ST has no profile yet: the
+  standard numbers it 5, but a number here travels with a palette, a screen and a
+  set of default colours, and no ST press of a graphical v6 title exists in the
+  reference collection to verify any of them against. *Trinity* off an ST disk
+  therefore answers VERSION with *Interpreter 1*, and will keep doing so until
+  there is a real ST machine behind the byte.
   This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config

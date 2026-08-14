@@ -1,12 +1,15 @@
 //! End-to-end: point the compiled `zvm-cli` at a disk image and let it mount
 //! the story off it (SQ-0834).
 //!
-//! Two kinds of disk here. The **real** one is an original Amiga release floppy
-//! out of the gitignored `stories/` tree — the only proof that the mount reads
-//! genuine media, and vacuously skipped when the fixture is absent. The
-//! **synthetic** ones are built here, because every Amiga floppy in the corpus
-//! carries exactly one story and the menu only appears when a disk carries
-//! several (the DOS and ST compilations do, and land under SQ-0833).
+//! Two kinds of disk here. The **real** ones come out of the gitignored
+//! `stories/` tree — the only proof that the mount reads genuine media, and
+//! vacuously skipped when a fixture is absent. The **synthetic** ones are built
+//! here, because every Amiga floppy in the corpus carries exactly one story and
+//! the menu only appears when a disk carries several.
+//!
+//! Since SQ-0833/SQ-0835 the menu has real disks to stand on: a DOS compilation
+//! carrying six games and an Atari ST one carrying four, where the ST's four are
+//! all called `STORY.DAT` and only the directory tells them apart.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -289,6 +292,67 @@ fn story_name_picks_one_off_the_disk() {
     assert!(!out.status.success(), "a name that matches nothing cannot open a story");
     assert!(stderr_of(&out).contains("is named 'zork9'"), "{}", stderr_of(&out));
     let _ = std::fs::remove_file(&image);
+}
+
+// ── real compilations, on both FAT12 machines (SQ-0833, SQ-0835) ──────────────
+
+/// **The menu the synthetic disks above were standing in for.** Until now every
+/// real floppy in the corpus carried exactly one story, so the choose-a-story
+/// path was only ever exercised against a disk this file built. *The Lost
+/// Treasures of Infocom* I, floppy2 carries six, and they are six different
+/// games with six different headers.
+///
+/// `HITCHHIK.DAT` here is the Solid Gold **v5 r31 s871119** — a different
+/// release AND a different Z-machine version from the standalone DOS disk's v3
+/// r58 s851002 and from the Atari ST's v3 r56 s841221. Which is why the menu
+/// shows the header beside the name: on this medium the names differ, and on
+/// the next one they do not.
+#[test]
+fn a_real_dos_compilation_lists_six_games_and_story_opens_one() {
+    let Some(image) = story_path("floppy2.ima") else { return };
+    let err = stderr_of(&run(&image, &[], ""));
+    assert!(err.contains("holds 6 stories"), "the whole disk is offered:\n{err}");
+    assert!(err.contains("1) HITCHHIK.DAT  (v5 r31 s871119)"), "the Solid Gold release:\n{err}");
+    assert!(err.contains("4) BALLYHOO.DAT  (v3 r97 s851218)"), "…and the rest of them:\n{err}");
+
+    let out = run(&image, &["--story", "hitchhik"], "quit\ny\n");
+    let text = stdout_of(&out);
+    assert!(text.contains("Opening 1) HITCHHIK.DAT"), "says which it opened:\n{text}");
+    assert!(
+        text.contains("Release 31 / Serial number 871119"),
+        "and the GAME says which release it is:\n{text}"
+    );
+}
+
+/// The Atari ST, where the filename gives nothing away: four games, four
+/// folders, and four files called `STORY.DAT`. The **directory** is the only
+/// thing that tells them apart, so it is what the menu shows — which is the
+/// whole of SQ-0835's naming finding, visible at the prompt.
+///
+/// FALSIFICATION: have `blorb::fat12` report `Fat12Entry::name` instead of
+/// `Fat12Entry::path` and this menu becomes four identical `STORY.DAT` lines,
+/// distinguishable only by their headers and unpickable by `--story <name>`.
+#[test]
+fn a_real_atari_st_compilation_names_its_games_by_directory() {
+    let Some(image) = story_path("Infocom Compilation 9 (19xx)(-).st") else { return };
+    let err = stderr_of(&run(&image, &[], ""));
+    assert!(err.contains("holds 4 stories"), "four games, and no saved game among them:\n{err}");
+    for line in [
+        "1) HITCHHIK/STORY.DAT  (v3 r56 s841221)",
+        "2) BUREAUCR.ACY/STORY.DAT  (v4 r86 s870212)",
+        "3) CUTHROAT/STORY.DAT  (v3 r23 s840809)",
+        "4) LEATHER.GOD/STORY.DAT  (v3 r59 s860730)",
+    ] {
+        assert!(err.contains(line), "expected {line:?} in:\n{err}");
+    }
+    assert!(!err.contains(".SAV"), "the disk's 1996 saved games are not games:\n{err}");
+
+    // …and the directory name is enough to pick one, which a bare `STORY.DAT`
+    // never could be.
+    let out = run(&image, &["--story", "cuthroat"], "quit\ny\n");
+    let text = stdout_of(&out);
+    assert!(text.contains("Opening 3) CUTHROAT/STORY.DAT"), "says which it opened:\n{text}");
+    assert!(text.contains("Hardscrabble Island"), "…and Cutthroats really ran:\n{text}");
 }
 
 // ── the medium picks the machine (SQ-0839) ────────────────────────────────────

@@ -94,10 +94,12 @@ pub enum AssetOrigin {
 /// is the one door, and it hides which of those two happened.
 #[derive(Debug, Clone)]
 pub struct AssetFile {
-    /// The bare filename, exactly as the directory or the volume spells it.
-    /// This is what goes into a `pictures = "…"` key: both doors resolve a bare
-    /// name against the story, the host filesystem first and then the medium
-    /// (see `crate::graphics::read_off_the_medium`).
+    /// The filename, exactly as the directory or the volume spells it — which on
+    /// FAT12, the one format with directories, includes the folder
+    /// (`HITCHHIK/STORY.DAT`). This is what goes into a `pictures = "…"` key:
+    /// both doors resolve the name against the story, the host filesystem first
+    /// and then the medium (see `crate::graphics::read_off_the_medium`), so
+    /// whatever is shown here can be asked for.
     pub name: String,
     /// The host path to open: the file itself when it is loose, and the disk
     /// image when it is on a volume — which is the file a person opened either

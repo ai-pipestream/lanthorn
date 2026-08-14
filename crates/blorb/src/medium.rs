@@ -41,6 +41,7 @@
 //! ProDOS `2IMG` length field reads zero.
 
 use crate::adf::{Adf, looks_like_story};
+use crate::fat12::Fat12;
 use crate::hfs::Hfs;
 use crate::infocom_pics::InfocomPics;
 
@@ -70,6 +71,14 @@ pub enum DiskImage {
     /// A Macintosh HFS volume, bare or inside a DiskCopy 4.2 wrapper —
     /// conventionally `.image` (SQ-0837).
     Hfs,
+    /// An IBM PC / MS-DOS FAT12 release floppy — conventionally `.ima` or
+    /// `.img`, and the two are the same thing (SQ-0833).
+    Fat12Dos,
+    /// An Atari ST GEMDOS floppy — conventionally `.st` (SQ-0835). The **same**
+    /// FAT12 filesystem as [`DiskImage::Fat12Dos`], down to the byte offsets of
+    /// the BPB, and a different machine; see [`crate::fat12`] for the
+    /// discriminator.
+    Fat12AtariSt,
 }
 
 impl DiskImage {
@@ -149,7 +158,7 @@ struct Format {
 /// resolution, and `zvm-cli`'s disk menu all read this table and none of them
 /// knows a format's name.
 ///
-/// Queued: DOS/ST FAT12 (SQ-0833) and ProDOS (SQ-0836).
+/// Queued: ProDOS (SQ-0836).
 const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::Adf,
@@ -164,6 +173,55 @@ const FORMATS: &[Format] = &[
         interpreter_number: Some(MACINTOSH_INTERPRETER_NUMBER),
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
+    },
+    // ── One filesystem, two machines (SQ-0833, SQ-0835) ──────────────────────
+    //
+    // These two rows share a reader and differ only in the sniff, because
+    // GEMDOS puts its BPB at the DOS offsets and a plain DOS parser reads an
+    // Atari disk with no Atari-specific code in it. The MACHINE is a separate
+    // question, asked of the boot sector — see `crate::fat12`.
+    Format {
+        image: DiskImage::Fat12Dos,
+        label: "DOS",
+        // **`None`, and that is the IBM PC's answer rather than a gap.** This
+        // codebase's IBM PC bundle — `app::interpreter::InterpreterProfile::IbmPc`,
+        // where a DOS disk resolves — deliberately returns no number of its
+        // own, because the honest one is version-dependent (Frotz's rule: 6 for
+        // Version 6, 1 otherwise) and no single constant expresses it. So
+        // `None` here means "the rule already in force IS the IBM PC's", which
+        // is exactly true, and a DOS floppy behaves as it always has.
+        //
+        // Hard-coding ZMSD §11.1.3's 6 would not be inert: `BEYONDZO.DAT` sits
+        // on `floppy1.ima` and *Beyond Zork* swaps Font 3 arrows for CP437
+        // character graphics when it believes it is on an IBM PC. That may well
+        // be the authentic Lost Treasures experience — it is also a visible
+        // rendering change on real media that nothing in this lane establishes,
+        // and it belongs to whoever can look at it.
+        interpreter_number: None,
+        looks_like: crate::fat12::looks_like_dos,
+        mount: mount_boxed::<Fat12>,
+    },
+    Format {
+        image: DiskImage::Fat12AtariSt,
+        label: "ST",
+        // **`None` on purpose**, exactly where `Hfs` stood before SQ-0838.
+        // ZMSD §11.1.3 numbers the Atari ST 5 and that much is not in doubt —
+        // but the number does not travel alone here: `InterpreterProfile`
+        // bundles it with default colours, a palette and a screen geometry, and
+        // NONE of those is established for the ST by anything in hand. SQ-0835's
+        // own corpus scan is why: all thirty-eight stories across the nine ST
+        // compilations are v3, v4 or v5, so there is **no ST v6 fixture** to
+        // verify a palette or an art path against, and this project's rules
+        // forbid deriving one from memory.
+        //
+        // The number is not inert either — a game reads header byte `$1E` and
+        // can take machine-specific paths — so announcing a machine we do not
+        // implement is a behaviour change nobody has evidence for. The container
+        // half of SQ-0835 is finished; the profile half stays open until an ST
+        // disk of Zork Zero, Arthur, Journey or Shogun turns up.
+        interpreter_number: None,
+        looks_like: crate::fat12::looks_like_atari_st,
+        mount: mount_boxed::<Fat12>,
     },
 ];
 
@@ -190,7 +248,10 @@ fn mount_boxed<V: Volume + Sized + 'static>(raw: Vec<u8>) -> Option<Box<dyn Volu
 /// [`crate::adf::looks_like_story`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskStory {
-    /// The stored filename, exactly as the volume spells it.
+    /// How the volume spells this file: the stored filename, prefixed by its
+    /// directory on a format that has them (`HITCHHIK/STORY.DAT`). Still not an
+    /// identifier — but on an ST compilation the directory is the only thing
+    /// that tells four files called `STORY.DAT` apart, so it is carried.
     pub name: String,
     /// The story image, byte-exact off the disk.
     pub bytes: Vec<u8>,
@@ -279,6 +340,17 @@ pub trait Volume: std::fmt::Debug {
     /// Every file that reads, in disk order, as `(name, bytes)`.
     fn contents(&self) -> Vec<(String, Vec<u8>)>;
 
+    /// One file by the name the user typed, or `None` when the volume has no
+    /// such file.
+    ///
+    /// **The matching rule is the format's own and is not restated here.** It is
+    /// what the user's `--pictures Pic.data` has to hit, so every reader
+    /// delegates straight to its own `read_named` rather than being normalised
+    /// into a shared one — AmigaDOS, HFS and FAT12 do not spell names alike, and
+    /// a seam that "helpfully" agreed on a rule would break the door SQ-0838
+    /// added (it is the only way to reach the Macintosh's two-colour archive).
+    fn read_named(&self, name: &str) -> Option<Vec<u8>>;
+
     /// The story to open, by the format's own tiebreak when a disk offers more
     /// than one.
     fn story(&self) -> Option<DiskStory>;
@@ -323,6 +395,11 @@ impl Volume for Adf {
         self.files().iter().filter_map(|e| self.read(e).map(|b| (e.name.clone(), b))).collect()
     }
 
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        // Case-insensitive on the stored AmigaDOS name.
+        Adf::read_named(self, name)
+    }
+
     fn story(&self) -> Option<DiskStory> {
         Adf::story(self).map(DiskStory::from)
     }
@@ -355,12 +432,67 @@ impl Volume for Hfs {
         self.files().iter().filter_map(|e| self.read(e).map(|b| (e.name.clone(), b))).collect()
     }
 
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        // Case-insensitive on the stored catalog name.
+        Hfs::read_named(self, name)
+    }
+
     fn story(&self) -> Option<DiskStory> {
         Hfs::story(self).map(DiskStory::from)
     }
 
     fn pictures(&self) -> Option<DiskArt> {
         Hfs::pictures(self).map(DiskArt::from)
+    }
+}
+
+/// One impl for both FAT12 rows. The rows differ in their sniff — which machine
+/// pressed the disk — and in nothing else, because the filesystem is the same
+/// filesystem.
+impl Volume for Fat12 {
+    /// The FILESYSTEM sniff, deliberately machine-neutral. The table does not
+    /// use this one: [`FORMATS`] holds `fat12::looks_like_dos` and
+    /// `fat12::looks_like_atari_st`, which are this question and then the
+    /// machine question, so the two rows stay disjoint.
+    fn looks_like(raw: &[u8]) -> bool {
+        Fat12::looks_like_fat12(raw)
+    }
+
+    fn mount(raw: Vec<u8>) -> Option<Fat12> {
+        Fat12::mount(raw).ok()
+    }
+
+    fn volume_name(&self) -> Option<&str> {
+        // The DOS release disks label their volumes (`Tresure 1`, `DISK 1`,
+        // `ZORK0 1`); no ST compilation does, and that reads as `None` rather
+        // than as an empty name spliced into somebody's sentence.
+        Fat12::volume_label(self)
+    }
+
+    fn file_count(&self) -> usize {
+        self.files().len()
+    }
+
+    fn contents(&self) -> Vec<(String, Vec<u8>)> {
+        // Named by PATH, not by filename: four of the games on `Infocom
+        // Compilation 9` are called `STORY.DAT` and only the directory tells
+        // them apart.
+        self.files().iter().filter_map(|e| self.read(e).map(|b| (e.path(), b))).collect()
+    }
+
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        // Case-insensitive on either the 8.3 filename or the full path — this
+        // is the one format with directories, and `contents` names its files by
+        // path, so the name a caller was SHOWN has to be a name it can ask for.
+        Fat12::read_named(self, name)
+    }
+
+    fn story(&self) -> Option<DiskStory> {
+        Fat12::story(self).map(DiskStory::from)
+    }
+
+    fn pictures(&self) -> Option<DiskArt> {
+        Fat12::pictures(self).map(DiskArt::from)
     }
 }
 
@@ -429,6 +561,16 @@ impl MountedDisk {
     /// Every story on the disk, in disk order.
     pub fn stories(&self) -> Vec<DiskStory> {
         self.volume.stories()
+    }
+
+    /// One file off the volume by the name the user typed — the `--pictures`
+    /// door (SQ-0838), and the other half of [`MountedDisk::contents`]: what a
+    /// caller was shown, it can ask for.
+    ///
+    /// See [`Volume::read_named`] for why the matching rule stays each format's
+    /// own.
+    pub fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        self.volume.read_named(name)
     }
 
     /// The story to open, by the format's tiebreak.
@@ -515,10 +657,20 @@ mod tests {
     /// returns. That is the whole guard against a format being half-wired again.
     fn sample_of(image: DiskImage) -> Vec<u8> {
         let story = fake_story();
-        let files: [(&str, &[u8]); 2] = [("Readme", b"just a text file"), ("Story.data", &story)];
+        // `STORY.DAT` rather than the Amiga's `Story.data`, because the sample
+        // has to be a name EVERY filesystem here can actually store and FAT12's
+        // 8.3 directory entry would shorten the longer one. The name is not what
+        // is under test; that a story is found by its bytes is.
+        let files: [(&str, &[u8]); 2] = [("Readme", b"just a text file"), ("STORY.DAT", &story)];
         match image {
             DiskImage::Adf => crate::adf::tests::sample_disk(&files),
             DiskImage::Hfs => crate::hfs::tests::sample_disk(&files),
+            DiskImage::Fat12Dos => {
+                crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::Dos)
+            }
+            DiskImage::Fat12AtariSt => {
+                crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
+            }
         }
     }
 
@@ -531,11 +683,18 @@ mod tests {
     /// SQ-0840 was filed for, one enum away from happening again.
     #[test]
     fn every_variant_the_enum_declares_has_a_row_in_the_one_table() {
-        let census = [DiskImage::Adf, DiskImage::Hfs];
+        let census =
+            [DiskImage::Adf, DiskImage::Hfs, DiskImage::Fat12Dos, DiskImage::Fat12AtariSt];
         for image in census {
             let (label, interpreter) = match image {
                 DiskImage::Adf => ("ADF", Some(AMIGA_INTERPRETER_NUMBER)),
                 DiskImage::Hfs => ("HFS", Some(MACINTOSH_INTERPRETER_NUMBER)),
+                // Both `None`, for two different reasons, both written out at
+                // their rows in `FORMATS`: the IBM PC's number is version-
+                // dependent and already in force, and the Atari ST has no
+                // profile to bring with a number.
+                DiskImage::Fat12Dos => ("DOS", None),
+                DiskImage::Fat12AtariSt => ("ST", None),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
@@ -569,11 +728,11 @@ mod tests {
             assert_eq!(disk.interpreter_number(), image.interpreter_number());
             assert_eq!(disk.file_count(), 2, "{image:?} lists what it mounted");
 
-            // Identified by CONTENT: `Readme` is not a story and `Story.data`
+            // Identified by CONTENT: `Readme` is not a story and `STORY.DAT`
             // is, and no format is allowed to decide that by name.
             let stories = disk.stories();
             assert_eq!(stories.len(), 1, "{image:?} found {stories:?}");
-            assert_eq!(stories[0].name, "Story.data", "{image:?}");
+            assert_eq!(stories[0].name, "STORY.DAT", "{image:?}");
             assert_eq!(stories[0].bytes, fake_story(), "{image:?} reads it byte-exact");
             assert_eq!(disk.story().map(|s| s.bytes), Some(fake_story()), "{image:?}");
 
@@ -596,7 +755,7 @@ mod tests {
             let names: Vec<&str> = contents.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(names.len(), disk.file_count(), "{image:?} lists what it counted");
             assert!(names.contains(&"Readme"), "{image:?}: {names:?}");
-            assert!(names.contains(&"Story.data"), "{image:?}: {names:?}");
+            assert!(names.contains(&"STORY.DAT"), "{image:?}: {names:?}");
             // Bytes, not just names — this is what a caller identifies by.
             let readme = contents.iter().find(|(n, _)| n == "Readme").expect("present");
             assert_eq!(readme.1, b"just a text file", "{image:?}");
@@ -604,6 +763,65 @@ mod tests {
             // file IS belongs to the caller, not to the mount.
             assert!(contents.iter().any(|(_, b)| *b == fake_story()), "{image:?}");
         }
+    }
+
+    /// **What a caller is shown, it can ask for** — on every format.
+    ///
+    /// `contents` is how the launch dialog enumerates a disk's artwork and
+    /// `read_named` is how the `--pictures` door then loads it, so the two
+    /// disagreeing is a file that is offered and cannot be opened. That is
+    /// exactly what happened while `graphics::read_off_the_medium` still carried
+    /// its own two-reader chain (SQ-0833): a FAT12 disk enumerated through the
+    /// table and loaded through a chain that had never heard of it.
+    ///
+    /// The matching rule stays each format's own; what is pinned here is that
+    /// the name in hand is one the same volume answers to.
+    #[test]
+    fn every_name_a_disk_lists_is_a_name_it_will_read_back() {
+        for image in DiskImage::all() {
+            let disk = MountedDisk::mount(sample_of(image)).expect("mounts");
+            for (name, bytes) in disk.contents() {
+                assert_eq!(
+                    disk.read_named(&name).as_ref(),
+                    Some(&bytes),
+                    "{image:?}: listed {name:?} and would not read it back"
+                );
+                // …and case is not what decides it, on any format.
+                assert_eq!(
+                    disk.read_named(&name.to_ascii_lowercase()).as_ref(),
+                    Some(&bytes),
+                    "{image:?}: {name:?} is case-sensitive"
+                );
+            }
+            assert_eq!(disk.read_named("NoSuchFile.data"), None, "{image:?}");
+        }
+    }
+
+    /// The same property on the real disk that motivated it: an ST compilation
+    /// names its files by folder, and the folder has to survive the round trip
+    /// or a picker offers `HITCHHIK/STORY.DAT` and opens nothing.
+    #[test]
+    fn a_real_directoried_disk_reads_back_the_paths_it_lists() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/Infocom Compilation 9 (19xx)(-).st");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored medium missing at {}", path.display());
+            return;
+        };
+        let disk = MountedDisk::mount(bytes).expect("the ST disk mounts");
+        assert_eq!(
+            disk.read_named("HITCHHIK/STORY.DAT").map(|b| b.len()),
+            Some(113444),
+            "the path names the game"
+        );
+        assert_eq!(
+            disk.read_named("cuthroat/story.dat").map(|b| b.len()),
+            Some(112558),
+            "…case-insensitively, like every other format here"
+        );
+        // The bare filename still resolves — to the first of the four, which is
+        // why a picker shows the path and not this.
+        assert!(disk.read_named("STORY.DAT").is_some());
     }
 
     /// A boot disk carries files and no game, on any format. The mount succeeds
@@ -617,6 +835,12 @@ mod tests {
             let raw = match image {
                 DiskImage::Adf => crate::adf::tests::sample_disk(&files),
                 DiskImage::Hfs => crate::hfs::tests::sample_disk(&files),
+                DiskImage::Fat12Dos => {
+                    crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::Dos)
+                }
+                DiskImage::Fat12AtariSt => {
+                    crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
+                }
             };
             let disk = MountedDisk::mount(raw).expect("a boot disk still mounts");
             assert_eq!(disk.file_count(), 2, "{image:?}");
@@ -647,14 +871,36 @@ mod tests {
     }
 
     /// Real media, every format: the disks the corpus actually holds mount
-    /// through the shared path and hand back their own story and their own art.
-    /// They live outside the repo, so each arm skips vacuously.
+    /// through the shared path and hand back their own story — and their own
+    /// art wherever the medium carries any. They live outside the repo, so each
+    /// arm skips vacuously.
+    ///
+    /// The match is exhaustive, so a new format has to name the disk that
+    /// proves it rather than quietly riding on somebody else's fixture. What
+    /// each arm expects is the medium's own truth and not a shared shape: three
+    /// of the four are *Zork Zero* in one press or another, and the fourth is
+    /// an Atari ST compilation, because **no ST v6 release exists in this
+    /// corpus** — all thirty-eight ST stories are v3, v4 or v5, and none of the
+    /// nine disks carries artwork at all.
     #[test]
     fn real_release_disks_of_every_format_mount_through_one_path() {
         for image in DiskImage::all() {
-            let fixture = match image {
-                DiskImage::Adf => "Zork Zero - The Revenge of Megaboz.adf",
-                DiskImage::Hfs => "Zork Zero Disk.image",
+            // (fixture, the story's stored name, its version, does the disk
+            //  also carry a picture archive?)
+            let (fixture, story_name, version, has_art) = match image {
+                DiskImage::Adf => ("Zork Zero - The Revenge of Megaboz.adf", "Story.data", 6, true),
+                DiskImage::Hfs => ("Zork Zero Disk.image", "Story.data", 6, true),
+                // Lost Treasures I floppy5: Zork Zero's story AND its EGA art.
+                // (Its CGA art is on floppy4, which is the whole of why a set
+                // model is a real thing this lane does not have.)
+                DiskImage::Fat12Dos => ("floppy5.ima", "ZORK0.ZIP", 6, true),
+                // Four games in four folders, ALL called `STORY.DAT` — so the
+                // conventional-name tiebreak cannot separate them and the
+                // largest wins, which is *Bureaucracy* (v4, 243200 bytes).
+                // Deterministic, and a compilation wants `stories()` anyway.
+                DiskImage::Fat12AtariSt => {
+                    ("Infocom Compilation 9 (19xx)(-).st", "BUREAUCR.ACY/STORY.DAT", 4, false)
+                }
             };
             let path =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(fixture);
@@ -666,10 +912,41 @@ mod tests {
             let disk = MountedDisk::mount(bytes).expect("the release disk mounts");
             assert_eq!(disk.format(), image, "{fixture}");
             let story = disk.story().expect("the release disk carries its game");
-            assert_eq!(story.name, "Story.data", "{fixture}");
-            assert_eq!(story.bytes[0], 6, "both Zork Zeros are v6: {fixture}");
-            let art = disk.pictures().expect("…and its own artwork");
-            assert!(art.pictures.entries().len() > 100, "{fixture}: {}", art.name);
+            assert_eq!(story.name, story_name, "{fixture}");
+            assert_eq!(story.bytes[0], version, "{fixture}");
+            match disk.pictures() {
+                Some(art) => {
+                    assert!(has_art, "{fixture}: unexpected artwork {}", art.name);
+                    assert!(art.pictures.entries().len() > 100, "{fixture}: {}", art.name);
+                }
+                None => assert!(!has_art, "{fixture}: its own artwork is missing"),
+            }
         }
+    }
+
+    /// **A compilation disk is a list, not a game** — and the list is what a
+    /// picker shows. `Infocom Compilation 9` is the sharpest case in the
+    /// corpus: four games, four folders, four files called `STORY.DAT`, and a
+    /// saved game sitting beside three of them.
+    #[test]
+    fn a_real_compilation_disk_lists_every_game_and_no_saved_game() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/Infocom Compilation 9 (19xx)(-).st");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored medium missing at {}", path.display());
+            return;
+        };
+        let disk = MountedDisk::mount(bytes).expect("the ST disk mounts");
+        assert_eq!(disk.format(), DiskImage::Fat12AtariSt);
+        assert_eq!(disk.label(), "ST");
+        assert_eq!(disk.interpreter_number(), None, "no ST profile to announce yet");
+        let names: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, [
+            "HITCHHIK/STORY.DAT",
+            "BUREAUCR.ACY/STORY.DAT",
+            "CUTHROAT/STORY.DAT",
+            "LEATHER.GOD/STORY.DAT",
+        ]);
+        assert_eq!(disk.file_count(), 14, "…out of fourteen files, saves and interpreters included");
     }
 }
