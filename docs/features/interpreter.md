@@ -39,6 +39,11 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
 - **Amiga `.adf` disk images** — the original release floppy, played as it shipped.
 - **Macintosh disk images** — a DiskCopy 4.2 `.image` (or a bare HFS volume), the
   Mac release floppy, likewise played as it shipped.
+- **Hybrid CD-ROMs** — `.bin`, the raw disc dump, no `.cue` wanted. *Classic Text
+  Adventure Masterpieces of Infocom* pressed one disc for two machines, and its
+  Macintosh half is an Apple partition three layers down: hand babelmap the
+  354 MB dump and it measures the sector framing, walks the partition map and
+  mounts the volume, offering all 83 games on it.
 - **DOS floppy images** — `.ima`, `.img`, or any name at all: the PC release disk,
   from a single-game 360 KB floppy to a *Lost Treasures* collection.
 - **Atari ST floppy images** — `.st`, the GEMDOS press, which turns out to be the
@@ -98,6 +103,32 @@ asks for — and babelmap walks it, extents overflow file and all. macOS is no h
 whatsoever: `hdiutil attach` has refused HFS-standard images since 10.14, so
 every layer of that chain is hand-rolled, with the same zero dependencies the
 rest of the container reading takes.
+
+The same reader opens a **CD**, because a CD is that volume in two more
+containers rather than a new filesystem. A raw disc dump keeps each sector's
+whole 2352-byte frame, so the 2048 bytes of user data have to be gathered out of
+it — and babelmap *measures* that frame rather than assuming it, by finding the
+sync pattern at the front and the next one after it, which reads a 2448-byte
+subchannel dump with nothing taught about the number and reads a cooked `.iso`
+by noticing there is no sync at all. Inside is an Apple Partition Map, and on a
+hybrid disc it names three: the map itself, the ISO9660 side the PC release
+lives on, and `Apple_HFS`, which is the Macintosh volume. Two signatures the
+mount never looked for while deriving any of that confirm it — Apple's `ER` at
+logical block 0 and ISO9660's `CD001` at logical sector 16 — and both land.
+
+That disc taught the reader one other thing, which was a bug rather than a
+feature: **a volume need not fill its container.** The *Masterpieces* partition
+is sized for the whole disc and claims 634.8 MB of allocation blocks on a disc
+whose entire payload is 308 MB, because it shares the platter with the ISO9660
+half and its free tail was simply never written. Every block any file actually
+uses is there. babelmap used to compare that nominal size against the image and
+decline the volume outright, which meant the disc — and the partition, even when
+you extracted it by hand — read as "Z-machine version 0 is not supported". The
+bound is now on what a reader *follows*: the catalogue, the extents overflow
+file, and each file's own extents must be present, and a missing tail nobody
+follows costs nothing. A genuinely truncated volume is still refused, and refused
+harder — a file whose extents run off the end yields no story rather than the
+front half of one.
 
 And the same content-first rule decides what to run, because the `.image`
 extension means nothing in particular and the Mac disk carries a story, an

@@ -3,6 +3,10 @@
 
 pub mod adf;
 pub mod bpal;
+/// The container a disc's filesystem sits inside — raw CD sectors and the Apple
+/// Partition Map. Private because it is a wrapper rather than a reader: what it
+/// finds is handed to [`hfs`], and nothing outside this crate asks for it.
+mod cd;
 pub mod d64;
 pub mod dos_order;
 pub mod fat12;

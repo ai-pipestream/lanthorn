@@ -467,7 +467,22 @@ const FORMATS: &[Format] = &[
         // pre-filters on — so an HFS volume under either name is opened, and
         // `looks_like_hfs` is what then claims it. Which row spells a name is
         // never which format the bytes are.
-        extensions: &["image"],
+        //
+        // `bin` is the second spelling, and the corpus earned it (SQ-0870):
+        // `Classic Text Adventure Masterpieces of Infocom (USA).bin` is a raw
+        // MODE1/2352 dump of a hybrid CD whose third Apple partition is the
+        // Macintosh collection. A raw dump is what `.bin` means, so a scan that
+        // would not open one could never offer the disc — SQ-0849's defect, on a
+        // medium 350 MB in size instead of 800 KB. What the bytes ARE is still
+        // `looks_like_hfs`'s answer, and it declines a `.bin` that is anything
+        // else.
+        //
+        // **Not `iso`**, by the rule the ProDOS row states for `hdv`: a cooked
+        // 2048-byte image of a hybrid disc reads perfectly well here — the
+        // partition map is walked in place, with no unwrapping at all — and
+        // nothing in the corpus is one. A spelling is claimed when a medium
+        // wears it.
+        extensions: &["image", "bin"],
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
     },
@@ -2016,6 +2031,81 @@ mod tests {
             "LEATHER.GOD/STORY.DAT",
         ]);
         assert_eq!(disk.file_count(), 14, "…out of fourteen files, saves and interpreters included");
+    }
+
+    // ── A disc, not a floppy (SQ-0870) ────────────────────────────────────────
+
+    /// **A hybrid CD is the Macintosh row wearing another container**, and the
+    /// table needed no new entry to read one: the sniff sees past the raw
+    /// sectors and the partition map to the same `BD` signature a floppy has.
+    ///
+    /// Both framings, because both circulate — a raw `.bin` dump keeps the whole
+    /// 2352-byte frame and a cooked `.iso` keeps only the 2048 bytes of user
+    /// data. The cooked one is read in place, with nothing copied at all; see
+    /// [`crate::cd`].
+    ///
+    /// Synthetic, so CI runs it. The real disc is in
+    /// [`crate::hfs`]'s tests.
+    #[test]
+    fn a_partitioned_disc_mounts_as_the_macintosh_volume_it_carries() {
+        let story = fake_story();
+        let files: [(&str, &[u8]); 2] = [("Readme", b"just a text file"), ("STORY.DAT", &story)];
+        let volume = crate::hfs::tests::sample_volume(&files);
+        // A partition map claiming twenty times the space the disc holds, which
+        // is what a hybrid disc's own map does.
+        let cooked = crate::cd::tests::partitioned(&volume, 20 * volume.len() / 512);
+        let raw = crate::cd::tests::raw_sectors(&cooked);
+
+        for (what, image) in [("a cooked .iso", cooked), ("a raw .bin dump", raw)] {
+            assert_eq!(DiskImage::detect(&image), Some(DiskImage::Hfs), "{what}");
+            // …and by exactly one row: a disc is not claimed by a floppy format
+            // that happens to be asked first.
+            let claims: Vec<DiskImage> =
+                FORMATS.iter().filter(|f| (f.looks_like)(&image)).map(|f| f.image).collect();
+            assert_eq!(claims, [DiskImage::Hfs], "{what}");
+
+            let disk = MountedDisk::mount(image).unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(disk.volume_name(), Some("Test Disk"), "{what}");
+            assert_eq!(disk.file_count(), 2, "{what}");
+            assert_eq!(disk.story().map(|s| s.bytes), Some(story.clone()), "{what}");
+            // The medium is still a Macintosh, so the number is still the
+            // Macintosh's — a container does not change the machine.
+            assert_eq!(disk.interpreter_number(), Some(MACINTOSH_INTERPRETER_NUMBER), "{what}");
+        }
+    }
+
+    /// **Real media**: the hybrid *Masterpieces* CD is claimed by one row and
+    /// opens through the shared path, with no front-end taught anything
+    /// (SQ-0870).
+    ///
+    /// The disjointness assertion is the one that earns its keep at 354 MB: a
+    /// file that large sails past most size-based sniffs, so "at most one row
+    /// claims it" is worth checking on the medium itself rather than inferring
+    /// from the corpus in `stories/`, which this walk does not cover.
+    ///
+    /// Skips vacuously — CI has no `masterpieces/`.
+    #[test]
+    fn the_real_hybrid_cd_is_claimed_by_exactly_one_row_and_mounts() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../masterpieces/Classic Text Adventure Masterpieces of Infocom (USA).bin");
+        let Ok(raw) = std::fs::read(&path) else {
+            eprintln!("SKIP: the Masterpieces CD is absent at {}", path.display());
+            return;
+        };
+        assert_eq!(raw.len(), 354_011_280);
+        let claims: Vec<DiskImage> =
+            FORMATS.iter().filter(|f| (f.looks_like)(&raw)).map(|f| f.image).collect();
+        assert_eq!(claims, [DiskImage::Hfs], "a 354 MB disc image is claimed once, by HFS");
+
+        let disk = MountedDisk::mount(raw).expect("the disc mounts");
+        assert_eq!(disk.format(), DiskImage::Hfs);
+        assert_eq!(disk.volume_name(), Some("Masterpieces"));
+        assert_eq!(disk.label(), "HFS");
+        assert_eq!(disk.interpreter_number(), Some(MACINTOSH_INTERPRETER_NUMBER));
+        assert_eq!(disk.stories().len(), 83, "the whole shelf, Macintosh and PC builds alike");
+        // …and the row that claims it names the spelling a scan pre-filters on,
+        // so the disc is offered rather than merely openable (SQ-0849's rule).
+        assert!(image_extensions().any(|e| e == "bin"));
     }
 
     // ── A story on no single disk (SQ-0864) ───────────────────────────────────
