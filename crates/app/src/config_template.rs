@@ -192,7 +192,10 @@ const INTERPRETER: &[Row] = &[
     d(
         "honor_game_colours",
         "true",
-        &["Honour game-set colours. Set false to use only the configured theme."],
+        &[
+            "Honour game-set colours. Set false to use only the configured theme.",
+            "Override for a single run with `babelmap --no-game-colours`.",
+        ],
     ),
     d(
         "honor_timed_input",
@@ -215,7 +218,7 @@ const INTERPRETER: &[Row] = &[
             "   6  IBM PC",
             "",
             "Unset auto-selects: 6 (IBM PC) for v6, else 1 (DECSystem-20). Override for",
-            "a single run with `babelmap --interpreter-number N`.",
+            "a single run with `babelmap --interpreter N`.",
         ],
     ),
     ex(

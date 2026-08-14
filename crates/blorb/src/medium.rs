@@ -439,7 +439,7 @@ const FORMATS: &[Format] = &[
         // the three the YZIP will run on at all (`cmp #6 / bne BADMACH` refuses
         // anything below an enhanced IIe), the IIgs is the top, and it is the one
         // a modern terminal with colour and a large screen actually resembles.
-        // The other two remain reachable by naming them: `--interpreter-number 2`
+        // The other two remain reachable by naming them: `--interpreter 2`
         // or `9` outranks this row, as every front-end pins.
         //
         // **Measured, not assumed** — the same way SQ-0835 settled the ST's 5.
@@ -1020,7 +1020,7 @@ mod tests {
                 // it — but declining lands a ProDOS story on 1 or 6, the
                 // DECSystem-20 or the IBM PC, so `None` names the wrong machine
                 // rather than no machine. 10 is the top of the family the Apple
-                // YZIP will run on, and `--interpreter-number` still reaches the
+                // YZIP will run on, and `--interpreter` still reaches the
                 // other two.
                 DiskImage::ProDos => ("ProDOS", Some(APPLE_IIGS_INTERPRETER_NUMBER)),
             };

@@ -63,7 +63,7 @@
 //!
 //! **Selection**, most specific first (SQ-0734):
 //!
-//! 1. An explicit `interpreter_number` (config or `--interpreter-number`) — the
+//! 1. An explicit `interpreter_number` (config or `--interpreter`) — the
 //!    number you name is the machine you are asking for, and it brings its whole
 //!    profile with it.
 //! 2. The ART: a picture archive named outright in the per-game sidecar

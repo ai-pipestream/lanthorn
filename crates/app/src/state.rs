@@ -2423,6 +2423,20 @@ pub struct AppState {
     /// (SQ-0318), so `auto` (no per-game override) falls back here.
     pub honor_game_colours_base: bool,
 
+    /// True when `--no-game-colours` was typed on this launch (SQ-0855).
+    ///
+    /// The base above is already `false` in that case, but a base is only the
+    /// FALLBACK — `reload_style` re-reads the two per-story sources from disk on
+    /// every reload, so without this a `garglk.ini` beside the story or a sidecar
+    /// `honor` key written on some earlier run would quietly turn the flag off
+    /// again. A flag is an instruction for the launch you typed it on and outranks
+    /// both, exactly as `--interpreter` outranks this game's sidecar.
+    ///
+    /// Cleared by `/set-game-colours`, which is the user overriding their own flag
+    /// in session — the same "a deliberate edit ends the one-run hold" rule
+    /// `--interpreter` follows (SQ-0646).
+    pub no_game_colours_cli: bool,
+
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
@@ -2724,6 +2738,7 @@ impl Default for AppState {
             transcript_filter: TranscriptFilter::Both,
             garglk_overlay: None,
             honor_game_colours_base: true,
+            no_game_colours_cli: false,
             transcript_scroll: 0,
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,

@@ -151,7 +151,7 @@ fn disk(name: &str) -> Option<PathBuf> {
 
 /// Boot the story `path` opens to, exactly as `startup.rs` does — the profile
 /// from the medium — but with `interpreter_override` standing in for an explicit
-/// `--interpreter-number`, which is how the falsification drives this.
+/// `--interpreter`, which is how the falsification drives this.
 fn boot(path: &Path, honor: bool, interpreter_override: Option<u8>) -> Option<GameSession> {
     let (loaded, mounted) = app::hints::load_mounted_story(path).ok()?;
     assert_eq!(

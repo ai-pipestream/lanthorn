@@ -92,7 +92,15 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         crate::styles::read_per_game_honor(&state.game_dir)
     };
     let garglk_honor = state.garglk_overlay.as_ref().and_then(|o| o.honor_game_colours);
-    let per_story_honor = per_game_honor.or(garglk_honor);
+    // SQ-0855: …unless `--no-game-colours` was typed on this launch, which outranks
+    // both per-story sources — see `AppState::no_game_colours_cli`. Still expressed
+    // as a per-story value rather than by lowering the base, so it is PINNED below
+    // and cannot reach the global config.toml.
+    let per_story_honor = if state.no_game_colours_cli {
+        Some(false)
+    } else {
+        per_game_honor.or(garglk_honor)
+    };
     state.config.honor_game_colours = per_story_honor.unwrap_or(state.honor_game_colours_base);
     // SQ-0807: whatever this recompute lands on, say where it came from. A per-game
     // (or garglk) value is in force for THIS story and must not reach the global
@@ -312,6 +320,92 @@ mod tests {
         crate::styles::write_per_game_honor(&game_dir, None).unwrap();
         reload_style(&mut state);
         assert!(state.config.honor_game_colours, "auto falls back to garglk stylehint");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0855: `--no-game-colours` outranks BOTH per-story sources a reload re-reads
+    /// from disk. Lowering `honor_game_colours_base` alone is not enough — the base is
+    /// only the fallback, so a `garglk.ini` beside the story or a sidecar `honor` key
+    /// left by an earlier run would turn the game's colours back on at the boot
+    /// `reload_style`, and the flag would do nothing on exactly the stories that have
+    /// an opinion about colour.
+    #[test]
+    fn a_cli_no_game_colours_outranks_garglk_and_the_per_game_sidecar() {
+        let dir = temp_dir("honor-cli-flag");
+        let global = seed_style(&dir);
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "honor_game_colours = true\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.config_file = cfg_path.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+        state.game_dir = game_dir.clone();
+        // As `resolve()` leaves a `--no-game-colours` launch: base lowered, flag noted.
+        state.honor_game_colours_base = false;
+        state.no_game_colours_cli = true;
+        // Both per-story sources ask loudly for the game's colours.
+        state.garglk_overlay = Some(crate::garglk_ini::GarglkOverlay {
+            honor_game_colours: Some(true),
+            ..Default::default()
+        });
+        crate::styles::write_per_game_honor(&game_dir, Some(true)).unwrap();
+
+        reload_style(&mut state);
+        assert!(
+            !state.config.honor_game_colours,
+            "the flag was typed on THIS launch; a file beside the story was not"
+        );
+        // …and it is still one-run through the reload, so a settings save — the story
+        // browser's "remember this directory?" prompt is enough — cannot bake one
+        // launch's flag into the global config.
+        crate::config::write_config_file(&state.config).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            toml::from_str::<crate::config::Config>(&back).unwrap().honor_game_colours,
+            "the GLOBAL file must still say true — the flag was for one run: {back}"
+        );
+
+        // `/set-game-colours` is the user overriding their own flag, and clears it.
+        state.no_game_colours_cli = false;
+        reload_style(&mut state);
+        assert!(
+            state.config.honor_game_colours,
+            "an explicit in-session choice ends the flag's hold (SQ-0646's rule)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other honor mode, per the project's colour-render convention: with the
+    /// flag absent, everything above must behave exactly as it always did — the
+    /// shipped default is `honor_game_colours = true` and the per-story sources rule.
+    #[test]
+    fn without_the_flag_the_per_story_sources_still_rule_both_ways() {
+        let dir = temp_dir("honor-noflag");
+        let global = seed_style(&dir);
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+        state.game_dir = game_dir.clone();
+        state.honor_game_colours_base = true;
+        state.no_game_colours_cli = false;
+
+        // The shipped default (true) with a sidecar asking for off.
+        crate::styles::write_per_game_honor(&game_dir, Some(false)).unwrap();
+        reload_style(&mut state);
+        assert!(!state.config.honor_game_colours, "sidecar off wins over base true");
+
+        // And a config that persisted false, with a sidecar asking for on.
+        state.honor_game_colours_base = false;
+        crate::styles::write_per_game_honor(&game_dir, Some(true)).unwrap();
+        reload_style(&mut state);
+        assert!(state.config.honor_game_colours, "sidecar on wins over base false");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
