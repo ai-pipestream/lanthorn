@@ -20,7 +20,14 @@ pub mod config;
 pub mod config_template;
 pub mod cover;
 pub mod debug_panel;
-pub mod disk_set;
+/// Which files are volumes of one multi-disk release (SQ-0844).
+///
+/// **Re-exported, not declared** (SQ-0874): the rule moved to `cli-host` the day
+/// `zvm-cli` needed it, because a CLI cannot depend on `app` and a second copy of
+/// "which files form a release" is how two front-ends end up disagreeing about
+/// what is on a shelf. One implementation, and every `app::disk_set::…` spelling
+/// still reaches it.
+pub use cli_host::disk_set;
 pub mod engine;
 pub mod garglk_ini;
 pub mod glk_backend;

@@ -9,8 +9,28 @@
 //!
 //! This module answers exactly one question — **which files are volumes of one
 //! set** — from their names. What the answer is *used* for lives elsewhere:
-//! [`crate::picker::StorySource`] scans a set, and [`crate::picker::scan_stories`]
-//! folds a set's duplicate builds together.
+//! `app::picker::StorySource` scans a set, `app::picker::scan_stories` folds a
+//! set's duplicate builds together, and [`mount_at`] hands the set to
+//! [`blorb::medium::MountedDisk::mount_set`] for both front-ends.
+//!
+//! # Why it is here and not in `app` (SQ-0874)
+//!
+//! It lived in `app` until the CLI needed it, and the CLI cannot depend on `app`.
+//! `zvm-cli` opened a disk with [`blorb::medium::MountedDisk::mount`] — that is
+//! `mount_set` with no companions — so **no multi-volume release opened in the
+//! CLI at all**: *Trinity* played in the TUI and not at the prompt, and the
+//! Apple II presses reported "no story file on this disk image" off a disk whose
+//! game is simply on the next floppy.
+//!
+//! The alternative was a second copy of the rule in `zvm-cli`, which is exactly
+//! what [`blorb::medium`]'s module doc exists to prevent: two front-ends with two
+//! ideas of what a release is disagree eventually, and the disagreement is
+//! invisible until a game goes missing from one of them. `cli-host` is the crate
+//! both front-ends already share and it already depends on `blorb`, so the rule
+//! moved down rather than being copied sideways — the same trade SQ-0850 made for
+//! the per-game save key. `app::disk_set` is now a re-export of this module, so
+//! there is one implementation and every existing call site still spells it the
+//! way it always did.
 //!
 //! # The rule
 //!
@@ -290,6 +310,39 @@ pub fn members_indexed(path: &Path) -> Option<Vec<(u64, PathBuf)>> {
         .filter(|p| p.is_file())
         .collect();
     group_indexed(&files).into_iter().find(|g| g.iter().any(|(_, m)| m == path))
+}
+
+/// Open the disk image `path`, whose bytes are `raw`, with the other volumes of
+/// its multi-disk release available to it (SQ-0864).
+///
+/// **The one way a front-end mounts a named disk**, and the reason it is one way:
+/// a story can live on no single floppy. The Apple II 5.25-inch presses of
+/// *Shogun*, *Journey* and *Zork Zero* page one game across five, five and four
+/// volumes, and the Commodore *Trinity* pages one across two sides — so opening
+/// any one of them and asking what is on it is a question only the whole release
+/// can answer.
+///
+/// Which files are one release is [`members`]'s answer, from their names and
+/// without opening anything. It is deliberately not `blorb`'s: naming is
+/// filesystem policy and that crate is given bytes.
+///
+/// **Nothing is read eagerly.** [`blorb::medium::MountedDisk::mount_set`] calls
+/// the closure only when the named volume turns out to have no story of its own,
+/// so an ordinary floppy and every volume of a compilation cost exactly the one
+/// read they always did — which is what keeps a library scan from reading seven
+/// 800 KB floppies per row.
+pub fn mount_at(
+    path: &Path,
+    raw: Vec<u8>,
+) -> Result<blorb::medium::MountedDisk, blorb::medium::MountError> {
+    blorb::medium::MountedDisk::mount_set(raw, || {
+        members(path)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| m != path)
+            .filter_map(|m| std::fs::read(m).ok())
+            .collect()
+    })
 }
 
 #[cfg(test)]

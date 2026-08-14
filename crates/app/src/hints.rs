@@ -717,22 +717,16 @@ pub fn mounted_stories(path: &Path) -> Option<(DiskImage, Vec<blorb::medium::Dis
 /// deliberately not `blorb`'s: naming is filesystem policy and that crate is
 /// given bytes.
 ///
-/// Nothing is read eagerly. [`blorb::medium::MountedDisk::mount_set`] calls the
-/// closure only when the named volume has no story of its own, so an ordinary
-/// floppy and every volume of a compilation cost exactly the one read they
-/// always did.
+/// Both are now [`cli_host::disk_set::mount_at`]'s, which is this function's
+/// whole body (SQ-0874). `zvm-cli` mounted with no companions at all until it
+/// could reach the rule, so *Trinity* opened in the TUI and not at the prompt;
+/// it calls this same helper, and neither front-end can drift from the other
+/// because there is nothing left to drift.
 fn mount_disk(
     path: &Path,
     raw: Vec<u8>,
 ) -> Result<blorb::medium::MountedDisk, blorb::medium::MountError> {
-    blorb::medium::MountedDisk::mount_set(raw, || {
-        crate::disk_set::members(path)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|m| m != path)
-            .filter_map(|m| std::fs::read(m).ok())
-            .collect()
-    })
+    cli_host::disk_set::mount_at(path, raw)
 }
 
 /// Read a story file's executable bytes, transparently unwrapping a ZIP whose

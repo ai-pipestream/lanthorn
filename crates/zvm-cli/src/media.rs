@@ -16,8 +16,18 @@
 //! but a compilation disk carries several, so a mounted image yields a list and
 //! somebody has to pick from it: the player at a prompt, or `--story` when
 //! nobody is watching.
+//!
+//! **And a release is not always one disk** (SQ-0874). This front-end mounted
+//! with [`blorb::medium::MountedDisk::mount`] — no companions — so every
+//! multi-volume release failed here while the TUI opened it: *Trinity* is a
+//! Version 4 story of 262,064 bytes paged across two 174,848-byte Commodore
+//! sides, and the Apple II 5.25-inch presses page theirs across four and five
+//! floppies, none of which carries a whole story on its own. The mount now goes
+//! through [`cli_host::disk_set::mount_at`], which is the seam the TUI uses and
+//! the only place the "which files are one release" rule is written down.
 
-use blorb::medium::{DiskImage, MountedDisk};
+use blorb::medium::DiskImage;
+use std::path::Path;
 
 /// One story found on a mounted disk image.
 pub struct Candidate {
@@ -86,15 +96,21 @@ pub fn looks_like_image(raw: &[u8]) -> bool {
     DiskImage::detect(raw).is_some()
 }
 
-/// Mount `raw` and return every story on it, in disk order.
+/// Mount the image at `path`, whose bytes are `raw`, and return every story on
+/// it — including the one the release keeps on **no single volume** (SQ-0874).
 ///
 /// Identified by content: a release disk's filenames prove nothing — AmigaDOS
 /// has no extensions and every Atari ST story is called `STORY.DAT` — so
 /// `blorb` decides by the bytes, strictly enough to reject the saved games the
 /// original *Zork Zero* floppy carries.
-pub fn story_candidates(raw: Vec<u8>) -> Result<Vec<Candidate>, String> {
-    let disk =
-        MountedDisk::mount(raw).map_err(|e| format!("Error: cannot mount the disk image: {e}"))?;
+///
+/// `path` is here for the set and nothing else. It is a **name**, so it decides
+/// which files are siblings and never what is on them; and the siblings are read
+/// only when this volume has no story of its own, so the single-disk path costs
+/// exactly the one read it always did.
+pub fn story_candidates(path: &Path, raw: Vec<u8>) -> Result<Vec<Candidate>, String> {
+    let disk = cli_host::disk_set::mount_at(path, raw)
+        .map_err(|e| format!("Error: cannot mount the disk image: {e}"))?;
     let mounted = disk.file_count();
     let found: Vec<Candidate> = disk
         .stories()
@@ -238,7 +254,8 @@ mod tests {
             // …and claiming it means being able to open it, not merely to name
             // it: a detector that claims a disk and then fails is worse than one
             // that declines it (SQ-0840).
-            let mounted = MountedDisk::mount(raw).expect("what we claim, we can mount");
+            let mounted =
+                blorb::medium::MountedDisk::mount(raw).expect("what we claim, we can mount");
             assert_eq!(mounted.format(), detected);
         }
     }

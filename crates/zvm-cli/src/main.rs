@@ -421,12 +421,21 @@ fn extract_story(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
 /// so there is nothing to hand back. Anything that leaves no story to open is
 /// fatal and says why: an unmountable image, a disk with no story on it, a
 /// `--story` that matches nothing, or a choice nobody is there to make.
-fn mount_and_pick(raw: Vec<u8>, stdin_is_tty: bool, want: Option<&str>) -> Vec<u8> {
+///
+/// `path` is the image the bytes came off, and it is passed for one reason: a
+/// multi-volume release keeps its story on no single floppy, so the other
+/// volumes have to be findable, and they are findable by **name** (SQ-0874).
+fn mount_and_pick(
+    path: &std::path::Path,
+    raw: Vec<u8>,
+    stdin_is_tty: bool,
+    want: Option<&str>,
+) -> Vec<u8> {
     let die = |e: String| -> ! {
         eprintln!("{e}");
         std::process::exit(1);
     };
-    let mut cands = match media::story_candidates(raw) {
+    let mut cands = match media::story_candidates(path, raw) {
         Ok(c) => c,
         Err(e) => die(e),
     };
@@ -1093,7 +1102,9 @@ Arguments:
                         implies, unless -I says otherwise:
                           {DISK_MACHINES}
                         A compilation disk holds several stories; pick one with
-                        --story, and each of them keeps its own saves. Graphical
+                        --story, and each of them keeps its own saves. A release
+                        pressed across several volumes is opened by naming ANY
+                        one of them — the rest are found beside it. Graphical
                         v6 stories are not supported — play those with babelmap.
 
 Host commands (never passed to the game):
@@ -1222,12 +1233,14 @@ fn main() {
     let medium = blorb::medium::DiskImage::detect(&story_bytes);
 
     // An original release floppy (SQ-0834): mount it and take a story off it.
-    // A single-game disk opens straight away; a compilation asks which one.
+    // A single-game disk opens straight away; a compilation asks which one; a
+    // volume of a multi-disk release reaches for its siblings (SQ-0874), which
+    // is why the PATH goes in and not only the bytes.
     // The question is `stdin_tty` — the device fact — not `stdin_is_tty`: a
     // screen-reader run has a real terminal in front of it and should be asked,
     // even though it wants no raw-mode line editing anywhere else.
     let story_bytes = if media::looks_like_image(&story_bytes) {
-        mount_and_pick(story_bytes, mode.stdin_tty(), args.story_pick.as_deref())
+        mount_and_pick(&story_path, story_bytes, mode.stdin_tty(), args.story_pick.as_deref())
     } else {
         story_bytes
     };

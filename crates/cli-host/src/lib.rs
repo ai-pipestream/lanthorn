@@ -19,6 +19,7 @@
 //! boundary each piece sits on.
 
 pub mod args;
+pub mod disk_set;
 pub mod flags;
 pub mod input;
 pub mod line;
