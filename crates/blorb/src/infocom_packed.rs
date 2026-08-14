@@ -258,6 +258,124 @@ pub fn story(files: &[(String, Vec<u8>)]) -> Option<(String, Vec<u8>)> {
     files.iter().find_map(|(name, bytes)| assemble(name, bytes, files))
 }
 
+/// The **header page** of the story a packed volume pages across, with the name
+/// of the segment carrying the index (SQ-0867).
+///
+/// # Why a page rather than the story
+///
+/// A build's whole name is in the first 30 bytes. Quetzal §5.4 defines the Game
+/// Identifier as release (`$02`), serial (`$12`) and checksum (`$1C`), and all
+/// three sit in page 0 — so *which build is this release* is a question one
+/// block answers, and reassembling 344 KB to read 30 bytes of it would be an
+/// absurd way to ask. [`crate::GameIdentifier::of_story`] takes what this
+/// returns.
+///
+/// Unlike [`story`] it therefore does not need every segment — only the one the
+/// index names as page 0, which on every release in the corpus is segment 1, the
+/// segment the index itself came off. [`picture_offsets`] already answers for a
+/// partial set on the same footing and for the same reason.
+///
+/// That is what makes `stories/Journey.2mg` answerable at all. Its index
+/// declares five segments and the image carries four, so 92 of its 552 pages are
+/// absent and [`story`] rightly refuses it — but page 0 is on `JOURNEY.D1` and
+/// intact, and it says release 77, serial 890616. A release that cannot be
+/// *played* off this image can still say what it is.
+///
+/// # What stands in for the checksum
+///
+/// [`story`] leans on the header checksum because reassembly is the risk: a
+/// wrong page map produces a plausible-looking file out of correct bytes, and
+/// only the checksum catches it. Reading ONE page the index points at is not
+/// that operation and cannot fail that way — there is no map to get wrong.
+///
+/// What has to be excluded instead is a block of arbitrary data being read as a
+/// header, and [`states_a_story_this_index_tiles`] is that test: the page must
+/// be a Z-machine header whose own declared story length lands inside the LAST
+/// block the index tiles. Two independent structures then have to agree about
+/// how long this story is, to within one block, which arbitrary data has no
+/// reason to do. Measured slack on the three packed releases here is 448, 352
+/// and 56 bytes — all inside one 512-byte page, none of them zero.
+///
+/// It is corroborated where corroboration is available: for
+/// `Arthur Quest 4 Excalibur.2mg` and the five-volume `shogun_s*.dsk` press,
+/// which [`story`] CAN reassemble and verify, this page reports the identical
+/// build — release 63 / serial 890622 and release 311 / serial 890510.
+pub fn story_header(files: &[(String, Vec<u8>)]) -> Option<(String, Vec<u8>)> {
+    files.iter().find_map(|(name, bytes)| header_page(name, bytes, files))
+}
+
+/// [`story_header`], taking `name`/`first` as the segment holding the index.
+fn header_page(name: &str, first: &[u8], files: &[(String, Vec<u8>)]) -> Option<(String, Vec<u8>)> {
+    let index = parse_index(first)?;
+    let table = page_table(&index)?;
+    let &(segment, block) = table.first()?;
+    // Segment 1 is the file the index came off; the rest are its namesakes,
+    // paired exactly as `assemble` pairs them.
+    let bytes: &[u8] = if segment == 0 {
+        first
+    } else {
+        let want = sibling_of(name, segment + 1)?;
+        files
+            .iter()
+            .find(|(other, _)| {
+                other.rsplit('/').next().is_some_and(|b| b.eq_ignore_ascii_case(&want))
+            })
+            .map(|(_, b)| b.as_slice())?
+    };
+    let at = block.checked_mul(BLOCK)?;
+    let page = bytes.get(at..at + BLOCK)?;
+    states_a_story_this_index_tiles(page, table.len() * BLOCK)
+        .then(|| (name.to_string(), page.to_vec()))
+}
+
+/// Is `page` a Z-machine header whose story is the length `tiled` bytes of
+/// pages could hold? See [`story_header`] for why this is the test.
+///
+/// The structural checks are [`looks_like_story`]'s, minus the ones that need
+/// the whole file present and re-bounded by the story's DECLARED length instead
+/// of by the slice — which is the entire difference, and the reason this cannot
+/// simply call it: that function bounds every table by `bytes.len()`, and here
+/// `bytes` is one page of a story three hundred times longer.
+fn states_a_story_this_index_tiles(page: &[u8], tiled: usize) -> bool {
+    if page.len() < 64 {
+        return false;
+    }
+    let word = |o: usize| usize::from(u16::from_be_bytes([page[o], page[o + 1]]));
+    // ZMSD §11.1.6, as in `verified`: the length field counts in the version's
+    // packed-address scale.
+    let scale = match page[0] {
+        3 => 2,
+        4 | 5 => 4,
+        6..=8 => 8,
+        _ => return false,
+    };
+    // The story must end inside the pages the index tiles, and inside the LAST
+    // of them — a page table tiles the story it maps and not a byte more, so a
+    // declared length that stops a whole block short means these two structures
+    // are not describing one story. Zero ("not recorded") cannot be tolerated
+    // here the way `looks_like_story` tolerates it: it is the check.
+    let length = word(0x1a) * scale;
+    if length < 64 || length > tiled || tiled - length >= BLOCK {
+        return false;
+    }
+    let (high, dict, objects, globals, static_base) =
+        (word(0x04), word(0x08), word(0x0a), word(0x0c), word(0x0e));
+    if !(64..=length).contains(&static_base) {
+        return false;
+    }
+    // Object and global tables are writable, so they live in dynamic memory.
+    if !(64..static_base).contains(&objects) || !(64..static_base).contains(&globals) {
+        return false;
+    }
+    // High memory begins at or after static memory; the dictionary is in static.
+    if high < static_base || high > length || dict < static_base || dict >= length {
+        return false;
+    }
+    // Serial is six printable characters, in ASCII or the Apple II's high ASCII
+    // — the mask is `looks_like_story`'s and is argued there (SQ-0856).
+    page[0x12..0x18].iter().all(|c| (0x20..0x7f).contains(&(c & 0x7f)))
+}
+
 /// Where each segment of a packed volume keeps its picture archive: the byte
 /// offset of the archive's 16-byte header, or `None` for a segment carrying no
 /// artwork. Indexed by segment, so entry 0 is `…D1`.
@@ -299,9 +417,11 @@ pub fn picture_offsets(files: &[(String, Vec<u8>)]) -> Option<(String, Vec<Optio
 ///
 /// The story's own artwork is NOT the same thing as the story: [`story`] will
 /// refuse a volume this accepts and vice versa, because they lean on different
-/// parts of the index. `stories/Journey.2mg` is the case in hand — four
-/// segments where the index declares five, so it yields no story, and its
-/// `SGTPICOF` fields are all zero, so it yields no artwork either.
+/// parts of the index. `stories/Journey.2mg` is the case in hand — four segments
+/// where the index declares five, so it yields no story; its `SGTPICOF` fields
+/// name artwork on segments 2 to 5, and the missing segment is 5, so it yields
+/// no artwork either. What it does still yield is its BUILD, which needs only
+/// the one page segment 1 carries — see [`story_header`].
 pub fn pictures(files: &[(String, Vec<u8>)]) -> Option<(String, InfocomPics)> {
     let (first, offsets) = picture_offsets(files)?;
     let mut set: Option<InfocomPics> = None;
@@ -508,6 +628,97 @@ mod tests {
         assert_eq!(story(&files), None);
     }
 
+    // ── SQ-0867: the header page on its own ──────────────────────────────────
+
+    /// Build a two-segment volume with the pages IN order — segment 1 carrying
+    /// the index and the first half, segment 2 the rest. The shape every real
+    /// press has, and the one where dropping the last floppy still leaves page 0
+    /// in hand.
+    fn packed_in_order(story: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let pages = story.len().div_ceil(BLOCK);
+        let half = pages / 2;
+        let mut d1 = vec![0u8; BLOCK * (1 + half)];
+        d1[BLOCK..BLOCK + half * BLOCK].copy_from_slice(&story[..half * BLOCK]);
+        let mut d2 = vec![0u8; BLOCK * (pages - half)];
+        d2[..story.len() - half * BLOCK].copy_from_slice(&story[half * BLOCK..]);
+        let mut index: Vec<u8> = Vec::new();
+        index.extend_from_slice(&0x0083u16.to_be_bytes());
+        index.extend_from_slice(&2u16.to_be_bytes());
+        index.resize(20, 0);
+        for (runs, first_page, last_page, block) in
+            [(1u16, 0u16, half as u16 - 1, 1u16), (1, half as u16, pages as u16 - 1, 0)]
+        {
+            index.extend_from_slice(&0u16.to_be_bytes()); // SGTCHKS
+            index.extend_from_slice(&0u16.to_be_bytes()); // SGTPICOF
+            index.extend_from_slice(&runs.to_be_bytes());
+            index.extend_from_slice(&0u16.to_be_bytes()); // SGTGPOF
+            index.extend_from_slice(&first_page.to_be_bytes());
+            index.extend_from_slice(&last_page.to_be_bytes());
+            index.extend_from_slice(&block.to_be_bytes());
+        }
+        d1[..index.len()].copy_from_slice(&index);
+        vec![("GAME.D1".into(), d1), ("GAME.D2".into(), d2)]
+    }
+
+    /// The header page is the story's own first page, whichever segment the
+    /// index puts it on — here, deliberately, the second one.
+    #[test]
+    fn the_header_page_is_read_off_whichever_segment_holds_page_zero() {
+        let want = story_bytes(BLOCK * 9);
+        let files = packed(&want);
+        let (name, page) = story_header(&files).expect("the volume states a header");
+        assert_eq!(name, "GAME.D1", "named for the segment carrying the index, as `story` is");
+        assert_eq!(page, want[..BLOCK], "and it is page 0 of the story, byte for byte");
+    }
+
+    /// **`Journey.2mg`'s case, in two lines.** A set missing its last segment
+    /// yields no story — and still yields the page a build is named from.
+    #[test]
+    fn an_incomplete_set_still_states_its_header_when_page_zero_survives() {
+        let want = story_bytes(BLOCK * 9);
+        let mut files = packed_in_order(&want);
+        assert!(story(&files).is_some(), "the premise: complete, it reassembles");
+        files.truncate(1);
+        assert_eq!(story(&files), None, "incomplete, it is refused as a story");
+        let (_, page) = story_header(&files).expect("but page 0 is still on segment 1");
+        assert_eq!(page, want[..BLOCK]);
+    }
+
+    /// …and when page 0 is on the segment that went missing, nothing is invented.
+    #[test]
+    fn an_incomplete_set_states_nothing_when_page_zero_is_on_the_absent_segment() {
+        let want = story_bytes(BLOCK * 9);
+        let mut files = packed(&want); // this fixture puts page 0 on segment 2
+        files.truncate(1);
+        assert_eq!(story_header(&files), None);
+    }
+
+    /// The check that stands in for the checksum: the header's own declared
+    /// length has to agree with the index's tiling to within one block. Move it
+    /// a whole block and the page is no longer this index's story.
+    #[test]
+    fn a_header_whose_length_disagrees_with_the_tiling_is_refused() {
+        let len = BLOCK * 9;
+        let mut want = story_bytes(len);
+        assert!(story_header(&packed_in_order(&want)).is_some(), "the premise");
+        // A story one whole page shorter than the pages the index tiles.
+        let short = ((len - BLOCK) / 8) as u16;
+        want[0x1a..0x1c].copy_from_slice(&short.to_be_bytes());
+        assert_eq!(story_header(&packed_in_order(&want)), None);
+    }
+
+    /// A block of arbitrary bytes under a well-formed index is not a header.
+    #[test]
+    fn arbitrary_pages_are_not_read_as_a_build() {
+        let want = story_bytes(BLOCK * 9);
+        let mut files = packed_in_order(&want);
+        // Page 0 sits at block 1 of segment 1; fill it with dirt.
+        files[0].1[BLOCK..2 * BLOCK].iter_mut().for_each(|b| *b = 0xa5);
+        assert_eq!(story_header(&files), None);
+        assert_eq!(story_header(&[("junk".into(), vec![0u8; BLOCK * 4])]), None);
+        assert_eq!(story_header(&[]), None);
+    }
+
     #[test]
     fn segments_are_paired_by_the_basename_under_any_directory() {
         assert_eq!(sibling_of("JOURNEY.D1", 3).as_deref(), Some("JOURNEY.D3"));
@@ -581,6 +792,43 @@ mod tests {
             "and only D2, D3 and D4 are on the volume"
         );
         assert_eq!(story(&files), None, "so no story is handed out at all");
+    }
+
+    /// …and it still says which build it is (SQ-0867).
+    ///
+    /// The story cannot be reassembled and the build is not in question: page 0
+    /// is on `JOURNEY.D1`, which the image has, and it reads release 77 / serial
+    /// 890616 — a different build from the release 83 / serial 890706
+    /// `stories/journey.z6` carries and from the release 30 / serial 890322 of
+    /// the Amiga floppy.
+    #[test]
+    fn real_journey_states_release_77_even_though_it_cannot_be_reassembled() {
+        let Some(files) = volume_files("Journey.2mg") else { return };
+        let (name, page) = story_header(&files).expect("page 0 survives on JOURNEY.D1");
+        assert_eq!(name, "JOURNEY.D1", "named for the segment carrying the index");
+        assert_eq!(page.len(), BLOCK);
+        assert_eq!(page[0], 6, "Version 6");
+        let id = crate::GameIdentifier::of_story(&page).expect("a header names a build");
+        assert_eq!(id.release, 77);
+        assert_eq!(id.serial_str(), "890616");
+    }
+
+    /// The complete Apple press of *Arthur* is where the cheap answer can be
+    /// checked against the expensive one: `story` reassembles 530 pages and
+    /// verifies them against the header checksum, `story_header` reads one page,
+    /// and the two must name the same build. This is what licenses trusting the
+    /// page alone on *Journey*, where no checksum can be taken.
+    #[test]
+    fn real_arthur_states_the_same_build_from_one_page_as_from_all_of_them() {
+        let Some(files) = volume_files("Arthur Quest 4 Excalibur.2mg") else { return };
+        let (_, whole) = story(&files).expect("the packed volume reassembles");
+        let (_, page) = story_header(&files).expect("and states a header");
+        assert_eq!(page, whole[..BLOCK], "the same page, byte for byte");
+        assert_eq!(
+            crate::GameIdentifier::of_story(&page),
+            crate::GameIdentifier::of_story(&whole),
+            "release 63, serial 890622, checksum $45EB either way"
+        );
     }
 
     /// SQ-0863: `SGTPICOF` names where each segment keeps its artwork.

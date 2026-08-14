@@ -67,6 +67,35 @@ fn any_present(names: &[&str]) -> bool {
 const IIGS_ARTHUR: &str = "Arthur Quest 4 Excalibur.2mg";
 const ARTHUR_BLORB: &str = "Arthur.blb";
 
+/// The Apple II press of *Journey*, whose story is paged across five segments of
+/// which the image carries four (SQ-0852) — and the DOS-press Blorb beside it.
+const IIGS_JOURNEY: &str = "Journey.2mg";
+const JOURNEY_BLORB: &str = "Journey.blb";
+
+/// The five-volume Apple II press of *Shogun*, whose story is on no single
+/// floppy, and the Blorb beside it.
+const SHOGUN_SET: [&str; 5] =
+    ["shogun_s1.dsk", "shogun_s2.dsk", "shogun_s3.dsk", "shogun_s4.dsk", "shogun_s5.dsk"];
+const SHOGUN_BLORB: &str = "Shogun.blb";
+
+/// Every medium in the corpus whose sidecar Blorb is refused, paired with the
+/// sidecar refused for it, **in `stories/` sort order** (SQ-0866, SQ-0867).
+///
+/// Stated once because two corpus-wide guards below both need it, and they must
+/// never be able to disagree about which pairings the rule changes: one counts
+/// the refusals and the other names them. Each entry is a measured
+/// contradiction, and the case that measures it is named in this file.
+fn mismatched() -> Vec<(String, &'static str)> {
+    let mut all = vec![
+        (IIGS_ARTHUR.to_string(), ARTHUR_BLORB),
+        (IIGS_JOURNEY.to_string(), JOURNEY_BLORB),
+    ];
+    all.extend(SHOGUN_SET.iter().map(|v| (v.to_string(), SHOGUN_BLORB)));
+    all.retain(|(m, b)| media(m).is_some() && media(b).is_some());
+    all.sort();
+    all
+}
+
 /// How many pictures the story would actually draw with.
 fn drawn_pictures(path: &std::path::Path) -> usize {
     PictSource::resolve(path).all_pict_dims().len()
@@ -257,12 +286,13 @@ fn a_disk_with_its_own_artwork_is_never_asked_about_a_blorb() {
 /// yielded at least one identifiable build AND that the Blorb's stated build is
 /// none of them. Nothing may be refused merely because a story could not be read.
 ///
-/// Three media are in that "could not be read" state today and all three keep
-/// their Blorb: `Journey.2mg`, whose volume mounts but yields no story, and the
-/// `shogun_s*.dsk` / `zork_zero_*.dsk` Apple II presses, whose stories are paged
-/// across the whole set while the identity check asks each volume on its own.
-/// When that reader lands, those releases start being checked and this test keeps
-/// passing either way — which is the point of stating it as an invariant.
+/// That reader has since landed and this test did keep passing, which is the
+/// point of stating it as an invariant: SQ-0867 taught the identity check to ask
+/// the RELEASE and not each volume on its own, so `Journey.2mg` and the
+/// `shogun_s*.dsk` and `zork_zero_*.dsk` Apple II presses — whose stories are
+/// paged across a whole set — went from unidentifiable to identified without a
+/// line here changing. Two of them turned out to be contradicted and are now
+/// refused; the census at the end moved and the invariant did not.
 #[test]
 fn nothing_is_refused_for_want_of_evidence() {
     let dir = stories_dir();
@@ -302,11 +332,13 @@ fn nothing_is_refused_for_want_of_evidence() {
         );
     }
     assert!(ran > 0 || !dir.is_dir(), "the corpus is here but no medium was measured");
-    // The corpus does contain a real mismatch, so an invariant that held only
+    // The corpus does contain real mismatches, so an invariant that held only
     // because nothing was ever refused would be worthless.
-    if media(IIGS_ARTHUR).is_some() && media(ARTHUR_BLORB).is_some() {
-        assert_eq!(refusals, 1, "exactly one refusal changes what a player sees");
-    }
+    assert_eq!(
+        refusals,
+        mismatched().len(),
+        "only the measured contradictions change what a player sees"
+    );
 }
 
 /// **Guard 1, as a test.** Sweep every medium and story in `stories/` and require
@@ -371,10 +403,202 @@ fn no_medium_in_the_corpus_loses_artwork_except_the_mismatched_one() {
     }
     // A partial corpus is normal (and CI has none of it), so the expectation is
     // built from what is actually on disk rather than asserted flat.
-    let expected: Vec<String> = match media(IIGS_ARTHUR).is_some() && media(ARTHUR_BLORB).is_some() {
-        true => vec![format!("{IIGS_ARTHUR}: Some(\"{ARTHUR_BLORB}\") -> None")],
-        false => Vec::new(),
-    };
-    assert_eq!(lost, expected, "exactly one pairing may change, and it is the reported one");
+    let expected: Vec<String> = mismatched()
+        .into_iter()
+        .map(|(m, b)| format!("{m}: Some(\"{b}\") -> None"))
+        .collect();
+    lost.sort();
+    assert_eq!(lost, expected, "only the measured pairings may change, and they are the listed ones");
     assert!(ran > 0 || !dir.is_dir(), "the corpus is here but nothing was measured");
+}
+
+// ── SQ-0867: a story that is on no single volume ─────────────────────────────
+
+/// Every volume of the *Shogun* press names the same build, whichever one is
+/// opened — the property that makes the rule's answer independent of which
+/// floppy a person happened to hand babelmap.
+///
+/// Release 311 / serial 890510 is the build SQ-0864 verified against the story's
+/// own header checksum `$E200` when it taught babelmap to reassemble this set.
+#[test]
+fn every_volume_of_the_shogun_press_names_release_311() {
+    let mut ran = 0;
+    for volume in SHOGUN_SET {
+        let Some(p) = media(volume) else { continue };
+        ran += 1;
+        let builds = app::graphics::release_builds(&p);
+        assert_eq!(builds.len(), 1, "{volume} must name exactly one build: {builds:?}");
+        assert_eq!(builds[0].release, 311, "{volume}");
+        assert_eq!(builds[0].serial_str(), "890510", "{volume}");
+        assert_eq!(builds[0].checksum, 0xE200, "{volume}: SQ-0864's verified checksum");
+    }
+    assert!(ran > 0 || !any_present(&SHOGUN_SET), "no volume ran but the fixtures are here");
+}
+
+/// **The cheap answer is the verified answer.** `story_header` reads one 512-byte
+/// page and `story` reassembles and checksums 344 KB; on the set where both can
+/// run they must agree, or the page being read is not the story's.
+///
+/// This is what licenses using the page alone on a set that is INCOMPLETE, where
+/// no checksum can be taken — see `infocom_packed::story_header`.
+#[test]
+fn the_header_page_agrees_with_the_checksum_verified_reassembly() {
+    let Some(p) = media(SHOGUN_SET[0]) else {
+        eprintln!("SKIP: gitignored medium missing: {}", SHOGUN_SET[0]);
+        return;
+    };
+    let files: Vec<(String, Vec<u8>)> =
+        app::assets::volumes(&p).iter().flat_map(|v| v.disk.contents()).collect();
+    let (_, whole) = blorb::infocom_packed::story(&files).expect("the set reassembles");
+    let (_, page) = blorb::infocom_packed::story_header(&files).expect("and states a header");
+    assert_eq!(
+        blorb::GameIdentifier::of_story(&page),
+        blorb::GameIdentifier::of_story(&whole),
+        "one page and the whole verified story must name the same build"
+    );
+    assert_eq!(&page[..64], &whole[..64], "and it must be the story's own header, byte for byte");
+}
+
+/// *Shogun*'s Blorb is release 322 / serial 890706 and the press is release 311,
+/// so it is refused on exactly the evidence `Arthur.blb` was — which is the
+/// pairing SQ-0866 could name but not reach.
+#[test]
+fn the_shogun_blorb_is_refused_by_the_press_it_contradicts() {
+    let Some(p) = media(SHOGUN_SET[0]) else {
+        eprintln!("SKIP: gitignored medium missing: {}", SHOGUN_SET[0]);
+        return;
+    };
+    let Some(blb) = media(SHOGUN_BLORB) else {
+        eprintln!("SKIP: gitignored sidecar missing: {SHOGUN_BLORB}");
+        return;
+    };
+    // The premise: the Blorb really does claim a build, and a different one.
+    let stated = blorb::Blorb::parse(std::fs::read(&blb).unwrap())
+        .unwrap()
+        .game_identifier()
+        .expect("Shogun.blb states a build");
+    assert_eq!((stated.release, stated.serial_str().into_owned()), (322, "890706".to_string()));
+
+    let said = resource_blorb(&p).refused.expect("a contradicted Blorb must be refused");
+    for want in [SHOGUN_BLORB, "release 322", "890706", "release 311", "890510"] {
+        assert!(said.contains(want), "the complaint must name {want:?}: {said}");
+    }
+    assert_eq!(drawn_pictures(&p), 0, "and no other build's pictures may be drawn");
+}
+
+/// **An incomplete press still says what it is.** `Journey.2mg` declares five
+/// segments and carries four, so 92 of its 552 pages are absent and the story
+/// cannot be reassembled at all — but page 0 is on `JOURNEY.D1` and intact, and
+/// it says release 77 / serial 890616 against `Journey.blb`'s release 83.
+///
+/// The brief for this quest expected this release to be unknowable and to keep
+/// its Blorb for want of evidence. It is not unknowable: the evidence is on the
+/// disk, in the one page a build is named from.
+#[test]
+fn the_incomplete_journey_press_is_identified_from_the_page_it_still_has() {
+    let Some(p) = media(IIGS_JOURNEY) else {
+        eprintln!("SKIP: gitignored medium missing: {IIGS_JOURNEY}");
+        return;
+    };
+    let files: Vec<(String, Vec<u8>)> =
+        app::assets::volumes(&p).iter().flat_map(|v| v.disk.contents()).collect();
+    assert!(
+        blorb::infocom_packed::story(&files).is_none(),
+        "the premise: this press is missing a segment and cannot be reassembled"
+    );
+
+    let builds = app::graphics::release_builds(&p);
+    assert_eq!(builds.len(), 1, "and is still identified: {builds:?}");
+    assert_eq!(builds[0].release, 77);
+    assert_eq!(builds[0].serial_str(), "890616");
+
+    let Some(_) = media(JOURNEY_BLORB) else { return };
+    let said = resource_blorb(&p).refused.expect("release 83 contradicts release 77");
+    for want in [JOURNEY_BLORB, "release 83", "release 77", "890616"] {
+        assert!(said.contains(want), "the complaint must name {want:?}: {said}");
+    }
+}
+
+/// Identifying a build is not the same as changing one, and the Apple II *Zork
+/// Zero* press is the case that keeps the two apart: it becomes identifiable
+/// (release 383 / serial 890602) and **nothing about what it draws moves**,
+/// because no Blorb in the corpus stem-matches `zork_zero_*.dsk` for the rule to
+/// weigh. Evidence gained, behaviour unchanged.
+#[test]
+fn the_zork_zero_apple_press_becomes_identified_without_changing_what_it_draws() {
+    const SET: [&str; 4] =
+        ["zork_zero_1.dsk", "zork_zero_2.dsk", "zork_zero_3.dsk", "zork_zero_4.dsk"];
+    let mut ran = 0;
+    for volume in SET {
+        let Some(p) = media(volume) else { continue };
+        ran += 1;
+        let builds = app::graphics::release_builds(&p);
+        assert_eq!(builds.len(), 1, "{volume} must name exactly one build: {builds:?}");
+        assert_eq!(builds[0].release, 383, "{volume}");
+        assert_eq!(builds[0].serial_str(), "890602", "{volume}");
+        let rb = resource_blorb(&p);
+        assert!(rb.found.is_none() && rb.refused.is_none(), "{volume}: no Blorb to weigh either way");
+    }
+    assert!(ran > 0 || !any_present(&SET), "no volume ran but the fixtures are here");
+}
+
+/// A loose story file is never checked, however plainly a Blorb beside it
+/// disagrees — SQ-0866's line, restated here because SQ-0867 widened what
+/// "identifiable" means and that widening must not have reached across it.
+///
+/// *The Lurking Horror*'s `Lurking.blb` states release 221 / serial 870918
+/// against a release 219 / serial 870912 story, on the SOUND path. It is a real
+/// `IFhd` mismatch and it changes nothing, because the story is loose: a person
+/// assembled that folder.
+#[test]
+fn the_lurking_horror_sound_sidecar_is_untouched_because_the_story_is_loose() {
+    const LURKING: &str = "lurkinghorror-r219-s870912.z3";
+    let Some(story) = media(LURKING) else {
+        eprintln!("SKIP: gitignored story missing: {LURKING}");
+        return;
+    };
+    // The premise: the sidecar really does state a different build.
+    if let Some(blb) = media("Lurking.blb") {
+        let stated = blorb::Blorb::parse(std::fs::read(&blb).unwrap())
+            .unwrap()
+            .game_identifier()
+            .expect("Lurking.blb states a build");
+        assert_eq!(
+            (stated.release, stated.serial_str().into_owned()),
+            (221, "870918".to_string()),
+            "against a release 219 / serial 870912 story"
+        );
+    }
+    let rb = resource_blorb(&story);
+    assert!(rb.refused.is_none(), "a loose story is never refused: {:?}", rb.refused);
+    assert!(rb.found.is_some(), "and keeps the sidecar it was placed beside");
+    assert!(
+        app::graphics::release_builds(&story).is_empty(),
+        "a loose story is on no release, so there is nothing to contradict"
+    );
+}
+
+/// **The rule is the container's, not the picture tier's** (SQ-0867). `IFhd`
+/// describes the whole Blorb, and a container built for another build numbers
+/// its sounds as build-specifically as its pictures — so the boot resolves the
+/// SOUND container through the same door, and a refused Blorb supplies neither.
+///
+/// The corpus makes that inert and says why: no Blorb the rule refuses holds a
+/// single `Snd ` resource. What it removes is a boot that refused a release's
+/// artwork out loud and then announced it had loaded 48 images from it.
+#[test]
+fn no_refused_blorb_in_the_corpus_holds_a_sound_to_lose() {
+    let mut ran = 0;
+    for (medium, sidecar) in mismatched() {
+        let (Some(m), Some(s)) = (media(&medium), media(sidecar)) else { continue };
+        ran += 1;
+        assert!(resource_blorb(&m).refused.is_some(), "{medium} must be a refusal");
+        let b = blorb::Blorb::parse(std::fs::read(&s).unwrap()).unwrap();
+        assert_eq!(
+            b.resources().iter().filter(|r| &r.usage == b"Snd ").count(),
+            0,
+            "{sidecar} holds sound, so refusing it is no longer inert — measure the corpus again"
+        );
+    }
+    assert!(ran > 0 || mismatched().is_empty(), "no pairing ran but the fixtures are here");
 }

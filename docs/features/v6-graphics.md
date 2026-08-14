@@ -285,11 +285,58 @@ things are therefore *not* contradictions —
   while the game is release 60 — and its own readme tells you to do that, because
   borrowing *Zork Zero*'s plates is the entire design of the game. babelmap does
   not overrule someone who has already answered the question.
-- **A disk whose story babelmap cannot yet identify.** Nothing to compare, so
-  nothing is proven. The check simply gets sharper as the disk readers learn more
-  formats — the Apple II `shogun_s*.dsk` press mounts all five of its volumes but
-  pages its story across the set, so there is currently no build to check it
-  against.
+- **A disk whose story babelmap cannot identify.** Nothing to compare, so nothing
+  is proven. The check simply gets sharper as the disk readers learn more, and it
+  has: see below.
+
+#### Asking the release, not the platter
+
+The Apple II presses of the graphical Version 6 games do not put a story *file*
+anywhere. They page one game across the whole set as opaque `.D1`…`.D5` segments,
+so the five-volume `shogun_s*.dsk` press is five floppies of which not one carries
+a story — and the identity check, which asked each volume on its own, came back
+empty however plainly the release stated its build. It kept `Shogun.blb`, release
+322 / serial 890706, and drew its 48 pictures into a game that is release **311**,
+serial 890510.
+
+The check now asks the release as a whole. The segment index names which block
+holds story page 0, and that page is where the release, serial and checksum live
+(Quetzal §5.4) — so *which build is this?* is a question **one 512-byte block**
+answers, without reassembling the 344 KB story around it. On the presses where
+babelmap can do both, the page and the full checksum-verified reassembly name the
+identical build, which is what licenses trusting the page on its own.
+
+Two releases changed, and nothing else in a corpus of 269 files did:
+
+| release | its build | the Blorb beside it | now |
+| --- | --- | --- | --- |
+| `shogun_s1.dsk` … `s5.dsk` | 311 / 890510 | `Shogun.blb`, 322 / 890706 | refused |
+| `Journey.2mg` | 77 / 890616 | `Journey.blb`, 83 / 890706 | refused |
+
+*Journey*'s image is the interesting one, because it is an **incomplete pressing**:
+its index declares five segments and the disk carries four, so 92 of the story's
+552 pages are missing and the game cannot be reassembled or played off that image
+at all. It can still say what it is — page 0 survives on `JOURNEY.D1` — and a
+release that cannot be played is still a release whose plates babelmap will not
+guess at. The four-volume Apple II *Zork Zero* press became identifiable in the
+same breath (release 383 / serial 890602) and nothing about it moved, because no
+Blorb in the corpus stem-matches it.
+
+Both refused releases now draw no artwork rather than another build's, exactly as
+the Apple IIgs *Arthur* does. Their own plates *are* on their platters, inside the
+same packed segments; teaching babelmap to read those is a separate job from
+refusing to draw the wrong ones.
+
+One more thing moved with it: `IFhd` describes the **container**, not its picture
+chunks, and a Blorb built for another build numbers its sounds every bit as
+build-specifically as its pictures. So the boot resolves the sound container
+through the same check. On today's corpus that changes nothing audible — no Blorb
+the rule refuses holds a single `Snd` resource — but it does end a boot that
+refused a release's artwork out loud and then reported, one line later, that it had
+loaded 48 images from it. The one genuine sound-path mismatch, `Lurking.blb` at
+release 221 / serial 870918 against a release 219 / serial 870912 story, is
+untouched for the reason *Frobozz Magic Video Poker* is: that story is a loose
+file, and somebody put those two in a folder together on purpose.
 
 And note that a contradiction only ever *matters* for a disk carrying no artwork
 of its own. The Amiga *Arthur* and *Journey* floppies are contradicted by the same
