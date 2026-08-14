@@ -45,6 +45,10 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   same filesystem one machine over.
 - **Apple II ProDOS disk images** — `.2mg`, the 800 KB 3.5" press: single-game
   Apple IIgs disks and the seven-volume *Lost Treasures of Infocom* collection.
+  And `.dsk`, the 5.25" press, which is the same filesystem with its sectors in
+  the order the drive numbers them rather than the order ProDOS does: hand
+  babelmap any one of *Shogun*'s five floppies or *Zork Zero*'s four and the
+  whole game opens, because a release is not a platter.
 
 Those last five are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
@@ -145,7 +149,9 @@ Two of these disks are worth knowing about before you open them. *Arthur* and
 *Journey* on the Apple II are the ProDOS **8** press, and they do not contain a
 story file at all: the game is split across `ARTHUR.D1`–`D5` and
 `JOURNEY.D1`–`D4`, none of which begins with a Z-machine header. babelmap reads
-them anyway — see [The packed Apple volume](#the-packed-apple-volume) below. And
+them anyway — see [The packed Apple volume](#the-packed-apple-volume) below,
+where the 5.25" presses of *Shogun* and *Zork Zero* do the same thing across
+five and four separate floppies. And
 *Lost Treasures* volume 1 is the GS/OS launcher — fifty-three
 files of system software and not one game. Volumes 2–7 carry thirty games
 between them, and since no ProDOS release uses a conventional story name, opening
@@ -199,6 +205,29 @@ honest answer to four fifths of a game is no game, so babelmap mounts the volume
 lists its files and declines to offer a story — the same answer it gave before,
 now for a reason it can state.
 
+#### …and the same container, one floppy per disk
+
+*Shogun* and *Zork Zero* shipped the same way and did not get the convenience of
+a single image. Their Apple II press is five and four **separate 5.25" floppies**,
+and the packed volume above spans all of them: `SHOGUN.D1` is alone on the first
+disk, `SHOGUN.D2` on the second, and the pages interleave across the lot. Open
+one of those files by itself and the honest answer is the *Journey* answer — a
+mounted ProDOS volume called `SHOGUN.1`, four files on it, and no game.
+
+So opening a disk had to stop meaning opening a file. Name any volume of the set
+and babelmap finds the rest the way the browser already grouped them — by their
+filenames, in one directory, without opening anything — and asks the container
+the question spanning them. The same header checksum settles it, so a pile of
+floppies that are not one release is refused rather than spliced: *Shogun*
+release 311, serial 890510, 344,224 bytes, checksum `$E200`, and *Zork Zero*
+release 383, serial 890602, 299,392 bytes, checksum `$6F7F`. Both are builds no
+other medium in the collection carries — a fifth *Shogun* and a fourth *Zork
+Zero*.
+
+In the browser they are two games and not nine disks: every volume reports the
+same reassembled build, and the fold that already existed for multi-disk
+collections keeps the first one and drops the rest.
+
 The artwork on those disks is a separate matter and is not read yet. It is in
 there — four picture archives on *Arthur*, in the space the story pages leave
 free at the end of each segment, with the familiar Infocom header and a directory
@@ -243,13 +272,30 @@ so it plugged into the seam's "every story on the volume" answer and *Arthur*
 appeared in the picker, in the launch dialog and in `zvm-cli`'s menu without any
 of them being told a thing.
 
-Apple II 5.25" `.dsk` media is next, and it is the one format that will *not*
-arrive the same way, because a row cannot express it: a `.dsk` is one 140 KB
-floppy, and *Shogun* is five of them. The container is decoded — both sets
-reassemble and verify against their own checksums, *Shogun* release 311 serial
-890510 and *Zork Zero* release 383 serial 890602 — but a `Volume` is mounted from
-one file's bytes, and no story comes out of one of these files alone. What that
-format needs first is a mount that takes a *set*.
+Apple II 5.25" `.dsk` media was going to be the exception — the one format a row
+could not express, because a `.dsk` is one 140 KB floppy and *Shogun* is five of
+them. It turned out to need no row at all, and for a better reason than expected.
+Look at one of those images the way ProDOS does, with its sectors put back in
+block order, and it is simply **a ProDOS volume**: block 2 is an ordinary volume
+directory calling itself `SHOGUN.1`, and the file on it is `SHOGUN.D1`. The
+5.25" press is the 3.5" press one de-interleave away, so it wears the same row,
+uses the same reader and announces the same Apple IIgs. `.dsk` became a spelling
+that row claims, and the picker, the launch dialog and the CLI's menu gained it
+with nothing edited anywhere.
+
+What was genuinely missing was not a format but a **set**. The story is paged
+across every floppy in the release and no single one carries a game, so opening a
+disk had to become a question a release could answer. It did, format-neutrally:
+name any volume and the others are offered alongside, and nobody else pays for it
+— the siblings are read only when the disk you named has no story of its own,
+which is true of a *Shogun* floppy and false of every compilation disk there is.
+Both sets verify against their own header checksums on the way out, *Shogun*
+release 311 serial 890510 and *Zork Zero* release 383 serial 890602, so a
+mismatched pile of floppies is refused rather than reassembled into plausible
+nonsense. And which files are one release was already known — the browser had
+been grouping multi-disk sets by name for a quest already, reading its list of
+disk spellings off the same table, so it recognised the two presses the day the
+reader landed without a line changed.
 
 The proof was not free, mind. One function had been missed — the one that reads
 an archive you name *inside* a disk, which predated the table and still carried a
@@ -320,6 +366,10 @@ volume opens with:
 | *Lost Treasures* 5 (`INFOCOM5`) | Trinity, v4 release 12, serial 860926 |
 | *Lost Treasures* 6 (`INFOCOM6`) | Sherlock, v5 release 21, serial 871214 |
 | *Lost Treasures* 7 (`INFOCOM7`) | Wishbringer, v3 release 69, serial 850920 |
+| `Arthur Quest 4 Excalibur.2mg` | Arthur, v6 release 63, serial 890622 — packed |
+| `Journey.2mg` | — declares five segments, carries four; no game |
+| `shogun_s1.dsk`…`s5` (5.25") | Shogun, v6 release 311, serial 890510 — packed across five |
+| `zork_zero_1.dsk`…`_4` (5.25") | Zork Zero, v6 release 383, serial 890602 — packed across four |
 
 Each of volumes 2–7 carries three to seven games; the one listed is the largest,
 which is what opening the disk gives you when nothing on it wears a conventional
