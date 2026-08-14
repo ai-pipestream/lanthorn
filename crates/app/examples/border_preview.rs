@@ -58,7 +58,8 @@ const DEFAULT_ROWS: u32 = 900;
 
 /// Contact-sheet geometry: how tall each band is drawn, and how wide its column
 /// is. The width is set by the caption — seventeen 8-pixel glyphs — because the
-/// bands themselves are only 46 to 86 units wide.
+/// bands themselves are only 12 to 86 units wide, whatever their picture space
+/// happens to state.
 const TILE_H: u32 = 320;
 const TILE_W: u32 = 136;
 /// Three caption lines of an 8x8 font, plus a little air.
@@ -157,11 +158,18 @@ fn main() -> ExitCode {
     );
 
     let label_slug = slug(&a.label);
-    let discovered = flanks(&mut a);
+    let found = flanks(&mut a);
+    let discovered = &found.flanks;
+    println!(
+        "  flank width stated by this archive: {:?} unit column(s); {} full-screen plate(s) state \
+         no story window and so state no flank",
+        found.stated_width,
+        found.stateless_plates,
+    );
     let mut tiles: Vec<Tile> = Vec::new();
     let mut unrecognised = 0usize;
 
-    for f in &discovered {
+    for f in discovered {
         let kind = border::recognize(&f.canvas, f.x0, f.x1, f.art, native_h);
         let width = f.x1 - f.x0;
         let tag = kind_tag(kind);
@@ -199,10 +207,12 @@ fn main() -> ExitCode {
 
     if tiles.is_empty() {
         eprintln!(
-            "border_preview: {} states no composable flank ({} candidate(s) discovered, none \
-             recognised as border art)",
+            "border_preview: {} states no composable flank — {} discovered, and {} full-screen \
+             plate(s) carry no story window at all, so nothing in this archive fixes a flank \
+             width. Journey's four archives are all like this: their border is glyphs, not art",
             a.label,
             discovered.len(),
+            found.stateless_plates,
         );
         return ExitCode::from(1);
     }
