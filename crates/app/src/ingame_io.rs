@@ -7,7 +7,7 @@
 
 use app::archive::SaveTrigger;
 use app::engine::Engine;
-use app::persist_files::{delete_save, list_saves, save_named};
+use app::persist_files::{delete_save, save_named};
 use app::state::{AppState, SavesState};
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
@@ -29,7 +29,15 @@ pub(crate) fn delete_save_confirmed(
             Ok(()) => {
                 state.push_notice("[Save deleted]");
                 if let Some(s) = &mut state.overlays.saves {
-                    s.entries = list_saves(dir);
+                    // SQ-0854: refresh through the SAME enumeration that filled
+                    // the list — `combined_saves`, which is `.babelmap` Save
+                    // States AND bare `.qzl` game saves. Re-listing with the
+                    // narrower `list_saves` dropped every `.qzl` row alongside
+                    // the one file actually deleted, so a single delete could
+                    // take two rows off the screen; the missing ones were never
+                    // gone from disk and came back the next time the dialog was
+                    // opened.
+                    s.entries = combined_saves(dir);
                     // Re-clamp the selection/offset to the new entry count.
                     s.scroll.len(s.entries.len());
                 }
@@ -118,9 +126,13 @@ pub(crate) fn handle_save_as(
             // now writes the same archive with the same session content, so
             // nagging about unsaved work the player just saved would be a lie.
             state.unsaved_progress = false;
-            // Refresh saves list.
+            // Refresh saves list. Same enumeration as the delete path above
+            // (SQ-0854): "Save As" is reached from inside the still-open saves
+            // manager, so re-listing with `list_saves` blanked its `.qzl` rows
+            // here too.
             if let Some(s) = &mut state.overlays.saves {
-                s.entries = list_saves(dir);
+                s.entries = combined_saves(dir);
+                s.scroll.len(s.entries.len());
             }
             // In-game SAVE: flag-hop so the run loop resumes the VM
             // (resume + recenter need session/mapper/last_panes scope).
@@ -638,6 +650,185 @@ mod tests {
         assert_eq!(find("from the game").trigger, SaveTrigger::Ingame);
         assert_eq!(find("from the host").trigger, SaveTrigger::HostState);
         assert_eq!(find("from-frotz").trigger, SaveTrigger::Ingame, "a bare .qzl IS a game save");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-0854: the open saves list after a delete ──────────────────────────
+
+    /// A game dir holding two `.babelmap` Save States and one bare `.qzl`.
+    ///
+    /// The merged list sorts newest-first, and all three files are written in
+    /// the same second, so the `.qzl`'s mtime is pushed a day off `now` to make
+    /// the row order deterministic: `qzl_first` puts it at the top, otherwise at
+    /// the bottom. That is what lets the first-row and last-row cases below each
+    /// pick a `.babelmap` on purpose.
+    fn dir_with_two_states_and_a_qzl(tag: &str, qzl_first: bool) -> std::path::PathBuf {
+        let dir = temp_dir(tag);
+        let mut mapper = mapper_with_room();
+        let mut writer = state_with_session(None);
+        super::handle_save_as("alpha".into(), &dir, IFID, &mut mapper, &mut minizork(), &mut writer, false);
+        super::handle_save_as("beta".into(), &dir, IFID, &mut mapper, &mut minizork(), &mut writer, false);
+        let qzl = dir.join("from-frotz.qzl");
+        std::fs::write(&qzl, b"carried in from elsewhere").unwrap();
+        let day = std::time::Duration::from_secs(86_400);
+        let now = std::time::SystemTime::now();
+        let when = if qzl_first { now + day } else { now - day };
+        std::fs::OpenOptions::new().write(true).open(&qzl).unwrap().set_modified(when).unwrap();
+        dir
+    }
+
+    /// Open the saves manager over `dir` exactly as the run loop does
+    /// (`Action::OpenSaves` → `combined_saves`), selecting the row holding
+    /// `select`.
+    fn open_saves_over(dir: &std::path::Path, select: &std::path::Path) -> app::state::AppState {
+        let mut state = state_with_session(None);
+        let entries = crate::combined_saves(dir);
+        let idx = entries
+            .iter()
+            .position(|e| e.path == select)
+            .unwrap_or_else(|| panic!("{} should be listed", select.display()));
+        let mut scroll = app::list_scroll::ListScroll::new();
+        scroll.len(entries.len());
+        scroll.selected = idx;
+        state.overlays.saves = Some(app::state::SavesState { entries, scroll });
+        state
+    }
+
+    /// The list's rows as a set of paths (order between two saves written in the
+    /// same second is a tie, so membership is what a test can pin).
+    fn rows(state: &app::state::AppState) -> Vec<std::path::PathBuf> {
+        let mut p: Vec<_> = state
+            .overlays
+            .saves
+            .as_ref()
+            .expect("the saves manager stays open behind the confirm dialog")
+            .entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        p.sort();
+        p
+    }
+
+    fn on_disk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut p: Vec<_> = crate::combined_saves(dir).into_iter().map(|e| e.path).collect();
+        p.sort();
+        p
+    }
+
+    /// The reported defect: one file leaves the disk, but TWO rows leave the
+    /// visible list, and the second one is back the next time the dialog is
+    /// opened. The list the player is left looking at must be exactly what a
+    /// reopen would enumerate.
+    #[test]
+    fn deleting_one_save_removes_exactly_that_row_from_the_open_list() {
+        let dir = dir_with_two_states_and_a_qzl("delete-one-row", false);
+        let victim = dir.join("alpha.babelmap");
+        let mut state = open_saves_over(&dir, &victim);
+        assert_eq!(rows(&state).len(), 3, "two Save States and one .qzl are listed");
+
+        super::delete_save_confirmed(&victim, true, &dir, &mut state);
+
+        // Exactly one file left the disk.
+        assert!(!victim.exists(), "the selected save is deleted");
+        assert!(dir.join("beta.babelmap").exists(), "the other Save State survives");
+        assert!(dir.join("from-frotz.qzl").exists(), "deleting a Save State never touches a .qzl");
+
+        // ...and exactly one row left the list.
+        assert_eq!(rows(&state).len(), 2, "one row gone, not two");
+        assert_eq!(rows(&state), on_disk(&dir), "the open list agrees with a fresh enumeration");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deleting a `.qzl` is the same contract from the other side: the `.qzl`
+    /// row goes and both Save States stay.
+    #[test]
+    fn deleting_a_qzl_leaves_the_babelmap_rows_alone() {
+        let dir = dir_with_two_states_and_a_qzl("delete-qzl", false);
+        let victim = dir.join("from-frotz.qzl");
+        let mut state = open_saves_over(&dir, &victim);
+
+        super::delete_save_confirmed(&victim, true, &dir, &mut state);
+
+        assert_eq!(rows(&state).len(), 2);
+        assert_eq!(rows(&state), on_disk(&dir), "the open list agrees with a fresh enumeration");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cancelled delete touches neither the disk nor the list.
+    #[test]
+    fn a_cancelled_delete_leaves_the_list_untouched() {
+        let dir = dir_with_two_states_and_a_qzl("delete-cancel", false);
+        let victim = dir.join("alpha.babelmap");
+        let mut state = open_saves_over(&dir, &victim);
+        let before = rows(&state);
+
+        super::delete_save_confirmed(&victim, false, &dir, &mut state);
+
+        assert!(victim.exists(), "cancel keeps the file");
+        assert_eq!(rows(&state), before, "cancel keeps every row");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Selection after a delete, at both ends of the list and at length 1.
+    /// The convention `ListScroll::len` already encodes: the cursor holds its
+    /// index (so it lands on the row that slid up into the deleted one) and is
+    /// clamped into the shortened list, never off its edge.
+    #[test]
+    fn the_cursor_stays_in_the_list_after_deleting_the_first_row() {
+        let dir = dir_with_two_states_and_a_qzl("delete-first", false);
+        let first = crate::combined_saves(&dir)[0].path.clone();
+        let expected_next = crate::combined_saves(&dir)[1].path.clone();
+        let mut state = open_saves_over(&dir, &first);
+        assert_eq!(state.overlays.saves.as_ref().unwrap().scroll.selected, 0);
+
+        super::delete_save_confirmed(&first, true, &dir, &mut state);
+
+        let s = state.overlays.saves.as_ref().unwrap();
+        assert_eq!(s.entries.len(), 2);
+        assert_eq!(s.scroll.selected, 0, "the cursor holds row 0");
+        assert_eq!(s.entries[0].path, expected_next, "which is now the row that followed the deleted one");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cursor_stays_in_the_list_after_deleting_the_last_row() {
+        let dir = dir_with_two_states_and_a_qzl("delete-last", true);
+        let last = crate::combined_saves(&dir)[2].path.clone();
+        let mut state = open_saves_over(&dir, &last);
+        assert_eq!(state.overlays.saves.as_ref().unwrap().scroll.selected, 2);
+
+        super::delete_save_confirmed(&last, true, &dir, &mut state);
+
+        let s = state.overlays.saves.as_ref().unwrap();
+        assert_eq!(s.entries.len(), 2);
+        assert_eq!(s.scroll.selected, 1, "the cursor is pulled back onto the new last row, not off the edge");
+        assert!(s.scroll.selected < s.entries.len());
+        assert_eq!(rows(&state), on_disk(&dir), "the open list agrees with a fresh enumeration");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_the_only_save_empties_the_list_without_stranding_the_cursor() {
+        let dir = temp_dir("delete-only");
+        let mut mapper = mapper_with_room();
+        let mut writer = state_with_session(None);
+        super::handle_save_as("alpha".into(), &dir, IFID, &mut mapper, &mut minizork(), &mut writer, false);
+        let only = dir.join("alpha.babelmap");
+        let mut state = open_saves_over(&dir, &only);
+
+        super::delete_save_confirmed(&only, true, &dir, &mut state);
+
+        let s = state.overlays.saves.as_ref().unwrap();
+        assert!(s.entries.is_empty(), "the last save leaves an empty list");
+        assert_eq!(s.scroll.selected, 0, "and a cursor parked at 0, not at usize::MAX");
+        assert!(on_disk(&dir).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
