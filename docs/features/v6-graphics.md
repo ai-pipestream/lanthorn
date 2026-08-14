@@ -296,11 +296,16 @@ always could, by naming it — `--pictures`, or the `pictures` key — and the d
 says so on its last line rather than leaving you to wonder.
 
 **Inside it**, when you launched a disk image, no name test applies at all: every
-archive on the release is offered, marked *on disk*, because the medium itself is
-the pairing. There is nothing to guess — the story and the art came out of one
-box. On a single-game multi-disk press that means the siblings too, which is what
-puts CGA and EGA in front of you when you boot the 360K *Zork Zero* story disk
-that carries neither. This is what makes the Macintosh's two archives pickable: a directory
+archive on the release is offered, because the medium itself is the pairing.
+There is nothing to guess — the story and the art came out of one box. On a
+single-game multi-disk press that means the siblings too, which is what puts CGA
+and EGA in front of you when you boot the 360K *Zork Zero* story disk that
+carries neither. Each of those rows says **which** disk it came off — *from disk
+3* for EGA on that press, *from game disk* when the release is a single platter
+and there is no number to give. That matters precisely because of the siblings:
+once an archive can live on a disk you never put in the drive, "on disk" stops
+being vague and starts being misleading. The number is the release's own, read
+off the set the filenames form, not counted from a position in a list. This is what makes the Macintosh's two archives pickable: a directory
 scan cannot see inside a disk image, so before this the dialog could offer a Mac
 disk nothing at all, and its black-and-white artwork could only be reached by
 typing `--pictures Pic.data`. Every archive is identified by *parsing* it rather

@@ -875,7 +875,12 @@ fn the_dialog_shows_the_disks_own_archives_and_says_where_they_live() {
     assert!(frame.contains("CPic.data"), "the colour archive is offered: {frame}");
     assert!(frame.contains("Pic.data"), "…and the two-colour one: {frame}");
     assert!(frame.contains("Mac B&W"), "labelled so a person can tell them apart: {frame}");
-    assert!(frame.contains("on disk"), "and told where they live: {frame}");
+    // SQ-0865: WHICH disk. This release is a single image, so there is no disk
+    // number to give and the phrase is the user's own wording — never the bare
+    // "on disk" it replaced, which said neither which disk nor even that there
+    // was only one.
+    assert!(frame.contains("from game disk"), "and told where they live: {frame}");
+    assert!(!frame.contains("on disk"), "the vague marker is gone: {frame}");
     // The provenance line must agree with the row selected above it: this disk
     // is a Macintosh whichever of its two archives you pick (SQ-0843).
     assert!(
@@ -883,5 +888,163 @@ fn the_dialog_shows_the_disks_own_archives_and_says_where_they_live() {
         "picking the Mac's own art must not demote the machine: {frame}"
     );
     assert!(frame.contains("from the disk image"), "and the line names what settled it: {frame}");
-    assert!(!frame.contains("(Amiga)"), "nothing on this disk is an Amiga: {frame}");
+}
+
+// ── SQ-0865: the default row says what it will open, and where it lives ──────
+//
+// Reported against the panel: *"the defaul artwork selection is 'Use this
+// story's own art (Blorb / disk image)'. We should be more specific on the
+// default format and match the text/formatting of the other options. In terms of
+// the other options, 'on disk' is confusing."*
+//
+// The old row was prose among columns and named nothing, which made it the one
+// row you could not judge before accepting it. It is columnar now and it names
+// the archive the boot will really open — resolved through the boot's own path
+// (`graphics::release_art`, then the resource Blorb), never re-derived here.
+
+/// A **single-image release** has no disk number to give, and says so in the
+/// user's own words. Both media in the corpus that are one platter: the
+/// Macintosh HFS disk and the Amiga floppy.
+///
+/// The default row is the interesting half. The Macintosh ships two archives and
+/// the automatic choice is the COLOUR one (`blorb::medium` tiebreak, SQ-0838), so
+/// the row must say `CPic.data` — naming `Pic.data` there would be a row
+/// promising two-colour art to someone who is about to get colour.
+#[test]
+fn a_single_image_release_says_from_game_disk_and_names_its_default() {
+    // (image, the archive that boots when nothing is overridden)
+    for (name, default_archive, rendition) in [
+        ("Zork Zero Disk.image", "CPic.data", "Amiga"),
+        ("Zork Zero - The Revenge of Megaboz.adf", "Pic.data", "Amiga"),
+    ] {
+        let image = stories_dir().join(name);
+        if !image.is_file() {
+            eprintln!("SKIP: gitignored medium missing: {name}");
+            continue;
+        }
+        let st = LaunchOptionsState::new("Zork Zero", &image, None, None, Some(6), None);
+
+        // No candidate off this medium carries a disk number, because the
+        // release is one disk — and each says the phrase that means exactly
+        // that, rather than the "on disk" that meant nothing in particular.
+        let on_medium: Vec<_> = st.candidates.iter().filter(|c| c.on_medium).collect();
+        assert!(!on_medium.is_empty(), "{name}: the volume's archives are offered");
+        for c in &on_medium {
+            assert_eq!(c.disk_number, None, "{name}/{}: one platter, no number", c.filename);
+            assert_eq!(
+                app::launch_options::medium_note(c),
+                "from game disk",
+                "{name}/{}",
+                c.filename,
+            );
+        }
+
+        let d = st.default_art.as_ref().unwrap_or_else(|| panic!("{name}: a default to name"));
+        assert_eq!(d.filename, default_archive, "{name}: the archive that actually boots");
+        assert_eq!(d.rendition, rendition, "{name}");
+        assert_eq!(d.medium_note(), "from game disk", "{name}");
+        assert!(d.on_medium && d.disk_number.is_none(), "{name}");
+
+        // …and it agrees with the boot. Same oracle as the DOS press's:
+        // naming what the row shows must reach the artwork accepting the
+        // default reaches.
+        let empty = tmp("single-agree");
+        let mut auto = app::graphics::PictSource::resolve(&image);
+        let over =
+            app::graphics::PictureOverride::resolve_with_session(&image, &empty, Some(&d.filename));
+        let mut named = app::graphics::PictSource::resolve_with_override(&image, over);
+        assert_eq!(
+            named.is_monochrome(),
+            auto.is_monochrome(),
+            "{name}: the row names {default_archive}, which is not what boots",
+        );
+        assert_eq!(named.native_std_window(), auto.native_std_window(), "{name}");
+        assert_eq!(named.dims(1), auto.dims(1), "{name}");
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+}
+
+/// An **ordinary file beside the story** keeps saying nothing about disks —
+/// there is no disk — and the default row names the resource Blorb, which is
+/// what tier 1 will actually open.
+///
+/// `Zork0.blb` is never a *pickable* row (it is not a native archive and the
+/// candidate list rightly refuses it), which is exactly why the default row has
+/// to name it: it is otherwise the one thing the dialog can boot and cannot show.
+#[test]
+fn a_loose_story_names_its_blorb_and_mentions_no_disk() {
+    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    if !z0.is_file() {
+        return; // gitignored fixture
+    }
+    let st = LaunchOptionsState::new("Zork Zero", &z0, None, None, Some(6), None);
+    for c in &st.candidates {
+        assert!(!c.on_medium, "{}: nothing here is on a medium", c.filename);
+        assert_eq!(c.disk_number, None, "{}", c.filename);
+        assert_eq!(app::launch_options::medium_note(c), "", "{}", c.filename);
+    }
+
+    let d = st.default_art.as_ref().expect("the Blorb beside it is what boots");
+    assert!(d.filename.eq_ignore_ascii_case("Zork0.blb"), "got {:?}", d.filename);
+    assert_eq!(d.rendition, "Blorb", "a Blorb is a container, not a video card");
+    assert_eq!(d.medium_note(), "", "a file in a folder explains nothing");
+    // The count is the Blorb's own `Pict` population — the same enumeration
+    // `PictSource::all_pict_dims` draws from, not the native archives' 503
+    // directory entries. `Zork0.blb`'s RIdx really does list 2213 of them, every
+    // one a `Pict`, which is why the two numbers differ by so much: a native
+    // archive holds one entry per picture id, a Blorb one per image.
+    assert_eq!(d.pictures, 2213, "the Blorb's Pict resources, whole");
+
+    // The row is not a claim about a native archive: `PictSource::resolve` on
+    // this story takes tier 1, and there is no release art to take instead.
+    assert!(app::graphics::release_art(&z0).is_none(), "no disk image, no release art");
+}
+
+/// **The narrow panel.** The dialog is not full-screen and its width follows the
+/// terminal's, so the widened name column has to be checked at the bottom of its
+/// range as well as the top.
+///
+/// What must survive clipping is the part that identifies the row — the mark,
+/// the archive's name and its rendition. The picture count and the disk note are
+/// the first things off the end, and that is the right order: a person at 48
+/// columns can still tell the rows apart, which is what the list is for. Pinned
+/// so that a future column change cannot quietly cost the rendition instead.
+#[test]
+fn a_narrow_dialog_keeps_the_name_and_the_rendition_of_every_row() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let image = stories_dir().join("Zork Zero Disk.image");
+    if !image.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium missing");
+        return;
+    }
+    let st = LaunchOptionsState::new("Zork Zero", &image, None, None, Some(6), None);
+    let cs = app::colors::ColorScheme::terminal_default();
+    for width in [48u16, 60, 100] {
+        let mut term = Terminal::new(TestBackend::new(width, 26)).unwrap();
+        let mut drew = false;
+        term.draw(|f| {
+            drew = app::render::launch_options_dialog::draw_launch_options(
+                &st,
+                f.area(),
+                &cs,
+                f.buffer_mut(),
+            )
+            .is_some();
+        })
+        .unwrap();
+        assert!(drew, "{width}: the dialog fits and must draw");
+        let buf = term.backend().buffer();
+        let mut frame = String::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                frame.push_str(buf.cell((x, y)).unwrap().symbol());
+            }
+            frame.push('\n');
+        }
+        println!("── {width} columns\n{frame}");
+        for want in ["CPic.data", "Pic.data", "Mac B&W", "Automatic — "] {
+            assert!(frame.contains(want), "{width} columns lost {want:?}:\n{frame}");
+        }
+    }
 }

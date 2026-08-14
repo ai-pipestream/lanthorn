@@ -125,6 +125,15 @@ pub struct AssetFile {
     pub path: PathBuf,
     /// Which source it came from.
     pub origin: AssetOrigin,
+    /// **Which volume of the release** carries it, when the release is a
+    /// multi-disk set (SQ-0865): the disk number `crate::disk_set` reads off the
+    /// set's varying index, which is the release's own spelling and not a
+    /// position in a list.
+    ///
+    /// `None` for a loose file, and `None` for a release that is a single image
+    /// — a story whose art is on the one disk it booted from has a "game disk"
+    /// and no disk *number*, and the two cases read differently to a person.
+    pub disk_number: Option<u64>,
     /// Already in hand for a volume's file; `None` for a loose one, which is
     /// what keeps the directory arm name-first.
     bytes: Option<Vec<u8>>,
@@ -171,7 +180,13 @@ fn beside_the_story(story_path: &Path) -> Vec<AssetFile> {
         .filter_map(|e| {
             let path = e.path();
             let name = path.file_name()?.to_str()?.to_string();
-            Some(AssetFile { name, path, origin: AssetOrigin::BesideTheStory, bytes: None })
+            Some(AssetFile {
+                name,
+                path,
+                origin: AssetOrigin::BesideTheStory,
+                disk_number: None,
+                bytes: None,
+            })
         })
         .collect()
 }
@@ -191,6 +206,7 @@ fn on_the_medium(story_path: &Path) -> Vec<AssetFile> {
                 name,
                 path: v.path.clone(),
                 origin: AssetOrigin::OnTheMedium,
+                disk_number: v.disk_number,
                 bytes: Some(bytes),
             })
         })
@@ -205,6 +221,10 @@ pub struct MountedVolume {
     pub path: PathBuf,
     /// The open volume.
     pub disk: blorb::medium::MountedDisk,
+    /// Which volume of its release this is, when the release is a multi-disk
+    /// set — `crate::disk_set`'s own index, not a position in this list.
+    /// `None` when the release is a single image (SQ-0865).
+    pub disk_number: Option<u64>,
 }
 
 /// Every volume of the release `story_path` came off, **the story's own image
@@ -262,23 +282,30 @@ pub struct MountedVolume {
 /// and `disk_set::members` is never even asked, because it wants a disk-image
 /// extension and answers `None` without touching the disk.
 pub fn volumes(story_path: &Path) -> Vec<MountedVolume> {
-    let Some(own) = mount(story_path) else {
+    let Some(mut own) = mount(story_path) else {
         return Vec::new();
     };
+    // The release's volumes and the disk number each one carries, from names
+    // alone — no disk is opened to answer it, so asking before the compilation
+    // check below costs one `read_dir` and no mount (SQ-0865).
+    let members = crate::disk_set::members_indexed(story_path);
+    own.disk_number =
+        members.as_ref().and_then(|m| m.iter().find(|(_, p)| p == story_path).map(|(n, _)| *n));
     let mut stories = own.disk.stories().len();
     let mut out = vec![own];
     if stories > 1 {
         return out; // one volume of a compilation: its siblings are other games'
     }
-    let Some(members) = crate::disk_set::members(story_path) else {
+    let Some(members) = members else {
         return out;
     };
     let mut siblings = Vec::new();
-    for m in members {
+    for (number, m) in members {
         if m == story_path {
             continue;
         }
-        let Some(v) = mount(&m) else { continue };
+        let Some(mut v) = mount(&m) else { continue };
+        v.disk_number = Some(number);
         stories += v.disk.stories().len();
         if stories > 1 {
             return out; // a shelf, not a release: the siblings contribute nothing
@@ -290,11 +317,14 @@ pub fn volumes(story_path: &Path) -> Vec<MountedVolume> {
 }
 
 /// Open one image, or `None` when the bytes are not a disk in any format.
+///
+/// The volume's own disk number is [`volumes`]'s to fill in: it is a property of
+/// the release the image belongs to, which one image cannot see.
 fn mount(path: &Path) -> Option<MountedVolume> {
     let raw = std::fs::read(path).ok()?;
     blorb::medium::DiskImage::detect(&raw)?;
     let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
-    Some(MountedVolume { path: path.to_path_buf(), disk })
+    Some(MountedVolume { path: path.to_path_buf(), disk, disk_number: None })
 }
 
 #[cfg(test)]

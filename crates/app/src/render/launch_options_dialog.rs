@@ -25,6 +25,27 @@ use crate::render::draw_str_clipped;
 /// Widest the dialog will grow, and the narrowest it will render at all.
 const MAX_W: u16 = 78;
 const MIN_W: u16 = 44;
+
+/// The art list's two text columns: the archive's name, then its rendition.
+///
+/// **The name column is 20 rather than the 14 it was** (SQ-0865), and the width
+/// is set by the DEFAULT row rather than by any filename. That row now reads
+/// `Automatic — CPic.data (Amiga)` — 29 characters at its longest across the
+/// corpus, `Pic.data (Mac B&W)` and `Zork0.blb (Blorb)` being the other two
+/// contenders — and it has to end exactly where the rendition column does, or
+/// the picture counts stop lining up in one column, which is the complaint that
+/// started this. `NAME_W + 1 + REND_W` is that 29, and it is the narrowest pair
+/// that reaches it while leaving the rendition column able to hold `Mac B&W`.
+///
+/// The cost is six spaces of padding after a nine-character `ZORK0.EG1`, which
+/// is a table with room in it; the alternative was a default row whose count sat
+/// four columns right of every other row's.
+const NAME_W: usize = 20;
+const REND_W: usize = 8;
+/// The span the default row's `Automatic — …` phrase fills: both name columns
+/// and the space between them, so its picture count lands in the same column as
+/// every candidate's.
+const DEFAULT_W: usize = NAME_W + 1 + REND_W;
 /// Tall enough for a long art list without becoming the whole screen; the list
 /// scrolls past this.
 const MAX_H: u16 = 24;
@@ -45,6 +66,12 @@ pub struct LaunchOptionsRects {
 /// missing box glyph would leave the one control whose state matters unreadable.
 fn checkbox(on: bool) -> &'static str {
     if on { "[x]" } else { "[ ]" }
+}
+
+/// A trailing note, spaced off the column before it — and nothing at all when
+/// there is no note, so an ordinary loose archive's row simply ends.
+fn note(s: &str) -> String {
+    if s.is_empty() { String::new() } else { format!("  {s}") }
 }
 
 /// Draw the dialog centred over `area`. `None` when the terminal is too small
@@ -158,22 +185,43 @@ pub fn draw_launch_options(
     }
     for idx in first..last {
         match idx.checked_sub(1) {
-            // Row 0 is always "inherit": whatever the story resolves on its own
-            // — its Blorb, or the Pic.data on the floppy it was mounted from.
-            None => option_row(buf, 0, "  (·) Use this story's own art (Blorb / disk image)", &mut rows, &mut y),
+            // Row 0 is "inherit": whatever the story resolves on its own — its
+            // Blorb, or the archive the release it came off supplies.
+            //
+            // It NAMES that archive (SQ-0865). It used to read "Use this story's
+            // own art (Blorb / disk image)", which was prose among columns and
+            // was the one row that said nothing about what accepting it would
+            // do. What it names is resolved by the boot path itself, once, when
+            // the dialog opens — see `launch_options::resolved_default_art`.
+            None => {
+                // Selected or not, like every other radio row; `·` rather than
+                // `•` is what marks this one as the automatic choice.
+                let mark = if st.art == 0 { "(·)" } else { "( )" };
+                let label = match &st.default_art {
+                    Some(d) => format!(
+                        "  {mark} {:<DEFAULT_W$} {:>4} pictures{}",
+                        format!("Automatic — {} ({})", d.filename, d.rendition),
+                        d.pictures,
+                        note(&d.medium_note()),
+                    ),
+                    None => format!("  {mark} Automatic — no artwork found"),
+                };
+                option_row(buf, 0, &label, &mut rows, &mut y);
+            }
             Some(i) => {
                 let c = &st.candidates[i];
                 let mark = if st.art == idx { "(•)" } else { "( )" };
-                // "on disk" says where an archive with no path of its own lives:
-                // `CPic.data` is not in the folder the story appears to be in,
-                // it is on the volume the story was mounted out of (SQ-0843).
+                // Where an archive with no path of its own lives: `CPic.data` is
+                // not in the folder the story appears to be in, it is inside the
+                // volume (SQ-0843) — and since SQ-0862 that volume may be a
+                // sibling of the one booted, so the row says WHICH (SQ-0865).
                 let label = format!(
-                    "  {mark} {:<14} {:<8} {:>4} pictures{}{}",
+                    "  {mark} {:<NAME_W$} {:<REND_W$} {:>4} pictures{}{}",
                     c.filename,
                     c.rendition,
                     c.pictures,
                     crate::launch_options::parts_note(c),
-                    if c.on_medium { "  on disk" } else { "" },
+                    note(&crate::launch_options::medium_note(c)),
                 );
                 option_row(buf, idx, &label, &mut rows, &mut y);
             }
