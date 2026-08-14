@@ -1613,9 +1613,14 @@ pub struct RegionPrompt {
     pub title: String,
     /// What is being asked, in one or two sentences.
     pub body: Vec<String>,
-    /// The rooms that would move, named — dimmer than the body, and empty when the rooms are not
-    /// settled yet (a seam pick, where each option takes a different set).
-    pub rooms: String,
+    /// The rooms that would move, named, one per entry and in region order — drawn as a bulleted
+    /// list under a count header (SQ-0858). Empty when the rooms are not settled yet (a seam pick,
+    /// where each option takes a different set).
+    ///
+    /// ALL of them, however many: the count header and the "…and N more" tail are the renderer's,
+    /// because how many names a modal can afford to show is a question about the terminal and not
+    /// about the map.
+    pub rooms: Vec<String>,
     /// The choices, best first. Never empty — a prompt with nothing to offer is not opened.
     pub options: Vec<RegionOption>,
     /// Index into `options` of the chosen row.

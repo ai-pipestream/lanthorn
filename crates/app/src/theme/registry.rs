@@ -423,7 +423,12 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // chrome; these style its contents. The chosen row borrows the shared modal
     // list highlight rather than minting a seventh look for "this is the one".
     row("dialog.region_prompt.body", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
+    // SQ-0858 split the room block in two: `rooms` is the COUNT — the "4 rooms:" header and the
+    // "…and N more" tail — and `room` is one named room in the bulleted list beneath it, so the
+    // names can be lit or dimmed apart from the arithmetic about them. It inherits `rooms`, so a
+    // theme that only knows the old selector still styles the whole block as one.
     row("dialog.region_prompt.rooms", Section::Dialog, Kind::Style, Some("dialog.list_footer"), Delta::EMPTY),
+    row("dialog.region_prompt.room", Section::Dialog, Kind::Style, Some("dialog.region_prompt.rooms"), Delta::EMPTY),
     row("dialog.region_prompt.option", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
     row("dialog.region_prompt.option:chosen", Section::Dialog, Kind::Style, Some("dialog.list_selected"), Delta::EMPTY),
     // ── SQ-0664: the command band (bottom dock). Its rows reuse
@@ -636,6 +641,7 @@ mod tests {
         // SQ-0439: the region prompt
         "dialog.region_prompt.body",
         "dialog.region_prompt.rooms",
+        "dialog.region_prompt.room",
         "dialog.region_prompt.option",
         "dialog.region_prompt.option:chosen",
         // SQ-0664: the command band

@@ -161,4 +161,32 @@ fn exploring_zork1s_cellar_offers_the_underground_a_layer_of_its_own() {
     }
     assert!(!s.destinations.is_empty(), "a suggestion with nowhere to go is never made");
     assert_eq!(map.graph.layers().len(), 1, "and nothing has moved: it only suggests");
+
+    // ── SQ-0858: and what the player actually READS off that suggestion. The report came from
+    // this very walk — "it looks like it has a spelling mistake 'You came d out of Living Room'" —
+    // so the room name in the sentence is Zork's own, not a fixture's.
+    let mut state = app::state::AppState::default();
+    app::input::open_layer_suggestion(&mut state, &map.graph, s);
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|f| {
+            app::render::region_prompt::draw_region_prompt(&state, f.area(), f.buffer_mut());
+        })
+        .unwrap();
+    let screen: String =
+        terminal.backend().buffer().content().iter().flat_map(|c| c.symbol().chars()).collect();
+
+    assert!(
+        screen.contains("You came DOWN from Living Room."),
+        "the trapdoor is spelled out, and read as the descent it is: {screen:?}"
+    );
+    assert!(
+        !screen.contains("You came d "),
+        "never the SeamKey tag, which is what was reported: {screen:?}"
+    );
+    assert!(screen.contains("4 rooms:"), "the count: {screen:?}");
+    for room in ["Cellar", "East of Chasm", "Gallery", "Studio"] {
+        assert!(screen.contains(&format!("• {room}")), "{room} is bulleted: {screen:?}");
+    }
 }

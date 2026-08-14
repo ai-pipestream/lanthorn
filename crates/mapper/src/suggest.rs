@@ -35,6 +35,14 @@ pub const STRUCTURAL_FLOOR: usize = 4;
 /// the way IN for [`name_trigger`] and [`descent_trigger`] (they fire while you are still inside).
 /// For a descent that is the portal the region hangs off, not whatever step happened to be walked
 /// when the region grew big enough to mention.
+///
+/// **Which way it points is readable from the suggestion itself**, and nothing else has to be told
+/// (SQ-0858): `from` is a room INSIDE [`LayerSuggestion::region`] exactly when the seam is a way
+/// out, and outside it exactly when the seam is a way in. Both triggers guarantee it by
+/// construction — [`structural_trigger`] walks the region FROM `from`, so it contains it, while
+/// [`entry_seam`] takes only origins the region does not contain. A prompt that reads the two
+/// apart this way cannot fall out of step with whichever trigger fired, because it is reading the
+/// data the trigger produced rather than a second label about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeamKey {
     pub from: RoomId,
@@ -556,6 +564,46 @@ mod tests {
         );
         assert_eq!(s.region.rooms, [6, 7, 8, 9].into_iter().collect());
         assert_eq!(s.destinations, vec![MoveTarget::New]);
+    }
+
+    /// The INVARIANT the prompt's two structural sentences are read apart by (SQ-0858). Both
+    /// shapes report `Trigger::Structural`, and the only thing that tells them apart is where the
+    /// seam's outside end sits: inside the region when it is the way out, outside it when it is
+    /// the way in. Break this and the descent prompt goes back to describing itself as a return.
+    #[test]
+    fn a_return_seam_is_inside_the_region_and_a_descent_seam_is_outside() {
+        // Climbing out: the seam is `Cellar -up-> Hall`, and the Cellar is one of the rooms that
+        // would move.
+        let mut m = manor();
+        back_to_the_stairs(&mut m);
+        m.observe(1, "Hall", Some(Direction::Up));
+        let out = m.take_suggestion().expect("the climb out speaks");
+        assert_eq!(out.trigger, Trigger::Structural);
+        assert!(
+            out.region.rooms.contains(&out.seam.from),
+            "a way OUT starts inside: {:?} in {:?}",
+            out.seam,
+            out.region.rooms
+        );
+
+        // Descending: the seam is `Living Room -down-> Cellar`, and the Living Room stays put.
+        let mut m = barred_trapdoor();
+        for (id, name, dir) in [
+            (6, "Cellar", Direction::Down),
+            (7, "East of Chasm", Direction::S),
+            (8, "Gallery", Direction::E),
+            (9, "Studio", Direction::N),
+        ] {
+            m.observe(id, name, Some(dir));
+        }
+        let down = m.take_suggestion().expect("the fourth room speaks");
+        assert_eq!(down.trigger, Trigger::Structural, "the SAME trigger, and a different reading");
+        assert!(
+            !down.region.rooms.contains(&down.seam.from),
+            "a way IN starts outside: {:?} in {:?}",
+            down.seam,
+            down.region.rooms
+        );
     }
 
     /// **The guard the forward direction exists to earn.** On the way down, the region BEHIND the

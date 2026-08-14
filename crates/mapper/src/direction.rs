@@ -91,6 +91,34 @@ pub fn short_label(d: Direction) -> &'static str {
     }
 }
 
+/// A direction's full word, lower case: `north`, `northeast`, `up`, `down`, `in`, `out` (SQ-0858).
+///
+/// **Prose, never a key.** [`short_label`] is load-bearing identity — `SeamKey`'s hand-written
+/// `Ord` is built on it, and those keys are persisted in the map file — so changing it silently
+/// reorders a `BTreeMap` that a save has already been written against. Anything the player READS
+/// spells the direction out here instead, and the two can never be confused for one another.
+///
+/// [`Direction::Unknown`] is a passage whose direction the map never learned. It has no word, so it
+/// gets a placeholder; no prompt reaches it today, because every sentence that names a direction is
+/// about a portal ([`is_portal`]) and `Unknown` is not one.
+pub fn long_label(d: Direction) -> &'static str {
+    match d {
+        Direction::N => "north",
+        Direction::S => "south",
+        Direction::E => "east",
+        Direction::W => "west",
+        Direction::NE => "northeast",
+        Direction::NW => "northwest",
+        Direction::SE => "southeast",
+        Direction::SW => "southwest",
+        Direction::Up => "up",
+        Direction::Down => "down",
+        Direction::In => "in",
+        Direction::Out => "out",
+        Direction::Unknown => "some way",
+    }
+}
+
 /// True for the four passages a layer boundary is made of: Up, Down, In, Out.
 ///
 /// Narrower than "has no [`grid_offset`]", which also catches [`Direction::Unknown`] — a passage
@@ -185,6 +213,69 @@ mod tests {
         assert_eq!(opposite(Direction::N), Direction::S);
         assert_eq!(opposite(Direction::NE), Direction::SW);
         assert_eq!(opposite(Direction::In), Direction::Out);
+    }
+
+    /// The full set of directions, so a table test cannot quietly miss the one that was added.
+    const ALL: [Direction; 13] = [
+        Direction::N,
+        Direction::S,
+        Direction::E,
+        Direction::W,
+        Direction::NE,
+        Direction::NW,
+        Direction::SE,
+        Direction::SW,
+        Direction::Up,
+        Direction::Down,
+        Direction::In,
+        Direction::Out,
+        Direction::Unknown,
+    ];
+
+    /// `short_label` is a KEY, not a label: `SeamKey`'s `Ord` is built on it and those keys are
+    /// persisted, so this pins the exact table. Changing any entry reorders a `BTreeMap` that
+    /// existing map files were written against — which is why SQ-0858 added a second function
+    /// rather than spelling this one out.
+    #[test]
+    fn short_label_is_the_pinned_ordering_key() {
+        let table: Vec<&str> = ALL.iter().map(|&d| short_label(d)).collect();
+        assert_eq!(table, ["n", "s", "e", "w", "ne", "nw", "se", "sw", "u", "d", "i", "o", "?"]);
+        let mut sorted = table.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), table.len(), "distinct for all thirteen, or SeamKey's Ord collides");
+    }
+
+    /// …and `long_label` is the one the player reads: a real word for every direction, never a tag.
+    #[test]
+    fn long_label_spells_every_direction_out() {
+        assert_eq!(long_label(Direction::Down), "down");
+        assert_eq!(long_label(Direction::Up), "up");
+        assert_eq!(long_label(Direction::NE), "northeast");
+        assert_eq!(long_label(Direction::In), "in");
+        assert_eq!(long_label(Direction::Out), "out");
+        let mut words: Vec<&str> = Vec::new();
+        for d in ALL {
+            let long = long_label(d);
+            assert_ne!(long, short_label(d), "{d:?} must be spelled out, not handed back its key");
+            assert!(
+                long.chars().all(|c| c.is_ascii_lowercase() || c == ' '),
+                "{d:?} is lower-case prose so a caller can case it as it likes: {long:?}"
+            );
+            if d != Direction::Unknown {
+                // `Unknown` is the one with no word of its own, so it is the one exempt.
+                assert_eq!(
+                    long.chars().next(),
+                    short_label(d).chars().next(),
+                    "{d:?}: the word and the tag disagree about which direction this is ({long:?})"
+                );
+            }
+            words.push(long);
+        }
+        let mut sorted = words.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), words.len(), "no two directions read the same: {words:?}");
     }
 
     #[test]
