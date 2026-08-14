@@ -212,8 +212,20 @@ Three sources, in decreasing order of how sure babelmap can be that the art and
 the story belong together:
 
 1. **A Blorb.** The container validates its own contents. Nothing to configure.
-2. **A disk image.** Story and archive came off one floppy, so the medium
-   guarantees the pairing. Nothing to configure.
+2. **A disk image — the whole release, not just the platter.** Story and archive
+   came out of one box, so the medium guarantees the pairing. Nothing to
+   configure. A multi-disk press can split them: the 360K DOS *Zork Zero* puts
+   CGA on disk 1, the story **alone** on disk 2 and EGA on disk 3, so booting the
+   story disk used to draw no artwork at all and offer none to pick. babelmap now
+   reads every volume of the release, and prefers the rendition that kept its
+   colour when the story's own disk carries none — EGA over CGA, on a terminal
+   with rather more than two.
+
+   It only does that when the release is *one game*. A twenty-game shelf like the
+   DOS `floppy1.ima`…`floppy5.ima` press of *The Lost Treasures of Infocom* keeps
+   each disk's artwork on that disk, because "in the same box" stops being
+   evidence the moment the box holds Zork I as well — and *Zork Zero*'s plates
+   drawn into *Zork I* would look like art rather than like a mistake.
 3. **You say so.** Put a `pictures` line in the game's own `config.toml` — the
    small per-game sidecar in `<save-dir>/<story>.save/`, alongside the per-game
    `style.toml`:
@@ -226,10 +238,11 @@ the story belong together:
    named archive **wins outright** — over a Blorb sitting right beside the story,
    over a floppy's own `Pic.data`, over everything. Naming it is an instruction,
    not a hint. If the name is a bare filename that is not on your filesystem and
-   the story was mounted out of a disk image, it is looked for *on that disk* —
-   which is how you reach the Macintosh's monochrome `Pic.data`, either archive
-   on an Amiga floppy, or a PC disk's `ZORK0.EG1`, without unpacking anything
-   first.
+   the story was mounted out of a disk image, it is looked for *on the release* —
+   the story's own disk first, then its siblings — which is how you reach the
+   Macintosh's monochrome `Pic.data`, either archive on an Amiga floppy, or a PC
+   disk's `ZORK0.EG1` while you are booted off the disk *next* to it, without
+   unpacking anything first.
 
 Tier 3 is how you *pick a rendition*, not just how you rescue a game. *Zork Zero*
 alone can be played four ways from the files that survive — the Amiga `zork0.pic`,
@@ -283,9 +296,11 @@ always could, by naming it — `--pictures`, or the `pictures` key — and the d
 says so on its last line rather than leaving you to wonder.
 
 **Inside it**, when you launched a disk image, no name test applies at all: every
-archive on that volume is offered, marked *on disk*, because the disk itself is
-the pairing. There is nothing to guess — the story and the art came off one
-floppy. This is what makes the Macintosh's two archives pickable: a directory
+archive on the release is offered, marked *on disk*, because the medium itself is
+the pairing. There is nothing to guess — the story and the art came out of one
+box. On a single-game multi-disk press that means the siblings too, which is what
+puts CGA and EGA in front of you when you boot the 360K *Zork Zero* story disk
+that carries neither. This is what makes the Macintosh's two archives pickable: a directory
 scan cannot see inside a disk image, so before this the dialog could offer a Mac
 disk nothing at all, and its black-and-white artwork could only be reached by
 typing `--pictures Pic.data`. Every archive is identified by *parsing* it rather
