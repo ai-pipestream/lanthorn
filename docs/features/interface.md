@@ -411,7 +411,8 @@ the type label rather than a separate badge.)
 
 The container is part of that label, so a story you're playing off its original
 release floppy reads `Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh
-one, `Z6 (DOS)` off a PC floppy or `Z4 (ST)` off an Atari ST one, and is never
+one, `Z6 (DOS)` off a PC floppy, `Z4 (ST)` off an Atari ST one or
+`Z5 (ProDOS)` off an Apple II disk, and is never
 mistaken for a loose story file. The disk says so, not the
 filename: the suffix comes from the mount that found the story inside the image,
 so a floppy named anything at all is labelled for the filesystem it actually
@@ -420,8 +421,8 @@ at all.
 
 **Every release medium babelmap can mount, the picker offers.** The scan decides
 which files are worth opening from the same format table the mount reads, so a
-shelf of `.ima`, `.img` and `.st` floppies lists beside the `.adf`s and the
-`.z5`s rather than being playable only by name. That is a pre-filter and nothing
+shelf of `.ima`, `.img`, `.st` and `.2mg` floppies lists beside the `.adf`s and
+the `.z5`s rather than being playable only by name. That is a pre-filter and nothing
 more — a `.img` that turns out to be a holiday photo is opened, found not to be a
 disk at all, and never shown.
 

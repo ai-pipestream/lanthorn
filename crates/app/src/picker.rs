@@ -1330,8 +1330,11 @@ mod tests {
         for ext in ["z3", "z5", "z8", "zblorb", "dat", "ulx", "blb"] {
             assert!(has_story_ext(Path::new(&format!("game.{ext}"))), "{ext}");
         }
-        // …and the union admits nothing beyond the two lists.
-        for ext in ["txt", "png", "qzl", "2mg", "dsk"] {
+        // …and the union admits nothing beyond the two lists. `2mg` used to sit
+        // in this list and now sits in the loop above, having moved from one to
+        // the other the moment `blorb` learned to mount ProDOS (SQ-0836) — with
+        // nothing in this file edited to make it happen, which is the point.
+        for ext in ["txt", "png", "qzl", "dsk"] {
             assert!(!has_story_ext(Path::new(&format!("thing.{ext}"))), "{ext}");
         }
     }

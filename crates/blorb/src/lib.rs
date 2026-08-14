@@ -7,6 +7,7 @@ pub mod fat12;
 pub mod hfs;
 pub mod infocom_pics;
 pub mod medium;
+pub mod prodos;
 
 /// Errors that can arise while parsing a Blorb container.
 #[derive(Debug, PartialEq, Eq)]

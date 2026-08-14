@@ -43,8 +43,10 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   from a single-game 360 KB floppy to a *Lost Treasures* collection.
 - **Atari ST floppy images** — `.st`, the GEMDOS press, which turns out to be the
   same filesystem one machine over.
+- **Apple II ProDOS disk images** — `.2mg`, the 800 KB 3.5" press: single-game
+  Apple IIgs disks and the seven-volume *Lost Treasures of Infocom* collection.
 
-Those last four are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
+Those last five are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
 titles circulate in their native form. Hand babelmap one — `babelmap "Zork
 Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem (both OFS and FFS),
@@ -118,10 +120,42 @@ installer, story and EGA art across three floppies. babelmap mounts **one image*
 and offers what that image holds, so pick the disk with the game on it. Joining
 several disks into one release is a set model that does not exist yet.
 
+The Apple II arrives wrapped. A `.2mg` is a 64-byte little-endian header bolted
+onto an 800 KB ProDOS volume, and every image in the reference collection carries
+a small trap in that header: the field that says how long the data is reads
+**zero**. That is a known quirk of the tool that wrote them — CiderPress signs
+its images `WOOF` — so babelmap takes the declared length when there is one, the
+block count when there is not, and the tail of the file only as a last resort,
+and insists in every case that what it lands on is a whole number of 512-byte
+blocks that are actually present. A bare ProDOS volume with no wrapper reads the
+same way.
+
+Underneath, ProDOS is the tidiest filesystem here and the one that nests deepest.
+Files come in four shapes and babelmap reads all of them: a *seedling* is a
+single block, a *sapling* points at an index block of 256 pointers, a *tree*
+points at a master index of index blocks, and a GS/OS *extended* file keeps a
+mini-entry per fork in an extended key block — of which babelmap reads the data
+fork, exactly as it does on the Macintosh. Holes are real: a zero pointer means a
+block ProDOS never allocated, and it reads back as 512 zero bytes rather than as
+an error. Directories nest two deep on the GS/OS disks, so files are named by
+path — `SYSTEM/SYSTEM.SETUP/TOOL.SETUP` — which the launcher volume insists on,
+since it carries three different files called `FINDER.DATA`.
+
+Two of these disks are worth knowing about before you open them. *Arthur* and
+*Journey* on the Apple II are the ProDOS **8** press, and they do not contain a
+story file at all: the game is split across `ARTHUR.D1`–`D5` and
+`JOURNEY.D1`–`D4`, none of which begins with a Z-machine header, so the disks
+mount, list their files and tell you there is no game on them rather than
+pretending. And *Lost Treasures* volume 1 is the GS/OS launcher — fifty-three
+files of system software and not one game. Volumes 2–7 carry twenty-nine games
+between them, and since no ProDOS release uses a conventional story name, opening
+one of those disks gives you the largest game on it while the picker and
+`--story` offer the whole list.
+
 Disk images are first-class in the library too: point babelmap at a directory of
 them and the picker's TYPE column names the container alongside the format —
 `Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh one, `Z6 (DOS)` off a PC
-floppy and `Z3 (ST)` off an Atari one — from the same content-based
+floppy, `Z3 (ST)` off an Atari one and `Z5 (ProDOS)` off an Apple II disk — from the same content-based
 identification, so a floppy is never listed as a bare story file, and one
 machine's media is never labelled as another's. See
 [Story picker](interface.md#story-picker).
@@ -143,7 +177,10 @@ naming a filesystem. **Whatever babelmap can recognise as a disk, it can open**,
 because recognising and opening are the same lookup. A format added to the table
 arrives everywhere at once, and DOS and the Atari ST proved it: they landed as
 two rows and one reader, and the picker, the CLI menu and the launch dialog all
-gained them without a line changed. Apple ProDOS is next, on the same terms.
+gained them without a line changed. Apple ProDOS then landed on exactly those
+terms — one row, one new reader, and not a line of the picker, the launch dialog
+or the command-line player touched. Apple II 5.25" `.dsk` media is next, and will
+arrive the same way.
 
 The proof was not free, mind. One function had been missed — the one that reads
 an archive you name *inside* a disk, which predated the table and still carried a
@@ -197,6 +234,29 @@ versions**:
 The collection ships the later "Solid Gold" edition — a different engine version,
 45 KB more story, and built-in hints the other two do not have. A result measured
 on one of those describes exactly one of them.
+
+The Apple II press makes the same point once more, and this time with a game that
+is *not* Hitchhiker's. *Trinity* is release 12, serial 860926 on the Apple IIgs
+*Lost Treasures* volume 5 and release 11, serial 860509 on `Infocom Compilation 8`
+for the Atari ST — two floppies, two builds, six months apart. What each ProDOS
+volume opens with:
+
+| Volume | Opens |
+| --- | --- |
+| `Beyond Zork (1988)(Infocom).2mg` | Beyond Zork, v5 release 57, serial 871221 |
+| *Lost Treasures* 1 (`INFOCOM1`) | — the GS/OS launcher, no game on it |
+| *Lost Treasures* 2 (`INFOCOM2`) | Beyond Zork, v5 release 57, serial 871221 |
+| *Lost Treasures* 3 (`INFOCOM3`) | Stationfall, v3 release 107, serial 870430 |
+| *Lost Treasures* 4 (`INFOCOM4`) | The Lurking Horror, v3 release 203, serial 870506 |
+| *Lost Treasures* 5 (`INFOCOM5`) | Trinity, v4 release 12, serial 860926 |
+| *Lost Treasures* 6 (`INFOCOM6`) | Sherlock, v5 release 21, serial 871214 |
+| *Lost Treasures* 7 (`INFOCOM7`) | Wishbringer, v3 release 69, serial 850920 |
+
+Each of volumes 2–7 carries three to seven games; the one listed is the largest,
+which is what opening the disk gives you when nothing on it wears a conventional
+story name. Ask the picker or `--story` for the rest. The Apple IIgs *Beyond
+Zork* is a happier note to end on than the trio above: it is the **same build**
+as the Amiga floppy and the bare `.z5`, so for once all three media agree.
 
 The PC disks add a smaller trap worth naming: *the same release can be a
 different file size on different media*. `LURKING` is 153,600 bytes on one Atari
@@ -354,6 +414,18 @@ Amiga floppy or anywhere else.
   So the ST profile states what it knows, declines the one thing it does not (a
   version-6 screen, which the machine never had), and *Trinity* off an ST disk now
   answers VERSION with *Interpreter 5*.
+  **Apple ProDOS is the second abstention, and for a different reason again**: it
+  is the only medium here that names a *family* rather than a machine. ProDOS is
+  the Apple II's filesystem from the IIe onward, and §11.1.3 gives that family
+  three numbers — 2 Apple IIe, 9 Apple IIc, 10 Apple IIgs — with nothing on the
+  volume to choose between them. Nor is that pedantry: eight of the ten ProDOS
+  images in the reference collection boot GS/OS and carry 16-bit `SYS16`
+  applications, which is a IIgs and nothing else, while *Arthur* and *Journey*
+  ship `INFOCOM.SYSTEM` beside `BASIC.SYSTEM` — the 8-bit ProDOS 8 press, equally
+  at home on a IIe. And unlike the ST, this corpus does contain version-6 art for
+  a wrongly-claimed machine to disagree with. So a ProDOS disk leaves the rule
+  already in force exactly where it is, which for a family whose own number cannot
+  be named is the honest answer.
   This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
