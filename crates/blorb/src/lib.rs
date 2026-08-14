@@ -3,6 +3,7 @@
 
 pub mod adf;
 pub mod bpal;
+pub mod dos_order;
 pub mod fat12;
 pub mod hfs;
 pub mod infocom_packed;

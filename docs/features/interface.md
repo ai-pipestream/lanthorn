@@ -421,8 +421,8 @@ at all.
 
 **Every release medium babelmap can mount, the picker offers.** The scan decides
 which files are worth opening from the same format table the mount reads, so a
-shelf of `.ima`, `.img`, `.st` and `.2mg` floppies lists beside the `.adf`s and
-the `.z5`s rather than being playable only by name. That is a pre-filter and nothing
+shelf of `.ima`, `.img`, `.st`, `.2mg` and `.dsk` floppies lists beside the
+`.adf`s and the `.z5`s rather than being playable only by name. That is a pre-filter and nothing
 more — a `.img` that turns out to be a holiday photo is opened, found not to be a
 disk at all, and never shown.
 
@@ -436,6 +436,13 @@ it. (*Journey*'s Apple press stays absent, and correctly: its image is missing
 one of the five floppies the game was pressed on, so there is no whole game on it
 to offer.) See
 [The packed Apple volume](interpreter.md#the-packed-apple-volume).
+
+**And a row need not be a *disk*.** *Shogun* and *Zork Zero* on the Apple II were
+pressed on five and four separate 5.25" floppies with the game paged across all
+of them, so no single `.dsk` holds a story and opening one alone is honestly told
+so. They are two rows now, one per game — the whole set is read whichever volume
+you name, and the other four are folded away rather than listed as four more
+copies of the same thing.
 
 **And a row is a game, not a file.** An Amiga release came one story to a disk,
 but a compilation does not: `Infocom Compilation 1` carries six, `floppy2.ima`
@@ -464,6 +471,12 @@ Treasures of Infocom*, nine Atari ST floppies, `floppy1.ima` through
 of disks, and it works out which files belong together from their names — files
 in one directory, sharing a disk-image extension, with identical names except
 for one run of digits that counts 1, 2, 3…
+
+That list of extensions is read off the same format table as everything else,
+which paid off the moment babelmap learned to mount 5.25" Apple II disks:
+`shogun_s1.dsk`…`s5` and `zork_zero_1.dsk`…`_4` had been sitting there refused
+for one reason only — `.dsk` was not a spelling any format claimed — and became
+sets the same day, with nothing in the grouping rule changed.
 
 **Name any one volume and you get the whole release.** `babelmap disk1.img` opens
 the browser on all eleven games across `disk1`–`disk4`, not the single story that

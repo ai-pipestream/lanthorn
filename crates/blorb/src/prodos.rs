@@ -46,10 +46,23 @@
 //! fixture, and no bare spelling is claimed in `blorb::medium`'s extension
 //! census. A bare image still mounts when it is opened by name.
 //!
-//! Image formats 0 and 2 are **not** re-ordered or decoded: a DOS-order or
-//! nibble image has its blocks somewhere else, so its volume directory does not
-//! validate and the sniff simply declines it. Apple II 5.25" media is SQ-0852's
-//! and arrives with its own reader.
+//! # Layer 1b — DOS sector order (SQ-0864)
+//!
+//! A **third** wrapper, and the one that is not an offset. Apple II 5.25-inch
+//! media is dumped in the order the drive numbers its sectors, not the order
+//! ProDOS numbers its blocks, so the volume directory of such an image is not at
+//! offset 1024 and the sniff above declines it — which is what this paragraph
+//! used to say was the end of the matter. It is not: those bytes are a ProDOS
+//! volume, merely shuffled, and [`crate::dos_order`] unshuffles them. The nine
+//! 5.25-inch images in the corpus — `shogun_s1.dsk`…`s5` and
+//! `zork_zero_1.dsk`…`_4` — are bare 143,360-byte dumps that mount here as
+//! `SHOGUN.1`…`SHOGUN.5` and `ZORK0.1`…`ZORK0.4` once they are.
+//!
+//! It stays a wrapper rather than becoming a format for the same reason `2IMG`
+//! does: what comes out is ProDOS, read by this reader, answering to
+//! `blorb::medium`'s ProDOS row. Nibble images (2IMG format 2) are still not
+//! decoded — that is a track encoding, not a permutation, and it arrives with
+//! its own decoder or not at all.
 //!
 //! # Layer 2 — ProDOS
 //!
@@ -296,12 +309,27 @@ impl ProDos {
     /// geometry, and a `total_blocks` that fits the bytes in hand. An AmigaDOS,
     /// HFS, FAT12, Z-machine, Glulx, Blorb or Scott image can never collide —
     /// none of them has that shape a kilobyte in.
+    ///
+    /// A 5.25-inch dump is asked the same question after its sectors are put
+    /// back in block order; see [`crate::dos_order`], and see [`ProDos::mount`]
+    /// for why that is an unwrapping rather than a second format.
     pub fn looks_like_prodos(raw: &[u8]) -> bool {
-        volume_at(raw).is_some()
+        volume_at(raw).is_some() || dos_ordered(raw).is_some()
     }
 
     /// Mount an image and enumerate it, subdirectories and all.
+    ///
+    /// Three placements are tried, and the volume directory decides between
+    /// them: a bare volume, one behind a `2IMG` header, and — SQ-0864 — a
+    /// 5.25-inch dump whose sectors are in DOS order. The third is the only one
+    /// that MOVES bytes rather than merely offsetting them, so it produces a new
+    /// image and the mount goes on with that; everything past this line is the
+    /// same ProDOS volume it always was.
     pub fn mount(image: Vec<u8>) -> Result<ProDos, ProDosError> {
+        let image = match volume_at(&image) {
+            Some(_) => image,
+            None => dos_ordered(&image).ok_or(ProDosError::NotProDos)?,
+        };
         let (data, blocks) = volume_at(&image).ok_or(ProDosError::NotProDos)?;
         let mut fs = ProDos { image, data, blocks, name: String::new(), files: Vec::new() };
         let key = fs.block(VOLUME_DIR_BLOCK).ok_or(ProDosError::NotProDos)?;
@@ -569,6 +597,18 @@ fn volume_at(raw: &[u8]) -> Option<(usize, usize)> {
         }
     }
     volume_is_sane(raw).map(|blocks| (0, blocks))
+}
+
+/// `raw` de-interleaved out of DOS sector order, when it is a 5.25-inch dump
+/// that holds a ProDOS volume once it is — else `None` (SQ-0864).
+///
+/// The re-order is [`crate::dos_order`]'s and the verdict is still
+/// [`volume_is_sane`]'s: a DOS 3.3 or Pascal 5.25-inch disk is re-ordered just
+/// as willingly and then declined, because nothing but a ProDOS volume directory
+/// is allowed to make this answer `Some`.
+fn dos_ordered(raw: &[u8]) -> Option<Vec<u8>> {
+    let volume = crate::dos_order::prodos_order(raw)?;
+    volume_is_sane(&volume).map(|_| volume)
 }
 
 /// The disk data a 2IMG header describes, as `(offset, length)`.
@@ -1480,29 +1520,102 @@ pub(crate) mod tests {
     /// formats already in the table, and a directory full of Amiga, Macintosh,
     /// DOS and Atari ST floppies beside bare story files is the strongest
     /// available statement of that.
+    ///
+    /// **Both spellings, since SQ-0864.** The nine `.dsk` images are ProDOS
+    /// volumes too — 5.25-inch dumps whose sectors are in the drive's order —
+    /// and every one of them now opens here. The extension is still not what
+    /// decides: it is the expectation the loop is checked AGAINST, and the sniff
+    /// reaches its verdict from the volume directory it finds after the
+    /// de-interleave.
     #[test]
     fn only_the_prodos_images_in_the_corpus_look_like_prodos() {
         let Ok(dir) = std::fs::read_dir(stories_dir()) else {
             eprintln!("SKIP: no stories directory");
             return;
         };
-        let mut seen = 0;
+        let (mut seen, mut five_and_a_quarter) = (0, 0);
         for entry in dir.flatten() {
             let path = entry.path();
             let Ok(raw) = std::fs::read(&path) else { continue };
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let claimed = ProDos::looks_like_prodos(&raw);
-            let is_2mg = name.to_ascii_lowercase().ends_with(".2mg");
-            assert_eq!(claimed, is_2mg, "{name}: looks_like_prodos = {claimed}");
-            if claimed {
-                seen += 1;
-                let fs = ProDos::mount(raw).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-                assert!(!fs.files().is_empty(), "{name}: mounted but empty");
-                assert!(!fs.volume_name().is_empty(), "{name}: no volume name");
+            let lower = name.to_ascii_lowercase();
+            let (is_2mg, is_dsk) = (lower.ends_with(".2mg"), lower.ends_with(".dsk"));
+            assert_eq!(claimed, is_2mg || is_dsk, "{name}: looks_like_prodos = {claimed}");
+            if !claimed {
+                continue;
             }
+            seen += 1;
+            if is_dsk {
+                five_and_a_quarter += 1;
+                assert_eq!(raw.len(), crate::dos_order::DOS_ORDER_LEN, "{name}: 35 × 16 × 256");
+            }
+            let fs = ProDos::mount(raw).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(!fs.files().is_empty(), "{name}: mounted but empty");
+            assert!(!fs.volume_name().is_empty(), "{name}: no volume name");
         }
+        assert!(five_and_a_quarter == 9 || seen == 0, "expected nine 5.25-inch volumes");
         if seen == 0 {
             eprintln!("SKIP: no ProDOS media present");
+        }
+    }
+
+    /// **The 5.25-inch press, volume by volume** (SQ-0864).
+    ///
+    /// SQ-0852 read these images as bare packed volumes with no filesystem —
+    /// "there is no ProDOS volume directory on any of the nine". There is one on
+    /// every one of them; it is 1,024 bytes into the image only once the sectors
+    /// are in ProDOS's order rather than the drive's. Each volume names itself
+    /// and carries its segment as an ordinary ProDOS file, which is what makes
+    /// [`crate::infocom_packed`]'s pairing-by-basename work unchanged.
+    ///
+    /// FALSIFICATION: reverse any two entries of `dos_order::SECTOR_OF` and no
+    /// image here mounts at all — the volume directory is simply not there.
+    #[test]
+    fn the_five_and_a_quarter_inch_volumes_name_themselves_and_their_segments() {
+        // (image, volume name, every file on it in directory order)
+        let expected: &[(&str, &str, &[&str])] = &[
+            ("shogun_s1.dsk", "SHOGUN.1", &[
+                "INFOCOM",
+                "SHOGUN.D1",
+                "INFOCOM.SYSTEM",
+                "INFODOS",
+            ]),
+            ("shogun_s2.dsk", "SHOGUN.2", &["SHOGUN.D2"]),
+            ("shogun_s3.dsk", "SHOGUN.3", &["SHOGUN.D3"]),
+            ("shogun_s4.dsk", "SHOGUN.4", &["SHOGUN.D4"]),
+            ("shogun_s5.dsk", "SHOGUN.5", &["SHOGUN.D5"]),
+            ("zork_zero_1.dsk", "ZORK0.1", &[
+                "ZORK0.D1",
+                "INFOCOM",
+                "INFOCOM.SYSTEM",
+                "INFODOS",
+            ]),
+            ("zork_zero_2.dsk", "ZORK0.2", &["ZORK0.D2"]),
+            ("zork_zero_3.dsk", "ZORK0.3", &["ZORK0.D3"]),
+            ("zork_zero_4.dsk", "ZORK0.4", &["ZORK0.D4"]),
+        ];
+        let mut ran = 0;
+        for (file, volume, files) in expected {
+            let Some(raw) = read_fixture(file) else { continue };
+            ran += 1;
+            let fs = ProDos::mount(raw).unwrap_or_else(|e| panic!("{file}: {e:?}"));
+            assert_eq!(fs.volume_name(), *volume, "{file}");
+            let names: Vec<String> = fs.files().iter().map(ProDosEntry::path).collect();
+            assert_eq!(names, *files, "{file}");
+            // Not one of them is a story on its own — a quarter of a game is
+            // not a game, and this is what makes the SET the answer.
+            for e in fs.files() {
+                let bytes = fs.read(e).unwrap_or_else(|| panic!("{file}: {} unreadable", e.name));
+                assert!(!looks_like_story(&bytes), "{file}: {} is a whole story?", e.name);
+            }
+            assert_eq!(fs.packed_story(), None, "{file}: no ONE volume holds the story");
+        }
+        // CI has no `stories/` at all, so the premise is guarded rather than
+        // asserted outright.
+        assert!(ran > 0 || !stories_dir().join("shogun_s1.dsk").exists());
+        if ran == 0 {
+            eprintln!("SKIP: no 5.25-inch media present");
         }
     }
 }

@@ -1622,7 +1622,10 @@ mod tests {
         // in this list and now sits in the loop above, having moved from one to
         // the other the moment `blorb` learned to mount ProDOS (SQ-0836) — with
         // nothing in this file edited to make it happen, which is the point.
-        for ext in ["txt", "png", "qzl", "dsk"] {
+        // `dsk` made the same crossing in SQ-0864, when the ProDOS row learned
+        // that a 5.25-inch dump is the same filesystem in the drive's sector
+        // order; this file was again not touched to let it through.
+        for ext in ["txt", "png", "qzl"] {
             assert!(!has_story_ext(Path::new(&format!("thing.{ext}"))), "{ext}");
         }
     }
