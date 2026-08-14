@@ -2458,25 +2458,32 @@ fn draw_info_panel(
 
     // Title.
     lines.push((title.to_string(), story_info_title));
-    // filename · size · [story size] · modified. The second size appears only
-    // when the file on disk is a container, because then the first one measures
-    // the container and not the game (SQ-0771): an Amiga `.adf` is 880 KB
-    // whatever it holds, and a blorb/zip carries resources beside the executable.
+    // The filename gets a line to itself, and the sizes get the next one. A
+    // compilation's name is long enough on its own — `Lost Treasures of Infocom,
+    // The (1993)(Big Red Computer Club)(Disk 6 of 7).2mg:LEATHRGODDESSES` — that
+    // anything sharing its line only wraps away from the thing it belongs to.
+    //
     // A story off a compilation names itself as the disk names it (SQ-0859):
-    // five rows share one filename, and this is what says which game of the five
-    // this row is — `Disk 6 of 7.2mg:LEATHRGODDESSES`.
+    // several rows share one filename, and the suffix is what says which game of
+    // them this row is.
     let container = match &meta.disk_entry {
         Some(name) => format!("{filename}:{name}"),
         None => filename.to_string(),
     };
-    let mut fs_line = format!("{} · {}", container, human_size(meta.size_bytes));
+    lines.push((container, story_info_value));
+    // The second size appears only when the file on disk is a container, because
+    // then the first one measures the container and not the game (SQ-0771): an
+    // Amiga `.adf` is 880 KB whatever it holds, and a blorb/zip carries resources
+    // beside the executable.
+    //
+    // No mtime. It dates the FILE, which is when this copy was written to this
+    // disk — it says nothing about when the game was published, and next to a
+    // release and serial that do, it invited exactly that misreading.
+    let mut size_line = human_size(meta.size_bytes);
     if meta.story_bytes > 0 && meta.story_bytes != meta.size_bytes {
-        fs_line.push_str(&format!(" · story {}", human_size(meta.story_bytes)));
+        size_line.push_str(&format!(" · story {}", human_size(meta.story_bytes)));
     }
-    if let Some(m) = &meta.modified {
-        fs_line.push_str(&format!(" · {m}"));
-    }
-    lines.push((fs_line, story_info_value));
+    lines.push((size_line, story_info_value));
     // format + version · release.
     let mut fmt_line = meta.format.clone();
     if let Some(v) = &meta.version {
@@ -4059,12 +4066,17 @@ mod tests {
             &mut Vec::new(), &mut Vec::new(),
         );
         let flat = panel_text_flat(&buf, area);
-        let expected = norm(&format!(
-            "{COMPILATION_FILE}:LEATHRGODDESSES · {} · story {} · 2026-08-14",
+        // The filename has a line of its own now, and still needs three rows of
+        // this panel — which is the case this test exists for.
+        let expected = norm(&format!("{COMPILATION_FILE}:LEATHRGODDESSES"));
+        assert!(flat.contains(&expected), "file line must render whole:\n  want {expected:?}\n  got  {flat:?}");
+        // …and the sizes, on the line below it, are whole too.
+        let sizes = norm(&format!(
+            "{} · story {}",
             super::human_size(meta.size_bytes),
             super::human_size(meta.story_bytes),
         ));
-        assert!(flat.contains(&expected), "file line must render whole:\n  want {expected:?}\n  got  {flat:?}");
+        assert!(flat.contains(&sizes), "size line must render whole:\n  want {sizes:?}\n  got  {flat:?}");
         // The IFID was clipped by the same flat-line treatment.
         assert!(
             flat.contains("IFID 1D2E3F45-6789-4ABC-8DEF-0123456789AB"),
@@ -4151,8 +4163,16 @@ mod tests {
             "no field should wrap at 60 columns: {rows:?}"
         );
         assert_eq!(rows[0].trim_end(), "Zork I");
-        assert_eq!(rows[1].trim_end(), "zork1.z3 · 92 KB · 2026-06-30");
-        assert_eq!(rows[2].trim_end(), "Z-code v3 · Release 88");
+        // Filename and sizes on their own lines, and no mtime anywhere: it dates
+        // the file rather than the game, and sat next to a release and serial
+        // that genuinely do.
+        assert_eq!(rows[1].trim_end(), "zork1.z3");
+        assert_eq!(rows[2].trim_end(), "92 KB");
+        assert_eq!(rows[3].trim_end(), "Z-code v3 · Release 88");
+        assert!(
+            !rows.iter().any(|r| r.contains("2026-06-30")),
+            "the file's mtime must not be shown: {rows:?}"
+        );
     }
 
     /// SQ-0861 (guard 3): with wrapped content present, `max_scroll` is measured
@@ -4434,14 +4454,18 @@ mod tests {
         );
         let text = buffer_to_string(&buf, area);
         let lines: Vec<&str> = text.lines().collect();
-        // Row 0 is the panel's own top border (with the " Info " title baked
-        // into it); content starts at row 1: title, filename/size,
-        // format/version, IFID, Features (no serial, no metadata).
-        assert!(lines[4].contains("IFID"), "row 4 should be the IFID line: {:?}", lines[4]);
+        // The property is ADJACENCY, not a row number: with no metadata, nothing
+        // may be inserted between IFID and Features. Found rather than indexed,
+        // so a layout change above them (the filename and its sizes became two
+        // lines) moves the pair without falsely failing this.
+        let ifid = lines
+            .iter()
+            .position(|l| l.contains("IFID"))
+            .unwrap_or_else(|| panic!("the IFID line should be shown: {text:?}"));
         assert!(
-            lines[5].trim_start_matches('│').trim().starts_with("Features:"),
+            lines[ifid + 1].trim_start_matches('│').trim().starts_with("Features:"),
             "no line should be inserted between IFID and Features when metadata is absent: {:?}",
-            lines[5]
+            lines[ifid + 1]
         );
         assert!(!text.contains("Author"), "no metadata label should appear: {text:?}");
     }
