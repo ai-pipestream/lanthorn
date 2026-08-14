@@ -40,6 +40,22 @@
 //! floppies call theirs `Story.data`, `.ima` and `.img` are one format, and the
 //! ProDOS `2IMG` length field reads zero on every image in the corpus.
 //!
+//! ## A story that is on no single disk (SQ-0864)
+//!
+//! One release in the corpus does not fit "a volume holds a story": the Apple II
+//! 5.25-inch presses of *Shogun* and *Zork Zero* page one story across **five**
+//! and **four** floppies, and no one of them carries a whole game. That is not a
+//! filesystem question — every volume mounts perfectly well and lists its
+//! segment — so it is not a format's business and there is no row for it.
+//!
+//! It is [`MountedDisk::mount_set`]'s: one image is opened exactly as ever, and
+//! the other volumes of its release are offered alongside so that the container
+//! spanning them ([`crate::infocom_packed`]) can be asked. Every format gets
+//! this and none of them pays for it — the companions are consulted only when
+//! the named volume has no story of its own, which is true of a Shogun floppy
+//! and false of every compilation disk here. [`MountedDisk::mount`] is that
+//! call with no companions, so nothing that does not want a set sees one.
+//!
 //! A row does carry [`Format::extensions`], and that is not a crack in the rule:
 //! it is the census a front-end scanning a DIRECTORY needs to decide which files
 //! are worth OPENING, and what a file turns out to be is still
@@ -317,26 +333,26 @@ struct Format {
 /// shipped formats were unreachable from the story list. That is exactly the
 /// half-wiring the table exists to make impossible, one column late (SQ-0849).
 ///
-/// Queued: the Apple II 5.25-inch press — `shogun_s1..s5.dsk`,
-/// `zork_zero_1..4.dsk`. It has no row **or an extension**, which is the table's
-/// own rule: `.dsk` arrives with the code that opens it, in one commit.
+/// **The Apple II 5.25-inch press arrived without one** (SQ-0864), and that is
+/// the table working rather than the table being bypassed. SQ-0852 queued
+/// `shogun_s1..s5.dsk` and `zork_zero_1..4.dsk` here as a sixth format, on the
+/// reading that a bare 143,360-byte DOS-order sector dump carries the packed
+/// volume directly, through a per-disk block map, with no filesystem under it.
 ///
-/// SQ-0852 established what that code would have to be, and it is not a
-/// filesystem reader. There is no DOS 3.3 VTOC and no ProDOS volume directory on
-/// any of the nine images; each is a bare 143,360-byte sector dump in DOS order
-/// carrying the same packed volume [`crate::infocom_packed`] reads off the
-/// `.2mg` presses, reached by de-interleaving to ProDOS block order and then
-/// through a per-disk block map (a ProDOS-style index block: 256 low bytes then
-/// 256 high). Both sets reassemble and verify against their own header
-/// checksums — *Shogun* r311/890510 `$E200`, *Zork Zero* r383/890602 `$6F7F`.
+/// Re-derived, that reading was one layer too low. The block map is a **ProDOS
+/// index block**, because the image is a **ProDOS volume** — the whole of the
+/// difference from a `.2mg` is that its sectors are in the order the 5.25-inch
+/// drive numbers them. De-interleave it ([`crate::dos_order`]) and block 2 is an
+/// ordinary volume directory naming `SHOGUN.1`…`SHOGUN.5` and `ZORK0.1`…
+/// `ZORK0.4`, each holding its segment as an ordinary ProDOS file
+/// (`SHOGUN.D3` is a tree file; the hand-rolled map could not have read it).
+/// So the medium is ProDOS, it wears the ProDOS row, it answers the Apple IIgs
+/// like every other ProDOS volume, and `.dsk` is a spelling that row claims.
 ///
-/// **What blocks the row is this trait, not the format.** [`Volume::mount`]
-/// takes ONE image's bytes, and a 140 KB floppy holds a fifth of *Shogun*: the
-/// index on disk 1 names pages that are physically on the other four files, and
-/// nothing in this API can ask for them. A row today would advertise a format
-/// that mounts nine images and yields nine refusals. What it needs first is a
-/// mount over a SET, which is a change to the seam and belongs to whoever makes
-/// it.
+/// What was genuinely missing was not a row but a **set**: the segments are on
+/// five different volumes and [`Volume::mount`] takes one image. That is
+/// [`MountedDisk::mount_set`], above the table and format-neutral, so the two
+/// sets ship without this list growing an entry.
 const FORMATS: &[Format] = &[
     Format {
         image: DiskImage::Adf,
@@ -354,10 +370,11 @@ const FORMATS: &[Format] = &[
         interpreter_number: Some(MACINTOSH_INTERPRETER_NUMBER),
         // `.image` is DiskCopy 4.2's own name and what the corpus uses (`Zork
         // Zero Disk.image`). Macintosh volumes also circulate as `.img` and
-        // `.dsk`; the first is already admitted by the DOS row below and the
-        // union is what a scan pre-filters on, so an HFS `.img` is opened and
-        // mounts. `.dsk` is deliberately absent — it is overwhelmingly Apple II
-        // media, which has no reader yet (SQ-0852).
+        // `.dsk`; the first is admitted by the DOS row below and the second by
+        // the ProDOS row at the bottom, and the union is what a scan
+        // pre-filters on — so an HFS volume under either name is opened, and
+        // `looks_like_hfs` is what then claims it. Which row spells a name is
+        // never which format the bytes are.
         extensions: &["image"],
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
@@ -482,13 +499,21 @@ const FORMATS: &[Format] = &[
         // Version 6 screen is 140x192 on a 3x9 cell, which is not a standard
         // window in this codebase's sense at all. See that knob's docs.
         interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
-        // `.2mg` is the wrapper every image in the corpus wears. **Not `.po` or
+        // Two spellings, one filesystem. `.2mg` is the wrapper every 3.5-inch
+        // image in the corpus wears; `.dsk` is what a 5.25-inch dump is called,
+        // and SQ-0864 established that those are ProDOS volumes too — the same
+        // reader, one de-interleave earlier (see [`crate::dos_order`]). Nine of
+        // them are in `stories/`, so the spelling is earned rather than assumed.
+        //
+        // `.dsk` is also a Macintosh spelling, which costs nothing: the census
+        // is a union a directory scan pre-filters on, and `looks_like_hfs`
+        // claims an HFS `.dsk` before this row is ever asked. **Not `.po` or
         // `.hdv`**, the conventional names for a BARE ProDOS volume: this reader
         // opens one (see [`crate::prodos`]) but nothing in `stories/` is one, so
         // claiming the spelling would be a census entry no medium here justifies.
         // A bare volume under any name still mounts when it is opened directly —
         // the extension is a directory scan's pre-filter, never the recogniser.
-        extensions: &["2mg"],
+        extensions: &["2mg", "dsk"],
         looks_like: <ProDos as Volume>::looks_like,
         mount: mount_boxed::<ProDos>,
     },
@@ -827,6 +852,11 @@ impl Volume for ProDos {
 pub struct MountedDisk {
     image: DiskImage,
     volume: Box<dyn Volume>,
+    /// The files on the OTHER volumes of this image's multi-disk release, when
+    /// there are any and this one had no story of its own. Empty for every
+    /// ordinary mount, which is nearly all of them; see
+    /// [`MountedDisk::mount_set`].
+    across: Vec<(String, Vec<u8>)>,
 }
 
 impl MountedDisk {
@@ -836,9 +866,67 @@ impl MountedDisk {
     /// file" answer and callers fall through on it; [`MountError::Unreadable`]
     /// means a disk we recognised is damaged, which is worth reporting.
     pub fn mount(raw: Vec<u8>) -> Result<MountedDisk, MountError> {
+        MountedDisk::mount_set(raw, Vec::new)
+    }
+
+    /// Open `raw`, with the other volumes of its multi-disk release available to
+    /// it — the mount a story that is on **no single disk** needs (SQ-0864).
+    ///
+    /// `companions` yields those other images, in disk order and without `raw`
+    /// itself. It is a closure and not a list because reading seven 800 KB
+    /// floppies to open one of them would be an absurd price for a library scan
+    /// to pay per row: **it is called only when the named volume turns out to
+    /// have no story of its own**, which is exactly the case that cannot be
+    /// answered without them. Every compilation disk in the corpus answers for
+    /// itself and never asks.
+    ///
+    /// What the companions can add is one thing and one thing only: the story a
+    /// release pages ACROSS its volumes, which is [`crate::infocom_packed`]'s
+    /// container. They do not become part of this volume — [`MountedDisk::contents`],
+    /// [`MountedDisk::read_named`], [`MountedDisk::file_count`] and
+    /// [`MountedDisk::volume_name`] all still describe the disk that was named,
+    /// because that is the disk the caller has. Ordinary files on a sibling
+    /// floppy are that floppy's business and it can be mounted.
+    ///
+    /// Format-neutral by construction: the companions are opened through the
+    /// **same row** that claimed `raw`, and one that the row declines is
+    /// dropped. No format implements anything for this and none can opt out.
+    pub fn mount_set(
+        raw: Vec<u8>,
+        companions: impl FnOnce() -> Vec<Vec<u8>>,
+    ) -> Result<MountedDisk, MountError> {
         let format = format_of(&raw).ok_or(MountError::NotADiskImage)?;
         let volume = (format.mount)(raw).ok_or(MountError::Unreadable(format.image))?;
-        Ok(MountedDisk { image: format.image, volume })
+        let across = if volume.stories().is_empty() {
+            companions()
+                .into_iter()
+                .filter(|raw| (format.looks_like)(raw))
+                .filter_map(|raw| (format.mount)(raw))
+                .flat_map(|v| v.contents())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(MountedDisk { image: format.image, volume, across })
+    }
+
+    /// The story this release keeps across its volumes, reassembled out of all
+    /// of them — or `None` when no companions were offered, or they hold no such
+    /// container, or the one they hold is incomplete.
+    ///
+    /// The named volume's files come FIRST, so the container's own
+    /// "which segment carries the index" search (and therefore the name it
+    /// reports) does not depend on which floppy of the set a person happened to
+    /// open. Reassembly is verified against the story's own header checksum by
+    /// [`crate::infocom_packed`], so a set that does not belong together is
+    /// refused rather than handed over as plausible-looking Z-code.
+    fn story_across_the_set(&self) -> Option<DiskStory> {
+        if self.across.is_empty() {
+            return None;
+        }
+        let mut all = self.volume.contents();
+        all.extend(self.across.iter().cloned());
+        crate::infocom_packed::story(&all).map(DiskStory::from)
     }
 
     /// Which format this turned out to be.
@@ -878,9 +966,21 @@ impl MountedDisk {
         self.volume.contents()
     }
 
-    /// Every story on the disk, in disk order.
+    /// Every story on the disk, in disk order — plus the one its release pages
+    /// across its volumes, when [`MountedDisk::mount_set`] was given them.
+    ///
+    /// Naming any floppy of a set therefore lists the same one game, which is
+    /// what makes a set behave like a shelf rather than like five refusals. The
+    /// duplicate rows that produces across a set are the browser's to fold, and
+    /// it already does (`app::picker::dedupe_within_sets`, SQ-0844).
     pub fn stories(&self) -> Vec<DiskStory> {
-        self.volume.stories()
+        let mut found = self.volume.stories();
+        if let Some(story) = self.story_across_the_set() {
+            if !found.iter().any(|f| f.name == story.name) {
+                found.push(story);
+            }
+        }
+        found
     }
 
     /// One file off the volume by the name the user typed — the `--pictures`
@@ -893,9 +993,14 @@ impl MountedDisk {
         self.volume.read_named(name)
     }
 
-    /// The story to open, by the format's tiebreak.
+    /// The story to open, by the format's tiebreak — falling back to the one the
+    /// release pages across its volumes.
+    ///
+    /// The order matters and is the conservative one: a volume that carries a
+    /// game answers with its own, always. Only a volume with nothing on it
+    /// reaches for the set, which is precisely the Shogun floppy's case.
     pub fn story(&self) -> Option<DiskStory> {
-        self.volume.story()
+        self.volume.story().or_else(|| self.story_across_the_set())
     }
 
     /// The disk's own artwork, if it carries a readable archive.
@@ -1099,15 +1204,17 @@ mod tests {
         );
         // The spellings the corpus in `stories/` actually uses, named outright
         // so a row losing one fails here rather than in the picker.
-        for want in ["adf", "image", "ima", "img", "st", "2mg"] {
+        // `dsk` joined them in SQ-0864, on the ProDOS row: the nine 5.25-inch
+        // images in `stories/` are ProDOS volumes whose sectors are in the
+        // drive's order rather than the filesystem's, and they mount through
+        // the same reader one de-interleave earlier.
+        for want in ["adf", "image", "ima", "img", "st", "2mg", "dsk"] {
             assert!(image_extensions().any(|e| e == want), "no row claims {want:?}");
         }
-        // …and the queued format does NOT get a name before it gets a reader
-        // (SQ-0852, the Apple II 5.25-inch press — whose container is decoded
-        // and whose row is blocked by `Volume::mount` taking one image at a
-        // time; see [`FORMATS`]). Nor do the bare-ProDOS spellings, which
-        // this crate CAN open and no medium in the corpus wears.
-        for queued in ["dsk", "po", "hdv"] {
+        // …and a spelling still does NOT get a name before it gets a reader:
+        // the bare-ProDOS ones, which this crate CAN open and no medium in the
+        // corpus wears.
+        for queued in ["po", "hdv"] {
             assert!(
                 !image_extensions().any(|e| e == queued),
                 "{queued:?} is claimed by a row, and no medium in the corpus justifies it"
@@ -1435,6 +1542,206 @@ mod tests {
             "LEATHER.GOD/STORY.DAT",
         ]);
         assert_eq!(disk.file_count(), 14, "…out of fourteen files, saves and interpreters included");
+    }
+
+    // ── A story on no single disk (SQ-0864) ───────────────────────────────────
+
+    /// `stories/`, gitignored — every case below skips vacuously without it, and
+    /// CI has none of it at all.
+    fn stories_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories")
+    }
+
+    /// The 5.25-inch sets, as the filenames in `stories/` spell them.
+    const SHOGUN_SET: [&str; 5] = [
+        "shogun_s1.dsk",
+        "shogun_s2.dsk",
+        "shogun_s3.dsk",
+        "shogun_s4.dsk",
+        "shogun_s5.dsk",
+    ];
+    const ZORK_ZERO_SET: [&str; 4] =
+        ["zork_zero_1.dsk", "zork_zero_2.dsk", "zork_zero_3.dsk", "zork_zero_4.dsk"];
+
+    /// Every volume of `set`, or `None` when any of them is absent.
+    fn read_set(set: &[&str]) -> Option<Vec<Vec<u8>>> {
+        set.iter().map(|n| std::fs::read(stories_dir().join(n)).ok()).collect()
+    }
+
+    /// **The headline.** *Shogun* is on five floppies and *Zork Zero* on four,
+    /// and not one of the nine carries a game — so this is the only test in the
+    /// file whose subject is a release rather than a disk.
+    ///
+    /// Every member is opened in turn with the other volumes as companions,
+    /// because that is what a person does: they name whichever floppy is on top.
+    /// All five must give the same story, under the same name, and it must be
+    /// the real one — pinned by release, serial and the story's own header
+    /// checksum, which is the oracle that says the pages were reassembled in the
+    /// right order rather than merely plausibly (ZMSD §11.1.6).
+    #[test]
+    fn a_release_pressed_across_five_floppies_opens_from_any_one_of_them() {
+        // (set, the segment carrying the index, length, release, serial, $1C)
+        let releases: &[(&[&str], &str, usize, u16, &str, u16)] = &[
+            (&SHOGUN_SET, "SHOGUN.D1", 344_224, 311, "890510", 0xE200),
+            (&ZORK_ZERO_SET, "ZORK0.D1", 299_392, 383, "890602", 0x6F7F),
+        ];
+        let mut ran = 0;
+        for (set, story_name, length, release, serial, checksum) in releases {
+            let Some(images) = read_set(set) else {
+                eprintln!("SKIP: {} is not complete in stories/", set[0]);
+                continue;
+            };
+            ran += 1;
+            for (n, named) in images.iter().enumerate() {
+                let rest: Vec<Vec<u8>> = images
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != n)
+                    .map(|(_, b)| b.clone())
+                    .collect();
+                let who = set[n];
+                let disk = MountedDisk::mount_set(named.clone(), || rest)
+                    .unwrap_or_else(|e| panic!("{who}: {e}"));
+                // It is a ProDOS volume like any other, and answers so.
+                assert_eq!(disk.format(), DiskImage::ProDos, "{who}");
+                assert_eq!(disk.label(), "ProDOS", "{who}");
+                assert_eq!(
+                    disk.interpreter_number(),
+                    Some(APPLE_IIGS_INTERPRETER_NUMBER),
+                    "{who}: a 5.25-inch press is Apple II media like the 3.5-inch one",
+                );
+
+                let stories = disk.stories();
+                assert_eq!(stories.len(), 1, "{who}: {:?}", stories.len());
+                let story = &stories[0];
+                assert_eq!(story.name, *story_name, "{who}: named for the index segment");
+                assert_eq!(disk.story().map(|s| s.name), Some(story.name.clone()), "{who}");
+                assert_eq!(disk.story().map(|s| s.bytes), Some(story.bytes.clone()), "{who}");
+
+                let bytes = &story.bytes;
+                assert_eq!(bytes.len(), *length, "{who}: the story's declared length");
+                assert_eq!(bytes[0], 6, "{who}: Version 6");
+                assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), *release, "{who}");
+                assert_eq!(&bytes[0x12..0x18], serial.as_bytes(), "{who}");
+                let sum = bytes[64..].iter().fold(0u16, |a, &b| a.wrapping_add(u16::from(b)));
+                assert_eq!(sum, *checksum, "{who}: ZMSD §11.1.6 checksum");
+                assert_eq!(u16::from_be_bytes([bytes[0x1c], bytes[0x1d]]), sum, "{who}");
+            }
+        }
+        // CI carries no `stories/`, so the premise is guarded and not asserted.
+        assert!(ran > 0 || !stories_dir().join(SHOGUN_SET[0]).exists());
+        if ran == 0 {
+            eprintln!("SKIP: no 5.25-inch media present");
+        }
+    }
+
+    /// **What a lone volume of a set does**, which is the question a person asks
+    /// by double-clicking `shogun_s3.dsk`.
+    ///
+    /// It mounts. It is a real ProDOS volume with a real name and a real file on
+    /// it, and it is honest that the file is not a game — so the front-ends'
+    /// existing "no story file on the disk image (N files on SHOGUN.3; is this
+    /// the boot disk?)" is what a person is told, rather than a refusal that
+    /// would suggest the floppy was unreadable or a truncated story that would
+    /// crash later. **Nothing is ever handed over half-assembled**: the header
+    /// checksum in [`crate::infocom_packed`] refuses four fifths of a game.
+    #[test]
+    fn a_lone_volume_of_a_set_mounts_and_says_it_has_no_game() {
+        // (image, volume name, files on it)
+        let lone: &[(&str, &str, usize)] = &[
+            ("shogun_s1.dsk", "SHOGUN.1", 4), // the one carrying the index…
+            ("shogun_s3.dsk", "SHOGUN.3", 1), // …and one that carries only pages
+            ("zork_zero_1.dsk", "ZORK0.1", 4),
+            ("zork_zero_4.dsk", "ZORK0.4", 1),
+        ];
+        let mut ran = 0;
+        for (file, volume, files) in lone {
+            let Ok(raw) = std::fs::read(stories_dir().join(file)) else { continue };
+            ran += 1;
+            assert_eq!(DiskImage::detect(&raw), Some(DiskImage::ProDos), "{file}");
+            let disk = MountedDisk::mount(raw).unwrap_or_else(|e| panic!("{file}: {e}"));
+            assert_eq!(disk.volume_name(), Some(*volume), "{file}");
+            assert_eq!(disk.file_count(), *files, "{file}");
+            assert!(disk.stories().is_empty(), "{file}: a fifth of a game is not a game");
+            assert_eq!(disk.story(), None, "{file}");
+        }
+        assert!(ran > 0 || !stories_dir().join("shogun_s1.dsk").exists());
+        if ran == 0 {
+            eprintln!("SKIP: no 5.25-inch media present");
+        }
+    }
+
+    /// **Volumes that are not one release are refused, not spliced.**
+    ///
+    /// Shogun's index disk with Zork Zero's three page disks is a set that
+    /// pairs by NAME perfectly well — every `SHOGUN.D2`…`D5` is simply absent —
+    /// and giving it Shogun's own disk 2 beside three of Zork Zero's is the
+    /// sharper case: the names now resolve and the pages do not. Either way
+    /// nothing is handed out, which is the property that makes name-based
+    /// pairing safe at all (`infocom_packed`'s header-checksum oracle).
+    #[test]
+    fn volumes_from_two_different_releases_assemble_nothing() {
+        let (Some(shogun), Some(zork)) = (read_set(&SHOGUN_SET), read_set(&ZORK_ZERO_SET)) else {
+            eprintln!("SKIP: both 5.25-inch sets are needed");
+            assert!(!stories_dir().join(SHOGUN_SET[0]).exists());
+            return;
+        };
+        // Shogun's index disk, with Zork Zero's volumes for company.
+        let strangers: Vec<Vec<u8>> = zork[1..].to_vec();
+        let disk = MountedDisk::mount_set(shogun[0].clone(), || strangers).expect("mounts");
+        assert!(disk.stories().is_empty(), "no story spans these five");
+        assert_eq!(disk.story(), None);
+
+        // And the other direction, with one real sibling in the mix.
+        let mixed: Vec<Vec<u8>> = vec![shogun[1].clone(), zork[1].clone(), zork[2].clone()];
+        let disk = MountedDisk::mount_set(shogun[0].clone(), || mixed).expect("mounts");
+        assert!(disk.stories().is_empty(), "three of Shogun's five are still not Shogun");
+    }
+
+    /// **Nobody else pays for the set.** The companions closure is called only
+    /// when the named volume has no story of its own, so a library scan does not
+    /// read seven 800 KB floppies to list one of them.
+    ///
+    /// Stated over every format's synthetic disk, because it is a property of
+    /// the seam and not of ProDOS: each sample carries `STORY.DAT`, so each must
+    /// answer for itself and never ask.
+    #[test]
+    fn a_volume_with_its_own_story_never_asks_for_its_siblings() {
+        for image in DiskImage::all() {
+            let asked = std::cell::Cell::new(false);
+            let disk = MountedDisk::mount_set(sample_of(image), || {
+                asked.set(true);
+                Vec::new()
+            })
+            .expect("mounts");
+            assert!(!asked.get(), "{image:?} read its siblings to open itself");
+            assert_eq!(disk.stories().len(), 1, "{image:?}");
+        }
+        // …and a volume with nothing on it does ask, which is the other half.
+        let files: [(&str, &[u8]); 1] = [("Readme", b"just a text file")];
+        let asked = std::cell::Cell::new(false);
+        let disk = MountedDisk::mount_set(crate::adf::tests::sample_disk(&files), || {
+            asked.set(true);
+            Vec::new()
+        })
+        .expect("mounts");
+        assert!(asked.get(), "a volume with no game must consult its release");
+        assert!(disk.stories().is_empty());
+    }
+
+    /// A 5.25-inch dump that is not a ProDOS volume is not a disk image here —
+    /// refused outright rather than de-interleaved into something that gets
+    /// misread. `.dsk` is overwhelmingly Apple II media and most of it is DOS
+    /// 3.3, which this crate does not read.
+    #[test]
+    fn a_five_and_a_quarter_inch_image_that_is_not_prodos_is_refused() {
+        let blank = vec![0u8; crate::dos_order::DOS_ORDER_LEN];
+        assert_eq!(DiskImage::detect(&blank), None);
+        assert_eq!(MountedDisk::mount(blank).err(), Some(MountError::NotADiskImage));
+        // Noise of the right size, likewise — the volume directory decides.
+        let noise: Vec<u8> =
+            (0..crate::dos_order::DOS_ORDER_LEN).map(|i| (i * 31 + 7) as u8).collect();
+        assert_eq!(DiskImage::detect(&noise), None);
     }
 
     /// The same property on the Apple IIgs press (SQ-0836). *Lost Treasures*

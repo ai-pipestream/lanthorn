@@ -31,9 +31,17 @@
 //!   textbook prefix-plus-index. `.dat` is not a disk-image extension, so they
 //!   are thirteen games and never a set. This is the case that makes the
 //!   extension test load-bearing rather than decorative.
-//! - **`shogun_s1.dsk`…`s5`, `zork_zero_1.dsk`…`4`** — `.dsk` is not a spelling
-//!   [`blorb::medium`] claims (those are SQ-0852's packed volumes), so they are
-//!   left entirely alone.
+//! And what it accepts, once a format learns a spelling:
+//!
+//! - **`shogun_s1.dsk`…`s5`, `zork_zero_1.dsk`…`4`.** These were refused for one
+//!   reason only — `.dsk` was not a spelling [`blorb::medium`] claimed. SQ-0864
+//!   gave it to the ProDOS row (they are ProDOS volumes in 5.25-inch sector
+//!   order), and **this module needed no change at all**: the extension census
+//!   is read from the table, so the two sets became sets the same day the reader
+//!   landed. That is the whole argument for [`has_image_ext`] asking
+//!   `blorb::medium` rather than keeping a list, and it is now a measured one.
+//!   It matters more here than elsewhere, because those releases page ONE story
+//!   across every volume of the set: without the grouping there is no game.
 //! - **Zork Zero's `(360K)` and `(720K)` DOS presses.** Both spell their disks
 //!   `(Disk 1)`, `(Disk 2)`, so `360K (Disk 1)` and `720K (Disk 1)` differ at
 //!   exactly one digit run — and that run's values are `{360, 720}`, which
@@ -353,11 +361,45 @@ mod tests {
         assert!(group(&paths(&refs)).is_empty(), ".dat is not a disk-image spelling");
     }
 
-    /// SQ-0852's packed Apple volumes are left alone entirely.
+    /// **The free consequence** (SQ-0864). The Apple II 5.25-inch presses were
+    /// refused here for exactly one reason — `.dsk` was not a spelling
+    /// `blorb::medium` claimed — and the moment the ProDOS row claimed it they
+    /// became sets, with not a line of this module changed.
+    ///
+    /// It is the sharpest case in the corpus for grouping at all: each of these
+    /// nine floppies carries a fifth or a quarter of one story and nothing else,
+    /// so a set that is not recognised is a game that cannot be opened.
     #[test]
-    fn dsk_volumes_are_not_grouped() {
-        let g = group(&paths(&["shogun_s1.dsk", "shogun_s2.dsk", "zork_zero_1.dsk"]));
-        assert!(g.is_empty(), "`.dsk` is not a spelling blorb::medium claims");
+    fn the_apple_five_and_a_quarter_inch_presses_are_two_sets() {
+        let mut names: Vec<String> = (1..=5).map(|n| format!("shogun_s{n}.dsk")).collect();
+        names.extend((1..=4).map(|n| format!("zork_zero_{n}.dsk")));
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let g = group(&paths(&refs));
+        assert_eq!(g.len(), 2, "{:?}", g.iter().map(|x| names_of(x)).collect::<Vec<_>>());
+        let sizes: Vec<usize> = {
+            let mut s: Vec<usize> = g.iter().map(|x| x.len()).collect();
+            s.sort_unstable();
+            s
+        };
+        assert_eq!(sizes, [4, 5], "Zork Zero on four floppies, Shogun on five");
+        // …and in disk order, which is the order the segments pair in.
+        let shogun = g.iter().find(|x| x.len() == 5).expect("the five-disk set");
+        assert_eq!(names_of(shogun), [
+            "shogun_s1.dsk",
+            "shogun_s2.dsk",
+            "shogun_s3.dsk",
+            "shogun_s4.dsk",
+            "shogun_s5.dsk",
+        ]);
+    }
+
+    /// …and the census is genuinely where that came from: nothing in this
+    /// module names a spelling, so `.dsk` had to arrive through the table.
+    #[test]
+    fn the_extension_census_is_the_tables_and_not_this_modules() {
+        assert!(has_image_ext(Path::new("/stories/shogun_s1.dsk")));
+        assert!(blorb::medium::image_extensions().any(|e| e == "dsk"));
+        assert!(!has_image_ext(Path::new("/stories/adv01.dat")));
     }
 
     /// **The corpus's sharpest case.** Zork Zero's two DOS presses spell their

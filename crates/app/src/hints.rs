@@ -696,10 +696,43 @@ pub use blorb::medium::DiskImage;
 pub fn mounted_stories(path: &Path) -> Option<(DiskImage, Vec<blorb::medium::DiskStory>)> {
     let raw = std::fs::read(path).ok()?;
     blorb::medium::DiskImage::detect(&raw)?;
-    let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
+    let disk = mount_disk(path, raw).ok()?;
     let format = disk.format();
     let stories = disk.stories();
     (!stories.is_empty()).then_some((format, stories))
+}
+
+/// Open the disk image `path`, whose bytes are `raw`, with the other volumes of
+/// its multi-disk release available to it (SQ-0864).
+///
+/// **The one place `app` mounts a disk**, and the reason it is one place: a
+/// story can live on no single floppy. The Apple II 5.25-inch presses of
+/// *Shogun* and *Zork Zero* page one game across five and four volumes, so
+/// opening any one of them and asking what is on it is a question only the whole
+/// release can answer.
+///
+/// Which files are one release is [`crate::disk_set`]'s answer, from their names
+/// and without opening anything — the same rule the browser groups on, so a set
+/// the picker shows as one shelf is the set the mount reads across. It is
+/// deliberately not `blorb`'s: naming is filesystem policy and that crate is
+/// given bytes.
+///
+/// Nothing is read eagerly. [`blorb::medium::MountedDisk::mount_set`] calls the
+/// closure only when the named volume has no story of its own, so an ordinary
+/// floppy and every volume of a compilation cost exactly the one read they
+/// always did.
+fn mount_disk(
+    path: &Path,
+    raw: Vec<u8>,
+) -> Result<blorb::medium::MountedDisk, blorb::medium::MountError> {
+    blorb::medium::MountedDisk::mount_set(raw, || {
+        crate::disk_set::members(path)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| m != path)
+            .filter_map(|m| std::fs::read(m).ok())
+            .collect()
+    })
 }
 
 /// Read a story file's executable bytes, transparently unwrapping a ZIP whose
@@ -726,7 +759,7 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
     // `detect` first because `mount` consumes the bytes, and a plain story file
     // has to fall through to the paths below with them intact.
     if blorb::medium::DiskImage::detect(&raw).is_some() {
-        let disk = blorb::medium::MountedDisk::mount(raw)
+        let disk = mount_disk(path, raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         // A named story is the browser's row (SQ-0859): the picker listed every
         // story on the image and this is the one the player chose, so it is
