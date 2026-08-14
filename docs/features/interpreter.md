@@ -531,6 +531,19 @@ Amiga floppy or anywhere else.
   *Journey* on its release floppy is white text on the machine's dark grey, frame
   and menu and prose alike, instead of your terminal's own colours.
 
+  **The Macintosh needed the same thing, and found out the same way.** *Zork
+  Zero* off its Mac disk never calls `set_colour` even once — the game asks a
+  Macintosh for nothing — so every window sat at "default", and with nothing
+  painting `$2C`/`$2D` the whole screen fell through to your theme. The visible
+  symptom was the status banner: location and score drawn in the theme's grey on
+  the game's own white plate, on a two-colour machine that has no grey in it
+  anywhere, which reads as text that failed to render. A Mac window was white
+  with black type, Infocom's own interpreter says so in one line, and that is
+  now the page babelmap paints. There is no claim about shared pens here — that
+  part is the Amiga's alone; a Mac `set_colour` still colours one window, exactly
+  as §8.3 describes. This is only the ground beneath a window that asked for
+  nothing, and `honor_game_colours = false` still hands it back to your theme.
+
   Two things the rule deliberately does *not* do. Colour **-1**, "the colour of the
   pixel under the cursor", names no colour, so it loads no pen — it stays a
   request to draw over what is already there, which is how *Zork Zero* prints its

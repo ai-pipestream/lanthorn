@@ -541,7 +541,13 @@ pub(crate) fn boot_story(
             // Pinned as one-run so a later settings write cannot bake "never
             // honour game colours" into the global config (SQ-0646's hazard, and
             // the same guard every other one-run source now gets — SQ-0807).
-            if picts.is_monochrome() && cfg.honor_game_colours {
+            //
+            // SQ-0846: and NOT on a machine that states its own defaults. The
+            // rule above reasons from the archive because on an IBM PC there is
+            // nothing else to reason from; where the medium named the machine and
+            // that machine's own interpreter named its colours, the guess is
+            // overruled by the fact. See `PictSource::declines_game_colours`.
+            if picts.declines_game_colours(cfg.interpreter_profile) && cfg.honor_game_colours {
                 cfg.honor_game_colours = false;
                 cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, false);
             }

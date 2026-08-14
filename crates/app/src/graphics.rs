@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 
+use crate::interpreter::InterpreterProfile;
+
 /// Unpack a Glk 24-bit `0xRRGGBB` color into an opaque RGBA pixel.
 fn rgb(color: u32) -> Rgba<u8> {
     Rgba([(color >> 16) as u8, (color >> 8) as u8, color as u8, 0xFF])
@@ -381,6 +383,35 @@ impl PictSource {
     /// which is never one.
     pub fn is_monochrome(&self) -> bool {
         self.native.as_ref().is_some_and(blorb::infocom_pics::InfocomPics::is_monochrome)
+    }
+
+    /// Should this launch declare the interpreter COLOURLESS to the story
+    /// (`honor_game_colours = false`), because the artwork in hand has no
+    /// colours to give? SQ-0806, refined by SQ-0846.
+    ///
+    /// **The archive's half is a guess about a machine, and that is the whole
+    /// point.** A two-colour rendition is a stencil whose transparency reveals a
+    /// ground the artwork never had to store, and the story cannot see which
+    /// archive was loaded — Zork Zero issues `set_colour(fg=2, bg=9)` for every
+    /// video card alike, so honouring it paints the white pillars out against
+    /// the white page it asked for. Nothing in a `.CG1` names its machine; the
+    /// monochrome flag is the only evidence there is, and bocfel says as much
+    /// ("the flags always *seem* to equal 0xe if the graphics are monochrome").
+    /// Declaring the interpreter colourless hands the ground back to the host
+    /// theme and the stencil reads again.
+    ///
+    /// **A profile that states its own defaults is not a guess, and outranks
+    /// one.** [`InterpreterProfile::default_colours`] is `None` for the IBM PC
+    /// precisely because babelmap has no machine there to speak for — which is
+    /// every launch the rule above was written for. Where it answers, the answer
+    /// came off that machine's own interpreter: the Macintosh's white page under
+    /// black ink is `mac/xzip.lst`'s `SetColor := (zWHITE*256) + zBLACK`, and a
+    /// mono Mac `Pic.data` is the archive that same interpreter chose *for* that
+    /// page, in one decision (SQ-0838). Turning colours off there does not save
+    /// a stencil from a colour the game asked for; it throws away the one machine
+    /// whose colours are known, and it cost SQ-0846's status banner its ink.
+    pub fn declines_game_colours(&self, profile: InterpreterProfile) -> bool {
+        self.is_monochrome() && profile.default_colours().is_none()
     }
 
     /// Is this Pict declared adaptive by the container's `APal` chunk (§11.3)?
