@@ -3117,16 +3117,16 @@ mod tests {
     /// Arthur's Apple press, or `None` (with a SKIP note) when the gitignored
     /// image is not there.
     ///
-    /// Deliberately through `MountedDisk::pictures` — the same call a host makes
-    /// — rather than through `infocom_packed` directly, so these tests prove the
-    /// whole chain from a `.2mg` on disk to decoded pixels, and would catch the
-    /// artwork being decodable but unreachable.
+    /// Through `ProDos::packed_pictures`, which is the door a host will use once
+    /// the picture-space question `ProDos::pictures` documents is settled. The
+    /// chain from a `.2mg` on disk to decoded pixels is otherwise complete, and
+    /// these tests walk all of it.
     fn apple_arthur() -> Option<InfocomPics> {
         let bytes = fixture("Arthur Quest 4 Excalibur.2mg")?;
-        let disk = crate::medium::MountedDisk::mount(bytes).expect("the 2mg mounts");
-        let art = disk.pictures().expect("Arthur's Apple press carries artwork");
-        assert_eq!(art.name, "ARTHUR.1/ARTHUR.D1", "named for the segment carrying the index");
-        Some(art.pictures)
+        let fs = crate::prodos::ProDos::mount(bytes).expect("the 2mg mounts");
+        let (name, pics) = fs.packed_pictures().expect("Arthur's Apple press carries artwork");
+        assert_eq!(name, "ARTHUR.1/ARTHUR.D1", "named for the segment carrying the index");
+        Some(pics)
     }
 
     /// SQ-0863, real media: *Arthur* release 63 / serial 890622, off

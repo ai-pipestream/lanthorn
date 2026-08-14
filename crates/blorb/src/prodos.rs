@@ -521,26 +521,33 @@ impl ProDos {
         crate::infocom_packed::story(&files)
     }
 
-    /// The native Infocom picture archive on this volume, with its stored path.
+    /// The native Infocom picture archive **file** on this volume, with its
+    /// stored path. Identified by parsing, exactly as
+    /// [`crate::adf::Adf::pictures`] does.
     ///
-    /// Identified by parsing, exactly as [`crate::adf::Adf::pictures`] does —
-    /// and then, when no FILE is one, by asking the packed volume, exactly as
-    /// [`Self::story`] falls through to [`Self::packed_story`].
+    /// Nothing in the ProDOS corpus answers, and the reason changed under
+    /// SQ-0852: the two graphical releases here (*Arthur* and *Journey*) keep
+    /// their artwork inside the same segmented `.D1`…`.D5` container as their
+    /// story — not as a file, so no per-file parse can ever reach it.
     ///
-    /// That second half is the whole of SQ-0863, and the shape of the problem is
-    /// why it needs its own door. The two graphical releases here (*Arthur* and
-    /// *Journey*) keep their artwork inside the same segmented `.D1`…`.D5`
-    /// container as their story — not as a file, so no per-file parse can ever
-    /// reach it — and what is in there is an Infocom picture archive of a
-    /// **fourth flavour**, [`crate::infocom_pics::Flavour::Apple`]: an 8-byte
-    /// directory record where the Amiga, Macintosh and PC spend twelve, fourteen
-    /// or sixteen, and offsets relative to the SEGMENT rather than to the
-    /// archive. [`InfocomPics::parse`] still refuses it, and still should —
-    /// there is no header at byte 0 of a segment to find.
+    /// # Why this does NOT fall through to [`Self::packed_pictures`]
     ///
-    /// *Arthur* answers with 168 pictures merged out of four floppies; *Journey*
-    /// still answers `None`, because its pressing is missing the segment that
-    /// carries a quarter of them.
+    /// [`Self::story`] falls through to [`Self::packed_story`], and the
+    /// symmetry is tempting, but the artwork is not ready to be handed over the
+    /// way the story is — and the obstacle is geometry, not decoding. SQ-0863
+    /// read the archives: 168 of *Arthur*'s pictures come out of the four
+    /// floppies, correct and pixel-exact. But an archive also STATES a picture
+    /// space, and the Apple's is 140×192 (`apple.equ`'s `MAXWIDTH`/`MAXHEIGHT`),
+    /// which `app`'s `PictSource::native_std_window` turns into a 560×384 story
+    /// window where release 63 is pinned at 640×400.
+    ///
+    /// That is the same question SQ-0857 met and deliberately left open when it
+    /// set `InterpreterProfile::AppleIIgs::std_window` to `None`: the Apple's
+    /// picture space cannot be honestly expressed while the v6 cell is a
+    /// compile-time 8×16. Wiring the art in without settling it would move
+    /// *Arthur*'s whole screen as a side effect of gaining pictures. So the
+    /// reader is landed and reachable — [`Self::packed_pictures`] — and this
+    /// door stays shut until the run-time-cell decision is made.
     pub fn pictures(&self) -> Option<(String, InfocomPics)> {
         let mut cands: Vec<(String, InfocomPics)> = self
             .files
@@ -551,7 +558,7 @@ impl ProDos {
             .filter(|(_, p)| p.entries().iter().any(|e| e.has_pixels()))
             .collect();
         cands.sort_by_key(|(path, pics)| (std::cmp::Reverse(pics.entries().len()), path.clone()));
-        cands.into_iter().next().or_else(|| self.packed_pictures())
+        cands.into_iter().next()
     }
 
     /// The artwork held in a packed Apple volume on this disk, merged out of the
@@ -1306,20 +1313,20 @@ pub(crate) mod tests {
                 assert_eq!((story[0], u16::from_be_bytes([story[2], story[3]])), (6, 63));
                 assert_eq!(&story[0x12..0x18], b"890622");
             }
-            // The artwork is in that container too (SQ-0863), and it follows the
-            // story exactly: *Arthur*'s four picture archives are all here, and
-            // *Journey*'s fifth segment is missing so its set is refused whole.
-            // No FILE on either volume is an archive, so this is the packed door
-            // answering, not a per-file parse.
+            // No FILE on either volume is an archive, so the per-file door
+            // answers `None` for both — and deliberately still does, even though
+            // the packed door can now read the artwork. See `ProDos::pictures`
+            // for why the two are not yet joined up.
+            assert!(fs.pictures().is_none(), "{fixture}: no FILE here is an archive");
+            // The packed door reads it, and follows the story exactly (SQ-0863):
+            // *Arthur*'s four archives are all here; *Journey*'s fifth segment
+            // is missing, so its set is refused whole rather than served short.
             assert_eq!(fs.packed_pictures().is_some(), packed, "{fixture}");
-            match fs.pictures() {
-                Some((name, pics)) => {
-                    assert!(packed, "{fixture}: artwork where none was expected");
-                    assert_eq!(name, "ARTHUR.1/ARTHUR.D1");
-                    assert_eq!(pics.entries().len(), 168);
-                    assert_eq!(pics.parts(), 4, "one archive per floppy, disks 2..=5");
-                }
-                None => assert!(!packed, "{fixture}: no artwork where some was expected"),
+            if packed {
+                let (name, pics) = fs.packed_pictures().expect("Arthur's artwork");
+                assert_eq!(name, "ARTHUR.1/ARTHUR.D1");
+                assert_eq!(pics.entries().len(), 168);
+                assert_eq!(pics.parts(), 4, "one archive per floppy, disks 2..=5");
             }
         }
     }
