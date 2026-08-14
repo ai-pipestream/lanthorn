@@ -122,6 +122,16 @@ pub struct ArtCandidate {
     /// consumed: picking it writes the same bare `filename`, and the two doors
     /// meet in `PictureOverride::resolve_with_session`.
     pub on_medium: bool,
+    /// **Which** volume of the release carries it, when the release is a set
+    /// (SQ-0865). `None` for a loose file and for a single-image release.
+    ///
+    /// SQ-0862 is what made this necessary rather than merely nice: an archive
+    /// can now come off a *sibling* volume, so booting the 360K press's disk 2
+    /// offers `ZORK0.EG1` — which is physically on disk 3. "on disk" was vague
+    /// before that and ambiguous after it. Straight from
+    /// [`crate::assets::AssetFile::disk_number`], so the number is the release's
+    /// own and never parsed out of a filename here.
+    pub disk_number: Option<u64>,
 }
 
 impl ArtCandidate {
@@ -257,6 +267,7 @@ pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
         let filename = file.name.clone();
         let path = file.path.clone();
         let on_medium = file.is_on_medium();
+        let disk_number = file.disk_number;
         let Some(raw) = file.into_bytes() else { continue };
         // **Identified by parsing, for both sources alike** — the same
         // content-first rule `adf.rs` and `hfs.rs` apply file by file inside a
@@ -304,6 +315,7 @@ pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
             parts: pics.parts(),
             space_width,
             on_medium,
+            disk_number,
             filename,
             path,
         });
@@ -397,6 +409,122 @@ pub fn parts_note(c: &ArtCandidate) -> String {
     } else {
         String::new()
     }
+}
+
+/// **Which disk** an archive lives on, or `""` for an ordinary file beside the
+/// story (SQ-0865).
+///
+/// The phrase both surfaces append, so the dialog and the browser's info panel
+/// cannot drift into two answers about one archive. Each adds its own separator;
+/// this is the words alone.
+///
+/// Three states, and the middle one is the whole reason this replaced `"on
+/// disk"`. A multi-disk release says **which** disk, because since SQ-0862 an
+/// archive can come off a volume the player never booted — the 360K press offers
+/// `ZORK0.EG1` from disk 3 while the story runs off disk 2, and "on disk" read
+/// as if it meant the disk in the drive. A single-image release has no disk
+/// number to give and says `from game disk`, which is the user's own wording and
+/// says the thing the marker was always for: this file is inside the image, not
+/// beside it. A loose file says nothing, because a file in the folder the story
+/// is in needs no explanation.
+pub fn medium_note(c: &ArtCandidate) -> String {
+    where_note(c.on_medium, c.disk_number)
+}
+
+/// [`medium_note`] over the two facts it reads, so the resolved-default row can
+/// share the wording without inventing an [`ArtCandidate`] to carry it.
+fn where_note(on_medium: bool, disk_number: Option<u64>) -> String {
+    match (on_medium, disk_number) {
+        (false, _) => String::new(),
+        (true, Some(n)) => format!("from disk {n}"),
+        (true, None) => "from game disk".to_string(),
+    }
+}
+
+// ── What "use this story's own art" actually resolves to ─────────────────────
+
+/// The archive a launch will open when nothing is overridden — the *default*
+/// choice, described well enough to name in the dialog before the story boots
+/// (SQ-0865).
+///
+/// # Why this exists at all
+///
+/// The default row used to read *"Use this story's own art (Blorb / disk
+/// image)"*: prose among columns, and the one row that said nothing about what
+/// accepting it would do — which is precisely the thing you want to know before
+/// accepting it. Naming the archive is only safe if the name is the one boot
+/// will really open, so this is **derived from the resolution boot performs**
+/// ([`crate::graphics::release_art`], then the resource Blorb) and never from a
+/// second reading of the same evidence. A row that claimed one archive while the
+/// boot took another would be worse than the prose it replaced.
+///
+/// Note the direction of the dependency, which is the tier policy's line held
+/// exactly where SQ-0734 put it: this *reports* an automatic choice that was
+/// already made, and nothing here feeds back into making one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultArt {
+    /// The archive's name, as its volume or its directory spells it.
+    pub filename: String,
+    /// The rendition label, from the same function the candidate rows use — or
+    /// `"Blorb"` when the story resolves its own resource file.
+    pub rendition: &'static str,
+    /// How many directory entries it holds.
+    pub pictures: usize,
+    /// Is it inside a disk image? See [`ArtCandidate::on_medium`].
+    pub on_medium: bool,
+    /// Which volume of the release, when the release is a set.
+    pub disk_number: Option<u64>,
+}
+
+impl DefaultArt {
+    /// Where this archive lives, in the dialog's words.
+    pub fn medium_note(&self) -> String {
+        where_note(self.on_medium, self.disk_number)
+    }
+}
+
+/// What `story_path` will draw with if the launch overrides nothing, or `None`
+/// when it will draw with nothing at all (SQ-0865).
+///
+/// The two tiers [`crate::graphics::PictSource::resolve`] walks, asked in its
+/// order and through its own functions: the release's native archive first, then
+/// the story's resource Blorb.
+///
+/// # Cost, and why the dialog resolves this once
+///
+/// It mounts the release's volumes — the same ~1.5 ms warm that
+/// [`discover_art_candidates`] pays, and for the same reason. That is far too
+/// much to repeat per frame, so [`LaunchOptionsState::new`] calls this **once**
+/// when the dialog opens and the renderer only formats the answer. The dialog is
+/// modal and nothing behind it can change the artwork on disk while it is up, so
+/// a value settled at open time cannot go stale before it is closed.
+pub fn resolved_default_art(story_path: &Path) -> Option<DefaultArt> {
+    if let Some(art) = crate::graphics::release_art(story_path) {
+        let space_width = art.pictures.picture_space_width();
+        let mono = art.pictures.is_monochrome();
+        return Some(DefaultArt {
+            rendition: rendition_label(art.pictures.flavour(), space_width, &art.name, mono),
+            pictures: art.pictures.entries().len(),
+            on_medium: true,
+            disk_number: art.disk_number,
+            filename: art.name,
+        });
+    }
+    // Tier 1. A Blorb is not a rendition of anything — it is the modern
+    // container, with no video card behind it — so the column says what it is
+    // rather than inventing a machine for it.
+    let (blorb, path) = blorb::resolve_resource_blorb(story_path)?;
+    let pictures = blorb.resources().iter().filter(|r| &r.usage == b"Pict").count();
+    if pictures == 0 {
+        return None; // a sound-only sidecar draws nothing
+    }
+    Some(DefaultArt {
+        filename: path.file_name()?.to_str()?.to_string(),
+        rendition: "Blorb",
+        pictures,
+        on_medium: false,
+        disk_number: None,
+    })
 }
 
 /// The rendition a human recognises.
@@ -584,6 +712,10 @@ pub struct LaunchOptionsState {
     pub title: String,
     pub story_path: PathBuf,
     pub candidates: Vec<ArtCandidate>,
+    /// What row 0 — "inherit" — actually resolves to, settled once when the
+    /// dialog opens (SQ-0865). See [`resolved_default_art`] for why it is
+    /// resolved here and not per frame.
+    pub default_art: Option<DefaultArt>,
     /// `0` = inherit; `1..` selects `candidates[i - 1]`.
     pub art: usize,
     pub interpreter: Option<u8>,
@@ -647,6 +779,7 @@ impl LaunchOptionsState {
             title: title.to_string(),
             story_path: story_path.to_path_buf(),
             candidates,
+            default_art: resolved_default_art(story_path),
             art,
             interpreter: inherited_interpreter,
             persist: false,
@@ -1037,6 +1170,7 @@ mod tests {
             parts: 1,
             space_width: 320,
             on_medium: false,
+            disk_number: None,
         };
         let pc = ArtCandidate { flavour: Flavour::Pc, rendition: "MCGA", ..amiga.clone() };
         assert_eq!(

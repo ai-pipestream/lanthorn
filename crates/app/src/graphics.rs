@@ -313,8 +313,8 @@ impl PictSource {
     /// image. See that function for which siblings are allowed to speak for a
     /// story and which are not.
     pub fn resolve(story_path: &std::path::Path) -> PictSource {
-        if let Some(pics) = release_art(story_path) {
-            return PictSource::from_native(pics);
+        if let Some(art) = release_art(story_path) {
+            return PictSource::from_native(art.pictures);
         }
         PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b))
     }
@@ -1076,17 +1076,53 @@ pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf>
 /// the same 503 pictures into the same geometry (`PictSource::art_scale`), and no
 /// release in the corpus puts the two on sibling volumes of one set, so ranking
 /// them would be a rule with no example. Disk order settles it if one ever does.
-fn release_art(story_path: &std::path::Path) -> Option<blorb::infocom_pics::InfocomPics> {
+///
+/// # Why it also reports WHICH archive it took (SQ-0865)
+///
+/// The launch dialog's default row has to name the archive accepting it will
+/// open, and the only way for that row to be trustworthy is for it to come from
+/// this function rather than from a second copy of the rule above. So the answer
+/// carries the archive's stored name and the volume it came off, and the choice
+/// itself is untouched: the sort key below is the same key, applied to the same
+/// stable sort, so every release resolves to exactly the archive it did before.
+pub fn release_art(story_path: &std::path::Path) -> Option<ReleaseArt> {
     let volumes = crate::assets::volumes(story_path);
     let (own, siblings) = volumes.split_first()?;
     if let Some(art) = own.disk.pictures() {
-        return Some(art.pictures);
+        return Some(ReleaseArt {
+            pictures: art.pictures,
+            name: art.name,
+            disk_number: own.disk_number,
+        });
     }
-    let mut found: Vec<blorb::infocom_pics::InfocomPics> =
-        siblings.iter().filter_map(|v| v.disk.pictures().map(|a| a.pictures)).collect();
+    let mut found: Vec<ReleaseArt> = siblings
+        .iter()
+        .filter_map(|v| {
+            v.disk.pictures().map(|a| ReleaseArt {
+                pictures: a.pictures,
+                name: a.name,
+                disk_number: v.disk_number,
+            })
+        })
+        .collect();
     // Stable, so disk order survives as the last tiebreak.
-    found.sort_by_key(|p| (p.is_monochrome(), std::cmp::Reverse(p.entries().len())));
+    found.sort_by_key(|a| {
+        (a.pictures.is_monochrome(), std::cmp::Reverse(a.pictures.entries().len()))
+    });
     found.into_iter().next()
+}
+
+/// The artwork a release supplies for a story, and where on the release it is
+/// (SQ-0865).
+#[derive(Debug)]
+pub struct ReleaseArt {
+    /// The parsed archive — what [`PictSource::resolve`] draws with.
+    pub pictures: blorb::infocom_pics::InfocomPics,
+    /// The archive's name as its volume spells it, e.g. `ZORK0.EG1`.
+    pub name: String,
+    /// The disk number of the volume it came off, or `None` when the release is
+    /// a single image. See [`crate::assets::MountedVolume::disk_number`].
+    pub disk_number: Option<u64>,
 }
 
 /// Read a bare filename off the release `story_path` was mounted from, for a

@@ -394,3 +394,214 @@ fn every_rendition_of_the_release_lands_on_one_screen() {
     }
     assert!(ran > 0 || !any_media_present(), "the DOS press is present but nothing ran");
 }
+
+// ── SQ-0865: which disk, and what "Automatic" will actually open ─────────────
+//
+// The report, against the launch-options panel:
+//
+// > "in the story list options panel the defaul artwork selection is 'Use this
+// > story's own art (Blorb / disk image)'. We should be more specific on the
+// > default format and match the text/formatting of the other options. In terms
+// > of the other options, 'on disk' is confusing. What do you think about 'from
+// > game disk'"
+//
+// Two defects, and SQ-0862 is what sharpened the second. Before it, an archive
+// "on disk" was on the disk you booted; now a candidate can live on a **sibling
+// volume of the release**, so booting `(360K) (Disk 2)` offers `ZORK0.EG1`,
+// which is physically on disk 3. "on disk" stopped being merely vague and became
+// wrong by implication. This press is the fixture that can prove it, being the
+// only release in the corpus whose artwork sits on a disk the story does not.
+
+/// The disk number on every row is the RELEASE's — not a position in a list, and
+/// not something parsed out of a filename in the dialog.
+///
+/// Pinned against the press's actual layout: on the 360K press CGA is disk 1,
+/// the story is alone on disk 2 and EGA is disk 3; on the 720K press the story
+/// and MCGA share disk 1 and CGA is disk 2. Every one of those numbers is one a
+/// person can read off the label of the floppy in their hand.
+#[test]
+fn every_candidate_names_the_disk_of_the_release_it_comes_off() {
+    // (image, [(archive, the disk it is really on)])
+    let want: &[(&str, &[(&str, u64)])] = &[
+        (P360_1, &[("ZORK0.CG1", 1), ("ZORK0.EG1", 3)]),
+        (P360_2, &[("ZORK0.CG1", 1), ("ZORK0.EG1", 3)]),
+        (P360_3, &[("ZORK0.CG1", 1), ("ZORK0.EG1", 3)]),
+        (P720_1, &[("ZORK0.CG1", 2), ("ZORK0.MG1", 1)]),
+        (P720_2, &[("ZORK0.CG1", 2), ("ZORK0.MG1", 1)]),
+    ];
+    let mut ran = 0;
+    for (image, rows) in want {
+        let Some(path) = media(image) else { continue };
+        for (archive, disk) in *rows {
+            let c = candidate(&path, archive)
+                .unwrap_or_else(|| panic!("{image}: {archive} must be offered"));
+            ran += 1;
+            assert!(c.on_medium, "{image}/{archive}");
+            assert_eq!(
+                c.disk_number,
+                Some(*disk),
+                "{image}: {archive} is on disk {disk} of this press",
+            );
+            // …and the phrase both surfaces print, which is what a person reads.
+            // Never the bare "on disk" it replaced.
+            assert_eq!(
+                app::launch_options::medium_note(&c),
+                format!("from disk {disk}"),
+                "{image}/{archive}",
+            );
+        }
+    }
+    assert!(ran > 0 || !any_media_present(), "the DOS press is present but nothing ran");
+}
+
+/// **The guard worth the most: the default row must not claim one archive while
+/// the boot opens another.**
+///
+/// Asserted as a property rather than as a string, and deliberately not against
+/// `release_art` — comparing that function with itself would pass however wrong
+/// the row was. The oracle is the ART ITSELF: take the name the row shows, feed
+/// it back through tier 3 (`PictureOverride` → `PictSource`) as if the user had
+/// typed it, and require the picture source that comes out to be
+/// indistinguishable from the one `PictSource::resolve` builds when nobody names
+/// anything. A row naming CGA where EGA boots differs in `is_monochrome`; a row
+/// naming MCGA where EGA boots differs in `dims`.
+#[test]
+fn the_default_row_names_the_archive_the_boot_actually_opens() {
+    // What the release supplies when nothing is overridden: the story's own
+    // volume wins outright, then colour beats monochrome — SQ-0862's policy,
+    // which this quest may only ever LABEL.
+    let want: &[(&str, &str, u64)] = &[
+        (P360_1, "ZORK0.CG1", 1), // disk 1 carries CGA itself
+        (P360_2, "ZORK0.EG1", 3), // the story disk has none; EGA over CGA
+        (P360_3, "ZORK0.EG1", 3),
+        (P720_1, "ZORK0.MG1", 1), // the story's own volume, unmoved
+        (P720_2, "ZORK0.CG1", 2),
+    ];
+    let mut ran = 0;
+    for (image, archive, disk) in want {
+        let Some(path) = media(image) else { continue };
+        ran += 1;
+        let st = app::launch_options::LaunchOptionsState::new(
+            "Zork Zero",
+            &path,
+            None,
+            None,
+            Some(6),
+            None,
+        );
+        let d = st.default_art.as_ref().unwrap_or_else(|| {
+            panic!("{image}: the release supplies artwork, so the default row must name it")
+        });
+        assert_eq!(d.filename, *archive, "{image}: the default row names the wrong archive");
+        assert_eq!(d.disk_number, Some(*disk), "{image}: …and the wrong disk");
+        assert_eq!(d.medium_note(), format!("from disk {disk}"), "{image}");
+        assert_eq!(d.pictures, 503, "{image}: Zork Zero's directory, whole");
+
+        // The agreement itself. Accepting the default and naming what the row
+        // says must reach the same artwork, in everything observable about it.
+        let empty = game_dir_with("agree", "");
+        let mut auto = PictSource::resolve(&path);
+        let over = PictureOverride::resolve_with_session(&path, &empty, Some(&d.filename));
+        assert!(matches!(over, PictureOverride::Loaded { .. }), "{image}: {over:?}");
+        let mut named = PictSource::resolve_with_override(&path, over);
+        assert_eq!(
+            named.is_monochrome(),
+            auto.is_monochrome(),
+            "{image}: the row names {archive}, which is not what boots",
+        );
+        assert_eq!(named.native_std_window(), auto.native_std_window(), "{image}");
+        assert_eq!(named.art_scale(), auto.art_scale(), "{image}");
+        assert_eq!(named.dims(1), auto.dims(1), "{image}");
+        assert_eq!(named.image(1).is_some(), auto.image(1).is_some(), "{image}");
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+    assert!(ran > 0 || !any_media_present(), "the DOS press is present but nothing ran");
+}
+
+/// **The panel the user is judging this by.** All five volumes are rendered and
+/// printed, so the rows can be read here rather than inferred (`cargo nextest
+/// run -p app the_launch_dialog_over_the_whole_dos_press -- --nocapture`).
+///
+/// The assertions are about SHAPE, not a snapshot: the default row is columnar
+/// and names its archive, no row says the bare "on disk", and the picture counts
+/// of the default row and the candidate rows land in one column — which is the
+/// complaint that started this quest.
+#[test]
+fn the_launch_dialog_over_the_whole_dos_press_names_its_disks() {
+    let mut ran = 0;
+    for image in DOS_PRESS {
+        let Some(path) = media(image) else { continue };
+        ran += 1;
+        let frame = render_launch_dialog(&path);
+        println!("── {image}\n{frame}");
+
+        assert!(frame.contains("Automatic — "), "the default row names what it picks: {frame}");
+        assert!(
+            !frame.contains("Use this story's own art"),
+            "the prose default row is gone: {frame}",
+        );
+        for line in frame.lines().filter(|l| l.contains(" pictures")) {
+            // The bare marker, in the exact spelling the report called
+            // confusing. It must survive nowhere.
+            assert!(
+                !line.contains("  on disk") && !line.contains("· on disk"),
+                "a row still says the bare 'on disk': {line:?}",
+            );
+            // Every archive that came off this press is on a numbered disk and
+            // says so. The `zorkzero.mg1` sitting loose in the corpus directory
+            // beside these images is the control: it is a file in a folder, it
+            // needs no explanation, and it gets none.
+            if line.contains("ZORK0.") {
+                assert!(line.contains("from disk "), "a volume's row must name its disk: {line:?}");
+            } else {
+                assert!(
+                    !line.contains("from disk") && !line.contains("from game disk"),
+                    "a loose file beside the story explains nothing: {line:?}",
+                );
+            }
+        }
+        // The columns really do line up: every option row carries its picture
+        // count in the same SCREEN column, the default row included — which is
+        // the half of the report about matching the other options' formatting.
+        //
+        // Counted in characters and not in bytes: the default row's `·` and `—`
+        // are three bytes wider than the `( )` of the rows under it, so a byte
+        // offset says they are misaligned when the screen says they are not.
+        let cols: Vec<usize> = frame
+            .lines()
+            .filter(|l| l.contains(") ") && l.contains(" pictures"))
+            .map(|l| l[..l.find(" pictures").unwrap()].chars().count())
+            .collect();
+        assert!(cols.len() >= 3, "the default row plus its candidates: {frame}");
+        assert!(
+            cols.iter().all(|c| *c == cols[0]),
+            "the picture counts are in one column, default row included: {cols:?}\n{frame}",
+        );
+    }
+    assert!(ran > 0 || !any_media_present(), "the DOS press is present but nothing ran");
+}
+
+/// Render the launch-options dialog for `story` into a plain string, one line per
+/// buffer row, at a size the whole dialog fits in.
+fn render_launch_dialog(story: &Path) -> String {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let disk = std::fs::read(story).ok().and_then(|b| blorb::medium::DiskImage::detect(&b));
+    let st =
+        app::launch_options::LaunchOptionsState::new("Zork Zero", story, None, None, Some(6), disk);
+    let cs = app::colors::ColorScheme::terminal_default();
+    let mut term = Terminal::new(TestBackend::new(100, 26)).unwrap();
+    term.draw(|f| {
+        app::render::launch_options_dialog::draw_launch_options(&st, f.area(), &cs, f.buffer_mut());
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let mut frame = String::new();
+    for y in 0..buf.area().height {
+        for x in 0..buf.area().width {
+            frame.push_str(buf.cell((x, y)).unwrap().symbol());
+        }
+        frame.push('\n');
+    }
+    frame
+}

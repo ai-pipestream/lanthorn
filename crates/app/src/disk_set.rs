@@ -177,6 +177,23 @@ fn is_index_run(values: &[u64]) -> bool {
 /// independent of the order `files` arrives in — the caller may hand over a
 /// directory listing in whatever order the filesystem produced.
 pub fn group(files: &[PathBuf]) -> Vec<Vec<PathBuf>> {
+    group_indexed(files)
+        .into_iter()
+        .map(|g| g.into_iter().map(|(_, p)| p).collect())
+        .collect()
+}
+
+/// [`group`], keeping each volume's **disk number** — the value of the digit run
+/// that varies across the set (SQ-0865).
+///
+/// The number is the one the release itself spells, not the position in the
+/// list: `is_index_run` requires the values to be distinct, to reach `1` and to
+/// stay under [`MAX_INDEX`], but never to be contiguous, so a set missing its
+/// middle platter still reports `3` for the disk labelled 3. That is the whole
+/// reason this is exposed rather than left to a caller counting positions — a
+/// dialog that says "from disk 2" about disk 3 is worse than one that says
+/// nothing.
+pub fn group_indexed(files: &[PathBuf]) -> Vec<Vec<(u64, PathBuf)>> {
     // Candidates: disk-image spellings only, sorted so the result never depends
     // on `read_dir` order.
     let mut cands: Vec<&PathBuf> = files.iter().filter(|p| has_image_ext(p)).collect();
@@ -223,14 +240,16 @@ pub fn group(files: &[PathBuf]) -> Vec<Vec<PathBuf>> {
     }
     groups.retain(|g| g.iter().all(|(_, p)| times_seen.get(p) == Some(&1)));
 
-    let mut out: Vec<Vec<PathBuf>> = groups
+    let mut out: Vec<Vec<(u64, PathBuf)>> = groups
         .into_iter()
         .map(|mut g| {
             g.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            g.into_iter().map(|(_, p)| p).collect()
+            g
         })
         .collect();
-    out.sort();
+    // Ordered by the paths alone, exactly as the `Vec<Vec<PathBuf>>` this used to
+    // build sorted itself — the disk numbers must not become a second sort key.
+    out.sort_by(|a, b| a.iter().map(|(_, p)| p).cmp(b.iter().map(|(_, p)| p)));
     out
 }
 
@@ -240,6 +259,12 @@ pub fn group(files: &[PathBuf]) -> Vec<Vec<PathBuf>> {
 /// Reads `path`'s directory and nothing else: the rule is entirely a question
 /// about names, so this never opens a disk.
 pub fn members(path: &Path) -> Option<Vec<PathBuf>> {
+    Some(members_indexed(path)?.into_iter().map(|(_, p)| p).collect())
+}
+
+/// [`members`], each volume paired with the **disk number** its name carries
+/// (SQ-0865).
+pub fn members_indexed(path: &Path) -> Option<Vec<(u64, PathBuf)>> {
     if !has_image_ext(path) {
         return None;
     }
@@ -250,7 +275,7 @@ pub fn members(path: &Path) -> Option<Vec<PathBuf>> {
         .map(|e| e.path())
         .filter(|p| p.is_file())
         .collect();
-    group(&files).into_iter().find(|g| g.iter().any(|m| m == path))
+    group_indexed(&files).into_iter().find(|g| g.iter().any(|(_, m)| m == path))
 }
 
 #[cfg(test)]

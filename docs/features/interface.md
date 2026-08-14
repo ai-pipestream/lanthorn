@@ -574,8 +574,25 @@ picture archive to draw its art from, and which machine to present itself as.
 and so does double-right-clicking a row.) Plain Enter is untouched, so you only
 meet the dialog when you ask for it. It offers the archives detected for *that*
 story — the same list the info panel shows — plus a line reminding you that an
-archive under some other name is still reachable by naming it outright. Inside
-it, `↑`/`↓` move between choices,
+archive under some other name is still reachable by naming it outright.
+
+Every row is one table: the archive's name, its rendition, how many pictures it
+holds, and where it lives (*from disk 3*, or *from game disk* for a release that
+is a single platter; a file sitting beside the story needs no explanation and
+gets none). The first row — the one that means *don't override anything* — is in
+those same columns and **names the archive it will actually open**:
+
+```
+  (·) Automatic — ZORK0.EG1 (EGA)    503 pictures  from disk 3
+  ( ) ZORK0.CG1            CGA       503 pictures  from disk 1
+  ( ) ZORK0.EG1            EGA       503 pictures  from disk 3
+```
+
+That name is not a guess about what *ought* to happen; it comes from the very
+resolution the launch performs, so the row and the boot cannot disagree. For a
+story with a resource Blorb beside it, that is the Blorb — *Automatic — Zork0.blb
+(Blorb)* — which is the one thing babelmap can boot that the list of native
+archives will never show you. Inside the dialog, `↑`/`↓` move between choices,
 `Space` picks the one under the cursor or flips a checkbox, `Tab`/`Shift-Tab`
 move between the buttons, `Enter` plays and `Esc` backs out. Its choices always
 fit the dialog, so a wheel notch over it has nothing to scroll — and it is eaten
