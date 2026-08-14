@@ -96,7 +96,15 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     // both per-story sources — see `AppState::no_game_colours_cli`. Still expressed
     // as a per-story value rather than by lowering the base, so it is PINNED below
     // and cannot reach the global config.toml.
-    let per_story_honor = if state.no_game_colours_cli {
+    // SQ-0860: …or unless the artwork in hand has no colours to give, which is the
+    // same shape of fact and gets the same treatment. `startup.rs` forces the key
+    // off and pins it before the engine is built (SQ-0806/SQ-0846); this recompute
+    // runs a few lines later and would otherwise land on the global base — captured
+    // BEFORE that force-off — releasing the pin and turning the colours back on for
+    // every consumer that reads `config.honor_game_colours` after boot. Both of
+    // these say "off, for this run" and neither may reach the user's file, so both
+    // ride the per-story value rather than lowering the base.
+    let per_story_honor = if state.no_game_colours_cli || state.artwork_declines_colours {
         Some(false)
     } else {
         per_game_honor.or(garglk_honor)
@@ -406,6 +414,135 @@ mod tests {
         crate::styles::write_per_game_honor(&game_dir, Some(true)).unwrap();
         reload_style(&mut state);
         assert!(state.config.honor_game_colours, "sidecar on wins over base false");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-0860: the artwork force-off survives the boot reload ──────────────
+
+    /// `startup.rs`'s honour sequence, up to the point the post-IFID
+    /// `reload_style` runs: the base is captured FIRST, and the monochrome-artwork
+    /// force-off lands on `Config` after it. `base` is the user's global file.
+    fn state_after_the_artwork_force_off(
+        tag: &str,
+        base: bool,
+    ) -> (AppState, std::path::PathBuf, std::path::PathBuf) {
+        let dir = temp_dir(tag);
+        let global = seed_style(&dir);
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, format!("honor_game_colours = {base}\n")).unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.config_file = cfg_path.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+        state.game_dir = game_dir.clone();
+        state.honor_game_colours_base = base;
+        state.no_game_colours_cli = false;
+        state.config.honor_game_colours = base;
+        if base {
+            // The archive declared the interpreter colourless (SQ-0806/SQ-0846).
+            state.artwork_declines_colours = true;
+            state.config.honor_game_colours = false;
+            state.config.one_run.pin(crate::config::keys::HONOR_GAME_COLOURS, false);
+        }
+        (state, dir, cfg_path)
+    }
+
+    /// The defect: the boot `reload_style` runs a few lines after the artwork
+    /// force-off, finds no `garglk.ini` and no sidecar, and lands on the global
+    /// base — which was captured BEFORE the force-off. Measured before the fix, the
+    /// flag came back `true` and the pin was released in the same breath, so from
+    /// the boot reload onward every consumer of `config.honor_game_colours` read
+    /// the opposite of what the artwork asked for: `poll_zvm_default_colours`
+    /// starts writing header $2C/$2D that §8.3.2 says to leave alone, and an
+    /// `@restart` (`reset.rs`) rebuilds the session honouring the very colours that
+    /// paint a two-colour stencil out.
+    #[test]
+    fn the_artwork_force_off_survives_the_boot_reload() {
+        let (mut state, dir, _cfg) = state_after_the_artwork_force_off("mono-boot", true);
+        reload_style(&mut state);
+        assert!(
+            !state.config.honor_game_colours,
+            "the archive has no colours to give; a reload that reads two files it is \
+             not written in must not overrule it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// …and it survives as a ONE-RUN value. The pin is what keeps a fact about
+    /// this launch's artwork out of the user's global file, so a settings save
+    /// afterwards — the story browser's "remember this directory?" prompt is
+    /// enough — must leave the key exactly as the user wrote it.
+    #[test]
+    fn the_artwork_force_off_never_reaches_the_global_config() {
+        let (mut state, dir, cfg_path) = state_after_the_artwork_force_off("mono-global", true);
+        reload_style(&mut state);
+        assert!(state.config.one_run.holds(crate::config::keys::HONOR_GAME_COLOURS));
+
+        crate::config::write_config_file(&state.config).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            toml::from_str::<crate::config::Config>(&back).unwrap().honor_game_colours,
+            "the GLOBAL file must still say true — one archive spoke, not the user: {back}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other honour mode: a user whose global file already says `false` gets no
+    /// force-off at all (`startup.rs` guards on the live value), nothing is pinned,
+    /// and their own `false` persists as it always has.
+    #[test]
+    fn a_global_false_is_untouched_by_the_artwork_path() {
+        let (mut state, dir, cfg_path) = state_after_the_artwork_force_off("mono-base-off", false);
+        reload_style(&mut state);
+        assert!(!state.config.honor_game_colours, "the user's own base stands");
+        assert!(
+            !state.config.one_run.holds(crate::config::keys::HONOR_GAME_COLOURS),
+            "nothing one-run is in force, so nothing is pinned"
+        );
+        crate::config::write_config_file(&state.config).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !toml::from_str::<crate::config::Config>(&back).unwrap().honor_game_colours,
+            "a global choice persists as always: {back}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pin must never become a blanket ban on writing the key. A deliberate
+    /// choice — `/set-game-colours`, or the settings panel's row edit, both of
+    /// which clear `artwork_declines_colours` — outranks a guess about a machine,
+    /// stays put across the next reload, AND reaches the file.
+    #[test]
+    fn a_deliberate_choice_outranks_the_artwork_and_still_persists() {
+        let (mut state, dir, cfg_path) = state_after_the_artwork_force_off("mono-user", true);
+        reload_style(&mut state);
+        assert!(!state.config.honor_game_colours);
+
+        // `/set-game-colours on`: the sidecar is written and the guess ends.
+        crate::styles::write_per_game_honor(&state.game_dir, Some(true)).unwrap();
+        state.artwork_declines_colours = false;
+        reload_style(&mut state);
+        assert!(state.config.honor_game_colours, "the player settled it by hand");
+
+        // And the settings panel's global edit: the row edit releases the pin, so
+        // the value it leaves is the user's and persists like any other setting.
+        crate::styles::write_per_game_honor(&state.game_dir, None).unwrap();
+        reload_style(&mut state);
+        state.config.one_run.release(crate::config::keys::HONOR_GAME_COLOURS);
+        state.config.honor_game_colours = false;
+        state.honor_game_colours_base = false;
+        crate::config::write_config_file(&state.config).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !toml::from_str::<crate::config::Config>(&back).unwrap().honor_game_colours,
+            "a deliberate global choice must still reach the file: {back}"
+        );
+        // …and a later reload keeps it, rather than recomputing it back on.
+        reload_style(&mut state);
+        assert!(!state.config.honor_game_colours, "the user's choice is not undone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
