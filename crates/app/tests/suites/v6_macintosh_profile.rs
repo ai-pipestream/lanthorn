@@ -82,10 +82,19 @@ struct Launch {
     std_window: Option<(u16, u16)>,
     art_scale: Option<(u32, u32)>,
     monochrome: bool,
+    /// Whether the game's colours were honoured once the archive had had its
+    /// say — `startup.rs`'s answer, not the caller's request (SQ-0846).
+    honoured: bool,
 }
 
 /// Boot the disk exactly as `startup.rs` does, optionally naming an archive by
 /// hand (`--pictures`) and optionally overriding the interpreter number.
+///
+/// `honor_game_colours` is the value the CONFIG carries into the launch; the
+/// value the session gets is that one filtered through
+/// [`PictSource::declines_game_colours`], because `startup.rs` runs the same
+/// filter and SQ-0846 is a defect about exactly which side of it the Macintosh
+/// falls on. `Launch::honoured` is what actually reached the session.
 fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>) -> Launch {
     let path = mac_disk().expect("caller checked the fixture is present");
     let bytes = match app::hints::load_story(&path).expect("Story.data mounts") {
@@ -114,10 +123,13 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
         .or_else(|| profile.std_window());
     let art_scale = picts.art_scale();
     let monochrome = picts.is_monochrome();
-    let default_colours = honor_game_colours.then(|| profile.default_colours()).flatten();
+    // SQ-0806/SQ-0846: two-colour artwork declares the interpreter colourless —
+    // but only where the machine has no colours of its own to declare.
+    let honoured = honor_game_colours && !picts.declines_game_colours(profile);
+    let default_colours = honoured.then(|| profile.default_colours()).flatten();
     let mut session = GameSession::new_with_art_scale(
         bytes,
-        honor_game_colours,
+        honoured,
         false,
         explicit.or_else(|| profile.interpreter_number()),
         false,
@@ -134,7 +146,7 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
     let _ = std::fs::remove_dir_all(&dir);
-    Launch { session, std_window, art_scale, monochrome }
+    Launch { session, std_window, art_scale, monochrome, honoured }
 }
 
 /// Ask the game for its VERSION line, which is where Zork Zero names the machine
@@ -206,9 +218,10 @@ fn zork_zero_off_the_macintosh_disk_says_it_is_on_a_macintosh() {
 /// this is the acceptance criterion in the game's own words.
 ///
 /// Pinned in both `honor_game_colours` modes: header `$1E` is not a colour and
-/// must not move with one, and the two-colour archive turns the flag off at
-/// startup on its own, which is exactly the kind of interaction a single-mode
-/// suite has masked before.
+/// must not move with one, and a two-colour archive has a say in that flag at
+/// startup, which is exactly the kind of interaction a single-mode suite has
+/// masked before. (On this machine it no longer gets one — SQ-0846, and
+/// `the_macintoshs_own_archive_no_longer_declines_its_own_colours` below.)
 #[test]
 fn naming_either_of_the_disks_archives_still_boots_a_macintosh() {
     if mac_disk().is_none() {
@@ -375,4 +388,228 @@ fn every_macintosh_plate_and_its_screen_are_in_the_same_space() {
             "{name}: picture_data must report unit-space sizes",
         );
     }
+}
+
+// ── The colours, on screen ───────────────────────────────────────────────────
+
+/// **The archive may not talk the Macintosh out of its own colours** (SQ-0846).
+///
+/// SQ-0806 reads a two-colour archive as evidence that the interpreter has no
+/// colours to offer, and on an IBM PC that is the only evidence there is: a
+/// `.CG1` names no machine, [`InterpreterProfile::IbmPc`] states no defaults,
+/// and bocfel's own note on the flag is *"the flags always seem to equal 0xe if
+/// the graphics are monochrome"* — a heuristic, doing the best that can be done.
+///
+/// A Macintosh is not that case. The medium named the machine (an HFS volume is
+/// Apple's and nobody else's), and the machine's own interpreter named its
+/// colours — `mac/xzip.lst`'s `SetColor := (zWHITE*256) + zBLACK`. That same
+/// interpreter picked `Pic.Data` *for* that white page, in one decision. So the
+/// guess stands down in front of the fact, and the discriminator is exactly
+/// that: does the profile state defaults of its own?
+///
+/// **The same bytes, two machines, two answers** — which is what makes this a
+/// profile question rather than an archive one. Ask the disk's monochrome
+/// archive under the Macintosh and it keeps its colours; ask it under the IBM PC
+/// and SQ-0806's rule fires on it unchanged.
+#[test]
+fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
+    if mac_disk().is_none() {
+        return;
+    }
+    let path = mac_disk().expect("fixture");
+    let dir = std::env::temp_dir().join(format!("babelmap-mac-declines-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    for (archive, mono) in [("Pic.data", true), ("CPic.data", false)] {
+        let over = PictureOverride::resolve_with_session(&path, &dir, Some(archive));
+        let picts = PictSource::resolve_with_override(&path, over);
+        assert_eq!(picts.is_monochrome(), mono, "{archive}: the archive's own EF_MONO flags");
+        assert!(
+            !picts.declines_game_colours(InterpreterProfile::Macintosh),
+            "{archive}: a machine that states its own defaults keeps them",
+        );
+        assert_eq!(
+            picts.declines_game_colours(InterpreterProfile::IbmPc),
+            mono,
+            "{archive}: the same bytes under a machine with no defaults — SQ-0806, unmoved",
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // …and the launch chain agrees, which is the half `startup.rs` runs.
+    assert!(launch(Some("Pic.data"), true, None).honoured, "the mono disk keeps its colours");
+    assert!(
+        !launch(Some("Pic.data"), false, None).honoured,
+        "and the user's own switch still turns them off",
+    );
+}
+
+/// **The Macintosh's page reaches the SCREEN MODEL, not just header `$2C`.**
+///
+/// This is SQ-0740's Amiga finding one machine later, and it was found the same
+/// way — by the profile being invisible. Zork Zero release 296 **never calls
+/// `set_colour` at all** on the Macintosh (measured: every window stays
+/// [`ZColour::Default`], on both of the disk's archives and in both colour
+/// modes), so with nothing painting the `$2C`/`$2D` pair the whole screen fell
+/// through to the host theme and a Macintosh rendered exactly like an IBM PC.
+///
+/// Pinned in BOTH `honor_game_colours` modes, per the project's colour
+/// convention. The `false` half is the load-bearing one here: a machine's own
+/// page is still a game colour, and the switch that declines them must decline
+/// this too — it does so at the source, since a colourless interpreter is never
+/// handed the profile's pair to publish and the header then carries zvm's own
+/// §8.3.2 seed, which is nobody's machine.
+#[test]
+fn the_macintosh_screen_model_carries_the_machines_white_page() {
+    if mac_disk().is_none() {
+        return;
+    }
+    use app::engine::Engine as _;
+    use zvm::screen::ZColour;
+
+    for archive in [None, Some("Pic.data"), Some("CPic.data")] {
+        let honoured = launch(archive, true, None);
+        assert!(honoured.honoured, "{archive:?}: colours are honoured on this machine");
+        let v6 = honoured.session.machine.screen.v6.as_ref().expect("v6 window table");
+        assert!(
+            v6.windows.iter().all(|w| (w.fg, w.bg) == (ZColour::Default, ZColour::Default)),
+            "{archive:?}: Zork Zero names no colour on the Mac — the machine's pair is all there is",
+        );
+        let model = honoured.session.screen();
+        assert_eq!(
+            (app::state::unpack_zcolour(model.fg), app::state::unpack_zcolour(model.bg)),
+            (
+                ZColour::Standard(app::interpreter::MAC_DEFAULT_FOREGROUND),
+                ZColour::Standard(app::interpreter::MAC_DEFAULT_BACKGROUND)
+            ),
+            "{archive:?}: black ink on a white page, as `mac/xzip.lst` states them",
+        );
+
+        let themed = launch(archive, false, None);
+        let model = themed.session.screen();
+        assert_eq!(
+            (app::state::unpack_zcolour(model.fg), app::state::unpack_zcolour(model.bg)),
+            (ZColour::Default, ZColour::Default),
+            "{archive:?}: colours declined — the host theme owns the page, machine or no machine",
+        );
+    }
+}
+
+/// A hybrid render at real kitty-ish cell metrics (8x18) — the shipped mode, and
+/// the one SQ-0846 was reported against. Returns the state the frame left
+/// behind, because the pair the pixel path resolves through
+/// (`render::screen::v6_host_pair`) is published during the render.
+#[allow(deprecated)]
+fn render_hybrid(session: &GameSession, honour: bool) -> app::state::AppState {
+    use app::engine::Engine as _;
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker =
+        Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.honor_game_colours = honour;
+    let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    state
+}
+
+/// Every colour inside the status banner window's own box, as the pixel path
+/// composes it, plus the `(ink, page)` pair that composition resolved through.
+type BannerTally = (image::Rgba<u8>, image::Rgba<u8>, std::collections::BTreeMap<[u8; 4], u32>);
+fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
+    use app::engine::{Engine as _, WinNode};
+    let state = render_hybrid(session, honour);
+    let (ink, page) = app::render::screen::v6_host_pair(&state);
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let canvas = app::render::v6_layout::build_chrome_canvas(
+        &layout.chrome,
+        native,
+        ink,
+        page,
+        &state.colors,
+    );
+    // The banner is found by the text in it, never by a window id.
+    let banner = layout
+        .chrome
+        .iter()
+        .find(|it| match &it.node {
+            WinNode::Grid(g) => g.px_texts.iter().any(|t| t.text.contains("Score:")),
+            _ => false,
+        })
+        .expect("Zork Zero's status banner is a grid window carrying a `Score:` run");
+    let (x0, y0) = (banner.x_px as u32, banner.y_px as u32);
+    let x1 = (x0 + banner.w_px as u32).min(canvas.width());
+    let y1 = (y0 + banner.h_px as u32).min(canvas.height());
+    let mut tally: std::collections::BTreeMap<[u8; 4], u32> = Default::default();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            *tally.entry(canvas.get_pixel(x, y).0).or_default() += 1;
+        }
+    }
+    (ink, page, tally)
+}
+
+/// **THE DELIVERABLE — SQ-0846, as reported:** *"the text is not rendering in
+/// the location/score area"*, on `stories/Zork Zero Disk.image` with
+/// `--pictures Pic.data`.
+///
+/// It was rendering. It was the host theme's **grey**, on the game's own
+/// **white** two-colour plate, and a two-colour Macintosh has no grey anywhere
+/// in it — so the banner read as empty. A real Mac drew it black on white, and
+/// `mac/xzip.lst` says so in one line.
+///
+/// **Measured, on the banner window's own box (480x59 native pixels), release
+/// 296 / serial 881019 at the first prompt.** The artwork accounts for 15,405
+/// white pixels, 8,805 black and 2,608 transparent in both modes; the only thing
+/// that moves is the 1,502 pixels of status-text ink:
+///
+/// | mode                     | black  | the theme's ink |
+/// |--------------------------|--------|-----------------|
+/// | colours honoured (fixed) | 10,307 | **0**           |
+/// | colours declined (theme) |  8,805 | **1,502**       |
+///
+/// The RELATION is asserted rather than the constants, so the day this banner's
+/// art changes under us the test still says the same true thing: every pixel the
+/// theme draws in its own ink is drawn black instead, and none go missing.
+///
+/// FALSIFIED by reverting either half of the fix — `session::machine_screen_pair`
+/// or [`PictSource::declines_game_colours`]. With either one back, the honoured
+/// column becomes the themed one and 1,502 grey pixels sit on the white banner,
+/// which is the report verbatim.
+#[test]
+fn the_macintosh_status_banner_is_black_ink_and_never_the_themes_grey() {
+    if mac_disk().is_none() {
+        return;
+    }
+    let honoured = launch(Some("Pic.data"), true, None);
+    let themed = launch(Some("Pic.data"), false, None);
+    assert!(honoured.monochrome && themed.monochrome, "both launches load the two-colour plate");
+
+    let (ink, page, hon) = banner_tally(&honoured.session, honoured.honoured);
+    let (theme_ink, _, thm) = banner_tally(&themed.session, themed.honoured);
+
+    let black = image::Rgba([0, 0, 0, 255]);
+    let white = image::Rgba([255, 255, 255, 255]);
+    assert_eq!((ink, page), (black, white), "the Macintosh's own pair reaches the pixel path");
+    assert_ne!(theme_ink, black, "the theme's ink is what the banner must NOT be drawn in");
+
+    let count = |t: &std::collections::BTreeMap<[u8; 4], u32>, c: image::Rgba<u8>| {
+        t.get(&c.0).copied().unwrap_or(0)
+    };
+    let grey_on_white = count(&thm, theme_ink);
+    assert!(
+        grey_on_white > 0,
+        "the symptom must reproduce with colours declined, else this test proves nothing",
+    );
+    assert_eq!(count(&hon, theme_ink), 0, "not one pixel of the theme's ink on a two-colour Mac");
+    assert_eq!(
+        count(&hon, black),
+        count(&thm, black) + grey_on_white,
+        "every pixel the theme drew grey is drawn black instead — none lost, none added",
+    );
+    assert_eq!(count(&hon, white), count(&thm, white), "the plate's own white is untouched");
 }

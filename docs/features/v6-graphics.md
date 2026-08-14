@@ -474,6 +474,17 @@ page, the stencil reveals it, and the artwork comes out in your colours. It
 applies to that story only — it never touches your saved settings, so opening a
 `.cg1` once does not quietly strip the colours from everything else you play.
 
+**Unless the machine has colours of its own to state.** That rule reasons from
+the artwork because on a PC there is nothing else to reason from: a `.CG1` names
+no machine, and the monochrome flag is the only evidence there is. A Macintosh
+disk is not that case — the volume names the machine, Infocom's own Mac
+interpreter names its colours, and the *same* interpreter picked the monochrome
+`Pic.data` **for** that white page, in one decision. So on a Mac the guess stands
+down in front of the fact and the machine keeps its black-on-white, which is what
+it took to stop the status banner's location and score coming out grey on the
+game's own white plate. Same bytes, two machines, two answers: hand that archive
+to the IBM PC profile and the stencil rule fires on it unchanged.
+
 Neither is *adaptive*, which matters more than it sounds. A picture that carries
 no palette normally means "draw me with whatever palette is current" (below), and
 an EGA picture carries none for an entirely different reason — it has no say in

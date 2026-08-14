@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use app::graphics::PictSource;
+use app::interpreter::InterpreterProfile;
 use app::session::{GameSession, InputKind};
 use blorb::infocom_pics::{InfocomPics, Rgb, CGA_PALETTE, DEFAULT_PALETTE, EGA_PALETTE};
 
@@ -325,5 +326,161 @@ fn a_cga_archive_reports_itself_monochrome_and_the_others_do_not() {
         assert_eq!(pics.is_monochrome(), want, "{archive}: InfocomPics::is_monochrome");
         let Some(src) = native(archive) else { continue };
         assert_eq!(src.is_monochrome(), want, "{archive}: PictSource::is_monochrome");
+    }
+}
+
+/// Boot a v6 story against a NAMED archive the way `startup.rs` does, with the
+/// interpreter number overridable so the alternative SQ-0806 rejected can be
+/// measured rather than asserted. `honour` is the config's value; the archive
+/// still gets its say through [`PictSource::declines_game_colours`].
+fn boot_named(
+    story: &str,
+    archive: &str,
+    release: (u16, &str),
+    honour: bool,
+    interpreter: Option<u8>,
+) -> Option<GameSession> {
+    let pics = InfocomPics::parse(read(archive)?).expect("a native Infocom archive parses");
+    let (loaded, _) = app::hints::load_mounted_story(&stories_dir().join(story))
+        .map_err(|_| eprintln!("SKIP: gitignored story missing: {story}"))
+        .ok()?;
+    let bytes = loaded.bytes().to_vec();
+    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), release.0, "{story}: release");
+    assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), release.1, "{story}: serial");
+    let profile = InterpreterProfile::for_art_flavour(pics.flavour());
+    zvm::screen::set_palette(profile.palette());
+    let mut picts = PictSource::from_native(pics);
+    let honoured = honour && !picts.declines_game_colours(profile);
+    let picture_dims = picts.all_pict_dims();
+    let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
+    let v6_art_scale = picts.art_scale();
+    let mut session = GameSession::new_with_art_scale(
+        bytes,
+        honoured,
+        false,
+        interpreter.or_else(|| profile.interpreter_number()),
+        false,
+        picture_dims,
+        v6_screen_px,
+        v6_art_scale,
+        honoured.then(|| profile.default_colours()).flatten(),
+        None,
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{story} + {archive}: should boot without a ZError: {e:?}"));
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    for _ in 0..4 {
+        match session.pending_input() {
+            InputKind::Line => session.submit("look"),
+            InputKind::Char => session.submit_char(b' '),
+            InputKind::Event => session.submit(""),
+        };
+    }
+    Some(session)
+}
+
+/// The opaque pixels of the flank either side of the story window, off the
+/// graphics canvas the render composes — `(left, right)`.
+fn flank_pixels(session: &GameSession) -> (u64, u64) {
+    use app::engine::{Engine as _, WinNode};
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+    let story = layout.story.expect("Shogun's gameplay screen has a story window");
+    let (lx, rx) = (story.x_px as u32, story.x_px as u32 + story.w_px as u32);
+    let tally = |x0: u32, x1: u32| -> u64 {
+        (0..gfx.height())
+            .map(|y| (x0..x1).filter(|&x| gfx.get_pixel(x, y)[3] != 0).count() as u64)
+            .sum()
+    };
+    (tally(0, lx), tally(rx, gfx.width()))
+}
+
+/// **SHOGUN MUST NOT BE TRADED FOR THE MACINTOSH** — the non-regression SQ-0846
+/// owes SQ-0806, pinned as its own case so a later change cannot quietly swap
+/// one for the other.
+///
+/// SQ-0806's comment records the alternative it turned down: *"Through the
+/// honour flag rather than the interpreter number, which would look like the
+/// tidier fix and is not: header `$1E` steers far more of a v6 game than colour,
+/// and advertising 1 (DECSystem-20) costs Shogun its entire RIGHT border."* This
+/// case holds both ends of that sentence down.
+///
+/// **Measured here**, on `shogun-r322-s890706.z6` at the first prompt, counting
+/// opaque pixels either side of the story window on the composed graphics canvas:
+///
+/// | rendition    | interpreter | left flank | right flank |
+/// |--------------|-------------|------------|-------------|
+/// | `shogun.cg1` | 6 (IBM PC)  | 22,220     | **22,794**  |
+/// | `shogun.cg1` | 1 (DEC-20)  | 22,220     | **0**       |
+/// | `shogun.eg1` | 6 (IBM PC)  | 18,400     | **18,400**  |
+/// | `shogun.eg1` | 1 (DEC-20)  | 18,400     | **0**       |
+///
+/// so the cost of the tidier fix is not "~11,000 pixels" as the comment
+/// estimated — it is the whole flank, on both renditions, with the left one
+/// standing untouched beside it to prove the game is still running.
+///
+/// **And the honour flag is free.** The same measurement is identical with
+/// colours honoured and declined, which is exactly why SQ-0806 could reach for
+/// it: Shogun's border is a function of the machine it thinks it is on, not of
+/// whether it was offered colours.
+///
+/// The Macintosh carve-out is checked in the same breath, because the way to
+/// regress this is to widen it: `zork0.cg1` and `shogun.cg1` state no machine,
+/// so they must still decline colours exactly as they did.
+#[test]
+fn shoguns_flanks_survive_the_rule_that_spared_them() {
+    for archive in ["shogun.cg1", "shogun.eg1"] {
+        let Some(pics) = read(archive).map(|r| InfocomPics::parse(r).expect("parses")) else {
+            continue;
+        };
+        let profile = InterpreterProfile::for_art_flavour(pics.flavour());
+        let src = PictSource::from_native(pics);
+        assert_eq!(profile, InterpreterProfile::IbmPc, "{archive}: a DOS rendition is an IBM PC");
+        assert_eq!(
+            src.declines_game_colours(profile),
+            src.is_monochrome(),
+            "{archive}: SQ-0806's rule, unmoved — a PC states no colours of its own",
+        );
+
+        for honour in [true, false] {
+            let Some(kept) = boot_named("shogun-r322-s890706.z6", archive, (322, "890706"), honour, None)
+            else {
+                continue;
+            };
+            assert_eq!(
+                kept.machine.mem.read_byte(0x1E),
+                6,
+                "{archive} (honour={honour}): the rule must never move header $1E",
+            );
+            let (left, right) = flank_pixels(&kept);
+            assert!(
+                right > 10_000,
+                "{archive} (honour={honour}): the right flank is gone — {right} opaque pixels",
+            );
+            assert_eq!(
+                (left, right),
+                match archive {
+                    "shogun.cg1" => (22_220, 22_794),
+                    _ => (18_400, 18_400),
+                },
+                "{archive} (honour={honour}): the flanks, measured",
+            );
+
+            // …and the alternative, so the number above is a finding and not a
+            // hope: advertise DECSystem-20 and the right flank is simply gone.
+            let Some(lost) =
+                boot_named("shogun-r322-s890706.z6", archive, (322, "890706"), honour, Some(1))
+            else {
+                continue;
+            };
+            let (dec_left, dec_right) = flank_pixels(&lost);
+            assert_eq!(dec_left, left, "{archive}: interpreter 1 keeps the LEFT flank");
+            assert_eq!(dec_right, 0, "{archive}: …and loses the right one entirely");
+        }
     }
 }
