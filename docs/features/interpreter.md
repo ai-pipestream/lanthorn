@@ -960,6 +960,17 @@ Amiga floppy or anywhere else.
   artwork-flavour preference needs the resource reader; and a standard window is
   a Version 6 picture space stated by an *archive* rather than by a machine.
 
+  One of those machine facts decides what the *artwork* does, not just the text.
+  The Amiga has a single set of colour registers, so a scene's palette is the
+  whole screen's: on a real Amiga, *Shogun*'s ornate side panels are
+  blue-and-white in the storm on deck and red-on-cream below decks, though the
+  border is drawn only once. The same game's DOS press leaves them one colour
+  throughout — and that is equally right, because the MCGA's DAC holds 256
+  entries and Infocom used them, which is how *Arthur*'s map screen manages
+  three palettes at once. One story, one border, two machines, two behaviours.
+  babelmap follows whichever machine you are presenting as; `one screen palette`
+  in the table above is the column that says which.
+
   **One byte in that neighbourhood is still unsourced**, and it is one a story
   can print. Header `$1F` is the interpreter *version*, and babelmap writes `A`
   for every machine — a value that arrived in the same early commit as the

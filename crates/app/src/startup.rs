@@ -556,6 +556,18 @@ pub(crate) fn boot_story(
             } else {
                 app::graphics::PictSource::new(None)
             };
+            // SQ-0887: does this MACHINE show one palette at a time? An archive
+            // cannot answer — Shogun's Amiga `Pic.data` and its DOS `.MG1` both
+            // give every picture its own colours, and only the Amiga lets the
+            // scene's table repaint the border — so the profile answers, here,
+            // where the machine is already resolved. Before `all_pict_dims`, for
+            // the same reason as the line below it.
+            picts.set_screen_palette(
+                cfg.interpreter_profile
+                    .interpreter_number()
+                    .and_then(zvm::interpreter::machine)
+                    .is_some_and(|m| m.one_screen_palette),
+            );
             // SQ-0816: the player may prefer the archive's own pixels to the
             // fused ones. Before `all_pict_dims`, so nothing is decoded under the
             // wrong answer.

@@ -345,6 +345,41 @@ pub struct MachineProfile {
     /// measured screen rather than a plausible one. Flipping this flag is what
     /// adding them would take.
     pub v6_screen_page: bool,
+    /// This machine shows the whole screen through **one palette**, so loading a
+    /// picture's colours recolours everything already drawn — border art
+    /// included, not just the pictures an archive declares adaptive.
+    ///
+    /// A v6 framebuffer holds palette INDICES. What that means for the screen
+    /// depends on how many colour registers the machine has, and the corpus
+    /// splits cleanly:
+    ///
+    /// * **The Amiga has one set.** Measured on `James Clavell's Shogun.adf`
+    ///   (release 295, serial 890321), whose `Pic.data` declares NO adaptive
+    ///   pictures and gives all 48 a palette of their own: picture 3 is the
+    ///   ornate border and its own table is gold (`#CCAA66`), picture 7 the
+    ///   storm on deck (blues — `#99BBDD`, `#334499`) and picture 8 below decks
+    ///   (reds and creams — `#CC0000`, `#CCAA88`). On the real machine the
+    ///   border is drawn once and is blue-and-white in the storm and red-on-cream
+    ///   below decks, because the scene's palette is the screen's palette.
+    /// * **The MCGA does not, and the SAME GAME proves it.** Shogun's DOS press
+    ///   leaves its side panels one colour throughout, where the Amiga's follow
+    ///   the scene — one story, one border, two machines, two behaviours, which
+    ///   is as clean a control as this corpus offers. The reason is the hardware:
+    ///   the MCGA's DAC has 256 entries and Infocom used them. Arthur's map
+    ///   screen lays down seven pictures carrying THREE distinct palettes at
+    ///   once and each keeps its own; forcing one onto all seven is what SQ-0881
+    ///   fixed — grey ground, rainbow scrolls.
+    /// * **EGA and CGA never ask**: a hardware table outranks any loaded palette
+    ///   (SQ-0794), so the question does not arise for them.
+    ///
+    /// **Only the Amiga sets it, and the others are DECLINED rather than
+    /// assumed** — the same standard as the rest of this table. The Macintosh
+    /// and the Atari ST plausibly had one screen palette too, but no frame of
+    /// either has been measured showing a border following a scene, and a
+    /// plausible-looking inference is exactly what this table refuses. Turning
+    /// one on is one measurement's work: find a title whose border art and scene
+    /// art carry different palettes, and look.
+    pub one_screen_palette: bool,
 }
 
 /// Every §11.1.3 machine zvm models, in number order.
@@ -369,6 +404,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: Some((APPLE_DEFAULT_BACKGROUND, APPLE_DEFAULT_FOREGROUND)),
         palette: Palette::Standard,
         global_colour_pens: false,
+        one_screen_palette: false,
         v6_screen_page: false,
     },
     MachineProfile {
@@ -377,6 +413,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: Some((MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND)),
         palette: Palette::Standard,
         global_colour_pens: false,
+        one_screen_palette: false,
         v6_screen_page: true,
     },
     MachineProfile {
@@ -385,6 +422,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: Some((AMIGA_DEFAULT_BACKGROUND, AMIGA_DEFAULT_FOREGROUND)),
         palette: Palette::Amiga,
         global_colour_pens: true,
+        one_screen_palette: true,
         v6_screen_page: true,
     },
     MachineProfile {
@@ -393,6 +431,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: Some((ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND)),
         palette: Palette::Standard,
         global_colour_pens: false,
+        one_screen_palette: false,
         v6_screen_page: false,
     },
     MachineProfile {
@@ -402,6 +441,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: None,
         palette: Palette::Standard,
         global_colour_pens: false,
+        one_screen_palette: false,
         v6_screen_page: false,
     },
     MachineProfile {
@@ -411,6 +451,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: None,
         palette: Palette::Standard,
         global_colour_pens: false,
+        one_screen_palette: false,
         v6_screen_page: false,
     },
     MachineProfile {
@@ -419,6 +460,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: Some((APPLE_DEFAULT_BACKGROUND, APPLE_DEFAULT_FOREGROUND)),
         palette: Palette::Standard,
         global_colour_pens: false,
+        one_screen_palette: false,
         v6_screen_page: false,
     },
     MachineProfile {
@@ -427,6 +469,7 @@ pub const MACHINES: &[MachineProfile] = &[
         default_colours: Some((APPLE_DEFAULT_BACKGROUND, APPLE_DEFAULT_FOREGROUND)),
         palette: Palette::Standard,
         global_colour_pens: false,
+        one_screen_palette: false,
         v6_screen_page: false,
     },
 ];

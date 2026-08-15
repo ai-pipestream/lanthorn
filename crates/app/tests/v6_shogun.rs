@@ -20,3 +20,6 @@ mod v6_shogun_prompt_style;
 mod v6_shogun_status_alignment;
 #[path = "suites/v6_shogun_title_header.rs"]
 mod v6_shogun_title_header;
+
+#[path = "suites/v6_screen_palette.rs"]
+mod v6_screen_palette;

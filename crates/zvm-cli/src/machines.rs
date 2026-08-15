@@ -76,13 +76,14 @@ pub fn table() -> String {
     );
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     s.push_str(&format!(
-        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {}\n",
-        "#", "machine", "default page / ink ($2C/$2D)", "palette", "global pens", "v6 screen page"
+        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {}\n",
+        "#", "machine", "default page / ink ($2C/$2D)", "palette", "global pens", "v6 screen page",
+        "one screen palette"
     ));
-    s.push_str(&format!("  {}\n", "-".repeat(name_w + 76)));
+    s.push_str(&format!("  {}\n", "-".repeat(name_w + 94)));
     for m in MACHINES {
         s.push_str(&format!(
-            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {}\n",
+            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {}\n",
             m.number,
             m.name,
             colours(m),
@@ -92,6 +93,7 @@ pub fn table() -> String {
             },
             yes_no(m.global_colour_pens),
             yes_no(m.v6_screen_page),
+            yes_no(m.one_screen_palette),
         ));
     }
     s.push_str(&format!("\n{LEGEND}"));
@@ -132,6 +134,8 @@ global pens     §8.3's Amiga rule: one pair of text pens for the whole screen,
                 so a set_colour moves the screen rather than one window.
 v6 screen page  the machine's default pair IS the Version 6 screen — the ground
                 every window that names no colour of its own is read on.
+one screen      the whole screen shows through ONE palette, so a picture's own
+palette         colours repaint everything already drawn, border art included.
 ";
 
 // NOT a `"\` continuation: that escape eats the newline AND the leading
@@ -183,12 +187,12 @@ mod tests {
         assert!(amiga.contains(" 4 "), "number");
         assert!(amiga.contains("bg 12") && amiga.contains("fg  9"), "default_colours: {amiga}");
         assert!(amiga.contains("Amiga  "), "palette named: {amiga}");
-        assert_eq!(amiga.matches("yes").count(), 2, "global pens AND v6 page: {amiga}");
+        assert_eq!(amiga.matches("yes").count(), 3, "global pens, v6 page AND one palette: {amiga}");
 
         let mac = row("Macintosh");
         assert!(mac.contains("bg  9") && mac.contains("fg  2"), "default_colours: {mac}");
         assert!(mac.contains("standard"), "palette: {mac}");
-        assert_eq!(mac.matches("yes").count(), 1, "v6 page but NOT global pens: {mac}");
+        assert_eq!(mac.matches("yes").count(), 1, "v6 page only — not global pens, not one palette: {mac}");
 
         let pc = row("IBM PC");
         assert!(pc.contains("the player's own terminal"), "a decline says so: {pc}");

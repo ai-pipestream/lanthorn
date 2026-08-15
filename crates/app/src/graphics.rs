@@ -239,6 +239,19 @@ pub struct PictSource {
     /// [`PictSource::is_monochrome`], because both answers come off the archive's
     /// own contents and neither ever changes for a loaded source.
     blend_columns: bool,
+    /// Does this run's MACHINE show the whole screen through one palette, so a
+    /// picture's colours recolour everything already drawn (SQ-0887)?
+    ///
+    /// `zvm::interpreter::MachineProfile::one_screen_palette`, handed down by
+    /// the app because only the app resolves which machine this is. It is a
+    /// hardware fact and not an archive one, which is why it arrives from
+    /// outside rather than being read off the file: Shogun's Amiga `Pic.data`
+    /// and its DOS `.MG1` both give every picture a palette, and only one of the
+    /// two machines lets the last one loaded repaint the border.
+    ///
+    /// `false` is the behaviour every source had before, so a machine that has
+    /// not been measured changes nothing.
+    screen_palette: bool,
 }
 
 impl PictSource {
@@ -257,7 +270,16 @@ impl PictSource {
             adaptive_cache: HashMap::new(),
             hw_palette: None,
             blend_columns: false,
+            screen_palette: false,
         }
+    }
+
+    /// Tell this source the machine shows one palette at a time (SQ-0887).
+    ///
+    /// Set from the interpreter profile at boot, and re-asserted every launch so
+    /// a picker→play loop cannot carry one story's machine into the next.
+    pub fn set_screen_palette(&mut self, one: bool) {
+        self.screen_palette = one;
     }
 
     /// A source backed by a native Infocom picture archive (Amiga `Pic.data`)
@@ -493,7 +515,13 @@ impl PictSource {
     /// Current Palette is what an ADAPTIVE picture is drawn through. A picture
     /// with a palette of its own was never asking.
     pub fn image_under_current_palette(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
-        if self.adaptive.contains(&resnum) {
+        // SQ-0887: on a one-palette machine EVERY picture on the screen is shown
+        // through the live table, which is the reading SQ-0881 removed — rightly,
+        // for the MCGA, whose DAC holds 256 entries and whose pictures therefore
+        // keep their own. Keyed on the machine, the two findings stop competing:
+        // Shogun's border follows the scene on the Amiga and does not on DOS,
+        // which is the same story and the same border on two machines.
+        if self.screen_palette || self.adaptive.contains(&resnum) {
             return self.adaptive_image(resnum);
         }
         self.get(resnum).cloned()
@@ -696,7 +724,15 @@ impl PictSource {
     pub fn image(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
         // No APal chunk → no adaptive pictures: keep the original fast path
         // (and never touch palette state) for every non-v6 / non-adaptive blorb.
-        if self.adaptive.is_empty() {
+        //
+        // SQ-0887: unless the MACHINE shows one palette at a time, in which case
+        // there is palette state to keep even with nothing declared adaptive —
+        // Shogun's Amiga archive declares none and gives all 48 pictures their
+        // own colours, and this early return is what left `current_plte` at
+        // `None` forever, so `palette_gen` never moved and the SQ-0567 replay
+        // never ran. The border kept the gold of its own table through every
+        // scene.
+        if self.adaptive.is_empty() && !self.screen_palette {
             return self.get(resnum).cloned();
         }
         if self.adaptive.contains(&resnum) {
