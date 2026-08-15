@@ -2016,7 +2016,6 @@ fn render_middle(
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
     let images_enabled = state.game_picker.is_some();
-    let frameless = state.config.v6_render == crate::config::V6RenderMode::Frameless;
     let char_px = state
         .game_picker
         .as_ref()
@@ -2055,7 +2054,6 @@ fn render_middle(
                     || c.key.width != body_area.width
                     || c.key.images_enabled != images_enabled
                     || c.key.char_px != char_px
-                    || c.key.frameless != frameless
                     || c.key.clear_anchor != state.clear_anchor
                     || c.key.room_name.as_deref() != state.current_room_name.as_deref()
                     || c.key.machine_pair != state.v6_page_pair.get()
@@ -2115,29 +2113,24 @@ fn render_middle(
         // per-frame by the v6 Layered arm; 0 (unset) or 1 = no scaling.
         let img_scale = state.v6_image_scale.get();
         let img_scale = if img_scale > 1.0 { img_scale } else { 1.0 };
-        // Frameless mode (SQ-0461) applies its OWN inline-image sizing (drop-caps
-        // to ~3–4 rows, band art upscaled) and is the ONLY mode that draws
-        // graphics-window CONTENT splashes inline — hybrid/raster render the
-        // window canvas itself, so they must DROP `ContentSplash` entries here to
-        // avoid double-rendering. Both branches leave hybrid/raster byte-identical.
+        // SQ-0895: this used to fork on frameless, which applied its own
+        // inline-image sizing and was the ONLY mode that drew graphics-window
+        // CONTENT splashes inline — every other mode had to DROP the
+        // `ContentSplash` entries to avoid double-rendering what it already drew
+        // as a window canvas. With the mode gone nothing draws them, so the
+        // entries are no longer emitted at all and the fork collapses to the
+        // hybrid letterbox scaling that was always the other branch.
         let filtered_images: Vec<Option<crate::inline_image::InlineImage>> = visible_indices
             .iter()
             .map(|&i| {
                 let mut img = state.transcript_images.get(i).cloned().flatten();
                 if let Some(im) = img.as_mut() {
-                    if !frameless && im.source == crate::inline_image::ImageSource::ContentSplash {
-                        return None; // hybrid/raster draw the window itself
-                    }
-                    if im.scaled.is_none() {
-                        if frameless {
-                            im.scaled = im.frameless_scaled(char_px, body_area.width);
-                        } else if img_scale > 1.0 {
-                            let (w, h) = (im.pixels.width().max(1), im.pixels.height().max(1));
-                            im.scaled = Some((
-                                (w as f32 * img_scale) as u32,
-                                (h as f32 * img_scale) as u32,
-                            ));
-                        }
+                    if im.scaled.is_none() && img_scale > 1.0 {
+                        let (w, h) = (im.pixels.width().max(1), im.pixels.height().max(1));
+                        im.scaled = Some((
+                            (w as f32 * img_scale) as u32,
+                            (h as f32 * img_scale) as u32,
+                        ));
                     }
                 }
                 img
@@ -2180,7 +2173,6 @@ fn render_middle(
                 width: body_area.width,
                 images_enabled,
                 char_px,
-                frameless,
                 clear_anchor: state.clear_anchor,
                 room_name: state.current_room_name.clone(),
                 machine_pair: state.v6_page_pair.get(),
@@ -2716,7 +2708,7 @@ mod tests {
     // ── Inline-image band wrapping ────────────────────────────────────────────
 
     fn dummy_img(w: u32, h: u32, align: crate::inline_image::ImageAlign) -> crate::inline_image::InlineImage {
-        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None , margin_px: None, source: crate::inline_image::ImageSource::Story }
+        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None, margin_px: None }
     }
 
     #[test]
@@ -2804,7 +2796,6 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px,
-            source: crate::inline_image::ImageSource::Story,
         }
     }
 
@@ -3579,7 +3570,6 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(4),
-            source: crate::inline_image::ImageSource::Story,
         };
         let lines = vec![String::new(), "AAAA".to_string()];
         let kinds = vec![TranscriptKind::Story; 2];

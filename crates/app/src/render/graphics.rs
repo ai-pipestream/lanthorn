@@ -1202,8 +1202,8 @@ impl GraphicsRender {
         });
     }
 
-    /// Record the click map for the v6 CELL path — frameless mode (SQ-0461), and
-    /// the same fallback taken on a terminal with no image protocol.
+    /// Record the click map for the v6 CELL path — a terminal with no image
+    /// protocol, a modal overlay over the story pane, or a painted menu takeover.
     ///
     /// That path draws no game image at all: it re-lays the v6 screen out as
     /// ordinary terminal text filling the whole pane. There is therefore no
@@ -1212,12 +1212,13 @@ impl GraphicsRender {
     /// native `(width, height)` game-pixel canvas, and a click at a given
     /// fraction across/down the pane yields the game pixel at the same fraction.
     ///
-    /// Without this, clicks in frameless mode were simply dead — the raster and
+    /// Without this, clicks on the cell path were simply dead — the raster and
     /// hybrid paths each recorded a map and this one recorded none, so
     /// `map_click` returned a stale (or missing) geometry while games that ask
     /// for mouse input (the capability bit is advertised) got nothing.
-    /// (SQ-0532/A-F4)
-    pub fn record_frameless_click_map(&mut self, pane: Rect, native: (u16, u16), cell_px: (u16, u16)) {
+    /// (SQ-0532/A-F4; named for the frameless mode until SQ-0895 removed it, of
+    /// which it was only ever one of the callers.)
+    pub fn record_cell_path_click_map(&mut self, pane: Rect, native: (u16, u16), cell_px: (u16, u16)) {
         let (cw, ch) = (cell_px.0.max(1), cell_px.1.max(1));
         self.last_v6_map = Some(V6ClickMap {
             pane_x: pane.x,

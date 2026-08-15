@@ -112,7 +112,8 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   contents and connections. → [mapping](docs/features/mapping.md)
 - **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
   columns, per-room compass, illuminated drop-caps) rendered faithfully at an
-  authentic 640×400 with a `hybrid` / `raster` / `frameless` render choice.
+  authentic 640×400 with a `hybrid` / `raster` render choice. (The released build
+  also offers a third mode, `frameless`; it is removed in the next release.)
   → [v6 graphics](docs/features/v6-graphics.md)
 - **Play straight off the original Amiga floppies** — hand babelmap an `.adf`
   disk image and it mounts the AmigaDOS filesystem, finds the story *and* its

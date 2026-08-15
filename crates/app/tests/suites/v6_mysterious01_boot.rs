@@ -141,18 +141,16 @@ fn mysterious01_stacks_both_title_cards_on_window_zero() {
         "the two cards stack with no gap: every row of 0..={LAST} is painted"
     );
 
-    // …and nothing about them reaches the transcript as a float.
+    // …and nothing about them reaches the transcript as a float. Tightened by
+    // SQ-0895: this used to allow the SQ-0461 `ContentSplash` band (emitted for
+    // the frameless mode, ignored by every other), so it could only assert that
+    // no image was sourced `Story`. With the mode and the band both gone, the
+    // cards anchor no transcript image whatsoever.
     let elems = Engine::take_transcript_elems(&mut { session });
-    let sources: Vec<_> = elems
-        .iter()
-        .filter_map(|e| match e {
-            TranscriptElem::Image(i) => Some(i.source),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !sources.contains(&app::inline_image::ImageSource::Story),
-        "a title card is not an inline float; boot transcript image sources: {sources:?}"
+    let images = elems.iter().filter(|e| matches!(e, TranscriptElem::Image(_))).count();
+    assert_eq!(
+        images, 0,
+        "a title card is not an inline float; it anchors no transcript image at all"
     );
 }
 

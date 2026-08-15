@@ -29,18 +29,18 @@
 use std::path::PathBuf;
 
 use app::graphics::PictSource;
-use app::inline_image::{ImageAlign, ImageSource};
+use app::inline_image::ImageAlign;
 use app::session::{GameSession, InputKind, TranscriptElem};
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
-/// The `(width, height, align, source)` of every inline float Zork Zero anchors
-/// into the transcript over its opening turns, plus the set of window canvases it
-/// ended up owning.
+/// The `(width, height, align)` of every inline float Zork Zero anchors into the
+/// transcript over its opening turns, plus the set of window canvases it ended up
+/// owning.
 struct Opening {
-    floats: Vec<(u32, u32, ImageAlign, ImageSource)>,
+    floats: Vec<(u32, u32, ImageAlign)>,
     canvases: Vec<u8>,
     /// The drop-cap's own pixels, for the render pass below.
     dropcap: Option<app::inline_image::InlineImage>,
@@ -79,8 +79,8 @@ fn opening(mut picts: PictSource, story: Vec<u8>, std_win: Option<(u16, u16)>, h
         };
         for e in &turn.transcript_elems {
             if let TranscriptElem::Image(img) = e {
-                floats.push((img.pixels.width(), img.pixels.height(), img.align, img.source));
-                if img.source == ImageSource::Story && dropcap.is_none() {
+                floats.push((img.pixels.width(), img.pixels.height(), img.align));
+                if dropcap.is_none() {
                     dropcap = Some(img.clone());
                 }
             }
@@ -118,16 +118,16 @@ fn blorb_pics(story_path: &std::path::Path) -> PictSource {
     PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b))
 }
 
-/// The Story-sourced floats only — the drop-caps and room icons the report is
-/// about. A `ContentSplash` band is a separate mechanism (a large graphics-window
-/// draw echoed into the transcript for frameless mode) and the two archives
-/// legitimately differ on whether picture 5 is full-screen art.
+/// The floats — the drop-caps and room icons the report is about.
+///
+/// This used to filter to `ImageSource::Story`, because a large graphics-window
+/// draw ALSO echoed into the transcript as a `ContentSplash` band for frameless
+/// mode, and the two archives legitimately differ on whether picture 5 is
+/// full-screen art. SQ-0895 removed the mode and stopped emitting those bands at
+/// the source, so the filter has nothing left to exclude and the projection is
+/// what remains of it.
 fn story_floats(o: &Opening) -> Vec<(u32, u32, ImageAlign)> {
-    o.floats
-        .iter()
-        .filter(|(_, _, _, src)| *src == ImageSource::Story)
-        .map(|&(w, h, a, _)| (w, h, a))
-        .collect()
+    o.floats.clone()
 }
 
 /// The bug, stated as the user reported it: with native art the transcript gets

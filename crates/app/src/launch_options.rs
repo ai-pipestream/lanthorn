@@ -22,7 +22,7 @@
 //! second settings screen:
 //!
 //! - **v6 render mode.** Checked rather than assumed: `/set-v6-render` switches
-//!   hybrid/raster/frameless **live** (`SlashOutcome::SetV6Render`, applied to
+//!   hybrid/raster **live** (`SlashOutcome::SetV6Render`, applied to
 //!   `state.config.v6_render` mid-session) and the settings screen persists it.
 //!   It fails the admission rule outright.
 //! - Colours, styles, map behaviour — all live-editable, all already have a home.

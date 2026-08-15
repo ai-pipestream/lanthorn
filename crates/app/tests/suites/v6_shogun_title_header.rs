@@ -131,7 +131,13 @@ fn fresh_state(honor: bool) -> app::state::AppState {
     state.colors = app::colors::ColorScheme::terminal_default();
     state.game_picker =
         Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
-    state.config.v6_render = app::config::V6RenderMode::Frameless;
+    // Force the CELL path: SQ-0895 removed frameless, which was the
+    // deliberate route in. Dropping the picker is the substitute whose
+    // ONLY effect is the one frameless contributed here — draw no game
+    // image. (A modal overlay also lands on the cell path, but it
+    // additionally suppresses the inlined input line, which shifts row
+    // counts.)
+    state.game_picker = None;
     state.config.honor_game_colours = honor;
     state
 }

@@ -21,12 +21,17 @@
 //! the story box re-renders the transcript — so the composite drew the credits a
 //! second time, into a box four rows tall that the menu is sitting in.
 //!
-//! WHAT THE FIX IS. Pictures have had this rule since SQ-0461: an image the
-//! canvas already carries is marked `ImageSource::ContentSplash`, and the modes
-//! that render the canvas skip it rather than draw it twice. Canvas-painted TEXT
-//! had no equivalent. It has one now — the engine's own retirement stamp, which
-//! says exactly "these characters are paint on the screen now" — and the host
-//! stops emitting the frozen head into the transcript at all.
+//! WHAT THE FIX IS. Pictures had had this rule since SQ-0461: an image the canvas
+//! already carried was marked `ImageSource::ContentSplash`, and the modes that
+//! render the canvas skipped it rather than draw it twice. Canvas-painted TEXT had
+//! no equivalent. It has one now — the engine's own retirement stamp, which says
+//! exactly "these characters are paint on the screen now" — and the host stops
+//! emitting the frozen head into the transcript at all.
+//!
+//! The picture-side twin is gone as of SQ-0895: it existed to feed the frameless
+//! mode, which was the only thing that ever drew those bands, so removing the mode
+//! left nothing to emit them for. The rule this suite asserts is unaffected — it
+//! was always the text-side statement, and it is now the only one.
 //!
 //! WHY CELL-VS-RASTER PARITY DOES NOT CATCH IT, and why this suite exists beside
 //! `v6_shogun_menu_ground.rs`: that suite asserts hybrid matches raster

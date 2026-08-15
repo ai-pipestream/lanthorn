@@ -366,60 +366,86 @@ fn a_v3_status_line_is_not_a_readable_transcript_row() {
 /// SQ-0539 note is about ("a menu/hint page that CLEARS and then paints more than
 /// a screenful").
 ///
-/// Shogun's boot is that turn for real (`v6_prose_freeze.rs` reads it out of the
-/// screen ops): it prints nine centred header lines, MOVES window 0 into a small
-/// box beside its menu — which freezes the header as paint and lands a
-/// `TranscriptElem::ScreenClear` mid-output — erases the new box and prints into
-/// it. The clear preserves scrollback and re-anchors, so "rows this turn added"
-/// still measures the repaint; the park must land on the first of them and not one
-/// row down. Measured at 80x30 on `shogun-r322-s890706.z6`: the boot turn that
-/// paints the menu adds more rows than the viewport carries, and parks with the
-/// first new row on top.
+/// DRIVEN SYNTHETICALLY since SQ-0895, and this is the second driver it has had.
+/// The case was written on Shogun's boot turn (`shogun-r322-s890706.z6`), which
+/// prints nine centred header lines, MOVES window 0 into a small box beside its
+/// menu — landing a `TranscriptElem::ScreenClear` mid-output — then erases the new
+/// box and prints into it. That turn no longer overflows any pane, so it can no
+/// longer make the pager engage, and a park is only observable on an engaged pager.
+/// Two merged changes took its bulk away, neither of them a defect:
 ///
-/// Shogun is also the user's own control for SQ-0823 ("Shogun [more] seems to work
-/// fine"), so it is worth a case of its own whatever the answer.
+/// 1. SQ-0890 retires those nine header lines as PAINT when window 0 walks away
+///    from them, so they are not transcript at all any more;
+/// 2. SQ-0461 used to echo Shogun's 320x200 title splash into the transcript as an
+///    inline band for the frameless mode, upscaled 2x — roughly 25 of the 30 rows
+///    that made the turn overflow. SQ-0895 removed the mode and the echo with it.
 ///
-/// FRAMELESS since SQ-0886, and it is the same turn either way. A park is only
-/// observable on a path that publishes a scrolling terminal viewport, and hybrid
-/// was that path for Shogun's boot until SQ-0886 found the same routing discarded
-/// the game's side panels and the machine's ground — a full-width black block where
-/// the frame belongs — and moved this frame to the composite, whose viewport is the
-/// game's own four-row box. Frameless is the cell path that remains. It draws the
-/// same transcript through the same pager; only the pane's chrome differs, and one
-/// row of it is why the menu turn is the FIRST park here rather than the second.
+/// MEASURED after both, on the raster path at 80x30: `first_new_row = 0`,
+/// `viewport_rows = 6`, four rows of menu, pager inactive. No pane size makes four
+/// rows overflow while the frame still lays a transcript out, on any path.
+///
+/// So the property moves to a synthetic driver, exactly as
+/// `a_continued_row_that_wraps_parks_on_the_row_it_shares_and_no_higher` already
+/// does: a plain primary Buffer, a settled screen with scrollback and an anchor,
+/// then one turn carrying `erase_lower` plus more rows than the viewport holds.
+/// That is the shape the Shogun turn had, with nothing about a v6 render mode in
+/// it — and it needs no gitignored fixture, so it stops skipping vacuously in CI.
 #[test]
 fn a_turn_that_clears_mid_output_parks_on_the_first_new_row() {
-    let file = "shogun-r322-s890706.z6";
-    let path = stories_dir().join(file);
-    let Ok(bytes) = std::fs::read(&path) else {
-        eprintln!("SKIP: gitignored story missing at {}", path.display());
-        return;
-    };
-    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 322, "{file}: release");
-    assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), "890706", "{file}: serial");
-    let mut picts = PictSource::resolve(&path, None);
-    let dims = picts.all_pict_dims();
-    let std_win = picts.std_window();
-    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, std_win, None, None)
-        .expect("Shogun boots");
-    s.set_pict_source(Some(picts));
-    s.flush_boot_pictures();
+    use app::engine::{BufferWindow, ScreenModel, StatusModel, WinNode};
 
-    let mut state = story_state(true);
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-    state.config.v6_render = app::config::V6RenderMode::Frameless;
-    let area = Rect::new(0, 0, 80, 30);
+    for honor in [true, false] {
+        let model = ScreenModel {
+            root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (0, 0),
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut state = story_state(honor);
+        let render = |state: &AppState| {
+            let mut buf = Buffer::empty(area);
+            let m = app::render::screen::render_story_pane(&model, false, None, state, area, &mut buf);
+            (m, state.transcript_geom.get())
+        };
 
-    // The boot turn that paints the menu: nine header lines, the mid-turn clear the
-    // window move lands, then the box. It overflows, so it pages — and it must park
-    // with the first of its own rows on top.
-    let p = park(&mut s, &mut state, area, &[""]);
-    assert_nothing_scrolled_past(&p, true, &format!("{file} [release 322, serial 890706] boot menu"));
+        // A settled screen with scrollback behind it — the state the app is in when
+        // a game opens a menu page over what the player was reading.
+        for i in 0..20 {
+            state.push_transcript(&format!("old line {i}"));
+        }
+        let (m0, _) = render(&state);
+        state.last_transcript_total_rows = m0.total_rows;
 
-    // The turn after it settles without paging: the menu selection reprints into
-    // the same small box and adds nothing the viewport cannot hold.
-    let next = park(&mut s, &mut state, area, &[""]);
-    assert!(!next.active, "the turn after the menu fits its box — nothing to page");
+        // The turn: it CLEARS mid-output (re-anchoring, scrollback preserved) and
+        // then prints far more rows than the 12-row pane can hold.
+        let r = app::session::TurnResult {
+            erase_lower: true,
+            transcript: (0..20).map(|i| format!("new line {i}")).collect::<Vec<_>>().join("\n"),
+            ..Default::default()
+        };
+        apply_turn(&mut state, &r);
+        let first_new_row = state.clear_anchor.expect("the mid-output clear re-anchored") as u16;
+        state.pager.arm(app::pager::baseline_before(first_new_row, false));
+
+        let (m1, _) = render(&state);
+        app::pager::apply_frame(
+            &mut state, m1.max_scroll, m1.viewport_rows, m1.prompt_rows, m1.total_rows, m1.transcript_surface,
+        );
+        let (_, g2) = render(&state);
+        let g2 = g2.expect("the parked frame lays the transcript out");
+
+        let ctx = format!("synthetic mid-output clear, honor={honor}");
+        assert!(state.pager.active, "{ctx}: this turn overflows the viewport — the pager must engage");
+        assert_eq!(
+            g2.first_abs_row, first_new_row as usize,
+            "{ctx}: the FIRST new row must be the top row of the parked frame — it sits {} row(s) \
+             above the fold, unread (viewport {} rows)",
+            g2.first_abs_row as i64 - first_new_row as i64,
+            m1.viewport_rows,
+        );
+    }
 }
 
 /// A turn whose output CONTINUES the row the game left the cursor on — the report,

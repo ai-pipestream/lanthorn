@@ -259,9 +259,8 @@ const INTERPRETER: &[Row] = &[
         "\"hybrid\"",
         &[
             "How v6 graphical games (Zork Zero, Arthur, Journey, Shogun) are drawn:",
-            "  \"hybrid\"    — crisp terminal story inside a scaled pixel frame (default)",
-            "  \"raster\"    — the whole pane as one pixel image",
-            "  \"frameless\" — no frame: full-pane text with a status band, inline pictures",
+            "  \"hybrid\" — crisp terminal story inside a scaled pixel frame (default)",
+            "  \"raster\" — the whole pane as one pixel image",
         ],
     ),
     d(

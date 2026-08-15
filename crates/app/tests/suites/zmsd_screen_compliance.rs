@@ -503,7 +503,13 @@ fn zork0_frameless_render_records_a_usable_click_map() {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
     state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-    state.config.v6_render = app::config::V6RenderMode::Frameless;
+    // Force the CELL path: SQ-0895 removed frameless, which was the
+    // deliberate route in. Dropping the picker is the substitute whose
+    // ONLY effect is the one frameless contributed here — draw no game
+    // image. (A modal overlay also lands on the cell path, but it
+    // additionally suppresses the inlined input line, which shifts row
+    // counts.)
+    state.game_picker = None;
 
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);

@@ -1382,20 +1382,24 @@ session-only switch that never touches your saved config:
   foreground/background at startup (OSC 10/11) and paints in those, so raster
   text stays readable on a light-background terminal instead of forcing a
   fixed light-grey-on-black.
-- **`frameless`** — a deliberate "classic terminal interpreter, but the
-  pictures still show" presentation: **no decorative frame at all**. The story
-  runs as a normal full-pane terminal transcript at full size with native
-  scrollback, the game's chrome/status text collapses to compact terminal bands,
-  and window-0's inline story pictures (drop-caps, room icons) still render via
-  the transcript image path. The decorative borders, compass, and banner are
-  simply not drawn — but a full-screen **splash** (a title screen, a cutscene
-  illustration) *does* show, inline, once, in the flow of the transcript (see
-  below). With `--no-images` this is identical to the cell fallback below.
+- **Cell fallback** — without an image protocol (a remote or text-only terminal),
+  while a menu or dialog is open over the story pane, or on a painted menu
+  takeover, everything — graphics windows, status grids, and story text —
+  composites as terminal cells instead of pixels, so the game stays playable
+  everywhere. It draws no game art at all: the story runs as a normal full-pane
+  terminal transcript at full size with native scrollback, and the game's
+  chrome/status text collapses to compact terminal bands.
+  - A dialog *has* to land here, because image placements draw **above** terminal
+    cells in the classic protocols — a menu rendered as cells over a v6 image
+    would simply be invisible underneath it. The command band is the deliberate
+    exception: it is a dock rather than dialog chrome, and counting it as an
+    overlay used to hide the story prompt and drop the whole pixel path for as
+    long as it was open.
   - The pane is laid out by **relation to the story window**, never by absolute
     pixel row — because v6 games put their chrome wherever their artwork leaves
     room. Chrome text *above* the story becomes the status band and pins to the
     **top** (Zork Zero and Shogun paint theirs on native row 0; Arthur paints his
-    on row 12, under a twelve-row art panel frameless doesn't draw — and it still
+    on row 12, under a twelve-row art panel this path doesn't draw — and it still
     lands on line one, not a quarter of the way down an empty pane). Chrome text
     *below* the story becomes a command band pinned to the **bottom**, so
     Journey's verb menu stays welded to the last row at any pane height instead
@@ -1416,26 +1420,21 @@ session-only switch that never touches your saved config:
   - A graphics window sitting wholly **beside** the story is story content, not
     frame, so it keeps its column: Journey's half-screen character portrait
     renders at its native proportion with the prose inset alongside it. Art that
-    spans or overlaps the story stays undrawn — that's what frameless means.
-  - Because native 320×200-era art is postage-stamp tiny on a modern display,
-    frameless **resizes inline images to taste**: a drop-cap floats at about
-    **3–4 text rows** tall, and any band-rendered picture (splashes included)
-    is **upscaled by a crisp integer factor** (2× or 3×) up to roughly 60% of
-    the viewport width — pixel art stays sharp, never blurred or shrunk below
-    life size. (Hybrid and raster keep their own letterbox-matched sizing.)
-  - *What you lose:* the compass rose and the decorative borders/banner.
-  - *What you gain:* full-size story text (no letterbox shrink), native
-    terminal scrollback, selectable text everywhere, and splash art that
-    scrolls with the story instead of living in a fixed frame — the most
-    legible mode on a small window or a slow terminal.
-- **Cell fallback** — without an image protocol (a remote or text-only
-  terminal, or while a menu/dialog is open), everything (graphics windows,
-  status grids, and story text) composites as terminal cells instead of
-  pixels, so the game stays playable everywhere. This is what `frameless`
-  makes the *deliberate, always-on* choice even when an image protocol is
-  available.
+    spans or overlaps the story stays undrawn.
+  - Clicks still work here even though no image is drawn: the pane stands for the
+    game's screen, so a click maps into the game pixel at the same fraction
+    across and down it.
 
-The status and command bands in `frameless` and the cell fallback are themed by
+> **Removed: `frameless`.** A third mode used to make this presentation the
+> *deliberate, always-on* choice even on an image-capable terminal, trading the
+> compass and border art for full-size text and native scrollback, and resizing
+> inline pictures to suit (drop-caps to ~3–4 rows, band art upscaled by a crisp
+> 2×/3×). It is gone as of the next release. A `config.toml` still naming it
+> falls back to `hybrid` without complaint; `/set-v6-render frameless` reports an
+> unknown mode. The layout above is unchanged — it was always the cell path's,
+> and `frameless` was only one of four ways in.
+
+The status and command bands on the cell path are themed by
 the `upper_window` style selector (the same one that colours a v4+ status line);
 a beside-the-story picture column letterboxes in the `graphics` selector's style.
 
@@ -1791,8 +1790,8 @@ the old half was only half the job: the live half has to land somewhere, and
 somewhere is the story window's own box. In the pixel composite that was always
 true — the transcript is drawn inside the window's rectangle, and `hybrid` takes
 that same composite on a menu screen the game has framed with artwork. The cell
-presentations (`frameless`, and `hybrid` on an art-less menu screen) build the pane
-by relation instead: the chrome above the story packs against your pane's top edge,
+presentations (a dialog over the pane, a terminal with no image protocol, and
+`hybrid` on an art-less menu screen) build the pane by relation instead: the chrome above the story packs against your pane's top edge,
 the chrome below packs against its bottom, and the transcript fills between. That
 packing used to start the transcript flush under the band, which is right for
 every game that puts its story window directly under its status bar — and wrong
@@ -1805,7 +1804,7 @@ painted *inside* that box — a menu's items, and the ground erased under them �
 travels with it. The gap is measured against the chrome's declared rectangle rather
 than the text in it, so a status panel taller than its own two lines (Zork Zero's
 is 78 pixels of which two rows carry text) does not push the transcript down for
-art `frameless` has deliberately dropped. Nothing above the story window at all
+art the cell path has deliberately dropped. Nothing above the story window at all
 means nothing to sit below, and the transcript keeps the top of your pane.
 
 **A cleared screen starts at the top of its box, in every mode.** When a game
@@ -1954,16 +1953,24 @@ right for Shogun, left for a drop-cap — wrapping the prose in the column the g
 left for it. A picture too wide to leave a readable column falls back to a
 full-width band.
 
-## Splash art, inline (frameless mode)
+## Splash art (removed: the inline echo)
 
 Some v6 titles paint a big picture straight into a graphics window: Shogun's
-320×200 title screen, Zork Zero's cutscene illustrations. `hybrid` and
-`raster` draw those windows directly, but `frameless` drops the graphics windows
-that frame the story — so it would lose the splash entirely. Instead, frameless
-recognizes a
-*content-sized* draw and re-emits it as a one-off inline image band in the
-transcript, upscaled by the sizing policy above, anchored at the point in the
-story where the game drew it. It scrolls away with the rest of the turn.
+320×200 title screen, Zork Zero's cutscene illustrations. `hybrid` and `raster`
+draw those windows directly. The removed `frameless` mode dropped the graphics
+windows that frame the story, so it would have lost the splash entirely — and to
+save it, babelmap used to recognise a *content-sized* draw and re-emit it as a
+one-off inline image band in the transcript, anchored where the game drew it,
+which every other mode then had to skip so the art was not drawn twice.
+
+That echo is gone with the mode. Both surviving modes render the window canvas
+itself, which is where the picture always was; nothing is lost on screen, and the
+"is this image already on the screen?" bookkeeping it required — a provenance tag
+on every transcript image, a skip in the raster path, a drop in the transcript,
+and a per-window redraw dedupe — is gone with it.
+
+The size classifier stayed, because it answers a second question too: whether a
+window-0 picture floats inline in the prose or reserves a margin beside it.
 
 The catch is telling a splash from decoration. babelmap classifies a
 graphics-window picture by its size against the reported screen: a picture is
@@ -2056,7 +2063,7 @@ and the frame appeared to have its top cut off — an artefact of the fill order
 of the artwork, which is neither clipped nor mis-placed.
 
 This colour honoring now spans *every* v6 presentation, not just the pixel
-raster: the frameless classic status band, the painted menu/hint overlays,
+raster: the cell path's classic status band, the painted menu/hint overlays,
 the hybrid story-strip overlay, and the plain cell fallback all resolve a
 run's game colours the same way. The rule is the shared one every engine
 follows — a channel the game explicitly set (a real palette entry or a true
@@ -2084,9 +2091,8 @@ decoding — keeping the overlay's own transparency intact, so the arrow still
 cuts a clean hole in the rose. Because the *same* overlay can legally be drawn
 under different base palettes as a game moves between scenes, the decoded result
 is cached per palette, not just per picture, so a palette change re-tints it
-rather than serving a stale copy. All the v6 render modes — ring, raster,
-frameless inline, cell fallback — share this decode path, so the fix lands
-everywhere at once.
+rather than serving a stale copy. All the v6 render paths — ring, raster, cell
+fallback — share this decode path, so the fix lands everywhere at once.
 
 The original Amiga archive has no `APal` chunk, because it never needed one: it
 writes a plain **zero** where each picture's palette would go, and a picture with

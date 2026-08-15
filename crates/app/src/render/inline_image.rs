@@ -104,8 +104,8 @@ type BandCacheKey = (usize, u16, u16, u16, u32);
 /// The resample is [`crate::render::graphics::resize_directional`] (SQ-0829). This
 /// site runs in BOTH directions — a picture wider than the transcript body is
 /// shrunk to it, while one that already fits is nudged UP to its ceil-to-cells box,
-/// and frameless mode deliberately asks for a whole 2×/3× enlargement
-/// (`InlineImage::frameless_scaled`, "an integer 2×/3× for pixel-art crispness").
+/// and the removed frameless mode deliberately asked for a whole 2×/3×
+/// enlargement ("an integer 2×/3× for pixel-art crispness", SQ-0461/SQ-0895).
 /// Triangle at every size served neither: it blurred away the very crispness the
 /// integer factor was chosen for, and, filtering the four channels independently,
 /// averaged the `(0, 0, 0)` behind a transparent pixel into its neighbours — which
@@ -348,7 +348,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
@@ -377,7 +377,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
@@ -516,7 +516,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
@@ -546,7 +546,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         };
         let picker = Picker::halfblocks();
         let (cols, rows) = (6u16, 8u16);
@@ -568,7 +568,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels,
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         };
         crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 }
     }

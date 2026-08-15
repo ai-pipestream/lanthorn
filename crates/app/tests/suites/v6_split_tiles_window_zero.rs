@@ -101,10 +101,10 @@ fn a_split_places_the_story_window_below_the_upper_one() {
 ///
 /// The two paths draw different things above the story, so each is measured for
 /// what it actually puts there. HYBRID (the default) keeps the picture, so the
-/// transcript must stay out of the picture window's 260px. FRAMELESS drops frame art
-/// by design — what it keeps is the narration mysterious01 PAINTS into that graphics
-/// window ("I'm in a dense SPOOKY Forest"), anchored to the pane top, and the
-/// transcript must start below that.
+/// transcript must stay out of the picture window's 260px. The CELL path draws no
+/// art at all — what it keeps is the narration mysterious01 PAINTS into that
+/// graphics window ("I'm in a dense SPOOKY Forest"), anchored to the pane top, and
+/// the transcript must start below that.
 ///
 /// Falsified by restoring the old "shorten only" arm: "hybrid honor=true: the story
 /// transcript must render clear of the artwork — story text on pane row(s) [0, 1, 2,
@@ -114,15 +114,16 @@ fn mysterious01_prose_renders_below_the_artwork() {
     let Some(session) = mysterious_in_play() else { return };
     let model = session.screen();
 
-    for (tag, mode) in [
-        ("hybrid", app::config::V6RenderMode::Hybrid),
-        ("frameless", app::config::V6RenderMode::Frameless),
-    ] {
+    // The second arm was `frameless` until SQ-0895 removed it. What it contributed
+    // was the CELL path as a contrast to hybrid's pixel ring, and it is reached now
+    // by dropping the picker instead of by asking for a mode.
+    for (tag, force_cell) in [("hybrid", false), ("cell", true)] {
         for honor in [true, false] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-            state.config.v6_render = mode;
+            state.game_picker =
+                (!force_cell).then(ratatui_image::picker::Picker::halfblocks);
+            state.config.v6_render = app::config::V6RenderMode::Hybrid;
             state.config.honor_game_colours = honor;
             for i in 0..20 {
                 state.push_transcript(&format!("story line {i} ------------------------------"));
@@ -137,16 +138,19 @@ fn mysterious01_prose_renders_below_the_artwork() {
                 .collect();
             let ctx = format!("{tag} honor={honor}");
 
-            // The first row the transcript may occupy.
-            let (reserved, what) = if mode == app::config::V6RenderMode::Hybrid {
+            // The first row the transcript may occupy. Keyed on `force_cell`, NOT
+            // on the mode: both arms ask for Hybrid now and it is the picker that
+            // separates them, so testing the mode would give the cell arm hybrid's
+            // expectation (SQ-0895).
+            let (reserved, what) = if !force_cell {
                 // The picture window's 260px, at the cell path's 1:1 16px rows.
                 (260 / 16, "the picture window ends at row 16".to_string())
             } else {
-                // Frameless drops the art and keeps the game's painted narration.
+                // The cell path draws no art and keeps the game's painted narration.
                 let last = rows
                     .iter()
                     .rposition(|r| r.contains("Visible items") || r.contains("SPOOKY Forest"))
-                    .unwrap_or_else(|| panic!("{ctx}: frameless keeps the game's painted narration\n{}", rows.join("\n")));
+                    .unwrap_or_else(|| panic!("{ctx}: the cell path keeps the game's painted narration\n{}", rows.join("\n")));
                 (last + 1, format!("the game's own painted narration ends at row {last}"))
             };
             let over_art: Vec<usize> = (0..reserved).filter(|&y| rows[y].contains("story line")).collect();
@@ -241,15 +245,16 @@ fn advents_status_bar_survives_its_own_windows_erase() {
          window there — the bar's 20px strip is above it, not under it"
     );
 
-    for (tag, mode) in [
-        ("hybrid", app::config::V6RenderMode::Hybrid),
-        ("frameless", app::config::V6RenderMode::Frameless),
-    ] {
+    // The second arm was `frameless` until SQ-0895 removed it. What it contributed
+    // was the CELL path as a contrast to hybrid's pixel ring, and it is reached now
+    // by dropping the picker instead of by asking for a mode.
+    for (tag, force_cell) in [("hybrid", false), ("cell", true)] {
         for honor in [true, false] {
             let mut state = app::state::AppState::default();
             state.colors = app::colors::ColorScheme::terminal_default();
-            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-            state.config.v6_render = mode;
+            state.game_picker =
+                (!force_cell).then(ratatui_image::picker::Picker::halfblocks);
+            state.config.v6_render = app::config::V6RenderMode::Hybrid;
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, 80, 25);
             let mut buf = Buffer::empty(area);

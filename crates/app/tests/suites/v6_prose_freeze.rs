@@ -284,13 +284,19 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
     // drew the screen as a full-width black block with no frame on it at all. The
     // composite arm at the foot of this case is what covers hybrid now, and it is
     // the arm that was never wrong.
-    for (tag, mode) in [("frameless", app::config::V6RenderMode::Frameless)] {
+    for tag in ["cell"] {
         for honor in [true, false] {
             for (w, h) in [(80u16, 25u16), (120, 40)] {
                 let mut state = app::state::AppState::default();
                 state.colors = app::colors::ColorScheme::terminal_default();
                 state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-                state.config.v6_render = mode;
+                // Force the CELL path: SQ-0895 removed frameless, which was the
+                // deliberate route in. Dropping the picker is the substitute whose
+                // ONLY effect is the one frameless contributed here — draw no game
+                // image. (A modal overlay also lands on the cell path, but it
+                // additionally suppresses the inlined input line, which shifts row
+                // counts.)
+                state.game_picker = None;
                 state.config.honor_game_colours = honor;
                 let area = Rect::new(0, 0, w, h);
                 let mut buf = Buffer::empty(area);
@@ -435,13 +441,19 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
     // composite, which places both windows at the coordinates the game declared
     // (window 0 at x=47, window 2 at x=235, both on native row 21) and so satisfies
     // this relation by construction. Asserted as pixels at the foot of the case.
-    for (tag, mode) in [("frameless", app::config::V6RenderMode::Frameless)] {
+    for tag in ["cell"] {
         for honor in [true, false] {
             for (w, h) in [(80u16, 25u16), (100, 40)] {
                 let mut state = app::state::AppState::default();
                 state.colors = app::colors::ColorScheme::terminal_default();
                 state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-                state.config.v6_render = mode;
+                // Force the CELL path: SQ-0895 removed frameless, which was the
+                // deliberate route in. Dropping the picker is the substitute whose
+                // ONLY effect is the one frameless contributed here — draw no game
+                // image. (A modal overlay also lands on the cell path, but it
+                // additionally suppresses the inlined input line, which shifts row
+                // counts.)
+                state.game_picker = None;
                 state.config.honor_game_colours = honor;
                 app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
                 let area = Rect::new(0, 0, w, h);
@@ -587,7 +599,13 @@ fn a_story_window_flush_under_its_chrome_keeps_the_pane_top() {
             state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
             // FRAMELESS forces the cell path for a game that would otherwise take
             // the hybrid pixel ring — that path is where the placement rule lives.
-            state.config.v6_render = app::config::V6RenderMode::Frameless;
+            // Force the CELL path: SQ-0895 removed frameless, which was the
+            // deliberate route in. Dropping the picker is the substitute whose
+            // ONLY effect is the one frameless contributed here — draw no game
+            // image. (A modal overlay also lands on the cell path, but it
+            // additionally suppresses the inlined input line, which shifts row
+            // counts.)
+            state.game_picker = None;
             state.config.honor_game_colours = honor;
             let area = Rect::new(0, 0, 80, 25);
             let mut buf = Buffer::empty(area);

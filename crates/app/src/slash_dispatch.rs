@@ -547,19 +547,17 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::SetV6Render(opt) => {
-            // Live, session-only switch for testing the three v6 looks; the
-            // config screen remains the persistence path. Bare cycles.
+            // Live, session-only switch for testing the two v6 looks; the
+            // config screen remains the persistence path. Bare toggles.
             use app::config::V6RenderMode;
             let next = opt.unwrap_or(match state.config.v6_render {
                 V6RenderMode::Hybrid => V6RenderMode::Raster,
-                V6RenderMode::Raster => V6RenderMode::Frameless,
-                V6RenderMode::Frameless => V6RenderMode::Hybrid,
+                V6RenderMode::Raster => V6RenderMode::Hybrid,
             });
             state.config.v6_render = next;
             let label = match next {
                 V6RenderMode::Hybrid => "hybrid",
                 V6RenderMode::Raster => "raster",
-                V6RenderMode::Frameless => "frameless",
             };
             state.push_transcript_internal(
                 &format!("v6 render: {label} (session only)"),

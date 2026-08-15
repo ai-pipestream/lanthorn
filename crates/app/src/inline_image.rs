@@ -29,23 +29,15 @@ impl ImageAlign {
     }
 }
 
-/// Where a transcript-anchored [`InlineImage`] came from — decides which render
-/// modes may draw it inline. (SQ-0461 decision 3)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum ImageSource {
-    /// A window-0 story picture (Zork Zero's drop-caps / room icons). Every mode
-    /// floats it in the transcript — it *is* the story content.
-    #[default]
-    Story,
-    /// Large CONTENT art drawn into a graphics window (windows 1–7), e.g.
-    /// Shogun's title splash. Only `frameless` renders this inline; `hybrid`
-    /// and `raster` draw the graphics window itself, so they must SKIP it to
-    /// avoid double-rendering.
-    ContentSplash,
-}
-
 /// An image drawn into a text-buffer window, carrying its pixels (shared, like
 /// `GraphicsWindow.canvas`), its alignment, and an optional scaled target size.
+///
+/// SQ-0461 also gave this an `ImageSource` provenance field, whose only job was
+/// to mark a band as *already on screen as a window canvas* so that every render
+/// mode but frameless would skip it. SQ-0895 removed frameless, which left every
+/// mode skipping every such band — so they stopped being emitted, and the field
+/// and its two-variant enum went with them. Everything anchored here now is
+/// story content that every mode floats in the transcript.
 #[derive(Clone, Debug)]
 pub struct InlineImage {
     pub pixels: Arc<image::RgbaImage>,
@@ -55,8 +47,6 @@ pub struct InlineImage {
     /// (the v6 game's own `set_margins` value when it followed the draw). `None`
     /// = derive from the image width. Ignored for inline (non-margin) aligns.
     pub margin_px: Option<u32>,
-    /// Provenance — gates which render modes draw this image inline (SQ-0461).
-    pub source: ImageSource,
 }
 
 impl InlineImage {
@@ -82,73 +72,6 @@ impl InlineImage {
         let rows = dh.div_ceil(cell_h).max(1) as u16;
         (cols, rows)
     }
-
-    /// The frameless-mode target `(w, h)` in device pixels for this image, or
-    /// `None` to keep native size — the value to store in `scaled` before render
-    /// (SQ-0461 decision 2). Native 320×200-era v6 art is tiny on a modern
-    /// display, so frameless upsizes it, crisply:
-    ///
-    /// - A **drop-cap float** (`MarginLeft`) scales toward **3.5 text rows** tall
-    ///   (kept ~3–4 rows) via a crisp integer/half-integer/reciprocal factor —
-    ///   large caps shrink, tiny caps grow.
-    /// - Any **other (band) image** upsizes by an **integer 2×/3×** for pixel-art
-    ///   crispness, capped at ~**60% of the viewport width**, never below 1×.
-    ///
-    /// `viewport_cols` is the transcript body width in cells; `char_px` the
-    /// picker's cell pixel size. Only the frameless render path calls this;
-    /// hybrid/raster leave `scaled` untouched (their own letterbox factor drives
-    /// sizing), so their output stays byte-identical.
-    pub fn frameless_scaled(&self, char_px: (u16, u16), viewport_cols: u16) -> Option<(u32, u32)> {
-        let (cw, ch) = (char_px.0.max(1) as f32, char_px.1.max(1) as f32);
-        let nw = self.pixels.width().max(1);
-        let nh = self.pixels.height().max(1);
-        match self.align {
-            ImageAlign::MarginLeft => {
-                let s = dropcap_scale(nh as f32, ch);
-                let w = (nw as f32 * s).round().max(1.0) as u32;
-                let h = (nh as f32 * s).round().max(1.0) as u32;
-                Some((w, h))
-            }
-            _ => {
-                let cap_px = 0.6 * viewport_cols.max(1) as f32 * cw;
-                let s = band_upscale(nw as f32, cap_px);
-                Some((nw * s, nh * s))
-            }
-        }
-    }
-}
-
-/// Crisp scale factor for a drop-cap float: the candidate factor whose scaled
-/// height lands closest to 3.5 text rows (keeping the picture ~3–4 rows tall).
-/// Candidates are simple reciprocals (shrink oversized caps) and
-/// integer/half-integer steps (grow small ones) so upscales stay pixel-crisp.
-fn dropcap_scale(native_h: f32, cell_h: f32) -> f32 {
-    let target = 3.5 * cell_h;
-    const CANDS: &[f32] = &[
-        0.25, 1.0 / 3.0, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0,
-    ];
-    let mut best = 1.0f32;
-    let mut best_err = f32::MAX;
-    for &s in CANDS {
-        let err = (s * native_h - target).abs();
-        if err < best_err {
-            best_err = err;
-            best = s;
-        }
-    }
-    best
-}
-
-/// Integer upscale factor for a band image: 3× or 2× native for crisp pixel art,
-/// but never wider than `cap_px`, and never below 1×.
-fn band_upscale(native_w: f32, cap_px: f32) -> u32 {
-    if native_w * 3.0 <= cap_px {
-        3
-    } else if native_w * 2.0 <= cap_px {
-        2
-    } else {
-        1
-    }
 }
 
 #[cfg(test)]
@@ -157,11 +80,7 @@ mod tests {
     use std::sync::Arc;
 
     fn img(w: u32, h: u32) -> InlineImage {
-        InlineImage { pixels: Arc::new(image::RgbaImage::new(w, h)), align: ImageAlign::InlineUp, scaled: None , margin_px: None, source: ImageSource::Story }
-    }
-
-    fn img_aligned(w: u32, h: u32, align: ImageAlign) -> InlineImage {
-        InlineImage { pixels: Arc::new(image::RgbaImage::new(w, h)), align, scaled: None, margin_px: None, source: ImageSource::Story }
+        InlineImage { pixels: Arc::new(image::RgbaImage::new(w, h)), align: ImageAlign::InlineUp, scaled: None , margin_px: None }
     }
 
     #[test]
@@ -204,69 +123,14 @@ mod tests {
         assert_eq!(img(1, 1).fitted_cells(40, (8, 8)), (1, 1));
     }
 
-    // ── frameless scaling policy (SQ-0461 decision 2) ──────────────────────
-
-    /// Height (in whole cell rows) a drop-cap occupies after the frameless policy.
-    fn dropcap_rows(native_h: u32, cell_h: u16) -> u32 {
-        let im = img_aligned(native_h, native_h, ImageAlign::MarginLeft); // square, so h == native_h
-        let (_, h) = im.frameless_scaled((cell_h, cell_h), 80).unwrap();
-        h.div_ceil(cell_h as u32)
-    }
-
-    #[test]
-    fn dropcap_targets_three_to_four_rows() {
-        // A range of native cap heights all land in the 3–4 row band with a
-        // 16px cell (target 3.5 rows = 56px).
-        for native in [8u32, 12, 16, 20, 24, 32, 40, 48, 56] {
-            let rows = dropcap_rows(native, 16);
-            assert!((3..=4).contains(&rows), "native {native}px → {rows} rows (want 3–4)");
-        }
-    }
-
-    #[test]
-    fn dropcap_tiny_image_upscales() {
-        // An 8px cap with a 16px cell → target 56px; the crisp factor is 7×,
-        // so it grows rather than staying a single row.
-        let im = img_aligned(8, 8, ImageAlign::MarginLeft);
-        let (_, h) = im.frameless_scaled((16, 16), 80).unwrap();
-        assert!(h >= 3 * 16, "tiny drop-cap must upscale toward 3–4 rows, got {h}px");
-    }
-
-    #[test]
-    fn dropcap_large_image_downscales() {
-        // A 120px cap with a 16px cell → target 56px; a reciprocal factor shrinks
-        // it toward the band rather than leaving it 8 rows tall.
-        let im = img_aligned(120, 120, ImageAlign::MarginLeft);
-        let (_, h) = im.frameless_scaled((16, 16), 80).unwrap();
-        assert!(h < 120, "oversized drop-cap must downscale, got {h}px");
-    }
-
-    #[test]
-    fn band_image_upscales_to_integer_factor_capped_at_60pct() {
-        // 100px-wide art, cell 8px, viewport 80 cols → 640px, 60% cap = 384px.
-        // 3× = 300px ≤ 384 → 3×.
-        let im = img_aligned(100, 60, ImageAlign::InlineUp);
-        let (w, h) = im.frameless_scaled((8, 8), 80).unwrap();
-        assert_eq!((w, h), (300, 180), "100px art upscales 3× under the 60% cap");
-    }
-
-    #[test]
-    fn band_image_caps_upscale_to_viewport() {
-        // 160px-wide art, cell 8px, viewport 80 cols → 640px, cap 384px.
-        // 3× = 480 > 384; 2× = 320 ≤ 384 → 2×.
-        let im = img_aligned(160, 100, ImageAlign::InlineUp);
-        let (w, _) = im.frameless_scaled((8, 8), 80).unwrap();
-        assert_eq!(w, 320, "art too wide for 3× falls back to 2×");
-    }
-
-    #[test]
-    fn band_image_never_below_native() {
-        // 320px art in a 40-col × 8px viewport (320px) → cap 192px; even 2× and 3×
-        // overflow, so it stays native 1× (fitted_cells clamps it for display).
-        let im = img_aligned(320, 200, ImageAlign::InlineUp);
-        let (w, h) = im.frameless_scaled((8, 8), 40).unwrap();
-        assert_eq!((w, h), (320, 200), "over-wide art is never shrunk below native");
-    }
+    // The `frameless scaling policy` section (SQ-0461 decision 2) was deleted
+    // here by SQ-0895 along with `InlineImage::frameless_scaled` and its
+    // `dropcap_scale` / `band_upscale` helpers. All six tests pinned the sizing
+    // policy of a mode that no longer exists — drop-caps to ~3.5 text rows, band
+    // art to an integer 2x/3x under a 60%-of-viewport cap — and the function was
+    // called from exactly one place, the frameless arm of the transcript's image
+    // filter. Hybrid and raster never called it: they size from their own
+    // letterbox factor, which `fitted_cells` (still tested above) applies.
 
     #[test]
     fn fitted_cells_pins_known_geometry() {

@@ -692,7 +692,9 @@ impl GlkPixelScale {
 
 /// How the v6 graphical story pane is rendered.
 ///
-/// TOML: `v6_render = "hybrid"` (default), `"raster"`, or `"frameless"`.
+/// TOML: `v6_render = "hybrid"` (default) or `"raster"`. Any other string —
+/// including `"frameless"`, the mode SQ-0895 removed — silently reads as
+/// `Hybrid`; see [`deserialize_v6_render`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum V6RenderMode {
@@ -702,13 +704,24 @@ pub enum V6RenderMode {
     Hybrid,
     /// The whole pane rasterized into one pixel image (feature-limited).
     Raster,
-    /// No decorative frame at all: the story runs as a normal full-pane terminal
-    /// transcript (native scrollback, full-size text), the game's chrome/status
-    /// text collapses to a compact terminal status band across the top, and
-    /// inline story pictures still render via the transcript image path. The
-    /// decorative frame art and full-screen graphics windows are simply not
-    /// drawn. With `--no-images` this equals the classic cell fallback. (SQ-0461)
-    Frameless,
+}
+
+/// Read `v6_render`, falling back to the default on any unrecognised string.
+///
+/// Deliberately silent, matching [`deserialize_easing`]: a config naming a mode
+/// this build does not have must not stop the game from launching. That covers
+/// the removed `"frameless"` (SQ-0895) and a plain typo alike — the trade is
+/// that `"rastr"` quietly renders hybrid rather than complaining, which is the
+/// behaviour every other token-valued key here already has.
+fn deserialize_v6_render<'de, D>(d: D) -> Result<V6RenderMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(match s.as_str() {
+        "raster" => V6RenderMode::Raster,
+        _ => V6RenderMode::Hybrid,
+    })
 }
 
 // ── Animation config ──────────────────────────────────────────────────────────
@@ -984,7 +997,7 @@ pub struct Config {
     #[serde(default)]
     pub aux_storage: AuxStorage,
     /// How the v6 graphical story pane is rendered. Default: Hybrid.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_v6_render")]
     pub v6_render: V6RenderMode,
     /// Fuse a 640-wide rendition's colour dither, because the card's pixels were
     /// half as wide as the unit screen's (SQ-0797). Default: true.
@@ -1648,7 +1661,6 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     let v6_str = match cfg.v6_render {
         V6RenderMode::Hybrid => "hybrid",
         V6RenderMode::Raster => "raster",
-        V6RenderMode::Frameless => "frameless",
     };
     doc.put("v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
     doc.put("fuse_art_dither", cfg.fuse_art_dither.into(), cfg.fuse_art_dither == def.fuse_art_dither);
@@ -2352,22 +2364,33 @@ use_defaults = false
         assert_eq!(c.v6_render, V6RenderMode::Hybrid);
     }
 
+    /// SQ-0895 removed the `frameless` mode. A config still naming it — and any
+    /// other unrecognised token — must launch the game on the default rather
+    /// than refuse to parse, which is what `deserialize_v6_render` buys.
     #[test]
-    fn v6_render_parses_frameless_from_toml() {
+    fn v6_render_unknown_mode_falls_back_to_hybrid_silently() {
         let c: Config = toml::from_str("v6_render = \"frameless\"").unwrap();
-        assert_eq!(c.v6_render, V6RenderMode::Frameless);
+        assert_eq!(c.v6_render, V6RenderMode::Hybrid, "the removed mode reads as the default");
+        let c: Config = toml::from_str("v6_render = \"rastr\"").unwrap();
+        assert_eq!(c.v6_render, V6RenderMode::Hybrid, "a typo reads as the default too");
+        // …and the fallback must not swallow the mode that DOES still exist.
+        let c: Config = toml::from_str("v6_render = \"raster\"").unwrap();
+        assert_eq!(c.v6_render, V6RenderMode::Raster);
     }
 
+    /// Retargeted from `v6_render_frameless_round_trips_through_writer` (SQ-0895):
+    /// the property is that a NON-DEFAULT mode survives save→load, and raster is
+    /// now the only non-default there is.
     #[test]
-    fn v6_render_frameless_round_trips_through_writer() {
-        let dir = std::env::temp_dir().join(format!("babelmap-v6-frameless-{}", std::process::id()));
+    fn v6_render_raster_round_trips_through_writer() {
+        let dir = std::env::temp_dir().join(format!("babelmap-v6-raster-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = Config::default();
-        cfg.v6_render = V6RenderMode::Frameless;
+        cfg.v6_render = V6RenderMode::Raster;
         write_config(&dir, &cfg).unwrap();
         let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(back.v6_render, V6RenderMode::Frameless, "frameless must survive save→load");
+        assert_eq!(back.v6_render, V6RenderMode::Raster, "raster must survive save→load");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

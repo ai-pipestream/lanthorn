@@ -108,21 +108,20 @@ fn fmvpoker_backdrop_lands_on_window_zero() {
         "the canvas is window 0's own pixel box, so the backdrop is not clipped"
     );
 
-    // …and it is not a Story FLOAT. The one transcript image it does anchor is
-    // the SQ-0461 `ContentSplash` band every large content picture in a graphics
-    // window gets, so frameless mode (which drops graphics windows entirely) still
-    // shows it; hybrid and raster ignore those and render the canvas.
-    let sources: Vec<_> = result
+    // …and it is not a transcript float at all. This used to assert only that no
+    // image was sourced `Story`, because the backdrop DID anchor one band — the
+    // SQ-0461 `ContentSplash` entry that existed so frameless mode, which drops
+    // graphics windows, could still show it. SQ-0895 removed that mode and the
+    // band with it, so the assertion tightens: the backdrop anchors NOTHING here,
+    // and every mode reads it off the window canvas asserted above.
+    let images = result
         .transcript_elems
         .iter()
-        .filter_map(|e| match e {
-            TranscriptElem::Image(i) => Some(i.source),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !sources.contains(&app::inline_image::ImageSource::Story),
-        "a backdrop is not an inline float; transcript image sources: {sources:?}"
+        .filter(|e| matches!(e, TranscriptElem::Image(_)))
+        .count();
+    assert_eq!(
+        images, 0,
+        "a backdrop is not an inline float; it anchors no transcript image at all"
     );
 }
 

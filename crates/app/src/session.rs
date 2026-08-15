@@ -217,9 +217,15 @@ fn v6_scaled_art(img: &image::DynamicImage, scale: (u32, u32)) -> image::Dynamic
     ))
 }
 
-/// Classify a graphics-window picture as CONTENT art (worth an inline band in
-/// frameless mode) versus decorative FRAME art (borders/tiles — left canvas-only).
-/// (SQ-0461 decision 3)
+/// Classify a picture as CONTENT art versus decorative FRAME art (borders,
+/// tiles). (SQ-0461 decision 3)
+///
+/// SQ-0461 asked this to decide whether a graphics-window draw was worth an
+/// inline transcript band for the frameless mode; SQ-0895 removed the mode and
+/// that caller with it. The surviving caller is [`win0_float_align`], where the
+/// same question decides whether a window-0 picture floats inline or takes a
+/// left margin — so the classifier is still load-bearing, just for one consumer
+/// rather than two.
 ///
 /// A picture is CONTENT when it covers **≥ 40% of the screen area**, OR is **≥
 /// 60% of screen width AND ≥ 30% of screen height**. Narrow strips (**≤ 15% of
@@ -740,11 +746,6 @@ pub struct GameSession {
     /// `Machine::v6_win0_out_chars` at the last transcript drain — an event's
     /// offset within the current turn's text is `out_chars - this`.
     v6_win0_chars_seen: u64,
-    /// The last CONTENT-art picture number anchored inline per graphics window
-    /// (1–7), so a per-turn redraw of the same splash doesn't spam the frameless
-    /// transcript. Cleared for a window on its canvas-clear (number-0 erase).
-    /// (SQ-0461 decision 3)
-    last_content_pic: std::collections::HashMap<u8, u16>,
     /// Ordered display list per window canvas: every picture drawn and every region
     /// erased, in the order it happened.
     ///
@@ -986,7 +987,6 @@ impl GameSession {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols,
@@ -1586,7 +1586,6 @@ impl GameSession {
         if std::mem::take(&mut self.machine.just_restarted) {
             self.pictures_canvas.clear();
             self.story_pics.clear();
-            self.last_content_pic.clear();
             // The display list is the RECIPE for `pictures_canvas` — dropping the
             // canvas and keeping the ops leaves a save/replay that cannot be
             // recomputed from its inputs. Concretely (SQ-0658): the reboot's first
@@ -1657,9 +1656,15 @@ impl GameSession {
         // too meant the story box re-rendered them a second time, into the four-row
         // prose box Shogun moves window 0 down to, straight across its START /
         // RESTORE / QUIT menu ("Copyright (c) 1988 by InfocomQUIT the game"). So the
-        // host stops carrying what it can see is already on the screen — the same
-        // rule `ImageSource::ContentSplash` states for pictures, whose canvas the
-        // raster path likewise draws instead of the transcript's copy (SQ-0461).
+        // host stops carrying what it can see is already on the screen.
+        //
+        // That rule used to have a picture-side twin to point at —
+        // `ImageSource::ContentSplash` (SQ-0461), which marked art the window
+        // canvas already carried so the drawing modes would skip the transcript's
+        // copy. SQ-0895 retired it: it existed for the frameless mode, and with
+        // the mode gone nothing anchored those bands at all. The principle is
+        // unchanged and now lives only here, which is why it is spelled out rather
+        // than cross-referenced.
         //
         // Only when the freeze took the window's WHOLE streamed screen: a partial
         // retirement interleaves frozen and still-live runs in one character stream
@@ -2246,7 +2251,6 @@ impl GameSession {
         // the window's replay list goes with them.
         self.display_ops.remove(&win);
         self.unreplayable.remove(&win);
-        self.last_content_pic.remove(&win);
         let (sw, sh) = self.v6_native_extent();
         let (ox, oy) = (
             u32::from(anchor.origin.0.max(1)) - 1,
@@ -2474,9 +2478,6 @@ impl GameSession {
         if ev.erase && ev.number == 0 {
             self.pictures_canvas.remove(&ev.window);
             self.canvas_anchor.remove(&ev.window); // nothing left to strand
-            // The window's canvas was cleared, so a later redraw of a content
-            // splash into it is genuinely new — forget the dedupe key. (SQ-0461)
-            self.last_content_pic.remove(&ev.window);
             // Nothing of this window survives to be replayed.
             self.display_ops.remove(&ev.window);
             self.unreplayable.remove(&ev.window);
@@ -2597,7 +2598,6 @@ impl GameSession {
                     align,
                     scaled: None,
                     margin_px,
-                    source: crate::inline_image::ImageSource::Story,
                 };
                 self.story_pics.push((ev.out_chars, float));
             }
@@ -2670,27 +2670,15 @@ impl GameSession {
             // palette they ALL recolour, and their order is what a replay has to
             // reproduce. (SQ-0567)
             self.record_op(ev.window, V6Op::Draw { number: ev.number, dx, dy });
-            // SQ-0461 decision 3: a large CONTENT-art draw into a graphics window
-            // (Shogun's title splash) ALSO anchors a transcript inline band, so
-            // the frameless mode — which drops graphics windows — still shows it.
-            // Frame/border art (narrow side strips, small compass tiles) is left
-            // canvas-only. Dedupe repeated identical draws so a per-turn redraw
-            // can't spam the transcript. Hybrid/raster ignore ContentSplash
-            // entries (they render the window canvas itself), so no double-draw.
-            let (iw, ih) = (img.width(), img.height());
-            let (screen_w, screen_h) = self.v6_screen_px();
-            if is_content_art(iw, ih, screen_w, screen_h)
-                && self.last_content_pic.get(&ev.window) != Some(&ev.number)
-            {
-                self.last_content_pic.insert(ev.window, ev.number);
-                self.story_pics.push((ev.out_chars, crate::inline_image::InlineImage {
-                    pixels: std::sync::Arc::new(img.to_rgba8()),
-                    align: crate::inline_image::ImageAlign::InlineUp,
-                    scaled: None,
-                    margin_px: None,
-                    source: crate::inline_image::ImageSource::ContentSplash,
-                }));
-            }
+            // SQ-0461 decision 3 ALSO anchored a transcript inline band here for a
+            // large CONTENT-art draw into a graphics window (Shogun's title
+            // splash), marked `ImageSource::ContentSplash`, so that the frameless
+            // mode — which drops graphics windows — could still show it. It was
+            // the only consumer: hybrid and raster both render the window canvas
+            // itself and had to SKIP the band to avoid drawing the art twice.
+            // SQ-0895 removed the mode, so the band had no reader left and is no
+            // longer emitted; `is_content_art` survives because the window-0
+            // margin/inline classifier above still asks it the same question.
         }
         // Apply the deferred cross-window erase now the canvas borrow has ended:
         // translate the window-relative footprint into screen coords (SQ-0568).
@@ -5115,7 +5103,6 @@ mod tests {
             align: ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(56),
-            source: crate::inline_image::ImageSource::Story,
         };
         let text = "first line\nsecond line";
         // One style chunk covering everything (bold), to verify run splitting.
@@ -5141,7 +5128,6 @@ mod tests {
             align: ImageAlign::MarginLeft,
             scaled: None,
             margin_px: None,
-            source: crate::inline_image::ImageSource::Story,
         };
         let elems = interleave_story_elems("story text", &[], vec![(0, TranscriptElem::Image(img))], 0, None);
         assert_eq!(elems.len(), 2, "Image then Text");
@@ -5240,7 +5226,7 @@ mod tests {
         crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(2, 2)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         }
     }
 
@@ -6573,7 +6559,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -6605,13 +6590,24 @@ mod tests {
         bytes
     }
 
+    /// Retargeted from `content_splash_anchors_once_and_dedupes_until_canvas_clear`
+    /// (SQ-0895), and INVERTED. It used to pin SQ-0461's emission: a large
+    /// content-art draw into a graphics window anchored one inline transcript
+    /// band, deduped against a per-turn redraw, with a canvas-clear resetting the
+    /// dedupe. Only the frameless mode ever drew that band — hybrid and raster
+    /// render the window canvas itself and had to skip it — so with the mode gone
+    /// the emission went too.
+    ///
+    /// Kept rather than deleted because the fixture is exactly the one that used
+    /// to fire, which makes it a live guard against the band coming back: if
+    /// anyone re-adds an emitter, this fails instead of a double-drawn splash
+    /// showing up on Shogun's title screen.
     #[test]
-    fn content_splash_anchors_once_and_dedupes_until_canvas_clear() {
+    fn a_graphics_window_content_splash_anchors_no_inline_band() {
         use zvm::screen::{V6Windows, ZWindow};
         // Window 7 sized to the full 320×200 screen; picture 1 is a 320×200 splash
-        // → CONTENT art. Drawing it should anchor ONE inline band; a repeat draw
-        // (per-turn redraw) must NOT add a second. A canvas-clear (number-0 erase)
-        // resets the dedupe so a genuinely new draw anchors again. (SQ-0461)
+        // → CONTENT art by `is_content_art`, i.e. precisely the case SQ-0461
+        // anchored. The canvas must carry it and the transcript must not.
         let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
@@ -6633,7 +6629,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -6642,16 +6637,22 @@ mod tests {
 
         let draw = PictureEvent { number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) };
         sess.apply_picture_event(&draw);
-        assert_eq!(sess.story_pics.len(), 1, "content splash anchors one inline band");
-        assert_eq!(sess.story_pics[0].1.source, crate::inline_image::ImageSource::ContentSplash);
+        assert!(sess.story_pics.is_empty(), "graphics-window content art anchors no transcript band");
+        // It really did reach the screen — the band's absence is a routing
+        // decision, not the picture going missing.
+        let canvas = sess.pictures_canvas.get(&7).expect("the splash is on window 7's canvas");
+        assert_ne!(canvas.img.get_pixel(0, 0).0, [0, 0, 0, 0], "the splash was actually drawn");
 
+        // A repeat draw (the per-turn redraw the old dedupe existed for) still
+        // anchors nothing, so no dedupe key is needed to keep it from spamming.
         sess.apply_picture_event(&draw);
-        assert_eq!(sess.story_pics.len(), 1, "a repeat draw of the same pic is deduped");
+        assert!(sess.story_pics.is_empty(), "a repeat draw anchors nothing either");
 
-        // Canvas clear (erase_window rides the queue as number 0) resets dedupe.
+        // …and neither does a fresh draw after a canvas clear (erase_window rides
+        // the queue as number 0), which used to be the case that reset the dedupe.
         sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) });
         sess.apply_picture_event(&draw);
-        assert_eq!(sess.story_pics.len(), 2, "after a canvas clear a fresh draw anchors again");
+        assert!(sess.story_pics.is_empty(), "a post-clear draw anchors nothing");
     }
 
     /// SQ-0741: a window-0 picture the game followed with `set_margins` is an
@@ -6693,7 +6694,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -6707,7 +6707,6 @@ mod tests {
             margin_after: Some(96), at_cursor: false, win_box: (89, 81, 464, 320),
         });
         assert_eq!(sess.story_pics.len(), 1, "the declared margin marks it as flowing with the text");
-        assert_eq!(sess.story_pics[0].1.source, crate::inline_image::ImageSource::Story);
         assert_eq!(sess.story_pics[0].1.align, crate::inline_image::ImageAlign::MarginLeft);
         assert_eq!(sess.story_pics[0].1.margin_px, Some(96), "the game's own left margin rides along");
         assert!(!sess.pictures_canvas.contains_key(&0), "a float never takes a window canvas");
@@ -6753,7 +6752,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -6841,7 +6839,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -6903,7 +6900,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -6944,7 +6940,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -6998,7 +6993,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -7094,7 +7088,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
@@ -7145,7 +7138,6 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,

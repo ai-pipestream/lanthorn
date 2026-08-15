@@ -172,7 +172,13 @@ fn zork0_hybrid_hint_header_floods_full_width_reverse_bar() {
 
     // FRAMELESS routes the hint menu through the SAME painted-screen renderer, so
     // the header floods identically there.
-    state.config.v6_render = app::config::V6RenderMode::Frameless;
+    // Force the CELL path: SQ-0895 removed frameless, which was the
+    // deliberate route in. Dropping the picker is the substitute whose
+    // ONLY effect is the one frameless contributed here — draw no game
+    // image. (A modal overlay also lands on the cell path, but it
+    // additionally suppresses the inlined input line, which shifts row
+    // counts.)
+    state.game_picker = None;
     let mut fbuf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut fbuf);
     let f_title: String = (0..area.width).map(|x| fbuf.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();

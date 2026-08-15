@@ -42,7 +42,7 @@ use std::sync::Mutex;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
-use app::inline_image::{ImageAlign, ImageSource};
+use app::inline_image::ImageAlign;
 use app::interpreter::InterpreterProfile;
 use app::session::{GameSession, InputKind, TranscriptElem};
 
@@ -155,15 +155,17 @@ fn ingest(state: &mut app::state::AppState, r: &app::session::TurnResult) {
     }
 }
 
-/// The one float on a turn: `(width, height, align, source)`.
-fn only_float(elems: &[TranscriptElem]) -> Option<(u32, u32, ImageAlign, ImageSource)> {
+/// The one float on a turn: `(width, height, align)`. The `ImageSource` that used
+/// to ride along was dropped with the enum in SQ-0895 — every float reaching the
+/// transcript is story content now, so the field distinguished nothing.
+fn only_float(elems: &[TranscriptElem]) -> Option<(u32, u32, ImageAlign)> {
     let mut it = elems.iter().filter_map(|e| match e {
         TranscriptElem::Image(im) => Some(im),
         _ => None,
     });
     let im = it.next()?;
     assert!(it.next().is_none(), "this scene anchors exactly one picture");
-    Some((im.pixels.width(), im.pixels.height(), im.align, im.source))
+    Some((im.pixels.width(), im.pixels.height(), im.align))
 }
 
 /// Window 0's box and margins on the frame now on screen.
@@ -345,7 +347,7 @@ fn both_presses_anchor_the_ship_as_a_right_margin_float_in_the_prose() {
         });
         assert_eq!(
             got,
-            (size.0, size.1, ImageAlign::MarginRight, ImageSource::Story),
+            (size.0, size.1, ImageAlign::MarginRight),
             "{} [release {}]: the ship floats at the RIGHT margin as story content",
             press.0,
             press.1
@@ -557,8 +559,8 @@ fn the_window_0_presses_are_untouched() {
             press.0, press.1
         );
         assert_eq!(
-            only_float(&elems).map(|f| (f.2, f.3)),
-            Some((ImageAlign::MarginRight, ImageSource::Story)),
+            only_float(&elems).map(|f| f.2),
+            Some(ImageAlign::MarginRight),
             "{} [release {}]: its ship is the window-0 margin float it has always been",
             press.0,
             press.1

@@ -61,6 +61,15 @@ fn render_state(mode: app::config::V6RenderMode) -> app::state::AppState {
     state
 }
 
+/// The same state, forced onto the CELL path. SQ-0895 removed `frameless`, which
+/// was the deliberate way to ask for it; dropping the picker is the substitute
+/// whose only effect is the one frameless contributed — draw no game image.
+fn cell_path_state() -> app::state::AppState {
+    let mut state = render_state(app::config::V6RenderMode::Hybrid);
+    state.game_picker = None;
+    state
+}
+
 #[test]
 fn zork0_hybrid_renders_story_as_terminal_text() {
     let Some(session) = boot_zork0() else { return };
@@ -147,7 +156,7 @@ fn zork0_frameless_status_band_is_anchored_full_width() {
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
 
-    let state = render_state(app::config::V6RenderMode::Frameless);
+    let state = cell_path_state();
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);

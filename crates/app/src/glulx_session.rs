@@ -2355,7 +2355,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         };
         sess.appglk().test_push_primary_image(dummy);
 

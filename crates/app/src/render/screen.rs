@@ -672,13 +672,6 @@ fn render_node(
             // the v6 image would be invisible — the cell fallback keeps the pane
             // readable behind the overlay until it closes.
             state.v6_image_scale.set(1.0);
-            // Frameless mode (SQ-0461): deliberately skip the pixel chrome (both
-            // the hybrid ring and the raster composite) and fall through to the
-            // cell path below — a compact terminal status band over the story as
-            // a normal full-pane transcript. A picker still renders inline story
-            // pictures there (the primary-Buffer transcript path blits them at
-            // native scale, `v6_image_scale` == 1.0 set just above).
-            let frameless = state.config.v6_render == crate::config::V6RenderMode::Frameless;
             // A painted MENU screen prints chrome text INSIDE the story window's
             // box, below the status band — Shogun's boot menu paints rows 21–23
             // over its story buffer (rows 21–25). In HYBRID mode such a takeover
@@ -686,8 +679,8 @@ fn render_node(
             // menu across the raster ring (items mapping above the terminal
             // viewport) and the terminal overlay (items inside it), the exact
             // mixed raster/text defect (SQ-0484). Routing it to the cell path
-            // below renders it as one coherent all-text screen, identical to
-            // frameless. BOTH conditions matter (SQ-0494): a grid run that is
+            // below renders it as one coherent all-text screen.
+            // BOTH conditions matter (SQ-0494): a grid run that is
             // merely deep but sits OUTSIDE the story box is ordinary gameplay
             // chrome — Arthur paints its status bar at row 12 above a story
             // buffer starting at row 13, and classing that as a menu dropped
@@ -769,7 +762,7 @@ fn render_node(
             // move — which re-tidies the map and starts its animation — dropped the
             // whole v6 pixel path for the duration, and Arthur's header art vanished
             // with it.
-            if !state.any_modal_overlay_open() && !frameless && !(has_menu && hybrid && !menu_over_art) {
+            if !state.any_modal_overlay_open() && !(has_menu && hybrid && !menu_over_art) {
             if let Some(picker) = state.game_picker.as_ref() {
                 let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
@@ -2104,9 +2097,12 @@ fn render_node(
             }
             } // !any_overlay_open
             // Cell path with a primary story window. Reached three ways: no image
-            // protocol (remote/text-only terminals), an overlay is open, or the
-            // user chose `v6_render = "frameless"` (SQ-0461) to always present the
-            // story this way. The v6 native cell geometry is a
+            // protocol (remote/text-only terminals), a modal overlay is open, or a
+            // painted menu takeover was routed here. (SQ-0461 added a fourth — the
+            // user asking for this presentation permanently via
+            // `v6_render = "frameless"` — and SQ-0895 removed that mode; the path
+            // itself is untouched, it simply has one fewer way in.) The v6 native
+            // cell geometry is a
             // 40x25-cell postage stamp on a real terminal and pixel art can't
             // render at all, so render like a classic two-window Z-machine
             // game instead — the status window's text rows across the top of
@@ -2125,8 +2121,8 @@ fn render_node(
                 // v6 mouse input in the cell path (SQ-0532/A-F4): this branch draws
                 // no game image, so there is no letterbox to invert — but the pane
                 // still IS the game's screen, so record the proportional pane→native
-                // map. Frameless mode lives here permanently; without a map its
-                // clicks were dead while the raster/hybrid paths' both worked.
+                // map. Without one, clicks on this path were simply dead while the
+                // raster/hybrid paths' both worked.
                 {
                     let cell_px = state
                         .game_picker
@@ -2136,7 +2132,7 @@ fn render_node(
                             (f.width, f.height)
                         })
                         .unwrap_or((8, 16));
-                    state.graphics_render.borrow_mut().record_frameless_click_map(
+                    state.graphics_render.borrow_mut().record_cell_path_click_map(
                         area,
                         (native_w, native_h),
                         cell_px,
@@ -2156,7 +2152,7 @@ fn render_node(
                     .flatten()
                     .collect();
                 if let Some(story) = layout.story {
-                    // The frameless pane is composed by RELATION to the story
+                    // The cell pane is composed by RELATION to the story
                     // window, never by an absolute native row (SQ-0549/SQ-0491).
                     // A v6 game puts its chrome wherever its artwork leaves room —
                     // Zork0 and Shogun status at rows 0–1, Arthur's at row 12 under
@@ -2196,7 +2192,7 @@ fn render_node(
                     // status panel is 78px of which two rows carry runs) has already
                     // been compressed to its inked rows by the band, and re-counting
                     // its own slack as empty screen would push the transcript down for
-                    // art frameless has deliberately dropped. Nothing above the story
+                    // art this path has deliberately dropped. Nothing above the story
                     // at all → nothing to sit below, so the story keeps the pane's top
                     // edge.
                     let chrome_bot = layout
@@ -2232,12 +2228,12 @@ fn render_node(
                         .min(area.height.saturating_sub(story_row));
                     // A chrome GRAPHICS window entirely BESIDE the story (Journey's
                     // half-screen picture column) is story content, not frame art —
-                    // frameless drops the surrounding chrome, but dropping this lost
+                    // this path drops the surrounding chrome, but dropping this lost
                     // the illustration the raster and hybrid paths both show. Give it
                     // its native-proportional column and inset the story beside it.
                     // Frame art that spans or overlaps the story (Arthur's header
                     // panel, every game's full-screen backdrop) is NOT beside it and
-                    // stays dropped — that is what frameless means.
+                    // stays dropped — that is what drawing no game image means.
                     let col_of = |px: u16| (area.width as u32 * px as u32 / native_w.max(1) as u32) as u16;
                     let story_l = story.x_px;
                     let story_r = story.x_px.saturating_add(story.w_px);
@@ -2293,8 +2289,6 @@ fn render_node(
                             let modals = state.open_modal_overlays();
                             if !modals.is_empty() {
                                 format!("modal overlay open: {}", modals.join(", "))
-                            } else if frameless {
-                                "v6_render = frameless".to_string()
                             } else if state.game_picker.is_none() {
                                 "no image protocol".to_string()
                             } else if has_menu && hybrid && !menu_over_art {
@@ -3293,12 +3287,11 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     for (i, line) in state.transcript.iter().enumerate() {
         line_starts.push(wrapped.len());
         if let Some(Some(img)) = state.transcript_images.get(i) {
-            // ContentSplash entries exist only for frameless mode; the raster
-            // path draws the graphics window canvas itself, so skip them here to
-            // avoid double-rendering (SQ-0461). They still occupy no text row.
-            if img.source == crate::inline_image::ImageSource::ContentSplash {
-                continue;
-            }
+            // SQ-0461's `ContentSplash` skip stood here: the raster path draws the
+            // graphics window canvas itself, so a band anchored for the frameless
+            // mode had to be stepped over or the art drew twice. SQ-0895 removed
+            // the mode and with it the only emitter, so there is nothing left to
+            // skip — every entry reaching this point is window-0 story content.
             let px = &img.pixels;
             // Rows the picture spans: ceil(h/FONT), so a picture whose height
             // isn't a cell multiple never has a full-width line drawn across
@@ -3518,17 +3511,17 @@ const STATUS_BAND_ROWS: u16 = 4;
 /// positioned (NOT left/center/right anchor groups like the status band).
 ///
 /// Only native rows inside `rows` are drawn, each placed at `area.y + row +
-/// shift`. The frameless path calls this twice (SQ-0491): once for the runs
+/// shift`. The cell path calls this twice (SQ-0491): once for the runs
 /// INSIDE the story box (`shift = 0` — Shogun's boot menu keeps its native rows
 /// over the transcript) and once for the command band BELOW it (a negative or
 /// positive `shift` that packs those rows against the pane's bottom edge, so
 /// Journey's menu stays locked to the bottom at any pane height). A story-less
 /// menu screen passes the whole range with no shift to stamp the entire pane.
-/// Shared by the frameless and hybrid (no story window) paths so both present a
+/// Shared by the cell and hybrid (no story window) paths so both present a
 /// painted screen identically.
 /// Resolve a v6 painted run's packed fg/bg (see [`crate::engine::PxText`]) plus
 /// its reverse bit onto a `base` theme [`Style`], for the CELL render paths (the
-/// frameless status band, the painted-screen overlay, and the hybrid story-strip
+/// cell-path status band, the painted-screen overlay, and the hybrid story-strip
 /// overlay). Mirrors the v1-5 / Glulx cell rule (`cell_style`): a run whose
 /// channel carries an EXPLICIT game colour (see [`v6_layout::packed_explicit`])
 /// replaces that channel; a Default or Standard-0/1 sentinel is inheritance, so
@@ -3878,8 +3871,9 @@ enum BottomPlan {
 /// whereas the map GROWS window 0 to the full screen `(0,0) 640×400` and paints the
 /// map into the full-screen graphics window beneath it. Hybrid mode then made the
 /// story viewport the entire pane, which leaves `chrome_bands` empty — so the map
-/// was never uploaded at all and the transcript painted over the whole screen. (It
-/// reads as a sudden drop into frameless mode: no frame, no picture, just text.)
+/// was never uploaded at all and the transcript painted over the whole screen. (On
+/// screen it reads as the frame falling away mid-game: no frame, no picture, just
+/// text.)
 ///
 /// Such a frame has no ring to draw, so there is nothing for hybrid to do: the
 /// caller falls through to the RASTER composite, which draws the picture and
@@ -3991,7 +3985,7 @@ fn art_paints_anything(
 /// to neither half: `build_chrome_canvas` never sees it (it is not chrome) and the
 /// viewport is far too small to show it. The ring came up with a canvas of ZERO
 /// opaque pixels and the player's frame vanished for the duration of the bet — the
-/// same "sudden drop into frameless mode" this function was written for.
+/// same "frame falls away, just text" symptom this function was written for.
 ///
 /// Cheap first: a plate the story window's box CONTAINS cannot escape it, which is
 /// every corpus frame that has a plate at all (Arthur's intro, Journey's title,
@@ -5828,7 +5822,7 @@ fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_px: i32) -> Vec<
     merged
 }
 
-/// Render the v6 frameless status band as a classic full-width status line
+/// Render the v6 cell-path status band as a classic full-width status line
 /// ("anchored bar", SQ-0467). `runs` are all the chrome grids' pixel-text runs;
 /// `ncols` is the native screen width in cells (so anchor thresholds scale to the
 /// game's own screen, not a hardcoded 40). Each native row (`(y-1)/16`) below
@@ -5840,8 +5834,8 @@ fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_px: i32) -> Vec<
 /// the status band is whatever chrome text sits ABOVE the story, wherever the
 /// game put it. The band is ANCHORED to the pane top — its first inked native row
 /// draws at `area.y`, and the rows below keep their relative spacing — so Arthur's
-/// row-12 bar (its story buffer starts at row 13, under a 12-row art panel that
-/// frameless mode drops) reads as a top status line instead of floating a quarter
+/// row-12 bar (its story buffer starts at row 13, under a 12-row art panel this
+/// path drops) reads as a top status line instead of floating a quarter
 /// of the way down the pane.
 /// How many pane rows [`draw_anchored_status_band`] will use, without painting
 /// anything (SQ-0712). The band has to be measured before the story area can be
@@ -6351,7 +6345,6 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(40),
-            source: crate::inline_image::ImageSource::Story,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -6386,7 +6379,6 @@ mod tests {
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None,
             margin_px: None,
-            source: crate::inline_image::ImageSource::Story,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -6421,7 +6413,6 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginRight,
             scaled: None,
             margin_px: None,
-            source: crate::inline_image::ImageSource::Story,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -7628,7 +7619,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+            scaled: None, margin_px: None,
         };
         let b = BufferWindow {
             lines: vec!["a".to_string(), String::new(), "b".to_string()],
@@ -8774,13 +8765,13 @@ mod tests {
         assert_ne!(base, v6_raster_gen(&items, &state, area, &picker), "a scroll change bumps the key");
     }
 
-    /// A synthetic v6 `Layered` model for the frameless-mode tests: a chrome
+    /// A synthetic v6 `Layered` model for the cell-path tests: a chrome
     /// `Grid` carrying one status px-run at native (1,1) → cell (0,0), plus a
     /// primary story `Buffer` one native row below it. No decorative graphics
     /// window. Pixel geometry is the authentic 8×16 v6 text cell (SQ-0479), so
     /// the status window really does occupy the row ABOVE the story — the
-    /// relation the frameless band split reads (SQ-0549).
-    fn frameless_v6_model() -> ScreenModel {
+    /// relation the cell-path band split reads (SQ-0549).
+    fn cell_path_v6_model() -> ScreenModel {
         let status = PositionedWindow {
             x: 0, y: 0, w: 40, h: 1, x_px: 0, y_px: 0, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
@@ -8809,34 +8800,37 @@ mod tests {
     }
 
     #[test]
-    fn frameless_renders_full_pane_transcript_with_status_band_and_no_graphics() {
-        // SQ-0461: `v6_render = "frameless"` deliberately skips the pixel chrome
-        // (both the hybrid ring and the raster composite) even with a picker
-        // present, and presents the story as a normal full-pane terminal
-        // transcript with the chrome text collapsed to a compact status band.
+    fn cell_path_renders_full_pane_transcript_with_status_band_and_no_graphics() {
+        // Retargeted from `frameless_renders_…` (SQ-0895). The property is the
+        // CELL PATH's layout — chrome text collapsed to a compact status band,
+        // story as a normal full-pane terminal transcript, no pixel chrome at
+        // all — which SQ-0461's removed mode was only one of four ways to reach.
+        // Driven here through the MODAL OVERLAY route so the "a picker is present
+        // and it still bypasses both pixel paths" half of the original assertion
+        // survives: image placements draw above terminal cells, so a dialog over
+        // the story pane needs the cells (`screen.rs:670-673`).
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        // A picker is present (images enabled) — frameless must STILL bypass the
-        // pixel paths and use the terminal transcript.
         state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-        state.config.v6_render = crate::config::V6RenderMode::Frameless;
+        state.overlays.reset_dialog = true;
+        assert!(state.any_modal_overlay_open(), "the overlay route into the cell path is open");
         state.push_transcript("HELLO STORY WORLD");
 
-        let model = frameless_v6_model();
+        let model = cell_path_v6_model();
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
         let m = render_node(
             &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
         );
-        let m = m.expect("frameless returns the primary-buffer transcript metrics");
+        let m = m.expect("the cell path returns the primary-buffer transcript metrics");
 
         // The transcript occupies the FULL pane below the one-row status band —
         // NOT an inset chrome-ring viewport (hybrid) and NOT a pixel raster. The
         // transcript always reserves the rightmost column as a scrollbar gutter,
         // so a full-pane body is `area.width - 1` wide (vs hybrid's much-narrower
         // inset viewport).
-        let geom = state.transcript_geom.get().expect("frameless publishes transcript geometry");
+        let geom = state.transcript_geom.get().expect("the cell path publishes transcript geometry");
         let vp = geom.area;
         assert_eq!(vp.x, area.x, "transcript is flush to the left pane edge (not inset)");
         assert_eq!(vp.width, area.width - 1, "transcript spans the full pane width minus the scrollbar gutter");
@@ -8853,19 +8847,22 @@ mod tests {
     }
 
     #[test]
-    fn frameless_publishes_a_click_map_covering_the_pane() {
-        // SQ-0532/A-F4: the cell path (frameless, and the no-picker fallback)
-        // draws no game image, so it used to record NO click map at all — v6
-        // mouse input was dead there while raster and hybrid both worked. It now
-        // records the proportional pane→native map, and a click maps into the
-        // game-pixel rect the clicked cell stands for.
+    fn cell_path_publishes_a_click_map_covering_the_pane() {
+        // SQ-0532/A-F4: the cell path draws no game image, so it used to record
+        // NO click map at all — v6 mouse input was dead there while raster and
+        // hybrid both worked. It now records the proportional pane→native map,
+        // and a click maps into the game-pixel rect the clicked cell stands for.
+        //
+        // Retargeted from `frameless_publishes_…` (SQ-0895) onto the NO-PICKER
+        // route, which the original's own comment already named as the other way
+        // in. Between this and `cell_path_renders_full_pane_transcript_…` (the
+        // overlay route) both surviving entrances stay covered.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-        state.config.v6_render = crate::config::V6RenderMode::Frameless;
+        state.game_picker = None; // no image protocol
         state.push_transcript("HELLO STORY WORLD");
 
-        let model = frameless_v6_model();
+        let model = cell_path_v6_model();
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
@@ -8877,11 +8874,11 @@ mod tests {
             .graphics_render
             .borrow()
             .last_v6_map
-            .expect("frameless publishes a v6 click map");
+            .expect("the cell path publishes a v6 click map");
         // The model's native extent is its 320x200 game-pixel screen.
         let (nw, nh) = crate::render::v6_layout::native_extent(match &model.root {
             WinNode::Layered(items) => items,
-            _ => unreachable!("frameless_v6_model is Layered"),
+            _ => unreachable!("cell_path_v6_model is Layered"),
         });
         assert_eq!((map.native_w, map.native_h), (nw, nh));
 
@@ -8901,35 +8898,15 @@ mod tests {
         assert_eq!(map.map_click(area.right() + 2, area.y), None);
     }
 
-    #[test]
-    fn frameless_no_images_equals_cell_fallback() {
-        // With `--no-images` (no picker) frameless must be byte-identical to the
-        // classic cell fallback: same full-pane transcript + status band. Render
-        // the SAME model once as the default (no picker → cell fallback) and once
-        // as frameless (no picker) and assert the buffers match.
-        let render = |mode: crate::config::V6RenderMode| {
-            let mut state = AppState::default();
-            state.colors = crate::colors::ColorScheme::terminal_default();
-            state.game_picker = None; // --no-images
-            state.config.v6_render = mode;
-            state.push_transcript("HELLO STORY WORLD");
-            let model = frameless_v6_model();
-            let area = Rect::new(0, 0, 40, 25);
-            let mut buf = Buffer::empty(area);
-            let mut links = Vec::new();
-            let _ = render_node(
-                &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
-            );
-            (0..area.height)
-                .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>() + "\n")
-                .collect::<String>()
-        };
-        assert_eq!(
-            render(crate::config::V6RenderMode::Hybrid),
-            render(crate::config::V6RenderMode::Frameless),
-            "with no picker, frameless equals the classic cell fallback"
-        );
-    }
+    // `frameless_no_images_equals_cell_fallback` was DELETED here by SQ-0895
+    // rather than retargeted, because it no longer describes anything. Its whole
+    // content was `render(Hybrid) == render(Frameless)` with no picker — an
+    // assertion that the mode COLLAPSED onto the fallback when there were no
+    // images to differentiate them. With the mode gone the two sides are the same
+    // expression and the comparison is vacuous. The surviving half of what it
+    // covered — that a no-picker hybrid config really does render the cell
+    // fallback — is asserted directly by `cell_path_publishes_a_click_map_…`,
+    // which drives exactly that configuration.
 
     // ── Anchored status band (SQ-0467) ──────────────────────────────────────────
 

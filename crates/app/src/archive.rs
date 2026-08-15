@@ -299,7 +299,6 @@ struct InlineImageDto {
     align: crate::inline_image::ImageAlign,
     scaled: Option<(u32, u32)>,
     margin_px: Option<u32>,
-    source: crate::inline_image::ImageSource,
 }
 
 /// Z-machine screen state written to `screen.json` (zvm has no serde, so we
@@ -859,7 +858,6 @@ pub fn save_archive_meta_pics(
                             align: img.align,
                             scaled: img.scaled,
                             margin_px: img.margin_px,
-                            source: img.source,
                         }));
                     } else {
                         // PNG encode failed (never expected for a valid RgbaImage);
@@ -1105,7 +1103,6 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
                 align: dto.align,
                 scaled: dto.scaled,
                 margin_px: dto.margin_px,
-                source: dto.source,
             })
         })
         .collect();
@@ -1404,7 +1401,7 @@ mod tests {
 
     #[test]
     fn inline_transcript_images_round_trip_through_archive() {
-        use crate::inline_image::{ImageAlign, ImageSource, InlineImage};
+        use crate::inline_image::{ImageAlign, InlineImage};
         use crate::state::TranscriptKind;
 
         // Two Story lines; the SECOND carries an inline image (an empty-string
@@ -1419,7 +1416,6 @@ mod tests {
             align: ImageAlign::MarginLeft,
             scaled: Some((12, 8)),
             margin_px: Some(40),
-            source: ImageSource::Story,
         };
 
         let transcript = vec!["West of House".to_string(), String::new()];
@@ -1445,7 +1441,6 @@ mod tests {
         assert_eq!(got.align, ImageAlign::MarginLeft, "align round-trips");
         assert_eq!(got.scaled, Some((12, 8)), "scaled round-trips");
         assert_eq!(got.margin_px, Some(40), "margin_px round-trips");
-        assert_eq!(got.source, ImageSource::Story, "source round-trips");
         assert_eq!(got.pixels.dimensions(), (6, 4), "pixel dims round-trip");
         assert_eq!(
             got.pixels.as_raw(), img.pixels.as_raw(),
