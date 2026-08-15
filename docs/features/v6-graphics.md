@@ -1002,6 +1002,23 @@ session-only switch that never touches your saved config:
   neither half and was drawn by nobody, and the frame vanished for as long as the
   player took to type a bet. A picture painting outside its own story window goes to
   the composite too. No other v6 title's picture ever leaves its story window.
+  The ring is drawn around the story window's box, and a game can tell us that box
+  is bigger than the part it narrates in — `set_margins` reserves a column its prose
+  will never enter. Where the game then paints **chrome art** in the column it gave
+  up, the viewport is the text column and the ring's flank carries the picture.
+  Shogun's Apple IIgs press is the one title that needs this: on the Bridge it gives
+  window 0 a 320-pixel right margin and draws its 312×348 ship into a *separate*
+  graphics window laid over the story — so the ring, which is only ever
+  pane-minus-viewport, threw away 316 of the picture's 348 rows and left the 32 that
+  happened to clear the window's top edge as a three-row sliver above the prose. Its
+  Amiga and IBM siblings say exactly the same thing the other way round, drawing the
+  same ship into window 0 with the margin call right after it, where it has always
+  been read as a margin picture and floated beside the text. One layout, two idioms.
+  The "art is actually there" half of the rule is what keeps it honest: a reserved
+  margin with nothing painted in it is an inset the game wants its own prose to
+  keep, not a column handed to a picture, and the ceded flank is a *picture* rather
+  than a repeating border — so it is drawn once at its own height, never tiled down
+  the column the way Zork Zero's pillars and Arthur's poles are.
   Not every v6 game *has* a story window to ring, though. scopa's card table
   streams no prose at all — its screen is three grid windows and a table drawn out
   of filled rectangles, with two button labels on top — and a ring around nothing

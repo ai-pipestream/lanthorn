@@ -18,6 +18,8 @@ mod v6_shogun_menu_ground;
 mod v6_shogun_native_archive;
 #[path = "suites/v6_shogun_prompt_style.rs"]
 mod v6_shogun_prompt_style;
+#[path = "suites/v6_shogun_room_art.rs"]
+mod v6_shogun_room_art;
 #[path = "suites/v6_shogun_status_alignment.rs"]
 mod v6_shogun_status_alignment;
 #[path = "suites/v6_shogun_title_header.rs"]

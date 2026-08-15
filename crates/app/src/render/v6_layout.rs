@@ -1481,6 +1481,63 @@ pub fn story_viewport(
     ratatui::layout::Rect { x: cell_left, y: cell_top, width, height }
 }
 
+/// SQ-0888: window 0's box narrowed to the column the game reserved for its TEXT,
+/// when a CHROME graphics window is painting in the column it gave up. `None`
+/// leaves the box exactly as the game set it, which is every other corpus frame.
+///
+/// Hybrid splits the pane in two: the story window's box is terminal cells, and
+/// [`chrome_bands`] gives the ring everything OUTSIDE it. That split assumes the
+/// whole of window 0's box is the story's to narrate in. A v6 game can say
+/// otherwise, and it says so in as many words — `set_margins` (ZMSD §8.8.3.2,
+/// window properties 6 and 7) reserves a column of window 0 that its text will
+/// never enter.
+///
+/// Shogun's Apple IIgs press (`shogun_s1.dsk`, release 311 / serial 890510) is the
+/// corpus case. On the Bridge it puts window 0 at (1,65) 560x320 with
+/// `right_margin` 320 — its prose lives in the left 240 px — and draws its 312x348
+/// ship at screen x 248 into WINDOW 6, a graphics window at (1,33) 560x352 that
+/// contains window 0 outright. Window 6 is chrome, so the ring got
+/// pane-minus-viewport, and with the viewport spanning window 0's full width there
+/// was nowhere for the ship to be drawn: 316 of its 348 rows were discarded and the
+/// 32 rows that happen to sit above window 0 survived as a three-row sliver at the
+/// top of the pane.
+///
+/// The Amiga press (`James Clavell's Shogun.adf`, release 295 / serial 890321)
+/// states the SAME layout the other way round — `draw_picture 7` into window 0 at
+/// (229,1) with `set_margins` right after, which [`is_win0_inline_float`] already
+/// reads as a margin picture — and its frame has always been right. One layout,
+/// two idioms; only the medium differs.
+///
+/// [`is_win0_inline_float`]: crate::session::GameSession
+///
+/// GUARDED ON ART ACTUALLY BEING THERE, and that guard is the whole of the rule's
+/// safety. A margin with nothing painted in it is an inset the game wants its own
+/// prose to keep clear, not a column it has handed to a picture: Zork Zero and the
+/// Amiga Shogun run `left_margin` 2 / `right_margin` 2 on every gameplay frame, and
+/// narrowing for those would take columns off the prose to hand the ring a blank
+/// flank. Measured over the v6 corpus, this moves the Apple Shogun's gameplay frame
+/// and nothing else.
+pub fn story_text_box(story: &PositionedWindow, gfx: &RgbaImage) -> Option<PositionedWindow> {
+    let (x0, y0) = (story.x_px as u32, story.y_px as u32);
+    let (w, h) = (story.w_px as u32, story.h_px as u32);
+    let (left, right) = (story.left_margin as u32, story.right_margin as u32);
+    // Margins that leave no text column at all are not a layout we can read.
+    if left.saturating_add(right) >= w {
+        return None;
+    }
+    let cede_left = left > 0 && region_has_opaque(gfx, x0, y0, left, h);
+    let cede_right = right > 0 && region_has_opaque(gfx, x0 + w - right, y0, right, h);
+    if !cede_left && !cede_right {
+        return None;
+    }
+    let nx = x0 + if cede_left { left } else { 0 };
+    let nr = x0 + w - if cede_right { right } else { 0 };
+    let mut out = story.clone();
+    out.x_px = nx as u16;
+    out.w_px = (nr - nx) as u16;
+    Some(out)
+}
+
 /// The story viewport cell rect (relative to the pane's top-left cell) for the
 /// HYBRID render mode: the win0 box (`story` x_px/y_px/w_px/h_px, native game
 /// pixels) mapped through the letterbox [`Scale`] to device pixels, then quantized
