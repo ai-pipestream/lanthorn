@@ -61,13 +61,20 @@
 //!
 //! # Layer 3 — choosing what to run
 //!
-//! Files are enumerated flat: the catalog names a parent for every record, and
-//! this reader simply does not care which folder something is in. That is the
-//! same choice [`crate::adf`] makes and for the same reason — the story is
-//! identified by CONTENT ([`crate::adf::looks_like_story`], and
-//! [`crate::infocom_pics::InfocomPics::parse`] for the artwork), so where it
-//! sits is not a question anyone has to answer. Infocom's `Story.data` /
-//! `Pic.data` names are a tiebreak, never a test.
+//! The scan is flat — a file in a folder is found without recursing into it —
+//! but each entry now REPORTS the folder it was found in ([`HfsEntry::path`]).
+//! What a story is, is still decided by CONTENT ([`crate::adf::looks_like_story`],
+//! and [`crate::infocom_pics::InfocomPics::parse`] for the artwork); Infocom's
+//! `Story.data` / `Pic.data` names remain a tiebreak, never a test.
+//!
+//! This reader used to drop the folder, on the stated grounds that "where it
+//! sits is not a question anyone has to answer". On a one-game floppy that was
+//! true. It is false on a compilation, and quietly so (SQ-0877): the Masterpieces
+//! CD holds THREE files called `STORY.DATA` — Arthur's, Journey's and Zork
+//! Zero's — so a listing showed one name three times, and `read_named` could
+//! only ever reach the first. [`crate::fat12`] had already learnt this from the
+//! Atari ST compilations, where four games call their story `STORY.DAT`, and
+//! reports `HITCHHIK/STORY.DAT`; the two formats now spell a path alike.
 //!
 //! # What is on the Macintosh Zork Zero disk
 //!
@@ -134,8 +141,15 @@ const ND_N_RECS: usize = 10;
 /// `bthFNode` — the first leaf node — within a header node's first record.
 const BTH_F_NODE: usize = 10;
 
+/// `cdrDirRec`: the catalog record for a folder.
+const CDR_DIR: u8 = 1;
 /// `cdrFilRec`: the catalog record for a plain file.
 const CDR_FILE: u8 = 2;
+/// `dirDirID` within a directory record, and the record's length.
+const DIR_DIR_ID: usize = 6;
+const DIR_REC_LEN: usize = 70;
+/// The root folder's CNID: every parent chain ends here.
+const ROOT_CNID: u32 = 2;
 /// The catalog file's own CNID, which is how its overflow extents are keyed.
 const CATALOG_CNID: u32 = 4;
 
@@ -193,8 +207,31 @@ pub struct HfsEntry {
     /// The catalog node id, unique on the volume, and the key its overflow
     /// extents are stored under.
     pub id: u32,
+    /// The folder chain from the volume root, outermost first; empty at the
+    /// root. **This is what names a game on a compilation** — `ARTHUR FOLDER`,
+    /// `JOURNEY FOLDER` and `ZORK ZERO` are the only things telling three files
+    /// called `STORY.DATA` apart.
+    pub dirs: Vec<String>,
     /// The first three data-fork extents; any more live in the overflow file.
     extents: ExtentRecord,
+}
+
+impl HfsEntry {
+    /// How this file is named to the outside world: `Folder/Sub/NAME` inside a
+    /// folder, the bare name at the volume root.
+    ///
+    /// Slash-separated, which is [`crate::fat12::Fat12Entry::path`]'s spelling
+    /// rather than the Finder's colon — a path here is read by the same callers
+    /// for both formats, so the two agree. A Macintosh filename may legally
+    /// contain `/` and never `:`; that makes this ambiguous in principle, and it
+    /// stays a listing label rather than a key, exactly as
+    /// [`crate::medium::DiskStory::name`] says.
+    pub fn path(&self) -> String {
+        if self.dirs.is_empty() {
+            return self.name.clone();
+        }
+        format!("{}/{}", self.dirs.join("/"), self.name)
+    }
 }
 
 /// A mounted Macintosh volume.
@@ -343,29 +380,42 @@ impl Hfs {
         self.read_fork(entry.id, entry.extents, entry.size)
     }
 
-    /// Read a file by name (case-insensitive), for callers that already know
-    /// what they want. Prefer [`Hfs::story`] / [`Hfs::pictures`], which identify
-    /// by content.
+    /// Read a file by path or by bare name (case-insensitive), for callers that
+    /// already know what they want. Prefer [`Hfs::story`] / [`Hfs::pictures`],
+    /// which identify by content.
+    ///
+    /// The bare name still matches, so every `--pictures Pic.data` that worked
+    /// on a single-game floppy works unchanged. The path is what reaches a
+    /// PARTICULAR one on a compilation: `Pic.data` on the Masterpieces CD is
+    /// three different archives, and only `JOURNEY FOLDER/PIC.DATA` says which.
+    /// Same rule, same order, as [`crate::fat12::Fat12::read_named`].
     pub fn read_named(&self, name: &str) -> Option<Vec<u8>> {
-        let e = self.files.iter().find(|e| e.name.eq_ignore_ascii_case(name))?;
+        let e = self
+            .files
+            .iter()
+            .find(|e| e.path().eq_ignore_ascii_case(name) || e.name.eq_ignore_ascii_case(name))?;
         self.read(e)
     }
 
-    /// The story image on this volume, with the name it was stored under.
+    /// The story image on this volume, with the path it was stored under.
     ///
     /// Every file is tested with [`looks_like_story`]; a volume with none yields
     /// `None`. When more than one passes, Infocom's `Story.data` convention
     /// breaks the tie, then the largest candidate, so the choice is
-    /// deterministic rather than catalog-order luck.
+    /// deterministic rather than catalog-order luck. A compilation wants
+    /// [`Hfs::files`] and a chooser, not this.
+    ///
+    /// The convention is matched on the file's own name, not on its path — a
+    /// story is no less conventionally named for sitting in a folder.
     pub fn story(&self) -> Option<(String, Vec<u8>)> {
         let mut cands: Vec<(String, Vec<u8>)> = self
             .files
             .iter()
-            .filter_map(|e| self.read(e).map(|b| (e.name.clone(), b)))
+            .filter_map(|e| self.read(e).map(|b| (e.path(), b)))
             .filter(|(_, b)| looks_like_story(b))
             .collect();
-        cands.sort_by_key(|(name, bytes)| {
-            (!name.eq_ignore_ascii_case(CONVENTIONAL_STORY), std::cmp::Reverse(bytes.len()))
+        cands.sort_by_key(|(path, bytes)| {
+            (!base_name(path).eq_ignore_ascii_case(CONVENTIONAL_STORY), std::cmp::Reverse(bytes.len()))
         });
         cands.into_iter().next()
     }
@@ -392,18 +442,25 @@ impl Hfs {
         let mut cands: Vec<(String, InfocomPics)> = self
             .files
             .iter()
-            .filter_map(|e| self.read(e).map(|b| (e.name.clone(), b)))
+            .filter_map(|e| self.read(e).map(|b| (e.path(), b)))
             .filter(|(_, b)| !looks_like_story(b))
-            .filter_map(|(name, b)| InfocomPics::parse(b).ok().map(|p| (name, p)))
+            .filter_map(|(path, b)| InfocomPics::parse(b).ok().map(|p| (path, p)))
             .filter(|(_, p)| p.entries().iter().any(|e| e.has_pixels()))
             .collect();
-        cands.sort_by_key(|(name, pics)| {
-            let lower = name.to_ascii_lowercase();
+        cands.sort_by_key(|(path, pics)| {
+            let lower = base_name(path).to_ascii_lowercase();
             let conventional = CONVENTIONAL_PICTURES.contains(&lower.as_str());
             (pics.is_monochrome(), !conventional, std::cmp::Reverse(pics.entries().len()))
         });
         cands.into_iter().next()
     }
+}
+
+/// The filename at the end of a [`HfsEntry::path`] — what a naming CONVENTION is
+/// tested against, since `Story.data` is no less conventional for living in a
+/// folder.
+fn base_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// Where the HFS volume starts inside `bytes` — 0 for a bare volume, 84 inside a
@@ -569,6 +626,19 @@ fn overflow_records(tree: &[u8]) -> Vec<(u32, u16, ExtentRecord)> {
 /// Every file the catalog names, wherever it lives on the volume.
 fn catalog_files(tree: &[u8]) -> Vec<HfsEntry> {
     let mut out = Vec::new();
+    let mut folders: std::collections::HashMap<u32, (String, u32)> = Default::default();
+    for rec in leaf_records(tree) {
+        let key_len = usize::from(rec[0]);
+        if key_len < 6 {
+            continue;
+        }
+        let Some(name) = mac_name(&rec[6..]) else { continue };
+        let data = (1 + key_len).next_multiple_of(2);
+        let Some(d) = rec.get(data..data + DIR_REC_LEN) else { continue };
+        if d[0] == CDR_DIR {
+            folders.insert(be32(d, DIR_DIR_ID), (name, be32(rec, 2)));
+        }
+    }
     for rec in leaf_records(tree) {
         // Key: length byte, reserved byte, parent id, then a Pascal name. The
         // record's data starts at the next even offset past it.
@@ -582,8 +652,17 @@ fn catalog_files(tree: &[u8]) -> Vec<HfsEntry> {
         if d[0] != CDR_FILE {
             continue;
         }
+        let mut dirs = Vec::new();
+        let mut at = be32(rec, 2);
+        while at != ROOT_CNID && dirs.len() < 32 {
+            let Some((folder, up)) = folders.get(&at) else { break };
+            dirs.push(folder.clone());
+            at = *up;
+        }
+        dirs.reverse();
         out.push(HfsEntry {
             name,
+            dirs,
             size: be32(d, FIL_LG_LEN) as usize,
             resource_size: be32(d, FIL_R_LG_LEN) as usize,
             file_type: [d[FIL_TYPE], d[FIL_TYPE + 1], d[FIL_TYPE + 2], d[FIL_TYPE + 3]],
@@ -718,9 +797,51 @@ pub(crate) mod tests {
             self.volume[at..at + 4].copy_from_slice(&v.to_be_bytes());
         }
 
-        /// Write `data` as a file, split into `pieces` extents. More than three
-        /// pieces spills into the extents overflow file, exactly as HFS does.
+        /// Catalogue a folder under `parent` and hand back its CNID, so files
+        /// can be put inside it. A directory record carries no data at all —
+        /// the folder IS its catalog entry.
+        fn add_folder(&mut self, name: &str, parent: u32) -> u32 {
+            let cnid = self.next_cnid;
+            self.next_cnid += 1;
+            let mut rec = self.key(name, parent);
+            let mut d = vec![0u8; DIR_REC_LEN];
+            d[0] = CDR_DIR;
+            d[DIR_DIR_ID..DIR_DIR_ID + 4].copy_from_slice(&cnid.to_be_bytes());
+            rec.extend_from_slice(&d);
+            self.catalog.push(rec);
+            cnid
+        }
+
+        /// A catalog key: length byte, reserved byte, parent CNID, Pascal name,
+        /// padded so the record's data starts on an even offset.
+        fn key(&self, name: &str, parent: u32) -> Vec<u8> {
+            let mut rec = vec![0u8; 1 + 1 + 4 + 1 + name.len()];
+            rec[0] = (rec.len() - 1) as u8;
+            rec[2..6].copy_from_slice(&parent.to_be_bytes());
+            rec[6] = name.len() as u8;
+            rec[7..].copy_from_slice(name.as_bytes());
+            while !rec.len().is_multiple_of(2) {
+                rec.push(0);
+            }
+            rec
+        }
+
+        /// Write `data` as a file at the volume root.
         fn add_file(&mut self, name: &str, ftype: &[u8; 4], data: &[u8], pieces: usize) {
+            self.add_file_in(ROOT_CNID, name, ftype, data, pieces);
+        }
+
+        /// Write `data` as a file under `parent`, split into `pieces` extents.
+        /// More than three pieces spills into the extents overflow file, exactly
+        /// as HFS does.
+        fn add_file_in(
+            &mut self,
+            parent: u32,
+            name: &str,
+            ftype: &[u8; 4],
+            data: &[u8],
+            pieces: usize,
+        ) {
             let cnid = self.next_cnid;
             self.next_cnid += 1;
             let blocks = data.len().div_ceil(BLOCK);
@@ -751,14 +872,7 @@ pub(crate) mod tests {
 
             // The catalog record: key (length, reserved, parent, name) then a
             // file record.
-            let mut rec = vec![0u8; 1 + 1 + 4 + 1 + name.len()];
-            rec[0] = (rec.len() - 1) as u8;
-            rec[2..6].copy_from_slice(&2u32.to_be_bytes()); // parent: the root
-            rec[6] = name.len() as u8;
-            rec[7..].copy_from_slice(name.as_bytes());
-            while !rec.len().is_multiple_of(2) {
-                rec.push(0);
-            }
+            let mut rec = self.key(name, parent);
             let mut d = vec![0u8; FILE_REC_LEN];
             d[0] = CDR_FILE;
             d[FIL_TYPE..FIL_TYPE + 4].copy_from_slice(ftype);
@@ -859,7 +973,7 @@ pub(crate) mod tests {
     /// A header node naming one leaf, then that leaf. Three blocks, which is
     /// what [`VolumeBuilder`] reserves for each tree.
     fn btree(records: &[Vec<u8>]) -> Vec<u8> {
-        let mut tree = vec![0u8; 3 * NODE_SIZE];
+        let mut tree = vec![0u8; 2 * NODE_SIZE];
         // Header node: one record, whose `bthFNode` is node 1.
         tree[8] = 1; // ndType: header
         tree[ND_N_RECS..ND_N_RECS + 2].copy_from_slice(&1u16.to_be_bytes());
@@ -869,22 +983,49 @@ pub(crate) mod tests {
         tree[NODE_HEADER + BTH_F_NODE..NODE_HEADER + BTH_F_NODE + 4]
             .copy_from_slice(&1u32.to_be_bytes());
 
-        // Leaf node 1: the records, front to back, with their offsets from the
-        // back. `ndType` is -1 and `ndFLink` 0 — one leaf, no chain.
-        let leaf = NODE_SIZE;
-        tree[leaf + 8] = 0xFF;
-        tree[leaf + ND_N_RECS..leaf + ND_N_RECS + 2]
-            .copy_from_slice(&(records.len() as u16).to_be_bytes());
-        let mut at = NODE_HEADER;
-        for (i, r) in records.iter().enumerate() {
-            tree[leaf + NODE_SIZE - 2 * (i + 1)..leaf + NODE_SIZE - 2 * i]
-                .copy_from_slice(&(at as u16).to_be_bytes());
-            tree[leaf + at..leaf + at + r.len()].copy_from_slice(r);
-            at += r.len();
+        // Pack the records into leaves, greedily, the way a real catalog does —
+        // a node holds what fits between its header and its offset table, and
+        // the rest go in the next leaf. A single-leaf builder cannot exercise
+        // the `ndFLink` chain [`leaf_records`] walks, and a folder record per
+        // game overflows one node the moment a volume holds more than a floppy's
+        // worth (SQ-0877).
+        let mut leaves: Vec<Vec<&Vec<u8>>> = vec![Vec::new()];
+        let mut used = NODE_HEADER;
+        for r in records {
+            // Each record costs its own bytes plus its offset, and one more
+            // offset marks the free space after the last.
+            let n = leaves.last().expect("one leaf always").len();
+            if !leaves.last().expect("one leaf always").is_empty()
+                && used + r.len() + 2 * (n + 2) > NODE_SIZE
+            {
+                leaves.push(Vec::new());
+                used = NODE_HEADER;
+            }
+            used += r.len();
+            leaves.last_mut().expect("one leaf always").push(r);
         }
-        let n = records.len();
-        tree[leaf + NODE_SIZE - 2 * (n + 1)..leaf + NODE_SIZE - 2 * n]
-            .copy_from_slice(&(at as u16).to_be_bytes());
+
+        // `ndType` is -1 for a leaf; `ndFLink` names the next, and 0 ends the
+        // chain.
+        tree.resize((1 + leaves.len()) * NODE_SIZE, 0);
+        for (l, recs) in leaves.iter().enumerate() {
+            let leaf = (1 + l) * NODE_SIZE;
+            tree[leaf + 8] = 0xFF;
+            let next = if l + 1 < leaves.len() { (l + 2) as u32 } else { 0 };
+            tree[leaf..leaf + 4].copy_from_slice(&next.to_be_bytes());
+            tree[leaf + ND_N_RECS..leaf + ND_N_RECS + 2]
+                .copy_from_slice(&(recs.len() as u16).to_be_bytes());
+            let mut at = NODE_HEADER;
+            for (i, r) in recs.iter().enumerate() {
+                tree[leaf + NODE_SIZE - 2 * (i + 1)..leaf + NODE_SIZE - 2 * i]
+                    .copy_from_slice(&(at as u16).to_be_bytes());
+                tree[leaf + at..leaf + at + r.len()].copy_from_slice(r);
+                at += r.len();
+            }
+            let n = recs.len();
+            tree[leaf + NODE_SIZE - 2 * (n + 1)..leaf + NODE_SIZE - 2 * n]
+                .copy_from_slice(&(at as u16).to_be_bytes());
+        }
         tree
     }
 
@@ -1151,6 +1292,57 @@ pub(crate) mod tests {
         assert_eq!(Hfs::mount(gutted).unwrap_err(), HfsError::NotHfs);
     }
 
+    /// **A folder is reported, and is what tells two identical names apart**
+    /// (SQ-0877).
+    ///
+    /// Synthetic, so it runs on CI, and shaped like the case that motivated it:
+    /// two games each shipping a `Story.data`, plus one at the root. Before this
+    /// quest all three answered to the name `Story.data` and `read_named` could
+    /// only ever reach the first.
+    ///
+    /// FALSIFICATION: report `e.name` instead of `e.path()` and the three paths
+    /// collapse to one repeated name; drop the parent walk and every path loses
+    /// its folder.
+    #[test]
+    fn a_folder_is_reported_and_tells_two_identical_names_apart() {
+        let mut b = VolumeBuilder::new();
+        let arthur = b.add_folder("ARTHUR FOLDER", ROOT_CNID);
+        let journey = b.add_folder("JOURNEY FOLDER", ROOT_CNID);
+        let deep = b.add_folder("DATA", journey);
+        b.add_file("Loose.data", b"INdf", b"at the volume root", 1);
+        b.add_file_in(arthur, "Story.data", b"INdf", b"arthur's story", 1);
+        b.add_file_in(journey, "Story.data", b"INdf", b"journey's story", 1);
+        b.add_file_in(deep, "Story.data", b"INdf", b"journey's spare", 1);
+        let hfs = Hfs::mount(b.finish()).expect("mounts");
+
+        let mut paths: Vec<String> = hfs.files().iter().map(|e| e.path()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "ARTHUR FOLDER/Story.data",
+                "JOURNEY FOLDER/DATA/Story.data",
+                "JOURNEY FOLDER/Story.data",
+                "Loose.data",
+            ],
+            "the folder chain, outermost first; a root file keeps its bare name"
+        );
+
+        // The path reaches a PARTICULAR one; the bare name still reaches some
+        // one of them, which is what keeps `--pictures Pic.data` working.
+        assert_eq!(
+            hfs.read_named("ARTHUR FOLDER/Story.data").as_deref(),
+            Some(&b"arthur's story"[..])
+        );
+        assert_eq!(
+            hfs.read_named("journey folder/data/STORY.DATA").as_deref(),
+            Some(&b"journey's spare"[..]),
+            "case-insensitive over the whole path"
+        );
+        assert!(hfs.read_named("Story.data").is_some(), "a bare name still resolves");
+        assert_eq!(hfs.read_named("Loose.data").as_deref(), Some(&b"at the volume root"[..]));
+    }
+
     /// **The hybrid CD, read where it lies** (SQ-0870): a raw MODE1/2352 dump
     /// whose third Apple partition is the Macintosh volume.
     ///
@@ -1186,7 +1378,7 @@ pub(crate) mod tests {
             assert_eq!(stories.len(), 83, "{what}");
             let zork = stories
                 .iter()
-                .find(|s| s.name == "ZORK I")
+                .find(|s| s.name == "MAC/ZORK I")
                 .unwrap_or_else(|| panic!("{what}: the Macintosh Zork I"));
             let release = u16::from_be_bytes([zork.bytes[2], zork.bytes[3]]);
             assert_eq!(zork.bytes[0], 3, "{what}: v3");
@@ -1202,18 +1394,20 @@ pub(crate) mod tests {
             );
             listings.push((
                 what.to_string(),
-                hfs.files().iter().map(|e| (e.name.clone(), e.size)).collect(),
+                hfs.files().iter().map(|e| (e.path(), e.size)).collect(),
             ));
         }
         if let [(a, one), (b, two)] = &listings[..] {
             assert_eq!(one, two, "{a} and {b} are the same volume");
         }
-        assert!(
-            listings.len() == media.len() || !dir.is_dir(),
-            "the CD is here and something did not read: {} of {}",
-            listings.len(),
-            media.len()
-        );
+        // Each medium that is PRESENT must read; a medium that is absent is a
+        // skip. The equality above is the interesting property and it needs
+        // both, but requiring both to exist would make this test hostage to a
+        // 354 MB derived artifact — and the hand-extracted partition is exactly
+        // the artifact SQ-0870 made unnecessary, so it is the one a tidy-up
+        // deletes first. Deleting it should not turn this red.
+        let present = media.iter().filter(|(_, f)| dir.join(f).is_file()).count();
+        assert_eq!(listings.len(), present, "every medium that is here has to read");
     }
 
     /// **The intact control** (SQ-0870): the 12 MB Macintosh compilation in

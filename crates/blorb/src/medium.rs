@@ -941,11 +941,14 @@ impl Volume for Hfs {
     }
 
     fn contents(&self) -> Vec<(String, Vec<u8>)> {
-        self.files().iter().filter_map(|e| self.read(e).map(|b| (e.name.clone(), b))).collect()
+        // The PATH, not the bare name: three files on the Masterpieces CD are
+        // called `STORY.DATA` and the folder is the only thing between them
+        // (SQ-0877). Same reason `Fat12` reports `HITCHHIK/STORY.DAT`.
+        self.files().iter().filter_map(|e| self.read(e).map(|b| (e.path(), b))).collect()
     }
 
     fn read_named(&self, name: &str) -> Option<Vec<u8>> {
-        // Case-insensitive on the stored catalog name.
+        // Case-insensitive on the stored path, then on the bare catalog name.
         Hfs::read_named(self, name)
     }
 
