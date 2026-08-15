@@ -273,10 +273,13 @@ pub(crate) fn boot_story(
     // another release. Asked only for a story that came off a disk image, which
     // is the only case the refusal can fire in, and only when no named archive
     // has already won; every ordinary boot pays nothing for it.
+    //
+    // SQ-0882: and only when the medium has no artwork of its own to draw, which
+    // is the warrant above taken literally — see `unpaired_art_warning`.
     let picture_warning = picture_override.warning().or_else(|| {
         let unnamed = !matches!(picture_override, app::graphics::PictureOverride::Loaded { .. });
         (cfg.images && disk_image.is_some() && unnamed)
-            .then(|| app::graphics::resource_blorb(&story_path).refused)
+            .then(|| app::graphics::unpaired_art_warning(&story_path, disk_entry))
             .flatten()
     });
     if let Some(msg) = &picture_warning {

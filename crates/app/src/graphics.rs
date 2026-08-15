@@ -1343,6 +1343,38 @@ pub fn resource_blorb(story_path: &std::path::Path) -> ResourceBlorb {
     }
 }
 
+/// The refused-Blorb complaint a player needs to SEE, or `None` (SQ-0882).
+///
+/// [`resource_blorb`]'s refusal is a fact about a sidecar. Whether it is news
+/// depends on something it deliberately does not look at: whether the medium
+/// carries artwork of its own. [`PictSource::resolve`] takes that first and only
+/// falls through to a sidecar when there is none, so on a disk that draws from
+/// its own archive the refusal changed nothing — it declined a file that was
+/// never going to be reached.
+///
+/// SQ-0866 put the warning in for one reason, stated in its own words: *"it is
+/// only honest if the player is told why their disk has no pictures"*. A disk
+/// that HAS pictures is outside that warrant, and telling it anyway is worse
+/// than silence, because the only sentence the player gets ends "a different
+/// build's pictures are not being drawn" and reads as *your artwork is missing*.
+/// Both Amiga and Apple II presses of Arthur are in that position — `Pic.data`
+/// and `ARTHUR.1/ARTHUR.D1` draw, while `Arthur.blb` (release 74, serial 890714)
+/// is refused against release 54/890606 and 63/890622 — and both were reporting
+/// it at every boot.
+///
+/// Asking what WON rather than what was declined also keeps this honest as the
+/// readers improve: a medium babelmap learns to read artwork off stops warning
+/// by itself, with nothing here to update.
+pub fn unpaired_art_warning(
+    story_path: &std::path::Path,
+    disk_entry: Option<&str>,
+) -> Option<String> {
+    if release_art(story_path, disk_entry).is_some() {
+        return None;
+    }
+    resource_blorb(story_path).refused
+}
+
 /// Why the Blorb at `path` may not speak for `story_path`, or `None` when
 /// nothing contradicts it. The rule, and the argument for where its line falls,
 /// are [`resource_blorb`]'s.

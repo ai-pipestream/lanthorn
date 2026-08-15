@@ -317,6 +317,14 @@ fn a_loose_story_keeps_the_blorb_that_states_its_own_build() {
 /// **The medium always wins first**, so a disk carrying its own artwork never
 /// reaches the rule at all — including the Amiga *Arthur*, whose neighbouring
 /// `Arthur.blb` states a build it does not share.
+///
+/// And so it is never TOLD about it either (SQ-0882). The refusal still fires
+/// on these disks — `Arthur.blb` genuinely contradicts release 54/890606 and
+/// 63/890622 — but it declined a file the boot was never going to reach, so
+/// there is no news in it. Reported anyway, the one sentence the player saw
+/// ended "a different build's pictures are not being drawn" while their disk was
+/// drawing perfectly well from `Pic.data`. `unpaired_art_warning` asks what won
+/// rather than what was declined; every row here must come back silent.
 #[test]
 fn a_disk_with_its_own_artwork_is_never_asked_about_a_blorb() {
     const CASES: &[(&str, &str)] = &[
@@ -342,9 +350,51 @@ fn a_disk_with_its_own_artwork_is_never_asked_about_a_blorb() {
         let art = app::graphics::release_art(&p, None).expect("this medium supplies its own art");
         assert_eq!(&art.name, archive, "{disk} draws with its own {archive}");
         assert!(drawn_pictures(&p) > 0, "{disk} draws");
+        assert_eq!(
+            app::graphics::unpaired_art_warning(&p, None),
+            None,
+            "{disk} draws its own {archive}, so it has nothing to be warned about — \
+             whatever sidecar was refused was never going to be reached"
+        );
         ran += 1;
     }
     assert!(ran > 0 || !any_present(&names), "no case ran but the fixtures are here");
+}
+
+/// The warning SURVIVES where it was earned: a disk with no artwork of its own
+/// and a sidecar refused for naming another build (SQ-0882's other half).
+///
+/// `Journey.2mg` is release 77 / serial 890616 and babelmap reads no archive off
+/// it, so the boot really does draw nothing and `Journey.blb` (release 83 /
+/// 890706) really is why. That is the case SQ-0866 was written for, and it is
+/// the ONLY one left in the corpus: measured across `stories/`, sixteen media
+/// refuse a sidecar and fifteen of them draw their own artwork anyway. Narrowing
+/// the warning to what actually won turned fifteen false alarms off and left the
+/// true one on — which is the whole claim, so both halves are pinned.
+///
+/// Falsifiable: drop the `release_art` check from `unpaired_art_warning` and the
+/// silence asserted above turns back into fifteen warnings.
+#[test]
+fn a_disk_that_really_has_no_artwork_still_says_why() {
+    const IIGS_JOURNEY_77: &str = "Journey.2mg";
+    let Some(p) = media(IIGS_JOURNEY_77) else {
+        eprintln!("SKIP: gitignored medium missing: {IIGS_JOURNEY_77}");
+        return;
+    };
+    if media(JOURNEY_BLORB).is_none() {
+        eprintln!("SKIP: gitignored sidecar missing: {JOURNEY_BLORB}");
+        return;
+    }
+    assert!(
+        app::graphics::release_art(&p, None).is_none(),
+        "{IIGS_JOURNEY_77} supplies no artwork of its own — if it starts to, this case \
+         has been overtaken by a better reader and the warning is right to go quiet"
+    );
+    let said = app::graphics::unpaired_art_warning(&p, None)
+        .expect("nothing draws, so the player must be told why");
+    for want in ["Journey.blb", "release 83", "890706", "release 77", "890616"] {
+        assert!(said.contains(want), "the complaint must name {want:?}: {said}");
+    }
 }
 
 /// **The rule refuses only on proof, never on absence of evidence.**
