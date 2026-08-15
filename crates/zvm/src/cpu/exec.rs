@@ -315,6 +315,18 @@ pub struct Machine {
     /// stamp — each retirement supersedes the one before it as the live screen's
     /// beginning. Set-only here; `GameSession::drain_turn` takes it.
     pub v6_prose_retired: Option<u64>,
+    /// Whether the retirement [`Machine::v6_prose_retired`] stamps froze the
+    /// window's WHOLE streamed screen, leaving nothing of it live (SQ-0890).
+    ///
+    /// [`crate::screen::ZWindow::retire_streamed`] freezes only the runs the new
+    /// box no longer covers, so a resize can strand some lines as paint and keep
+    /// the rest as the window's own live prose. When it takes everything, the
+    /// text below the stamp is paint in its entirety and the host can stop
+    /// carrying it at all; when it takes only part, the frozen and the live runs
+    /// interleave in one character stream and no single offset separates them —
+    /// so the host keeps the lot, exactly as it did before. Set beside the stamp,
+    /// and taken with it.
+    pub v6_prose_retired_whole: bool,
     /// Where the host's transcript stands at the moment an `erase_window` cleared
     /// the window whose prose the HOST is holding — a [`Machine::v6_win0_out_chars`]
     /// stamp, `None` when no such erase happened this turn (SQ-0755).
@@ -530,6 +542,7 @@ impl Machine {
             pending_erase_fills: Vec::new(),
             v6_win0_out_chars: 0,
             v6_prose_retired: None,
+            v6_prose_retired_whole: false,
             v6_screen_cleared: None,
             v6_declared_x: None,
             diagnostics: Vec::new(),
@@ -1920,6 +1933,7 @@ impl Machine {
                     let screen_w = self.mem.read_word(0x22);
                     let screen_h = self.mem.read_word(0x24);
                     let mut retired = false;
+                    let mut whole = true;
                     if let Some(v6) = self.screen.v6.as_mut() {
                         // (window, new top, new height) — window 1 across the top,
                         // window 0 tiled below it, both the full screen width.
@@ -1928,8 +1942,11 @@ impl Machine {
                         for (win, y, h) in tiling {
                             let w = &mut v6.windows[win];
                             let nw = if screen_w > 0 { screen_w } else { w.x_size };
-                            if (w.y_coord, w.x_coord, w.y_size, w.x_size) != (y, 1, h, nw) {
-                                retired |= w.retire_streamed(1, y, nw, h);
+                            if (w.y_coord, w.x_coord, w.y_size, w.x_size) != (y, 1, h, nw)
+                                && w.retire_streamed(1, y, nw, h)
+                            {
+                                retired = true;
+                                whole &= w.streamed.is_empty();
                             }
                             w.x_coord = 1;
                             w.y_coord = y;
@@ -1939,6 +1956,7 @@ impl Machine {
                     }
                     if retired {
                         self.v6_prose_retired = Some(self.v6_win0_out_chars);
+                        self.v6_prose_retired_whole = whole;
                     }
                 } else {
                     // Cap the row count like EXT window_size does (GRID_CELL_CAP):
@@ -3091,6 +3109,7 @@ impl Machine {
                     self.screen_trace.push(format!("@move_window(win={win}, y={y}, x={x})"));
                 }
                 let mut retired = false;
+                let mut whole = false;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
@@ -3098,6 +3117,7 @@ impl Machine {
                             // Freeze whatever the window's NEW box leaves behind.
                             let (bw, bh) = (w.x_size, w.y_size);
                             retired = w.retire_streamed(x, y, bw, bh);
+                            whole = w.streamed.is_empty();
                         }
                         w.y_coord = y;
                         w.x_coord = x;
@@ -3105,6 +3125,7 @@ impl Machine {
                 }
                 if retired {
                     self.v6_prose_retired = Some(self.v6_win0_out_chars);
+                    self.v6_prose_retired_whole = whole;
                 }
                 StepResult::Continue
             }
@@ -3126,6 +3147,7 @@ impl Machine {
                 // caps worst-case storage at ~1M cells. The pixel sizes (props
                 // 2/3) are still stored verbatim; only the cell grid is bounded.
                 let mut retired = false;
+                let mut whole = false;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
@@ -3135,6 +3157,7 @@ impl Machine {
                         if (w.y_size, w.x_size) != (y, x) {
                             let (bx, by) = (w.x_coord, w.y_coord);
                             retired = w.retire_streamed(bx, by, x, y);
+                            whole = w.streamed.is_empty();
                         }
                         w.y_size = y;
                         w.x_size = x;
@@ -3155,6 +3178,7 @@ impl Machine {
                 }
                 if retired {
                     self.v6_prose_retired = Some(self.v6_win0_out_chars);
+                    self.v6_prose_retired_whole = whole;
                 }
                 StepResult::Continue
             }

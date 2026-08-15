@@ -130,8 +130,12 @@ fn shogun_title_header_freezes_where_it_was_painted() {
         "the frozen header keeps the game's own 16px row grid"
     );
 
-    // The frozen half is BEFORE the boundary; the prompt the game printed at the
-    // window's new origin is after it.
+    // The boundary is still marked, and the prompt the game printed at the
+    // window's new origin is still after it — but the frozen half is no longer
+    // emitted at all (SQ-0890). It is PAINT now, asserted run by run above, and
+    // the story box renders the transcript: keeping a copy there drew the header
+    // a second time into the four-row box, across the game's own menu. Nothing
+    // above the boundary reaches the host, so `before` is empty.
     let mut before = String::new();
     let mut after = String::new();
     let mut seen_clear = false;
@@ -150,20 +154,21 @@ fn shogun_title_header_freezes_where_it_was_painted() {
     }
     assert!(seen_clear, "the turn carries a screen-clear boundary at the freeze");
     assert!(
-        before.contains("SHOGUN") && !before.contains("You may choose to"),
-        "everything printed before the move stays above the boundary: {before:?}"
+        before.is_empty(),
+        "the frozen half is paint, not transcript — nothing above the boundary is \
+         emitted: {before:?}"
     );
     assert_eq!(
         after.trim(),
         "You may choose to:",
         "and the live screen restarts with what the game printed at the new origin"
     );
-    // The reported offset is the boundary in the flat transcript; the element
-    // split drops the '\n' it lands after (the break IS the element boundary), so
-    // the head is exactly one char shorter.
+    // The reported offset is still the boundary in the FLAT transcript, which
+    // keeps every character the turn printed (the mapper reads it) — so it counts
+    // the header the elems channel dropped.
     assert_eq!(
         result.prose_retired,
-        Some(before.chars().count() + 1),
+        Some(result.transcript.chars().count() - after.chars().count()),
         "the reported offset is the boundary itself"
     );
 }

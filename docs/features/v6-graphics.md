@@ -1762,10 +1762,23 @@ promptly scrolled out of a four-row box.
 
 So a scrolling window's prose is now frozen the moment its window moves out from
 under it: the lines become paint, at the exact rows and columns the game printed
-them at, and the transcript starts again at the window's new origin. Everything
-frozen stays in your scrollback — nothing is deleted, it just stops being the
-live screen. Shogun's title now reads the way it does on the original: the header
-centred across the top, "You may choose to:" down beside START/RESTORE/QUIT.
+them at, and the transcript starts again at the window's new origin. Shogun's
+title now reads the way it does on the original: the header centred across the
+top, "You may choose to:" down beside START/RESTORE/QUIT.
+
+**Frozen means frozen — the transcript lets go of it.** When the freeze takes the
+whole of what a window had on screen, those characters stop being transcript at
+all. They are on the glass, drawn as paint, and a transcript copy of them is a
+second rendition of pixels that are already there — which is exactly what went
+wrong once the boot menu started taking the pixel composite: the credits were
+painted correctly across the top *and* replayed into the four-row prose box at
+the bottom, colliding mid-line with the menu ("Copyright (c) 1988 by
+InfocomQUIT the game"). Pictures have had this rule since the splash art learned
+it: an image the canvas already carries is marked as such, and the modes that
+draw the canvas skip it rather than draw it twice. Canvas-painted text now has
+the same provenance. A *partial* freeze — some lines stranded, the rest still
+inside the window's new box — keeps every line, because there the frozen and the
+live text are interleaved in one stream and no single boundary separates them.
 
 **Only prose the window walks away from freezes.** A window resized *around* the
 text it just printed still covers it, so that text is still the window's own and

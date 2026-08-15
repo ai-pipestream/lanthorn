@@ -301,6 +301,7 @@ fn interleave_story_elems(
     runs: &[CaptureRun],
     marks: Vec<(u64, TranscriptElem)>,
     base: u64,
+    frozen_through: Option<usize>,
 ) -> Vec<TranscriptElem> {
     let chars: Vec<char> = text.chars().collect();
     let total = chars.len();
@@ -369,7 +370,14 @@ fn interleave_story_elems(
             if chunk_end > pos {
                 let chunk: String = chars[pos..chunk_end].iter().collect();
                 let chunk_runs = take(chunk_end - pos);
-                elems.push(TranscriptElem::Text { text: chunk, runs: chunk_runs });
+                // …unless the retirement below froze it (SQ-0890): this text is
+                // PAINT on the screen now, published as its own layer, and a
+                // transcript copy of it is a second rendition of pixels that are
+                // already there. The style chunks are consumed either way, so the
+                // runs stay in lockstep with the text that survives.
+                if frozen_through.is_none_or(|f| chunk_end > f) {
+                    elems.push(TranscriptElem::Text { text: chunk, runs: chunk_runs });
+                }
             }
             if drop_sep {
                 let _ = take(1); // consume the dropped separator's style char
@@ -1643,6 +1651,21 @@ impl GameSession {
         let prose_retired_at = std::mem::take(&mut self.machine.v6_prose_retired);
         let prose_retired = prose_retired_at
             .map(|at| (at.saturating_sub(win0_base) as usize).min(transcript.chars().count()));
+        // …and the head above that boundary is not scrollback, it is PAINT (SQ-0890).
+        // The frozen runs publish as their own layer and the composite draws them at
+        // the game's own coordinates; carrying the same characters in the transcript
+        // too meant the story box re-rendered them a second time, into the four-row
+        // prose box Shogun moves window 0 down to, straight across its START /
+        // RESTORE / QUIT menu ("Copyright (c) 1988 by InfocomQUIT the game"). So the
+        // host stops carrying what it can see is already on the screen — the same
+        // rule `ImageSource::ContentSplash` states for pictures, whose canvas the
+        // raster path likewise draws instead of the transcript's copy (SQ-0461).
+        //
+        // Only when the freeze took the window's WHOLE streamed screen: a partial
+        // retirement interleaves frozen and still-live runs in one character stream
+        // and no single offset separates them, so that case keeps every line.
+        let froze_whole = std::mem::take(&mut self.machine.v6_prose_retired_whole);
+        let frozen_head = prose_retired.filter(|_| froze_whole);
         // SQ-0755: the same boundary from the other cause — the game ERASED the
         // window the host's transcript belongs to. A v6 erase never reached the host
         // at all (`erase_lower_requested` is the v1–5 lower window's flag), so the
@@ -1691,7 +1714,7 @@ impl GameSession {
                     marks.push((at, TranscriptElem::ScreenClear));
                 }
             }
-            interleave_story_elems(&transcript, &transcript_runs, marks, win0_base)
+            interleave_story_elems(&transcript, &transcript_runs, marks, win0_base, frozen_head)
         };
 
         TurnResult {
@@ -4358,7 +4381,7 @@ impl Engine for GameSession {
             .into_iter()
             .map(|(at, img)| (at, TranscriptElem::Image(img)))
             .collect();
-        interleave_story_elems(&transcript, &runs, marks, base)
+        interleave_story_elems(&transcript, &runs, marks, base, None)
     }
 
     fn set_strip_prompt(&mut self, on: bool) {
@@ -5099,7 +5122,7 @@ mod tests {
         let runs = vec![(text.chars().count(), 2u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0u8, false)];
         // Drawn at abs offset base+15 — mid-"second line" — must SNAP to that
         // line's start (offset 11), splitting cleanly at the line boundary.
-        let elems = interleave_story_elems(text, &runs, vec![(115, TranscriptElem::Image(img))], 100);
+        let elems = interleave_story_elems(text, &runs, vec![(115, TranscriptElem::Image(img))], 100, None);
         assert_eq!(elems.len(), 3, "Text, Image, Text");
         let TranscriptElem::Text { text: t0, runs: r0 } = &elems[0] else { panic!("elem 0 is Text") };
         assert_eq!(t0, "first line", "separator dropped — element boundary is the break");
@@ -5120,7 +5143,7 @@ mod tests {
             margin_px: None,
             source: crate::inline_image::ImageSource::Story,
         };
-        let elems = interleave_story_elems("story text", &[], vec![(0, TranscriptElem::Image(img))], 0);
+        let elems = interleave_story_elems("story text", &[], vec![(0, TranscriptElem::Image(img))], 0, None);
         assert_eq!(elems.len(), 2, "Image then Text");
         assert!(matches!(&elems[0], TranscriptElem::Image(_)));
         assert!(matches!(&elems[1], TranscriptElem::Text { text, .. } if text == "story text"));

@@ -8,6 +8,8 @@
 
 #![allow(dead_code, unused_imports)]
 
+#[path = "suites/v6_shogun_credit_replay.rs"]
+mod v6_shogun_credit_replay;
 #[path = "suites/v6_shogun_declared_columns.rs"]
 mod v6_shogun_declared_columns;
 #[path = "suites/v6_shogun_gameplay.rs"]
