@@ -57,7 +57,7 @@ fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
     if !z0.is_file() {
         return; // gitignored fixture
     }
-    let found = discover_art_candidates(&z0);
+    let found = discover_art_candidates(&z0, None);
     assert!(!found.is_empty(), "Zork Zero's archives sit beside it");
 
     for c in &found {
@@ -154,7 +154,7 @@ fn each_game_in_the_library_detects_its_own_archives_and_no_others() {
         if !path.is_file() {
             continue; // gitignored fixture
         }
-        let found = discover_art_candidates(&path);
+        let found = discover_art_candidates(&path, None);
         let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
         for w in *wanted {
             // Only assert on archives this library actually has.
@@ -194,7 +194,7 @@ fn a_split_ega_archive_is_offered_as_one_entry_carrying_both_files() {
         if !path.is_file() || !stories_dir().join(tail).is_file() {
             continue; // gitignored fixtures
         }
-        let found = discover_art_candidates(&path);
+        let found = discover_art_candidates(&path, None);
         let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
 
         let c = found
@@ -241,7 +241,7 @@ fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
     std::fs::copy(&eg2, dir.join("arthur.eg2")).unwrap();
     std::fs::write(dir.join("arthur.z6"), b"x").unwrap();
 
-    let found = discover_art_candidates(&dir.join("arthur.z6"));
+    let found = discover_art_candidates(&dir.join("arthur.z6"), None);
     let c = found
         .iter()
         .find(|c| c.filename.eq_ignore_ascii_case("arthur.eg2"))
@@ -251,7 +251,7 @@ fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
 
     // Put part 1 back and the row disappears into it.
     std::fs::copy(stories_dir().join("arthur.eg1"), dir.join("arthur.eg1")).unwrap();
-    let found = discover_art_candidates(&dir.join("arthur.z6"));
+    let found = discover_art_candidates(&dir.join("arthur.z6"), None);
     assert!(!found.iter().any(|c| c.filename.eq_ignore_ascii_case("arthur.eg2")));
     assert_eq!(
         found.iter().find(|c| c.filename.eq_ignore_ascii_case("arthur.eg1")).map(|c| c.pictures),
@@ -268,12 +268,12 @@ fn the_detected_list_is_sorted_and_holds_only_native_archives() {
     if !z0.is_file() {
         return;
     }
-    let found = discover_art_candidates(&z0);
+    let found = discover_art_candidates(&z0, None);
     let names: Vec<String> = found.iter().map(|c| c.filename.to_lowercase()).collect();
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted, "the list is alphabetical");
-    assert_eq!(found, discover_art_candidates(&z0), "and stable across calls");
+    assert_eq!(found, discover_art_candidates(&z0, None), "and stable across calls");
     assert!(found.iter().all(|c| !c.filename.eq_ignore_ascii_case("Zork0.blb")));
     assert!(found.iter().all(|c| !c.filename.to_lowercase().ends_with(".z6")));
 }
@@ -513,7 +513,7 @@ fn the_dialog_opens_on_what_the_story_already_inherits() {
     if !z0.is_file() {
         return;
     }
-    let all = discover_art_candidates(&z0);
+    let all = discover_art_candidates(&z0, None);
     let Some(i) = all.iter().position(|c| c.filename.eq_ignore_ascii_case("zork0.eg1")) else {
         return;
     };
@@ -623,7 +623,7 @@ fn both_macintosh_archives_are_offered_from_inside_the_disk_image() {
         eprintln!("SKIP: gitignored Macintosh medium missing");
         return;
     }
-    let found = discover_art_candidates(&image);
+    let found = discover_art_candidates(&image, None);
     let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
 
     let colour = found
@@ -672,7 +672,7 @@ fn an_amiga_floppy_offers_its_own_archive_through_the_same_seam() {
         eprintln!("SKIP: gitignored Amiga medium missing");
         return;
     }
-    let found = discover_art_candidates(&adf);
+    let found = discover_art_candidates(&adf, None);
     let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
     let pic = found
         .iter()
@@ -819,7 +819,7 @@ fn adding_the_medium_arm_moved_nothing_beside_the_story() {
         if !path.is_file() {
             continue; // gitignored fixtures
         }
-        let found = discover_art_candidates(&path);
+        let found = discover_art_candidates(&path, None);
         let names: Vec<String> = found.iter().map(|c| c.filename.to_lowercase()).collect();
         assert_eq!(names, want, "{story}");
         assert!(found.iter().all(|c| !c.on_medium), "{story} is not release media");

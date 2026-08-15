@@ -119,6 +119,41 @@ fn each_graphical_game_draws_with_its_own_folders_archive() {
     }
 }
 
+/// The options panel offers ONE game's archives, not the whole platter's.
+///
+/// The medium's guarantee is "it shipped in the box the story was mounted out
+/// of", and that was enough while a box held one game. This disc's box holds
+/// six, so the unfiltered list offered all sixteen archives on it — Macintosh
+/// and DOS renditions of three other games — for whichever story you opened.
+#[test]
+fn the_options_panel_offers_only_this_storys_own_archives() {
+    let Some(disc) = disc() else {
+        eprintln!("SKIP: the Masterpieces CD is absent");
+        return;
+    };
+    // The whole platter, which is what a person used to be shown for any of the
+    // 83 stories: six Macintosh archives (three games, colour and monochrome
+    // each) and ten DOS ones (Arthur and Journey at four renditions, Zork Zero
+    // at two).
+    let unfiltered = app::launch_options::discover_art_candidates(&disc, None);
+    assert_eq!(unfiltered.len(), 16, "every archive on the disc");
+
+    for (entry, want) in [
+        ("MAC/JOURNEY FOLDER/STORY.DATA", vec!["CPIC.DATA", "PIC.DATA"]),
+        ("PC/ZORK0/ZORK0.ZIP", vec!["ZORK0.CG1", "ZORK0.EG1"]),
+        ("PC/ARTHUR/ARTHUR.ZIP", vec!["ARTHUR.CG1", "ARTHUR.EG1", "ARTHUR.EG2", "ARTHUR.MG1"]),
+        // A text game shipped beside no artwork is offered none.
+        ("MAC/ZORK I", vec![]),
+    ] {
+        let mut got: Vec<String> = app::launch_options::discover_art_candidates(&disc, Some(entry))
+            .into_iter()
+            .map(|c| c.filename.rsplit('/').next().unwrap_or_default().to_string())
+            .collect();
+        got.sort();
+        assert_eq!(got, want, "the archives offered for {entry}");
+    }
+}
+
 /// The launch dialog's "what this will draw with" row agrees with the boot, per
 /// story.
 ///

@@ -238,8 +238,22 @@ const ART_EXTS: &[&str] = &["pic", "mg1", "mg2", "eg1", "eg2", "cg1", "cg2", "da
 /// set's picture count. The bare continuation stays reachable by name, like every
 /// other file this list declines to show, for anyone who genuinely wants only
 /// disk two.
-pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
+/// # Which story, on a disc that holds several (SQ-0876)
+///
+/// `disk_entry` is the story's own name on the volume. On a medium whose games
+/// live in FOLDERS, only the archives in this story's folder are listed — the
+/// medium's guarantee is "it shipped in the box", and on a compilation the box
+/// holds six games. Offering all 22 of the Masterpieces CD's archives for one
+/// game is the same wrong-pairing hazard this module's header warns about, just
+/// sourced from one disc instead of one directory.
+///
+/// The comparison is on the folder the MEDIUM spells, so a story at the volume
+/// root sees the root's archives — which is every single-game floppy, and also
+/// the multi-disk case where a sibling volume carries the art at ITS root
+/// (SQ-0862). `None` lists everything on the medium, exactly as before.
+pub fn discover_art_candidates(story_path: &Path, disk_entry: Option<&str>) -> Vec<ArtCandidate> {
     let story_stem = story_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let want_folder = disk_entry.map(folder_of);
     let mut out: Vec<ArtCandidate> = Vec::new();
     for file in crate::assets::files(story_path) {
         // **The name filter is the LOOSE source's, and only its.** A file beside
@@ -255,7 +269,12 @@ pub fn discover_art_candidates(story_path: &Path) -> Vec<ArtCandidate> {
         // flat library holds a dozen of them. Deciding on the name before
         // reading keeps this cheap enough for the browser's info panel to ask
         // per story.
-        if !file.is_on_medium() {
+        if file.is_on_medium() {
+            // Same folder as the story, when we know which story it is.
+            if want_folder.is_some_and(|want| folder_of(&file.name) != want) {
+                continue;
+            }
+        } else {
             if !looks_like_art_name(&file.name) {
                 continue;
             }
@@ -754,6 +773,24 @@ pub struct LaunchOptionsState {
     /// unchanged path. Set by [`LaunchOptionsState::on_disk_entry`] so the
     /// constructor stays the six arguments it was.
     pub disk_entry: Option<String>,
+    /// The sidecar's inherited `pictures` name, kept so
+    /// [`LaunchOptionsState::on_disk_entry`] can re-derive the selection after
+    /// it narrows the candidate list to one game's folder (SQ-0876).
+    pub(crate) inherited_pictures: Option<String>,
+}
+
+/// The folder part of a name the medium spells — everything before the last
+/// `/`, and `""` at the volume root.
+///
+/// Both [`crate::hints::mounted_stories`] and [`crate::assets::files`] report a
+/// medium's names the same way (`MAC/ZORK ZERO/STORY.DATA`), so comparing this
+/// of a story against this of an archive asks "did these ship in the same
+/// folder" without either side knowing what a folder is.
+fn folder_of(name: &str) -> &str {
+    match name.rfind('/') {
+        Some(at) => &name[..at],
+        None => "",
+    }
 }
 
 /// What a key did to the dialog.
@@ -781,7 +818,7 @@ impl LaunchOptionsState {
         z_version: Option<u8>,
         disk_image: Option<crate::hints::DiskImage>,
     ) -> LaunchOptionsState {
-        let candidates = discover_art_candidates(story_path);
+        let candidates = discover_art_candidates(story_path, None);
         // A sidecar naming an archive that is not in the list (an absolute path,
         // or a file that no longer parses) still deserves to be the baseline —
         // "inherit" is what it is, and the dialog must not silently re-point the
@@ -793,6 +830,7 @@ impl LaunchOptionsState {
             title: title.to_string(),
             story_path: story_path.to_path_buf(),
             candidates,
+            inherited_pictures: inherited_pictures.map(str::to_string),
             // `None` here, re-resolved by `on_disk_entry`: which story on the
             // medium is bound after construction, and on a compilation that is
             // what decides which archive is the default (SQ-0876).
@@ -821,7 +859,19 @@ impl LaunchOptionsState {
     pub fn on_disk_entry(mut self, disk_entry: Option<&str>) -> LaunchOptionsState {
         self.disk_entry = disk_entry.map(str::to_string);
         if self.disk_entry.is_some() {
-            self.default_art = resolved_default_art(&self.story_path, self.disk_entry.as_deref());
+            let entry = self.disk_entry.as_deref();
+            self.default_art = resolved_default_art(&self.story_path, entry);
+            // …and the LIST too, not only the default row: a compilation offers
+            // one game's archives, not the whole platter's (SQ-0876).
+            self.candidates = discover_art_candidates(&self.story_path, entry);
+            self.art = self
+                .inherited_pictures
+                .as_deref()
+                .and_then(|name| {
+                    self.candidates.iter().position(|c| c.filename.eq_ignore_ascii_case(name))
+                })
+                .map_or(0, |i| i + 1);
+            self.cursor = Row::Art(self.art);
         }
         self
     }
@@ -1075,7 +1125,7 @@ mod tests {
         let dir = tmp("bogus");
         std::fs::write(dir.join("story.z6"), b"not a story").unwrap();
         std::fs::write(dir.join("story.mg1"), b"nowhere near an archive").unwrap();
-        assert!(discover_art_candidates(&dir.join("story.z6")).is_empty());
+        assert!(discover_art_candidates(&dir.join("story.z6"), None).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1085,7 +1135,7 @@ mod tests {
         if !z0.is_file() {
             return; // gitignored fixtures; skip vacuously (CI-safe)
         }
-        let found = discover_art_candidates(&z0);
+        let found = discover_art_candidates(&z0, None);
         let by_name = |n: &str| found.iter().find(|c| c.filename.eq_ignore_ascii_case(n)).cloned();
         // Every rendition the SQ-0734 note tabulates, each labelled from its own
         // codec and picture-space width rather than from its name.

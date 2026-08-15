@@ -347,7 +347,12 @@ pub fn resolve_aux(
     // Resolved here rather than in the panel because the panel redraws every
     // frame and this reads and parses whole archives; the aux cache is already
     // the per-story "things that touch the disk" tier.
-    let art_candidates = crate::launch_options::discover_art_candidates(&entry.path);
+    // The story's own entry, so the info panel lists one game's archives rather
+    // than the whole platter's on a compilation (SQ-0876).
+    let art_candidates = crate::launch_options::discover_art_candidates(
+        &entry.path,
+        entry.meta.disk_entry.as_deref(),
+    );
     let art_in_use = crate::styles::read_per_game_pictures(&game_dir);
     StoryAux {
         assoc_blorb,
