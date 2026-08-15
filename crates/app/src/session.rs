@@ -471,6 +471,7 @@ pub enum SchannelOp {
 }
 
 /// Result of one player turn.
+#[derive(Default)]
 pub struct TurnResult {
     pub transcript: String,
     /// Text-style chunks for `transcript`: a `(char_count, bits, fg, bg, link, para)`

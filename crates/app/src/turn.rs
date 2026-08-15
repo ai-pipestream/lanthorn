@@ -30,8 +30,44 @@ use crate::{
 /// normal `SubmitCommand` path and the terminator-key submit gate (SQ-0188).
 /// Returns `true` if the app should exit after this turn.
 #[allow(clippy::too_many_arguments)]
+/// **A line read that ended on a terminating character echoed no newline**, so
+/// the host must not invent one (SQ-0881).
+///
+/// The newline ZMSD §7.1.1.1 has an interpreter echo after a `read` is the echo
+/// of the newline the player TYPED. From Version 5 a read can instead end on a
+/// character the game listed in its terminating-characters table (§10.7), and
+/// then nothing was typed and nothing was echoed. Arthur lists the four arrows,
+/// F1–F6 (ZSCII 133–138) and both mouse clicks, so pressing F2 for its map is a
+/// read that ends with no newline anywhere in it.
+///
+/// The host adds a transcript line per turn, and that line IS its way of
+/// supplying §7.1.1.1's newline — so on such a turn it supplies one the game
+/// never echoed, and the player watches the cursor drop a line for every
+/// function key they press.
+///
+/// True only when the turn has nothing whatsoever to show: no typed text to
+/// echo, and no output. A terminator that ends a line the player DID type still
+/// echoes that text, and a game that prints in response still gets its line —
+/// this silences a turn that was already silent, and nothing else.
+pub(crate) fn silent_terminator_turn(
+    cmd: &str,
+    ended_on_newline: bool,
+    result: &TurnResult,
+) -> bool {
+    use app::session::TranscriptElem;
+    !ended_on_newline
+        && cmd.is_empty()
+        && result.transcript.is_empty()
+        && result.info.is_none()
+        && result
+            .transcript_elems
+            .iter()
+            .all(|e| matches!(e, TranscriptElem::Text { text, .. } if text.is_empty()))
+}
+
 pub(crate) fn finish_command_turn(
     cmd: &str,
+    ended_on_newline: bool,
     result: TurnResult,
     state: &mut AppState,
     mapper: &mut Mapper,
@@ -43,11 +79,16 @@ pub(crate) fn finish_command_turn(
     bg_tidy_counter: &mut u32,
 ) -> bool {
     if result.erase_lower { state.mark_screen_clear(); }
+    // A read that ended on a terminating character with nothing typed and
+    // nothing printed adds nothing to the transcript — see
+    // [`silent_terminator_turn`]. Everything below this point that is NOT the
+    // transcript (the map, the turn events, the save bookkeeping) still runs.
+    let silent = silent_terminator_turn(cmd, ended_on_newline, &result);
     // Some games echo the typed command themselves at the start of their turn
     // output (e.g. CounterfeitMonkey prints it back in bold). Adding our own echo
     // on top would show the command twice, so detect that and skip ours. Most
     // games don't self-echo, so they still get our echo below.
-    let self_echo = game_echoes_command(&result.transcript, cmd);
+    let self_echo = silent || game_echoes_command(&result.transcript, cmd);
     // When the game self-echoes AND we're inline with the `>` as the last line,
     // fold the game's echo onto that prompt line (below) so it reads `>look` at
     // the prompt, with the game's own styling — instead of a detached line.
@@ -65,7 +106,9 @@ pub(crate) fn finish_command_turn(
         state.append_to_last_transcript_line(cmd);
     }
     let before_push = state.transcript.len();
-    if result.transcript_elems.is_empty() {
+    if silent {
+        // Nothing to push: the turn printed nothing and the read ate no newline.
+    } else if result.transcript_elems.is_empty() {
         state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
     } else {
         app::state::apply_transcript_elems(state, &result.transcript_elems);
@@ -825,6 +868,54 @@ pub(crate) fn next_input_deadline(
 
 #[cfg(test)]
 mod tests {
+    use super::silent_terminator_turn;
+    use app::session::{TranscriptElem, TurnResult};
+
+    fn blank_turn() -> TurnResult {
+        TurnResult::default()
+    }
+
+    /// SQ-0881: the four states this rule has to tell apart.
+    ///
+    /// Arthur lists F1–F6 among its terminating characters, so pressing F2 for
+    /// the map is a `read` that ends with no newline in it. Measured on
+    /// `arthur-r74-s890714.z6`: at an ordinary line prompt,
+    /// `submit_line_with_terminator("", 134)` returns an EMPTY transcript and a
+    /// single empty text element — the game draws its map into a v6 window and
+    /// prints nothing — so the transcript line the host adds per turn is a
+    /// newline nothing echoed.
+    #[test]
+    fn only_a_turn_with_nothing_to_show_is_silenced() {
+        // The reported case: a function key, nothing typed, nothing printed.
+        assert!(silent_terminator_turn("", false, &blank_turn()));
+        // …including when the engine reports it as one empty text element,
+        // which is the shape Arthur actually produces.
+        let mut empty_elem = blank_turn();
+        empty_elem.transcript_elems =
+            vec![TranscriptElem::Text { text: String::new(), runs: Vec::new() }];
+        assert!(silent_terminator_turn("", false, &empty_elem));
+
+        // A newline-terminated read is untouched, however empty — pressing
+        // Enter on a blank line is a turn the player took and the game answered.
+        assert!(!silent_terminator_turn("", true, &blank_turn()));
+
+        // A terminator that ended a line the player TYPED still echoes it.
+        assert!(!silent_terminator_turn("look", false, &blank_turn()));
+
+        // …and a game that printed something still gets its line.
+        let mut printed = blank_turn();
+        printed.transcript = "The map unfolds.".to_string();
+        assert!(!silent_terminator_turn("", false, &printed));
+        let mut elem = blank_turn();
+        elem.transcript_elems =
+            vec![TranscriptElem::Text { text: "x".to_string(), runs: Vec::new() }];
+        assert!(!silent_terminator_turn("", false, &elem));
+        // A screen clear is output too: it moves the transcript's anchor.
+        let mut cleared = blank_turn();
+        cleared.transcript_elems = vec![TranscriptElem::ScreenClear];
+        assert!(!silent_terminator_turn("", false, &cleared));
+    }
+
     // ── screen-trace flush (drain-always, write-when-on) ────────────────────────
 
     /// A minimal `Engine` double whose `take_screen_trace` returns one line on

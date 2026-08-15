@@ -2738,7 +2738,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 .expect("z-machine line read is pending")
                                 .submit_line_with_terminator(&cmd, term);
                             if turn::finish_command_turn(
-                                &cmd, result, &mut state, &mut mapper, &mut *session,
+                                // The read ended on a listed terminating
+                                // character, not a newline (SQ-0881).
+                                &cmd, false, result, &mut state, &mut mapper, &mut *session,
                                 &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                             ) {
                                 break 'event_loop state.exit_target.into();
@@ -3052,7 +3054,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             cmd
                         };
                         if turn::finish_command_turn(
-                            &cmd, result, &mut state, &mut mapper, &mut *session,
+                            &cmd, true, result, &mut state, &mut mapper, &mut *session,
                             &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                         ) {
                             break 'event_loop state.exit_target.into();
@@ -3203,7 +3205,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("input_line({cmd:?})"));
                 let result = session.submit(&cmd);
                 if turn::finish_command_turn(
-                    &cmd, result, &mut state, &mut mapper, &mut *session,
+                    &cmd, true, result, &mut state, &mut mapper, &mut *session,
                     &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                 ) {
                     break 'event_loop state.exit_target.into();
