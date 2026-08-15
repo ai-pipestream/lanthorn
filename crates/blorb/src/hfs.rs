@@ -106,7 +106,11 @@ use crate::infocom_pics::InfocomPics;
 pub const BLOCK: usize = 512;
 
 /// Bytes of DiskCopy 4.2 header ahead of the volume.
-const DISKCOPY_HEADER: usize = 84;
+///
+/// Shared with [`crate::prodos`]: DiskCopy is a wrapper, not a filesystem, and
+/// an Apple II 800 KB ProDOS volume arrives inside one exactly as a Macintosh
+/// volume does (SQ-0889).
+pub(crate) const DISKCOPY_HEADER: usize = 84;
 /// `dataSize` — the volume's length in bytes.
 const DISKCOPY_DATA_SIZE: usize = 0x40;
 /// `tagSize` — the sector tags, which FOLLOW the volume and are not part of it.
@@ -575,7 +579,13 @@ fn raw_disc_volume(bytes: &[u8]) -> bool {
 }
 
 /// The volume length a DiskCopy 4.2 header declares, when `bytes` carries one.
-fn diskcopy_volume_len(bytes: &[u8]) -> Option<usize> {
+///
+/// Nothing here is Macintosh-specific — it reads the wrapper's own declared
+/// geometry and checks it against the bytes in hand — so [`crate::prodos`]
+/// asks it the same question for its Apple II images (SQ-0889). What the
+/// wrapper contains is the caller's to decide: each reader runs its own volume
+/// sniff at [`DISKCOPY_HEADER`] and declines what is not its filesystem.
+pub(crate) fn diskcopy_volume_len(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < DISKCOPY_HEADER || be16(bytes, DISKCOPY_MAGIC_OFF) != DISKCOPY_MAGIC {
         return None;
     }

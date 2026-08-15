@@ -281,18 +281,27 @@ fn a_dsk_that_is_not_a_prodos_volume_is_not_listed() {
     let _ = std::fs::create_dir_all(&dir);
     // 143,360 bytes — the right geometry, no volume directory anywhere in it,
     // and byte `$00` is `$E5` (the classic format filler) rather than anything
-    // a Z-machine version could be. That last part is not fussiness: a file the
-    // mount declines falls through to being read as a plain story, so a fixture
-    // whose first byte is 6, 7 or 8 gets listed as a story and this case passes
-    // for the wrong reason.
+    // a Z-machine version could be. That last part was not fussiness: a file the
+    // mount declined fell through to being read as a plain story, so a fixture
+    // whose first byte was 6, 7 or 8 got listed as a story and this case passed
+    // for the wrong reason. SQ-0889 closed that fallthrough — a header, not a
+    // version byte, is what claims a file for the Z-machine now — so the `$E5`
+    // is belt and braces rather than the thing holding this case up.
     let noise: Vec<u8> = (0..143_360usize).map(|i| (i * 31 + 7) as u8).collect();
     let noise: Vec<u8> = std::iter::once(0xE5).chain(noise.into_iter().skip(1)).collect();
     std::fs::write(dir.join("homebrew1.dsk"), &noise).unwrap();
     std::fs::write(dir.join("homebrew2.dsk"), &noise).unwrap();
-    // A real story beside them, so an empty list cannot pass by accident.
+    // A real story beside them, so an empty list cannot pass by accident — and
+    // a real one it has to be, with the ZMSD §1.1 memory map it claims: dynamic
+    // memory below `$0e`, the writable object and global tables inside it, the
+    // dictionary above it (SQ-0889).
     let mut story = vec![0u8; 4096];
     story[0] = 3;
-    story[0x0e] = 0x02;
+    story[0x04..0x06].copy_from_slice(&0x0200u16.to_be_bytes()); // high memory base
+    story[0x08..0x0a].copy_from_slice(&0x0400u16.to_be_bytes()); // dictionary
+    story[0x0a..0x0c].copy_from_slice(&0x0080u16.to_be_bytes()); // object table
+    story[0x0c..0x0e].copy_from_slice(&0x0100u16.to_be_bytes()); // globals
+    story[0x0e..0x10].copy_from_slice(&0x0200u16.to_be_bytes()); // static memory base
     story[0x12..0x18].copy_from_slice(b"840726");
     story[0x1a..0x1c].copy_from_slice(&((4096u16 / 2).to_be_bytes()));
     std::fs::write(dir.join("game.z3"), &story).unwrap();
