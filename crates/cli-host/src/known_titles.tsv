@@ -18,6 +18,18 @@
 # A WRONG entry mislabels a game; a MISSING one just falls back to the filename.
 # To extend the table, add lines only for prefixes you can verify.
 #
+# Verified against the compilation discs (SQ-0884): every Z-code build pressed on
+# The Lost Treasures of Infocom I and II and on Classic Text Adventure
+# Masterpieces of Infocom — 151 stories across the three — resolves to a row
+# below, so that sweep added none. Widened to every disk image in the corpus (320
+# stories on 69 media) it turns up exactly ONE build this table cannot name, and
+# it is unnameable rather than missing: `LEATHRGODDESSES` on the Apple II Lost
+# Treasures volume `INFOCOM6` stores its header in high ASCII and reads release 0,
+# serial `Blown!`, which is no key at all. Its menu row keeps the stored name.
+# `zvm_cli::tests::disk_image::every_build_on_the_compilation_discs_has_a_canonical_title`
+# re-runs the disc half of that sweep, so the next set that turns up an uncovered
+# build fails and names the release and serial to add.
+#
 # Games are listed once per released version (a game with several disk releases
 # has several rows, ordered by serial date). v6 (YZIP graphical) titles are
 # included for completeness even though babelmap doesn't yet launch them.

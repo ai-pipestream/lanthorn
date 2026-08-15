@@ -36,7 +36,8 @@ pub struct Candidate {
     /// AmigaDOS release floppies name every story `Story.data` and Atari ST
     /// compilations name every one `STORY.DAT`, so on a flat disk this rarely
     /// distinguishes anything — which is why the menu also shows
-    /// [`Candidate::header`].
+    /// [`Candidate::header`], and why [`Candidate::title`] prefers a real game
+    /// name when the build has one.
     pub name: String,
     /// The story bytes, read off the image.
     pub bytes: Vec<u8>,
@@ -57,6 +58,18 @@ impl Candidate {
     /// `LEATHRGODDESSES` on *Lost Treasures* `INFOCOM6` writes its serial in the
     /// Apple II's high ASCII and reads `Blown!` with the bit off.
     pub fn header(&self) -> Option<String> {
+        let (v, release, serial) = self.build()?;
+        Some(format!("v{v} r{release} s{serial}"))
+    }
+
+    /// The Z-machine version, release and serial as the header spells them —
+    /// what [`Candidate::header`] prints and what [`Candidate::title`] looks up.
+    ///
+    /// One reader for both, because they must agree about which bytes are a
+    /// header at all: a menu row that says `v3 r88 s840726` and then declines to
+    /// name the build, or names one the header does not describe, is worse than
+    /// either alone.
+    fn build(&self) -> Option<(u8, u16, String)> {
         let b = &self.bytes;
         if b.len() < 0x18 || !(3..=8).contains(&b[0]) {
             return None;
@@ -65,17 +78,53 @@ impl Candidate {
         if !serial.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
             return None;
         }
-        let release = u16::from_be_bytes([b[0x02], b[0x03]]);
-        Some(format!("v{} r{release} s{serial}", b[0]))
+        Some((b[0], u16::from_be_bytes([b[0x02], b[0x03]]), serial))
     }
 
-    /// How this candidate reads in the menu: its name, then its header when
-    /// there is one.
+    /// The canonical title `cli_host`'s bundled `known_titles.tsv` gives this
+    /// build, when it carries one (SQ-0884).
+    ///
+    /// **Keyed by the build, never by the filename**, which is the whole reason
+    /// this is worth doing here: a release disk's names are `Story.data`,
+    /// `STORY.DAT` and `PC/DATA/BEYONDZO.DAT`, and none of them is a title. The
+    /// release and serial in the header are, and they are the same key
+    /// `app::picker` names the story browser's rows with and
+    /// `cli_host::storage` builds the per-game save directory from — so a game
+    /// opened off a disc reads the same in all three places without a second
+    /// table.
+    ///
+    /// `None` for a build the table does not carry, which is honest rather than
+    /// unfortunate: the fallback is the name the medium stored, and a missing
+    /// row costs a filename while a wrong one mislabels a game.
+    pub fn title(&self) -> Option<&'static str> {
+        let (_, release, serial) = self.build()?;
+        cli_host::titles::title_for_build(release, &serial)
+    }
+
+    /// The name this candidate goes by: its canonical title when the table knows
+    /// the build, and otherwise the name the medium stored.
+    pub fn display_name(&self) -> &str {
+        self.title().unwrap_or(&self.name)
+    }
+
+    /// How this candidate reads in the menu: the name it goes by, its header
+    /// when there is one, and — when the title replaced it — the stored name it
+    /// came off the disc under.
+    ///
+    /// The stored name is kept rather than dropped because the title alone does
+    /// not tell two rows apart: *Masterpieces* carries *Ballyhoo* three times as
+    /// `MAC/BALLYHOO`, `PC/BALLYHOO/DATA/BALLYHOO.DAT` and `PC/DATA/BALLYHOO.DAT`
+    /// — one build, three files — and a menu of three identical lines is not a
+    /// choice anybody can make.
     pub fn label(&self) -> String {
-        match self.header() {
-            Some(h) => format!("{}  ({h})", self.name),
-            None => self.name.clone(),
+        let mut s = self.display_name().to_string();
+        if let Some(h) = self.header() {
+            s.push_str(&format!("  ({h})"));
         }
+        if self.title().is_some() {
+            s.push_str(&format!("  {}", self.name));
+        }
+        s
     }
 }
 
@@ -152,8 +201,16 @@ pub fn find(cands: &[Candidate], want: &str) -> Result<usize, String> {
         return Err(format!("no story {n} on this disk — pick 1 to {last}:\n{}", menu(cands)));
     }
     let lower = want.to_ascii_lowercase();
+    // Both names a row shows: the stored one, and the canonical title when the
+    // table gave it one (SQ-0884). Matching only the stored name would make the
+    // menu a liar — it prints `Zork I: The Great Underground Empire` and
+    // `--story "zork i"` would find nothing.
     let hits: Vec<usize> = (0..cands.len())
-        .filter(|&i| cands[i].name.to_ascii_lowercase().contains(&lower))
+        .filter(|&i| {
+            let c = &cands[i];
+            c.name.to_ascii_lowercase().contains(&lower)
+                || c.title().is_some_and(|t| t.to_ascii_lowercase().contains(&lower))
+        })
         .collect();
     match hits.as_slice() {
         [i] => Ok(*i),
@@ -282,14 +339,66 @@ mod tests {
         Candidate { name: name.to_string(), bytes: story(v, release, serial) }
     }
 
-    /// The whole point of showing the header: an Amiga floppy calls every story
-    /// `Story.data`, and an ST compilation calls every one `STORY.DAT`, so the
-    /// name alone makes a menu of identical lines.
+    /// **The lookup** (SQ-0884). The whole point of showing the header was that
+    /// an Amiga floppy calls every story `Story.data` and an ST compilation
+    /// calls every one `STORY.DAT`, so the name alone makes a menu of identical
+    /// lines — but the header is an identity, not a name. `known_titles.tsv`
+    /// turns it into one, and the stored name stays on the row so two copies of
+    /// one build are still told apart.
+    ///
+    /// FALSIFICATION: make `label` build from `self.name` again (or `title`
+    /// return `None`) and this fails with exactly the reported symptom —
+    /// `Story.data  (v3 r88 s840726)`, a menu row that will not say it is
+    /// *Zork I*.
     #[test]
-    fn a_candidate_is_labelled_by_name_and_header() {
+    fn a_candidate_is_labelled_by_its_canonical_title() {
         let c = cand("Story.data", 3, 88, "840726");
         assert_eq!(c.header().as_deref(), Some("v3 r88 s840726"));
-        assert_eq!(c.label(), "Story.data  (v3 r88 s840726)");
+        assert_eq!(c.title(), Some("Zork I: The Great Underground Empire"));
+        assert_eq!(c.label(), "Zork I: The Great Underground Empire  (v3 r88 s840726)  Story.data");
+    }
+
+    /// The key is the **build**, never the filename — which is what makes this
+    /// worth doing at all. `PC/DATA/BEYONDZO.DAT` off *Lost Treasures I* names
+    /// nothing; its release and serial name the game exactly.
+    #[test]
+    fn the_title_comes_from_the_build_and_not_from_the_name() {
+        let c = cand("PC/DATA/BEYONDZO.DAT", 5, 57, "871221");
+        assert_eq!(c.title(), Some("Beyond Zork: The Coconut of Quendor"));
+        // …and the same build under any other name resolves the same way.
+        assert_eq!(cand("MAC/BEYOND ZORK", 5, 57, "871221").title(), c.title());
+        // A different build of the same game is a different row, correctly named.
+        assert_eq!(cand("STORY.DAT", 5, 51, "870923").title(), c.title());
+    }
+
+    /// A build the table does not carry falls back to the name the medium
+    /// stored, and says so by carrying no title at all. A missing row costs a
+    /// filename; a wrong one mislabels a game.
+    #[test]
+    fn an_unknown_build_keeps_the_name_the_medium_stored() {
+        let c = cand("STORY.DAT", 3, 999, "010203");
+        assert_eq!(c.title(), None);
+        assert_eq!(c.display_name(), "STORY.DAT");
+        assert_eq!(c.label(), "STORY.DAT  (v3 r999 s010203)");
+    }
+
+    /// **One build, three files** — *Masterpieces* carries *Ballyhoo* as
+    /// `MAC/BALLYHOO`, `PC/BALLYHOO/DATA/BALLYHOO.DAT` and
+    /// `PC/DATA/BALLYHOO.DAT`. Naming them all *Ballyhoo* and stopping there
+    /// would print three identical rows, which is not a choice anybody can make,
+    /// so the stored name stays.
+    #[test]
+    fn duplicate_builds_are_still_told_apart_by_their_stored_names() {
+        let files = ["MAC/BALLYHOO", "PC/BALLYHOO/DATA/BALLYHOO.DAT", "PC/DATA/BALLYHOO.DAT"];
+        let cands: Vec<Candidate> = files.iter().map(|n| cand(n, 3, 97, "851218")).collect();
+        let mut labels: Vec<String> = cands.iter().map(|c| c.label()).collect();
+        for (label, name) in labels.iter().zip(files) {
+            assert!(label.starts_with("Ballyhoo  (v3 r97 s851218)  "), "{label}");
+            assert!(label.ends_with(name), "{label}");
+        }
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), 3, "three files must not read as one row");
     }
 
     /// A serial in the Apple II's high ASCII labels as the text it is, so the
@@ -332,8 +441,14 @@ mod tests {
         let mut lines = ["2\n".to_string()].into_iter();
         let i = choose(&cands, None, true, |s| said.push_str(s), || lines.next());
         assert_eq!(i, Ok(1));
-        assert!(said.contains("1) Story.data  (v3 r56 s841221)"), "menu shown:\n{said}");
-        assert!(said.contains("2) Story.data  (v5 r31 s871119)"), "menu shown:\n{said}");
+        // Two builds of one game, told apart by their headers and named by the
+        // table; the third is a build the table does not carry.
+        let hhgg = "The Hitchhiker's Guide to the Galaxy";
+        let one = format!("1) {hhgg}  (v3 r56 s841221)  Story.data");
+        let two = format!("2) {hhgg}  (v5 r31 s871119)  Story.data");
+        assert!(said.contains(&one), "menu shown:\n{said}");
+        assert!(said.contains(&two), "menu shown:\n{said}");
+        assert!(said.contains("3) Hints.data  (v3 r22 s870918)"), "menu shown:\n{said}");
         assert!(said.contains("Which one? [1-3]"), "prompt shown:\n{said}");
     }
 
@@ -357,18 +472,48 @@ mod tests {
         let e = choose(&cands, None, false, |_| {}, || panic!("must not read stdin"))
             .expect_err("no terminal, so no prompt");
         assert!(e.contains("--story <n|name>"), "names the flag:\n{e}");
-        assert!(e.contains("1) Story.data"), "lists what it found:\n{e}");
+        assert!(e.contains("1) The Hitchhiker's Guide to the Galaxy"), "lists what it found:\n{e}");
     }
 
     #[test]
     fn story_picks_by_number_or_by_name() {
         let cands =
-            vec![cand("Story.data", 3, 56, "841221"), cand("HITCHHIK.DAT", 5, 31, "871119")];
+            vec![cand("Story.data", 3, 56, "841221"), cand("PLANETFA.DAT", 3, 37, "851003")];
         let never = || -> Option<String> { panic!("must not read stdin") };
         assert_eq!(choose(&cands, Some("1"), false, |_| {}, never), Ok(0));
-        assert_eq!(choose(&cands, Some("hitchhik"), false, |_| {}, never), Ok(1));
+        assert_eq!(choose(&cands, Some("planetfa"), false, |_| {}, never), Ok(1));
         assert!(find(&cands, "3").is_err(), "out of range");
         assert!(find(&cands, "zork").is_err(), "no such name");
         assert!(find(&cands, ".dat").is_err_and(|e| e.contains("more than one")), "ambiguous");
+    }
+
+    /// **The menu is the contract for `--story`** (SQ-0884): a row that reads
+    /// *Zork I: The Great Underground Empire* must answer to that, or naming the
+    /// table's titles made the front-end less usable rather than more.
+    #[test]
+    fn story_picks_by_the_title_the_menu_shows() {
+        let cands =
+            vec![cand("PC/DATA/ZORK1.DAT", 3, 88, "840726"), cand("Hints.data", 3, 22, "870918")];
+        let never = || -> Option<String> { panic!("must not read stdin") };
+        // The title, which appears nowhere in the stored name…
+        assert_eq!(choose(&cands, Some("great underground"), false, |_| {}, never), Ok(0));
+        assert_eq!(find(&cands, "Zork I"), Ok(0));
+        // …and the stored name, which still works exactly as it did.
+        assert_eq!(find(&cands, "zork1.dat"), Ok(0));
+        assert_eq!(find(&cands, "hints"), Ok(1));
+    }
+
+    /// Two builds of one game share a title, so the title alone is ambiguous —
+    /// which is the truth, and is reported as such rather than guessed at. The
+    /// header on every row is what a person disambiguates with, plus the number.
+    #[test]
+    fn a_title_carried_by_two_builds_is_ambiguous_not_guessed() {
+        let cands =
+            vec![cand("Story.data", 3, 56, "841221"), cand("HITCHHIK.DAT", 5, 31, "871119")];
+        assert!(
+            find(&cands, "hitchhiker").is_err_and(|e| e.contains("more than one")),
+            "two builds of Hitchhiker's are two answers"
+        );
+        assert_eq!(find(&cands, "2"), Ok(1), "the number always decides");
     }
 }

@@ -568,20 +568,43 @@ than one turns up you get a menu. Here is a real Atari one:
 
 ```
 This disk holds 4 stories:
-  1) HITCHHIK/STORY.DAT  (v3 r56 s841221)
-  2) BUREAUCR.ACY/STORY.DAT  (v4 r86 s870212)
-  3) CUTHROAT/STORY.DAT  (v3 r23 s840809)
-  4) LEATHER.GOD/STORY.DAT  (v3 r59 s860730)
+  1) The Hitchhiker's Guide to the Galaxy  (v3 r56 s841221)  HITCHHIK/STORY.DAT
+  2) Bureaucracy  (v4 r86 s870212)  BUREAUCR.ACY/STORY.DAT
+  3) Cutthroats  (v3 r23 s840809)  CUTHROAT/STORY.DAT
+  4) Leather Goddesses of Phobos  (v3 r59 s860730)  LEATHER.GOD/STORY.DAT
 Which one? [1-4] 3
-Opening 3) CUTHROAT/STORY.DAT  (v3 r23 s840809)
+Opening 3) Cutthroats  (v3 r23 s840809)  CUTHROAT/STORY.DAT
 ```
 
-That is the naming rule doing visible work. All four files are called
-`STORY.DAT`; without the folder in front of them the menu would be four identical
-lines, and `--story cuthroat` would have nothing to match. And every line carries
-its Z-machine version, release and serial, which is not decoration either — the
-collection holds three different builds of *Hitchhiker's* alone. The header tells
-them apart when the filename refuses to.
+Three things are on every line, and each earns its place.
+
+**The game's name comes first, and no medium supplied it** (SQ-0884). All four
+files here are called `STORY.DAT`; on *Lost Treasures* they are `MAC/BALLYHOO`
+and `PC/DATA/BEYONDZO.DAT`, and on an Amiga floppy every one of them is
+`Story.data`. None of those is a title. What *is* one is the release and serial
+in the header, so the menu looks the build up in the bundled title table
+(`crates/cli-host/src/known_titles.tsv`) — the same table and the same key the
+story browser names its rows with and the per-game save directory is built from,
+so a game reads the same in all three places. A build the table does not carry
+falls back to the name the disc stored, which is the honest failure: a missing
+row costs a filename, a wrong one mislabels a game.
+
+**The version, release and serial come next**, and they are not decoration
+either — the collection holds three different builds of *Hitchhiker's* alone, and
+*Lost Treasures I* carries the Solid Gold v5 r31 alongside the v3. Two rows with
+one title are told apart here and nowhere else.
+
+**The stored name stays on the end.** *Masterpieces* presses *Ballyhoo* three
+times — `MAC/BALLYHOO`, `PC/BALLYHOO/DATA/BALLYHOO.DAT`, `PC/DATA/BALLYHOO.DAT`,
+one build in three files — so a menu that stopped at the title would print three
+identical lines and no choice anybody could make. It is also what keeps the
+folder visible on the Atari press, where the directory is the only thing telling
+four `STORY.DAT`s apart.
+
+`--story` answers to either name: `--story cuthroat` picks the folder as it
+always did, and `--story "leather goddesses"` now picks the title the menu shows.
+When a title matches two builds — both copies of *Hitchhiker's*, say — that is
+reported as ambiguous rather than guessed at, and the menu number always decides.
 
 A disk with one story opens straight into it and asks nothing. A disk with none
 says what it mounted instead of failing later as a corrupt story file. And
