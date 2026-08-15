@@ -29,6 +29,7 @@ use zvm::memory::Memory;
 
 mod screen;
 mod auxiliary; // "aux" is a reserved filename on Windows — module renamed accordingly
+mod machines;
 mod media;
 
 // ── sound ──────────────────────────────────────────────────────────────────────
@@ -585,6 +586,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
+    cli_host::Opt::flag(&["--machines"]),
     cli_host::Opt::valued(&["--volume"]),
     cli_host::Opt::valued(&["--interpreter", "-I"]),
     cli_host::Opt::valued(&["--data-dir"]),
@@ -1172,6 +1174,11 @@ Options:
                         opened off a release floppy defaults to that machine's
                         number, and this beats it.
       --data-dir <path> Base dir for saves/sidecars (default: beside the story)
+      --machines        Print the ZMSD 11.1.3 machine table — every setting each
+                        interpreter number carries (its default page and ink,
+                        the palette those colour numbers resolve through, and
+                        the two screen rules) — and exit. This is the table -I
+                        selects a row of, and the one babelmap presents from.
   -V, --version         Print version and exit
   -h, --help            Print this help and exit
 ";
@@ -1217,6 +1224,13 @@ fn help() -> String {
 fn main() {
     let argv: Vec<String> = env::args().collect();
     if cli_host::handled_common_flags(&argv, &help(), env!("CARGO_PKG_NAME"), buildinfo::LONG) {
+        return;
+    }
+    // Answered beside `--help`, and for the same reason: it describes the
+    // program rather than a story, so demanding a story file to see it would be
+    // the wrong question. Printed before anything reads a terminal.
+    if argv.iter().any(|a| a == "--machines") {
+        print!("{}", machines::table());
         return;
     }
     let args = match parse_args(&argv) {

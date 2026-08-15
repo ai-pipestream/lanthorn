@@ -960,6 +960,23 @@ Amiga floppy or anywhere else.
   artwork-flavour preference needs the resource reader; and a standard window is
   a Version 6 picture space stated by an *archive* rather than by a machine.
 
+  You can read the whole table without opening the source or starting a game:
+
+  ```sh
+  zvm-cli --machines
+  ```
+
+  It prints every machine `zvm` models, in number order, with every setting each
+  one carries — the number it writes into `$1E`, the default page and ink it
+  reports in `$2C`/`$2D`, the palette those colour numbers resolve through, and
+  the two §8.3 screen rules — followed by the numbers that have no row and the
+  argument for each absence. The colours come out **resolved through each
+  machine's own palette**, which is the only rendering in which the page and ink
+  columns mean what they say: colour 12 is `#5A5A5A` under §8.3.1 and `#424242`
+  on the Amiga, where it happens to be the Amiga's own page. The output is
+  generated from the table itself, so a machine added to `zvm` appears there with
+  no second copy to keep in step.
+
   In a terminal, note that a machine's page is what the story is *told*, not
   something painted over your theme. Where a game names no colour, `zvm-cli` and
   `babelmap` both still show your terminal's own — a machine's colours reach the
