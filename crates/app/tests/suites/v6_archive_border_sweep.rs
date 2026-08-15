@@ -499,7 +499,15 @@ fn arthurs_archives_compose_a_well_formed_flank() {
             ("arthur.mg1", t(MCGA, None, 0, 0, 0, 0, 3)),
             ("arthur.eg1", t(EGA, None, 0, 0, 0, 0, 3)),
             ("arthur.cg1", t(EGA, None, 0, 0, 0, 0, 3)),
-            ("Arthur - The Quest for Excalibur.adf", t(MCGA, Some(12), 0, 2, 0, 0, 3)),
+            // **Poles, not slabs** (SQ-0881). This pin recorded 2 slabs until
+            // the width discriminator landed: swept off the archive, a flank's
+            // art starts at row 0, and `top == 0` alone was `recognize`'s test
+            // for Shogun's single-piece border — so Arthur's poles took Shogun's
+            // arm, which extends by stamping a second copy of the whole border
+            // and tiles its BANNER down the side of the screen. Reported on the
+            // Macintosh monochrome press, where the art is short enough relative
+            // to the pane that the extension actually runs.
+            ("Arthur - The Quest for Excalibur.adf", t(MCGA, Some(12), 0, 0, 2, 0, 3)),
         ],
     );
 }

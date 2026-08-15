@@ -44,6 +44,38 @@ use image::{Rgba, RgbaImage};
 /// [`recognize`].
 const V6_TEXT_ROW: u32 = 16;
 
+/// The narrowest painted row a **single-piece border** has, in unit columns —
+/// the third measurement [`recognize`] needs, and the one SQ-0881 added.
+///
+/// `top == 0` alone stood in for "single piece" until a flank turned up that
+/// starts at row 0 and is *not* one: the MACINTOSH press of Arthur. Its poles
+/// run native rows 0..368 of 400 (0..275 of 304 in the monochrome archive),
+/// where the Amiga press runs them 11..379 — so a nonzero top had been carrying
+/// the whole distinction, by luck of which media had been measured. Arthur's
+/// Macintosh flank therefore took `shogun()`, which extends by stamping a second
+/// copy of the WHOLE border below the first; that copy carries the top banner,
+/// and the player sees a piece of it tiled down the side of the screen.
+///
+/// Neither existing measurement can separate the two — Arthur's Macintosh flank
+/// and Shogun's Amiga flank (0..336 of 400) both start at row 0, both stop short
+/// of the bottom, and both are slabs of constant width. What does separate them
+/// is how WIDE they are, which is the difference between a decorated panel and a
+/// narrow column, and it is not close:
+///
+/// | flank | measured width |
+/// |---|---|
+/// | Shogun, Macintosh colour | 60 |
+/// | Shogun, Amiga (r295) | 46 |
+/// | Shogun, Macintosh monochrome | 44 |
+/// | Arthur, Macintosh colour | 12 |
+/// | Arthur, Macintosh monochrome | 8 |
+/// | Arthur, Amiga (r54) | 6 |
+///
+/// The cut sits in the middle of a gap nearly four times wide, so it is a
+/// threshold in name only. Both ends are pinned in the tests below and swept
+/// over the whole corpus by `v6_archive_border_sweep.rs`.
+const SINGLE_PIECE_MIN_WIDTH: u32 = 24;
+
 /// Which of the three Infocom v6 side-border layouts a flank is showing.
 ///
 /// Recognised from the art's own native extent rather than from the story's
@@ -143,16 +175,55 @@ fn painted_widths(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32)) -> Opti
 /// Shogun's single-piece slab and extended them by MIRRORING the whole column —
 /// which is what stamped a second capital, and a length of bare shaft, below
 /// their feet.
+///
+/// **The slack is the WHOLE inset, not the bottom's alone — SQ-0881.**
+/// Measuring only the bottom left the top free, and a tolerance with a free end
+/// gets met by something it was not sized for. Arthur's Macintosh MONOCHROME
+/// plate is drawn at native rows 14..289 of that same 304-row screen: fifteen
+/// short at the bottom, one inside the sixteen allowed. It also narrows — a
+/// 16-wide banner over a 5-wide pole, ratio 0.31 — so both older measurements
+/// agreed on Zork Zero, and the player got Zork Zero's masonry recipe stamped
+/// down Arthur's side, capital and all. That is the "piece of the upper frame"
+/// tiling down the flank.
+///
+/// A pillar under a banner SPANS its screen: the banner is painted to the top
+/// edge and the pillars stand on the bottom one, and the only thing between the
+/// art and the frame is the cell rounding SQ-0841 named. So charge that rounding
+/// once, against `top + (native_h - bottom)`, and the two titles separate by a
+/// factor of seven. Measured in-game at 165x50 through the pty harness, on the
+/// frame each title actually draws:
+///
+/// | title | rendition | art rows | screen | inset |
+/// |---|---|---|---|---|
+/// | Zork Zero | Macintosh monochrome | 0..300 | 304 | **4** |
+/// | Zork Zero | Macintosh colour, DOS `.MG1`, Amiga | 0..400 | 400 | **0** |
+/// | Shogun | DOS `.MG1` | 0..400 | 400 | **0** |
+/// | Arthur | Macintosh monochrome | 14..289 | 304 | **29** |
+/// | Arthur | Macintosh colour, Amiga (r54) | 11..379 | 400 | **32** |
+/// | Arthur | DOS `.MG1`, Blorb | 16..384 | 400 | **32** |
+///
+/// Shogun's Amiga flank (0..336 of 400, inset 64) fails this as it failed the
+/// bottom test, and lands where it always did. The one flank in the corpus that
+/// is neither perfectly flush nor inset is `Zork Zero - The Revenge of
+/// Megaboz.adf`'s **plate 6, right side**, whose art begins at row **2** where
+/// its own left side begins at 0 — two blank rows in the drawing, and the reason
+/// this is a tolerance rather than `top == 0`. `v6_archive_border_sweep` asserts
+/// a plate's two crops classify alike, and that asymmetry is what it caught.
+///
+/// Note how narrowly the DOS press escaped under the bottom-only test: 384 + 16
+/// is 400, which is not *greater* than 400, so one row of inset stood between it
+/// and the same fault. Against the whole inset its margin is sixteen.
 pub fn recognize(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), native_h: u32) -> Option<BorderArt> {
     let (top, bottom) = art;
     if bottom <= top {
         return None;
     }
     let (lo, hi) = painted_widths(canvas, x0, x1, art)?;
-    if bottom + V6_TEXT_ROW > native_h && lo * 10 < hi * 9 {
+    let inset = top + native_h.saturating_sub(bottom);
+    if inset <= V6_TEXT_ROW && lo * 10 < hi * 9 {
         return Some(BorderArt::ZorkZeroPillars);
     }
-    if top == 0 {
+    if top == 0 && hi >= SINGLE_PIECE_MIN_WIDTH {
         return Some(BorderArt::ShogunSinglePiece);
     }
     Some(BorderArt::ArthurPoles)
@@ -903,6 +974,59 @@ mod tests {
         // 70/86, ratio 0.81 — is still pillars. The cut is at 9/10, in the gap.
         let u = flank(86, 0, 400, 78, 70);
         assert_eq!(recognize(&u, 0, 86, (0, 400), 400), Some(BorderArt::ZorkZeroPillars));
+    }
+
+    /// A flank on a screen of a stated height: rows `[top, bottom)` painted,
+    /// `wide` columns above `waist` and `narrow` below it.
+    ///
+    /// [`flank`]'s 400-row screen cannot express the standard Macintosh's
+    /// monochrome one, which is 304 — and 304 is where every case below lives.
+    fn flank_on(w: u32, h: u32, top: u32, bottom: u32, waist: u32, wide: u32, narrow: u32) -> RgbaImage {
+        let mut c = RgbaImage::new(w, h);
+        for y in top..bottom.min(h) {
+            for x in 0..(if y < waist { wide } else { narrow }).min(w) {
+                c.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+            }
+        }
+        c
+    }
+
+    /// SQ-0881 — an INSET plate that all but reaches the bottom is not a pillar.
+    ///
+    /// SQ-0841 loosened "reaches the bottom" to one text row so the standard
+    /// Macintosh's 480x300 art would still count on its 304-row screen. Arthur's
+    /// monochrome plate is inset fifteen rows above that same bottom — one row
+    /// inside the tolerance — and narrows like a pillar, so both of the older
+    /// measurements agreed on Zork Zero and the player got Zork Zero's capital
+    /// stamped down Arthur's side. The art's TOP is what tells them apart.
+    ///
+    /// Every number here was measured in-game through the pty harness at 165x50,
+    /// on the frame each title draws; see [`recognize`]'s table.
+    ///
+    /// Falsifiable: drop `top == 0` from the pillar branch and the first case
+    /// comes back `ZorkZeroPillars`.
+    #[test]
+    fn an_inset_plate_that_all_but_reaches_the_bottom_is_not_a_pillar() {
+        // Arthur, `MAC/ARTHUR FOLDER/PIC.DATA`: art 14..289 of 304, a 16-wide
+        // banner over a 5-wide pole. Fifteen short of 304, ratio 0.31 — inside
+        // BOTH older tests, and outside this one.
+        let a = flank_on(21, 304, 14, 289, 130, 16, 5);
+        assert_eq!(recognize(&a, 0, 21, (14, 289), 304), Some(BorderArt::ArthurPoles));
+        // Zork Zero, `Pic.data` on the same 304-row screen: SQ-0841's case, and
+        // still a pillar — inset 4, the cell rounding and nothing else.
+        let z = flank_on(62, 304, 0, 300, 60, 62, 35);
+        assert_eq!(recognize(&z, 0, 62, (0, 300), 304), Some(BorderArt::ZorkZeroPillars));
+        // `Zork Zero - The Revenge of Megaboz.adf` plate 6's RIGHT flank starts
+        // at row 2 where its left starts at 0 — two blank rows in the drawing.
+        // A `top == 0` rule would classify one plate's two crops differently,
+        // which `v6_archive_border_sweep` forbids and caught.
+        let r = flank_on(86, 400, 2, 400, 68, 86, 48);
+        assert_eq!(recognize(&r, 0, 86, (2, 400), 400), Some(BorderArt::ZorkZeroPillars));
+        // Arthur's DOS press clears the bottom test by exactly one row —
+        // 384 + 16 is 400, which is not GREATER than 400 — so it was never
+        // misread, and must not start being read differently now.
+        let d = flank_on(31, 400, 16, 384, 130, 25, 4);
+        assert_eq!(recognize(&d, 0, 31, (16, 384), 400), Some(BorderArt::ArthurPoles));
     }
 
     #[test]
