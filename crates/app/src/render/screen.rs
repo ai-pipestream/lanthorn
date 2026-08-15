@@ -1160,6 +1160,16 @@ fn render_node(
                                 // Asked by role (SQ-0894): `b.width < area.width` meant
                                 // "a flank" only while the top and bottom bands spanned
                                 // the pane.
+                                //
+                                // SQ-0894 measured this exemption for removal — §4 of the
+                                // pipeline document calls it "a patch on a patch" — and
+                                // KEPT it. Deleting it fails
+                                // `arthur_hybrid_tall_pane_extends_story_to_bottom`: the
+                                // clip trims the ring to the art's lowest opaque row, and
+                                // a content-built flank is still a band the clip can cut.
+                                // Owning the right ROWS does not exempt a flank from a
+                                // later stage shortening it; that is a separate decision
+                                // and it still has to be made here.
                                 if role.is_flank() && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some() {
                                     continue;
                                 }
@@ -1213,6 +1223,30 @@ fn render_node(
                             let x1 = inv_x(r.right()).min(gfx.width()).max(x0);
                             crate::render::v6_layout::region_has_opaque(&gfx, x0, y0, (x1 - x0).max(1), h)
                         };
+                        // SQ-0894 MEASURED THIS FOR REMOVAL AND KEPT IT. The
+                        // content-built ring was expected to subsume the walk: a flank
+                        // now owns its rows by what is in its own columns, so the
+                        // remainder row beside the viewport should need no handing back.
+                        // For every flank whose border is ART that is exactly what
+                        // happens, and the walk no longer fires on Zork Zero, Arthur or
+                        // Shogun.
+                        //
+                        // It is still load-bearing for ONE case, and deleting it fails
+                        // `journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack`
+                        // with the original symptom — Journey's Amiga press at a 96x26
+                        // pane, "row 1 of the rule's span (1, 2, 2, 17) holds '│' in 0
+                        // column(s), not 1". The reason is that Journey's side rule is a
+                        // CHARACTER the game printed, not artwork: the graphics-only
+                        // canvas is empty across those columns by construction (that is
+                        // the whole of SQ-0750), so the ring's art test cannot see the
+                        // border and the flank declines the remainder row. The walk
+                        // reaches it by geometry instead, which is the one thing content
+                        // classification cannot do for content that is not pixels.
+                        //
+                        // So it stays, narrowed in purpose rather than in code. Removing
+                        // it needs the flank's row test to accept the game's own border
+                        // GLYPHS alongside art — a change to the glyph-border machinery,
+                        // not to this walk.
                         // SQ-0747: the QUANTIZATION REMAINDER beside the story viewport belongs
                         // to the flanks, not to the full-width band and not to nothing —
                         // ABOVE the viewport and BELOW it alike.
@@ -1663,6 +1697,26 @@ fn render_node(
                                             // SQ-0698: a recognised side border, tiled to
                                             // the band's own height at the uniform scale.
                                             gr.draw_chrome_band_image(picker, img, *r, crate::render::graphics::BandSlot::Art, buf);
+                                        // SQ-0894 measured this arm and KEPT it, with the
+                                        // result recorded because it is not the obvious one:
+                                        // disabling it passes the FULL gate, 5555 tests. That
+                                        // is not evidence it is dead — it is evidence the
+                                        // corpus has no fixture for it. The arm fires only for
+                                        // a flank `v6_border::recognize` does NOT know, and
+                                        // every flank we ship a story for is recognised, so
+                                        // arm 2 (`tiled_flanks`) takes them all first.
+                                        //
+                                        // §5 argues this arm is wrong where it does fire — it
+                                        // stretches a native crop into the band with no aspect
+                                        // constraint, against a documented promise that flanks
+                                        // are "TILED down the flank, never stretched into it"
+                                        // — and that removing it would drop such a flank to
+                                        // arm 4's straight crop at the uniform scale. That is
+                                        // probably right and it is NOT PROVEN: with no
+                                        // unrecognised-flank fixture there is no way to show
+                                        // arm 4 still reaches the pane bottom under the Frame
+                                        // plan, which is the whole reason the stretch is here.
+                                        // Removing it needs that fixture first.
                                         } else if let Some(crop) = (matches!(plan, BottomPlan::Frame) && role.is_flank())
                                             .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
                                             .flatten()
