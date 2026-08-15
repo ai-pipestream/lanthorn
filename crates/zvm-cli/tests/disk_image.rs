@@ -260,8 +260,10 @@ fn several_stories_and_no_terminal_lists_them_and_refuses_to_block() {
     let err = stderr_of(&out);
     assert!(err.contains("holds 2 stories"), "says what it found:\n{err}");
     assert!(err.contains("--story <n|name>"), "names the flag to pass:\n{err}");
-    assert!(err.contains("1) Zork1.Data  (v3 r88 s840726)"), "labels the first:\n{err}");
-    assert!(err.contains("2) Zork2.Data  (v5 r48 s840904)"), "labels the second:\n{err}");
+    let one = "1) Zork I: The Great Underground Empire  (v3 r88 s840726)  Zork1.Data";
+    let two = "2) Zork II: The Wizard of Frobozz  (v5 r48 s840904)  Zork2.Data";
+    assert!(err.contains(one), "labels the first:\n{err}");
+    assert!(err.contains(two), "labels the second:\n{err}");
     let _ = std::fs::remove_file(&image);
 }
 
@@ -273,7 +275,8 @@ fn story_number_picks_one_off_the_disk() {
     let out = run(&image, &["--story", "2"], "");
     let text = stdout_of(&out);
     assert!(out.status.success(), "the chosen story ran: {}", stderr_of(&out));
-    assert!(text.contains("Opening 2) Zork2.Data  (v5 r48 s840904)"), "says which:\n{text}");
+    let two = "Opening 2) Zork II: The Wizard of Frobozz  (v5 r48 s840904)  Zork2.Data";
+    assert!(text.contains(two), "says which:\n{text}");
     let _ = std::fs::remove_file(&image);
 }
 
@@ -286,7 +289,8 @@ fn story_name_picks_one_off_the_disk() {
     let out = run(&image, &["--story", "zork1"], "");
     let text = stdout_of(&out);
     assert!(out.status.success(), "the chosen story ran: {}", stderr_of(&out));
-    assert!(text.contains("Opening 1) Zork1.Data  (v3 r88 s840726)"), "says which:\n{text}");
+    let one = "Opening 1) Zork I: The Great Underground Empire  (v3 r88 s840726)  Zork1.Data";
+    assert!(text.contains(one), "says which:\n{text}");
 
     let out = run(&image, &["--story", "zork9"], "");
     assert!(!out.status.success(), "a name that matches nothing cannot open a story");
@@ -312,12 +316,15 @@ fn a_real_dos_compilation_lists_six_games_and_story_opens_one() {
     let Some(image) = story_path("floppy2.ima") else { return };
     let err = stderr_of(&run(&image, &[], ""));
     assert!(err.contains("holds 6 stories"), "the whole disk is offered:\n{err}");
-    assert!(err.contains("1) HITCHHIK.DAT  (v5 r31 s871119)"), "the Solid Gold release:\n{err}");
-    assert!(err.contains("4) BALLYHOO.DAT  (v3 r97 s851218)"), "…and the rest of them:\n{err}");
+    let gold = "1) The Hitchhiker's Guide to the Galaxy  (v5 r31 s871119)  HITCHHIK.DAT";
+    assert!(err.contains(gold), "the Solid Gold release:\n{err}");
+    let rest = "4) Ballyhoo  (v3 r97 s851218)  BALLYHOO.DAT";
+    assert!(err.contains(rest), "…and the rest of them:\n{err}");
 
     let out = run(&image, &["--story", "hitchhik"], "quit\ny\n");
     let text = stdout_of(&out);
-    assert!(text.contains("Opening 1) HITCHHIK.DAT"), "says which it opened:\n{text}");
+    let opened = "Opening 1) The Hitchhiker's Guide to the Galaxy  (v5 r31 s871119)  HITCHHIK.DAT";
+    assert!(text.contains(opened), "says which it opened:\n{text}");
     assert!(
         text.contains("Release 31 / Serial number 871119"),
         "and the GAME says which release it is:\n{text}"
@@ -338,10 +345,10 @@ fn a_real_atari_st_compilation_names_its_games_by_directory() {
     let err = stderr_of(&run(&image, &[], ""));
     assert!(err.contains("holds 4 stories"), "four games, and no saved game among them:\n{err}");
     for line in [
-        "1) HITCHHIK/STORY.DAT  (v3 r56 s841221)",
-        "2) BUREAUCR.ACY/STORY.DAT  (v4 r86 s870212)",
-        "3) CUTHROAT/STORY.DAT  (v3 r23 s840809)",
-        "4) LEATHER.GOD/STORY.DAT  (v3 r59 s860730)",
+        "1) The Hitchhiker's Guide to the Galaxy  (v3 r56 s841221)  HITCHHIK/STORY.DAT",
+        "2) Bureaucracy  (v4 r86 s870212)  BUREAUCR.ACY/STORY.DAT",
+        "3) Cutthroats  (v3 r23 s840809)  CUTHROAT/STORY.DAT",
+        "4) Leather Goddesses of Phobos  (v3 r59 s860730)  LEATHER.GOD/STORY.DAT",
     ] {
         assert!(err.contains(line), "expected {line:?} in:\n{err}");
     }
@@ -351,7 +358,8 @@ fn a_real_atari_st_compilation_names_its_games_by_directory() {
     // never could be.
     let out = run(&image, &["--story", "cuthroat"], "quit\ny\n");
     let text = stdout_of(&out);
-    assert!(text.contains("Opening 3) CUTHROAT/STORY.DAT"), "says which it opened:\n{text}");
+    let opened = "Opening 3) Cutthroats  (v3 r23 s840809)  CUTHROAT/STORY.DAT";
+    assert!(text.contains(opened), "says which it opened:\n{text}");
     assert!(text.contains("Hardscrabble Island"), "…and Cutthroats really ran:\n{text}");
 }
 
@@ -383,16 +391,17 @@ fn a_real_apple_iigs_compilation_mounts_through_the_shared_table() {
     let err = stderr_of(&run(&image, &[], ""));
     assert!(err.contains("holds 3 stories"), "the whole disk is offered:\n{err}");
     for line in [
-        "1) HOLLYWOOD  (v3 r37 s861215)",
-        "2) CUTTTHROAT  (v3 r23 s840809)",
-        "3) WISHBRINGER  (v3 r69 s850920)",
+        "1) Hollywood Hijinx  (v3 r37 s861215)  HOLLYWOOD",
+        "2) Cutthroats  (v3 r23 s840809)  CUTTTHROAT",
+        "3) Wishbringer  (v3 r69 s850920)  WISHBRINGER",
     ] {
         assert!(err.contains(line), "expected {line:?} in:\n{err}");
     }
 
     let out = run(&image, &["--story", "wishbringer"], "quit\ny\n");
     let text = stdout_of(&out);
-    assert!(text.contains("Opening 3) WISHBRINGER"), "says which it opened:\n{text}");
+    let opened = "Opening 3) Wishbringer  (v3 r69 s850920)  WISHBRINGER";
+    assert!(text.contains(opened), "says which it opened:\n{text}");
     assert!(
         text.contains("Release 69 / Serial Number 850920"),
         "and the GAME says which release it is:\n{text}"
@@ -423,11 +432,14 @@ fn a_high_ascii_serial_does_not_hide_a_game_from_the_menu() {
     let err = stderr_of(&run(&image, &[], ""));
     assert!(err.contains("holds 5 stories"), "all five are offered:\n{err}");
     for line in [
-        "1) SHERLOCK  (v5 r21 s871214)",
-        "2) BORDERZONE  (v5 r9 s871008)",
-        "3) NORDANDBERT  (v4 r19 s870722)",
+        "1) Sherlock: The Riddle of the Crown Jewels  (v5 r21 s871214)  SHERLOCK",
+        "2) Border Zone  (v5 r9 s871008)  BORDERZONE",
+        "3) Nord and Bert Couldn't Make Head or Tail of It  (v4 r19 s870722)  NORDANDBERT",
+        // The one build on any set the table cannot name: this Apple II press
+        // writes its header in high ASCII, so its release and serial read as 0
+        // and `Blown!`. There is no key to add, so the stored name stands.
         "4) LEATHRGODDESSES  (v3 r0 sBlown!)",
-        "5) PLUNDERED  (v3 r26 s870730)",
+        "5) Plundered Hearts  (v3 r26 s870730)  PLUNDERED",
     ] {
         assert!(err.contains(line), "expected {line:?} in:\n{err}");
     }
@@ -665,7 +677,8 @@ fn a_set_offers_exactly_the_one_story_the_release_carries() {
     // without the v6 refusal cutting the run short.
     let err = stderr_of(&run(&image, &["--story", "2"], ""));
     assert!(err.contains("pick 1 to 1"), "one story, so one choice:\n{err}");
-    assert!(err.contains("1) SHOGUN.D1  (v6 r311 s890510)"), "the build it reassembled:\n{err}");
+    let row = "1) Shogun  (v6 r311 s890510)  SHOGUN.D1";
+    assert!(err.contains(row), "the build it reassembled:\n{err}");
 
     // …and the name really does select it: this reaches the v6 refusal, which
     // only a story that was found can be refused for.
@@ -877,4 +890,139 @@ fn the_prodos_press_names_its_machine_and_reports_that_machines_page() {
         text.contains("Apple //gs"),
         "and the GAME names the machine it was told it is running on:\n{text}"
     );
+}
+
+// ── the compilation discs, named from the bundled table (SQ-0884) ─────────────
+
+/// A gitignored compilation disc, by directory and filename. These live beside
+/// `stories/` rather than in it — `treasures/` and `masterpieces/` — and like it
+/// they are absent from any checkout that has not been handed the media.
+fn disc_path(dir: &str, name: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir).join(name);
+    if p.exists() {
+        return Some(p);
+    }
+    eprintln!("SKIP: gitignored disc missing at {}", p.display());
+    None
+}
+
+/// The three compilation sets this quest measured, with the number of stories
+/// each carries. The count is here so a test that enumerates nothing cannot
+/// quietly pass as a test that found everything named.
+const COMPILATION_DISCS: &[(&str, &str, usize)] = &[
+    ("treasures", "LostTreasures1.iso", 40),
+    ("treasures", "LostTreasures2.iso", 28),
+    ("masterpieces", "Classic Text Adventure Masterpieces of Infocom (USA).bin", 83),
+];
+
+/// The Z-machine release and serial in a story's header, with bit 7 off each
+/// serial byte exactly as `Candidate::header` masks it.
+fn build_of(bytes: &[u8]) -> Option<(u16, String)> {
+    if bytes.len() < 0x18 || !(3..=8).contains(&bytes[0]) {
+        return None;
+    }
+    let serial: String = bytes[0x12..0x18].iter().map(|c| char::from(c & 0x7f)).collect();
+    Some((u16::from_be_bytes([bytes[0x02], bytes[0x03]]), serial))
+}
+
+/// **Half two of this quest, as a test.** Every Z-code build these three sets
+/// carry must be a build `known_titles.tsv` can name — that is what makes the
+/// menu above read as a shelf of games rather than a directory listing, and it
+/// is the thing that goes stale when a new set arrives.
+///
+/// Driving the media is the point: the table is checked against what is actually
+/// pressed on the discs, not against a remembered list. A row that fails here
+/// names the exact release and serial to add, measured off the medium that
+/// carries it — which is the only provenance this table accepts, because a disc
+/// is a different release and not the same story on other media.
+///
+/// The sweep that first ran this found **nothing missing**: all 151 stories
+/// across the three sets resolve, so no row was added. The value is forward —
+/// the next set that turns up an uncovered build fails here and says which.
+#[test]
+fn every_build_on_the_compilation_discs_has_a_canonical_title() {
+    let mut ran = 0;
+    for (dir, name, want) in COMPILATION_DISCS {
+        let Some(path) = disc_path(dir, name) else { continue };
+        ran += 1;
+        let raw = std::fs::read(&path).expect("the disc reads");
+        let disk = cli_host::disk_set::mount_at(&path, raw).expect("the disc mounts");
+        let stories = disk.stories();
+        assert_eq!(stories.len(), *want, "{name}: the disc's story count changed");
+        let unnamed: Vec<String> = stories
+            .iter()
+            .filter_map(|s| {
+                let (release, serial) = build_of(&s.bytes)?;
+                cli_host::titles::title_for_build(release, &serial)
+                    .is_none()
+                    .then(|| format!("ZCODE-{release}-{serial}\t({})", s.name))
+            })
+            .collect();
+        assert!(
+            unnamed.is_empty(),
+            "{name}: known_titles.tsv does not carry these builds — add them:\n{}",
+            unnamed.join("\n")
+        );
+    }
+    assert!(
+        ran > 0 || COMPILATION_DISCS.iter().all(|(d, n, _)| disc_path(d, n).is_none()),
+        "discs are present but nothing ran"
+    );
+}
+
+/// **The defect this quest was filed for**, off the real disc. *Lost Treasures
+/// of Infocom I* listed forty rows of `MAC/BALLYHOO` and `PC/DATA/BEYONDZO.DAT`
+/// — the names the medium stored, none of which is a game's name.
+///
+/// FALSIFICATION: make `media::Candidate::label` build from `self.name` again
+/// and every row here fails with the symptom as reported, verbatim:
+///
+/// ```text
+/// 2) MAC/BEYOND ZORK  (v5 r57 s871221)
+/// 22) PC/DATA/BEYONDZO.DAT  (v5 r57 s871221)
+/// ```
+///
+/// — one game, two files, and nothing on either line that says *Beyond Zork*.
+#[test]
+fn a_real_compilation_disc_names_its_games_from_the_table() {
+    let Some(image) = disc_path("treasures", "LostTreasures1.iso") else { return };
+    let err = stderr_of(&run(&image, &[], ""));
+    assert!(err.contains("holds 40 stories"), "the whole disc is offered:\n{err}");
+    for line in [
+        "1) Ballyhoo  (v3 r97 s851218)  MAC/BALLYHOO",
+        "2) Beyond Zork: The Coconut of Quendor  (v5 r57 s871221)  MAC/BEYOND ZORK",
+        "22) Beyond Zork: The Coconut of Quendor  (v5 r57 s871221)  PC/DATA/BEYONDZO.DAT",
+        "25) The Hitchhiker's Guide to the Galaxy  (v5 r31 s871119)  PC/DATA/HITCHHIK.DAT",
+        "40) Zork Zero: The Revenge of Megaboz  (v6 r393 s890714)  PC/ZORK0/ZORK0.ZIP",
+    ] {
+        assert!(err.contains(line), "expected {line:?} in:\n{err}");
+    }
+
+    // …and the title the menu shows is a title `--story` answers to. `Ballyhoo`
+    // is on this disc twice, so the ambiguity is real and is reported rather
+    // than guessed at; `beyond zork` picks out one game and two files.
+    let err = stderr_of(&run(&image, &["--story", "ballyhoo"], ""));
+    assert!(err.contains("matches more than one story"), "two copies, two answers:\n{err}");
+    let err = stderr_of(&run(&image, &["--story", "coconut of quendor"], ""));
+    assert!(err.contains("matches more than one story"), "the subtitle matches too:\n{err}");
+}
+
+/// *Masterpieces* carries *Ballyhoo* three times — `MAC/BALLYHOO`,
+/// `PC/BALLYHOO/DATA/BALLYHOO.DAT` and `PC/DATA/BALLYHOO.DAT`, one build in
+/// three files. Naming rows from the table must not turn those into three
+/// identical lines, so the stored name stays on every row.
+#[test]
+fn one_build_in_three_files_is_still_three_distinguishable_rows() {
+    let Some(image) =
+        disc_path("masterpieces", "Classic Text Adventure Masterpieces of Infocom (USA).bin")
+    else {
+        return;
+    };
+    let err = stderr_of(&run(&image, &[], ""));
+    let rows: Vec<&str> =
+        err.lines().filter(|l| l.contains("Ballyhoo  (v3 r97 s851218)")).collect();
+    assert_eq!(rows.len(), 3, "three files carry this build:\n{err}");
+    for name in ["MAC/BALLYHOO", "PC/BALLYHOO/DATA/BALLYHOO.DAT", "PC/DATA/BALLYHOO.DAT"] {
+        assert!(rows.iter().any(|r| r.ends_with(name)), "no row for {name}:\n{err}");
+    }
 }
