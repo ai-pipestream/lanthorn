@@ -12,6 +12,10 @@
 # No trailing slash, so this also covers the SYMLINK a worktree carries — a
 # pattern ending in `/` matches a directory and would let the link through.
 /masterpieces
+# …and `treasures/` for the cooked `.iso` pressings of the same kind of disc
+# (SQ-0879). Same contract: read when present, skipped vacuously when not, and
+# no trailing slash so a worktree's symlink is covered too.
+/treasures
 
 # Glulx/Glk conformance test story binaries (fetched, never committed — see
 # unit_tests/README.md for the manifest + re-fetch recipe)

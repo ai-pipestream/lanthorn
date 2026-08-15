@@ -493,12 +493,20 @@ const FORMATS: &[Format] = &[
         // `looks_like_hfs`'s answer, and it declines a `.bin` that is anything
         // else.
         //
-        // **Not `iso`**, by the rule the ProDOS row states for `hdv`: a cooked
-        // 2048-byte image of a hybrid disc reads perfectly well here — the
-        // partition map is walked in place, with no unwrapping at all — and
-        // nothing in the corpus is one. A spelling is claimed when a medium
-        // wears it.
-        extensions: &["image", "bin"],
+        // `iso` is the third, and it was declined once (SQ-0870) on the ground
+        // that "nothing in the corpus is one". That ground does not hold up
+        // (SQ-0879). A cooked 2048-byte image is the ORDINARY way a hybrid disc
+        // is archived — the raw `.bin` here cooks to a perfectly readable
+        // 308 MB `.iso`, walked in place with no unwrapping at all — so the
+        // question was never whether the reader could take one, only whether a
+        // scan would offer it. It would not: the file was skipped before its
+        // bytes were ever looked at, which is SQ-0849's defect verbatim, and the
+        // only symptom is a disc that is silently absent from the story list
+        // while opening it by name works fine.
+        //
+        // A spelling is still claimed when a medium wears it — and `.iso` is
+        // what this medium wears everywhere it is distributed.
+        extensions: &["image", "bin", "iso"],
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
         pages_across_images: false,
@@ -2302,6 +2310,99 @@ mod tests {
         // …and the row that claims it names the spelling a scan pre-filters on,
         // so the disc is offered rather than merely openable (SQ-0849's rule).
         assert!(image_extensions().any(|e| e == "bin"));
+        // …and so does the cooked spelling the same disc is archived under
+        // everywhere else (SQ-0879). Declining it meant the file was skipped
+        // before its bytes were ever looked at, so a disc that opens perfectly
+        // well by name was silently absent from the story list.
+        assert!(image_extensions().any(|e| e == "iso"));
+    }
+
+    /// **A cooked 2048-byte image of the hybrid disc reads exactly as the raw
+    /// dump does** (SQ-0879).
+    ///
+    /// Cooked here rather than kept on disk, because the property is that the
+    /// two are the same volume and a second 308 MB fixture would prove nothing
+    /// the arithmetic does not. MODE1/2352 carries 2048 bytes of user data at
+    /// offset 16 of each sector; stripping the frames IS the cook.
+    ///
+    /// FALSIFICATION: drop `iso` from the row and this still passes — the
+    /// reader never needed it — which is exactly why the extension census has
+    /// its own assertion above. The two halves of SQ-0849's rule are separate:
+    /// can we read it, and will a scan offer it.
+    #[test]
+    fn the_hybrid_disc_reads_the_same_cooked_as_raw() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../masterpieces");
+        let file = "Classic Text Adventure Masterpieces of Infocom (USA).bin";
+        let Ok(raw) = std::fs::read(dir.join(file)) else {
+            eprintln!("SKIP: the raw disc is absent at {}", dir.join(file).display());
+            return;
+        };
+        let cooked: Vec<u8> =
+            raw.chunks_exact(2352).flat_map(|s| s[16..16 + 2048].iter().copied()).collect();
+        assert!(
+            DiskImage::detect(&cooked) == Some(DiskImage::Hfs),
+            "the cooked image is the same Macintosh volume"
+        );
+        let disk = MountedDisk::mount(cooked).expect("the cooked image mounts");
+        assert_eq!(disk.volume_name(), Some("Masterpieces"));
+        assert_eq!(disk.stories().len(), 83, "every story the raw dump offers");
+        assert_eq!(disk.image_for("PC/AMFV/AMFV.DAT"), DiskImage::Fat12Dos, "and both halves");
+    }
+
+    /// **Every disc the user drops in `treasures/` mounts AND would be offered
+    /// by a directory scan** (SQ-0879).
+    ///
+    /// That directory exists for cooked `.iso` pressings, and it is gitignored
+    /// like `stories/` and `masterpieces/`, so this skips vacuously when it is
+    /// empty or absent — which is CI, always.
+    ///
+    /// Both halves are asserted because they fail independently, and the second
+    /// is the one that bites silently: a reader that opens a medium a SCAN never
+    /// offers is a disc missing from the story list with nothing on screen to say
+    /// why. That is SQ-0849's defect, and it has now recurred twice.
+    #[test]
+    fn every_disc_in_treasures_mounts_and_a_scan_would_offer_it() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../treasures");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("SKIP: no treasures/ at {}", dir.display());
+            return;
+        };
+        let mut ran = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if name.starts_with('.') {
+                continue; // .DS_Store and friends
+            }
+            let raw = std::fs::read(&path).expect("readable");
+            // CONTENT decides what is a disc, so the box scans and the checksum
+            // file sitting beside the discs are simply not this test's business.
+            let Some(image) = DiskImage::detect(&raw) else { continue };
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            assert!(
+                image_extensions().any(|e| e == ext),
+                "{name}: we can read it as {}, but no row claims {ext:?} — so a directory \
+                 scan skips the file before its bytes are ever looked at",
+                image.label()
+            );
+            let disk = MountedDisk::mount(raw).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                !disk.stories().is_empty(),
+                "{name}: mounted as {} and offered no story",
+                image.label()
+            );
+            ran += 1;
+        }
+        if ran == 0 {
+            eprintln!("SKIP: treasures/ holds no disc images yet");
+        }
     }
 
     // ── A story on no single disk (SQ-0864) ───────────────────────────────────
