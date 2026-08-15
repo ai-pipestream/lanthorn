@@ -452,20 +452,51 @@ impl PictSource {
         }
     }
 
-    /// Decode `resnum` under the CURRENT palette WITHOUT establishing a new one —
+    /// Decode `resnum` for a replay WITHOUT establishing a new Current Palette —
     /// the replay path (SQ-0567).
     ///
-    /// A v6 screen holds palette indices, so once a picture is on it, it displays
-    /// through whatever palette is loaded now — base pictures included, not just the
-    /// adaptive ones. Replaying a window therefore decodes every picture the same way
-    /// an adaptive draw is decoded: the live PLTE spliced in, its own ignored. Calling
-    /// `image` here instead would let each replayed base picture reload the palette
-    /// and undo the change being replayed for.
+    /// This is [`Self::image`] with its one side effect removed. An **adaptive**
+    /// picture has no colours of its own and decodes through the live palette,
+    /// which is the whole point of the replay: Arthur's frame — Picts 54, 170 and
+    /// 171, the archive's only `APal` entries — has to follow the scene that
+    /// established it. A picture that CARRIES a palette decodes through its own,
+    /// exactly as the draw that first put it on the canvas did; what must not
+    /// happen is `image`'s reload of the Current Palette from it, which would
+    /// undo the change being replayed for.
+    ///
+    /// # Why a base picture keeps its own palette — SQ-0881
+    ///
+    /// This used to send base pictures through the live palette too, on the
+    /// reading that a v6 framebuffer holds indices and so recolours wholesale
+    /// when a palette is loaded. That is true of a machine with ONE palette, and
+    /// the corpus says the MCGA is not one. Measured on Arthur's map screen —
+    /// `F2` from the churchyard, `arthur-r74-s890714.z6` at 165x50 — the pictures
+    /// the game lays down and how many distinct palettes they carry:
+    ///
+    /// | rendition | map pictures | distinct palettes |
+    /// |---|---|---|
+    /// | Amiga `Pic.data` | 137, 108, 115, 112, 138, 147, 140 | **1** |
+    /// | DOS `.MG1` | the same seven | **3** |
+    /// | DOS `.EG1`/`.CG1` | the same seven | none — a hardware table |
+    ///
+    /// A single-palette machine's archive gives one palette to a screenful
+    /// because it has no choice; the MCGA's DAC has 256 entries and Infocom used
+    /// them, so its archive gives the scroll, the room box and the compass rose
+    /// palettes of their own. Forcing the last one onto all three left the
+    /// parchment showing [`blorb::infocom_pics::DEFAULT_PALETTE`] where the
+    /// borrowed table ran out — entry 8 grey for the ground, 9 and 10 for the
+    /// scroll rods, which is the grey field and rainbow scrolls reported. The
+    /// Amiga and the Blorb were never wrong because their palettes agree with
+    /// each other, so the same bug drew the same picture.
+    ///
+    /// Blorb §11.3 already says this without reference to any machine: the
+    /// Current Palette is what an ADAPTIVE picture is drawn through. A picture
+    /// with a palette of its own was never asking.
     pub fn image_under_current_palette(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
-        if self.adaptive.is_empty() && self.current_plte.is_none() {
-            return self.get(resnum).cloned();
+        if self.adaptive.contains(&resnum) {
+            return self.adaptive_image(resnum);
         }
-        self.adaptive_image(resnum)
+        self.get(resnum).cloned()
     }
 
     /// The Blorb `Reso` standard window `(width, height)` in pixels — the

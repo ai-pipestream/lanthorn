@@ -211,3 +211,67 @@ fn a_palette_replay_keeps_a_later_background_above_the_frame() {
         "the picture screen is restored exactly ({back:.3} vs {picture:.3})"
     );
 }
+
+// ── SQ-0881: what a replay must NOT recolour ─────────────────────────────────
+
+/// The centre pixel of a decoded Pict, or `None` when it did not decode.
+fn centre(img: Option<std::sync::Arc<image::DynamicImage>>) -> Option<[u8; 4]> {
+    let rgba = img?.to_rgba8();
+    Some(rgba.get_pixel(rgba.width() / 2, rgba.height() / 2).0)
+}
+
+/// A palette change must recolour the ADAPTIVE frame and nothing else — SQ-0881.
+///
+/// The replay above (SQ-0567) rebuilds a window by re-decoding its whole display
+/// list, and it used to push every picture through the live palette, base ones
+/// included. Arthur's map screen is where that shows: the game lays down the
+/// parchment scroll (Pict 137), then the room box and compass rose, and on the
+/// DOS MCGA archive those three carry palettes of their OWN — a machine whose DAC
+/// had 256 entries did not have to share sixteen. Replayed through the last of
+/// them, the scroll came back in `DEFAULT_PALETTE` wherever the borrowed table ran
+/// out: entry 8 grey for the parchment, 9 and 10 for the rods. The Amiga archive
+/// gives that same screen ONE palette, so it drew correctly throughout and hid
+/// this for as long as MCGA was not the default rendition (SQ-0880).
+///
+/// Both halves are asserted here, because the fix is a narrowing and a narrowing
+/// can take too much: the frame — Picts 54, 170 and 171, this archive's only
+/// `APal` entries — must still follow.
+///
+/// Falsifiable: send base pictures through `adaptive_image` again and the scroll
+/// comes back `[85, 85, 85, 255]`, the reported grey.
+#[test]
+fn a_replay_recolours_the_adaptive_frame_and_leaves_base_art_alone() {
+    let mg1 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/arthur.mg1");
+    let Ok(bytes) = std::fs::read(&mg1) else {
+        eprintln!("SKIP: gitignored archive missing at {}", mg1.display());
+        return;
+    };
+    let pics = blorb::infocom_pics::InfocomPics::parse(bytes).expect("arthur.mg1 parses");
+    assert_eq!(pics.adaptive_pictures(), vec![54, 170, 171], "the archive's APal set");
+    let mut src = PictSource::from_native(pics);
+
+    // The map's parchment scroll, drawn through the palette it carries.
+    let scroll = centre(src.image(137)).expect("Pict 137 decodes");
+    assert_eq!(scroll, [255, 192, 133, 255], "the scroll's own parchment");
+
+    // Pict 115 — a marker the game draws onto that scroll a moment later —
+    // carries a DIFFERENT palette, and drawing it establishes it as Current.
+    let before = src.current_palette().map(<[u8]>::to_vec);
+    let _ = src.image(115);
+    assert_ne!(src.current_palette().map(<[u8]>::to_vec), before, "115 loads its own palette");
+
+    // The replay hands the scroll back unchanged…
+    assert_eq!(
+        centre(src.image_under_current_palette(137)),
+        Some(scroll),
+        "a base picture is replayed in ITS OWN colours, not the last picture's"
+    );
+    // …and the frame still follows the palette, which is what the replay is for.
+    let frame_now = centre(src.image_under_current_palette(170)).expect("Pict 170 decodes");
+    src.set_current_palette(before);
+    assert_ne!(
+        centre(src.image_under_current_palette(170)),
+        Some(frame_now),
+        "an adaptive picture still tracks the Current Palette"
+    );
+}
