@@ -316,10 +316,17 @@ pub(crate) fn boot_story(
         cfg.interpreter_number = Some(n);
         cfg.one_run.pin(app::config::keys::INTERPRETER_NUMBER, n);
     }
+    // Ride with the story for the session: the restart path re-resolves artwork
+    // and has no other way to know which game on the disc this is (SQ-0876).
+    cfg.disk_entry = disk_entry.map(str::to_string);
     cfg.interpreter_profile = app::interpreter::InterpreterProfile::resolve(
         &story_path,
         cfg.interpreter_number,
         picture_override.flavour(),
+        // The medium THIS story came off, already resolved by the mount above —
+        // which on a hybrid disc is not the same as the image's own format
+        // (SQ-0876).
+        disk_image,
     );
     zvm::screen::set_palette(cfg.interpreter_profile.palette());
 
@@ -527,7 +534,15 @@ pub(crate) fn boot_story(
             // both, which is how a user picks the MCGA, EGA, CGA or Amiga
             // rendition of a game whose Blorb art is already perfectly fine.
             let mut picts = if cfg.images {
-                app::graphics::PictSource::resolve_with_override(&story_path, picture_override)
+                // SQ-0876: and WHICH story on the medium, so a compilation
+                // pairs each game with the archive in its own folder instead
+                // of handing all six of the Masterpieces CD's graphical games
+                // Arthur's plates.
+                app::graphics::PictSource::resolve_with_override(
+                    &story_path,
+                    picture_override,
+                    disk_entry,
+                )
             } else {
                 app::graphics::PictSource::new(None)
             };

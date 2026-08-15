@@ -220,18 +220,32 @@ impl InterpreterProfile {
     /// `named_art` is [`crate::graphics::PictureOverride::flavour`]: `None`
     /// whenever no usable archive was named, which is every launch that does not
     /// use tier 3.
+    ///
+    /// `mounted_as` is the medium a caller ALREADY resolved for the particular
+    /// story it is launching — [`crate::hints::load_mounted_story_from`]'s second
+    /// answer. Pass it whenever you have it (SQ-0876). Two reasons, and the first
+    /// is correctness: on a hybrid disc the medium is a property of the story and
+    /// not of the image, so re-deriving it from `story_path` reads the
+    /// FILESYSTEM's machine and tells all 50 of the Masterpieces CD's DOS builds
+    /// to advertise the Macintosh. The second is cost — that caller has already
+    /// mounted the image, and this is a 354 MB read not to repeat.
+    ///
+    /// `None` means "work it out from the path", which is what every caller
+    /// without a mount does and is exactly the old behaviour.
     pub fn resolve(
         story_path: &Path,
         configured_interpreter_number: Option<u8>,
         named_art: Option<Flavour>,
+        mounted_as: Option<blorb::medium::DiskImage>,
     ) -> Self {
         if let Some(n) = configured_interpreter_number {
             return Self::for_interpreter_number(n);
         }
+        let medium = mounted_as.or_else(|| Self::medium(story_path));
         if let Some(flavour) = named_art {
-            return Self::for_art_flavour_on(flavour, Self::medium(story_path));
+            return Self::for_art_flavour_on(flavour, medium);
         }
-        if let Some(n) = Self::medium_interpreter_number(story_path) {
+        if let Some(n) = medium.and_then(|m| m.interpreter_number()) {
             return Self::for_interpreter_number(n);
         }
         Self::IbmPc
@@ -365,8 +379,9 @@ impl InterpreterProfile {
         zvm::interpreter::machine(self.interpreter_number()?)
     }
 
-    /// The interpreter number the medium at `path` defaults to, or `None` when
-    /// it is not release media.
+    /// The release medium at `path`, or `None` when it is not one. The single
+    /// read this module does, and only the fallback — [`Self::resolve`]'s
+    /// `mounted_as` is preferred, being both per-story and already paid for.
     ///
     /// Content, not extension: [`blorb::medium::DiskImage::detect`] reads the
     /// filesystem, exactly as `PictSource::resolve` and `hints::read_story_file`
@@ -374,13 +389,6 @@ impl InterpreterProfile {
     /// ordinary story file is not. The MAPPING is `blorb`'s so that `zvm-cli`
     /// reaches the same conclusion off the same bytes (SQ-0839) — this only
     /// supplies the file.
-    fn medium_interpreter_number(path: &Path) -> Option<u8> {
-        Self::medium(path)?.interpreter_number()
-    }
-
-    /// The release medium at `path`, or `None` when it is not one. The single
-    /// read this module does; see [`Self::medium_interpreter_number`] for why it
-    /// is content and not extension.
     fn medium(path: &Path) -> Option<blorb::medium::DiskImage> {
         let raw = std::fs::read(path).ok()?;
         blorb::medium::DiskImage::detect(&raw)
@@ -1084,9 +1092,9 @@ mod tests {
     #[test]
     fn a_missing_file_is_not_a_disk_image() {
         let missing = std::path::Path::new("/nonexistent/babelmap/no-such-story.z6");
-        assert_eq!(InterpreterProfile::resolve(missing, None, None), InterpreterProfile::IbmPc);
+        assert_eq!(InterpreterProfile::resolve(missing, None, None, None), InterpreterProfile::IbmPc);
         // …and an explicit number still decides without ever touching the disk.
-        assert_eq!(InterpreterProfile::resolve(missing, Some(4), None), InterpreterProfile::Amiga);
+        assert_eq!(InterpreterProfile::resolve(missing, Some(4), None, None), InterpreterProfile::Amiga);
     }
 
     #[test]
@@ -1104,12 +1112,12 @@ mod tests {
         let plain = std::path::Path::new("/nonexistent/babelmap/no-such-story.z6");
         // Naming an Amiga archive beside an ordinary file makes it an Amiga…
         assert_eq!(
-            InterpreterProfile::resolve(plain, None, Some(Flavour::AmigaMac)),
+            InterpreterProfile::resolve(plain, None, Some(Flavour::AmigaMac), None),
             InterpreterProfile::Amiga,
         );
         // …and an explicit number still outranks it (precedence 1 over 2).
         assert_eq!(
-            InterpreterProfile::resolve(plain, Some(6), Some(Flavour::AmigaMac)),
+            InterpreterProfile::resolve(plain, Some(6), Some(Flavour::AmigaMac), None),
             InterpreterProfile::IbmPc,
         );
     }

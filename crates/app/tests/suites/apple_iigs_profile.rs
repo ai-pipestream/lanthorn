@@ -162,7 +162,7 @@ fn boot(path: &Path, honor: bool, interpreter_override: Option<u8>) -> Option<Ga
         "{}: this suite's fixtures are Apple ProDOS volumes",
         path.display()
     );
-    let profile = InterpreterProfile::resolve(path, interpreter_override, None);
+    let profile = InterpreterProfile::resolve(path, interpreter_override, None, None);
     zvm::screen::set_palette(profile.palette());
     let s = GameSession::new_with_art_scale(
         loaded.bytes().to_vec(),
@@ -343,7 +343,7 @@ fn a_prodos_volume_tells_its_story_it_is_an_apple_iigs() {
     for name in ALL_DISKS {
         let Some(path) = disk(name) else { continue };
         ran += 1;
-        let profile = InterpreterProfile::resolve(&path, None, None);
+        let profile = InterpreterProfile::resolve(&path, None, None, None);
         assert_eq!(profile, InterpreterProfile::AppleIIgs, "{name}: the medium picks the machine");
         assert_eq!(
             profile.interpreter_number(),
@@ -550,7 +550,7 @@ fn the_tui_the_cli_and_the_launch_dialog_advertise_the_same_byte() {
         assert_eq!(cli, Some(10), "{name}: zvm-cli reads the medium directly");
 
         // 2. The TUI's route: `InterpreterProfile::resolve` on the path opened.
-        let tui = InterpreterProfile::resolve(&path, None, None).interpreter_number();
+        let tui = InterpreterProfile::resolve(&path, None, None, None).interpreter_number();
         assert_eq!(tui, cli, "{name}: the TUI and zvm-cli disagree about the same disk");
 
         // 3. The launch dialog's route, for every Z-version the corpus holds —
@@ -582,12 +582,12 @@ fn the_tui_the_cli_and_the_launch_dialog_advertise_the_same_byte() {
         // rather than falling through to the IBM PC. The volume still says IIgs
         // and is still outranked.
         assert_eq!(
-            InterpreterProfile::resolve(&path, Some(2), None),
+            InterpreterProfile::resolve(&path, Some(2), None, None),
             InterpreterProfile::AppleIIe,
             "{name}: asking for the Apple IIe on a IIgs volume must get the IIe",
         );
         assert_eq!(
-            InterpreterProfile::resolve(&path, Some(2), None).interpreter_number(),
+            InterpreterProfile::resolve(&path, Some(2), None, None).interpreter_number(),
             Some(2),
             "{name}: …and advertise 2, not the volume's 10",
         );

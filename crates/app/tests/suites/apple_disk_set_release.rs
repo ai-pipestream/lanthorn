@@ -261,7 +261,7 @@ fn a_volume_that_carries_games_is_untouched_by_the_set_path() {
         return;
     };
     assert_eq!(image, app::hints::DiskImage::ProDos);
-    let names: Vec<&str> = stories.iter().map(|s| s.name.as_str()).collect();
+    let names: Vec<&str> = stories.iter().map(|(s, _)| s.name.as_str()).collect();
     assert_eq!(
         names,
         ["ZORK.III", "ZORK.II", "ZORK.I", "HITCHHIKER", "BEYOND.ZORK"],

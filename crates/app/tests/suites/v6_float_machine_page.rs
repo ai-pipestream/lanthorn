@@ -115,9 +115,9 @@ fn frame(file: &str, pictures: Option<&str>, honor: bool) -> Option<Frame> {
         None => PictureOverride::Unset,
     };
     let named_art_std_window = over.std_window();
-    let profile = InterpreterProfile::resolve(&path, None, over.flavour());
+    let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve_with_override(&path, over);
+    let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
     let std_window = picts
         .std_window()

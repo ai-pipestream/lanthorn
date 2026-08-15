@@ -64,7 +64,7 @@ fn boot_v6(file: &str, release: u16, serial: &str, honor: bool) -> Option<GameSe
         "{file}: this medium carries a DIFFERENT build than the case says"
     );
     assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), serial, "{file}: serial");
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let std_win = picts.std_window();
     let mut s =
@@ -387,7 +387,7 @@ fn a_turn_that_clears_mid_output_parks_on_the_first_new_row() {
     };
     assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 322, "{file}: release");
     assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), "890706", "{file}: serial");
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let dims = picts.all_pict_dims();
     let std_win = picts.std_window();
     let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, std_win, None, None)

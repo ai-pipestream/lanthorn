@@ -280,10 +280,10 @@ fn open(path: &Path, pictures: Option<&str>) -> Option<(String, PictSource)> {
             );
             return None;
         }
-        return Some((format!("{base} [{name}]"), PictSource::resolve_with_override(path, over)));
+        return Some((format!("{base} [{name}]"), PictSource::resolve_with_override(path, over, None)));
     }
 
-    let src = PictSource::resolve(path);
+    let src = PictSource::resolve(path, None);
     if src.native_std_window().is_some() {
         return Some((base, src));
     }
@@ -298,7 +298,7 @@ fn open(path: &Path, pictures: Option<&str>) -> Option<(String, PictSource)> {
         );
         return None;
     }
-    Some((base, PictSource::resolve_with_override(path, over)))
+    Some((base, PictSource::resolve_with_override(path, over, None)))
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────

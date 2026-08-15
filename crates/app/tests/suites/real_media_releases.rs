@@ -593,9 +593,9 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
     let bytes = story_bytes(m)?;
     assert_is_the_pinned_release(m, &bytes);
     let path = stories_dir().join(m.file);
-    let profile = InterpreterProfile::resolve(&path, None, None);
+    let profile = InterpreterProfile::resolve(&path, None, None, None);
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     // The same chain, in the same order: the Blorb's `Reso`, the archive the
     // medium supplied, then the machine (SQ-0838). No medium here names an
@@ -778,7 +778,7 @@ fn every_release_medium_is_offered_by_the_story_picker() {
     /// helper cannot quietly disagree with the list it is checking.
     fn stories_on(path: &Path) -> Vec<Vec<u8>> {
         app::hints::mounted_stories(path)
-            .map(|(_, s)| s.into_iter().map(|s| s.bytes).collect())
+            .map(|(_, s)| s.into_iter().map(|(s, _)| s.bytes).collect())
             .unwrap_or_default()
     }
 
@@ -1023,7 +1023,7 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(
-            InterpreterProfile::resolve(&path, None, None),
+            InterpreterProfile::resolve(&path, None, None, None),
             expected,
             "{}: the medium decides the profile",
             ctx(m)
@@ -1158,7 +1158,7 @@ fn floppy_alone(tag: &str) -> Option<FloppyAlone> {
 #[test]
 fn a_dos_release_floppy_supplies_its_own_pc_artwork() {
     let Some(disk) = floppy_alone("dos-art") else { return };
-    let mut picts = PictSource::resolve(&disk.image);
+    let mut picts = PictSource::resolve(&disk.image, None);
     let dims = picts.all_pict_dims();
     assert!(dims.len() > 100, "the disk's own archive, {} pictures", dims.len());
     assert!(
@@ -1226,7 +1226,7 @@ fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
     // The medium says Amiga; the launch says IBM PC. The launch wins, and it
     // brings its whole profile with it — that is what asking for a number means.
     let path = stories_dir().join(m.file);
-    let profile = InterpreterProfile::resolve(&path, Some(6), None);
+    let profile = InterpreterProfile::resolve(&path, Some(6), None, None);
     assert_eq!(profile, InterpreterProfile::IbmPc, "{}: explicit beats the medium", ctx(m));
     zvm::screen::set_palette(profile.palette());
 

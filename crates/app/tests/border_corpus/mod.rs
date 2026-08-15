@@ -126,7 +126,7 @@ impl Archive {
             eprintln!("SKIP: gitignored picture archive {label} is absent or will not parse");
             return None;
         }
-        Archive::wrap(label.to_string(), PictSource::resolve_with_override(story, over))
+        Archive::wrap(label.to_string(), PictSource::resolve_with_override(story, over, None))
     }
 
     /// The archive a disk image supplies by itself — the Amiga floppies' own
@@ -137,7 +137,7 @@ impl Archive {
             eprintln!("SKIP: gitignored medium {image} is absent");
             return None;
         }
-        Archive::wrap(image.to_string(), PictSource::resolve(&path))
+        Archive::wrap(image.to_string(), PictSource::resolve(&path, None))
     }
 
     /// Every picture the archive carries, in UNIT space: `(id, width, height)`,

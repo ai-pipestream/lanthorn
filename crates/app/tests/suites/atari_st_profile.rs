@@ -107,7 +107,7 @@ fn boot(path: &Path, honor: bool, interpreter_override: Option<u8>) -> Option<Ga
         "{}: this suite's fixtures are Atari ST floppies",
         path.display()
     );
-    let profile = InterpreterProfile::resolve(path, interpreter_override, None);
+    let profile = InterpreterProfile::resolve(path, interpreter_override, None, None);
     zvm::screen::set_palette(profile.palette());
     let s = GameSession::new_with_art_scale(
         loaded.bytes().to_vec(),
@@ -218,7 +218,7 @@ fn an_atari_st_floppy_tells_its_story_it_is_an_atari_st() {
     for name in [BEYOND_ZORK_DISK, V3_DISK, "Infocom Compilation 8 (19xx)(-).st"] {
         let Some(path) = disk(name) else { continue };
         ran += 1;
-        let profile = InterpreterProfile::resolve(&path, None, None);
+        let profile = InterpreterProfile::resolve(&path, None, None, None);
         assert_eq!(profile, InterpreterProfile::AtariSt, "{name}: the medium picks the machine");
         assert_eq!(
             profile.interpreter_number(),

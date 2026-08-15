@@ -505,8 +505,10 @@ impl Hfs {
     /// [`Hfs::pictures`] asks "what artwork is on this disk", and on a
     /// single-game floppy those are the same question. On a compilation they are
     /// not, and answering the easy one is how every graphical game on the
-    /// Masterpieces CD came to be handed `MAC/ARTHUR FOLDER/CPIC.DATA` —
-    /// Journey included, whose own archive sits one folder away.
+    /// Masterpieces CD came to be handed `MAC/ZORK ZERO/CPIC.DATA` — Journey
+    /// and Arthur included, whose own archives sit one folder away. (Zork Zero's
+    /// wins the volume-wide tiebreak on picture count, which is the point: the
+    /// stranger a game gets is whichever archive happens to sort first.)
     ///
     /// Two filters, and the second is what "same machine" buys. The folder alone
     /// would already pair each game correctly on this disc; the machine test is
@@ -1575,7 +1577,7 @@ pub(crate) mod tests {
             );
             // SQ-0876, on the real disc: the two halves separate exactly, and
             // each graphical game pairs with its OWN archive. Before this, all
-            // six resolved to `MAC/ARTHUR FOLDER/CPIC.DATA` and all 83 stories
+            // six resolved to `MAC/ZORK ZERO/CPIC.DATA` and all 83 stories
             // claimed the Macintosh.
             let disk = crate::medium::MountedDisk::mount(std::fs::read(dir.join(file)).unwrap())
                 .unwrap_or_else(|e| panic!("{what}: {e}"));

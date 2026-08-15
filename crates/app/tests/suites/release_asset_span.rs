@@ -116,7 +116,7 @@ fn the_360k_story_disk_offers_and_draws_the_releases_artwork() {
     // And the automatic resolution draws. This is the half of the report that a
     // list of candidates cannot settle: "no artwork is used so the story doesn't
     // display any."
-    let mut src = PictSource::resolve(&disk2);
+    let mut src = PictSource::resolve(&disk2, None);
     assert_eq!(
         src.dims(1),
         Some((640, 200)),
@@ -138,7 +138,7 @@ fn the_720k_story_disk_offers_both_renditions_and_keeps_its_own() {
     );
     // The story's own volume still wins the automatic pick, so nothing that
     // worked before this quest moved: 320-wide MCGA, not disk 2's 640-wide CGA.
-    let mut src = PictSource::resolve(&disk1);
+    let mut src = PictSource::resolve(&disk1, None);
     assert_eq!(src.dims(1), Some((320, 200)), "the story's own volume keeps precedence");
     assert!(!src.is_monochrome());
 }
@@ -263,7 +263,7 @@ fn a_single_volume_release_is_unchanged() {
             want.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
             "{name}",
         );
-        let mut src = PictSource::resolve(&path);
+        let mut src = PictSource::resolve(&path, None);
         assert_eq!(
             src.native_std_window(),
             Some(*space),
@@ -305,7 +305,7 @@ fn a_named_archive_on_a_sibling_volume_wins() {
 
     // Automatic: the release's EGA, 640-wide and in colour.
     let plain = game_dir_with("auto", "");
-    let mut auto = PictSource::resolve_with_override(&disk2, PictureOverride::resolve(&disk2, &plain));
+    let mut auto = PictSource::resolve_with_override(&disk2, PictureOverride::resolve(&disk2, &plain), None);
     assert_eq!(auto.dims(1), Some((640, 200)));
     assert!(!auto.is_monochrome(), "EGA by default");
 
@@ -315,7 +315,7 @@ fn a_named_archive_on_a_sibling_volume_wins() {
     let over = PictureOverride::resolve(&disk2, &dir);
     assert!(matches!(over, PictureOverride::Loaded { .. }), "got {over:?}");
     assert!(over.warning().is_none(), "a name that resolved is not loud");
-    let mut named = PictSource::resolve_with_override(&disk2, over);
+    let mut named = PictSource::resolve_with_override(&disk2, over, None);
     assert_eq!(named.dims(1), Some((640, 200)));
     assert!(named.is_monochrome(), "the CGA archive the user named, not the EGA default");
     assert!(named.image(1).is_some(), "and it decodes off the sibling volume");
@@ -379,7 +379,7 @@ fn every_rendition_of_the_release_lands_on_one_screen() {
             let over = PictureOverride::resolve(&path, &dir);
             assert!(matches!(over, PictureOverride::Loaded { .. }), "{}: {over:?}", c.filename);
             assert_eq!(over.std_window(), Some(want.space), "{name}/{}", c.filename);
-            let src = PictSource::resolve_with_override(&path, over);
+            let src = PictSource::resolve_with_override(&path, over, None);
             assert_eq!(src.native_std_window(), Some(want.space), "{name}/{}", c.filename);
             assert_eq!(src.art_scale(), Some(want.scale), "{name}/{}", c.filename);
             // Space times scale is the same unit screen for all three.
@@ -500,10 +500,10 @@ fn the_default_row_names_the_archive_the_boot_actually_opens() {
         // The agreement itself. Accepting the default and naming what the row
         // says must reach the same artwork, in everything observable about it.
         let empty = game_dir_with("agree", "");
-        let mut auto = PictSource::resolve(&path);
+        let mut auto = PictSource::resolve(&path, None);
         let over = PictureOverride::resolve_with_session(&path, &empty, Some(&d.filename));
         assert!(matches!(over, PictureOverride::Loaded { .. }), "{image}: {over:?}");
-        let mut named = PictSource::resolve_with_override(&path, over);
+        let mut named = PictSource::resolve_with_override(&path, over, None);
         assert_eq!(
             named.is_monochrome(),
             auto.is_monochrome(),

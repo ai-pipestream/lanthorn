@@ -104,9 +104,9 @@ fn boot(file: &str, profile: Option<InterpreterProfile>, turns: usize) -> Option
             return None;
         }
     };
-    let profile = profile.unwrap_or_else(|| InterpreterProfile::resolve(&path, None, None));
+    let profile = profile.unwrap_or_else(|| InterpreterProfile::resolve(&path, None, None, None));
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
     let mut s = GameSession::new_with_trace(

@@ -85,8 +85,8 @@ fn boot_colour_decision(story: &str, pictures: Option<&str>) -> Option<Boot> {
     let _ = std::fs::create_dir_all(&dir);
     let over = PictureOverride::resolve_with_session(&path, &dir, pictures);
     // `startup.rs`'s order: the named archive's flavour, then the medium.
-    let profile = InterpreterProfile::resolve(&path, None, over.flavour());
-    let picts = PictSource::resolve_with_override(&path, over);
+    let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
+    let picts = PictSource::resolve_with_override(&path, over, None);
     let decision = Boot {
         profile,
         monochrome: picts.is_monochrome(),

@@ -156,7 +156,7 @@ fn shogun_boots_off_its_floppy_and_draws_its_title_screen() {
         };
         assert_eq!(bytes[0], 6, "Shogun is a v6 story");
 
-        let mut picts = PictSource::resolve(&path);
+        let mut picts = PictSource::resolve(&path, None);
         let dims = picts.all_pict_dims();
         assert_eq!(
             dims.len(),

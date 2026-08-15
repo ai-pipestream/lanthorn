@@ -118,9 +118,9 @@ fn boot(file: &str, release: u16, serial: &str, turns: usize) -> Option<GameSess
     let got: String = bytes[18..24].iter().map(|&b| b as char).collect();
     assert_eq!(got, serial, "{file}: this suite's numbers were measured on serial {serial}");
 
-    let profile = InterpreterProfile::resolve(&path, None, None);
+    let profile = InterpreterProfile::resolve(&path, None, None, None);
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
     let mut s = GameSession::new_with_trace(

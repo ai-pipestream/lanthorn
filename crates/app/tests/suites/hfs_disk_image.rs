@@ -220,7 +220,7 @@ fn a_macintosh_disk_image_yields_both_the_story_and_its_artwork() {
     let loaded = app::hints::load_story(&path).expect("the story mounts out of the image");
     assert_eq!(loaded, app::hints::LoadedStory::ZCode(story), "byte-exact off the disk");
 
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     assert_eq!(picts.all_pict_dims(), vec![(7, 4, 2)], "the disk's own archive is the art");
     let img = picts.image(7).expect("picture 7 decodes");
     assert_eq!((img.width(), img.height()), (4, 2));
@@ -251,7 +251,7 @@ fn the_mount_names_the_container_it_came_out_of() {
         "an HFS volume is a Macintosh, and never an Amiga"
     );
     assert_eq!(
-        app::interpreter::InterpreterProfile::resolve(&path, None, None),
+        app::interpreter::InterpreterProfile::resolve(&path, None, None, None),
         app::interpreter::InterpreterProfile::Macintosh,
         "and the boot path agrees with the dialog"
     );
@@ -302,7 +302,7 @@ fn a_disk_without_artwork_still_loads_the_story() {
     let path = write_image("nopics", &build_mac_image(&[("Story.data", b"INdf", &fake_story())]));
 
     assert!(app::hints::load_story(&path).is_ok());
-    assert!(PictSource::resolve(&path).all_pict_dims().is_empty());
+    assert!(PictSource::resolve(&path, None).all_pict_dims().is_empty());
 
     let _ = std::fs::remove_file(&path);
 }
@@ -347,8 +347,8 @@ fn zork_zero_boots_from_its_macintosh_release_floppy() {
     assert_eq!(&bytes[0x12..0x18], SERIAL);
     assert_eq!(bytes.len(), 295_936);
 
-    let profile = app::interpreter::InterpreterProfile::resolve(&path, None, None);
-    let mut picts = PictSource::resolve(&path);
+    let profile = app::interpreter::InterpreterProfile::resolve(&path, None, None, None);
+    let mut picts = PictSource::resolve(&path, None);
     let dims = picts.all_pict_dims();
     // The same chain `startup.rs` runs: the Blorb's `Reso` (there is none), the
     // machine's own answer (the IBM PC bundle has none), then the archive the
@@ -423,7 +423,7 @@ fn the_macintosh_disk_carries_two_picture_archives_and_the_colour_one_is_the_art
         "the whole volume: a story, two picture archives, Infocom's own interpreter, the desktop"
     );
 
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let dims = picts.all_pict_dims();
     assert_eq!(dims.len(), 483, "every directory record reaches the dimension table");
     let img = picts.image(1).expect("picture 1 decodes straight off the disk");
@@ -466,7 +466,7 @@ fn naming_the_monochrome_archive_by_hand_draws_the_monochrome_artwork() {
     assert_eq!(over.warning(), None, "a name that loads is not a complaint");
     assert_eq!(over.flavour(), Some(blorb::infocom_pics::Flavour::AmigaMac));
 
-    let mut picts = app::graphics::PictSource::resolve_with_override(&path, over);
+    let mut picts = app::graphics::PictSource::resolve_with_override(&path, over, None);
     assert!(picts.is_monochrome(), "the named archive is the two-colour one");
     assert_eq!(picts.all_pict_dims().len(), 483, "the same catalogue as the colour archive");
 

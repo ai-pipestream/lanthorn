@@ -179,7 +179,7 @@ fn a_named_archive_beats_a_perfectly_good_blorb() {
     // Baseline: with no key at all, tier 1 answers and picture 1 is the Blorb's.
     let plain = game_dir_with("beats-blorb-off", None);
     let mut blorb_src =
-        PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &plain));
+        PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &plain), None);
     assert_eq!(
         blorb_src.dims(1),
         Some((320, 200)),
@@ -190,7 +190,7 @@ fn a_named_archive_beats_a_perfectly_good_blorb() {
     let dir = game_dir_with("beats-blorb-on", Some("pictures = \"zork0.eg1\"\n"));
     let over = PictureOverride::resolve(&z0, &dir);
     assert!(matches!(over, PictureOverride::Loaded { .. }), "got {over:?}");
-    let mut ega = PictSource::resolve_with_override(&z0, over);
+    let mut ega = PictSource::resolve_with_override(&z0, over, None);
     assert_eq!(
         ega.dims(1),
         Some((640, 200)),
@@ -216,13 +216,13 @@ fn a_named_archive_beats_the_disk_image_it_was_mounted_from() {
     // Baseline: the floppy's own art, 320-wide like every Amiga archive.
     let plain = game_dir_with("beats-adf-off", None);
     let mut native =
-        PictSource::resolve_with_override(&adf, PictureOverride::resolve(&adf, &plain));
+        PictSource::resolve_with_override(&adf, PictureOverride::resolve(&adf, &plain), None);
     assert_eq!(native.dims(1), Some((320, 200)), "the floppy supplies its own Pic.data");
 
     // The key wins over the medium.
     let dir = game_dir_with("beats-adf-on", Some("pictures = \"zork0.eg1\"\n"));
     let mut ega =
-        PictSource::resolve_with_override(&adf, PictureOverride::resolve(&adf, &dir));
+        PictSource::resolve_with_override(&adf, PictureOverride::resolve(&adf, &dir), None);
     assert_eq!(ega.dims(1), Some((640, 200)), "the named archive outranks the medium");
 
     let _ = std::fs::remove_dir_all(&plain);
@@ -249,7 +249,7 @@ fn an_unusable_name_still_leaves_the_blorb_drawing() {
     let over = PictureOverride::resolve(&z0, &dir);
     assert!(matches!(over, PictureOverride::Unusable { .. }), "got {over:?}");
     assert!(over.warning().is_some(), "and it is loud");
-    let mut src = PictSource::resolve_with_override(&z0, over);
+    let mut src = PictSource::resolve_with_override(&z0, over, None);
     assert_eq!(src.dims(1), Some((320, 200)), "the Blorb keeps drawing");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -278,13 +278,13 @@ fn the_named_archives_flavour_comes_from_its_content() {
         // …and the flavour is what selects the machine, with no interpreter
         // number configured and no disk image involved.
         assert_eq!(
-            InterpreterProfile::resolve(&story_path, None, over.flavour()),
+            InterpreterProfile::resolve(&story_path, None, over.flavour(), None),
             want_profile,
             "{name} selects the machine",
         );
         // An explicit number still outranks it (precedence 1 over 2).
         assert_eq!(
-            InterpreterProfile::resolve(&story_path, Some(6), over.flavour()),
+            InterpreterProfile::resolve(&story_path, Some(6), over.flavour(), None),
             InterpreterProfile::IbmPc,
             "{name}: an explicit interpreter number wins",
         );
@@ -303,7 +303,7 @@ fn naming_a_pc_archive_leaves_the_v6_corpus_on_ibm_pc() {
     }
     let dir = game_dir_with("blast", Some("pictures = \"zork0.eg1\"\n"));
     let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-    let profile = InterpreterProfile::resolve(&stories_dir().join("anything.z6"), None, over.flavour());
+    let profile = InterpreterProfile::resolve(&stories_dir().join("anything.z6"), None, over.flavour(), None);
     assert_eq!(profile, InterpreterProfile::IbmPc);
     assert_eq!(profile.interpreter_number(), None, "zvm's 6-for-v6 rule stays in force");
     let _ = std::fs::remove_dir_all(&dir);
@@ -342,7 +342,7 @@ fn every_rendition_supplies_the_same_standard_window() {
         let dir = game_dir_with(&format!("stdwin-{name}"), Some(&format!("pictures = {name:?}\n")));
         let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
         let space = over.std_window().unwrap_or_else(|| panic!("{name} declares a picture space"));
-        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over);
+        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over, None);
         let (sx, sy) = picts.art_scale().unwrap_or_else(|| panic!("{name} declares a density"));
         assert_eq!(
             (u32::from(space.0) * sx, u32::from(space.1) * sy),
@@ -384,7 +384,7 @@ fn a_640_wide_rendition_arrives_at_half_width_pixels() {
         }
         let dir = game_dir_with(&format!("scale-{name}"), Some(&format!("pictures = {name:?}\n")));
         let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over);
+        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over, None);
         assert_eq!(picts.art_scale(), Some(want), "{name}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -393,7 +393,7 @@ fn a_640_wide_rendition_arrives_at_half_width_pixels() {
         if story("Zork0.blb").is_some() {
             let none = game_dir_with("scale-blorb", None);
             let picts =
-                PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &none));
+                PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &none), None);
             assert_eq!(picts.art_scale(), None, "a Blorb keeps the uniform V6_ART_SCALE");
             let _ = std::fs::remove_dir_all(&none);
         }
@@ -418,7 +418,7 @@ fn the_ega_and_mcga_renditions_of_one_game_land_in_the_same_places() {
         story(name)?;
         let dir = game_dir_with(&format!("agree-{name}"), Some(&format!("pictures = {name:?}\n")));
         let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-        let mut picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over);
+        let mut picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over, None);
         let (sx, sy) = picts.art_scale().expect("a native archive declares its picture space");
         let table = picts
             .all_pict_dims()
@@ -462,13 +462,13 @@ fn a_named_mcga_rendition_lands_where_the_blorb_art_did() {
 
     let plain = game_dir_with("mcga-off", None);
     let over_off = PictureOverride::resolve(&z0, &plain);
-    let blorb_std = PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &plain))
+    let blorb_std = PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &plain), None)
         .std_window()
         .or(over_off.std_window());
 
     let dir = game_dir_with("mcga-on", Some("pictures = \"zork0.mg1\"\n"));
     let over = PictureOverride::resolve(&z0, &dir);
-    let mut mcga = PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &dir));
+    let mut mcga = PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &dir), None);
     let mcga_std = mcga.std_window().or(over.std_window());
 
     assert_eq!(blorb_std, Some((320, 200)), "the Blorb's own Reso chunk");
@@ -505,7 +505,7 @@ fn zork_zeros_ega_rendition_boots_the_geometry_its_mcga_one_does() {
         let dir = game_dir_with(&format!("boot-{archive}"), Some(&format!("pictures = {archive:?}\n")));
         let over = PictureOverride::resolve(&z0, &dir);
         let std_window = over.std_window();
-        let mut picts = PictSource::resolve_with_override(&z0, over);
+        let mut picts = PictSource::resolve_with_override(&z0, over, None);
         let art_scale = scale.map(Some).unwrap_or_else(|| picts.art_scale());
         let dims = picts.all_pict_dims();
         let mut s = GameSession::new_with_art_scale(
@@ -591,12 +591,12 @@ fn fmvpoker_draws_from_the_archive_its_readme_names() {
     assert_eq!(pics.flavour(), Flavour::Pc, "content, not the odd filename");
     assert_eq!(pics.entries().len(), 503, "Zork Zero's EGA directory");
     assert_eq!(
-        InterpreterProfile::resolve(&story_path, None, over.flavour()),
+        InterpreterProfile::resolve(&story_path, None, over.flavour(), None),
         InterpreterProfile::IbmPc,
         "an EGA archive is an IBM PC",
     );
 
-    let mut src = PictSource::resolve_with_override(&story_path, over);
+    let mut src = PictSource::resolve_with_override(&story_path, over, None);
     let dims = src.all_pict_dims();
     assert_eq!(dims.len(), 503, "the engine's dimension table comes from the archive");
     assert!(
@@ -617,6 +617,7 @@ fn fmvpoker_draws_from_the_archive_its_readme_names() {
     let mut blorb_src = PictSource::resolve_with_override(
         &story_path,
         PictureOverride::resolve(&story_path, &plain),
+            None,
     );
     assert_eq!(
         blorb_src.dims(1),
@@ -672,7 +673,7 @@ fn naming_part_one_of_a_split_archive_loads_the_whole_set() {
         // …and the app's own resolution really draws them. `all_pict_dims` is
         // what feeds the v6 `picture_data` table at boot, so a picture missing
         // here is a picture the story is told does not exist.
-        let mut src = PictSource::resolve_with_override(&story_path, over);
+        let mut src = PictSource::resolve_with_override(&story_path, over, None);
         let ids: Vec<u16> = src.all_pict_dims().into_iter().map(|(id, _, _)| id).collect();
         let drawable = ids.iter().filter(|&&id| src.image(u32::from(id)).is_some()).count();
         assert_eq!(drawable, want_pictures, "{archive}: pictures that actually decode");
@@ -704,6 +705,7 @@ fn the_pictures_that_only_part_two_holds_now_decode() {
         let mut src = PictSource::resolve_with_override(
             &story_path,
             PictureOverride::resolve(&story_path, &dir),
+                    None,
         );
         for &(id, w, h) in cases {
             assert_eq!(src.dims(id), Some((w, h)), "{archive}: picture {id}'s size");

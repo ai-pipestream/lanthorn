@@ -420,7 +420,7 @@ fn the_art_choice_moves_the_machine_and_the_dialog_can_name_the_source() {
         assert_eq!(st.derived(), Some((4, InterpreterSource::Artwork)));
         // The same answer `InterpreterProfile::resolve` reaches at boot, so the
         // dialog is reporting the real chain rather than a parallel guess.
-        let profile = app::interpreter::InterpreterProfile::resolve(&z0, None, st.chosen_art().map(|c| c.flavour));
+        let profile = app::interpreter::InterpreterProfile::resolve(&z0, None, st.chosen_art().map(|c| c.flavour), None);
         assert_eq!(profile.interpreter_number(), Some(4));
     }
     // A DOS rendition asks for the IBM PC, which defers to zvm's own rule.
@@ -447,7 +447,7 @@ fn the_cli_door_reaches_the_machine_the_same_way_boot_does() {
 
     // Baseline: no flag, no sidecar → the Blorb, and the default machine.
     let none = app::graphics::PictureOverride::resolve_with_session(&z0, &empty, None);
-    let base = app::interpreter::InterpreterProfile::resolve(&z0, None, none.flavour());
+    let base = app::interpreter::InterpreterProfile::resolve(&z0, None, none.flavour(), None);
     assert_eq!(base, app::interpreter::InterpreterProfile::IbmPc);
     assert_eq!(base.interpreter_number(), None, "IBM PC defers to zvm's own rule");
 
@@ -455,12 +455,12 @@ fn the_cli_door_reaches_the_machine_the_same_way_boot_does() {
     let named =
         app::graphics::PictureOverride::resolve_with_session(&z0, &empty, Some("zork0.pic"));
     assert!(matches!(named, app::graphics::PictureOverride::Loaded { .. }), "{named:?}");
-    let amiga = app::interpreter::InterpreterProfile::resolve(&z0, None, named.flavour());
+    let amiga = app::interpreter::InterpreterProfile::resolve(&z0, None, named.flavour(), None);
     assert_eq!(amiga, app::interpreter::InterpreterProfile::Amiga);
     assert_eq!(amiga.interpreter_number(), Some(4));
 
     // …unless a number is set outright, which still wins over the art.
-    let pinned = app::interpreter::InterpreterProfile::resolve(&z0, Some(6), named.flavour());
+    let pinned = app::interpreter::InterpreterProfile::resolve(&z0, Some(6), named.flavour(), None);
     assert_eq!(pinned, app::interpreter::InterpreterProfile::IbmPc);
     let _ = std::fs::remove_dir_all(&empty);
 }
@@ -738,7 +738,7 @@ fn picking_the_monochrome_row_loads_the_monochrome_art() {
         );
         assert_eq!(over.warning(), None, "{filename}: a row that was offered must load quietly");
         assert_eq!(over.std_window(), Some(want_space), "{filename}");
-        let src = app::graphics::PictSource::resolve_with_override(&image, over);
+        let src = app::graphics::PictSource::resolve_with_override(&image, over, None);
         assert_eq!(src.is_monochrome(), want_mono, "{filename}: the art actually drawn");
         assert_eq!(src.native_std_window(), Some(want_space), "{filename}");
     }
@@ -785,7 +785,7 @@ fn choosing_a_macintosh_archive_leaves_the_machine_a_macintosh() {
         );
         // The same answer boot reaches, through the same function.
         let over = app::graphics::PictureOverride::resolve_with_session(&image, &empty, Some(filename));
-        let profile = app::interpreter::InterpreterProfile::resolve(&image, None, over.flavour());
+        let profile = app::interpreter::InterpreterProfile::resolve(&image, None, over.flavour(), None);
         assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "{filename}");
         assert_eq!(profile.interpreter_number(), Some(3), "{filename}");
     }
@@ -949,10 +949,10 @@ fn a_single_image_release_says_from_game_disk_and_names_its_default() {
         // naming what the row shows must reach the artwork accepting the
         // default reaches.
         let empty = tmp("single-agree");
-        let mut auto = app::graphics::PictSource::resolve(&image);
+        let mut auto = app::graphics::PictSource::resolve(&image, None);
         let over =
             app::graphics::PictureOverride::resolve_with_session(&image, &empty, Some(&d.filename));
-        let mut named = app::graphics::PictSource::resolve_with_override(&image, over);
+        let mut named = app::graphics::PictSource::resolve_with_override(&image, over, None);
         assert_eq!(
             named.is_monochrome(),
             auto.is_monochrome(),
@@ -997,7 +997,7 @@ fn a_loose_story_names_its_blorb_and_mentions_no_disk() {
 
     // The row is not a claim about a native archive: `PictSource::resolve` on
     // this story takes tier 1, and there is no release art to take instead.
-    assert!(app::graphics::release_art(&z0).is_none(), "no disk image, no release art");
+    assert!(app::graphics::release_art(&z0, None).is_none(), "no disk image, no release art");
 }
 
 /// **The narrow panel.** The dialog is not full-screen and its width follows the

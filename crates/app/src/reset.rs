@@ -63,7 +63,13 @@ pub(crate) fn reset_game(
             };
             let named_art_std_window = over.std_window();
             let mut picts = if state.config.images {
-                app::graphics::PictSource::resolve_with_override(story_path, over)
+                // The story's own entry on the medium, carried by the config for
+                // exactly this moment (SQ-0876).
+                app::graphics::PictSource::resolve_with_override(
+                    story_path,
+                    over,
+                    state.config.disk_entry.clone().as_deref(),
+                )
             } else {
                 app::graphics::PictSource::new(None)
             };

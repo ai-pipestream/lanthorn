@@ -498,8 +498,8 @@ impl DefaultArt {
 /// when the dialog opens and the renderer only formats the answer. The dialog is
 /// modal and nothing behind it can change the artwork on disk while it is up, so
 /// a value settled at open time cannot go stale before it is closed.
-pub fn resolved_default_art(story_path: &Path) -> Option<DefaultArt> {
-    if let Some(art) = crate::graphics::release_art(story_path) {
+pub fn resolved_default_art(story_path: &Path, disk_entry: Option<&str>) -> Option<DefaultArt> {
+    if let Some(art) = crate::graphics::release_art(story_path, disk_entry) {
         let space_width = art.pictures.picture_space_width();
         let mono = art.pictures.is_monochrome();
         return Some(DefaultArt {
@@ -793,7 +793,10 @@ impl LaunchOptionsState {
             title: title.to_string(),
             story_path: story_path.to_path_buf(),
             candidates,
-            default_art: resolved_default_art(story_path),
+            // `None` here, re-resolved by `on_disk_entry`: which story on the
+            // medium is bound after construction, and on a compilation that is
+            // what decides which archive is the default (SQ-0876).
+            default_art: resolved_default_art(story_path, None),
             art,
             interpreter: inherited_interpreter,
             persist: false,
@@ -808,8 +811,18 @@ impl LaunchOptionsState {
     }
 
     /// Bind this dialog to one story on a multi-story disk image (SQ-0859).
+    ///
+    /// Re-resolves the default artwork, because on a disc that keeps its games
+    /// in folders the answer is the STORY's and not the platter's — every
+    /// graphical game on the Masterpieces CD otherwise reports Arthur's
+    /// `CPIC.DATA` as what it will draw with (SQ-0876). One extra mount, once,
+    /// when the dialog opens on a disk entry; `resolved_default_art` documents
+    /// why that cost is paid at open time and not per frame.
     pub fn on_disk_entry(mut self, disk_entry: Option<&str>) -> LaunchOptionsState {
         self.disk_entry = disk_entry.map(str::to_string);
+        if self.disk_entry.is_some() {
+            self.default_art = resolved_default_art(&self.story_path, self.disk_entry.as_deref());
+        }
         self
     }
 

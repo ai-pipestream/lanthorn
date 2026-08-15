@@ -79,9 +79,9 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
         None => PictureOverride::Unset,
     };
     let named = over.std_window();
-    let profile = InterpreterProfile::resolve(&path, None, over.flavour());
+    let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve_with_override(&path, over);
+    let mut picts = PictSource::resolve_with_override(&path, over, None);
     let dims = picts.all_pict_dims();
     let std_window =
         picts.std_window().or(named).or_else(|| picts.native_std_window()).or_else(|| profile.std_window());

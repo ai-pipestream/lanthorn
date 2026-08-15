@@ -22,6 +22,8 @@ mod disk_story_rows;
 mod glulx_banner_rooms;
 #[path = "suites/hfs_disk_image.rs"]
 mod hfs_disk_image;
+#[path = "suites/masterpieces_sides.rs"]
+mod masterpieces_sides;
 #[path = "suites/glulx_boot_room_id.rs"]
 mod glulx_boot_room_id;
 #[path = "suites/glulx_game_colours.rs"]

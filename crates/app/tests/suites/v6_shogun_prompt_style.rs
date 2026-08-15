@@ -126,7 +126,7 @@ fn boot(file: &str, honor_game_colours: bool) -> Option<GameSession> {
         ctx(file)
     );
 
-    let profile = InterpreterProfile::resolve(&story_path, None, None);
+    let profile = InterpreterProfile::resolve(&story_path, None, None, None);
     assert_eq!(
         profile,
         if file.ends_with(".adf") { InterpreterProfile::Amiga } else { InterpreterProfile::IbmPc },
@@ -134,7 +134,7 @@ fn boot(file: &str, honor_game_colours: bool) -> Option<GameSession> {
         ctx(file)
     );
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&story_path);
+    let mut picts = PictSource::resolve(&story_path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
     let mut session = GameSession::new_with_trace(

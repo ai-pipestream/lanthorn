@@ -1474,7 +1474,7 @@ impl MountedDisk {
     ///
     /// This is what stops a compilation handing every graphical game the first
     /// archive on the platter. All six on the Masterpieces CD resolved to
-    /// `MAC/ARTHUR FOLDER/CPIC.DATA` — so opening Journey drew Arthur's plates,
+    /// `MAC/ZORK ZERO/CPIC.DATA` — so opening Journey drew Zork Zero's plates,
     /// silently, and looked like artwork the whole time.
     pub fn pictures_for(&self, entry: &str) -> Option<DiskArt> {
         match self.volume.pictures_beside(entry) {

@@ -316,8 +316,11 @@ impl PictSource {
     /// story** (SQ-0866). That is [`resource_blorb`]'s rule, and it is applied
     /// here rather than in `blorb` because it turns on how the two files came to
     /// be considered together, which is app policy.
-    pub fn resolve(story_path: &std::path::Path) -> PictSource {
-        if let Some(art) = release_art(story_path) {
+    ///
+    /// `disk_entry` names WHICH story on the medium, so a compilation pairs each
+    /// game with its own archive; see [`release_art`] (SQ-0876).
+    pub fn resolve(story_path: &std::path::Path, disk_entry: Option<&str>) -> PictSource {
+        if let Some(art) = release_art(story_path, disk_entry) {
             return PictSource::from_native(art.pictures);
         }
         PictSource::new(resource_blorb(story_path).found.map(|(b, _)| b))
@@ -340,12 +343,13 @@ impl PictSource {
     pub fn resolve_with_override(
         story_path: &std::path::Path,
         over: PictureOverride,
+        disk_entry: Option<&str>,
     ) -> PictSource {
         match over {
             PictureOverride::Loaded { pics, .. } => PictSource::from_native(pics),
             PictureOverride::Unset
             | PictureOverride::Missing { .. }
-            | PictureOverride::Unusable { .. } => PictSource::resolve(story_path),
+            | PictureOverride::Unusable { .. } => PictSource::resolve(story_path, disk_entry),
         }
     }
 
@@ -1138,10 +1142,28 @@ pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf>
 /// carries the archive's stored name and the volume it came off, and the choice
 /// itself is untouched: the sort key below is the same key, applied to the same
 /// stable sort, so every release resolves to exactly the archive it did before.
-pub fn release_art(story_path: &std::path::Path) -> Option<ReleaseArt> {
+/// # Which story, on a disc that holds several (SQ-0876)
+///
+/// `disk_entry` is the story's own name on the volume — the browser row's, the
+/// same selector [`crate::hints::load_mounted_story_from`] takes. A volume that
+/// keeps its games in folders answers for that story alone, and a story with no
+/// artwork beside it gets none rather than a stranger's.
+///
+/// `None` means "whatever this release's artwork is", which is every single-game
+/// press and is exactly the old behaviour.
+pub fn release_art(
+    story_path: &std::path::Path,
+    disk_entry: Option<&str>,
+) -> Option<ReleaseArt> {
     let volumes = crate::assets::volumes(story_path);
     let (own, siblings) = volumes.split_first()?;
-    if let Some(art) = own.disk.pictures() {
+    // The story's own volume wins outright, as ever — but WHICH archive on it is
+    // now the story's question when the volume can tell games apart.
+    let own_art = match disk_entry {
+        Some(entry) => own.disk.pictures_for(entry),
+        None => own.disk.pictures(),
+    };
+    if let Some(art) = own_art {
         return Some(ReleaseArt {
             pictures: art.pictures,
             name: art.name,

@@ -133,7 +133,7 @@ fn mismatched() -> Vec<(String, &'static str)> {
 
 /// How many pictures the story would actually draw with.
 fn drawn_pictures(path: &std::path::Path) -> usize {
-    PictSource::resolve(path).all_pict_dims().len()
+    PictSource::resolve(path, None).all_pict_dims().len()
 }
 
 /// The reported case. The IIgs disk draws **its own 168 pictures** rather than
@@ -169,7 +169,7 @@ fn the_apple_iigs_arthur_draws_its_own_pictures_not_another_builds() {
         );
     }
     assert_eq!(drawn_pictures(&disk), 168, "{IIGS_ARTHUR} must draw its own 168 pictures");
-    let art = app::graphics::release_art(&disk).expect("off the disk's own segments");
+    let art = app::graphics::release_art(&disk, None).expect("off the disk's own segments");
     assert_eq!(art.name, "ARTHUR.1/ARTHUR.D1", "named for the segment carrying the index");
     assert!(
         resource_blorb(&disk).found.is_none(),
@@ -206,7 +206,7 @@ fn the_refusal_names_the_archive_and_both_builds() {
 #[test]
 fn the_launch_dialog_names_exactly_what_the_boot_will_draw() {
     if let Some(disk) = media(IIGS_ARTHUR) {
-        let row = app::launch_options::resolved_default_art(&disk)
+        let row = app::launch_options::resolved_default_art(&disk, None)
             .expect("the boot draws, so the dialog must say what with");
         assert_eq!(row.filename, "ARTHUR.1/ARTHUR.D1");
         assert_eq!(row.pictures, 168);
@@ -216,7 +216,7 @@ fn the_launch_dialog_names_exactly_what_the_boot_will_draw() {
     }
     if let Some(disk) = media(IIGS_JOURNEY) {
         assert_eq!(
-            app::launch_options::resolved_default_art(&disk),
+            app::launch_options::resolved_default_art(&disk, None),
             None,
             "the default row must not name an archive the boot refuses"
         );
@@ -339,7 +339,7 @@ fn a_disk_with_its_own_artwork_is_never_asked_about_a_blorb() {
     let mut ran = 0;
     for (disk, archive) in CASES {
         let Some(p) = media(disk) else { continue };
-        let art = app::graphics::release_art(&p).expect("this medium supplies its own art");
+        let art = app::graphics::release_art(&p, None).expect("this medium supplies its own art");
         assert_eq!(&art.name, archive, "{disk} draws with its own {archive}");
         assert!(drawn_pictures(&p) > 0, "{disk} draws");
         ran += 1;
@@ -456,7 +456,7 @@ fn no_medium_in_the_corpus_loses_artwork_except_the_mismatched_one() {
         }
         // The medium's own art is resolved ahead of tier 1 and cannot be touched
         // by the rule, so only the Blorb tier is compared.
-        if app::graphics::release_art(&p).is_some() {
+        if app::graphics::release_art(&p, None).is_some() {
             ran += 1;
             continue;
         }
@@ -486,7 +486,7 @@ fn no_medium_in_the_corpus_loses_artwork_except_the_mismatched_one() {
     // skip above, and then pinned by name below so it cannot quietly empty.
     let expected: Vec<String> = mismatched()
         .into_iter()
-        .filter(|(m, _)| media(m).is_some_and(|p| app::graphics::release_art(&p).is_none()))
+        .filter(|(m, _)| media(m).is_some_and(|p| app::graphics::release_art(&p, None).is_none()))
         .map(|(m, b)| format!("{m}: Some(\"{b}\") -> None"))
         .collect();
     if media(IIGS_JOURNEY).is_some() && media(JOURNEY_BLORB).is_some() {
@@ -577,7 +577,7 @@ fn the_shogun_blorb_is_refused_by_the_press_it_contradicts() {
     // the Blorb and drawing nothing was the state of things while that arm did
     // not exist; what the rule forbids is release 322's pictures, not artwork.
     assert_eq!(drawn_pictures(&p), 55, "the press must draw its own 55 plates");
-    let art = app::graphics::release_art(&p).expect("off the set's own segments");
+    let art = app::graphics::release_art(&p, None).expect("off the set's own segments");
     assert_eq!(art.name, "SHOGUN.D1");
     assert_ne!(
         drawn_pictures(&p),

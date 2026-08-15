@@ -693,12 +693,31 @@ pub use blorb::medium::DiskImage;
 /// The names come back exactly as [`blorb::medium::MountedDisk::stories`] gives
 /// them — by path on the formats that have directories — which is what makes
 /// them usable as the selector [`load_mounted_story_from`] takes.
-pub fn mounted_stories(path: &Path) -> Option<(DiskImage, Vec<blorb::medium::DiskStory>)> {
+///
+/// # Two mediums, not one (SQ-0876)
+///
+/// The first answer is the VOLUME's format, which is what it always was. Each
+/// story then carries **its own**, because on a hybrid disc those differ: the
+/// Masterpieces CD's Macintosh partition holds 50 DOS builds beside its 33
+/// Macintosh ones, and a browser that reported the volume's format for all 83
+/// told every PC build to advertise itself as a Macintosh. Every other medium
+/// answers its one format for every story on it, so the pair is equal there and
+/// nothing moves.
+pub fn mounted_stories(
+    path: &Path,
+) -> Option<(DiskImage, Vec<(blorb::medium::DiskStory, DiskImage)>)> {
     let raw = std::fs::read(path).ok()?;
     blorb::medium::DiskImage::detect(&raw)?;
     let disk = mount_disk(path, raw).ok()?;
     let format = disk.format();
-    let stories = disk.stories();
+    let stories: Vec<_> = disk
+        .stories()
+        .into_iter()
+        .map(|s| {
+            let image = disk.image_for(&s.name);
+            (s, image)
+        })
+        .collect();
     (!stories.is_empty()).then_some((format, stories))
 }
 
@@ -766,7 +785,15 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
                 .into_iter()
                 .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want));
             return match found {
-                Some(story) => Ok((story.bytes, Some(disk.format()))),
+                // `image_for`, not `format`: on a hybrid disc the story's own
+                // half of the platter decides, so a DOS build sitting on a
+                // Macintosh filesystem reports DOS and advertises the IBM PC's
+                // interpreter number rather than the Macintosh's (SQ-0876).
+                // Every other medium answers its one format, as before.
+                Some(story) => {
+                    let image = disk.image_for(&story.name);
+                    Ok((story.bytes, Some(image)))
+                }
                 None => Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("no story named '{want}' on the disk image {}", path.display()),
@@ -774,7 +801,10 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
             };
         }
         return match disk.story() {
-            Some(story) => Ok((story.bytes, Some(disk.format()))),
+            Some(story) => {
+                let image = disk.image_for(&story.name);
+                Ok((story.bytes, Some(image)))
+            }
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(

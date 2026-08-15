@@ -88,10 +88,10 @@ fn mac_at_prompt(pictures: Option<&str>, honor_game_colours: bool) -> Option<AtP
         None => PictureOverride::Unset,
     };
     let named_art_std_window = over.std_window();
-    let profile = InterpreterProfile::resolve(&path, None, over.flavour());
+    let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
     assert_eq!(profile, InterpreterProfile::Macintosh, "an HFS volume is Apple's and nobody else's");
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve_with_override(&path, over);
+    let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
     let std_window = picts
         .std_window()

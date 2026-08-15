@@ -1127,6 +1127,19 @@ pub struct Config {
     /// checkbox is what writes a choice down.
     #[serde(skip)]
     pub pictures_override: Option<String>,
+    /// Which story on the disk image this launch opened — the browser row's own
+    /// name, as [`blorb::medium::DiskStory`] spells it (SQ-0876).
+    ///
+    /// Not a config key, and parked here for the reason `interpreter_profile`
+    /// and `pictures_override` are: it rides with the story for the session. The
+    /// restart path re-resolves the picture source, and on a disc that keeps its
+    /// games in folders the answer is this story's rather than the platter's —
+    /// without it a restart of Journey off the Masterpieces CD would come back
+    /// drawing Arthur's plates. `None` for a loose story file and for a
+    /// single-game floppy, which is every release but a compilation. Never
+    /// persisted.
+    #[serde(skip)]
+    pub disk_entry: Option<String>,
     /// When true (default), play audio for `sound_effect` (bleeps + Blorb samples).
     #[serde(default = "default_enable_sound")]
     pub enable_sound: bool,
@@ -1236,6 +1249,7 @@ impl Default for Config {
             one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             pictures_override: None,
+            disk_entry: None,
             enable_sound: default_enable_sound(),
             volume: default_volume(),
             acceleration: default_acceleration(),
@@ -2359,6 +2373,7 @@ use_defaults = false
             one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             pictures_override: None,
+            disk_entry: None,
             enable_sound: true,
             volume: 100,
             search: SearchConfig::default(),

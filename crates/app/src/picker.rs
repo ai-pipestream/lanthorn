@@ -1103,7 +1103,7 @@ pub fn resolve_entry_from(
 /// the plain path with no selector at all: nothing about a single-game floppy
 /// changes, which is most of the corpus.
 pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
-    let Some((disk_image, stories)) = crate::hints::mounted_stories(path) else {
+    let Some((_, stories)) = crate::hints::mounted_stories(path) else {
         return resolve_entry(path, data_base).into_iter().collect();
     };
     if stories.len() < 2 {
@@ -1111,9 +1111,12 @@ pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
     }
     stories
         .into_iter()
-        .filter_map(|story| {
+        .filter_map(|(story, image)| {
             let loaded = crate::hints::extract_story(story.bytes).ok()?;
-            entry_from_loaded(path, Some(&story.name), loaded, Some(disk_image), data_base)
+            // `image` is THIS story's, not the volume's: on a hybrid disc the
+            // two differ, and the row's badge and interpreter both follow from
+            // it (SQ-0876).
+            entry_from_loaded(path, Some(&story.name), loaded, Some(image), data_base)
         })
         .collect()
 }

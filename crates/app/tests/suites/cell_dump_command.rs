@@ -77,7 +77,7 @@ fn journey_at_menu() -> Option<(GameSession, AppState)> {
     };
     let profile = InterpreterProfile::Amiga;
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&story_path);
+    let mut picts = PictSource::resolve(&story_path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
     let mut session = GameSession::new_with_trace(

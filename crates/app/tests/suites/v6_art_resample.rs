@@ -88,9 +88,9 @@ fn journey_floppy_at_menu() -> Option<GameSession> {
     );
     assert_eq!(&String::from_utf8_lossy(&bytes[0x12..0x18]), SERIAL, "{FIXTURE}: serial");
 
-    let profile = InterpreterProfile::resolve(&path, None, None);
+    let profile = InterpreterProfile::resolve(&path, None, None, None);
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
     let mut session = GameSession::new_with_trace(

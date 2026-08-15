@@ -111,9 +111,9 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
         None => PictureOverride::Unset,
     };
     let named_art_std_window = over.std_window();
-    let profile = InterpreterProfile::resolve(&path, explicit, over.flavour());
+    let profile = InterpreterProfile::resolve(&path, explicit, over.flavour(), None);
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve_with_override(&path, over);
+    let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
     // The four links, in `startup.rs`'s order.
     let std_window = picts
@@ -317,6 +317,7 @@ fn the_archive_in_hand_picks_which_macintosh_screen_the_game_is_told_about() {
             &std::env::temp_dir(),
             Some("Pic.data"),
         ),
+            None,
     );
     assert_eq!(mounted.native_std_window(), Some((480, 300)), "the archive's own picture space");
     assert_eq!(mounted.art_scale(), Some((1, 1)));
@@ -421,7 +422,7 @@ fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
     let _ = std::fs::create_dir_all(&dir);
     for (archive, mono) in [("Pic.data", true), ("CPic.data", false)] {
         let over = PictureOverride::resolve_with_session(&path, &dir, Some(archive));
-        let picts = PictSource::resolve_with_override(&path, over);
+        let picts = PictSource::resolve_with_override(&path, over, None);
         assert_eq!(picts.is_monochrome(), mono, "{archive}: the archive's own EF_MONO flags");
         assert!(
             !picts.declines_game_colours(InterpreterProfile::Macintosh),

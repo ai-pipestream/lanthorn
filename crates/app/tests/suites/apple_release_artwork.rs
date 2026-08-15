@@ -125,12 +125,12 @@ fn every_apple_press_draws_its_own_segmented_archive() {
             continue;
         };
         ran += 1;
-        let art = app::graphics::release_art(&p)
+        let art = app::graphics::release_art(&p, None)
             .unwrap_or_else(|| panic!("{image}: the press must draw its own artwork"));
         assert_eq!(&art.name, archive, "{image}: named for the segment carrying the index");
         assert_eq!(art.pictures.entries().len(), *pictures, "{image}");
         assert_eq!(
-            PictSource::resolve(&p).all_pict_dims().len(),
+            PictSource::resolve(&p, None).all_pict_dims().len(),
             *pictures,
             "{image}: and that is what the story is told it has"
         );
@@ -171,7 +171,7 @@ fn the_screen_is_the_archives_picture_space_at_the_machines_scale() {
     for (image, ..) in PRESSES {
         let Some(p) = media(image) else { continue };
         ran += 1;
-        let picts = PictSource::resolve(&p);
+        let picts = PictSource::resolve(&p, None);
         assert_eq!(picts.native_std_window(), Some(APPLE_PICTURE_SPACE), "{image}");
         assert_eq!(picts.art_scale(), Some((4, 2)), "{image}");
         // The chain `reset.rs` and `startup.rs` walk, in their order: no Blorb
@@ -228,14 +228,14 @@ fn the_short_journey_pressing_draws_nothing_because_a_segment_is_absent() {
         blorb::infocom_packed::pictures(&files).is_none(),
         "a partial picture set is refused whole, not served short"
     );
-    assert!(app::graphics::release_art(&p).is_none(), "so the medium offers no artwork");
-    assert_eq!(PictSource::resolve(&p).all_pict_dims().len(), 0, "and nothing is drawn");
+    assert!(app::graphics::release_art(&p, None).is_none(), "so the medium offers no artwork");
+    assert_eq!(PictSource::resolve(&p, None).all_pict_dims().len(), 0, "and nothing is drawn");
 
     // The same release, complete, does draw — which is what makes the sentence
     // above a statement about this IMAGE and not about the Apple press.
     if let Some(whole) = media("journey_s1.dsk") {
         assert_eq!(
-            app::graphics::release_art(&whole).map(|a| a.pictures.entries().len()),
+            app::graphics::release_art(&whole, None).map(|a| a.pictures.entries().len()),
             Some(135),
             "release 77 draws 135 pictures wherever every segment is present"
         );
@@ -267,7 +267,7 @@ fn two_dumps_of_one_press_agree_about_story_and_artwork() {
     let story = |p: &PathBuf| app::hints::load_mounted_story(p).expect("opens").0.bytes().to_vec();
     assert_eq!(story(&bare), story(&wrapped), "the same story, byte for byte");
 
-    let art = |p: &PathBuf| app::graphics::release_art(p).expect("draws").pictures;
+    let art = |p: &PathBuf| app::graphics::release_art(p, None).expect("draws").pictures;
     let (a, b) = (art(&bare), art(&wrapped));
     assert_eq!(a.entries(), b.entries(), "the same directory, entry for entry");
     assert_eq!(a.parts(), b.parts(), "merged out of the same four archives");

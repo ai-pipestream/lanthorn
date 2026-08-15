@@ -124,9 +124,9 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
     }
     // No tier-3 archive is named here — this suite resolves art through
     // `PictSource::resolve`, so the profile comes from the medium alone.
-    let profile = InterpreterProfile::resolve(&path, None, None);
+    let profile = InterpreterProfile::resolve(&path, None, None, None);
     zvm::screen::set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
     let mut s = GameSession::new_with_trace(

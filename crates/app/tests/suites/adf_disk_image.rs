@@ -141,7 +141,7 @@ fn a_disk_image_yields_both_the_story_and_its_artwork() {
     let loaded = app::hints::load_story(&path).expect("the story mounts out of the image");
     assert_eq!(loaded, app::hints::LoadedStory::ZCode(story), "byte-exact off the disk");
 
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     assert_eq!(picts.all_pict_dims(), vec![(7, 4, 2)], "the disk's own Pic.data is the art");
     let img = picts.image(7).expect("picture 7 decodes");
     assert_eq!((img.width(), img.height()), (4, 2));
@@ -156,7 +156,7 @@ fn a_disk_image_yields_both_the_story_and_its_artwork() {
         matches!(over, app::graphics::PictureOverride::Loaded { .. }),
         "a bare name absent from the filesystem is looked up on the volume, got {over:?}"
     );
-    let mut named = PictSource::resolve_with_override(&path, over);
+    let mut named = PictSource::resolve_with_override(&path, over, None);
     assert_eq!(named.all_pict_dims(), vec![(7, 4, 2)]);
     let absent =
         app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some("Nope.data"));
@@ -190,7 +190,7 @@ fn a_disk_without_artwork_still_loads_the_story() {
     let path = write_image("nopics", &image);
 
     assert!(app::hints::load_story(&path).is_ok());
-    assert!(PictSource::resolve(&path).all_pict_dims().is_empty());
+    assert!(PictSource::resolve(&path, None).all_pict_dims().is_empty());
 
     let _ = std::fs::remove_file(&path);
 }
@@ -227,7 +227,7 @@ fn zork_zero_boots_and_draws_from_its_release_floppy() {
     assert_eq!(bytes[0], 6, "Zork Zero is a v6 story");
     assert_eq!(&bytes[0x12..0x18], b"890323");
 
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     let dims = picts.all_pict_dims();
     assert_eq!(dims.len(), 495, "every directory record reaches the dimension table");
     let std_window = picts.std_window();
@@ -258,7 +258,7 @@ fn zork_zero_boots_and_draws_from_its_release_floppy() {
 #[test]
 fn the_disk_carries_the_full_size_frames_the_blorb_crops() {
     let Some(path) = zork_zero_disk1() else { return };
-    let mut picts = PictSource::resolve(&path);
+    let mut picts = PictSource::resolve(&path, None);
     for id in [5u32, 6, 7] {
         let img = picts.image(id).unwrap_or_else(|| panic!("picture {id} decodes"));
         assert_eq!(
