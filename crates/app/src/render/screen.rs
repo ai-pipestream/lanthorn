@@ -1146,13 +1146,14 @@ fn render_node(
                         }
                         // SQ-0511: the native row a stretched flank band's art reaches down
                         // to. Frame flanks span the full canvas height (Zork0/Shogun columns
-                        // are opaque to the native bottom); the Menu flank (Journey's picture
-                        // column + divider) reaches the story bottom, where the bottom-anchored
-                        // menu strip begins — so the divider runs unbroken to the menu.
-                        let flank_native_bottom = match plan {
-                            BottomPlan::Menu => story.y_px as u32 + story.h_px as u32,
-                            _ => native.1 as u32,
-                        };
+                        // are opaque to the native bottom).
+                        //
+                        // This carried a `BottomPlan::Menu` arm reaching the story bottom,
+                        // for Journey's picture column and divider. It was unreachable and
+                        // removed in SQ-0893: the sole consumer, `flank_crop`, is gated
+                        // `matches!(plan, BottomPlan::Frame)`, so the Menu arm could never
+                        // be selected — while its comment described the case as live.
+                        let flank_native_bottom = native.1 as u32;
                         // Cell rects of the secondary prose windows: the ring leaves
                         // those rows to them (SQ-0585).
                         let panel_rects: Vec<Rect> = layout
@@ -5151,7 +5152,6 @@ fn decompose_chrome_strips<'a>(
             if !matches!(classes[i], RowClass::Empty) {
                 continue;
             }
-            let _ = &classes[i];
             let above = (0..i).rev().find(|&j| !matches!(classes[j], RowClass::Empty));
             let below = (i + 1..n).find(|&j| !matches!(classes[j], RowClass::Empty));
             if above.is_some_and(|j| is_text(&classes[j])) && below.is_some_and(|j| is_text(&classes[j])) {

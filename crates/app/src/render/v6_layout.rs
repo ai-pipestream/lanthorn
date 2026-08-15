@@ -1445,6 +1445,18 @@ pub fn story_clear_native(
 /// goes: the largest cell-aligned rect inside the story window's device rect
 /// that touches no opaque chrome pixel. Falls back to the full pane when
 /// there is no story window.
+///
+/// **Currently unused in production, and deliberately kept** (SQ-0893). Only
+/// this module's own unit tests call it: hybrid uses
+/// [`story_viewport_hybrid`], which takes the raw window box, and raster uses
+/// its native-space sibling. It is retained because it is exactly the
+/// shrink-until-clear-then-quantize step that SQ-0894 needs — "determine the
+/// valid text region from what the chrome leaves" — and rewriting it from
+/// scratch there would be worse than carrying it. See §3(b) of
+/// `docs/superpowers/specs/2026-08-15-v6-render-pipeline.md`, which also notes
+/// its oracle canvas needs fixing before it can be used.
+///
+/// If SQ-0894 lands without adopting it, delete it then.
 pub fn story_viewport(
     story: Option<&PositionedWindow>,
     chrome_canvas: &image::RgbaImage,
