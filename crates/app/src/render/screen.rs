@@ -890,26 +890,6 @@ fn render_node(
                         // below (only the vertical offset moves), so publish it now.
                         state.v6_image_scale.set(scale_center.s);
                         let gfx = v6::build_graphics_canvas(&layout.chrome, native);
-                        // SQ-0888: a column of window 0 the game reserved with
-                        // `set_margins` and then painted CHROME ART into is not the
-                        // story's to narrate in — it belongs to the ring, which is the
-                        // only half of the hybrid split that can draw a picture. See
-                        // [`v6::story_text_box`]; `None` (every other corpus frame)
-                        // leaves the box exactly as the game set it.
-                        let narrowed = v6::story_text_box(story, &gfx);
-                        // The native columns it took OFF, computed here while both boxes
-                        // are still in scope. Empty on every frame it left alone; the ring
-                        // needs them further down, to know that flank is a PICTURE and not
-                        // a border column to tile.
-                        let ceded: Vec<(u32, u32)> = match &narrowed {
-                            Some(n) => {
-                                let (ox0, ox1) = (story.x_px as u32, story.x_px as u32 + story.w_px as u32);
-                                let (nx0, nx1) = (n.x_px as u32, n.x_px as u32 + n.w_px as u32);
-                                [(ox0, nx0), (nx1, ox1)].into_iter().filter(|(a, b)| a < b).collect()
-                            }
-                            None => Vec::new(),
-                        };
-                        let story = narrowed.as_ref().unwrap_or(story);
                         let chrome_runs: Vec<&crate::engine::PxText> = layout
                             .chrome
                             .iter()
@@ -1069,33 +1049,6 @@ fn render_node(
                         // art stay the theme backdrop — no art stretching or tiling there.
                         // Letterbox is untouched (its bands lie within the scaled canvas).
                         let stretch_flanks = matches!(plan, BottomPlan::Frame | BottomPlan::Menu);
-                        // SQ-0888: is this side flank one of the columns
-                        // [`v6::story_text_box`] ceded? Such a flank is a PICTURE the game
-                        // reserved a margin for, and it is not border art: it must be drawn
-                        // as the plain uniform-scale crop of the canvas, never tiled the way
-                        // a repeating border column is.
-                        //
-                        // Nothing in [`v6_border::recognize`] can tell them apart, because
-                        // it is not asked to — it names the border it is looking at and
-                        // falls through to `ArthurPoles` for anything it does not recognise,
-                        // which is a 4-row strip stamped down the column to the screen
-                        // bottom. Run over Shogun's ship that painted a smear of the hull's
-                        // last rows across the frame's whole lower third. This is the same
-                        // shape SQ-0819 records for Journey's picture column, arrived at
-                        // from the other side: a column that carries an illustration is
-                        // never a border, however tall and thin it is.
-                        //
-                        // Measured by where the band maps back to natively, exactly as
-                        // `flank_tiled_source` reads it, so the two always agree on which
-                        // column they are looking at.
-                        let ceded_flank = |r: Rect| -> bool {
-                            !ceded.is_empty()
-                                && r.width < area.width
-                                && {
-                                    let (x0, x1, _, _) = flank_native_box(r, area, &scale, cell_px, native);
-                                    ceded.iter().any(|&(a, b)| x0 < b && a < x1)
-                                }
-                        };
                         state.v6_ring_plan.set(match plan {
                             BottomPlan::Letterbox => "letterbox",
                             BottomPlan::Extend => "extend",
@@ -1180,10 +1133,7 @@ fn render_node(
                             // side art, or side art of a shape this code does not know,
                             // is clipped exactly as before.
                             for b in &mut ring_bands {
-                                if b.width < area.width
-                                    && !ceded_flank(*b)
-                                    && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some()
-                                {
+                                if b.width < area.width && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some() {
                                     continue;
                                 }
                                 if b.y >= clip_row {
@@ -1579,7 +1529,7 @@ fn render_node(
                             strips
                                 .iter()
                                 .filter_map(|s| match s {
-                                    ChromeStrip::Art(r) if r.width < area.width && !ceded_flank(*r) => {
+                                    ChromeStrip::Art(r) if r.width < area.width => {
                                         flank_tiled_source(*r, area, &scale, cell_px, native, &canvas, &gfx)
                                             .map(|img| (*r, img))
                                     }

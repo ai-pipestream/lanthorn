@@ -2024,6 +2024,16 @@ impl GameSession {
     /// Art that will not resolve keeps the old answer: neither path paints
     /// anything for it, and guessing a canvas would only create an empty one.
     fn is_win0_inline_float(&mut self, ev: &PictureEvent) -> bool {
+        self.win0_inline_float_x(ev).is_some()
+    }
+
+    /// The same question, answering with the picture's `x` **inside window 0** —
+    /// which is the coordinate the float's alignment is read from, and which is
+    /// not `ev.x` when the game drew into some other window (SQ-0888).
+    fn win0_inline_float_x(&mut self, ev: &PictureEvent) -> Option<u16> {
+        if ev.window != 0 {
+            return self.ceded_margin_float_x(ev);
+        }
         // `at_cursor` is evidence only when the cursor means something. It is a
         // pixel-exact `y == y_cursor`, and with NOTHING ever streamed to window 0
         // the cursor is simply where `erase_window` left it — home. A picture
@@ -2031,8 +2041,8 @@ impl GameSession {
         // carries no intent at all (SQ-0722). `margin_after` is unconditional:
         // a `set_margins` is the game speaking, not a coordinate coinciding.
         let intent = (ev.at_cursor && ev.out_chars > 0) || ev.margin_after.is_some();
-        if ev.window != 0 || !intent {
-            return false;
+        if !intent {
+            return None;
         }
         let win_w = self
             .machine
@@ -2043,12 +2053,86 @@ impl GameSession {
             .map_or(0, |w| u32::from(w.x_size));
         let Some((pic_w, _)) = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32))
         else {
-            return true;
+            return Some(ev.x);
         };
         // Spans the window: starts at (or left of) its left edge and reaches the
         // right one. Window coords are 1-based (ZMSD §8.8.1).
         let spans_window = ev.x <= 1 && pic_w * self.art_scale.0 >= win_w.max(1);
-        !spans_window
+        (!spans_window).then_some(ev.x)
+    }
+
+    /// SQ-0888: the same margin picture, spelled by a game that paints it from a
+    /// GRAPHICS window instead of from window 0 — answering with the picture's `x`
+    /// inside window 0, or `None` when the event is not that.
+    ///
+    /// Shogun says one layout two ways. Its Amiga press (release 295 / serial
+    /// 890321) draws picture 7 into window 0 at (229,1) and calls `set_margins`
+    /// right after, which the arm above already reads as ZMSD §15's margin picture;
+    /// its Apple IIgs press (`shogun_s1.dsk`, release 311 / serial 890510) draws
+    /// the SAME picture 7 into WINDOW 6 — a graphics window at (1,33) 560x352 that
+    /// contains window 0 outright — at (249,1), and then calls
+    /// `set_margins(0, 320, win 0)`. Both reserve about 320 px of the same window
+    /// for the same ship on the same scene. Only the window number differs.
+    ///
+    /// The window number was read as a difference in KIND, and it is a difference
+    /// in SPELLING. The reference rendition settles it: on the original the ship
+    /// **scrolls up with the prose** and the text wraps around its bottom, which is
+    /// exactly what a window-0 margin float does here — and is exactly what art
+    /// pinned to a window canvas cannot do. So the picture is routed to the same
+    /// float, and the Amiga's frame is the acceptance criterion for the Apple's.
+    ///
+    /// THREE THINGS HAVE TO HOLD, and between them they are why this cannot fire
+    /// on a game that merely happens to have a graphics window open:
+    ///
+    /// 1. The drawing window CONTAINS window 0. A window that merely overlaps it is
+    ///    a neighbour; one that encloses it is being used as the surface window 0's
+    ///    own prose sits on.
+    /// 2. Window 0 holds a `set_margins` reservation *right now* — the margin in
+    ///    force, not one the event carries. [`PictureEvent::margin_after`] is
+    ///    `None` here, because the engine only attaches a `set_margins` issued on
+    ///    the SAME window as the draw, and this game's lands on window 0 while
+    ///    window 6 is current.
+    /// 3. The picture lies ENTIRELY inside the column that reservation gave up, and
+    ///    overlaps window 0 vertically. This is the whole of the safety: Zork Zero
+    ///    and the Amiga Shogun run `left_margin` 2 / `right_margin` 2 on every
+    ///    gameplay frame, and no picture in the corpus fits in a 2 px column.
+    ///
+    /// An erase paints no float — it is a fill of the window canvas, and has to
+    /// stay one.
+    fn ceded_margin_float_x(&mut self, ev: &PictureEvent) -> Option<u16> {
+        if ev.erase || ev.number == 0 || ev.window == 1 {
+            return None;
+        }
+        let v6 = self.machine.screen.v6.as_ref()?;
+        let w0 = v6.windows.first()?;
+        let (w0x, w0y) = (i64::from(w0.x_coord.max(1)), i64::from(w0.y_coord.max(1)));
+        let (w0w, w0h) = (i64::from(w0.x_size), i64::from(w0.y_size));
+        let (left, right) = (i64::from(w0.left_margin), i64::from(w0.right_margin));
+        if w0w <= 0 || w0h <= 0 || left + right >= w0w {
+            return None;
+        }
+        // (1) the drawing window contains window 0's box. `win_box` is the box AT
+        // THE MOMENT OF THE CALL (SQ-0715), which is the one the picture was
+        // clipped to.
+        let (dx, dy) = (i64::from(ev.win_box.0.max(1)), i64::from(ev.win_box.1.max(1)));
+        let (dw, dh) = (i64::from(ev.win_box.2), i64::from(ev.win_box.3));
+        if dx > w0x || dy > w0y || dx + dw < w0x + w0w || dy + dh < w0y + w0h {
+            return None;
+        }
+        // (3) the picture's box on screen, against the text column and the ceded ones.
+        let (pw, ph) = self.pict_source.as_mut()?.dims(u32::from(ev.number))?;
+        let (pw, ph) = (i64::from(pw * self.art_scale.0), i64::from(ph * self.art_scale.1));
+        let px0 = dx + i64::from(ev.x.max(1)) - 1;
+        let py0 = dy + i64::from(ev.y.max(1)) - 1;
+        if py0 + ph <= w0y || py0 >= w0y + w0h {
+            return None; // nothing of it is beside window 0's prose at all
+        }
+        let in_right = right > 0 && px0 >= w0x + w0w - right && px0 + pw <= w0x + w0w;
+        let in_left = left > 0 && px0 >= w0x && px0 + pw <= w0x + left;
+        if !(in_right || in_left) {
+            return None;
+        }
+        u16::try_from(px0 - w0x + 1).ok()
     }
 
     // ── The paced picture sequence, as the app loop drives it (SQ-0708) ───────
@@ -2412,16 +2496,24 @@ impl GameSession {
         }
         // Decided before the window borrow below, since it consults `pict_source`
         // for the picture's own width (see `is_win0_inline_float`).
-        let inline_float = self.is_win0_inline_float(ev);
+        let inline_float_x = self.win0_inline_float_x(ev);
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
-        let Some(w) = v6.windows.get(ev.window as usize) else { return };
+        if v6.windows.get(ev.window as usize).is_none() {
+            return;
+        }
         // Snapshot window 0's margin/size state (pixels) so the win0-picture
         // classifier below can detect a right-margin float without holding a
         // borrow across the `pict_source` mutable borrow. The margins reflect the
         // `set_margins` the game issued right after the draw (ZMSD §15 margin
         // picture) — captured here at drain time.
+        //
+        // WINDOW 0's, not the drawing window's: the Apple Shogun paints its margin
+        // picture from window 6 and reserves the column on window 0 (SQ-0888), and
+        // reading window 6's own (always zero) margins would classify the ship as a
+        // drop-cap. For every window-0 draw the two are the same window.
+        let Some(w0) = v6.windows.first() else { return };
         let (win0_left_margin, win0_right_margin, win0_x_size) =
-            (w.left_margin, w.right_margin, w.x_size);
+            (w0.left_margin, w0.right_margin, w0.x_size);
         // Window 0 is the main scrolling text window, and a picture drawn ON ITS
         // CURRENT TEXT LINE is INLINE story content (Zork Zero's drop-caps and
         // room icons, drawn at the text cursor with a margin set for the text to
@@ -2447,7 +2539,7 @@ impl GameSession {
         // A picture that SPANS window 0's full width is not inline either, even
         // when it lands on the cursor's own line: nothing can flow beside it. See
         // `is_win0_inline_float` for the corpus measurements (SQ-0714).
-        if inline_float {
+        if let Some(float_x) = inline_float_x {
             if ev.erase {
                 return; // no canvas to erase; a win0 erase_picture is a no-op here
             }
@@ -2468,7 +2560,7 @@ impl GameSession {
                 let (screen_w, screen_h) = self.v6_screen_px();
                 let align = win0_pic_align(
                     iw, ih, screen_w, screen_h,
-                    ev.x, win0_left_margin, win0_right_margin, win0_x_size,
+                    float_x, win0_left_margin, win0_right_margin, win0_x_size,
                 );
                 let margin_px = match align {
                     // MarginLeft carries the game's own left `set_margins` value

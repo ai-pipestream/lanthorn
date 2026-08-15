@@ -1002,23 +1002,6 @@ session-only switch that never touches your saved config:
   neither half and was drawn by nobody, and the frame vanished for as long as the
   player took to type a bet. A picture painting outside its own story window goes to
   the composite too. No other v6 title's picture ever leaves its story window.
-  The ring is drawn around the story window's box, and a game can tell us that box
-  is bigger than the part it narrates in — `set_margins` reserves a column its prose
-  will never enter. Where the game then paints **chrome art** in the column it gave
-  up, the viewport is the text column and the ring's flank carries the picture.
-  Shogun's Apple IIgs press is the one title that needs this: on the Bridge it gives
-  window 0 a 320-pixel right margin and draws its 312×348 ship into a *separate*
-  graphics window laid over the story — so the ring, which is only ever
-  pane-minus-viewport, threw away 316 of the picture's 348 rows and left the 32 that
-  happened to clear the window's top edge as a three-row sliver above the prose. Its
-  Amiga and IBM siblings say exactly the same thing the other way round, drawing the
-  same ship into window 0 with the margin call right after it, where it has always
-  been read as a margin picture and floated beside the text. One layout, two idioms.
-  The "art is actually there" half of the rule is what keeps it honest: a reserved
-  margin with nothing painted in it is an inset the game wants its own prose to
-  keep, not a column handed to a picture, and the ceded flank is a *picture* rather
-  than a repeating border — so it is drawn once at its own height, never tiled down
-  the column the way Zork Zero's pillars and Arthur's poles are.
   Not every v6 game *has* a story window to ring, though. scopa's card table
   streams no prose at all — its screen is three grid windows and a table drawn out
   of filled rectangles, with two button labels on top — and a ring around nothing
@@ -1471,6 +1454,24 @@ picture at a row the cursor is nowhere near and you mean something else
 entirely: you have placed it. (An inline float's horizontal position is a margin
 choice — Shogun parks its ship at the right edge and still means "beside this
 paragraph".)
+
+**And a game may paint the float from a different window entirely.** Shogun's
+Apple IIgs press (`shogun_s1.dsk`, release 311) states the Bridge exactly as its
+Amiga sibling does and spells it differently: where the Amiga draws the ship into
+window 0 and calls `set_margins` on the window it just drew into, the Apple gives
+window 0 a 320-pixel right margin and paints the same ship from a *graphics*
+window laid over the story. Read as a difference in kind, that cost the picture
+its place in the text — it went onto a window canvas, where hybrid's ring (only
+ever pane-minus-viewport) threw away 316 of its 348 rows and left the rest as a
+three-row sliver above the prose. It is a difference in spelling. A picture a
+window laid over the story paints **entirely inside the column window 0's own
+margin reserved**, and nowhere else, is that window's margin picture: it floats
+in the prose, it scrolls up with it, and the text reclaims the full width once it
+has passed the picture's bottom edge — which is what the original does. The three
+conditions are what keep the rule narrow: the painting window has to *contain*
+window 0, the margin has to be in force at the time of the draw, and the picture
+has to fit inside the column it gave up. Across the whole v6 corpus exactly one
+picture on one press answers to all three.
 
 A game can also say it in words, and Zork Zero does. It follows an inline draw
 with `set_margins`, reserving the column its prose is about to flow in, and that
