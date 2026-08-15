@@ -530,6 +530,7 @@ fn ctx(m: &Medium) -> String {
             Some(DiskImage::ProDos) => "Apple ProDOS floppy",
             Some(DiskImage::InfocomBootDisk) => "Apple self-booting floppy",
             Some(DiskImage::CommodoreD64) => "Commodore 1541 floppy",
+            Some(DiskImage::Iso9660) => "ISO 9660 CD-ROM",
             None => "story file",
         },
         m.release,
@@ -1020,6 +1021,16 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // palette and the default colour pair, none of which anything here
             // establishes. Argued at `InterpreterProfile::Commodore128`.
             Some(DiskImage::CommodoreD64) => InterpreterProfile::Commodore128,
+            // **The one row that states no machine because the MEDIUM has
+            // none** (SQ-0871), which is a different thing from the IBM PC's
+            // deliberate decline above it. A CD-ROM carries both machines'
+            // builds in one filesystem, so a number stated by the row would be
+            // wrong for half the disc; the machine is a per-FILE question the
+            // Apple ISO 9660 extension answers, and a file it cannot speak for
+            // leaves the rule already in force. This arm is what a caller with
+            // no story in hand gets, and the IBM PC default is the right thing
+            // for it to be.
+            Some(DiskImage::Iso9660) => InterpreterProfile::IbmPc,
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(

@@ -14,6 +14,7 @@ pub mod hfs;
 pub mod infocom_boot;
 pub mod infocom_packed;
 pub mod infocom_pics;
+pub mod iso9660;
 pub mod medium;
 pub mod prodos;
 

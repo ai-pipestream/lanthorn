@@ -69,6 +69,7 @@ use crate::fat12::Fat12;
 use crate::hfs::Hfs;
 use crate::infocom_boot::InfocomBoot;
 use crate::infocom_pics::InfocomPics;
+use crate::iso9660::Iso9660;
 use crate::prodos::ProDos;
 
 /// Amiga, from the ZMSD §11.1.3 interpreter-number table (1 DECSystem-20,
@@ -286,6 +287,20 @@ pub enum DiskImage {
     /// game of 262,064 bytes that no single 174,848-byte floppy could hold. See
     /// [`crate::d64`].
     CommodoreD64,
+    /// An **ISO 9660 CD-ROM** — *The Lost Treasures of Infocom* I and II
+    /// (SQ-0871).
+    ///
+    /// The second CD here and a different construction from the first: no Apple
+    /// partition map and no HFS volume anywhere, just ISO 9660 with Apple's
+    /// extensions layered in, which is the ordinary way a hybrid CD is made.
+    /// [`DiskImage::Hfs`] reads the Masterpieces disc through its Macintosh
+    /// PARTITION and cannot help here; these two opened as nothing at all.
+    ///
+    /// Both machines' builds share the one filesystem, so this row states **no**
+    /// interpreter number and the machine is a per-file question answered from
+    /// the Apple extension's Finder metadata — see
+    /// [`machine_from_finder`] and [`crate::iso9660`].
+    Iso9660,
 }
 
 impl DiskImage {
@@ -732,7 +747,81 @@ const FORMATS: &[Format] = &[
         mount: mount_boxed::<D64>,
         pages_across_images: true,
     },
+    Format {
+        image: DiskImage::Iso9660,
+        // The filesystem, like every row that has one — and NOT the machine,
+        // because this disc is both. `machine_from_finder` answers that per
+        // file, and `image_of` below is what a listing and a boot ask.
+        label: "ISO",
+        // **None, and here that is a fact about the medium rather than a
+        // deferral.** A CD-ROM is not a machine: these two carry Macintosh and
+        // DOS builds in one filesystem, so a number stated by the row would be
+        // wrong for half the disc — which is exactly the defect SQ-0876 fixed on
+        // the hybrid HFS disc, and there the row at least had a machine to be
+        // wrong about. A file Apple's extension identifies gets its own answer;
+        // one it does not leaves the rule already in force, which is the IBM PC's
+        // and is right for the DOS files on disc 1 that carry a blank creator.
+        interpreter_number: None,
+        // `iso` is the universal spelling and what both discs wear. `bin` and
+        // `img` are claimed by rows above and reach this one anyway, since a
+        // scan pre-filters on the union and `looks_like` decides.
+        extensions: &["iso"],
+        looks_like: <Iso9660 as Volume>::looks_like,
+        mount: mount_boxed::<Iso9660>,
+        pages_across_images: false,
+    },
 ];
+
+impl Volume for Iso9660 {
+    fn looks_like(raw: &[u8]) -> bool {
+        Iso9660::looks_like_iso9660(raw)
+    }
+
+    fn mount(raw: Vec<u8>) -> Option<Iso9660> {
+        Iso9660::mount(raw).ok()
+    }
+
+    fn volume_name(&self) -> Option<&str> {
+        // The PVD names every disc, and these two use it for something a person
+        // recognises: `INFOCOM` and `LOST TREASURES II`.
+        Some(Iso9660::volume_name(self)).filter(|n| !n.is_empty())
+    }
+
+    fn file_count(&self) -> usize {
+        self.files().len()
+    }
+
+    fn contents(&self) -> Vec<(String, Vec<u8>)> {
+        // By PATH, like HFS and FAT12 — three files on disc 2 are called
+        // `STORY.DATA` and the folder is the only thing between them.
+        self.files().iter().filter_map(|e| self.read(e).map(|b| (e.path(), b))).collect()
+    }
+
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        Iso9660::read_named(self, name)
+    }
+
+    fn story(&self) -> Option<DiskStory> {
+        Iso9660::story(self).map(DiskStory::from)
+    }
+
+    fn pictures(&self) -> Option<DiskArt> {
+        Iso9660::pictures(self).map(DiskArt::from)
+    }
+
+    fn pictures_beside(&self, path: &str) -> ArtPairing {
+        if !Iso9660::holds(self, path) {
+            return ArtPairing::WholeVolume;
+        }
+        ArtPairing::Beside(Iso9660::pictures_beside(self, path).map(DiskArt::from))
+    }
+
+    fn image_of(&self, path: &str) -> Option<DiskImage> {
+        // The Finder metadata Apple's ISO 9660 extension carries, read through
+        // the same rule the HFS catalog's is (SQ-0871).
+        Iso9660::machine_of(self, path)
+    }
+}
 
 /// The row whose sniff claims `raw`, if any. The single point at which bytes
 /// become a format — [`DiskImage::detect`] and [`MountedDisk::mount`] both go
@@ -1686,6 +1775,7 @@ mod tests {
                 crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
             }
             DiskImage::ProDos => crate::prodos::tests::sample_disk(&files),
+            DiskImage::Iso9660 => crate::iso9660::tests::sample_disc(&files),
             // No `files`, because there is nowhere to put them: a raw
             // self-booting disk has no directory at all. See
             // [`sample_entries`] for what the tests below do about that.
@@ -1716,7 +1806,8 @@ mod tests {
             | DiskImage::Hfs
             | DiskImage::Fat12Dos
             | DiskImage::Fat12AtariSt
-            | DiskImage::ProDos => ("STORY.DAT", &["Readme"]),
+            | DiskImage::ProDos
+            | DiskImage::Iso9660 => ("STORY.DAT", &["Readme"]),
             // Where the story is, which is the only thing this medium knows
             // about it. `crate::infocom_boot::InfocomBoot::entry_name`.
             DiskImage::InfocomBootDisk => ("T3/S0", &[]),
@@ -1743,11 +1834,15 @@ mod tests {
             DiskImage::ProDos,
             DiskImage::InfocomBootDisk,
             DiskImage::CommodoreD64,
+            DiskImage::Iso9660,
         ];
         for image in census {
             let (label, interpreter) = match image {
                 DiskImage::Adf => ("ADF", Some(AMIGA_INTERPRETER_NUMBER)),
                 DiskImage::Hfs => ("HFS", Some(MACINTOSH_INTERPRETER_NUMBER)),
+                // A CD-ROM is not a machine: this one carries both, so the row
+                // states none and the file decides (SQ-0871).
+                DiskImage::Iso9660 => ("ISO", None),
                 // One FAT12 filesystem, two machines, two different answers —
                 // and the difference is the point. The IBM PC's honest number
                 // is version-dependent (6 for Version 6, else 1), so no single
@@ -1824,16 +1919,25 @@ mod tests {
             union,
             "the census is the rows' extensions and nothing else"
         );
-        // **A spelling MAY be claimed by more than one row**, and exactly one is
-        // (SQ-0868): `.dsk` is the Apple II 5.25-inch press, and that press is a
-        // ProDOS volume on nine disks in `stories/` and a raw self-booting disk
-        // on the tenth. This assertion used to forbid the overlap outright; what
-        // it forbids now is an *unnoticed* one, because a second shared spelling
-        // is a claim about the corpus that wants writing down.
+        // **A spelling MAY be claimed by more than one row**, and two are. This
+        // assertion used to forbid the overlap outright; what it forbids now is
+        // an *unnoticed* one, because a shared spelling is a claim about the
+        // corpus that wants writing down.
+        //
+        // `.dsk` (SQ-0868) is the Apple II 5.25-inch press, which is a ProDOS
+        // volume on nine disks in `stories/` and a raw self-booting disk on the
+        // tenth.
+        //
+        // `.iso` (SQ-0871) is a CD-ROM, and a CD-ROM is two constructions: a
+        // cooked hybrid whose Apple partition map leads to an HFS volume, and a
+        // plain ISO 9660 disc with Apple's extensions and no HFS anywhere. The
+        // corpus holds one of each. Which one a file IS stays `looks_like`'s
+        // answer over its bytes, so the shared spelling costs a scan nothing.
         let mut shared: Vec<&str> =
             union.iter().filter(|e| union.iter().filter(|o| o == e).count() > 1).copied().collect();
+        shared.sort_unstable();
         shared.dedup();
-        assert_eq!(shared, ["dsk"], "an extension is shared by two rows and undocumented");
+        assert_eq!(shared, ["dsk", "iso"], "an extension is shared by two rows and undocumented");
         // The spellings the corpus in `stories/` actually uses, named outright
         // so a row losing one fails here rather than in the picker.
         // `dsk` joined them in SQ-0864, on the ProDOS row: the fourteen
@@ -2072,6 +2176,7 @@ mod tests {
                     crate::fat12::tests::sample_disk(&files, crate::fat12::Machine::AtariSt)
                 }
                 DiskImage::ProDos => crate::prodos::tests::sample_disk(&files),
+            DiskImage::Iso9660 => crate::iso9660::tests::sample_disc(&files),
                 DiskImage::InfocomBootDisk => {
                     // Said as an assertion rather than as a `continue`, so the
                     // exclusion is a claim this test checks and not a hole in it.
@@ -2190,6 +2295,17 @@ mod tests {
             let (fixture, story_name, version, has_art) = match image {
                 DiskImage::Adf => ("Zork Zero - The Revenge of Megaboz.adf", "Story.data", 6, true),
                 DiskImage::Hfs => ("Zork Zero Disk.image", "Story.data", 6, true),
+                // The one fixture NOT in `stories/`: the Lost Treasures discs
+                // live in `treasures/` beside the other CD-ROMs, and the loader
+                // below looks there when `stories/` has no such name.
+                //
+                // Shogun's DOS pressing is the largest story on disc 2 at
+                // 345,088 bytes — just over its Macintosh pressing's 341,416 —
+                // and largest is this format's tiebreak, the two halves having
+                // no naming convention in common (SQ-0871). A compilation wants
+                // `stories()`; this pins that the single-story door answers
+                // deterministically at all.
+                DiskImage::Iso9660 => ("LostTreasures2.iso", "DOS/SHOGUN/SHOGUN.ZIP", 6, true),
                 // Lost Treasures I floppy5: Zork Zero's story AND its EGA art.
                 // (Its CGA art is on floppy4, which is the whole of why a set
                 // model is a real thing this lane does not have.)
@@ -2235,10 +2351,19 @@ mod tests {
                     ("Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64", "T5/S0", 3, false)
                 }
             };
-            let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(fixture);
+            // `stories/` for a floppy, `treasures/` for a CD-ROM — both
+            // gitignored, and a fixture in neither is a skip.
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let path = [root.join("../../stories"), root.join("../../treasures")]
+                .into_iter()
+                .map(|d| d.join(fixture))
+                .find(|p| p.is_file());
+            let Some(path) = path else {
+                eprintln!("SKIP: {image:?} media absent ({fixture})");
+                continue;
+            };
             let Ok(bytes) = std::fs::read(&path) else {
-                eprintln!("SKIP: {image:?} media absent at {}", path.display());
+                eprintln!("SKIP: {image:?} media unreadable at {}", path.display());
                 continue;
             };
             assert_eq!(DiskImage::detect(&bytes), Some(image), "{fixture}");
