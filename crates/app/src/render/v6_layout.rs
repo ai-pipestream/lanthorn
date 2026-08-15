@@ -1541,15 +1541,52 @@ pub fn story_viewport_box(
     ratatui::layout::Rect { x: cell_left, y: cell_top, width, height }
 }
 
+/// Which side of the ring a chrome band is — its IDENTITY, carried alongside its
+/// rect (SQ-0894).
+///
+/// Before this existed, downstream stages recovered the answer by measuring:
+/// `band.width < pane.width` meant "a flank" in `decompose_chrome_strips` and in
+/// the Extend clip, and `width == pane.width && y == viewport.bottom()` meant "the
+/// menu band". Those tests are only true while the top and bottom bands span the
+/// full pane width, which is the very definition SQ-0894 is replacing — and a
+/// width test that silently becomes wrong is how Shogun's eight-run header and
+/// Arthur's seventy-two-run status bar would have rasterised, in violation of the
+/// SQ-0750 rule that hybrid never rasterises what the game printed as a character.
+///
+/// A band knows what it is. Nothing downstream measures to find out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BandRole {
+    /// Above the story viewport.
+    Top,
+    /// Below the story viewport — under the `Menu` plan this is the game's own
+    /// command strip.
+    Bottom,
+    /// Left of the story viewport.
+    LeftFlank,
+    /// Right of the story viewport.
+    RightFlank,
+}
+
+impl BandRole {
+    /// A flank carries the frame's side art: one continuous column, tiled or
+    /// extended, never split row-by-row into text.
+    pub fn is_flank(self) -> bool {
+        matches!(self, BandRole::LeftFlank | BandRole::RightFlank)
+    }
+}
+
 /// The chrome RING cell rects around a story `viewport` inside a `pane`: up to
 /// four non-overlapping rects (top, bottom, left, right) that exactly tile
-/// `pane − viewport`. The top and bottom bands span the pane's full width (and so
-/// own the corners); the left and right bands span only the viewport's vertical
-/// extent. An edge-flush viewport omits that side's band; `viewport == pane`
-/// yields an empty list. `viewport` is assumed to lie within `pane`; it is clamped
-/// defensively. Both rects share one coordinate space (both absolute, or both
-/// pane-relative).
-pub fn chrome_bands(pane: ratatui::layout::Rect, viewport: ratatui::layout::Rect) -> Vec<ratatui::layout::Rect> {
+/// `pane − viewport`, each tagged with its [`BandRole`]. The top and bottom bands
+/// span the pane's full width (and so own the corners); the left and right bands
+/// span only the viewport's vertical extent. An edge-flush viewport omits that
+/// side's band; `viewport == pane` yields an empty list. `viewport` is assumed to
+/// lie within `pane`; it is clamped defensively. Both rects share one coordinate
+/// space (both absolute, or both pane-relative).
+pub fn chrome_bands(
+    pane: ratatui::layout::Rect,
+    viewport: ratatui::layout::Rect,
+) -> Vec<(BandRole, ratatui::layout::Rect)> {
     use ratatui::layout::Rect;
     // Clamp the viewport within the pane so the band arithmetic can't underflow.
     let vx = viewport.x.clamp(pane.x, pane.right());
@@ -1559,15 +1596,15 @@ pub fn chrome_bands(pane: ratatui::layout::Rect, viewport: ratatui::layout::Rect
 
     let mut out = vec![
         // Top band: full pane width, from the pane top down to the viewport top.
-        Rect::new(pane.x, pane.y, pane.width, vy - pane.y),
+        (BandRole::Top, Rect::new(pane.x, pane.y, pane.width, vy - pane.y)),
         // Bottom band: full pane width, from the viewport bottom to the pane bottom.
-        Rect::new(pane.x, vb, pane.width, pane.bottom() - vb),
+        (BandRole::Bottom, Rect::new(pane.x, vb, pane.width, pane.bottom() - vb)),
         // Left band: the viewport's vertical span, from the pane left to the viewport left.
-        Rect::new(pane.x, vy, vx - pane.x, vb - vy),
+        (BandRole::LeftFlank, Rect::new(pane.x, vy, vx - pane.x, vb - vy)),
         // Right band: the viewport's vertical span, from the viewport right to the pane right.
-        Rect::new(vr, vy, pane.right() - vr, vb - vy),
+        (BandRole::RightFlank, Rect::new(vr, vy, pane.right() - vr, vb - vy)),
     ];
-    out.retain(|r| r.width > 0 && r.height > 0);
+    out.retain(|(_, r)| r.width > 0 && r.height > 0);
     out
 }
 
@@ -2742,10 +2779,17 @@ mod tests {
         let viewport = Rect::new(6, 5, 28, 19); // interior, all four edges inset
         let bands = chrome_bands(pane, viewport);
         assert_eq!(bands.len(), 4, "all four edges produce a band");
+        // Each band carries its own identity (SQ-0894), so no downstream stage has
+        // to infer "is this a flank?" from its width.
+        let roles: Vec<BandRole> = bands.iter().map(|(r, _)| *r).collect();
+        for want in [BandRole::Top, BandRole::Bottom, BandRole::LeftFlank, BandRole::RightFlank] {
+            assert!(roles.contains(&want), "{want:?} missing from {roles:?}");
+        }
+        assert!(bands.iter().filter(|(r, _)| r.is_flank()).count() == 2, "exactly two flanks");
         // Non-overlap + exact tiling: every pane cell OUTSIDE the viewport is
         // covered exactly once; every viewport cell is covered zero times.
         let mut cover = vec![0u8; (pane.width as usize) * (pane.height as usize)];
-        for b in &bands {
+        for (_, b) in &bands {
             for y in b.y..b.bottom() {
                 for x in b.x..b.right() {
                     cover[y as usize * pane.width as usize + x as usize] += 1;
@@ -2773,7 +2817,10 @@ mod tests {
         let viewport = Rect::new(0, 0, 30, 20);
         let bands = chrome_bands(pane, viewport);
         assert_eq!(bands.len(), 2, "left+top flush → those bands omitted");
-        assert!(bands.iter().all(|b| b.x >= 30 || b.y >= 20), "remaining bands are the right/bottom ring");
+        assert!(bands.iter().all(|(_, b)| b.x >= 30 || b.y >= 20), "remaining bands are the right/bottom ring");
+        // …and they say which sides they are, rather than leaving it to be measured.
+        let roles: Vec<BandRole> = bands.iter().map(|(r, _)| *r).collect();
+        assert!(roles.contains(&BandRole::Bottom) && roles.contains(&BandRole::RightFlank), "roles: {roles:?}");
     }
 
     #[test]
@@ -2792,7 +2839,7 @@ mod tests {
         let viewport = Rect::new(13, 6, 12, 6);
         let bands = chrome_bands(pane, viewport);
         assert_eq!(bands.len(), 4);
-        for b in &bands {
+        for (_, b) in &bands {
             assert!(b.x >= pane.x && b.right() <= pane.right() && b.y >= pane.y && b.bottom() <= pane.bottom(),
                 "band {b:?} stays inside the pane");
         }

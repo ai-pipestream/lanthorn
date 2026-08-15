@@ -1026,9 +1026,16 @@ fn render_node(
                         // the story/top/sides stay top-anchored.
                         let mut ring_bands = bands;
                         let menu_bands: Vec<Rect> = if menu.is_some() {
-                            let vb = viewport.bottom();
-                            let m: Vec<Rect> = ring_bands.iter().copied().filter(|b| b.width == area.width && b.y == vb).collect();
-                            ring_bands.retain(|b| !(b.width == area.width && b.y == vb));
+                            // The menu band IS the bottom band — asked by role, not by
+                            // recognising its shape (SQ-0894). The old test was
+                            // `width == area.width && y == viewport.bottom()`, which is a
+                            // description of where `chrome_bands` happened to put it.
+                            let m: Vec<Rect> = ring_bands
+                                .iter()
+                                .filter(|(role, _)| *role == v6::BandRole::Bottom)
+                                .map(|(_, r)| *r)
+                                .collect();
+                            ring_bands.retain(|(role, _)| *role != v6::BandRole::Bottom);
                             m
                         } else {
                             Vec::new()
@@ -1125,8 +1132,11 @@ fn render_node(
                             // RECOGNISED flank (`v6_border::recognize`): a game with no
                             // side art, or side art of a shape this code does not know,
                             // is clipped exactly as before.
-                            for b in &mut ring_bands {
-                                if b.width < area.width && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some() {
+                            for (role, b) in &mut ring_bands {
+                                // Asked by role (SQ-0894): `b.width < area.width` meant
+                                // "a flank" only while the top and bottom bands spanned
+                                // the pane.
+                                if role.is_flank() && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some() {
                                     continue;
                                 }
                                 if b.y >= clip_row {
@@ -1135,7 +1145,7 @@ fn render_node(
                                     b.height = b.height.min(clip_row - b.y);
                                 }
                             }
-                            ring_bands.retain(|b| b.height > 0 && b.width > 0);
+                            ring_bands.retain(|(_, b)| b.height > 0 && b.width > 0);
                         }
                         // SQ-0511: the native row a stretched flank band's art reaches down
                         // to. Frame flanks span the full canvas height (Zork0/Shogun columns
@@ -5062,7 +5072,7 @@ fn menu_band_strips<'a>(
 /// over the panel, and under a graphics protocol like kitty the image composites
 /// ABOVE the cells, so the panel's text vanished behind stray rasterized banner.
 fn decompose_chrome_strips<'a>(
-    bands: &[Rect],
+    bands: &[(crate::render::v6_layout::BandRole, Rect)],
     pane: Rect,
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
@@ -5108,9 +5118,18 @@ fn decompose_chrome_strips<'a>(
     }
     let in_panel = |row: u16| panels.iter().any(|p| row >= p.y && row < p.bottom());
     let mut out = Vec::new();
-    for band in bands {
-        // Side bands (narrower than the pane) are never text — one Art strip.
-        if band.width < pane.width {
+    for (role, band) in bands {
+        // A FLANK is never text — one Art strip. Asked by role since SQ-0894: the
+        // test used to be `band.width < pane.width`, which answers correctly only
+        // while the top and bottom bands span the whole pane. Measured on the two
+        // frames that would have broken first: Shogun's header is a full-width
+        // `strip:text(8 runs)` and Arthur's status bar a full-width
+        // `strip:text(72 runs)`, both on plain ground and both rendered as glyphs
+        // today — a width test would have classed either as Art the moment a
+        // top band stopped spanning the pane, rasterising what the game printed as
+        // characters (SQ-0750). Zork Zero's banner is unaffected either way: it is
+        // text OVER art, the legitimate raster case, and `over_art` decides it.
+        if role.is_flank() {
             out.push(ChromeStrip::Art(*band));
             continue;
         }
