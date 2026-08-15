@@ -273,10 +273,13 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
         "IBM Interpreter version 6.65",
     ];
 
-    for (tag, mode) in [
-        ("hybrid", app::config::V6RenderMode::Hybrid),
-        ("frameless", app::config::V6RenderMode::Frameless),
-    ] {
+    // SQ-0886: the CELL paths. Hybrid is no longer one of them on this frame —
+    // Shogun's boot menu is a painted takeover over the game's own side panels, and
+    // hybrid takes the composite for it rather than the art-less cell path, which
+    // drew the screen as a full-width black block with no frame on it at all. The
+    // composite arm at the foot of this case is what covers hybrid now, and it is
+    // the arm that was never wrong.
+    for (tag, mode) in [("frameless", app::config::V6RenderMode::Frameless)] {
         for honor in [true, false] {
             for (w, h) in [(80u16, 25u16), (120, 40)] {
                 let mut state = app::state::AppState::default();
@@ -320,11 +323,32 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
         }
     }
 
-    // …and the RASTER composite, the third path. It paints the frozen layer as
-    // pixels at the game's own coordinates and was never wrong, but it is pinned
-    // here so the invariant is "centred in every path" rather than "centred in the
-    // two we happened to fix". Measured as the INK extent of each 16px text row,
-    // inside the middle band where the frame art never reaches.
+    // …and the COMPOSITE, which is both the raster path and — since SQ-0886 — the
+    // path hybrid takes on this frame. It paints the frozen layer as pixels at the
+    // game's own coordinates and was never wrong, but it is pinned here so the
+    // invariant is "centred in every path" rather than "centred in the ones we
+    // happened to fix". Measured as the INK extent of each 16px text row, inside
+    // the middle band where the frame art never reaches.
+    //
+    // That hybrid really does arrive here is asserted first: a mode that quietly
+    // stopped taking the composite would leave this arm covering nothing.
+    for honor in [true, false] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        state.config.honor_game_colours = honor;
+        let area = Rect::new(0, 0, 80, 25);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+        assert_eq!(
+            path, "raster",
+            "hybrid honor={honor}: Shogun's boot menu is a painted takeover over the game's own \
+             artwork, so hybrid draws it with the composite below (SQ-0886)"
+        );
+    }
+
     let layout = app::render::v6_layout::classify_windows(match &model.root {
         WinNode::Layered(items) => items,
         _ => panic!("v6 builds a Layered root"),
@@ -401,10 +425,12 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
     };
     let model = session.screen();
 
-    for (tag, mode) in [
-        ("hybrid", app::config::V6RenderMode::Hybrid),
-        ("frameless", app::config::V6RenderMode::Frameless),
-    ] {
+    // SQ-0886: the CELL paths. Hybrid left them for this frame — its takeover
+    // escape now routes a menu screen with the game's ARTWORK behind it to the
+    // composite, which places both windows at the coordinates the game declared
+    // (window 0 at x=47, window 2 at x=235, both on native row 21) and so satisfies
+    // this relation by construction. Asserted as pixels at the foot of the case.
+    for (tag, mode) in [("frameless", app::config::V6RenderMode::Frameless)] {
         for honor in [true, false] {
             for (w, h) in [(80u16, 25u16), (100, 40)] {
                 let mut state = app::state::AppState::default();
@@ -468,6 +494,43 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
                 );
             }
         }
+    }
+
+    // …and HYBRID, which takes the composite for this frame (SQ-0886). The same
+    // relation, measured where the composite states it: on the game's own native
+    // row 21 (y 336..351), ink stands both left of native x=235 — the prompt, in
+    // window 0 at x=47 — and at or right of it, which is the menu in window 2. A
+    // prompt nine rows above its menu would leave that row bare on the left.
+    let items = match &model.root {
+        WinNode::Layered(items) => items,
+        _ => panic!("v6 builds a Layered root"),
+    };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    for honor in [true, false] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        state.config.honor_game_colours = honor;
+        app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+        assert_eq!(path, "raster", "hybrid honor={honor}: this frame is drawn by the composite (SQ-0886)");
+
+        let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+        let ground = canvas.get_pixel(20, 340).0;
+        let ink = |x0: u32, x1: u32| {
+            (336..352).any(|y| (x0..x1).any(|x| canvas.get_pixel_checked(x, y).is_some_and(|p| p.0 != ground)))
+        };
+        assert!(
+            ink(47, 235),
+            "hybrid honor={honor}: the prompt renders on the menu's own row, in the box the game \
+             moved window 0 to (native x 47..235 of row 21) — not nine rows above it"
+        );
+        assert!(ink(235, native.0 as u32), "hybrid honor={honor}: the menu renders on that same row");
     }
 }
 

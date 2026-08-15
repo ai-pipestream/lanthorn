@@ -372,11 +372,21 @@ fn a_v3_status_line_is_not_a_readable_transcript_row() {
 /// `TranscriptElem::ScreenClear` mid-output — erases the new box and prints into
 /// it. The clear preserves scrollback and re-anchors, so "rows this turn added"
 /// still measures the repaint; the park must land on the first of them and not one
-/// row down. Measured at 80x30 on `shogun-r322-s890706.z6`: the second boot turn
-/// adds 31 rows into a 28-row viewport and parks at offset 4, first new row on top.
+/// row down. Measured at 80x30 on `shogun-r322-s890706.z6`: the boot turn that
+/// paints the menu adds more rows than the viewport carries, and parks with the
+/// first new row on top.
 ///
 /// Shogun is also the user's own control for SQ-0823 ("Shogun [more] seems to work
 /// fine"), so it is worth a case of its own whatever the answer.
+///
+/// FRAMELESS since SQ-0886, and it is the same turn either way. A park is only
+/// observable on a path that publishes a scrolling terminal viewport, and hybrid
+/// was that path for Shogun's boot until SQ-0886 found the same routing discarded
+/// the game's side panels and the machine's ground — a full-width black block where
+/// the frame belongs — and moved this frame to the composite, whose viewport is the
+/// game's own four-row box. Frameless is the cell path that remains. It draws the
+/// same transcript through the same pager; only the pane's chrome differs, and one
+/// row of it is why the menu turn is the FIRST park here rather than the second.
 #[test]
 fn a_turn_that_clears_mid_output_parks_on_the_first_new_row() {
     let file = "shogun-r322-s890706.z6";
@@ -397,17 +407,19 @@ fn a_turn_that_clears_mid_output_parks_on_the_first_new_row() {
 
     let mut state = story_state(true);
     state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.v6_render = app::config::V6RenderMode::Frameless;
     let area = Rect::new(0, 0, 80, 30);
 
-    // First boot turn: header + mid-turn clear + one line — it fits, so no pager,
-    // and the fresh box is pinned to the top of the transcript region.
-    let first = park(&mut s, &mut state, area, &[""]);
-    assert!(!first.active, "Shogun's opening turn fits its box — nothing to page");
-
-    // Second turn: the menu paints past the viewport, and this one pages.
+    // The boot turn that paints the menu: nine header lines, the mid-turn clear the
+    // window move lands, then the box. It overflows, so it pages — and it must park
+    // with the first of its own rows on top.
     let p = park(&mut s, &mut state, area, &[""]);
     assert_nothing_scrolled_past(&p, true, &format!("{file} [release 322, serial 890706] boot menu"));
+
+    // The turn after it settles without paging: the menu selection reprints into
+    // the same small box and adds nothing the viewport cannot hold.
+    let next = park(&mut s, &mut state, area, &[""]);
+    assert!(!next.active, "the turn after the menu fits its box — nothing to page");
 }
 
 /// A turn whose output CONTINUES the row the game left the cursor on — the report,

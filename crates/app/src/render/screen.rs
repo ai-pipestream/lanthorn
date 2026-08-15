@@ -733,6 +733,33 @@ fn render_node(
                             })
                     }))
             });
+            // SQ-0886: …but the cell path DRAWS NO ART, so it is the wrong
+            // destination for a takeover screen the game framed with artwork.
+            // Shogun's boot menu is exactly that: its credits and its three items
+            // sit on the machine's own ground between two ornate side panels, and
+            // routing the screen to cells discarded both — no panels anywhere, and
+            // the story window's page flooded across the pane (measured on
+            // `James Clavell's Shogun.adf` release 295 and on the Blorb release 322
+            // alike: `#000000` across 761 of 800 columns where the Amiga's colour 12
+            // ground belongs). Not the RING either — the ring cannot lay this screen
+            // out, which is what SQ-0484 found — but the COMPOSITE, which draws the
+            // whole thing in native pixels and already gets this frame right in
+            // `v6_render = "raster"`. It is the same rule the no-story takeover path
+            // below already makes for a painted ground (SQ-0711): pixels only the
+            // composite can show mean the composite draws this screen, and it draws
+            // the runs over them anyway.
+            //
+            // ART, specifically — a chrome GRAPHICS window with opaque pixels in it.
+            // An `erase_window` fill is not art: the cell path draws those itself
+            // (`draw_erase_fills`), which is what keeps advent's boot popup — a
+            // painted panel over a story with no artwork in the game at all — on the
+            // coherent all-text path SQ-0484 put it on.
+            let menu_over_art = has_menu
+                && hybrid
+                && items.iter().any(|pw| {
+                    matches!(&pw.node, WinNode::Graphics(g)
+                        if g.win != 0 && g.canvas.pixels().any(|p| p[3] >= 128))
+                });
             // MODAL overlays only (SQ-0587). The fall-through exists because image
             // placements draw above terminal cells in classic protocols, so a
             // menu/dialog over the story pane would be invisible under the v6 image.
@@ -742,7 +769,7 @@ fn render_node(
             // move — which re-tidies the map and starts its animation — dropped the
             // whole v6 pixel path for the duration, and Arthur's header art vanished
             // with it.
-            if !state.any_modal_overlay_open() && !frameless && !(has_menu && hybrid) {
+            if !state.any_modal_overlay_open() && !frameless && !(has_menu && hybrid && !menu_over_art) {
             if let Some(picker) = state.game_picker.as_ref() {
                 let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
@@ -758,7 +785,16 @@ fn render_node(
                 // bands. Needs a story window; without one — or with a full-screen
                 // picture takeover, which has no ring to draw (SQ-0570) — fall
                 // through to raster.
-                if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
+                // SQ-0886: a menu takeover over the game's own artwork reaches this
+                // branch precisely so it can take the composite below. The RING is not
+                // an option for it — that is what SQ-0484 found, and it is still true:
+                // driven on Shogun's boot menu the ring rasterises the frozen banner
+                // into a full-width art band (the very thing SQ-0750 forbids) and lays
+                // the menu out one CHARACTER per rounded cell, because the game prints
+                // it glyph by glyph through a 1px caret window ("SI(RT th e ga me" at a
+                // 100x40 pane). The composite draws every one of those pixels at the
+                // game's own coordinates and is measurably right on this frame.
+                if state.config.v6_render == crate::config::V6RenderMode::Hybrid && !menu_over_art {
                     if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, layout.story_gfx, native)) {
                         // The op log's frame boundary (SQ-0590) opens HERE, not at
                         // the band draw further down: the two calls below are the
@@ -2260,7 +2296,7 @@ fn render_node(
                                 "v6_render = frameless".to_string()
                             } else if state.game_picker.is_none() {
                                 "no image protocol".to_string()
-                            } else if has_menu && hybrid {
+                            } else if has_menu && hybrid && !menu_over_art {
                                 "painted menu takeover routed here".to_string()
                             } else {
                                 "no story window, or a full-screen picture takeover".to_string()
@@ -8450,6 +8486,12 @@ mod tests {
         // menu painted over it as ONE coherent all-text screen, matching the
         // frameless path — so all three items are terminal cells and the transcript
         // ("You may choose to:") is preserved.
+        //
+        // SQ-0886 narrowed that routing to the case it is right for, which is this
+        // one: a takeover screen with NO ARTWORK behind it. The chrome window here
+        // is therefore transparent — a game that publishes a graphics window and
+        // never draws in it, which is what advent.z6 is. When the game HAS painted
+        // art the cell path throws it away, and the sibling case below is that.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
         state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
@@ -8457,6 +8499,11 @@ mod tests {
         state.push_transcript("You may choose to:");
 
         let mut model = hybrid_v6_model();
+        if let WinNode::Layered(items) = &mut model.root {
+            if let WinNode::Graphics(g) = &mut items[0].node {
+                g.canvas = std::sync::Arc::new(image::RgbaImage::new(320, 200));
+            }
+        }
         // A chrome grid whose pixel runs sit DEEP (native rows 8/9/10, ≥
         // STATUS_BAND_ROWS) inside the story box (native y 39..199 → the 8×16 cell
         // rows land at (y-1)/16). Distinct rows, like Shogun's real 21/22/23.
@@ -8502,6 +8549,57 @@ mod tests {
         assert_eq!(row_text(6).trim(), "START the game", "row 6 is the START item, screen:\n{screen}");
         assert_eq!(row_text(7).trim(), "RESTORE a saved game", "row 7 is the RESTORE item");
         assert_eq!(row_text(8).trim(), "QUIT the game", "row 8 is the QUIT item");
+    }
+
+    #[test]
+    fn hybrid_menu_screen_over_artwork_takes_the_composite() {
+        // SQ-0886: the same takeover screen, with the game's ARTWORK behind it —
+        // Shogun's boot menu, whose credits and menu sit on the machine's own ground
+        // between two ornate side panels. The cell path above draws no art at all, so
+        // routing this screen there lost every pixel the game had drawn: no panels
+        // anywhere and the story window's page flooded across the pane (`#000000` over
+        // 761 of 800 columns, measured on the Amiga floppy AND the IBM Blorb). It goes
+        // to the composite instead, which draws all of it at the game's own
+        // coordinates — the frame `v6_render = "raster"` already shipped.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = crate::config::V6RenderMode::Hybrid;
+        state.push_transcript("You may choose to:");
+
+        // `hybrid_v6_model` ships an OPAQUE chrome canvas, which is the whole
+        // difference from the case above.
+        let mut model = hybrid_v6_model();
+        let menu = PositionedWindow {
+            x: 12, y: 8, w: 1, h: 3, x_px: 100, y_px: 129, w_px: 1, h_px: 48,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(crate::engine::GridWindow {
+                fill: None,
+                cols: 1, rows: 3, cells: vec![], active_rows: 3, cursor: (1, 1),
+                cursor_active: false, border: crate::engine::BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false,
+                px_texts: vec![
+                    crate::engine::PxText { y: 129, x: 101, text: "START the game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText { y: 145, x: 101, text: "RESTORE a saved game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText { y: 161, x: 101, text: "QUIT the game".into(), style: 0, fg: 0, bg: 0 },
+                ],
+            }),
+        };
+        if let WinNode::Layered(items) = &mut model.root {
+            items.push(menu);
+        }
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let _ = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+        let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+        assert_eq!(
+            path, "raster",
+            "a menu takeover with the game's artwork behind it takes the composite — the cell path \
+             draws no art, so it can only render this screen without the game's frame"
+        );
     }
 
     /// SQ-0515: a chrome grid window carrying `px_texts`, for the flood discriminator.

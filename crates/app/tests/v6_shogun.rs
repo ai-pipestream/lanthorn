@@ -12,6 +12,8 @@
 mod v6_shogun_declared_columns;
 #[path = "suites/v6_shogun_gameplay.rs"]
 mod v6_shogun_gameplay;
+#[path = "suites/v6_shogun_menu_ground.rs"]
+mod v6_shogun_menu_ground;
 #[path = "suites/v6_shogun_native_archive.rs"]
 mod v6_shogun_native_archive;
 #[path = "suites/v6_shogun_prompt_style.rs"]

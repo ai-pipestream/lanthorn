@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use app::engine::Engine;
+use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
@@ -329,14 +329,23 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
 /// (the story buffer) open AND paints its three items as DEEP chrome runs (native
 /// rows 21–23). The old ring+viewport hybrid path split that menu across the raster
 /// pixel ring (items mapping above the terminal viewport) and the terminal overlay
-/// (items inside it) — the "first option raster, rest terminal text" defect. It must
-/// now render as one coherent all-text screen (like frameless): all three items are
-/// terminal cells on distinct rows, and the SELECTED item's reverse-video bar is
-/// solid across the inter-word gaps (the game paints those gaps as separate reverse
-/// space runs that were being dropped — the "moth-eaten" selection defect).
+/// (items inside it) — the "first option raster, rest terminal text" defect.
+///
+/// SQ-0886 RETARGETED THIS, and the requirement it was written for is unchanged:
+/// the screen is ONE coherent thing, never half ring and half overlay. What moved
+/// is which coherent thing. Routing it to the all-text cell path threw away every
+/// pixel Shogun had drawn — its two ornate side panels and the machine's ground —
+/// because that path draws no art at all, and the player got a full-width black
+/// block where the frame belongs. So this frame takes the COMPOSITE, which draws
+/// the artwork, the credits and the menu together at the game's own coordinates.
+///
+/// The coherent ALL-TEXT screen is still required and still asserted — of
+/// `frameless`, in the case directly above, which is the mode whose whole promise
+/// is text. And the solid selection bar is asserted here where it now lives: as
+/// the highlight block the composite paints behind the selected item (SQ-0487),
+/// gaps between the words included.
 #[test]
-fn shogun_hybrid_boot_menu_is_coherent_text_with_solid_reverse_bar() {
-    use ratatui::style::Modifier;
+fn shogun_hybrid_boot_menu_takes_the_composite_with_a_solid_selection_bar() {
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -362,37 +371,43 @@ fn shogun_hybrid_boot_menu_is_coherent_text_with_solid_reverse_bar() {
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
 
-    let row_text = |y: u16| -> String {
-        (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect()
-    };
-    // The three items — as terminal cells, NOT a raster stamp (the whole menu is one
-    // coherent all-text screen) — on the packed rows the story box carried them to
-    // (native 21–23 → pane 18–20; see the frameless case above).
-    let r0 = row_text(18);
-    let r1 = row_text(19);
-    let r2 = row_text(20);
-    assert!(r0.contains("START the game"), "row 18 shows the START item: {r0:?}");
-    assert!(r1.contains("RESTORE a saved game"), "row 19 shows the RESTORE item: {r1:?}");
-    assert!(r2.contains("QUIT the game"), "row 20 shows the QUIT item: {r2:?}");
-
-    // The selected item (START, reverse-video) is a SOLID reverse bar: every cell
-    // from the first glyph to the last — INCLUDING the gap cells between "START",
-    // "the", and "game" — carries the REVERSED modifier. The old per-run stamp left
-    // the gaps unreversed (moth-eaten).
-    let start = r0.find("START").unwrap() as u16;
-    let end = (r0.rfind("game").unwrap() + "game".len()) as u16; // exclusive
-    for x in start..end {
-        assert!(
-            buf.cell((x, 18)).unwrap().modifier.contains(Modifier::REVERSED),
-            "START selection bar cell {x} is reversed (incl. inter-word gaps): {r0:?}"
-        );
-    }
-    // An UNSELECTED item (RESTORE, normal video) is NOT reversed.
-    let restore = r1.find("RESTORE").unwrap() as u16;
-    assert!(
-        !buf.cell((restore, 19)).unwrap().modifier.contains(Modifier::REVERSED),
-        "RESTORE (unselected) is not reverse-video"
+    // One coherent screen, and it is the composite — never the split the report
+    // named, and never the art-less cell path SQ-0886 measured.
+    let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+    assert_eq!(
+        path, "raster",
+        "the boot menu draws over Shogun's own side panels, so hybrid takes the composite: the cell \
+         path draws no art and left the player a black block where the frame belongs (SQ-0886)"
     );
+
+    // …and the SELECTED item carries a solid highlight bar (SQ-0487). Shogun prints
+    // its menu one glyph at a time through a 1px caret window, and the spaces
+    // between the words are their own reversed runs — so the bar is only solid if
+    // every one of them paints. Read off the composite's own canvas: every COLUMN of
+    // the item's own 16px cell row, across all fourteen characters of "START the
+    // game" from native x 234, must carry the highlight SOMEWHERE down its height.
+    // Column-wise rather than row-wise because the bar reverses the pair — its ink
+    // is the ground colour — so a glyph column and a dropped gap column are the same
+    // colour on any single row, and only the column tells them apart.
+    let items = match &model.root {
+        WinNode::Layered(items) => items,
+        _ => panic!("v6 builds a Layered root"),
+    };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    let ground = canvas.get_pixel(180, 337).0; // the same row, left of the menu
+    let lit = |x: u32, top: u32| (top..top + 16).any(|y| canvas.get_pixel(x, y).0 != ground);
+    let gaps: Vec<u32> = (234..234 + 14 * 8).filter(|&x| !lit(x, 336)).collect();
+    assert!(
+        gaps.is_empty(),
+        "the selection bar is solid across the whole item, inter-word gaps included — these \
+         columns are bare ground {ground:?} down the item's whole height, which is the \
+         moth-eaten defect: {gaps:?}"
+    );
+    // The UNSELECTED item below it is not barred: the ground shows between its words.
+    let bare = (234..234 + 20 * 8).filter(|&x| !lit(x, 352)).count();
+    assert!(bare > 0, "RESTORE is not selected, so its row carries no highlight bar");
 }
 
 /// SQ-0467 follow-up: the frameless status band fills its ENTIRE row(s) with the

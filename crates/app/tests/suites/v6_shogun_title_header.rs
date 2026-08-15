@@ -117,12 +117,21 @@ fn apply(state: &mut app::state::AppState, r: &TurnResult) {
 }
 
 #[allow(deprecated)]
+/// The state these cases render through.
+///
+/// FRAMELESS, since SQ-0886. What is being asserted is that the header SURVIVES the
+/// split — a property of the screen model, read off a pane — and it needs a path
+/// that draws the game's text as terminal rows to read it off. Hybrid was that path
+/// for this frame until SQ-0886 found that the same routing threw away Shogun's side
+/// panels and its ground, and moved the frame to the composite; the composite's own
+/// arm on this header is `v6_prose_freeze::shogun_frozen_header_stays_centred_in_
+/// every_render_path`, which measures the same nine lines as ink.
 fn fresh_state(honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
     state.game_picker =
         Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
-    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.config.v6_render = app::config::V6RenderMode::Frameless;
     state.config.honor_game_colours = honor;
     state
 }

@@ -1011,6 +1011,17 @@ session-only switch that never touches your saved config:
   because those pixels *are* the screen and the composite draws the labels over
   them anyway. So hybrid shows scopa's table exactly as raster does, and Zork
   Zero's InvisiClues stays the readable full-pane text screen it has always been.
+  **A takeover screen that keeps its story window follows the same rule.** A game
+  can print a menu *inside* the box its story window occupies — Shogun's boot
+  menu, advent's help popup — and hybrid presents those whole too, because the ring
+  can only split them (its viewport covers the very rows the menu is painted on).
+  Whether "whole" means text or pixels is decided the same way as above: advent
+  has no artwork in it anywhere, so its popup is the coherent all-text page it has
+  always been, while Shogun's boot menu sits on the machine's own ground between
+  two panels of gold filigree and goes to the composite. Sending it to the text
+  page instead lost every one of those pixels — the panels gone and a full-width
+  black block where the frame belongs, on the Amiga floppy, the IBM Blorb and the
+  Apple ProDOS set alike.
 - **More than one scrolling text window.** A v6 game may run several flowing-prose
   windows at once — advent.z6's `style` opens one across the top of the screen and
   keeps playing in another below it. Both are wrap+scroll, so both stream through
@@ -1747,9 +1758,10 @@ quietly stops scrolling.
 **And the transcript restarts in the box the game moved the window to.** Freezing
 the old half was only half the job: the live half has to land somewhere, and
 somewhere is the story window's own box. In the pixel composite that was always
-true — the transcript is drawn inside the window's rectangle. The cell
-presentations (`frameless`, and `hybrid` on a menu screen) build the pane by
-relation instead: the chrome above the story packs against your pane's top edge,
+true — the transcript is drawn inside the window's rectangle, and `hybrid` takes
+that same composite on a menu screen the game has framed with artwork. The cell
+presentations (`frameless`, and `hybrid` on an art-less menu screen) build the pane
+by relation instead: the chrome above the story packs against your pane's top edge,
 the chrome below packs against its bottom, and the transcript fills between. That
 packing used to start the transcript flush under the band, which is right for
 every game that puts its story window directly under its status bar — and wrong
@@ -1774,8 +1786,9 @@ keeps Shogun's four-row box showing the one line the game printed into it instea
 of redrawing the tail of the banner it had just frozen up top.
 
 **Frozen prose keeps the columns it was given.** `raster` composites the frozen
-layer as pixels, so it lands exactly where the game put it. `hybrid` and
-`frameless` have no pixels to composite there: text sitting above the story window
+layer as pixels, so it lands exactly where the game put it — and so does `hybrid`
+wherever it takes the composite, which on Shogun's boot menu it now does. Where a
+cell path draws the screen there are no pixels to composite: text above the story window
 is drawn by the anchored status-band renderer, which stretches a game's 40- or
 80-column bar across whatever width your terminal is by sorting each run into a
 left, centre or right field. It decides by where the run *starts*, which is how a
