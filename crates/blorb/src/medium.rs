@@ -790,6 +790,57 @@ impl From<(String, InfocomPics)> for DiskArt {
     }
 }
 
+/// The machine a file's **Finder metadata** says it was made for, or `None`
+/// when the metadata says nothing this crate recognises (SQ-0876, SQ-0871).
+///
+/// One copy, called by every reader whose format carries a Finder type and
+/// creator — [`crate::hfs`] reads them out of the catalog record, and
+/// [`crate::iso9660`] out of an Apple `AA` System Use entry. The two formats
+/// spell the metadata differently and mean exactly the same thing by it, so the
+/// RULE lives here with the rest of the machine vocabulary rather than twice in
+/// the readers.
+///
+/// **Measured on the corpus, and stated as narrowly as it was measured.** Three
+/// compilation discs carry both machines' builds side by side:
+///
+/// | disc | Macintosh side | DOS side |
+/// |---|---|---|
+/// | Masterpieces (HFS) | `IN**` + `APPL`/`INdf` | `mdos` |
+/// | Lost Treasures 1 (ISO) | `IN**` + `APPL`/`INdf` | `mdos`, and blank |
+/// | Lost Treasures 2 (ISO) | `IN**` + `APPL`/`INdf` | `PCXT`, `????` |
+///
+/// So the **Macintosh** test is the one that generalises: Infocom stamped its
+/// own creator on its own Macintosh releases, uniformly, and no DOS file on any
+/// of the three wears one. The DOS test does not generalise — `mdos` covers
+/// Masterpieces and only part of Lost Treasures 1, and disc 2 uses a creator of
+/// its authoring tool's choosing — so it is a list of what was actually seen and
+/// will grow when a disc shows something new.
+///
+/// Both fail SAFE: an unrecognised pair is `None`, and the caller falls back to
+/// whatever the VOLUME implies, which is what every medium did before this
+/// existed.
+///
+/// It is a rule about the metadata, never about the bytes — what a file IS
+/// remains [`crate::adf::looks_like_story`]'s and
+/// [`crate::infocom_pics::InfocomPics::parse`]'s answer, asked separately.
+pub fn machine_from_finder(file_type: &[u8; 4], creator: &[u8; 4]) -> Option<DiskImage> {
+    /// Creators seen on DOS files sitting on a Macintosh-readable volume:
+    /// Apple's PC Exchange stamps `mdos` and `dosa` on an import, and Lost
+    /// Treasures II's authoring tool stamped `PCXT`.
+    const DOS_CREATORS: [&[u8; 4]; 3] = [b"mdos", b"dosa", b"PCXT"];
+    /// A Macintosh Infocom release is one of exactly two Finder types: the
+    /// game as a double-clickable application, or its data file.
+    const INFOCOM_TYPES: [&[u8; 4]; 2] = [b"APPL", b"INdf"];
+
+    if DOS_CREATORS.contains(&creator) {
+        return Some(DiskImage::Fat12Dos);
+    }
+    if creator.starts_with(b"IN") && INFOCOM_TYPES.contains(&file_type) {
+        return Some(DiskImage::Hfs);
+    }
+    None
+}
+
 /// What a volume can say about which artwork pairs with ONE story on it
 /// (SQ-0876).
 ///

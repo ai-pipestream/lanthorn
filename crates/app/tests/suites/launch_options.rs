@@ -714,16 +714,25 @@ fn picking_the_monochrome_row_loads_the_monochrome_art() {
         [("Pic.data", true, (480u16, 300u16)), ("CPic.data", false, (320, 200))]
     {
         let mut st = base.clone();
-        let i = st
-            .candidates
-            .iter()
-            .position(|c| c.filename == filename)
-            .unwrap_or_else(|| panic!("{filename} must be a candidate"));
-        st.art = i + 1;
+        // The colour archive is what row 0 already resolves to, so it is not
+        // listed a second time (SQ-0876) and "pick it" means accepting the
+        // automatic row — which writes no `pictures` key and draws the very
+        // same file. The monochrome one is a row of its own.
+        let is_default =
+            base.default_art.as_ref().is_some_and(|d| d.filename.eq_ignore_ascii_case(filename));
+        st.art = match st.candidates.iter().position(|c| c.filename == filename) {
+            Some(i) => i + 1,
+            None => {
+                assert!(is_default, "{filename} is neither a row nor the automatic choice");
+                0
+            }
+        };
 
-        // What the dialog hands the launch: one override, one bare name.
+        // What the dialog hands the launch: one override, one bare name — and
+        // nothing at all when the automatic row is the one accepted.
         let ov = st.overrides();
-        assert_eq!(ov.pictures.as_deref(), Some(filename));
+        let want = (!is_default).then_some(filename);
+        assert_eq!(ov.pictures.as_deref(), want);
         assert_eq!(ov.interpreter_number, None, "an untouched interpreter row overrides nothing");
 
         // …and what that name resolves to, off the medium.
@@ -732,12 +741,14 @@ fn picking_the_monochrome_row_loads_the_monochrome_art() {
             &empty,
             ov.pictures.as_deref(),
         );
-        assert!(
-            matches!(over, app::graphics::PictureOverride::Loaded { .. }),
-            "{filename} was offered and did not load: {over:?}"
-        );
-        assert_eq!(over.warning(), None, "{filename}: a row that was offered must load quietly");
-        assert_eq!(over.std_window(), Some(want_space), "{filename}");
+        if !is_default {
+            assert!(
+                matches!(over, app::graphics::PictureOverride::Loaded { .. }),
+                "{filename} was offered and did not load: {over:?}"
+            );
+            assert_eq!(over.warning(), None, "{filename}: a row offered must load quietly");
+            assert_eq!(over.std_window(), Some(want_space), "{filename}");
+        }
         let src = app::graphics::PictSource::resolve_with_override(&image, over, None);
         assert_eq!(src.is_monochrome(), want_mono, "{filename}: the art actually drawn");
         assert_eq!(src.native_std_window(), Some(want_space), "{filename}");
@@ -776,8 +787,12 @@ fn choosing_a_macintosh_archive_leaves_the_machine_a_macintosh() {
     assert_eq!(st.derived(), Some((3, InterpreterSource::DiskImage)));
 
     for filename in ["CPic.data", "Pic.data"] {
-        let i = st.candidates.iter().position(|c| c.filename == filename).expect("a candidate");
-        st.art = i + 1;
+        // `CPic.data` is the automatic choice and so is not listed twice
+        // (SQ-0876); accepting row 0 is how it is picked.
+        st.art = match st.candidates.iter().position(|c| c.filename == filename) {
+            Some(i) => i + 1,
+            None => 0,
+        };
         assert_eq!(
             st.derived(),
             Some((3, InterpreterSource::DiskImage)),
@@ -927,8 +942,16 @@ fn a_single_image_release_says_from_game_disk_and_names_its_default() {
         // No candidate off this medium carries a disk number, because the
         // release is one disk — and each says the phrase that means exactly
         // that, rather than the "on disk" that meant nothing in particular.
+        // The list holds the volume's archives OTHER than the one row 0 already
+        // names, so the Amiga floppy — which carries exactly one — lists none
+        // and the Macintosh disk lists its monochrome `Pic.data` beside the
+        // colour default. Both are correct; what must never happen is an
+        // archive being offered twice.
         let on_medium: Vec<_> = st.candidates.iter().filter(|c| c.on_medium).collect();
-        assert!(!on_medium.is_empty(), "{name}: the volume's archives are offered");
+        assert!(
+            on_medium.iter().all(|c| !c.filename.eq_ignore_ascii_case(default_archive)),
+            "{name}: the automatic row already names {default_archive}"
+        );
         for c in &on_medium {
             assert_eq!(c.disk_number, None, "{name}/{}: one platter, no number", c.filename);
             assert_eq!(

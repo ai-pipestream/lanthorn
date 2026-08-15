@@ -176,11 +176,6 @@ type ExtentRecord = [Extent; 3];
 /// Infocom's conventional names on a release disk. Never a test — only a
 /// tiebreak when content identification finds more than one candidate. The Mac
 /// ships both `Pic.data` and `CPic.data`, so both count as conventional.
-/// The Finder creators Apple's PC Exchange stamps on a file imported from a DOS
-/// volume. See [`HfsEntry::is_from_dos`] for how they are used and what corpus
-/// measurement stands behind them.
-const DOS_IMPORT_CREATORS: [&[u8; 4]; 2] = [b"mdos", b"dosa"];
-
 const CONVENTIONAL_STORY: &str = "story.data";
 const CONVENTIONAL_PICTURES: [&str; 2] = ["pic.data", "cpic.data"];
 
@@ -222,32 +217,20 @@ pub struct HfsEntry {
 }
 
 impl HfsEntry {
-    /// Whether the Finder metadata says this file was copied in from a DOS
-    /// volume rather than authored on the Macintosh — so a HYBRID disc's two
-    /// halves can be told apart (SQ-0876).
+    /// The machine this file's Finder metadata names, or `None` when it names
+    /// none this crate knows (SQ-0876).
     ///
-    /// **Measured on the corpus, not read out of a specification**, and scoped
-    /// carefully to what was measured.
-    ///
-    /// Apple's PC Exchange stamps an imported file with `mdos` (and, on this
-    /// disc, `dosa`). Over the Masterpieces CD's **stories and picture
-    /// archives** the split is total: all 50 DOS stories under `PC/` and all 16
-    /// of its `.CG1`/`.EG1`/`.EG2`/`.MG1` archives carry `mdos`/`TEXT`, and not
-    /// one of the 33 Macintosh stories does — those carry Infocom's own creators
-    /// (`INZ1`, `INL1`, `IN0Z`…) with type `APPL` or `INdf`.
-    ///
-    /// It is **not** total over the whole catalogue, and saying so is the point:
-    /// the `PC/` tree also holds 413 files stamped `hscd`, three `ttxt`, and two
-    /// `dosa`, while `ttxt` appears on the Macintosh side too. Those are
-    /// documents, drivers and installers — never a story or an archive — so the
-    /// test is exact for the files it is asked about and would be wrong as a
-    /// general claim about which half of the disc a file sits on.
-    ///
-    /// It FAILS SAFE either way: an unrecognised creator is not claimed for DOS,
-    /// so the volume's own machine stands, and a disc that does not stamp its
-    /// imports behaves exactly as it did before this existed.
+    /// The RULE is [`crate::medium::machine_from_finder`]'s and is documented
+    /// there, in one copy, because `iso9660` asks exactly the same question of
+    /// the same two fields carried in a different place.
+    pub fn machine(&self) -> Option<crate::medium::DiskImage> {
+        crate::medium::machine_from_finder(&self.file_type, &self.creator)
+    }
+
+    /// Whether this file was copied in from a DOS volume rather than authored
+    /// on the Macintosh — so a HYBRID disc's two halves can be told apart.
     pub fn is_from_dos(&self) -> bool {
-        DOS_IMPORT_CREATORS.contains(&&self.creator)
+        self.machine() == Some(crate::medium::DiskImage::Fat12Dos)
     }
 
     /// How this file is named to the outside world: `Folder/Sub/NAME` inside a
@@ -933,7 +916,7 @@ pub(crate) mod tests {
         /// Write `data` as a file that Apple's PC Exchange imported from a DOS
         /// volume — the other half of a hybrid disc.
         fn add_dos_file_in(&mut self, parent: u32, name: &str, data: &[u8], pieces: usize) {
-            self.add_entry(parent, name, b"TEXT", DOS_IMPORT_CREATORS[0], data, pieces);
+            self.add_entry(parent, name, b"TEXT", b"mdos", data, pieces);
         }
 
         /// Split into `pieces` extents. More than three spills into the extents

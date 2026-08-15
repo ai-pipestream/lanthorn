@@ -779,6 +779,28 @@ pub struct LaunchOptionsState {
     pub(crate) inherited_pictures: Option<String>,
 }
 
+/// Drop the candidate the "Automatic" row already names, so one archive is not
+/// offered twice.
+///
+/// Row 0 resolves to a specific archive and SAYS which (SQ-0865), so listing
+/// that same archive again below it is one choice wearing two rows. It was easy
+/// to miss while a compilation offered sixteen; scoping the list to one game's
+/// folder left Journey with exactly `CPIC.DATA` and `PIC.DATA` and the duplicate
+/// became half the list.
+///
+/// Dropping it costs nothing that can be reached another way: picking
+/// "Automatic" draws the very archive the dropped row would have, and because
+/// `baseline_art` is derived from the SAME filtered list, a sidecar that happens
+/// to name the default resolves to row 0 with no change recorded — so no
+/// `pictures` key is written and none is cleared.
+fn without_the_default(
+    candidates: Vec<ArtCandidate>,
+    default_art: Option<&DefaultArt>,
+) -> Vec<ArtCandidate> {
+    let Some(default) = default_art else { return candidates };
+    candidates.into_iter().filter(|c| !c.filename.eq_ignore_ascii_case(&default.filename)).collect()
+}
+
 /// The folder part of a name the medium spells — everything before the last
 /// `/`, and `""` at the volume root.
 ///
@@ -818,7 +840,9 @@ impl LaunchOptionsState {
         z_version: Option<u8>,
         disk_image: Option<crate::hints::DiskImage>,
     ) -> LaunchOptionsState {
-        let candidates = discover_art_candidates(story_path, None);
+        let default_art = resolved_default_art(story_path, None);
+        let candidates =
+            without_the_default(discover_art_candidates(story_path, None), default_art.as_ref());
         // A sidecar naming an archive that is not in the list (an absolute path,
         // or a file that no longer parses) still deserves to be the baseline —
         // "inherit" is what it is, and the dialog must not silently re-point the
@@ -831,10 +855,11 @@ impl LaunchOptionsState {
             story_path: story_path.to_path_buf(),
             candidates,
             inherited_pictures: inherited_pictures.map(str::to_string),
-            // `None` here, re-resolved by `on_disk_entry`: which story on the
-            // medium is bound after construction, and on a compilation that is
-            // what decides which archive is the default (SQ-0876).
-            default_art: resolved_default_art(story_path, None),
+            // Resolved with no entry here and re-resolved by `on_disk_entry`:
+            // which story on the medium is bound after construction, and on a
+            // compilation that is what decides which archive is the default
+            // (SQ-0876).
+            default_art,
             art,
             interpreter: inherited_interpreter,
             persist: false,
@@ -863,7 +888,10 @@ impl LaunchOptionsState {
             self.default_art = resolved_default_art(&self.story_path, entry);
             // …and the LIST too, not only the default row: a compilation offers
             // one game's archives, not the whole platter's (SQ-0876).
-            self.candidates = discover_art_candidates(&self.story_path, entry);
+            self.candidates = without_the_default(
+                discover_art_candidates(&self.story_path, entry),
+                self.default_art.as_ref(),
+            );
             self.art = self
                 .inherited_pictures
                 .as_deref()

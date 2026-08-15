@@ -230,7 +230,12 @@ pub fn draw_launch_options(
     if last < art_total {
         line(buf, &format!("  ↓ {} more below", art_total - last), dim, &mut y);
     }
-    if st.candidates.is_empty() {
+    // Only when there is genuinely NOTHING — the automatic row counts. An
+    // empty candidate list no longer means no artwork: a release carrying one
+    // archive has it named by row 0 and nothing left to list beside it, and
+    // saying "none detected" directly under a row naming one would be a plain
+    // contradiction on screen.
+    if st.candidates.is_empty() && st.default_art.is_none() {
         line(buf, "  no picture archives detected for this story", dim, &mut y);
     }
     // Selecting "inherit" over a sidecar that names an archive cannot be
