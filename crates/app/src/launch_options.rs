@@ -255,7 +255,20 @@ pub fn discover_art_candidates(story_path: &Path, disk_entry: Option<&str>) -> V
     let story_stem = story_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let want_folder = disk_entry.map(folder_of);
     let mut out: Vec<ArtCandidate> = Vec::new();
-    for file in crate::assets::files(story_path) {
+    let all = crate::assets::files(story_path);
+    // The names on the MEDIUM, and the bytes of the ones that could be a
+    // continuation — everything needed to resolve a multi-part set without
+    // mounting the volume a second time. Only a file whose extension ends in
+    // 2..9 can be a continuation, so this holds two files on the largest disc
+    // in the corpus rather than the whole platter (SQ-0881).
+    let medium_names: Vec<&str> =
+        all.iter().filter(|f| f.is_on_medium()).map(|f| f.name.as_str()).collect();
+    let medium_parts: Vec<(&str, &[u8])> = all
+        .iter()
+        .filter(|f| f.is_on_medium() && part_of_name(&f.name).is_some_and(|n| n > 1))
+        .filter_map(|f| f.peek_bytes().map(|b| (f.name.as_str(), b)))
+        .collect();
+    for file in &all {
         // **The name filter is the LOOSE source's, and only its.** A file beside
         // the story proves nothing by sitting there — `stories/` holds Arthur,
         // Journey, Shogun and Zork Zero side by side — so it must carry this
@@ -287,7 +300,7 @@ pub fn discover_art_candidates(story_path: &Path, disk_entry: Option<&str>) -> V
         let path = file.path.clone();
         let on_medium = file.is_on_medium();
         let disk_number = file.disk_number;
-        let Some(raw) = file.into_bytes() else { continue };
+        let Some(raw) = file.clone().into_bytes() else { continue };
         // **Identified by parsing, for both sources alike** — the same
         // content-first rule `adf.rs` and `hfs.rs` apply file by file inside a
         // volume, and it has to be the same one here or a directory's files
@@ -302,7 +315,23 @@ pub fn discover_art_candidates(story_path: &Path, disk_entry: Option<&str>) -> V
         if !pics.entries().iter().any(|e| e.has_pixels()) {
             continue;
         }
-        if !on_medium {
+        if on_medium {
+            // **The same rule the loose arm has always had, on the medium**
+            // (SQ-0881). `ARTHUR.EG1` and `ARTHUR.EG2` are one two-part EGA set
+            // that the run merges, so offering them as two rows offers half a
+            // set as a choice — picking `.EG2` means silently losing the front
+            // half. Off the Masterpieces CD the dialog listed both.
+            //
+            // A continuation whose earlier part is on the same volume is not a
+            // row; the row that IS listed absorbs it and reports the whole
+            // set's picture count.
+            if crate::graphics::part_name(&filename, pics.part().saturating_sub(1))
+                .is_some_and(|prev| medium_names.iter().any(|n| n.eq_ignore_ascii_case(&prev)))
+            {
+                continue;
+            }
+            absorb_medium_continuations(&mut pics, &filename, &medium_parts);
+        } else {
             // A continuation whose earlier part is here is not a choice — it is
             // the back half of the row above it, and that row already carries it.
             if crate::graphics::part_path(&path, pics.part().saturating_sub(1))
@@ -799,6 +828,39 @@ fn without_the_default(
 ) -> Vec<ArtCandidate> {
     let Some(default) = default_art else { return candidates };
     candidates.into_iter().filter(|c| !c.filename.eq_ignore_ascii_case(&default.filename)).collect()
+}
+
+/// Which part of a multi-part set this name is, or `None` when it is not one.
+///
+/// The digit an Infocom PC archive ends its extension with — `.EG1` is part 1,
+/// `.EG2` part 2 — and nothing else here reads it, because a Macintosh or Amiga
+/// archive is never split.
+fn part_of_name(name: &str) -> Option<u8> {
+    let (_, ext) = name.rsplit_once('.')?;
+    let d = ext.as_bytes().last()?;
+    d.is_ascii_digit().then(|| d - b'0')
+}
+
+/// Merge the later parts of a multi-part archive that live on the same volume.
+///
+/// The medium's answer to [`crate::graphics::absorb_continuations`], which reads
+/// the host filesystem. A part that will not parse or will not append ends the
+/// merge where it is: this list is display-only and silent by design, and the
+/// loud version is `PictureOverride::warning` on the archive actually chosen.
+fn absorb_medium_continuations(
+    pics: &mut InfocomPics,
+    name: &str,
+    parts: &[(&str, &[u8])],
+) {
+    while let Some(next) = crate::graphics::part_name(name, pics.next_part()) {
+        let Some((_, raw)) = parts.iter().find(|(n, _)| n.eq_ignore_ascii_case(&next)) else {
+            return; // no such part: the set ends here, as most do.
+        };
+        let Ok(part) = InfocomPics::parse(raw.to_vec()) else { return };
+        if pics.append_part(part).is_err() {
+            return;
+        }
+    }
 }
 
 /// The folder part of a name the medium spells — everything before the last

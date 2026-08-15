@@ -145,6 +145,17 @@ impl AssetFile {
         self.origin == AssetOrigin::OnTheMedium
     }
 
+    /// The bytes a MEDIUM file already has in hand, without consuming the entry
+    /// and without touching the host filesystem — `None` for a loose file,
+    /// whose bytes are deliberately not read until someone commits to it.
+    ///
+    /// For a caller that needs to look at one file while deciding about
+    /// another: the continuation parts of a multi-part archive are on the same
+    /// volume, and resolving them must not mean mounting it twice.
+    pub fn peek_bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+
     /// The file's bytes, read now if they were not read already. `None` when a
     /// loose file will not read — a caller that cannot use it simply skips it.
     pub fn into_bytes(self) -> Option<Vec<u8>> {

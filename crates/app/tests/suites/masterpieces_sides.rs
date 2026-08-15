@@ -42,8 +42,10 @@ fn every_row_reports_the_machine_its_own_story_came_off() {
         return;
     };
     let base = std::env::temp_dir().join("bm-masterpieces-sides");
+    // 66, not 83: seventeen DOS builds are on the disc twice and fold
+    // (SQ-0878, pinned in full below).
     let rows = app::picker::resolve_entries(&disc, &base);
-    assert_eq!(rows.len(), 83, "one row per launchable story");
+    assert_eq!(rows.len(), 66, "one row per launchable build, per machine");
 
     let mut mac = 0;
     let mut dos = 0;
@@ -58,7 +60,65 @@ fn every_row_reports_the_machine_its_own_story_came_off() {
         };
         assert_eq!(row.meta.disk_image, Some(want), "{entry}");
     }
-    assert_eq!((mac, dos), (33, 50), "the disc's two halves");
+    assert_eq!((mac, dos), (33, 33), "the disc's two halves, each build once");
+}
+
+/// **One build per machine, once** (SQ-0878) — and neither of the two traps
+/// this disc sets is fallen into.
+///
+/// Seventeen DOS builds are on the disc twice, because the 1996 reissue put
+/// each game in its own folder and left the 1991 shared `PC/DATA/` directory
+/// in place. Those fold. What must NOT fold:
+///
+/// * *Cutthroats* is **byte-identical** across the two machines, all 112,640 of
+///   them, so comparing bytes would merge a Macintosh row with a DOS one.
+/// * Mac and DOS ship the **same build** of many games — Zork I is r88/840726
+///   on both sides — so comparing the IFID alone would do the same.
+/// * *Beyond Zork*'s only DOS copy is in `PC/DATA/`: the one game the
+///   reorganisation missed. Folding on the folder rather than the build would
+///   lose it outright.
+#[test]
+fn one_build_per_machine_survives_and_the_cross_machine_pairs_do_not_fold() {
+    let Some(disc) = disc() else {
+        eprintln!("SKIP: the Masterpieces CD is absent");
+        return;
+    };
+    let base = std::env::temp_dir().join("bm-masterpieces-dedupe");
+    let rows = app::picker::resolve_entries(&disc, &base);
+    assert_eq!(rows.len(), 66, "83 stories, seventeen of them the same build twice");
+
+    let entry = |row: &app::picker::StoryEntry| row.meta.disk_entry.clone().unwrap_or_default();
+    let names: Vec<String> = rows.iter().map(entry).collect();
+
+    // The vestigial 1991 directory is gone…
+    assert!(
+        !names.iter().any(|n| n == "PC/DATA/ZORK1.DAT"),
+        "the shared copy folds into the per-game one the disc's README runs"
+    );
+    assert!(names.iter().any(|n| n == "PC/ZORK1/DATA/ZORK1.DAT"), "…and that one survives");
+    // …except where it is the only copy there is.
+    assert!(
+        names.iter().any(|n| n == "PC/DATA/BEYONDZO.DAT"),
+        "Beyond Zork has no per-game folder; its only DOS copy must survive"
+    );
+
+    // Both machines' pressings survive, including the byte-identical pair.
+    for (mac, dos) in [
+        ("MAC/CUTTHROATS", "PC/CUTTHROA/CUTTHROA.DAT"),
+        ("MAC/ZORK I", "PC/ZORK1/DATA/ZORK1.DAT"),
+    ] {
+        assert!(names.iter().any(|n| n == mac), "{mac}");
+        assert!(names.iter().any(|n| n == dos), "{dos}");
+    }
+    // …and no row is a duplicate of another for the same machine.
+    let mut keys: Vec<(Option<&'static str>, String)> = rows
+        .iter()
+        .map(|r| (r.meta.disk_image.map(|d| d.label()), r.meta.ifid.clone()))
+        .collect();
+    let before = keys.len();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), before, "a build is offered once per machine");
 }
 
 /// The machine each half resolves to, through the profile the boot actually
@@ -134,14 +194,16 @@ fn the_options_panel_offers_only_this_storys_own_archives() {
     // The whole platter, which is what a person used to be shown for any of the
     // 83 stories: six Macintosh archives (three games, colour and monochrome
     // each) and ten DOS ones (Arthur and Journey at four renditions, Zork Zero
-    // at two).
+    // at two) — less the two `.EG2` continuations, which are the back halves of
+    // their `.EG1` rows rather than rows of their own.
     let unfiltered = app::launch_options::discover_art_candidates(&disc, None);
-    assert_eq!(unfiltered.len(), 16, "every archive on the disc");
+    assert_eq!(unfiltered.len(), 14, "every archive on the disc, EGA sets counted once");
 
     for (entry, want) in [
         ("MAC/JOURNEY FOLDER/STORY.DATA", vec!["CPIC.DATA", "PIC.DATA"]),
         ("PC/ZORK0/ZORK0.ZIP", vec!["ZORK0.CG1", "ZORK0.EG1"]),
-        ("PC/ARTHUR/ARTHUR.ZIP", vec!["ARTHUR.CG1", "ARTHUR.EG1", "ARTHUR.EG2", "ARTHUR.MG1"]),
+        // `.EG2` is the back half of `.EG1`, not a choice of its own (SQ-0881).
+        ("PC/ARTHUR/ARTHUR.ZIP", vec!["ARTHUR.CG1", "ARTHUR.EG1", "ARTHUR.MG1"]),
         // A text game shipped beside no artwork is offered none.
         ("MAC/ZORK I", vec![]),
     ] {

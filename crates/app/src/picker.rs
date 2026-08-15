@@ -888,10 +888,77 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
         }
         out.extend(resolve_entries(path, data_base));
     }
+    dedupe_within_a_volume(&mut out);
     dedupe_within_sets(&mut out, &sets);
     associate_hint_sidecars(&mut out);
     sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
     out
+}
+
+/// **One disc, not two layouts** (SQ-0878): drop a row whose build is already
+/// offered by an earlier story on the *same volume*, for the *same machine*.
+///
+/// A compilation can carry one build twice, and the Masterpieces CD does it
+/// seventeen times over. The reason is archaeological rather than accidental:
+/// *The Lost Treasures of Infocom* (1991) laid its DOS side out flat — one
+/// interpreter per game at `PC/`, one shared `PC/DATA/` holding every story —
+/// and the 1996 Masterpieces reissue reorganised into self-contained per-game
+/// folders (`PC/ZORK1/` with its own `.BAT`, `.COM`, `DATA/` and `SAVE/`) while
+/// leaving the old shared directory in place. The two `PC/DATA/` sets are
+/// identical across the two discs but for `HITCHHIK.DAT`, and Masterpieces'
+/// `PC/` root still holds the old `BZORK.EXE` and `NNANSI.COM`. So the
+/// duplicates are a 1991 layout fossilised inside a 1996 one.
+///
+/// **Keyed on the machine as well as the build, and that is the whole
+/// subtlety.** Byte-identity alone would be wrong in both directions here:
+///
+/// - Mac and DOS ship the SAME build of many games — Zork I is r88/840726 on
+///   both sides of the disc — so the IFID alone folds two machines' pressings
+///   into one row, which is the opposite of telling them apart.
+/// - `MAC/CUTTHROATS` and `PC/CUTTHROA/CUTTHROA.DAT` are byte-identical, all
+///   112,640 of them, so even comparing the bytes folds a cross-machine pair.
+///
+/// The machine is `blorb::medium::MountedDisk::image_for`'s answer, already on
+/// the row (SQ-0876). A medium that answers one machine for everything on it —
+/// which is every medium but a hybrid disc — folds purely on the build, as it
+/// should.
+///
+/// **The deepest path survives**, then disk order. The copies are byte-identical
+/// so nothing about the game changes either way; what changes is the row a
+/// person reads, and `PC/ZORK1/DATA/ZORK1.DAT` names its game where
+/// `PC/DATA/ZORK1.DAT` names a bucket. Disk order alone would not do it —
+/// `PC/DATA/` precedes `PC/ZORK1/` for the games whose folder sorts after it,
+/// so which copy came first is an accident of the alphabet.
+///
+/// Beyond Zork keeps its row regardless: it is the one game the reorganisation
+/// missed, and `PC/DATA/BEYONDZO.DAT` is the only copy of it on the disc.
+fn dedupe_within_a_volume(out: &mut Vec<StoryEntry>) {
+    type Key = (PathBuf, Option<crate::hints::DiskImage>, String);
+    let key = |e: &StoryEntry| -> Option<Key> {
+        // Only a row that came off a disk image can be a duplicate of another
+        // row off the same one; a loose story file has no volume to share.
+        e.meta.disk_entry.as_ref()?;
+        Some((e.path.clone(), e.meta.disk_image, e.meta.ifid.clone()))
+    };
+    let depth = |e: &StoryEntry| {
+        e.meta.disk_entry.as_deref().map_or(0, |n| n.matches('/').count())
+    };
+    let mut best: std::collections::HashMap<Key, usize> = std::collections::HashMap::new();
+    for (i, e) in out.iter().enumerate() {
+        let Some(k) = key(e) else { continue };
+        match best.get(&k) {
+            Some(&j) if depth(&out[j]) >= depth(e) => {}
+            _ => {
+                best.insert(k, i);
+            }
+        }
+    }
+    let mut i = 0;
+    out.retain(|e| {
+        let keep = key(e).is_none_or(|k| best.get(&k) == Some(&i));
+        i += 1;
+        keep
+    });
 }
 
 /// **One collection, not several disks** (SQ-0844): drop a row whose build is
@@ -1114,7 +1181,7 @@ pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
     if stories.len() < 2 {
         return resolve_entry(path, data_base).into_iter().collect();
     }
-    stories
+    let mut rows: Vec<StoryEntry> = stories
         .into_iter()
         .filter_map(|(story, image)| {
             let loaded = crate::hints::extract_story(story.bytes).ok()?;
@@ -1123,7 +1190,12 @@ pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
             // it (SQ-0876).
             entry_from_loaded(path, Some(&story.name), loaded, Some(image), data_base)
         })
-        .collect()
+        .collect();
+    // One build per machine, once — the same fold the directory scan applies,
+    // applied here because this door builds a volume's rows on its own
+    // (SQ-0878).
+    dedupe_within_a_volume(&mut rows);
+    rows
 }
 
 /// The body both doors share: build one row out of a story that is already

@@ -466,7 +466,11 @@ impl Hfs {
         cands.sort_by_key(|(path, pics)| {
             let lower = base_name(path).to_ascii_lowercase();
             let conventional = CONVENTIONAL_PICTURES.contains(&lower.as_str());
-            (pics.is_monochrome(), !conventional, std::cmp::Reverse(pics.entries().len()))
+            (
+                crate::medium::art_preference(pics),
+                !conventional,
+                std::cmp::Reverse(pics.entries().len()),
+            )
         });
         cands.into_iter().next()
     }
@@ -518,7 +522,11 @@ impl Hfs {
         cands.sort_by_key(|(p, pics)| {
             let lower = base_name(p).to_ascii_lowercase();
             let conventional = CONVENTIONAL_PICTURES.contains(&lower.as_str());
-            (pics.is_monochrome(), !conventional, std::cmp::Reverse(pics.entries().len()))
+            (
+                crate::medium::art_preference(pics),
+                !conventional,
+                std::cmp::Reverse(pics.entries().len()),
+            )
         });
         cands.into_iter().next()
     }

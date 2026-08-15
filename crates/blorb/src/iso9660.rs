@@ -301,7 +301,11 @@ impl Iso9660 {
     /// preference [`crate::hfs`] states and for the reason stated there.
     fn best_archive(mut cands: Vec<(String, InfocomPics)>) -> Option<(String, InfocomPics)> {
         cands.sort_by_key(|(path, pics)| {
-            (pics.is_monochrome(), std::cmp::Reverse(pics.entries().len()), path.clone())
+            (
+                crate::medium::art_preference(pics),
+                std::cmp::Reverse(pics.entries().len()),
+                path.clone(),
+            )
         });
         cands.into_iter().next()
     }
@@ -670,17 +674,13 @@ pub(crate) mod tests {
             ("MAC/SHOGUN FOLDER/STORY.DATA", Some("MAC/SHOGUN FOLDER/CPIC.DATA")),
             ("MAC/ARTHUR FOLDER/STORY.DATA", Some("MAC/ARTHUR FOLDER/CPIC.DATA")),
             ("MAC/JOURNEY FOLDER/STORY.DATA", Some("MAC/JOURNEY FOLDER/CPIC.DATA")),
-            // EGA, not MCGA — and deliberately not "fixed". `medium.rs`'s DOS
-            // row states that no video card is preferred here and that ranking
-            // MCGA against EGA would be "a rule with no example"; this disc is
-            // the first example, so the choice is a real decision and not one
-            // to make silently inside a tiebreak. What the existing rule does:
-            // both are colour, so picture count settles it, and Shogun's EG1
-            // holds 50 against MG1's 48. Arthur and Journey land on MCGA off
-            // the same disc because THEIR EGA is part 1 of a two-part set
-            // (125 + `ARTHUR.EG2`), so the count compares a part against a
-            // whole. Every rendition is listed in the launch dialog.
-            ("DOS/SHOGUN/SHOGUN.ZIP", Some("DOS/SHOGUN/SHOGUN.EG1")),
+            // MCGA, and this disc is why the rule exists (SQ-0880). All three
+            // of its DOS games press `.MG1` and `.EG1` into ONE folder, which
+            // is the example `medium.rs` said the MCGA-against-EGA question
+            // lacked. Ranking on picture count split them two ways — Shogun's
+            // EGA holds 50 against MCGA's 48, Arthur's 171 against 171 — so
+            // `art_preference` decides it outright and all three agree.
+            ("DOS/SHOGUN/SHOGUN.ZIP", Some("DOS/SHOGUN/SHOGUN.MG1")),
             ("DOS/ARTHUR/ARTHUR.ZIP", Some("DOS/ARTHUR/ARTHUR.MG1")),
             ("DOS/JOURNEY/JOURNEY.ZIP", Some("DOS/JOURNEY/JOURNEY.MG1")),
             // A text game shipped with no artwork gets none, not another's.

@@ -236,7 +236,7 @@ pub const COMMODORE_128_INTERPRETER_NUMBER: u8 = 7;
 /// image's own filesystem rather than by its filename. Callers use it to NAME
 /// the container (the picker's TYPE column) and, via
 /// [`DiskImage::interpreter_number`], to imply the machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiskImage {
     /// An Amiga AmigaDOS release floppy — conventionally `.adf` (SQ-0719).
     Adf,
@@ -928,6 +928,41 @@ pub fn machine_from_finder(file_type: &[u8; 4], creator: &[u8; 4]) -> Option<Dis
         return Some(DiskImage::Hfs);
     }
     None
+}
+
+/// How good a rendition is, as a sort key — lower is better (SQ-0880).
+///
+/// One copy, used by every reader that has to pick one archive out of several,
+/// so the Macintosh disc and the two CD-ROMs cannot rank them differently.
+///
+/// **Colour beats monochrome**, which is the rule this codebase already had:
+/// two colours is a 1989 hardware constraint rather than an authorial choice,
+/// and handing a terminal with sixteen million of them a two-colour Zork Zero
+/// would need a reason nothing on the disk gives.
+///
+/// **Then MCGA beats EGA**, which is new and is the first half of a question
+/// that was deliberately left open. [`DiskImage::Fat12Dos`]'s row said no video
+/// card is preferred, on the ground that no release put two colour renditions
+/// where one choice had to be made — "a rule with no example". *The Lost
+/// Treasures of Infocom II* is the example: `ARTHUR.MG1` and `ARTHUR.EG1` sit
+/// in ONE folder, for three games, so there is no disk order left to defer to.
+///
+/// The count cannot settle it and must not be asked to. Once an EGA set is
+/// merged with its continuation the two hold the same pictures — Arthur 171
+/// against 171, Journey 135 against 134, Shogun 50 against 48 — so ranking on
+/// count is ranking on noise, and it split those three games two ways.
+///
+/// MCGA wins on the same argument colour wins on: 320x200 in 256 colours
+/// against 640x200 in 16. The horizontal resolution EGA trades for it is the
+/// lesser thing, and the pictures are the same pictures either way.
+///
+/// It is a DEFAULT and only a default. Every rendition a release carries is
+/// listed in the launch dialog and reachable by name, which is where someone
+/// who wants the EGA plates says so.
+pub fn art_preference(pics: &InfocomPics) -> (bool, bool) {
+    let wide_pc =
+        pics.flavour() == crate::infocom_pics::Flavour::Pc && pics.picture_space_width() != 320;
+    (pics.is_monochrome(), wide_pc)
 }
 
 /// What a volume can say about which artwork pairs with ONE story on it

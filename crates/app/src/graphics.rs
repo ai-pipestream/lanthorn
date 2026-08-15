@@ -1085,6 +1085,25 @@ impl PictureOverride {
 /// [`blorb::infocom_pics::InfocomPics::append_part`], which refuses a file whose
 /// part byte, codec or picture ids say it is not the continuation. A stem rule
 /// has nothing to verify against; this one does.
+/// [`part_path`] over a NAME rather than a host path — what a file on a medium
+/// has, where `PC/ARTHUR/ARTHUR.EG1` is a name the volume spells and not
+/// anywhere on this machine (SQ-0881).
+///
+/// The two share their whole rule, because they are one rule: only the last
+/// character of the extension changes, and only `1..=9` is a part.
+pub fn part_name(name: &str, part: u8) -> Option<String> {
+    if !(1..=9).contains(&part) {
+        return None;
+    }
+    let (stem, ext) = name.rsplit_once('.')?;
+    let mut ext: Vec<u8> = ext.as_bytes().to_vec();
+    if !ext.last()?.is_ascii_digit() {
+        return None;
+    }
+    *ext.last_mut()? = b'0' + part;
+    Some(format!("{stem}.{}", String::from_utf8(ext).ok()?))
+}
+
 pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf> {
     // One digit is all a DOS 8.3 extension can hold, and it is all `bcpic.c`
     // writes; 0 is not a part number.
@@ -1129,10 +1148,12 @@ pub fn part_path(path: &std::path::Path, part: u8) -> Option<std::path::PathBuf>
 /// release is listed in the launch dialog and reachable by name, which is where
 /// a person who wants the CGA plates says so.
 ///
-/// Note what is NOT decided here — MCGA against EGA. Both are colour, both draw
-/// the same 503 pictures into the same geometry (`PictSource::art_scale`), and no
-/// release in the corpus puts the two on sibling volumes of one set, so ranking
-/// them would be a rule with no example. Disk order settles it if one ever does.
+/// **MCGA against EGA is decided now** (SQ-0880), and by `blorb::medium::art_preference`
+/// rather than here, so one volume's folders and a release's volumes rank alike.
+/// It was left open while no release put two colour renditions where a choice
+/// had to be made; *The Lost Treasures of Infocom II* puts `ARTHUR.MG1` and
+/// `ARTHUR.EG1` in one folder for three games. See that function for why the
+/// picture count cannot settle it and why 256 colours beats 640 pixels.
 ///
 /// # Why it also reports WHICH archive it took (SQ-0865)
 ///
@@ -1182,7 +1203,10 @@ pub fn release_art(
         .collect();
     // Stable, so disk order survives as the last tiebreak.
     found.sort_by_key(|a| {
-        (a.pictures.is_monochrome(), std::cmp::Reverse(a.pictures.entries().len()))
+        // The same preference `blorb` applies within one volume, so a sibling
+        // volume cannot be ranked by a different rule from a sibling folder
+        // (SQ-0880).
+        (blorb::medium::art_preference(&a.pictures), std::cmp::Reverse(a.pictures.entries().len()))
     });
     found.into_iter().next()
 }
