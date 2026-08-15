@@ -295,9 +295,32 @@ fn frame(session: &GameSession, pane: (u16, u16)) -> (Buffer, Vec<Band>, (u16, u
     (buf, bands, native)
 }
 
-/// The bands that are SIDE flanks: narrower than the pane.
+/// The bands that are SIDE flanks.
+///
+/// Selected by EDGE since SQ-0894, not by `cells.0 < pane_w`. The content-built
+/// ring narrows the top and bottom bands to the story viewport's columns on any
+/// row a flank took, so "narrower than the pane" now matches those too: on Arthur
+/// at 100x40 it collected his `90x13` top band as a fifth flank.
 fn flanks(bands: &[Band], pane_w: u16) -> Vec<Band> {
-    bands.iter().copied().filter(|b| b.cells.0 < pane_w).collect()
+    bands
+        .iter()
+        .copied()
+        .filter(|b| b.cells.0 < pane_w && (b.at.0 == 0 || b.at.0 + b.cells.0 >= pane_w))
+        .collect()
+}
+
+/// The lowest flank piece on each side — the ones that must reach the story's
+/// bottom and so are the ones that must EXTEND past the artwork.
+fn lowest_flank_per_side(fl: &[Band], pane_w: u16) -> Vec<Band> {
+    let side = |b: &Band| b.at.0 == 0;
+    let mut out = Vec::new();
+    for left in [true, false] {
+        if let Some(b) = fl.iter().filter(|b| side(b) == left).max_by_key(|b| b.at.1) {
+            out.push(*b);
+        }
+    }
+    let _ = pane_w;
+    out
 }
 
 // ── 1. Every side flank is tiled ─────────────────────────────────────────────
@@ -312,17 +335,38 @@ fn every_side_flank_is_tiled_and_none_is_stretched() {
         for &(w, h) in PANES {
             let (_, bands, _) = frame(&s, (w, h));
             let fl = flanks(&bands, w);
-            assert_eq!(
-                fl.len(),
-                2,
+            // SQ-0894: a flank is no longer one band per side. The content-built ring
+            // stops a flank at any row carrying full-width chrome TEXT, so Arthur's
+            // column is two pieces — rows 0..13 and 14..40, split at his status bar —
+            // and the split is at the bar rather than at the arbitrary edge of the
+            // story window it used to fall on. What must still hold is that BOTH
+            // sides are present.
+            let left = fl.iter().filter(|b| b.at.0 == 0).count();
+            let right = fl.iter().filter(|b| b.at.0 != 0).count();
+            assert!(
+                left > 0 && right > 0,
                 "{} [release {}] at {w}x{h}: expected a left and a right flank band, got {fl:?}",
                 sp.title,
                 sp.release
             );
+            // Never STRETCHED — that is the defect this case is named for, and it
+            // applies to every piece.
             for b in &fl {
                 assert!(
-                    b.tiled && !b.stretched,
-                    "{} [release {}] at {w}x{h}: flank {b:?} must be TILED, not stretched",
+                    !b.stretched,
+                    "{} [release {}] at {w}x{h}: flank {b:?} must never be stretched",
+                    sp.title,
+                    sp.release
+                );
+            }
+            // TILED is required of the piece that has to reach past the artwork. A
+            // piece wholly inside the art (Arthur's upper 5x13, native rows 0..187 of
+            // 400) needs no extension and is a plain crop, which is not the SQ-0698
+            // defect — that was the flank stopping SHORT, asserted directly below.
+            for b in lowest_flank_per_side(&fl, w) {
+                assert!(
+                    b.tiled,
+                    "{} [release {}] at {w}x{h}: the lowest flank {b:?} must be TILED to reach the story's bottom",
                     sp.title,
                     sp.release
                 );
@@ -360,7 +404,11 @@ fn a_flank_reaches_the_story_viewports_bottom() {
             let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
             let bands = parse_bands(&state.graphics_render.borrow().band_log);
             let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
-            for b in flanks(&bands, w) {
+            // SQ-0894: only the LOWEST piece per side has to reach the bottom — a
+            // flank may now be split by a full-width chrome text row (Arthur's status
+            // bar), and an upper piece legitimately stops at it.
+            let fl = flanks(&bands, w);
+            for b in lowest_flank_per_side(&fl, w) {
                 assert!(
                     b.at.1 + b.cells.1 >= vp.bottom(),
                     "{} [release {}] at {w}x{h}: the flank band {b:?} stops at row {} while the \

@@ -245,7 +245,16 @@ fn desired_heights(s: &GameSession, panes: &[(u16, u16)]) -> Vec<u32> {
                 }
             }
             assert!(rows > 0, "{w}x{h}: the render drew no tiled side flank");
-            assert!(top > 0, "{w}x{h}: the banner plate above the flanks was not drawn");
+            // `top` is the native row the flank's crop began at — the depth of the
+            // full-width plate that used to own the column above it. Since SQ-0894
+            // built the ring from content there is usually no such plate: the flank
+            // starts at the pane's own top row and crops from native row 0, so `top`
+            // is legitimately 0 and the whole column is in `rows`.
+            //
+            // The QUANTITY this helper yields is unchanged, which is why it is still
+            // the right one to assert on. Measured on Zork Zero at a 98x37 pane: the
+            // flank source was 91x456 under a plate 88 native rows deep (88 + 456),
+            // and is now 91x544 with no plate (0 + 544).
             top + rows
         })
         .collect()

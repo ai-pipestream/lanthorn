@@ -70,18 +70,47 @@ fn frame(session: &GameSession, state: &app::state::AppState) {
     app::render::screen::render_story_pane(&model, false, None, state, PANE, &mut buf);
 }
 
-/// The banner's bands: the ring's full-width TOP strip, which is the one this quest is
-/// about. Identified by sitting on the pane's first row; the side flanks start below it.
+/// The banner's bands: the ring's TOP strip, which is the one this quest is about.
+///
+/// Identified by sitting on the pane's first row AND not being pane-tall. The
+/// original selector was `y == PANE.y` alone, on the reasoning that "the side
+/// flanks start below it" — true while the ring was `pane − viewport`, and false
+/// since SQ-0894 built it from content: the flanks now begin on the pane's first
+/// row too, and own the corners the banner used to.
 fn banner(set: &std::collections::BTreeSet<GraphicsTarget>) -> Vec<(u16, u16, u16, u16)> {
     let mut v: Vec<_> = set
         .iter()
         .filter_map(|t| match *t {
-            GraphicsTarget::Band(x, y, w, h) if y == PANE.y => Some((x, y, w, h)),
+            GraphicsTarget::Band(x, y, w, h) if y == PANE.y && h < PANE.height => Some((x, y, w, h)),
             _ => None,
         })
         .collect();
     v.sort();
     v
+}
+
+/// The full-height side flanks — one object per side since SQ-0894.
+fn flank_bands(set: &std::collections::BTreeSet<GraphicsTarget>) -> Vec<(u16, u16, u16, u16)> {
+    let mut v: Vec<_> = set
+        .iter()
+        .filter_map(|t| match *t {
+            GraphicsTarget::Band(x, y, w, h) if h >= PANE.height => Some((x, y, w, h)),
+            _ => None,
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The columns the banner strip must span: exactly the gap the two flanks leave.
+///
+/// Stronger than the `== PANE.width` it replaces — it asserts the ring's pieces
+/// ABUT, which is the property the seam SQ-0894 removed used to violate.
+fn banner_span(set: &std::collections::BTreeSet<GraphicsTarget>) -> (u16, u16) {
+    let fl = flank_bands(set);
+    let left = fl.iter().find(|b| b.0 == PANE.x).map(|b| b.0 + b.2).unwrap_or(PANE.x);
+    let right = fl.iter().find(|b| b.0 > PANE.x).map(|b| b.0).unwrap_or(PANE.right());
+    (left, right)
 }
 
 /// Cells of banner pixels the frame actually SENT — the quest's whole quantity, in the
@@ -135,21 +164,23 @@ fn the_banner_tiles_partition_the_strip_exactly() {
         let tiles = banner(&state.graphics_render.borrow().placed_targets());
 
         assert!(tiles.len() > 1, "honor={honor}: the banner strip is tiled, not one image: {tiles:?}");
+        let (span_l, span_r) = banner_span(&state.graphics_render.borrow().placed_targets());
         assert_eq!(
             tiles.len(),
-            PANE.width.div_ceil(TILE_COLS) as usize,
+            (span_r - span_l).div_ceil(TILE_COLS) as usize,
             "honor={honor}: {}-cell strip in {TILE_COLS}-column tiles: {tiles:?}",
-            PANE.width
+            span_r - span_l
         );
         let (_, y0, _, h0) = tiles[0];
-        let mut x = PANE.x;
+        // The strip starts where the left flank ends, not at the pane edge (SQ-0894).
+        let mut x = span_l;
         for &(tx, ty, tw, th) in &tiles {
             assert_eq!(tx, x, "honor={honor}: no gap and no overlap at column {x}: {tiles:?}");
             assert!((1..=TILE_COLS).contains(&tw), "honor={honor}: tile width {tw} is in 1..={TILE_COLS}: {tiles:?}");
             assert_eq!((ty, th), (y0, h0), "honor={honor}: every tile keeps the strip's rows: {tiles:?}");
             x += tw;
         }
-        assert_eq!(x, PANE.right(), "honor={honor}: the tiles reach the strip's right edge: {tiles:?}");
+        assert_eq!(x, span_r, "honor={honor}: the tiles reach the strip's right edge: {tiles:?}");
     }
 }
 
@@ -207,6 +238,10 @@ fn a_one_tile_change_re_uploads_that_tile_and_reuses_the_rest() {
             gr.ops()
         );
         assert!(tiles.contains(&uploaded[0]), "honor={honor}: {uploaded:?} is one of the banner's tiles {tiles:?}");
+        // Only the BANNER's tiles are the subject; since SQ-0894 the reuse set also
+        // carries the two full-height flanks, which are one object per side and not
+        // tiles of this strip.
+        let reused: Vec<_> = reused.into_iter().filter(|b| tiles.contains(b)).collect();
         assert_eq!(
             reused.len(),
             tiles.len() - 1,
@@ -236,7 +271,9 @@ fn sixel_keeps_the_strip_whole() {
             "honor={honor}: sixel uploads the banner as ONE image — a palette per tile is \
              a first-frame regression: {tiles:?}"
         );
-        assert_eq!(tiles[0].2, PANE.width, "honor={honor}: and it spans the whole strip: {tiles:?}");
+        let (l, r) = banner_span(&state.graphics_render.borrow().placed_targets());
+        assert_eq!((tiles[0].0, tiles[0].0 + tiles[0].2), (l, r),
+            "honor={honor}: and it spans the whole strip, abutting both flanks: {tiles:?}");
     }
 }
 
@@ -250,6 +287,8 @@ fn halfblocks_keeps_the_strip_whole() {
         frame(&session, &state);
         let tiles = banner(&state.graphics_render.borrow().placed_targets());
         assert_eq!(tiles.len(), 1, "honor={honor}: halfblocks keeps the banner as one band: {tiles:?}");
-        assert_eq!(tiles[0].2, PANE.width, "honor={honor}: spanning the whole strip: {tiles:?}");
+        let (l, r) = banner_span(&state.graphics_render.borrow().placed_targets());
+        assert_eq!((tiles[0].0, tiles[0].0 + tiles[0].2), (l, r),
+            "honor={honor}: spanning the whole strip, abutting both flanks: {tiles:?}");
     }
 }
