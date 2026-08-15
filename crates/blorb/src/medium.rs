@@ -1980,9 +1980,11 @@ mod tests {
         // the drive's order rather than the filesystem's, and they mount through
         // the same reader one de-interleave earlier.
         // `po` joined them in SQ-0863, on the same row and by the same rule: the
-        // corpus acquired four bare ProDOS volumes (`Arthur.po`, `Journey.po`,
-        // `ZorkZero.po` and a `Shogun.po` that is really a DiskCopy wrapper), and
-        // three of them mount. A spelling is claimed when a medium wears it.
+        // corpus acquired four ProDOS volumes wearing it — `Arthur.po`,
+        // `Journey.po` and `ZorkZero.po` bare, and a `Shogun.po` that is really
+        // a DiskCopy wrapper round one. Three of them mounted then and all four
+        // do since SQ-0889 taught the ProDOS reader that placement. A spelling
+        // is claimed when a medium wears it.
         for want in ["adf", "image", "ima", "img", "st", "2mg", "dsk", "po"] {
             assert!(image_extensions().any(|e| e == want), "no row claims {want:?}");
         }

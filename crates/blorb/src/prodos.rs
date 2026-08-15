@@ -48,13 +48,34 @@
 //! `ZORK.ZERO.3.5`). They opened the day they arrived, and `.po` is claimed in
 //! [`crate::medium`]'s extension census now that a medium wears it.
 //!
-//! **`Shogun.po` is not one of them and its name is the point.** Despite the
-//! spelling it is a DiskCopy 4.2 image — 838,484 bytes, `06 "SHOGUN"`, with the
-//! volume 84 bytes in — and this reader does not unwrap that, so it is declined
-//! whatever it is called. [`crate::hfs`] has the unwrap for its Macintosh
-//! images and sharing it here is a small refactor nobody has done; the artwork
-//! it would reach is already reachable off `shogun_s1.dsk`…`s5`. A bare image
-//! still mounts when it is opened by name, and a misnamed one still does not.
+//! # Layer 1a — the DiskCopy 4.2 wrapper (SQ-0889)
+//!
+//! **`Shogun.po` is a fourth spelling, and it used to be declined.** Despite the
+//! extension it is not a bare volume: it is a DiskCopy 4.2 image — 838,484
+//! bytes, `06 "SHOGUN"`, magic `0100` at `+$52` — and this module said for two
+//! quests that not unwrapping it was the point, because the Apple artwork was
+//! reachable off `shogun_s1.dsk`…`s5` anyway. That was a refusal to open a file
+//! that is perfectly readable, and it is gone.
+//!
+//! The wrapper states its own geometry and the arithmetic closes to the byte:
+//! `dataSize` at `+$40` is `$000C8000` = 819,200 — the same 800 KB as the three
+//! bare `.po` volumes — `tagSize` at `+$44` is `$00004B00` = 19,200, and
+//! 84 + 819,200 + 19,200 = 838,484. So an intact 800K ProDOS volume sits 84
+//! bytes in, and its volume directory header at file offset 1108 (= 84 + 1024)
+//! reads `0000 0300 f6 "SHOGUN     "` — storage type `$F`, name length 6 —
+//! structurally identical to `Journey.po`'s `0000 0300 fb "JOURNEY.3.5"` at
+//! offset 1024. The sector tags follow the volume and are not part of it, so
+//! nothing here ever addresses them.
+//!
+//! The unwrap itself is **[`crate::hfs`]'s**, shared rather than rewritten:
+//! `diskcopy_volume_len` reads the wrapper's declared geometry and knows
+//! nothing about which filesystem is inside, so each reader runs its own volume
+//! sniff at the offset and declines what is not its own. That is the "small
+//! refactor nobody has done" this paragraph used to describe as optional, and
+//! it is one placement in [`volume_at`] beside the `2IMG` one. A Macintosh
+//! DiskCopy image is unwrapped here just as willingly and then declined, for
+//! the same reason a DOS 3.3 dump is: nothing but a ProDOS volume directory is
+//! allowed to make [`volume_is_sane`] answer `Some`.
 //!
 //! # Layer 1b — DOS sector order (SQ-0864)
 //!
@@ -315,11 +336,12 @@ impl ProDos {
     /// Cheap sniff: does this look like a ProDOS disk image?
     ///
     /// By CONTENT — the `.2mg` extension the corpus happens to use means nothing
-    /// in particular. The volume directory decides: a `$F` header entry at block
-    /// 2 carrying a legal volume name, the format's fixed `$27`/`$0D` entry
-    /// geometry, and a `total_blocks` that fits the bytes in hand. An AmigaDOS,
-    /// HFS, FAT12, Z-machine, Glulx, Blorb or Scott image can never collide —
-    /// none of them has that shape a kilobyte in.
+    /// in particular, and neither does the `.po` one that `Shogun.po` wears over
+    /// a DiskCopy wrapper. The volume directory decides: a `$F` header entry at
+    /// block 2 carrying a legal volume name, the format's fixed `$27`/`$0D`
+    /// entry geometry, and a `total_blocks` that fits the bytes in hand. An
+    /// AmigaDOS, HFS, FAT12, Z-machine, Glulx, Blorb or Scott image can never
+    /// collide — none of them has that shape a kilobyte in, wrapped or not.
     ///
     /// A 5.25-inch dump is asked the same question after its sectors are put
     /// back in block order; see [`crate::dos_order`], and see [`ProDos::mount`]
@@ -330,12 +352,13 @@ impl ProDos {
 
     /// Mount an image and enumerate it, subdirectories and all.
     ///
-    /// Three placements are tried, and the volume directory decides between
-    /// them: a bare volume, one behind a `2IMG` header, and — SQ-0864 — a
-    /// 5.25-inch dump whose sectors are in DOS order. The third is the only one
-    /// that MOVES bytes rather than merely offsetting them, so it produces a new
-    /// image and the mount goes on with that; everything past this line is the
-    /// same ProDOS volume it always was.
+    /// Four placements are tried, and the volume directory decides between
+    /// them: a bare volume, one behind a `2IMG` header, one behind a DiskCopy
+    /// 4.2 header (SQ-0889), and — SQ-0864 — a 5.25-inch dump whose sectors are
+    /// in DOS order. The last is the only one that MOVES bytes rather than
+    /// merely offsetting them, so it produces a new image and the mount goes on
+    /// with that; everything past this line is the same ProDOS volume it always
+    /// was.
     pub fn mount(image: Vec<u8>) -> Result<ProDos, ProDosError> {
         let image = match volume_at(&image) {
             Some(_) => image,
@@ -622,10 +645,19 @@ fn sparse(out: &mut Vec<u8>, want: usize, size: usize) {
 }
 
 /// Where the ProDOS volume starts inside `raw` and how many blocks it has — 0
-/// for a bare volume, the 2IMG data offset inside a wrapper — or `None` when
-/// neither placement holds one.
+/// for a bare volume, the 2IMG data offset inside a `2IMG` wrapper, 84 inside a
+/// DiskCopy 4.2 one — or `None` when no placement holds one.
 fn volume_at(raw: &[u8]) -> Option<(usize, usize)> {
     if let Some((at, len)) = two_img_data(raw) {
+        if let Some(blocks) = volume_is_sane(&raw[at..at + len]) {
+            return Some((at, blocks));
+        }
+    }
+    // DiskCopy 4.2, whose unwrap is [`crate::hfs`]'s and is shared rather than
+    // rewritten (SQ-0889). The header declares the volume's length; the tags
+    // that follow it are not part of the volume and are never addressed.
+    if let Some(len) = crate::hfs::diskcopy_volume_len(raw) {
+        let at = crate::hfs::DISKCOPY_HEADER;
         if let Some(blocks) = volume_is_sane(&raw[at..at + len]) {
             return Some((at, blocks));
         }
@@ -680,8 +712,8 @@ fn two_img_data(raw: &[u8]) -> Option<(usize, usize)> {
 /// this safe to run over arbitrary bytes ahead of story loading. The key block
 /// has no predecessor, the header entry is a `$F`, the entry geometry is ProDOS's
 /// own `$27`/`$0D`, the bitmap is on the volume, and the last block the header
-/// claims has to be inside the bytes in hand — which a wrapper's 64-byte offset
-/// breaks, so the two placements cannot both pass.
+/// claims has to be inside the bytes in hand — which a wrapper's 64- or 84-byte
+/// offset breaks, so no two placements can both pass.
 fn volume_is_sane(volume: &[u8]) -> Option<usize> {
     let key = volume.get(usize::from(VOLUME_DIR_BLOCK) * BLOCK..)?.get(..BLOCK)?;
     if le16(key, DIR_PREV) != 0 {
@@ -1599,12 +1631,16 @@ pub(crate) mod tests {
     ///   volume is claimed and opens. A reader that quietly stopped recognising
     ///   the 5.25-inch press fails here rather than passing an emptier sweep.
     ///
-    /// The two files that make the difference are worth naming. `Shogun.po` is a
-    /// DiskCopy 4.2 image wearing a ProDOS name — declined, because the bytes say
-    /// so and the name is not evidence. `Planetfall r29 (clean copy from retail
-    /// disk).dsk` is a 143,360-byte Apple II 5.25-inch dump that is **DOS 3.3**:
-    /// [`dos_ordered`] re-orders it as willingly as any other and then declines
-    /// it, because nothing but a ProDOS volume directory is allowed to make this
+    /// The two files that make the difference are worth naming, and one of them
+    /// changed sides in SQ-0889. `Shogun.po` is a DiskCopy 4.2 image wearing a
+    /// ProDOS extension; it used to be declined here and that decline was this
+    /// case's headline claim. It is claimed now — not because of the name, which
+    /// is still not evidence, but because the wrapper is unwrapped and there is
+    /// an ordinary 800 KB `SHOGUN` volume 84 bytes in. `Planetfall r29 (clean
+    /// copy from retail disk).dsk` is the half that has not moved: a
+    /// 143,360-byte Apple II 5.25-inch dump that is **DOS 3.3**, which
+    /// [`dos_ordered`] re-orders as willingly as any other and then declines,
+    /// because nothing but a ProDOS volume directory is allowed to make this
     /// answer `Some`.
     #[test]
     fn only_the_prodos_images_in_the_corpus_look_like_prodos() {
@@ -1635,7 +1671,7 @@ pub(crate) mod tests {
 
         // Direction two: every image we NAME as one is claimed, at the geometry
         // its wrapper implies.
-        let (mut five_and_a_quarter, mut bare, mut ran) = (0, 0, 0);
+        let (mut five_and_a_quarter, mut bare, mut diskcopy, mut ran) = (0, 0, 0, 0);
         for (name, kind) in PRODOS_MEDIA {
             let Ok(raw) = std::fs::read(stories_dir().join(name)) else { continue };
             ran += 1;
@@ -1651,6 +1687,12 @@ pub(crate) mod tests {
                     // blocks of 3.5-inch media, with no header to skip.
                     assert_eq!(raw.len(), 1600 * BLOCK, "{name}: 1600 × 512, bare");
                 }
+                ProDosMedium::DiskCopy => {
+                    diskcopy += 1;
+                    // The same 1600 blocks, plus the header in front and the
+                    // sector tags behind — the wrapper accounts for every byte.
+                    assert_eq!(raw.len(), 84 + 1600 * BLOCK + 19_200, "{name}: wrapped 800 KB");
+                }
                 ProDosMedium::TwoImg => {}
             }
         }
@@ -1660,6 +1702,7 @@ pub(crate) mod tests {
             "expected fourteen 5.25-inch volumes, got {five_and_a_quarter}"
         );
         assert!(bare == 3 || ran == 0, "expected three bare 3.5-inch volumes, got {bare}");
+        assert!(diskcopy == 1 || ran == 0, "expected one DiskCopy 3.5-inch volume, got {diskcopy}");
         if ran == 0 {
             eprintln!("SKIP: no ProDOS media present");
         }
@@ -1674,6 +1717,9 @@ pub(crate) mod tests {
         FiveAndAQuarter,
         /// An 800 KB volume and nothing else.
         Bare,
+        /// An 800 KB volume behind an 84-byte DiskCopy 4.2 header, with the
+        /// sector tags trailing it (SQ-0889).
+        DiskCopy,
     }
 
     /// Every ProDOS image in `stories/`, named. See the case above for why the
@@ -1692,6 +1738,7 @@ pub(crate) mod tests {
         ("Arthur.po", ProDosMedium::Bare),
         ("Journey.po", ProDosMedium::Bare),
         ("ZorkZero.po", ProDosMedium::Bare),
+        ("Shogun.po", ProDosMedium::DiskCopy),
         ("shogun_s1.dsk", ProDosMedium::FiveAndAQuarter),
         ("shogun_s2.dsk", ProDosMedium::FiveAndAQuarter),
         ("shogun_s3.dsk", ProDosMedium::FiveAndAQuarter),
@@ -1708,30 +1755,89 @@ pub(crate) mod tests {
         ("journey_s5.dsk", ProDosMedium::FiveAndAQuarter),
     ];
 
-    /// **The two files in the corpus whose NAME says ProDOS and whose bytes do
-    /// not**, declined for two different reasons (SQ-0863).
+    /// **A file in the corpus whose NAME says ProDOS and whose bytes do not**
+    /// (SQ-0863).
     ///
     /// The module's rule is that recognition is by content; a corpus of
-    /// well-named files cannot demonstrate that, and these two can.
+    /// well-named files cannot demonstrate that, and this one can. It used to
+    /// have a companion — `Shogun.po`, declined for wearing a `.po` over a
+    /// DiskCopy 4.2 wrapper — and SQ-0889 took that companion away by unwrapping
+    /// the wrapper. The claim survives the loss intact, because the reason the
+    /// two were declined was never the same reason: `Shogun.po` was declined for
+    /// a placement this reader had not been taught, and holds a real ProDOS
+    /// volume; this file is declined because there is no ProDOS volume in it at
+    /// any placement or ordering. See
+    /// [`a_diskcopy_wrapper_is_unwrapped_like_any_other`] for where the other
+    /// half went.
+    ///
+    /// An Apple II 5.25-inch dump that is DOS 3.3 rather than ProDOS:
+    /// [`dos_ordered`] re-orders it as willingly as any other and then declines
+    /// it, which is the de-interleave being a wrapper and never a verdict.
     #[test]
     fn a_prodos_spelling_is_not_a_prodos_volume() {
-        // A DiskCopy 4.2 image under a ProDOS name — `06 "SHOGUN"`, with the
-        // volume 84 bytes in. `crate::hfs` has that unwrap for its Macintosh
-        // images and this reader does not share it yet; the artwork it would
-        // reach is on `shogun_s1.dsk`…`s5` regardless.
-        if let Ok(raw) = std::fs::read(stories_dir().join("Shogun.po")) {
-            assert!(!ProDos::looks_like_prodos(&raw), "a DiskCopy image is not a bare volume");
-            assert_eq!(&raw[..7], b"\x06SHOGUN", "the premise: a DiskCopy 4.2 name field");
-        }
-        // …and an Apple II 5.25-inch dump that is DOS 3.3 rather than ProDOS.
-        // `dos_ordered` re-orders it as willingly as any other and then declines
-        // it, which is the de-interleave being a wrapper and never a verdict.
         let planetfall = "Planetfall r29 (clean copy from retail disk).dsk";
-        if let Ok(raw) = std::fs::read(stories_dir().join(planetfall)) {
-            assert_eq!(raw.len(), crate::dos_order::DOS_ORDER_LEN, "the 5.25-inch geometry");
-            assert!(crate::dos_order::prodos_order(&raw).is_some(), "it re-orders willingly");
-            assert!(!ProDos::looks_like_prodos(&raw), "and holds no ProDOS volume directory");
+        let Ok(raw) = std::fs::read(stories_dir().join(planetfall)) else {
+            eprintln!("SKIP: no {planetfall}");
+            return;
+        };
+        assert_eq!(raw.len(), crate::dos_order::DOS_ORDER_LEN, "the 5.25-inch geometry");
+        assert!(crate::dos_order::prodos_order(&raw).is_some(), "it re-orders willingly");
+        assert!(!ProDos::looks_like_prodos(&raw), "and holds no ProDOS volume directory");
+    }
+
+    /// **`Shogun.po` is a DiskCopy 4.2 image and it mounts** (SQ-0889).
+    ///
+    /// The inverse of what this module asserted for two quests. Nothing about
+    /// the file changed; what changed is that [`volume_at`] now tries the
+    /// wrapper's placement, borrowing the unwrap from [`crate::hfs`] rather than
+    /// growing a second one.
+    ///
+    /// Every number below was measured, and the arithmetic is what makes the
+    /// placement safe to trust rather than a lucky offset: the header declares
+    /// `dataSize` and `tagSize`, and 84 + `dataSize` + `tagSize` is the file
+    /// length to the byte. What comes out is the **Apple II press, release 311 /
+    /// serial 890510, checksum `$E200`** — the same release the five-volume
+    /// 5.25-inch set `shogun_s1.dsk`…`s5` reassembles to, which is the outside
+    /// evidence that the unwrap landed on the right bytes rather than on
+    /// something merely well-formed. The story's own header agrees: its declared
+    /// length is exactly the bytes that came out, and the checksum over
+    /// `$40..len` is the one the header carries.
+    #[test]
+    fn a_diskcopy_wrapper_is_unwrapped_like_any_other() {
+        let Ok(raw) = std::fs::read(stories_dir().join("Shogun.po")) else {
+            eprintln!("SKIP: no Shogun.po");
+            return;
+        };
+        // The premise: a DiskCopy 4.2 name field, not a ProDOS boot block.
+        assert_eq!(&raw[..7], b"\x06SHOGUN", "the DiskCopy 4.2 name field");
+        assert_eq!(&raw[0x52..0x54], &[0x01, 0x00], "the DiskCopy 4.2 magic at +$52");
+        let data = u32::from_be_bytes(raw[0x40..0x44].try_into().unwrap()) as usize;
+        let tag = u32::from_be_bytes(raw[0x44..0x48].try_into().unwrap()) as usize;
+        assert_eq!(data, 1600 * BLOCK, "dataSize: an 800 KB volume");
+        assert_eq!(tag, 19_200, "tagSize: the sector tags that follow it");
+        assert_eq!(84 + data + tag, raw.len(), "the wrapper accounts for every byte");
+
+        assert!(ProDos::looks_like_prodos(&raw), "a wrapped volume is still a volume");
+        let fs = ProDos::mount(raw).expect("Shogun.po mounts");
+        assert_eq!(fs.volume_name(), "SHOGUN");
+        // The segmented Apple II press, as on the 5.25-inch set: five segments
+        // and the ProDOS 8 launcher beside them, no whole story file.
+        for seg in ["SHOGUN.D1", "SHOGUN.D2", "SHOGUN.D3", "SHOGUN.D4", "SHOGUN.D5"] {
+            assert!(fs.files().iter().any(|f| f.path() == seg), "{seg} missing");
         }
+        let (name, story) = fs.story().expect("the segments reassemble into a story");
+        assert_eq!(name, "SHOGUN.D1", "the reassembly is named for its first segment");
+        assert_eq!(story[0], 6, "Version 6");
+        assert_eq!(u16::from_be_bytes([story[2], story[3]]), 311, "release 311");
+        assert_eq!(&story[0x12..0x18], b"890510", "serial 890510");
+        assert_eq!(u16::from_be_bytes([story[0x1c], story[0x1d]]), 0xe200, "checksum $E200");
+        // ZMSD §11.1: `$1a` is the file length in words, and Version 6 scales it
+        // by 8. It has to be the bytes actually in hand.
+        let declared = usize::from(u16::from_be_bytes([story[0x1a], story[0x1b]])) * 8;
+        assert_eq!(declared, story.len(), "the header's own length matches the reassembly");
+        let sum: u32 = story[0x40..].iter().map(|b| u32::from(*b)).sum();
+        assert_eq!(sum & 0xffff, 0xe200, "and the bytes check out against it");
+        assert!(fs.pictures().is_some(), "the Apple artwork comes off the same disk");
     }
 
     /// **The 5.25-inch press, volume by volume** (SQ-0864).

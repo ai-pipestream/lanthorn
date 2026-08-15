@@ -240,6 +240,17 @@ const MEDIA: &[Medium] = &[
     // the 3.5-inch consolidation of the four `zork_zero_*.dsk` floppies.
     Medium { title: "Arthur (Apple II 3.5)", file: "Arthur.po", image: Some(DiskImage::ProDos), version: 6, release: 63, serial: "890622" },
     Medium { title: "Zork Zero (Apple II 3.5)", file: "ZorkZero.po", image: Some(DiskImage::ProDos), version: 6, release: 383, serial: "890602" },
+    // …and the fourth `.po`, which is not a bare volume and was declined for two
+    // quests on that ground (SQ-0889). `Shogun.po` is a **DiskCopy 4.2** image —
+    // 84-byte header, 819,200-byte volume, 19,200 bytes of sector tags, summing
+    // to its 838,484 exactly — wearing a ProDOS extension over an ordinary 800 KB
+    // `SHOGUN` volume. `blorb::prodos` now tries that placement using
+    // `blorb::hfs`'s unwrap rather than a second one, and what comes out is the
+    // 3.5-inch consolidation of the five `shogun_s*.dsk` floppies: the same
+    // release 311 / serial 890510, packed across `SHOGUN.D1`…`D5` on one disk.
+    // Two rows for one build is the point — this is the control that says the
+    // wrapper landed on the right bytes rather than on merely plausible ones.
+    Medium { title: "Shogun (Apple II 3.5)", file: "Shogun.po", image: Some(DiskImage::ProDos), version: 6, release: 311, serial: "890510" },
     // ── The raw self-booting Apple II press (SQ-0868) ────────────────────────
     //
     // **The first non-v6 Apple disk in the corpus**, and the first medium here

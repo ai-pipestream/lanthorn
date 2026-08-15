@@ -104,6 +104,16 @@ const SHOGUN_SET: [&str; 5] =
     ["shogun_s1.dsk", "shogun_s2.dsk", "shogun_s3.dsk", "shogun_s4.dsk", "shogun_s5.dsk"];
 const SHOGUN_BLORB: &str = "Shogun.blb";
 
+/// …and the 3.5-inch consolidation of that set, which joined the census in
+/// SQ-0889 when `blorb::prodos` learned to unwrap its DiskCopy 4.2 header.
+///
+/// It is contradicted by the same `Shogun.blb` for the same reason the five
+/// floppies are — the Blorb is release 322 / serial 890706 and the Apple press
+/// is release 311 / serial 890510 — so it arrives already refused, and that is
+/// the census moving without the rule moving, exactly as this file's invariant
+/// promises. The refusal is inert: the disk draws its own segmented plates.
+const SHOGUN_PO: &str = "Shogun.po";
+
 /// Every medium in the corpus whose sidecar Blorb is refused, paired with the
 /// sidecar refused for it, **in `stories/` sort order** (SQ-0866, SQ-0867).
 ///
@@ -125,6 +135,7 @@ fn mismatched() -> Vec<(String, &'static str)> {
         ("Journey - The Quest Begins.adf".to_string(), JOURNEY_BLORB),
     ];
     all.extend(SHOGUN_SET.iter().map(|v| (v.to_string(), SHOGUN_BLORB)));
+    all.push((SHOGUN_PO.to_string(), SHOGUN_BLORB));
     all.extend(JOURNEY_SET.iter().map(|v| (v.to_string(), JOURNEY_BLORB)));
     all.retain(|(m, b)| media(m).is_some() && media(b).is_some());
     all.sort();

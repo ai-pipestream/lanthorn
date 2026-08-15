@@ -267,14 +267,31 @@ own 135 pictures. That is what turns "this image is short" from a suspicion into
 a measurement — the same build, off media that have every segment, behaves.
 
 `Journey.po` is also the reason `.po` is a spelling the library scan knows. A
-`.po` is a **bare** ProDOS volume with nothing wrapped round it, which this reader
-has always been able to open; until these images arrived nothing in the reference
-collection was one, so the extension was in no format's list and the disks were
-openable by name and invisible in the story list. Three of the four now here are
-bare volumes and mount (`Arthur.po`, `Journey.po`, `ZorkZero.po`); the fourth,
-`Shogun.po`, is a DiskCopy 4.2 image wearing a ProDOS name and is declined,
-because recognition is by content and never by extension. Its game is on the
-five-floppy set regardless.
+`.po` is usually a **bare** ProDOS volume with nothing wrapped round it, which this
+reader has always been able to open; until these images arrived nothing in the
+reference collection was one, so the extension was in no format's list and the
+disks were openable by name and invisible in the story list. Three of the four
+here are bare volumes and mount (`Arthur.po`, `Journey.po`, `ZorkZero.po`).
+
+The fourth, `Shogun.po`, wears the same extension over a **DiskCopy 4.2** image,
+and it used to be declined on exactly the grounds this page keeps repeating —
+recognition is by content, never by extension. That was right about the name and
+wrong about the file: the bytes are readable, and refusing them cost the Apple
+*Shogun* press for two quests. The wrapper states its own geometry and the
+arithmetic closes to the byte — `dataSize` 819,200, `tagSize` 19,200, and
+84 + 819,200 + 19,200 = 838,484, the file's length — so an ordinary 800 KB
+`SHOGUN` volume is sitting 84 bytes in, with a volume directory header at offset
+1108 as textbook as `Journey.po`'s at 1024. SQ-0889 mounts it, and not through a
+new decoder: the unwrap is the **Macintosh** reader's, shared rather than
+rewritten, because DiskCopy is a wrapper and not a filesystem. Each reader runs
+its own volume sniff 84 bytes in and declines what is not its own, so a Macintosh
+DiskCopy image is unwrapped by the ProDOS reader just as willingly and then
+turned away — the same way a DOS 3.3 floppy is de-interleaved and then turned
+away. What comes out is the segmented Apple II press on one disk instead of five:
+`SHOGUN.D1`…`D5` beside `INFOCOM.SYSTEM`, reassembling to **release 311, serial
+890510, checksum `$E200`** — the same build the five-floppy set gives, which is
+the outside evidence that the unwrap landed on the right bytes and not merely on
+well-formed ones.
 
 #### …and the same container, one floppy per disk
 
@@ -517,7 +534,7 @@ volume opens with:
 | `Journey.po` (bare, 3.5") | Journey, v6 release 77, serial 890616 — packed, and complete |
 | `journey_s1.dsk`…`s5` (5.25") | Journey, v6 release 77, serial 890616 — packed across five |
 | `shogun_s1.dsk`…`s5` (5.25") | Shogun, v6 release 311, serial 890510 — packed across five |
-| `Shogun.po` | — a DiskCopy 4.2 image under a ProDOS name; declined, and its game is on the five floppies above |
+| `Shogun.po` (DiskCopy 4.2, 3.5") | Shogun, v6 release 311, serial 890510 — the same press as the five floppies, packed on one disk behind an 84-byte wrapper |
 | `zork_zero_1.dsk`…`_4` (5.25") | Zork Zero, v6 release 383, serial 890602 — packed across four |
 | `ZorkZero.po` (bare, 3.5") | Zork Zero, v6 release 383, serial 890602 — packed across four subdirectories |
 | `Planetfall r29 …dsk` (5.25", raw) | Planetfall, v3 release 29, serial 840118 — no filesystem; 426 sectors from track 3 |
