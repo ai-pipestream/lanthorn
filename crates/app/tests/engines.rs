@@ -56,6 +56,8 @@ mod launch_options;
 mod picture_override;
 #[path = "suites/real_media_releases.rs"]
 mod real_media_releases;
+#[path = "suites/story_identity_sweep.rs"]
+mod story_identity_sweep;
 #[path = "suites/release_asset_span.rs"]
 mod release_asset_span;
 #[path = "suites/restart_reboots_in_place.rs"]

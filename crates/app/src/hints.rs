@@ -891,12 +891,39 @@ pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
 /// Classify `bytes` into a [`LoadedStory`].
 ///
 /// A Blorb yields its embedded executable's kind; a raw image starting with the
-/// `Glul` magic is Glulx; anything else is treated as a raw Z-code story (the
-/// historical pass-through). Never errors for a non-Blorb input.
+/// `Glul` magic is Glulx; a Scott Adams database is content-sniffed; and a
+/// Z-machine story **proves itself by its header** like the other three prove
+/// themselves, rather than being what is left over.
+///
+/// # Z-code stopped being the else-branch (SQ-0889)
+///
+/// It used to be: three formats were tested and everything else was handed to
+/// the Z-machine, which is what this doc meant by "the historical pass-through…
+/// never errors for a non-Blorb input". The only gate downstream was
+/// `zvm::header::parse_header`'s `3..=8` on byte 0 — six of 256 values, so
+/// roughly **2.3% of arbitrary containers pass it**, and one of them was an
+/// 838 KB Apple II disk image whose DiskCopy 4.2 name-length byte is `0x06`.
+/// babelmap opened the whole image as a Version 6 story, paired it with a
+/// sidecar Blorb belonging to a different file, printed
+/// "story ended without asking for input", and exited **0** — a message that
+/// reads as a game bug and sends the reader looking somewhere else entirely.
+///
+/// The check is [`blorb::adf::looks_like_zcode`], the same one every disk reader
+/// already uses to decide which file on a volume is the game, and it is
+/// borrowed rather than restated: it encodes ZMSD §1.1's memory map (dynamic
+/// memory ends below `$0e`; the object and global tables are writable so they
+/// are inside it; the dictionary is in static memory) and §11.1.6's file-length
+/// word, and two of its clauses are corrections that a from-memory rewrite would
+/// get wrong. A second copy is a second place for that to go stale.
+///
+/// Errors with [`io::ErrorKind::InvalidData`] and a diagnostic that says what
+/// the bytes are, so the exit status is non-zero and the message names the
+/// container instead of the game.
 pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
     if !blorb::Blorb::is_blorb(&bytes) {
         // Raw image: distinguish Glulx by its `Glul` magic; a Scott Adams `.dat`
-        // is content-sniffed (it has no fixed magic); default to Z-code.
+        // is content-sniffed (it has no fixed magic); a Z-machine story by its
+        // header.
         if bytes.starts_with(b"Glul") {
             return Ok(LoadedStory::Glulx(bytes));
         }
@@ -904,6 +931,9 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
             if scott::looks_like_scott(s) {
                 return Ok(LoadedStory::Scott(bytes));
             }
+        }
+        if !blorb::adf::looks_like_zcode(&bytes) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, unrunnable(&bytes)));
         }
         return Ok(LoadedStory::ZCode(bytes));
     }
@@ -930,6 +960,35 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
             format!("Blorb has no executable: {e:?}"),
         )),
     }
+}
+
+/// Why `bytes` are not a story babelmap can run — the diagnostic that replaced
+/// running them anyway (SQ-0889).
+///
+/// Deliberately factual rather than clever, because the failure this exists for
+/// is a file the player *thinks* is a game and is not, and the only useful thing
+/// to say is what it actually is. Two facts, both always available: the length
+/// and the head of the file, which is where a container writes its magic and
+/// very often its name — `Shogun.po` opens `06 53 48 4f 47 55 4e 20  |.SHOGUN |`,
+/// and that line alone identifies it — and, when `blorb` recognises the bytes as
+/// a disk image, the format's own label, because "this is a container, not a
+/// game" is the whole answer in that case.
+fn unrunnable(bytes: &[u8]) -> String {
+    let head = &bytes[..bytes.len().min(8)];
+    let hex: Vec<String> = head.iter().map(|b| format!("{b:02x}")).collect();
+    let text: String =
+        head.iter().map(|b| if (0x20..0x7f).contains(b) { char::from(*b) } else { '.' }).collect();
+    let what = match blorb::medium::DiskImage::detect(bytes) {
+        Some(image) => format!("it is a {} disk image — a container, not a story", image.label()),
+        None => "no format babelmap reads claims it".to_string(),
+    };
+    format!(
+        "not a story file: {} bytes beginning {}  |{text}| — {what}. It is not a Blorb, \
+         not a Glulx image, not a Scott Adams database, and its first 64 bytes are not a \
+         Z-machine header (ZMSD §11.1)",
+        bytes.len(),
+        hex.join(" "),
+    )
 }
 
 /// Cap on one extracted ZIP entry (SQ-0660). Story files here are Z-code
@@ -1206,8 +1265,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
 
-        // Some bytes that look like a valid Z-machine story (just need to be distinct).
-        let story_bytes: Vec<u8> = vec![5, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4];
+        // A real v5 header, distinguished by a byte the checks do not read, so
+        // "the same bytes came back" stays the thing being asserted. Twelve
+        // bytes starting `5` used to be enough; since SQ-0889 a story has to
+        // look like one.
+        let mut story_bytes = sample_zcode(5);
+        story_bytes.extend_from_slice(&[1, 2, 3, 4]);
 
         // --- raw path: a plain .z5 file, no zip magic ---
         let raw_path = base.join("game.z5");
@@ -1357,13 +1420,55 @@ mod tests {
         // GLUL Blorb → Glulx(payload).
         let gblorb = make_blorb(b"GLUL", b"GLULX");
         assert_eq!(extract_story(gblorb).unwrap(), LoadedStory::Glulx(b"GLULX".to_vec()));
-        // Raw Z-code (version byte, no Glul magic) → ZCode pass-through.
-        let raw_z: Vec<u8> = vec![5, 0, 0, 0, 0, 0, 0, 0];
+        // Raw Z-code → ZCode. This used to be eight bytes, `[5, 0, 0, …]`, and
+        // that it sufficed was the whole defect (SQ-0889): a version byte was
+        // the entire claim a file had to make. It now has to carry a header.
+        let raw_z = sample_zcode(5);
         assert_eq!(extract_story(raw_z.clone()).unwrap(), LoadedStory::ZCode(raw_z));
         // Raw .ulx (Glul magic) → Glulx pass-through.
         let mut raw_ulx = b"Glul".to_vec();
         raw_ulx.extend_from_slice(&[0, 3, 1, 2]);
         assert_eq!(extract_story(raw_ulx.clone()).unwrap(), LoadedStory::Glulx(raw_ulx));
+    }
+
+    /// A structurally valid story image, small but real: a memory map that
+    /// obeys ZMSD §1.1 (dynamic memory below `$0e`, the writable object and
+    /// global tables inside it, the dictionary in static memory) and a serial
+    /// of six printable bytes.
+    fn sample_zcode(version: u8) -> Vec<u8> {
+        let mut b = vec![0u8; 0x400];
+        b[0x00] = version;
+        b[0x04..0x06].copy_from_slice(&0x0100u16.to_be_bytes()); // high memory base
+        b[0x06..0x08].copy_from_slice(&0x0100u16.to_be_bytes()); // initial PC
+        b[0x08..0x0a].copy_from_slice(&0x0200u16.to_be_bytes()); // dictionary
+        b[0x0a..0x0c].copy_from_slice(&0x0040u16.to_be_bytes()); // object table
+        b[0x0c..0x0e].copy_from_slice(&0x0080u16.to_be_bytes()); // globals
+        b[0x0e..0x10].copy_from_slice(&0x0100u16.to_be_bytes()); // static memory base
+        b[0x12..0x18].copy_from_slice(b"890101"); // serial
+        b
+    }
+
+    /// **A version byte is no longer a story** (SQ-0889).
+    ///
+    /// The reported shape, in miniature: a container whose first byte is a legal
+    /// Z-machine version and whose remaining 4,095 bytes are nothing of the
+    /// kind. It used to load, run, print nothing and exit 0.
+    #[test]
+    fn extract_story_refuses_a_container_wearing_a_version_byte() {
+        let mut junk = vec![0xa5u8; 4096];
+        junk[0] = 6;
+        let err = extract_story(junk).expect_err("a version byte is not a header");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("not a story file"), "{err}");
+
+        // …and every version the Z-machine runs still loads when the header is
+        // real, so the gate is on the header and not on the version byte.
+        for version in 3..=8u8 {
+            assert!(
+                matches!(extract_story(sample_zcode(version)), Ok(LoadedStory::ZCode(_))),
+                "a real v{version} header must still load"
+            );
+        }
     }
 
     #[test]
@@ -1415,12 +1520,19 @@ mod tests {
         }
     }
 
+    /// **Z-code is claimed, not defaulted to** (SQ-0889).
+    ///
+    /// This case used to be called `zcode_still_defaults` and asserted that
+    /// `[3, 0, 0, 0, 0, 0, 0, 0]` — a version byte and seven zeroes — came back
+    /// as a story. That was the rule, and it is the rule this quest removed: a
+    /// Z-machine image now proves itself by its header exactly as Blorb, Glulx
+    /// and Scott Adams prove themselves by theirs.
     #[test]
-    fn zcode_still_defaults() {
-        assert!(matches!(
-            extract_story(vec![3, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
-            LoadedStory::ZCode(_)
-        ));
+    fn zcode_is_claimed_by_a_header_not_defaulted_to() {
+        let err = extract_story(vec![3, 0, 0, 0, 0, 0, 0, 0])
+            .expect_err("eight bytes are not a story");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(matches!(extract_story(sample_zcode(3)).unwrap(), LoadedStory::ZCode(_)));
     }
 
     #[test]

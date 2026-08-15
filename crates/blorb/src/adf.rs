@@ -277,8 +277,22 @@ pub fn looks_like_story(bytes: &[u8]) -> bool {
     looks_like_zcode(bytes)
 }
 
-/// The Z-machine half of [`looks_like_story`].
-fn looks_like_zcode(bytes: &[u8]) -> bool {
+/// The Z-machine half of [`looks_like_story`], and the workspace's **only**
+/// positive identity check for a Z-code image.
+///
+/// Public since SQ-0889, which needed it above the disk readers: `app` used to
+/// treat Z-code as the untested else-branch — Blorb proves itself by magic,
+/// Glulx by `Glul`, Scott by content sniff, and anything left over was assumed
+/// to be a story — so the only gate a container had to pass was `parse_header`'s
+/// `3..=8` on byte 0, which about 2.3% of arbitrary bytes do. What it let
+/// through ran, printed nothing, and exited 0.
+///
+/// It is exported rather than reimplemented deliberately. Every clause below is
+/// a measurement against the corpus, two of them are corrections that cost a
+/// real game its visibility (SQ-0856's high-ASCII serial, SQ-0869's Commodore
+/// *Trinity*), and a second sniff elsewhere in the workspace would be a second
+/// place for that knowledge to go stale.
+pub fn looks_like_zcode(bytes: &[u8]) -> bool {
     if bytes.len() < 64 {
         return false;
     }

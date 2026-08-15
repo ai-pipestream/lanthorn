@@ -5015,6 +5015,9 @@ mod tests {
         buf[0x0E] = 0x03; buf[0x0F] = 0x00;
         buf[0x08] = 0x04; buf[0x09] = 0x00;
         buf[0x18] = 0x00; buf[0x19] = 0x60;
+        // A printable serial (ZMSD §11.1, `$12`–`$17`) — required since SQ-0889,
+        // when a Z-machine image started having to look like one.
+        buf[0x12..0x18].copy_from_slice(b"000000");
         buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0;
         buf
     }

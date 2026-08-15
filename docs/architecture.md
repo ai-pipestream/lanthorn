@@ -81,6 +81,30 @@ So **Glk is confined to the Glulx path.** Z-machine and Scott are implemented
 against their own I/O models and converge with Glulx only at the neutral
 `ScreenModel` layer.
 
+**Which engine gets the file is decided by evidence, and all four of them are
+tested now** (SQ-0889). `hints::extract_story` classifies a story image: a Blorb
+proves itself by its `FORM`/`IFRS` magic, a Glulx image by `Glul`, a Scott Adams
+database by a content sniff of its leading integers — and, until SQ-0889, a
+Z-machine story by being none of those. Z-code was the else-branch, so the only
+gate a file had left was `zvm::header::parse_header`'s `3..=8` on byte 0, which
+about **2.3% of arbitrary containers pass**. One did: an 838 KB Apple II DiskCopy
+image whose name-length byte is `0x06` opened as a Version 6 story, paired itself
+with a sidecar archive belonging to a different game, printed "story ended
+without asking for input" and exited **0** — a message that reads as a game bug
+and sends the reader looking somewhere else entirely. Z-code now proves itself
+like the other three, by `blorb::adf::looks_like_zcode`: dynamic memory ends
+below `$0e`, the writable object and global tables are inside it, the dictionary
+is in static memory, the serial is six printable bytes, and the declared file
+length does not over-run the bytes present (ZMSD §1.1, §11.1.6). That check is
+**borrowed from the disk readers rather than restated** — it is the same one that
+decides which file on a mounted volume is the game, and two of its clauses are
+corrections that cost a real release its visibility when they were assumed
+instead of measured (`SQ-0856`'s high-ASCII serial, `SQ-0869`'s Commodore
+*Trinity* whose high-memory mark sits below its static base). A second copy would
+be a second place for that to go stale. A container that passes nothing is
+refused with its length and the head of its file, which is where a wrapper writes
+its name, and the process exits non-zero.
+
 ### Why confine Glk to Glulx
 
 - **Spec-faithful.** Glulx's I/O *is defined* in terms of Glk — using Glk there
