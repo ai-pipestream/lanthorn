@@ -782,6 +782,26 @@ impl From<(String, InfocomPics)> for DiskArt {
     }
 }
 
+/// What a volume can say about which artwork pairs with ONE story on it
+/// (SQ-0876).
+///
+/// The tri-state exists because "no artwork beside this story" and "this volume
+/// cannot be more specific than the whole disk" are different answers that a
+/// bare `Option` would spell the same way — and collapsing them is exactly the
+/// bug: a Macintosh *Zork I*, which never had artwork, would be handed the
+/// archive of whichever graphical game happened to sit elsewhere on the disc.
+#[derive(Debug)]
+pub enum ArtPairing {
+    /// This volume has nothing finer to say — ask [`MountedDisk::pictures`].
+    /// Every format but HFS answers this, and so does HFS for a story it does
+    /// not hold.
+    WholeVolume,
+    /// The archive stored beside this story, or `None` when it genuinely has
+    /// none. **`Beside(None)` is a decision**, and the caller must not fall
+    /// back past it.
+    Beside(Option<DiskArt>),
+}
+
 /// Why a disk would not open. **Format-neutral on purpose**: a caller reports
 /// that a disk did not mount, never that an HFS catalog B*-tree was short — the
 /// front-ends do not know what a catalog is, and must not have to.
@@ -858,6 +878,30 @@ pub trait Volume: std::fmt::Debug {
 
     /// The native picture archive, if the disk carries a readable one.
     fn pictures(&self) -> Option<DiskArt>;
+
+    /// The artwork paired with ONE story on this volume, when the volume can
+    /// pair more precisely than "the archive on this disk" (SQ-0876).
+    ///
+    /// Provided, and the default is [`ArtPairing::WholeVolume`] — "I cannot be
+    /// more specific" — so a format that adopts nothing here behaves exactly as
+    /// it did. Only a volume that keeps its games in FOLDERS has anything finer
+    /// to say, and on this corpus that is HFS: the Masterpieces CD holds six
+    /// graphical games in six folders and one flat `pictures()` for all of them.
+    ///
+    /// `path` is the story's own [`DiskStory::name`], as this volume spells it.
+    fn pictures_beside(&self, _path: &str) -> ArtPairing {
+        ArtPairing::WholeVolume
+    }
+
+    /// The machine ONE file on this volume was pressed for, when the volume
+    /// records that per file — a hybrid disc carries both (SQ-0876).
+    ///
+    /// `None` means "the volume's own machine", which is every format, every
+    /// file, but one: a DOS build sitting on the Macintosh half of a hybrid CD,
+    /// which the Finder metadata marks as an import.
+    fn image_of(&self, _path: &str) -> Option<DiskImage> {
+        None
+    }
 
     /// **Every** story on the volume, in disk order — what a picker lists when a
     /// compilation disk holds four games and an InvisiClues file.
@@ -958,6 +1002,26 @@ impl Volume for Hfs {
 
     fn pictures(&self) -> Option<DiskArt> {
         Hfs::pictures(self).map(DiskArt::from)
+    }
+
+    /// A story this volume holds gets the archive beside it, and a story it does
+    /// not hold gets no opinion at all — which is what keeps a caller passing a
+    /// name from somewhere else falling through to the volume-wide answer rather
+    /// than being told "no artwork".
+    fn pictures_beside(&self, path: &str) -> ArtPairing {
+        if Hfs::is_from_dos(self, path).is_none() {
+            return ArtPairing::WholeVolume;
+        }
+        ArtPairing::Beside(Hfs::pictures_beside(self, path).map(DiskArt::from))
+    }
+
+    fn image_of(&self, path: &str) -> Option<DiskImage> {
+        // A DOS build on the Macintosh half of a hybrid disc is a DOS build:
+        // it wears the DOS row, so it answers the DOS row's interpreter number
+        // (`None` — the IBM PC's rule is version-dependent) and calls itself
+        // "DOS" in a listing, instead of claiming the Macintosh the FILESYSTEM
+        // implies. See `hfs::HfsEntry::is_from_dos`.
+        Hfs::is_from_dos(self, path)?.then_some(DiskImage::Fat12Dos)
     }
 }
 
@@ -1396,6 +1460,45 @@ impl MountedDisk {
     /// only a volume with none reaches for the set.
     pub fn pictures(&self) -> Option<DiskArt> {
         self.volume.pictures().or_else(|| self.pictures_across_the_set())
+    }
+
+    /// The artwork paired with ONE story on this release, named as
+    /// [`DiskStory::name`] spells it (SQ-0876).
+    ///
+    /// A volume that keeps its games in folders answers for that story alone,
+    /// **including when the answer is "none"** — see [`ArtPairing`]. Every other
+    /// volume, and any name this one does not hold, falls through to
+    /// [`Self::pictures`], so nothing that worked before moves: a single-game
+    /// floppy keeps its story and its archive at the volume root, where "beside
+    /// this story" and "on this disk" are the same set of files.
+    ///
+    /// This is what stops a compilation handing every graphical game the first
+    /// archive on the platter. All six on the Masterpieces CD resolved to
+    /// `MAC/ARTHUR FOLDER/CPIC.DATA` — so opening Journey drew Arthur's plates,
+    /// silently, and looked like artwork the whole time.
+    pub fn pictures_for(&self, entry: &str) -> Option<DiskArt> {
+        match self.volume.pictures_beside(entry) {
+            ArtPairing::Beside(art) => art,
+            ArtPairing::WholeVolume => self.pictures(),
+        }
+    }
+
+    /// The medium ONE story on this release was pressed for — this disk's own
+    /// format, unless the volume records that this particular file came off
+    /// another machine (SQ-0876).
+    ///
+    /// A hybrid disc is the case: the Masterpieces CD's Macintosh partition
+    /// carries Infocom's DOS builds too, and answering "HFS" for all 83 stories
+    /// told every PC one to advertise itself as a Macintosh — header `$1E` = 3,
+    /// which ZMSD §11.1.3 warns is exactly the byte a Version 6 story leans on.
+    pub fn image_for(&self, entry: &str) -> DiskImage {
+        self.volume.image_of(entry).unwrap_or(self.image)
+    }
+
+    /// [`DiskImage::interpreter_number`] for the medium ONE story came off —
+    /// see [`Self::image_for`].
+    pub fn interpreter_number_for(&self, entry: &str) -> Option<u8> {
+        self.image_for(entry).interpreter_number()
     }
 }
 

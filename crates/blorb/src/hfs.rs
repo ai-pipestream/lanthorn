@@ -176,6 +176,11 @@ type ExtentRecord = [Extent; 3];
 /// Infocom's conventional names on a release disk. Never a test — only a
 /// tiebreak when content identification finds more than one candidate. The Mac
 /// ships both `Pic.data` and `CPic.data`, so both count as conventional.
+/// The Finder creators Apple's PC Exchange stamps on a file imported from a DOS
+/// volume. See [`HfsEntry::is_from_dos`] for how they are used and what corpus
+/// measurement stands behind them.
+const DOS_IMPORT_CREATORS: [&[u8; 4]; 2] = [b"mdos", b"dosa"];
+
 const CONVENTIONAL_STORY: &str = "story.data";
 const CONVENTIONAL_PICTURES: [&str; 2] = ["pic.data", "cpic.data"];
 
@@ -217,6 +222,34 @@ pub struct HfsEntry {
 }
 
 impl HfsEntry {
+    /// Whether the Finder metadata says this file was copied in from a DOS
+    /// volume rather than authored on the Macintosh — so a HYBRID disc's two
+    /// halves can be told apart (SQ-0876).
+    ///
+    /// **Measured on the corpus, not read out of a specification**, and scoped
+    /// carefully to what was measured.
+    ///
+    /// Apple's PC Exchange stamps an imported file with `mdos` (and, on this
+    /// disc, `dosa`). Over the Masterpieces CD's **stories and picture
+    /// archives** the split is total: all 50 DOS stories under `PC/` and all 16
+    /// of its `.CG1`/`.EG1`/`.EG2`/`.MG1` archives carry `mdos`/`TEXT`, and not
+    /// one of the 33 Macintosh stories does — those carry Infocom's own creators
+    /// (`INZ1`, `INL1`, `IN0Z`…) with type `APPL` or `INdf`.
+    ///
+    /// It is **not** total over the whole catalogue, and saying so is the point:
+    /// the `PC/` tree also holds 413 files stamped `hscd`, three `ttxt`, and two
+    /// `dosa`, while `ttxt` appears on the Macintosh side too. Those are
+    /// documents, drivers and installers — never a story or an archive — so the
+    /// test is exact for the files it is asked about and would be wrong as a
+    /// general claim about which half of the disc a file sits on.
+    ///
+    /// It FAILS SAFE either way: an unrecognised creator is not claimed for DOS,
+    /// so the volume's own machine stands, and a disc that does not stamp its
+    /// imports behaves exactly as it did before this existed.
+    pub fn is_from_dos(&self) -> bool {
+        DOS_IMPORT_CREATORS.contains(&&self.creator)
+    }
+
     /// How this file is named to the outside world: `Folder/Sub/NAME` inside a
     /// folder, the bare name at the volume root.
     ///
@@ -461,6 +494,55 @@ impl Hfs {
 /// folder.
 fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+impl Hfs {
+    /// The picture archive stored **beside** the story at `path` — same folder,
+    /// same machine — or `None` when that story has no artwork of its own
+    /// (SQ-0876).
+    ///
+    /// `None` here is an ANSWER and not a gap, which is the whole point.
+    /// [`Hfs::pictures`] asks "what artwork is on this disk", and on a
+    /// single-game floppy those are the same question. On a compilation they are
+    /// not, and answering the easy one is how every graphical game on the
+    /// Masterpieces CD came to be handed `MAC/ARTHUR FOLDER/CPIC.DATA` —
+    /// Journey included, whose own archive sits one folder away.
+    ///
+    /// Two filters, and the second is what "same machine" buys. The folder alone
+    /// would already pair each game correctly on this disc; the machine test is
+    /// what keeps that true on a hybrid volume that puts both pressings of one
+    /// game in one folder, and it costs nothing to state now while the evidence
+    /// ([`HfsEntry::is_from_dos`]) is in hand.
+    ///
+    /// The ranking within a folder is [`Hfs::pictures`]' own — colour over
+    /// monochrome, then the conventional names, then picture count — so a
+    /// Macintosh game still lands on its `CPic.data` and its `Pic.data` is still
+    /// the thing you ask for by name.
+    pub fn pictures_beside(&self, path: &str) -> Option<(String, InfocomPics)> {
+        let story = self.files.iter().find(|e| e.path().eq_ignore_ascii_case(path))?;
+        let (dirs, dos) = (story.dirs.clone(), story.is_from_dos());
+        let mut cands: Vec<(String, InfocomPics)> = self
+            .files
+            .iter()
+            .filter(|e| e.dirs == dirs && e.is_from_dos() == dos)
+            .filter_map(|e| self.read(e).map(|b| (e.path(), b)))
+            .filter(|(_, b)| !looks_like_story(b))
+            .filter_map(|(p, b)| InfocomPics::parse(b).ok().map(|pics| (p, pics)))
+            .filter(|(_, p)| p.entries().iter().any(|e| e.has_pixels()))
+            .collect();
+        cands.sort_by_key(|(p, pics)| {
+            let lower = base_name(p).to_ascii_lowercase();
+            let conventional = CONVENTIONAL_PICTURES.contains(&lower.as_str());
+            (pics.is_monochrome(), !conventional, std::cmp::Reverse(pics.entries().len()))
+        });
+        cands.into_iter().next()
+    }
+
+    /// Whether the volume holds the story at `path` as a file imported from DOS.
+    /// `None` when it holds no such file at all.
+    pub fn is_from_dos(&self, path: &str) -> Option<bool> {
+        self.files.iter().find(|e| e.path().eq_ignore_ascii_case(path)).map(HfsEntry::is_from_dos)
+    }
 }
 
 /// Where the HFS volume starts inside `bytes` — 0 for a bare volume, 84 inside a
@@ -759,6 +841,9 @@ pub(crate) mod tests {
     const VOLUME_BLOCKS: usize = 1600;
     /// Where this builder puts its allocation blocks, matching a real disk.
     const ALLOC_START: usize = 4;
+    /// Allocation blocks reserved for EACH of the two B*-trees. Three was the
+    /// original reservation and it capped the catalog at two leaves.
+    const TREE_BLOCKS: usize = 12;
 
     /// Builder for a synthetic HFS volume, so the tests need no fixture.
     ///
@@ -781,8 +866,8 @@ pub(crate) mod tests {
         fn new() -> VolumeBuilder {
             VolumeBuilder {
                 volume: vec![0u8; VOLUME_BLOCKS * BLOCK],
-                // The two B*-trees take the first six allocation blocks.
-                next: 6,
+                // The two B*-trees take the first `2 * TREE_BLOCKS`.
+                next: 2 * TREE_BLOCKS,
                 catalog: Vec::new(),
                 overflow: Vec::new(),
                 next_cnid: 16,
@@ -831,14 +916,32 @@ pub(crate) mod tests {
             self.add_file_in(ROOT_CNID, name, ftype, data, pieces);
         }
 
-        /// Write `data` as a file under `parent`, split into `pieces` extents.
-        /// More than three pieces spills into the extents overflow file, exactly
-        /// as HFS does.
+        /// Write `data` as a file under `parent`, with Infocom's own creator.
         fn add_file_in(
             &mut self,
             parent: u32,
             name: &str,
             ftype: &[u8; 4],
+            data: &[u8],
+            pieces: usize,
+        ) {
+            self.add_entry(parent, name, ftype, b"IN0Z", data, pieces);
+        }
+
+        /// Write `data` as a file that Apple's PC Exchange imported from a DOS
+        /// volume — the other half of a hybrid disc.
+        fn add_dos_file_in(&mut self, parent: u32, name: &str, data: &[u8], pieces: usize) {
+            self.add_entry(parent, name, b"TEXT", DOS_IMPORT_CREATORS[0], data, pieces);
+        }
+
+        /// Split into `pieces` extents. More than three spills into the extents
+        /// overflow file, exactly as HFS does.
+        fn add_entry(
+            &mut self,
+            parent: u32,
+            name: &str,
+            ftype: &[u8; 4],
+            creator: &[u8; 4],
             data: &[u8],
             pieces: usize,
         ) {
@@ -876,7 +979,7 @@ pub(crate) mod tests {
             let mut d = vec![0u8; FILE_REC_LEN];
             d[0] = CDR_FILE;
             d[FIL_TYPE..FIL_TYPE + 4].copy_from_slice(ftype);
-            d[FIL_CREATOR..FIL_CREATOR + 4].copy_from_slice(b"IN0Z");
+            d[FIL_CREATOR..FIL_CREATOR + 4].copy_from_slice(creator);
             d[FIL_FL_NUM..FIL_FL_NUM + 4].copy_from_slice(&cnid.to_be_bytes());
             d[FIL_LG_LEN..FIL_LG_LEN + 4].copy_from_slice(&(data.len() as u32).to_be_bytes());
             for (i, (start, count)) in first.iter().enumerate() {
@@ -918,9 +1021,17 @@ pub(crate) mod tests {
                 .collect();
             let extents = btree(&overflow);
 
-            // Trees first: allocation blocks 0..3 are the extents file, 3..6 the
-            // catalog. (`VolumeBuilder::new` reserves exactly those.)
-            for (base, tree) in [(0usize, &extents), (3usize, &catalog)] {
+            // Trees first, in the blocks `VolumeBuilder::new` reserved: the
+            // extents file at 0, the catalog at `TREE_BLOCKS`. Each is declared
+            // at its ACTUAL length rather than at the reservation — a fixed
+            // `3 * BLOCK` silently truncated the catalog to its first two leaves
+            // the moment a volume held more than a floppy's worth of records,
+            // and the files past that point simply were not there (SQ-0876).
+            assert!(
+                extents.len() <= TREE_BLOCKS * BLOCK && catalog.len() <= TREE_BLOCKS * BLOCK,
+                "the builder's B*-tree reservation is too small for this fixture"
+            );
+            for (base, tree) in [(0usize, &extents), (TREE_BLOCKS, &catalog)] {
                 let at = (ALLOC_START + base) * BLOCK;
                 self.volume[at..at + tree.len()].copy_from_slice(tree);
             }
@@ -933,12 +1044,12 @@ pub(crate) mod tests {
             let name = b"Test Disk";
             self.volume[mdb + MDB_VN] = name.len() as u8;
             self.volume[mdb + MDB_VN + 1..mdb + MDB_VN + 1 + name.len()].copy_from_slice(name);
-            self.put32(mdb + MDB_XT_FL_SIZE, (3 * BLOCK) as u32);
+            self.put32(mdb + MDB_XT_FL_SIZE, extents.len() as u32);
             self.put16(mdb + MDB_XT_EXT_REC, 0);
-            self.put16(mdb + MDB_XT_EXT_REC + 2, 3);
-            self.put32(mdb + MDB_CT_FL_SIZE, (3 * BLOCK) as u32);
-            self.put16(mdb + MDB_CT_EXT_REC, 3);
-            self.put16(mdb + MDB_CT_EXT_REC + 2, 3);
+            self.put16(mdb + MDB_XT_EXT_REC + 2, TREE_BLOCKS as u16);
+            self.put32(mdb + MDB_CT_FL_SIZE, catalog.len() as u32);
+            self.put16(mdb + MDB_CT_EXT_REC, TREE_BLOCKS as u16);
+            self.put16(mdb + MDB_CT_EXT_REC + 2, TREE_BLOCKS as u16);
             self.volume
         }
     }
@@ -1343,6 +1454,76 @@ pub(crate) mod tests {
         assert_eq!(hfs.read_named("Loose.data").as_deref(), Some(&b"at the volume root"[..]));
     }
 
+    /// **Each game's artwork is its own, and a DOS import is not a Macintosh**
+    /// (SQ-0876).
+    ///
+    /// Synthetic, so it runs on CI, and shaped like the disc that motivated it:
+    /// two graphical games in two folders, plus the same game again on the DOS
+    /// side of the hybrid, plus a game with no artwork at all.
+    ///
+    /// FALSIFICATION: return `Hfs::pictures(self)` from `pictures_beside` and
+    /// all three stories get Arthur's archive — the reported symptom; make
+    /// `is_from_dos` always false and the DOS build claims the Macintosh.
+    #[test]
+    fn each_folder_pairs_its_own_artwork_and_a_dos_import_is_not_a_macintosh() {
+        let mut b = VolumeBuilder::new();
+        let mac = b.add_folder("MAC", ROOT_CNID);
+        let arthur = b.add_folder("ARTHUR FOLDER", mac);
+        let journey = b.add_folder("JOURNEY FOLDER", mac);
+        let pc = b.add_folder("PC", ROOT_CNID);
+        let pc_arthur = b.add_folder("ARTHUR", pc);
+
+        b.add_file_in(arthur, "Story.data", b"INdf", &fake_story(4096), 1);
+        b.add_file_in(arthur, "CPic.data", b"INdf", &fake_pics(false), 1);
+        b.add_file_in(journey, "Story.data", b"INdf", &fake_story(2048), 1);
+        b.add_file_in(journey, "CPic.data", b"INdf", &fake_pics(false), 1);
+        b.add_file_in(mac, "ZORK I", b"APPL", &fake_story(1024), 1);
+        b.add_dos_file_in(pc_arthur, "ARTHUR.ZIP", &fake_story(3072), 1);
+        b.add_dos_file_in(pc_arthur, "ARTHUR.MG1", &fake_pics(false), 1);
+        let raw = b.finish();
+
+        let hfs = Hfs::mount(raw.clone()).expect("mounts");
+        let named = |p: &str| hfs.pictures_beside(p).map(|(n, _)| n);
+        assert_eq!(
+            named("MAC/ARTHUR FOLDER/Story.data").as_deref(),
+            Some("MAC/ARTHUR FOLDER/CPic.data"),
+            "Arthur's own archive, not the first on the platter"
+        );
+        assert_eq!(
+            named("MAC/JOURNEY FOLDER/Story.data").as_deref(),
+            Some("MAC/JOURNEY FOLDER/CPic.data"),
+            "Journey's own — the case that drew Arthur's plates"
+        );
+        assert_eq!(named("MAC/ZORK I"), None, "a game with no artwork has none, not another's");
+        assert_eq!(
+            named("PC/ARTHUR/ARTHUR.ZIP").as_deref(),
+            Some("PC/ARTHUR/ARTHUR.MG1"),
+            "the DOS build pairs with the DOS artwork in its own folder"
+        );
+
+        // The machine, per file, through the format-neutral door.
+        let disk = crate::medium::MountedDisk::mount(raw).expect("mounts as a disk");
+        assert_eq!(disk.image_for("MAC/ARTHUR FOLDER/Story.data"), crate::medium::DiskImage::Hfs);
+        assert_eq!(
+            disk.interpreter_number_for("MAC/ARTHUR FOLDER/Story.data"),
+            Some(crate::medium::MACINTOSH_INTERPRETER_NUMBER),
+            "ZMSD §11.1.3: 3 = Macintosh"
+        );
+        assert_eq!(
+            disk.image_for("PC/ARTHUR/ARTHUR.ZIP"),
+            crate::medium::DiskImage::Fat12Dos,
+            "a DOS import wears the DOS row, on a Macintosh filesystem"
+        );
+        assert_eq!(
+            disk.interpreter_number_for("PC/ARTHUR/ARTHUR.ZIP"),
+            None,
+            "the IBM PC's answer: leave the version-dependent rule in force"
+        );
+        // A name this volume does not hold gets no opinion, and falls through.
+        assert_eq!(disk.image_for("nothing/here"), crate::medium::DiskImage::Hfs);
+        assert!(disk.pictures_for("nothing/here").is_some(), "falls through to the whole volume");
+    }
+
     /// **The hybrid CD, read where it lies** (SQ-0870): a raw MODE1/2352 dump
     /// whose third Apple partition is the Macintosh volume.
     ///
@@ -1392,6 +1573,42 @@ pub(crate) mod tests {
                 stories.iter().any(|s| s.bytes[0] == 6 && &s.bytes[0x12..0x18] == b"890316"),
                 "{what}: the r26 Macintosh Journey"
             );
+            // SQ-0876, on the real disc: the two halves separate exactly, and
+            // each graphical game pairs with its OWN archive. Before this, all
+            // six resolved to `MAC/ARTHUR FOLDER/CPIC.DATA` and all 83 stories
+            // claimed the Macintosh.
+            let disk = crate::medium::MountedDisk::mount(std::fs::read(dir.join(file)).unwrap())
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let mac = stories.iter().filter(|s| s.name.starts_with("MAC/")).count();
+            let pc = stories.iter().filter(|s| s.name.starts_with("PC/")).count();
+            assert_eq!((mac, pc), (33, 50), "{what}: every story is on one side or the other");
+            for s in &stories {
+                let want = if s.name.starts_with("PC/") {
+                    crate::medium::DiskImage::Fat12Dos
+                } else {
+                    crate::medium::DiskImage::Hfs
+                };
+                assert_eq!(disk.image_for(&s.name), want, "{what}: {}", s.name);
+            }
+            for (story, art) in [
+                ("MAC/ARTHUR FOLDER/STORY.DATA", Some("MAC/ARTHUR FOLDER/CPIC.DATA")),
+                ("MAC/JOURNEY FOLDER/STORY.DATA", Some("MAC/JOURNEY FOLDER/CPIC.DATA")),
+                ("MAC/ZORK ZERO/STORY.DATA", Some("MAC/ZORK ZERO/CPIC.DATA")),
+                ("PC/ARTHUR/ARTHUR.ZIP", Some("PC/ARTHUR/ARTHUR.MG1")),
+                ("PC/JOURNEY/JOURNEY.ZIP", Some("PC/JOURNEY/JOURNEY.MG1")),
+                ("PC/ZORK0/ZORK0.ZIP", Some("PC/ZORK0/ZORK0.EG1")),
+                // A text game shipped with no artwork gets none, not another
+                // game's — the failure mode the whole-volume answer had.
+                ("MAC/ZORK I", None),
+                ("PC/ZORK1/DATA/ZORK1.DAT", None),
+            ] {
+                assert_eq!(
+                    disk.pictures_for(story).map(|a| a.name).as_deref(),
+                    art,
+                    "{what}: the artwork paired with {story}"
+                );
+            }
+
             listings.push((
                 what.to_string(),
                 hfs.files().iter().map(|e| (e.path(), e.size)).collect(),
