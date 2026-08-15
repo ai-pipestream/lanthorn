@@ -332,6 +332,13 @@ pub(crate) fn boot_story(
         disk_image,
     );
     zvm::screen::set_palette(cfg.interpreter_profile.palette());
+    // SQ-0885: an experiment knob for header `$1F`, set beside the palette
+    // because it is the same kind of fact — one machine per run — and because
+    // the session constructor runs the story, so it has to be in force before
+    // the boot below. Re-asserted every launch (with `None` when the flag is
+    // absent) so a picker→play loop cannot carry one story's override into the
+    // next, exactly as the palette is.
+    zvm::screen::set_interpreter_version(cli.interpreter_version);
 
     // Booting a large story to its first prompt can take several seconds, and this
     // happens before the alternate screen is entered — so the normal terminal would

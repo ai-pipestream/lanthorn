@@ -1532,8 +1532,14 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_availa
     let interp = interpreter_number.unwrap_or_else(|| default_interpreter_number(version));
     mem.write_byte(0x1E, interp);
 
-    // Interpreter version (0x1F): b'A' = 0x41.
-    mem.write_byte(0x1F, b'A');
+    // Interpreter version (0x1F). `b'A'` = 0x41 is the default and has NO
+    // PROVENANCE: it arrived in this function's first commit beside `$1E`'s
+    // "6, a common neutral value", which SQ-0872 has since replaced with a
+    // sourced machine table, and it was never revisited. A story can PRINT this
+    // byte — Shogun r295 renders it as a decimal, so 'A' shows as 65 — so
+    // `set_interpreter_version` exists to override it while SQ-0885 works out
+    // what each machine actually wrote.
+    mem.write_byte(0x1F, interpreter_version().unwrap_or(b'A'));
 
     // Standard revision (0x32 = major, 0x33 = minor): 1.1 — the only published
     // Z-Machine Standards Document revision (ZMSD 1.1); no "1.2" exists.
@@ -1602,6 +1608,44 @@ const PALETTE_AMIGA: u8 = 1;
 /// boot so a picker→play loop cannot carry one story's machine into the next.
 static ACTIVE_PALETTE: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(PALETTE_STANDARD);
+
+/// The interpreter version byte for header `$1F`, or `NO_VERSION` for "unset"
+/// — a `u16` so the sentinel can sit outside the byte's own range.
+const NO_VERSION: u16 = 0x100;
+static INTERPRETER_VERSION: core::sync::atomic::AtomicU16 =
+    core::sync::atomic::AtomicU16::new(NO_VERSION);
+
+/// Override the interpreter version written into header `$1F`, process-wide.
+///
+/// Global for the same reason [`set_palette`] is, and it is the same KIND of
+/// fact: the byte is a property of the machine babelmap is pretending to be, and
+/// there is exactly one of those per run. It cannot be a session parameter
+/// because `GameSession`'s constructor runs the story to its first input, so the
+/// header has to be right before construction returns — and threading a
+/// twelfth positional argument through an eleven-argument constructor and its
+/// fifteen call sites to carry a debugging knob is a worse trade than this.
+///
+/// `None` restores the default, which is what every ordinary run uses.
+///
+/// # Why it is worth overriding (SQ-0885)
+///
+/// The default `b'A'` has no provenance — see [`init_header_caps`] — and the
+/// byte is one a story can PRINT. *Shogun* release 295 renders it as a decimal,
+/// so `'A'` (65) makes its Amiga banner read "version 6.65" where the original
+/// read "version 6.8". Whether a story also BRANCHES on it is unknown and is
+/// exactly what this exists to find out: set it, run the game, watch.
+pub fn set_interpreter_version(v: Option<u8>) {
+    let raw = v.map_or(NO_VERSION, u16::from);
+    INTERPRETER_VERSION.store(raw, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The interpreter version override, or `None` when no one has set one.
+pub fn interpreter_version() -> Option<u8> {
+    match INTERPRETER_VERSION.load(core::sync::atomic::Ordering::Relaxed) {
+        NO_VERSION => None,
+        v => Some(v as u8),
+    }
+}
 
 /// Select the palette standard colour numbers resolve through, process-wide.
 pub fn set_palette(p: Palette) {
@@ -2429,6 +2473,33 @@ mod tests {
         assert_eq!(default_interpreter_number(5), 1);
         assert_eq!(default_interpreter_number(8), 1);
         assert_eq!(default_interpreter_number(6), 6);
+    }
+
+    /// SQ-0885: `$1F` is overridable, and `None` restores the default.
+    ///
+    /// The byte has no provenance (see [`init_header_caps`]) and a story can
+    /// PRINT it — Shogun r295 renders it as a decimal, so the default `'A'` (65)
+    /// makes its Amiga banner read "version 6.65" against the real machine's
+    /// "6.8". This is the knob that lets that be tried.
+    ///
+    /// The override is process-wide, so this restores it before returning; under
+    /// `cargo test` (one process for the binary) a leak would reach every later
+    /// case, and under nextest (a process per test) it would not — a difference
+    /// that must not decide whether the suite passes.
+    #[test]
+    fn the_interpreter_version_byte_is_overridable() {
+        let restore = interpreter_version();
+        let byte_after = |v: Option<u8>| {
+            set_interpreter_version(v);
+            let mut mem = Memory::new(sample_story(5)).unwrap();
+            init_header_caps(&mut mem, true, false, None);
+            mem.read_byte(0x1F)
+        };
+        assert_eq!(byte_after(None), b'A', "the default, unchanged");
+        assert_eq!(byte_after(Some(8)), 8, "the Amiga's own, per Shogun's banner");
+        assert_eq!(byte_after(Some(0)), 0, "zero is a value, not 'unset'");
+        assert_eq!(byte_after(None), b'A', "…and None restores the default");
+        set_interpreter_version(restore);
     }
 
     #[test]

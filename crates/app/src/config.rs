@@ -187,6 +187,30 @@ impl Default for SearchConfig {
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 /// babelmap: a Z-machine interpreter with live automapping.
+/// `--interpreter-version`: a decimal byte, or a single character taken as its
+/// ASCII code.
+///
+/// Both spellings are accepted because the corpus renders the byte both ways —
+/// *Shogun* r295 prints it as a decimal ("version 6.**8**") and *Nord and Bert*
+/// r19 as a letter ("Version **C**") — so whichever a person is trying to
+/// reproduce, they can type what they SAW rather than convert it (SQ-0885).
+///
+/// A single digit is a NUMBER, not a character: `--interpreter-version 8` means
+/// 8, never 56. Nobody reproducing a banner wants the ASCII code of a digit, and
+/// the letter form exists for letters.
+fn parse_interpreter_version(s: &str) -> Result<u8, String> {
+    if let Ok(n) = s.parse::<u8>() {
+        return Ok(n);
+    }
+    let mut it = s.chars();
+    match (it.next(), it.next()) {
+        (Some(c), None) if c.is_ascii() => Ok(c as u8),
+        _ => Err(format!(
+            "expected a number 0-255 or one ASCII character, got {s:?}"
+        )),
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "babelmap",
@@ -261,6 +285,22 @@ pub struct Cli {
     // (SQ-0855); the FIELD keeps the config key's name because that is what it sets.
     #[arg(long = "interpreter", value_name = "N", verbatim_doc_comment)]
     pub interpreter_number: Option<u8>,
+
+    /// Interpreter VERSION to advertise in the story header (0x1F).
+    ///
+    /// A number (`8`) or a single character (`A`, taken as its ASCII code).
+    /// Both spellings are accepted because games render this byte both ways:
+    /// Shogun prints it as a decimal, Nord and Bert as a letter.
+    ///
+    /// This is an EXPERIMENT knob, not a setting — there is no config key and
+    /// nothing is written back. babelmap's default is `A` (65), which has no
+    /// provenance, and the original Amiga wrote 8: on release 295 of Shogun the
+    /// credits read "Amiga Interpreter version 6.65" here against the real
+    /// machine's "6.8". Whether any story BRANCHES on the byte rather than
+    /// merely printing it is unknown, and this is how to find out (SQ-0885).
+    #[arg(long = "interpreter-version", value_name = "V", verbatim_doc_comment,
+          value_parser = parse_interpreter_version)]
+    pub interpreter_version: Option<u8>,
 
     /// Native Infocom picture archive to draw this story's art from.
     ///
@@ -1715,6 +1755,27 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+    /// SQ-0885: `--interpreter-version` takes a number or one ASCII character.
+    ///
+    /// Both because the corpus renders the byte both ways — Shogun r295 prints
+    /// it as a decimal, Nord and Bert r19 as a letter — so a person can type
+    /// what they SAW. The digit rule is the one that could surprise: `8` is
+    /// eight, never 56, because nobody reproducing a banner wants the ASCII code
+    /// of a digit.
+    #[test]
+    fn interpreter_version_accepts_a_number_or_a_character() {
+        assert_eq!(parse_interpreter_version("8"), Ok(8), "a digit is a NUMBER");
+        assert_eq!(parse_interpreter_version("65"), Ok(65));
+        assert_eq!(parse_interpreter_version("0"), Ok(0));
+        assert_eq!(parse_interpreter_version("255"), Ok(255));
+        assert_eq!(parse_interpreter_version("A"), Ok(b'A'), "a letter is its code");
+        assert_eq!(parse_interpreter_version("C"), Ok(b'C'), "Nord and Bert's");
+        assert!(parse_interpreter_version("256").is_err(), "past a byte");
+        assert!(parse_interpreter_version("AB").is_err(), "two characters is neither");
+        assert!(parse_interpreter_version("").is_err());
+        assert!(parse_interpreter_version("\u{e9}").is_err(), "non-ASCII has no byte");
+    }
+
 
 #[cfg(test)]
 mod tests {
@@ -1981,6 +2042,7 @@ mod tests {
             no_images: false,
             no_game_colours: false,
             interpreter_number,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2061,6 +2123,7 @@ mod tests {
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2084,6 +2147,7 @@ mod tests {
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2107,6 +2171,7 @@ mod tests {
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2679,6 +2744,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2700,6 +2766,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2731,6 +2798,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2754,6 +2822,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2778,6 +2847,7 @@ use_defaults = false
             no_images: true,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2837,6 +2907,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2889,6 +2960,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -2929,6 +3001,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -3114,6 +3187,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,
@@ -3165,6 +3239,7 @@ use_defaults = false
             no_images: false,
             no_game_colours: false,
             interpreter_number: None,
+            interpreter_version: None,
             pictures: None,
             trace: None,
             debug: false,

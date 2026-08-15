@@ -960,6 +960,25 @@ Amiga floppy or anywhere else.
   artwork-flavour preference needs the resource reader; and a standard window is
   a Version 6 picture space stated by an *archive* rather than by a machine.
 
+  **One byte in that neighbourhood is still unsourced**, and it is one a story
+  can print. Header `$1F` is the interpreter *version*, and babelmap writes `A`
+  for every machine — a value that arrived in the same early commit as the
+  interpreter number's since-replaced "6, a common neutral value" and was never
+  revisited. *Shogun* renders it as a decimal, so its Amiga credits read
+  `Amiga Interpreter version 6.65` where a real Amiga read `6.8`. Until it is
+  settled you can set it yourself:
+
+  ```sh
+  babelmap "stories/James Clavell's Shogun.adf" --interpreter-version 8
+  ```
+
+  A number or a single character (`A` is taken as its ASCII code), because games
+  render the byte both ways — *Nord and Bert* prints a letter where *Shogun*
+  prints a decimal, so you can type what you saw. It is an experiment knob, not
+  a setting: there is no config key and nothing is written back. Whether any
+  story *branches* on the byte rather than merely printing it is exactly what it
+  exists to find out.
+
   You can read the whole table without opening the source or starting a game:
 
   ```sh
