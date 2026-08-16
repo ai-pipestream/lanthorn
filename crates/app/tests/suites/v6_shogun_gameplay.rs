@@ -337,21 +337,29 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
 /// pixel ring (items mapping above the terminal viewport) and the terminal overlay
 /// (items inside it) — the "first option raster, rest terminal text" defect.
 ///
-/// SQ-0886 RETARGETED THIS, and the requirement it was written for is unchanged:
-/// the screen is ONE coherent thing, never half ring and half overlay. What moved
-/// is which coherent thing. Routing it to the all-text cell path threw away every
-/// pixel Shogun had drawn — its two ornate side panels and the machine's ground —
-/// because that path draws no art at all, and the player got a full-width black
-/// block where the frame belongs. So this frame takes the COMPOSITE, which draws
-/// the artwork, the credits and the menu together at the game's own coordinates.
+/// SQ-0886 and then SQ-0892 RETARGETED THIS, and the requirement it was written for
+/// has never moved: the screen is ONE coherent thing, never half ring and half
+/// overlay. What moved is which coherent thing.
 ///
-/// The coherent ALL-TEXT screen is still required and still asserted — of
-/// `frameless`, in the case directly above, which is the mode whose whole promise
-/// is text. And the solid selection bar is asserted here where it now lives: as
-/// the highlight block the composite paints behind the selected item (SQ-0487),
-/// gaps between the words included.
+/// SQ-0886 sent it to the COMPOSITE, because routing it to the all-text cell path
+/// threw away every pixel Shogun had drawn — its two ornate side panels and the
+/// machine's ground — and the player got a full-width black block where the frame
+/// belongs. SQ-0892 sent it to the RING, which draws the panels as art and the menu
+/// as glyphs; the composite could only ever draw the menu as pixels, which is what
+/// SQ-0750 forbids wherever the runs account for the pixels themselves.
+///
+/// So the coherence requirement is asserted in its most direct form yet: all three
+/// items are terminal GLYPHS, on CONSECUTIVE rows, in the order the game printed
+/// them. That is precisely the shape the original defect broke — and the shape both
+/// of SQ-0892's own defects broke too, one per axis: independently rounded columns
+/// gave `SI(RT th e ga me`, and independently rounded rows put the three items on
+/// terminal rows 26, 28 and 29 with the first clipped off the top of the viewport.
+///
+/// The solid selection bar (SQ-0487) is asserted on both paths: as terminal cells
+/// carrying the reverse attribute on the ring, and as the highlight block the
+/// composite paints in raster mode, gaps between the words included.
 #[test]
-fn shogun_hybrid_boot_menu_takes_the_composite_with_a_solid_selection_bar() {
+fn shogun_hybrid_boot_menu_is_one_coherent_ring_screen_with_a_solid_selection_bar() {
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -377,14 +385,62 @@ fn shogun_hybrid_boot_menu_takes_the_composite_with_a_solid_selection_bar() {
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
 
-    // One coherent screen, and it is the composite — never the split the report
-    // named, and never the art-less cell path SQ-0886 measured.
+    // One coherent screen, and it is the RING — never the split the report named,
+    // and never the art-less cell path SQ-0886 measured.
     let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
     assert_eq!(
-        path, "raster",
-        "the boot menu draws over Shogun's own side panels, so hybrid takes the composite: the cell \
-         path draws no art and left the player a black block where the frame belongs (SQ-0886)"
+        path, "hybrid-ring",
+        "the boot menu draws over Shogun's own side panels, so hybrid draws it on the ring: \
+         panels as art, menu as glyphs (SQ-0892). The cell path draws no art and left the \
+         player a black block where the frame belongs (SQ-0886)"
     );
+
+    // …and the three items are glyphs, on consecutive rows, in the game's own order.
+    let rows: Vec<String> = (0..area.height)
+        .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect())
+        .collect();
+    let row_of = |s: &str| {
+        rows.iter()
+            .position(|r| r.contains(s))
+            .unwrap_or_else(|| panic!("the menu item {s:?} reaches the pane as text:\n{}", rows.join("\n")))
+    };
+    let (start, restore, quit) = (row_of("START the game"), row_of("RESTORE a saved game"), row_of("QUIT the game"));
+    assert_eq!(
+        (restore, quit),
+        (start + 1, start + 2),
+        "the game printed its three items on consecutive native rows, so they occupy consecutive \
+         terminal rows — no skipped row through the middle of the menu:\n{}",
+        rows.join("\n")
+    );
+    // The selected item's cells carry the highlight across their whole span — the
+    // inter-word gaps included, which is the moth-eaten defect SQ-0487 was about.
+    // Measured against the SAME columns one row down, which is the unselected item:
+    // a bar that painted only the glyph cells would leave the gaps agreeing with it.
+    let start_col = rows[start].find("START the game").map(|b| rows[start][..b].chars().count()).expect("located above");
+    // The game asks for the bar with reverse video (ZMSD §8.7.1 bit 1), which
+    // `v6_run_style` carries into the cell as `REVERSED`.
+    let barred = |y: usize, x: usize| {
+        buf.cell((x as u16, y as u16))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    };
+    let span = start_col..start_col + "START the game".chars().count();
+    assert!(
+        span.clone().all(|x| barred(start, x)),
+        "the selected item carries a solid highlight across all fourteen of its columns, \
+         inter-word gaps included (SQ-0487):\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        span.clone().all(|x| !barred(restore, x)),
+        "RESTORE is not selected, so its row carries no highlight bar:\n{}",
+        rows.join("\n")
+    );
+
+    // The composite still paints the same bar in RASTER mode, where it is pixels.
+    state.config.v6_render = app::config::V6RenderMode::Raster;
 
     // …and the SELECTED item carries a solid highlight bar (SQ-0487). Shogun prints
     // its menu one glyph at a time through a 1px caret window, and the spaces

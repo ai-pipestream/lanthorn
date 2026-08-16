@@ -734,13 +734,23 @@ fn render_node(
             // the story window's page flooded across the pane (measured on
             // `James Clavell's Shogun.adf` release 295 and on the Blorb release 322
             // alike: `#000000` across 761 of 800 columns where the Amiga's colour 12
-            // ground belongs). Not the RING either — the ring cannot lay this screen
-            // out, which is what SQ-0484 found — but the COMPOSITE, which draws the
-            // whole thing in native pixels and already gets this frame right in
-            // `v6_render = "raster"`. It is the same rule the no-story takeover path
-            // below already makes for a painted ground (SQ-0711): pixels only the
-            // composite can show mean the composite draws this screen, and it draws
-            // the runs over them anyway.
+            // ground belongs).
+            //
+            // SQ-0892 RE-POINTED WHERE IT SENDS THEM. It sent them to the COMPOSITE,
+            // because the ring could not lay this screen out — the reason recorded
+            // below at the hybrid branch, and true until now: the ring drew the menu
+            // one CHARACTER per independently rounded cell (`SI(RT th e ga me`). Both
+            // halves of that are gone. SQ-0894 built the ring from content, so the
+            // ornaments are one flank down the whole pane on either press; SQ-0892
+            // groups a row's runs before placing them, so the menu is intact. The
+            // frame now takes the RING, which draws the panels as art and the credits
+            // and menu as CRISP GLYPHS — SQ-0750's rule, which the composite cannot
+            // honour because it rasterises every character on the screen.
+            //
+            // What this predicate still decides, and why it is kept: a menu takeover
+            // with NO art goes to the coherent all-text cell path (SQ-0484), and one
+            // WITH art must not, because the cell path draws no art. That is the
+            // distinction it was always making. Only its destination changed.
             //
             // ART, specifically — a chrome GRAPHICS window with opaque pixels in it.
             // An `erase_window` fill is not art: the cell path draws those itself
@@ -778,16 +788,17 @@ fn render_node(
                 // bands. Needs a story window; without one — or with a full-screen
                 // picture takeover, which has no ring to draw (SQ-0570) — fall
                 // through to raster.
-                // SQ-0886: a menu takeover over the game's own artwork reaches this
-                // branch precisely so it can take the composite below. The RING is not
-                // an option for it — that is what SQ-0484 found, and it is still true:
-                // driven on Shogun's boot menu the ring rasterises the frozen banner
-                // into a full-width art band (the very thing SQ-0750 forbids) and lays
-                // the menu out one CHARACTER per rounded cell, because the game prints
-                // it glyph by glyph through a 1px caret window ("SI(RT th e ga me" at a
-                // 100x40 pane). The composite draws every one of those pixels at the
-                // game's own coordinates and is measurably right on this frame.
-                if state.config.v6_render == crate::config::V6RenderMode::Hybrid && !menu_over_art {
+                // SQ-0886 excluded a menu takeover over the game's own artwork here, so
+                // it fell to the composite below; SQ-0892 removed that exclusion. The
+                // two defects it named are both fixed: the ring no longer rasterises
+                // the frozen banner into a full-width art band (SQ-0894 classifies a
+                // band by its CONTENT, so a banner of text is a text strip), and it no
+                // longer lays the menu out one CHARACTER per rounded cell (a row's
+                // abutting runs are grouped before they are placed). Shogun's boot menu
+                // now draws its panels as art and its credits and menu as glyphs, which
+                // is what SQ-0750 asks for and what the composite structurally cannot
+                // do — it rasterises every character on the screen.
+                if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
                     if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, layout.story_gfx, native)) {
                         // The op log's frame boundary (SQ-0590) opens HERE, not at
                         // the band draw further down: the two calls below are the
@@ -2055,6 +2066,33 @@ fn render_node(
                         // them because the terminal viewport covers that area).
                         // Native px → device px (chrome-ring scale) → terminal
                         // cell, glyphs only (no background fill).
+                        //
+                        // SQ-0892: the runs of one native text row are grouped
+                        // before they are placed, exactly as a chrome text STRIP
+                        // has grouped its own since SQ-0509. A run is POSITIONED
+                        // through the ring scale but then ADVANCES ONE TERMINAL
+                        // COLUMN per character, and the two rates coincide only
+                        // where a terminal column is one native 8px text cell — so
+                        // rounding each fragment on its own scatters text the game
+                        // printed as one stream. Shogun prints its boot menu glyph
+                        // by glyph through a 1px caret window: fifteen abutting
+                        // single-character runs at exactly 8px pitch, which at a
+                        // 100x40 pane (1.225 columns per native cell) rounded to
+                        // 36,37,38,40,41,… — neighbours colliding into one column
+                        // and skipping the next, the `SI(RT th e ga me` this path
+                        // was blamed for. Merged, the group is placed ONCE and its
+                        // characters advance together, so it is intact and off by
+                        // at most the quarter cell its origin was never on.
+                        //
+                        // [`merge_strip_fragments`] is that rule and is reused
+                        // rather than restated: abutting fragments and one-cell
+                        // word gaps join, a FIELD gap keeps its own column
+                        // (SQ-0757). Nothing here is a rule or a divider — those
+                        // are frame geometry, and frame geometry is not inside the
+                        // story box — so the strip path's `collapse_row_rules`
+                        // wrapper has nothing to do on this route.
+                        let mut in_box: std::collections::BTreeMap<u16, Vec<&crate::engine::PxText>> =
+                            std::collections::BTreeMap::new();
                         for it in &layout.chrome {
                             if let WinNode::Grid(g) = &it.node {
                                 for t in &g.px_texts {
@@ -2067,28 +2105,61 @@ fn render_node(
                                     {
                                         continue; // outside the story box → already in the ring
                                     }
-                                    let cw = cell_px.0.max(1) as f32;
-                                    let ch = cell_px.1.max(1) as f32;
-                                    // Pane-relative cell → absolute buffer cell.
-                                    let col = area.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
-                                    let row = area.y as i32 + ((scale.off_y as f32 + py * scale.s) / ch).round() as i32;
-                                    if row < viewport.y as i32
-                                        || row >= viewport.bottom() as i32
-                                        || col < viewport.x as i32
-                                        || col >= viewport.right() as i32
-                                    {
-                                        continue;
-                                    }
-                                    // Explicit game colours on the run replace the
-                                    // theme base per channel; inherited channels
-                                    // keep it, reverse toggles (SQ-0488).
-                                    let style = v6_run_style(base, t.fg, t.bg, t.style, state.config.honor_game_colours, &state.colors);
-                                    let max_w = viewport.right() as usize - col as usize;
-                                    if max_w > 0 {
-                                        // Untrusted game text (SQ-0639).
-                                        let text = crate::render::blank_control_chars(&t.text);
-                                        buf.set_stringn(col as u16, row as u16, text.as_ref(), max_w, style);
-                                    }
+                                    in_box.entry(t.y).or_default().push(t);
+                                }
+                            }
+                        }
+                        for row_runs in in_box.values_mut() {
+                            row_runs.sort_by_key(|t| t.x);
+                            for t in merge_strip_fragments(row_runs) {
+                                let px = t.x.max(1) as f32 - 1.0;
+                                let cw = cell_px.0.max(1) as f32;
+                                // Pane-relative cell → absolute buffer cell.
+                                let col = area.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
+                                // SQ-0892: the ROW is the run's own native text row
+                                // counted from the story box's first — one terminal row
+                                // each — not its native pixel through the ring scale.
+                                //
+                                // This is SQ-0543's packing, which a chrome text STRIP
+                                // has had since it was written, applied to the runs that
+                                // land INSIDE the story box. It is the stronger case of
+                                // the two: these runs are stamped ON the transcript, and
+                                // the transcript advances exactly one terminal row per
+                                // line, so a run placed by device pixel drifts away from
+                                // the very text it overlays as soon as a terminal row
+                                // stops being one native 16px text row.
+                                //
+                                // MEASURED on Shogun's boot menu at a 100x40 pane: the
+                                // game prints its three items on consecutive native rows
+                                // 21, 22 and 23, and the device mapping put them on
+                                // terminal rows 26, 28 and 29 — a skipped row through the
+                                // middle of a three-line menu, and `START the game`
+                                // rounded to row 26 against a viewport that ceils to 27,
+                                // so the first item was clipped off the screen entirely.
+                                // A ceil-vs-round disagreement on a shared boundary, which
+                                // is the usual shape of a v6 geometry defect. Counting
+                                // rows from the box's own top cannot disagree with the
+                                // box: the run at the box's first row IS the viewport's
+                                // first row, by construction.
+                                let row = viewport.y as i32
+                                    + (t.y.max(1) as i32 - 1) / 16
+                                    - (story.y_px as i32) / 16;
+                                if row < viewport.y as i32
+                                    || row >= viewport.bottom() as i32
+                                    || col < viewport.x as i32
+                                    || col >= viewport.right() as i32
+                                {
+                                    continue;
+                                }
+                                // Explicit game colours on the run replace the
+                                // theme base per channel; inherited channels
+                                // keep it, reverse toggles (SQ-0488).
+                                let style = v6_run_style(base, t.fg, t.bg, t.style, state.config.honor_game_colours, &state.colors);
+                                let max_w = viewport.right() as usize - col as usize;
+                                if max_w > 0 {
+                                    // Untrusted game text (SQ-0639).
+                                    let text = crate::render::blank_control_chars(&t.text);
+                                    buf.set_stringn(col as u16, row as u16, text.as_ref(), max_w, style);
                                 }
                             }
                         }
@@ -5084,6 +5155,94 @@ fn px_rect_to_cells(
     Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
 }
 
+/// SQ-0892: the X-axis counterpart of SQ-0543's row packing, for a text strip that
+/// has no horizontal structure to preserve. `Some(origin)` gives the terminal column
+/// the strip's LEFTMOST native text cell occupies, after which every run is placed by
+/// its offset in native cells and each character advances one column.
+///
+/// **Why a strip needs its own map at all.** A run occupies two widths at once. Its
+/// NATIVE footprint is `chars × 8` game pixels, which the letterbox scale stretches
+/// to `chars × 8 × s` device pixels — what the composite draws, and what the art
+/// around it is drawn at. Its RENDERED width is `chars` terminal cells, because a
+/// glyph is one cell and no scale changes that. [`run_cell`] maps the run's first
+/// native pixel and lets the characters advance from there, which piles the whole
+/// difference onto the right-hand end — and the difference grows with the run's
+/// LENGTH, so two runs of different lengths that the game aligned with each other no
+/// longer are. MEASURED on Shogun's credits at a 100x40 pane (s = 1.225): the game
+/// centres all nine lines on native x=320, and per-run mapping lands their centres in
+/// columns 43, 44, 44, 45, 45.5, 46, 47, 47 and 48 — a five-column wobble, on text
+/// whose entire design is that it is centred. Indexing by native cell instead brings
+/// all nine back to column 49, which is exactly where native x=320 maps.
+///
+/// This is SQ-0543's argument on the other axis, and that comment already makes it:
+/// *"Inside a TEXT strip there is no art to stay aligned with — having no frame
+/// graphics behind it is what MAKES it a text strip — so the game's own row structure
+/// is the truth to preserve, not the device-pixel position."* Column structure is the
+/// truth on the same grounds. Only the Y half was ever written.
+///
+/// **Why it is refused when a row carries more than one run, which is the whole of
+/// the guard.** Native-cell indexing has slope 1 column per native cell where the
+/// device map has slope `s`, so the two diverge linearly with distance from the
+/// origin. Over a block the game composed in its own text grid that is the point.
+/// Over FIELDS the game pinned to SCREEN positions it is a disaster, and the corpus
+/// says so — each of these was measured, not supposed:
+///
+/// * Journey's Amiga menu band puts verbs and `▌` dividers on one row across the full
+///   640px; moving them by native offset drags every column in from the pane edges
+///   and `journey_amiga_menu_dividers_line_up_down_the_panel` fails with the divider
+///   8 columns adrift of the text it belongs to.
+/// * Shogun's own gameplay status band is `Erasmus` … `SHOGUN` … `Score:` `0` on one
+///   row, right-justified at native x=586; native indexing moves the left field 8
+///   columns right and the value 5 left, so the band's contents shrink away from the
+///   flood that is still drawn edge to edge.
+/// * Arthur's status row and Zork Zero's location/score row are the same shape.
+///
+/// A row carrying one run has no such relationship to break: nothing stands beside it,
+/// and its only alignments are with the OTHER ROWS, which is precisely what this
+/// preserves and what per-run mapping destroys. On the corpus the two classes separate
+/// cleanly — Shogun's credits are 9 rows of one run; Journey's band, Arthur's and Zork
+/// Zero's status rows and advent's bar all carry two or more after merging.
+///
+/// **The origin.** The strip's leftmost native pixel through the device map, plus half
+/// the strip's SLACK — the columns by which the whole block's native footprint exceeds
+/// the glyphs that will be drawn in it. Distributing the slack evenly is what keeps a
+/// centred block centred where the composite centres it (Shogun's, exactly). Slack is
+/// floored at zero: below one column per native cell the glyphs are WIDER than their
+/// footprint and there is nothing to distribute, so the block keeps the left edge the
+/// game gave it rather than being pushed off the pane. That case is live — Shogun at a
+/// 74-column pane resolves to s = 0.925.
+fn strip_native_origin(
+    runs: &[&crate::engine::PxText],
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+) -> Option<i32> {
+    /// The v6 text cell is 8x16 (SQ-0479).
+    const FONT_W: i32 = 8;
+    if runs.is_empty() {
+        return None;
+    }
+    // One run per native text row, or the row has fields whose screen positions are
+    // the truth. Counted on the runs as they will be DRAWN, so the caller must merge
+    // first — Arthur emits his status a glyph at a time and would otherwise look like
+    // 72 fields on one row.
+    let mut per_row: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+    for t in runs {
+        *per_row.entry((t.y.max(1) - 1) / 16).or_default() += 1;
+    }
+    if per_row.values().any(|&n| n > 1) {
+        return None;
+    }
+    let x0 = runs.iter().map(|t| t.x.max(1) as i32 - 1).min()?;
+    let x1 = runs.iter().map(|t| (t.x.max(1) as i32 - 1) + t.text.chars().count() as i32 * FONT_W).max()?;
+    let cw = cell_px.0.max(1) as f32;
+    let cells = ((x1 - x0) as f32 / FONT_W as f32).max(1.0);
+    let footprint = (x1 - x0) as f32 * scale.s / cw;
+    let slack = (footprint - cells).max(0.0);
+    let left = pane.x as f32 + (scale.off_x as f32 + x0 as f32 * scale.s) / cw;
+    Some((left + slack / 2.0).round() as i32)
+}
+
 fn run_cell(t: &crate::engine::PxText, scale: &crate::render::v6_layout::Scale, cell_px: (u16, u16), pane: Rect) -> (i32, i32) {
     let cw = cell_px.0.max(1) as f32;
     let ch = cell_px.1.max(1) as f32;
@@ -5918,6 +6077,16 @@ fn draw_chrome_text_strip(
         by_row.insert(row, collapse_row_rules(&rr, scale, cell_px, pane));
     }
 
+    // SQ-0892: if this strip is a BLOCK the game composed in its own text grid — one
+    // run per row, nothing standing beside anything — place its runs by their offset
+    // in native text cells from one shared origin, rather than mapping each one's own
+    // native pixel through the scale. See [`strip_native_origin`] for the measurement
+    // and for why a row with two runs on it is refused. Asked AFTER the collapse, so
+    // the count is of runs as they will be drawn.
+    let drawn: Vec<&PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
+    let native_origin = strip_native_origin(&drawn, scale, cell_px, pane);
+    let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
+
     // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run in
     // a MIXED row (normal verb text among reversed dividers — Journey's menu body) is
     // a vertical column divider; extend every such column across the FULL strip height
@@ -6008,7 +6177,13 @@ fn draw_chrome_text_strip(
         // side of every neighbour. Everything else keeps exactly the span its
         // characters occupy.
         let base_span = |t: &PxText| {
-            let (c, _) = run_cell(t, scale, cell_px, pane);
+            // SQ-0892: in a strip with no horizontal structure the column is the
+            // run's offset in NATIVE TEXT CELLS from the strip's own origin;
+            // everywhere else it is this run's own native pixel through the scale.
+            let c = match native_origin {
+                Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / 8.0).round() as i32,
+                None => run_cell(t, scale, cell_px, pane).0,
+            };
             // SQ-0783: a LONE frame glyph standing at the game screen's own edge — the
             // `┐` that ends the top rule, the `┘` that ends the bottom one, the `│` that
             // closes the menu header — aligns to the far end of its own native cell, so
@@ -9190,15 +9365,19 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_menu_screen_over_artwork_takes_the_composite() {
+    fn hybrid_menu_screen_over_artwork_takes_the_ring() {
         // SQ-0886: the same takeover screen, with the game's ARTWORK behind it —
         // Shogun's boot menu, whose credits and menu sit on the machine's own ground
         // between two ornate side panels. The cell path above draws no art at all, so
         // routing this screen there lost every pixel the game had drawn: no panels
         // anywhere and the story window's page flooded across the pane (`#000000` over
-        // 761 of 800 columns, measured on the Amiga floppy AND the IBM Blorb). It goes
-        // to the composite instead, which draws all of it at the game's own
-        // coordinates — the frame `v6_render = "raster"` already shipped.
+        // 761 of 800 columns, measured on the Amiga floppy AND the IBM Blorb).
+        //
+        // SQ-0886 sent it to the composite; SQ-0892 sends it to the RING, which draws
+        // the panels as art AND the menu as glyphs — the composite can only draw the
+        // menu as pixels, and SQ-0750 reserves raster for pixels the runs cannot
+        // account for. Which destination it takes is the whole of this case; that the
+        // menu SURVIVES the trip is the sibling assertion below it.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
         state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
@@ -9234,9 +9413,30 @@ mod tests {
         );
         let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
         assert_eq!(
-            path, "raster",
-            "a menu takeover with the game's artwork behind it takes the composite — the cell path \
-             draws no art, so it can only render this screen without the game's frame"
+            path, "hybrid-ring",
+            "a menu takeover with the game's artwork behind it takes the RING — the cell path \
+             draws no art, and the composite draws the menu as pixels (SQ-0892)"
+        );
+
+        // …and the menu arrives as GLYPHS, on the three consecutive rows the game
+        // printed them on. This is the whole of SQ-0892 in one assertion: the runs
+        // abut at 8px pitch and stand on consecutive 16px rows, so rounding each one
+        // on its own axis-independently is what produced `SI(RT th e ga me` across
+        // the columns and a skipped row down the middle of the menu.
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+        };
+        let screen: String = (0..area.height).map(|y| row_text(y) + "\n").collect();
+        let row_of = |s: &str| {
+            (0..area.height)
+                .find(|&y| row_text(y).contains(s))
+                .unwrap_or_else(|| panic!("the menu item {s:?} reaches the pane as text:\n{screen}"))
+        };
+        let start = row_of("START the game");
+        assert_eq!(
+            (row_of("RESTORE a saved game"), row_of("QUIT the game")),
+            (start + 1, start + 2),
+            "the three items keep the game's own consecutive rows:\n{screen}"
         );
     }
 

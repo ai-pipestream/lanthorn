@@ -278,25 +278,33 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
         "IBM Interpreter version 6.65",
     ];
 
-    // SQ-0886: the CELL paths. Hybrid is no longer one of them on this frame —
-    // Shogun's boot menu is a painted takeover over the game's own side panels, and
-    // hybrid takes the composite for it rather than the art-less cell path, which
-    // drew the screen as a full-width black block with no frame on it at all. The
-    // composite arm at the foot of this case is what covers hybrid now, and it is
-    // the arm that was never wrong.
-    for tag in ["cell"] {
+    // The paths that draw this header as GLYPHS in the cell buffer.
+    //
+    // SQ-0886 took hybrid out of this loop: the boot menu is a painted takeover over
+    // Shogun's own side panels, and hybrid sent it to the composite rather than to
+    // the art-less cell path, which drew the screen as a full-width black block with
+    // no frame on it at all. SQ-0892 put hybrid back, and on the RING — which draws
+    // the panels as art and the header as text, so it belongs in this loop and not in
+    // the composite arm below. It is also the arm that would have caught SQ-0892's
+    // own defect: driven here before the fix, the ring mapped each line's own native
+    // pixel through the scale and the nine centres came out five columns apart.
+    for tag in ["cell", "hybrid"] {
         for honor in [true, false] {
             for (w, h) in [(80u16, 25u16), (120, 40)] {
                 let mut state = app::state::AppState::default();
                 state.colors = app::colors::ColorScheme::terminal_default();
                 state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-                // Force the CELL path: SQ-0895 removed frameless, which was the
-                // deliberate route in. Dropping the picker is the substitute whose
-                // ONLY effect is the one frameless contributed here — draw no game
-                // image. (A modal overlay also lands on the cell path, but it
-                // additionally suppresses the inlined input line, which shifts row
-                // counts.)
-                state.game_picker = None;
+                if tag == "cell" {
+                    // Force the CELL path: SQ-0895 removed frameless, which was the
+                    // deliberate route in. Dropping the picker is the substitute whose
+                    // ONLY effect is the one frameless contributed here — draw no game
+                    // image. (A modal overlay also lands on the cell path, but it
+                    // additionally suppresses the inlined input line, which shifts row
+                    // counts.)
+                    state.game_picker = None;
+                } else {
+                    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+                }
                 state.config.honor_game_colours = honor;
                 let area = Rect::new(0, 0, w, h);
                 let mut buf = Buffer::empty(area);
@@ -307,10 +315,16 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
                 let rows: Vec<String> = (0..h).map(row_text).collect();
                 let ctx = format!("{tag} honor={honor} {w}x{h}");
 
+                // CHAR index, not byte: on the ring the row begins with the frame's
+                // half-blocks, three bytes each, and `str::find` would report a column
+                // eight past the one the glyph is in (SQ-0894 fixed the same defect in
+                // `v6_shogun_status_alignment`). The cell path's rows are all-ASCII, so
+                // the two agreed there and only ever there.
+                let find_col = |r: &String, s: &str| r.find(s).map(|b| r[..b].chars().count());
                 for line in lines {
                     let at = rows
                         .iter()
-                        .find_map(|r| r.find(line))
+                        .find_map(|r| find_col(r, line))
                         .unwrap_or_else(|| panic!("{ctx}: the frozen header line {line:?} reaches the pane:\n{}", rows.join("\n")));
                     let want = (w as usize - line.chars().count()) / 2;
                     assert!(
@@ -334,30 +348,37 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
         }
     }
 
-    // …and the COMPOSITE, which is both the raster path and — since SQ-0886 — the
-    // path hybrid takes on this frame. It paints the frozen layer as pixels at the
-    // game's own coordinates and was never wrong, but it is pinned here so the
-    // invariant is "centred in every path" rather than "centred in the ones we
-    // happened to fix". Measured as the INK extent of each 16px text row, inside
-    // the middle band where the frame art never reaches.
+    // …and the COMPOSITE, which is the raster MODE's answer for this frame. It paints
+    // the frozen layer as pixels at the game's own coordinates and was never wrong,
+    // but it is pinned here so the invariant is "centred in every path" rather than
+    // "centred in the ones we happened to fix". Measured as the INK extent of each
+    // 16px text row, inside the middle band where the frame art never reaches.
     //
-    // That hybrid really does arrive here is asserted first: a mode that quietly
-    // stopped taking the composite would leave this arm covering nothing.
+    // Which path each MODE takes is asserted first, so an arm that quietly stopped
+    // covering what it names cannot pass by covering nothing. SQ-0892 moved hybrid off
+    // the composite and onto the ring; raster is unmoved, and still the only mode that
+    // draws this screen as pixels.
     for honor in [true, false] {
-        let mut state = app::state::AppState::default();
-        state.colors = app::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-        state.config.v6_render = app::config::V6RenderMode::Hybrid;
-        state.config.honor_game_colours = honor;
-        let area = Rect::new(0, 0, 80, 25);
-        let mut buf = Buffer::empty(area);
-        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
-        let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
-        assert_eq!(
-            path, "raster",
-            "hybrid honor={honor}: Shogun's boot menu is a painted takeover over the game's own \
-             artwork, so hybrid draws it with the composite below (SQ-0886)"
-        );
+        for (mode, want) in [
+            (app::config::V6RenderMode::Hybrid, "hybrid-ring"),
+            (app::config::V6RenderMode::Raster, "raster"),
+        ] {
+            let mut state = app::state::AppState::default();
+            state.colors = app::colors::ColorScheme::terminal_default();
+            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.config.v6_render = mode;
+            state.config.honor_game_colours = honor;
+            let area = Rect::new(0, 0, 80, 25);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+            let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+            assert_eq!(
+                path, want,
+                "{mode:?} honor={honor}: Shogun's boot menu is a painted takeover over the game's \
+                 own artwork. Hybrid draws it on the RING — panels as art, header and menu as \
+                 glyphs (SQ-0892); raster draws every pixel of it as the composite"
+            );
+        }
     }
 
     let layout = app::render::v6_layout::classify_windows(match &model.root {
@@ -513,17 +534,10 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
         }
     }
 
-    // …and HYBRID, which takes the composite for this frame (SQ-0886). The same
-    // relation, measured where the composite states it: on the game's own native
-    // row 21 (y 336..351), ink stands both left of native x=235 — the prompt, in
-    // window 0 at x=47 — and at or right of it, which is the menu in window 2. A
-    // prompt nine rows above its menu would leave that row bare on the left.
-    let items = match &model.root {
-        WinNode::Layered(items) => items,
-        _ => panic!("v6 builds a Layered root"),
-    };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    // …and HYBRID, which since SQ-0892 draws this frame on the RING: the prompt is
+    // transcript text in the story viewport and the menu is chrome runs stamped over
+    // it, so the relation is now visible in the cell buffer and is asserted there,
+    // on the path hybrid actually takes.
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();
@@ -535,7 +549,58 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
         let mut buf = Buffer::empty(area);
         let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
         let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
-        assert_eq!(path, "raster", "hybrid honor={honor}: this frame is drawn by the composite (SQ-0886)");
+        assert_eq!(
+            path, "hybrid-ring",
+            "hybrid honor={honor}: the ring draws this frame — panels as art, menu as glyphs (SQ-0892)"
+        );
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect())
+            .collect();
+        // CHAR index, not byte — the ring's rows begin with the frame's half-blocks.
+        let col_of = |r: &String, s: &str| r.find(s).map(|b| r[..b].chars().count());
+        let prompt = rows
+            .iter()
+            .position(|r| r.contains("You may choose to:"))
+            .unwrap_or_else(|| panic!("hybrid honor={honor}: the prompt reaches the pane:\n{}", rows.join("\n")));
+        let menu = rows
+            .iter()
+            .position(|r| r.contains("START the game"))
+            .unwrap_or_else(|| panic!("hybrid honor={honor}: the menu reaches the pane:\n{}", rows.join("\n")));
+        assert_eq!(
+            prompt, menu,
+            "hybrid honor={honor}: the prompt lands on the menu's OWN row, not nine above it:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            col_of(&rows[prompt], "You may choose to:") < col_of(&rows[menu], "START the game"),
+            "hybrid honor={honor}: and to its left, as the game placed them (window 0 at native \
+             x=47, window 2 at x=235):\n{}",
+            rows.join("\n")
+        );
+    }
+
+    // …and the COMPOSITE, which is what raster MODE still draws. The same relation,
+    // measured where the composite states it: on the game's own native row 21
+    // (y 336..351), ink stands both left of native x=235 — the prompt, in window 0
+    // at x=47 — and at or right of it, which is the menu in window 2.
+    let items = match &model.root {
+        WinNode::Layered(items) => items,
+        _ => panic!("v6 builds a Layered root"),
+    };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    for honor in [true, false] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = app::config::V6RenderMode::Raster;
+        state.config.honor_game_colours = honor;
+        app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+        assert_eq!(path, "raster", "raster honor={honor}: this frame is drawn by the composite");
 
         let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
         let ground = canvas.get_pixel(20, 340).0;

@@ -20,8 +20,15 @@
 //! ring and the terminal overlay). That path draws no art whatsoever, so the panels
 //! were never composed and the story window's page flooded the pane. SQ-0886
 //! keeps the escape and changes its DESTINATION for one case: a takeover screen
-//! with the game's own ARTWORK behind it takes the composite, which draws every
-//! pixel at the game's own coordinates and is the frame raster mode already shipped.
+//! with the game's own ARTWORK behind it.
+//!
+//! WHERE THAT DESTINATION IS NOW. SQ-0886 sent it to the composite, which draws every
+//! pixel at the game's own coordinates and was the frame raster mode already shipped.
+//! SQ-0892 sends it to the RING instead, which draws the panels as art and the
+//! credits and menu as GLYPHS — SQ-0750's rule, and the one thing the composite
+//! structurally cannot do. The two halves are pinned separately below: section 2 that
+//! the artwork reaches the pane, section 3 that the text does, both across all three
+//! renditions and all three panes.
 //!
 //! THREE RENDITIONS, because the medium is incidental — the same screen fails the
 //! same way from an Amiga floppy, an IBM Blorb and a five-volume ProDOS set, and a
@@ -206,17 +213,33 @@ fn the_games_own_artwork_reaches_the_pane() {
     assert!(ran > 0 || !stories_dir().exists(), "no Shogun rendition present — every case skipped");
 }
 
-// ── 3. Hybrid and raster agree on this frame ────────────────────────────────
+// ── 3. Hybrid draws the TEXT as text ────────────────────────────────────────
 
-/// The quest's own statement: raster was correct and hybrid was not, from the same
-/// bytes on the same frame. They must now draw the same screen.
+/// The other half of the screen, and the half only hybrid can get right.
 ///
-/// This is the assertion that pins WHERE the fix lives. A menu takeover with the
-/// game's artwork behind it takes the composite in hybrid too, so the two modes
-/// resolve to one pane; the cell path that used to take this frame could not have
-/// matched it at any pane size, having no pixels to draw at all.
+/// SQ-0886 asserted here that hybrid and raster resolve to the SAME pane, cell for
+/// cell. That was true only because hybrid took the composite: it was a check on
+/// agreement between two modes rather than on either of them, and the pipeline
+/// document says so (§4, "tests weaker than their names"). SQ-0892 made it
+/// structurally impossible and, in doing so, made it the wrong assertion — cell-wise
+/// identity with a full-frame rasterisation is exactly what SQ-0750 forbids, because
+/// it means every character on the screen was drawn as pixels.
+///
+/// So this pins the property the parity check was standing in for, stated directly:
+/// hybrid puts the credits and the menu on the pane as TEXT CELLS. The composite
+/// cannot — it has no glyphs at all — which is what makes this a check on hybrid and
+/// not on agreement. Section 2 above pins the artwork independently, at the same
+/// three panes and three renditions, so between them the screen is whole.
+///
+/// It is also the falsification for SQ-0892 itself: before the run grouping, driving
+/// this frame through the ring gave `SI(RT th e ga me` at a 100x40 pane, and none of
+/// these strings would be found.
 #[test]
-fn hybrid_draws_the_frame_raster_already_drew() {
+fn hybrid_draws_the_credits_and_menu_as_text() {
+    /// Strings every press shares — nothing carrying a release or serial number,
+    /// which differ by medium (295/890321, 322/890706, 311/890510).
+    const LINES: &[&str] =
+        &["SHOGUN", "A Story of Japan", "All rights reserved.", "START the game", "RESTORE a saved game", "QUIT the game"];
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for r in RENDITIONS {
@@ -226,26 +249,38 @@ fn hybrid_draws_the_frame_raster_already_drew() {
             for &(w, h) in PANES {
                 let (hy, path) = frame(&session, app::config::V6RenderMode::Hybrid, honor, (w, h));
                 assert_eq!(
-                    path, "raster",
+                    path, "hybrid-ring",
                     "{} [release {}] hybrid honor={honor} {w}x{h}: a menu takeover over the game's own \
-                     artwork takes the COMPOSITE. Routed to the cell path instead (`cell — painted menu \
-                     takeover routed here`) it loses every pixel the game drew: no side panels, and the \
-                     story window's page flooded across the pane.",
+                     artwork takes the RING (SQ-0892). The cell path (`cell — painted menu takeover \
+                     routed here`) loses every pixel the game drew; the composite draws every \
+                     character as pixels.",
                     r.file,
                     r.release
                 );
-                let (ra, _) = frame(&session, app::config::V6RenderMode::Raster, honor, (w, h));
-                let diff = (0..h)
-                    .flat_map(|y| (0..w).map(move |x| (x, y)))
-                    .filter(|&(x, y)| hy[(x, y)] != ra[(x, y)])
-                    .count();
+                let rows: Vec<String> = (0..h)
+                    .map(|y| (0..w).map(|x| hy[(x, y)].symbol().chars().next().unwrap_or(' ')).collect())
+                    .collect();
+                for line in LINES {
+                    assert!(
+                        rows.iter().any(|row| row.contains(line)),
+                        "{} [release {}] honor={honor} {w}x{h}: {line:?} is on the pane as TEXT — \
+                         whole, in one row, not scattered across independently rounded cells:\n{}",
+                        r.file,
+                        r.release,
+                        rows.join("\n")
+                    );
+                }
+                // The three menu items keep the game's own consecutive rows.
+                let row_of = |s: &str| rows.iter().position(|row| row.contains(s)).expect("asserted above");
+                let start = row_of("START the game");
                 assert_eq!(
-                    diff, 0,
-                    "{} [release {}] honor={honor} {w}x{h}: hybrid and raster must draw the same \
-                     credits screen — {diff} of {} cells differ",
+                    (row_of("RESTORE a saved game"), row_of("QUIT the game")),
+                    (start + 1, start + 2),
+                    "{} [release {}] honor={honor} {w}x{h}: the menu keeps the game's own row \
+                     order and spacing:\n{}",
                     r.file,
                     r.release,
-                    w as usize * h as usize
+                    rows.join("\n")
                 );
             }
         }

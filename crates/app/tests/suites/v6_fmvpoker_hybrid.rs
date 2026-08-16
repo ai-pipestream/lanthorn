@@ -195,10 +195,14 @@ fn fmvpoker_is_the_only_title_this_moves() {
         ("arthur-r74-s890714.z6", &["raster", RING, RING, RING]),
         // SQ-0886: Shogun's boot menu is a painted takeover WITH the game's own
         // artwork behind it — the ornate side panels and the machine's ground — and
-        // the cell path draws no art at all, so it takes the composite instead of
-        // MENU. advent's popup below is the control that kept the cell path: same
-        // takeover shape, no artwork in the game anywhere.
-        ("shogun-r322-s890706.z6", &["raster", "raster", RING, RING]),
+        // the cell path draws no art at all, so it does not take MENU. advent's popup
+        // below is the control that kept the cell path: same takeover shape, no
+        // artwork in the game anywhere.
+        //
+        // SQ-0892 moved that frame from the composite to the RING, which draws the
+        // panels as art and the menu as glyphs; step 0 is the splash BEFORE the menu,
+        // a full-screen picture with no story window, and stays `raster`.
+        ("shogun-r322-s890706.z6", &["raster", RING, RING, RING]),
         ("journey-r83-s890706.z6", &[RING, "raster", RING, RING]),
         ("advent.z6", &[RING, MENU, RING, RING]),
         ("scopa.z6", &["painted (hint/menu takeover)"; 4]),

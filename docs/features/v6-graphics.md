@@ -1011,17 +1011,31 @@ session-only switch that never touches your saved config:
   because those pixels *are* the screen and the composite draws the labels over
   them anyway. So hybrid shows scopa's table exactly as raster does, and Zork
   Zero's InvisiClues stays the readable full-pane text screen it has always been.
-  **A takeover screen that keeps its story window follows the same rule.** A game
-  can print a menu *inside* the box its story window occupies — Shogun's boot
-  menu, advent's help popup — and hybrid presents those whole too, because the ring
-  can only split them (its viewport covers the very rows the menu is painted on).
-  Whether "whole" means text or pixels is decided the same way as above: advent
-  has no artwork in it anywhere, so its popup is the coherent all-text page it has
-  always been, while Shogun's boot menu sits on the machine's own ground between
-  two panels of gold filigree and goes to the composite. Sending it to the text
-  page instead lost every one of those pixels — the panels gone and a full-width
-  black block where the frame belongs, on the Amiga floppy, the IBM Blorb and the
-  Apple ProDOS set alike.
+  **A takeover screen that keeps its story window is sorted by what is behind it.**
+  A game can print a menu *inside* the box its story window occupies — Shogun's
+  boot menu, advent's help popup. advent has no artwork in it anywhere, so its
+  popup is the coherent all-text page it has always been. Shogun's boot menu sits
+  on the machine's own ground between two panels of gold filigree, and sending it
+  to that text page lost every one of those pixels — the panels gone and a
+  full-width black block where the frame belongs, on the Amiga floppy, the IBM
+  Blorb and the Apple ProDOS set alike — so it takes the **ring**, which draws the
+  panels as artwork and the credits and the menu as ordinary terminal glyphs.
+
+  That screen used to take the composite instead, and the reason it could not take
+  the ring is worth keeping, because it is a nice illustration of what hybrid is
+  actually doing. Shogun prints its menu one character at a time through a
+  one-pixel-wide caret window: `START the game` arrives as fourteen separate runs,
+  each eight game pixels along from the last. Each run used to be placed on its
+  own — its game pixel mapped through the picture's scale and rounded to the
+  nearest cell — and at a pane where a cell is 1.2 game characters wide, rounding
+  fourteen neighbours independently makes some of them collide into one column and
+  others skip one. `SI(RT th e ga me`. The same arithmetic on the other axis put
+  the three menu items on rows 26, 28 and 29 and pushed the first one off the top
+  of the story window altogether. Runs the game printed as one stream are now
+  grouped and placed together, and a block of centred lines — the credits — is
+  laid out in the game's *own* text grid rather than line by line through the
+  picture's scale, so the nine lines share one centre again instead of drifting up
+  to five columns apart.
 - **More than one scrolling text window.** A v6 game may run several flowing-prose
   windows at once — advent.z6's `style` opens one across the top of the screen and
   keeps playing in another below it. Both are wrap+scroll, so both stream through
@@ -1801,11 +1815,13 @@ top, "You may choose to:" down beside START/RESTORE/QUIT.
 **Frozen means frozen — the transcript lets go of it.** When the freeze takes the
 whole of what a window had on screen, those characters stop being transcript at
 all. They are on the glass, drawn as paint, and a transcript copy of them is a
-second rendition of pixels that are already there — which is exactly what went
-wrong once the boot menu started taking the pixel composite: the credits were
-painted correctly across the top *and* replayed into the four-row prose box at
+second rendition of characters that are already there — which is exactly what went
+wrong once the boot menu stopped drawing them as transcript: the credits were
+drawn correctly across the top *and* replayed into the four-row prose box at
 the bottom, colliding mid-line with the menu ("Copyright (c) 1988 by
-InfocomQUIT the game"). Pictures have had this rule since the splash art learned
+InfocomQUIT the game"). It holds whichever way that screen is drawn, because
+either way the frozen lines reach the glass by another route — as composited
+pixels in `raster`, as a band of chrome glyphs on the ring. Pictures have had this rule since the splash art learned
 it: an image the canvas already carries is marked as such, and the modes that
 draw the canvas skip it rather than draw it twice. Canvas-painted text now has
 the same provenance. A *partial* freeze — some lines stranded, the rest still
@@ -1821,8 +1837,8 @@ quietly stops scrolling.
 **And the transcript restarts in the box the game moved the window to.** Freezing
 the old half was only half the job: the live half has to land somewhere, and
 somewhere is the story window's own box. In the pixel composite that was always
-true — the transcript is drawn inside the window's rectangle, and `hybrid` takes
-that same composite on a menu screen the game has framed with artwork. The cell
+true — the transcript is drawn inside the window's rectangle — and it is true on
+the ring, which insets a real terminal viewport at that same rectangle. The cell
 presentations (a dialog over the pane, a terminal with no image protocol, and
 `hybrid` on an art-less menu screen) build the pane by relation instead: the chrome above the story packs against your pane's top edge,
 the chrome below packs against its bottom, and the transcript fills between. That
@@ -1849,8 +1865,10 @@ keeps Shogun's four-row box showing the one line the game printed into it instea
 of redrawing the tail of the banner it had just frozen up top.
 
 **Frozen prose keeps the columns it was given.** `raster` composites the frozen
-layer as pixels, so it lands exactly where the game put it — and so does `hybrid`
-wherever it takes the composite, which on Shogun's boot menu it now does. Where a
+layer as pixels, so it lands exactly where the game put it. The ring keeps the
+same columns by a different route — it lays the frozen block out in the game's own
+text grid, one terminal column per game character, so Shogun's nine centred credit
+lines come back sharing the centre the game gave them. Where a
 cell path draws the screen there are no pixels to composite: text above the story window
 is drawn by the anchored status-band renderer, which stretches a game's 40- or
 80-column bar across whatever width your terminal is by sorting each run into a
