@@ -50,6 +50,7 @@ fn main() {
     let mut all = false;
     let mut pane_cells = (98u16, 37u16);
     let mut cell_px = (8u16, 18u16);
+    let mut turns = 0usize;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -58,6 +59,12 @@ fn main() {
                 i += 1;
             }
             "--all" => all = true,
+            "--turns" => {
+                if let Some(v) = args.get(i + 1) {
+                    turns = v.parse().unwrap_or(0);
+                }
+                i += 1;
+            }
             "--size" => {
                 if let Some(v) = args.get(i + 1) {
                     pane_cells = parse_pair(v).unwrap_or(pane_cells);
@@ -93,11 +100,38 @@ fn main() {
 
     for (path, keys) in targets {
         println!("═══ {path}");
-        match scout(&path, &keys, pane_cells, cell_px) {
+        match scout(&path, &keys, pane_cells, cell_px, turns) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
     }
+}
+
+/// The cell rect the CONTENT leaves for story text — SQ-0894 step (b).
+///
+/// `v6_layout::story_viewport` used to be this, and SQ-0894 deleted it after
+/// measuring the answer to be identical to the declared window box on every corpus
+/// frame. Kept here, against the surviving native-space `story_clear_native`, so
+/// the measurement can be re-run rather than taken on trust.
+fn clear_viewport_cells(
+    story: Option<&app::engine::PositionedWindow>,
+    gfx: &image::RgbaImage,
+    scale: &v6::Scale,
+    pane_cells: (u16, u16),
+    cell_px: (u16, u16),
+) -> Rect {
+    let Some((left, top, w, h)) = v6::story_clear_native(story, gfx) else {
+        return Rect { x: 0, y: 0, width: pane_cells.0, height: pane_cells.1 };
+    };
+    let (cw, ch) = (cell_px.0.max(1) as f32, cell_px.1.max(1) as f32);
+    let dev = |v: u32, off: u32, per: f32| (off as f32 + v as f32 * scale.s) / per;
+    let cell_left = dev(left, scale.off_x, cw).ceil() as u16;
+    let cell_top = dev(top, scale.off_y, ch).ceil() as u16;
+    let cell_right = dev(left + w, scale.off_x, cw).floor() as u16;
+    let cell_bottom = dev(top + h, scale.off_y, ch).floor() as u16;
+    let width = cell_right.saturating_sub(cell_left).max(1).min(pane_cells.0.saturating_sub(cell_left));
+    let height = cell_bottom.saturating_sub(cell_top).max(1).min(pane_cells.1.saturating_sub(cell_top));
+    Rect { x: cell_left, y: cell_top, width, height }
 }
 
 fn parse_pair(s: &str) -> Option<(u16, u16)> {
@@ -110,6 +144,7 @@ fn scout(
     keys: &str,
     pane_cells: (u16, u16),
     cell_px: (u16, u16),
+    turns: usize,
 ) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     if bytes.first() != Some(&6) {
@@ -141,6 +176,38 @@ fn scout(
         }
     }
 
+    // …then as many further turns as asked, reporting (b) at each: a declared box
+    // that avoids the art at BOOT may stop doing so once the game draws into its
+    // own story window.
+    for t in 0..=turns {
+        if t > 0 {
+            match s.pending_input() {
+                InputKind::Line => { let _ = s.submit("look"); }
+                InputKind::Char => { let _ = s.submit_char(13); }
+                InputKind::Event => { let _ = s.submit(""); }
+            }
+            let _ = s.take_transcript();
+        }
+        let m = s.screen();
+        let app::engine::WinNode::Layered(it) = &m.root else { continue };
+        let nat = v6::native_extent(it.as_slice());
+        let lay = v6::classify_windows(it.as_slice());
+        let pd = (pane_cells.0 as u32 * cell_px.0 as u32, pane_cells.1 as u32 * cell_px.1 as u32);
+        let sc = v6::uniform_scale(nat, pd);
+        let vp_box = v6::story_viewport_box(lay.story, &sc, pane_cells, cell_px);
+        let g = v6::build_graphics_canvas(&lay.chrome, nat);
+        let vp_clear = clear_viewport_cells(lay.story, &g, &sc, pane_cells, cell_px);
+        if vp_box != vp_clear {
+            println!(
+                "  turn {t}: (b) DIFFERS — box {}x{}@({},{}) vs content {}x{}@({},{}); declared {:?} -> clear {:?}",
+                vp_box.width, vp_box.height, vp_box.x, vp_box.y,
+                vp_clear.width, vp_clear.height, vp_clear.x, vp_clear.y,
+                lay.story.map(|w| (w.x_px, w.y_px, w.w_px, w.h_px)),
+                v6::story_clear_native(lay.story, &g),
+            );
+        }
+    }
+
     let model = s.screen();
     let app::engine::WinNode::Layered(items) = &model.root else {
         return Err("not a Layered v6 frame".into());
@@ -159,6 +226,26 @@ fn scout(
         viewport.width, viewport.height, viewport.x, viewport.y,
         layout.chrome.len(),
     );
+
+    // SQ-0894 step (b): the text region the PANELS leave, versus the raw window box
+    // hybrid takes today. `story_viewport` is the shrink-until-clear-then-quantize
+    // wrapper that has never had a production caller; measured here against the
+    // ART-ONLY canvas, which is the oracle raster uses and the one §3(b) says it
+    // needs (against the full chrome canvas — which carries rasterised TEXT as
+    // opaque pixels — Shogun's declared 548x64 box comes back 548x16).
+    let gfx = v6::build_graphics_canvas(&layout.chrome, native);
+    let clear = clear_viewport_cells(layout.story, &gfx, &scale, pane_cells, cell_px);
+    let native_clear = v6::story_clear_native(layout.story, &gfx);
+    println!(
+        "  (b) viewport by BOX   {}x{} at ({},{})\n      viewport by CONTENT {}x{} at ({},{}){}",
+        viewport.width, viewport.height, viewport.x, viewport.y,
+        clear.width, clear.height, clear.x, clear.y,
+        if clear == viewport { "   [no change]" } else { "   <-- DIFFERS" },
+    );
+    if let Some((l, t, w, h)) = native_clear {
+        let sw = layout.story.map(|s| (s.x_px, s.y_px, s.w_px, s.h_px));
+        println!("      native: declared {sw:?} -> clear ({l},{t},{w},{h})");
+    }
 
     let old = v6::chrome_bands(pane, viewport);
     let new = proposed_bands(pane, viewport);

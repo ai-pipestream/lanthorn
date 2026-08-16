@@ -1441,57 +1441,25 @@ pub fn story_clear_native(
     Some((left, top, right.saturating_sub(left), bottom.saturating_sub(top)))
 }
 
-/// The cell rect (relative to the pane's top-left cell) where story text
-/// goes: the largest cell-aligned rect inside the story window's device rect
-/// that touches no opaque chrome pixel. Falls back to the full pane when
-/// there is no story window.
-///
-/// **Currently unused in production, and deliberately kept** (SQ-0893). Only
-/// this module's own unit tests call it: hybrid uses
-/// [`story_viewport_hybrid`], which takes the raw window box, and raster uses
-/// its native-space sibling. It is retained because it is exactly the
-/// shrink-until-clear-then-quantize step that SQ-0894 needs — "determine the
-/// valid text region from what the chrome leaves" — and rewriting it from
-/// scratch there would be worse than carrying it. See §3(b) of
-/// `docs/superpowers/specs/2026-08-15-v6-render-pipeline.md`, which also notes
-/// its oracle canvas needs fixing before it can be used.
-///
-/// If SQ-0894 lands without adopting it, delete it then.
-pub fn story_viewport(
-    story: Option<&PositionedWindow>,
-    chrome_canvas: &image::RgbaImage,
-    scale: &Scale,
-    pane_cells: (u16, u16),
-    cell_px: (u16, u16),
-) -> ratatui::layout::Rect {
-    let Some((left, top, w, h)) = story_clear_native(story, chrome_canvas) else {
-        return ratatui::layout::Rect { x: 0, y: 0, width: pane_cells.0, height: pane_cells.1 };
-    };
-    let (right, bottom) = (left + w, top + h);
-
-    let dev_left = scale.off_x as f32 + left as f32 * scale.s;
-    let dev_top = scale.off_y as f32 + top as f32 * scale.s;
-    let dev_right = scale.off_x as f32 + right as f32 * scale.s;
-    let dev_bottom = scale.off_y as f32 + bottom as f32 * scale.s;
-
-    let cw_px = if cell_px.0 == 0 { 1 } else { cell_px.0 } as f32;
-    let ch_px = if cell_px.1 == 0 { 1 } else { cell_px.1 } as f32;
-
-    let cell_left = (dev_left / cw_px).ceil() as u16;
-    let cell_top = (dev_top / ch_px).ceil() as u16;
-    let cell_right = (dev_right / cw_px).floor() as u16;
-    let cell_bottom = (dev_bottom / ch_px).floor() as u16;
-
-    let width = cell_right.saturating_sub(cell_left).max(1);
-    let height = cell_bottom.saturating_sub(cell_top).max(1);
-
-    let cell_left = cell_left.min(pane_cells.0.saturating_sub(1));
-    let cell_top = cell_top.min(pane_cells.1.saturating_sub(1));
-    let width = width.min(pane_cells.0.saturating_sub(cell_left));
-    let height = height.min(pane_cells.1.saturating_sub(cell_top));
-
-    ratatui::layout::Rect { x: cell_left, y: cell_top, width, height }
-}
+// `story_viewport` — the cell-space shrink-until-clear-then-quantize wrapper — was
+// DELETED by SQ-0894, on the instruction SQ-0893 left when it kept it: "It is
+// retained because it is exactly the shrink-until-clear-then-quantize step that
+// SQ-0894 needs… If SQ-0894 lands without adopting it, delete it then."
+//
+// SQ-0894 measured adopting it and it is a NO-OP. Driven over the v6 corpus —
+// Zork Zero, Arthur, Shogun, Journey, mysterious01, fmvpoker, scopa and advent —
+// at boot and through six further turns each, at a 98x37 pane against the ART-ONLY
+// canvas (the oracle §3(b) says it needs; against the full chrome canvas, which
+// carries rasterised text as opaque pixels, Shogun's declared 548x64 comes back
+// 548x16), the clear region equalled the declared window-0 box on EVERY frame.
+// These games place window 0 to fit their own frame and do not draw art into it;
+// a margin picture goes to the transcript as a float (SQ-0888), not onto the canvas.
+//
+// That is a property of the CORPUS, not of the function: its own unit tests proved
+// it insets correctly on a synthetic canvas whose bands overlap the story window.
+// `story_clear_native` above — the NATIVE-space sibling, which raster really does
+// call — is untouched. Reinstate this wrapper from the commit that removed it if
+// hybrid ever needs the cell-space answer.
 
 /// The story viewport cell rect (relative to the pane's top-left cell) for the
 /// HYBRID render mode: the win0 box (`story` x_px/y_px/w_px/h_px, native game
@@ -2714,41 +2682,7 @@ mod tests {
         assert_eq!(scale.off_y, 40);
     }
 
-    #[test]
-    fn story_viewport_clears_the_chrome_ring() {
-        // 40x40 native canvas: opaque top band rows 0..8, opaque left cols
-        // 0..8 and right cols 32..40 across all rows; interior transparent.
-        let mut canvas = image::RgbaImage::new(40, 40);
-        let opaque = Rgba([255, 255, 255, 255]);
-        for y in 0..40u32 {
-            for x in 0..40u32 {
-                let in_band = y < 8;
-                let in_side = !(8..32).contains(&x);
-                if in_band || in_side {
-                    canvas.put_pixel(x, y, opaque);
-                }
-            }
-        }
-        let story = buffer_item(0, true);
-        // buffer_item defaults x_px/y_px to 0 and w_px/h_px to 8; override via
-        // a fresh PositionedWindow spanning the whole native area.
-        let story = PositionedWindow { x_px: 0, y_px: 0, w_px: 40, h_px: 40, ..story };
-        let scale = uniform_scale((40, 40), (40, 40));
-        let rect = story_viewport(Some(&story), &canvas, &scale, (40, 40), (1, 1));
-        assert!(rect.x >= 8, "left edge clears the left band: x={}", rect.x);
-        assert!(rect.y >= 8, "top edge clears the top band: y={}", rect.y);
-        assert!(rect.x + rect.width <= 32, "right edge clears the right band: x+w={}", rect.x + rect.width);
-        assert!(rect.width >= 1);
-        assert!(rect.height >= 1);
-    }
 
-    #[test]
-    fn story_viewport_no_story_is_full_pane() {
-        let canvas = image::RgbaImage::new(40, 40);
-        let scale = uniform_scale((40, 40), (40, 40));
-        let rect = story_viewport(None, &canvas, &scale, (40, 40), (1, 1));
-        assert_eq!(rect, ratatui::layout::Rect { x: 0, y: 0, width: 40, height: 40 });
-    }
 
     // ── Hybrid render mode: story_viewport_box + chrome_bands ──────────────────
 
