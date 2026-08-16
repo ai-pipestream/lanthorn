@@ -1228,16 +1228,6 @@ fn render_node(
                             }
                             ring_bands.retain(|(_, b)| b.height > 0 && b.width > 0);
                         }
-                        // SQ-0511: the native row a stretched flank band's art reaches down
-                        // to. Frame flanks span the full canvas height (Zork0/Shogun columns
-                        // are opaque to the native bottom).
-                        //
-                        // This carried a `BottomPlan::Menu` arm reaching the story bottom,
-                        // for Journey's picture column and divider. It was unreachable and
-                        // removed in SQ-0893: the sole consumer, `flank_crop`, is gated
-                        // `matches!(plan, BottomPlan::Frame)`, so the Menu arm could never
-                        // be selected — while its comment described the case as live.
-                        let flank_native_bottom = native.1 as u32;
                         let mut strips = decompose_chrome_strips(&ring_bands, &row_oracle);
                         // An ART strip with no actual art behind it draws a rasterized
                         // slice of the chrome canvas — which carries TEXT too, so on a
@@ -1673,13 +1663,13 @@ fn render_node(
                             ratatui_image::picker::ProtocolType::Sixel
                             | ratatui_image::picker::ProtocolType::Halfblocks => 0,
                         };
-                        // …and only a FULL-WIDTH strip, which is provably the one drawn by
-                        // the plain `draw_chrome_band` crop: every other arm of the draw
-                        // below (`flank_panels`, `tiled_flanks`, the Frame-plan
-                        // `flank_crop`) is reserved to `r.width < area.width`, and each of
-                        // those composes its own source image from geometry that is not a
-                        // straight sub-rect of the scaled canvas. A side flank is tall and
-                        // thin anyway — column tiles would buy it nothing.
+                        // …and only a strip that is NOT a flank, which is asked by role
+                        // rather than inferred from the draw: `flank_panels` and
+                        // `tiled_flanks` each compose their own source image from geometry
+                        // that is not a straight sub-rect of the scaled canvas, and a flank
+                        // the plain crop draws (SQ-0898 removed the stretch arm, so a piece
+                        // needing no extension lands here) is tall and thin — column tiles
+                        // would buy it nothing.
                         let art_tiles = |role: v6::BandRole, r: Rect| -> Vec<Rect> {
                             if role.is_flank() {
                                 vec![r]
@@ -1739,14 +1729,16 @@ fn render_node(
                                     // not a pixel; the pixels are not ours to throw away for it.
                                 }
                                 match strip {
-                                    // SQ-0511: a SIDE flank band (narrower than the pane)
-                                    // under the FRAME stretch plan is drawn vertically
-                                    // stretched to fill the reclaimed space, keeping the
-                                    // horizontal (uniform) scale; the native crop is the
-                                    // flank columns from this band's device top (via the
-                                    // uniform scale) down to the flank art's bottom. Menu
-                                    // flanks and every band under the non-stretch plans draw
-                                    // at the uniform scale (aspect preserved).
+                                    // Three ways an ART strip reaches the screen, and since
+                                    // SQ-0898 all three draw at the frame's ONE magnification:
+                                    // a Menu-plan flank PANEL (a picture fitted to a panel,
+                                    // the one deliberate exception), a recognised side border
+                                    // TILED to the rows the band asks for, and otherwise a
+                                    // plain CROP of the shared scaled canvas.
+                                    //
+                                    // A fourth used to sit between the last two — SQ-0511's
+                                    // Frame-plan vertical STRETCH — and it is gone; see the
+                                    // note on the tiled arm below.
                                     ChromeStrip::Art(role, r) => {
                                         // SQ-0547: a Menu-plan SIDE flank is a panel — flood the
                                         // whole column with the game's own panel colour (sampled
@@ -1758,7 +1750,15 @@ fn render_node(
                                         let panel = flank_panels.iter().find(|(sr, _)| sr == r).map(|(_, p)| *p);
                                         if let Some((bg, fill, dest, crop)) = panel {
                                             fill_pane_page(fill, bg, buf);
-                                            gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, crate::render::graphics::BandSlot::Art, buf);
+                                            gr.draw_chrome_band_stretched(
+                                                picker,
+                                                &canvas,
+                                                dest,
+                                                crop,
+                                                crate::render::graphics::BandSlot::Art,
+                                                crate::render::graphics::BandFit::MenuPanel,
+                                                buf,
+                                            );
                                         } else if let Some((img, dest)) = tiled_flanks.iter().find(|(sr, _)| sr == r).map(|(_, i)| i) {
                                             // SQ-0698: a recognised side border, tiled to
                                             // the band's own height at the uniform scale —
@@ -1767,31 +1767,45 @@ fn render_node(
                                             // scale rather than whatever a fit to the band
                                             // would have produced (SQ-0898).
                                             gr.draw_chrome_band_image(picker, img, *r, *dest, crate::render::graphics::BandSlot::Art, buf);
-                                        // SQ-0894 measured this arm and KEPT it, with the
-                                        // result recorded because it is not the obvious one:
-                                        // disabling it passes the FULL gate, 5555 tests. That
-                                        // is not evidence it is dead — it is evidence the
-                                        // corpus has no fixture for it. The arm fires only for
-                                        // a flank `v6_border::recognize` does NOT know, and
-                                        // every flank we ship a story for is recognised, so
-                                        // arm 2 (`tiled_flanks`) takes them all first.
+                                        // SQ-0511's Frame-plan flank STRETCH stood here, and
+                                        // SQ-0898 REMOVED IT with the measurement SQ-0894 asked
+                                        // for and could not supply. That lane recorded the arm
+                                        // as unreachable — disabling it passed the full gate —
+                                        // and kept it on the reasoning that a green gate over a
+                                        // corpus with no fixture proves nothing. The corpus did
+                                        // have one; nothing drove it far enough to see it.
                                         //
-                                        // §5 argues this arm is wrong where it does fire — it
-                                        // stretches a native crop into the band with no aspect
-                                        // constraint, against a documented promise that flanks
-                                        // are "TILED down the flank, never stretched into it"
-                                        // — and that removing it would drop such a flank to
-                                        // arm 4's straight crop at the uniform scale. That is
-                                        // probably right and it is NOT PROVEN: with no
-                                        // unrecognised-flank fixture there is no way to show
-                                        // arm 4 still reaches the pane bottom under the Frame
-                                        // plan, which is the whole reason the stretch is here.
-                                        // Removing it needs that fixture first.
-                                        } else if let Some(crop) = (matches!(plan, BottomPlan::Frame) && role.is_flank())
-                                            .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
-                                            .flatten()
-                                        {
-                                            gr.draw_chrome_band_stretched(picker, &canvas, *r, crop, crate::render::graphics::BandSlot::Art, buf);
+                                        // It is reached by a flank the arm above DECLINES, and
+                                        // `flank_source` declines for two reasons, not one.
+                                        // "Unrecognised" is the reason SQ-0894 looked for and
+                                        // no shipped title has. The other is `desired <= art.1`
+                                        // — the band lies wholly INSIDE the artwork and needs
+                                        // no extension at all — and Arthur reaches it on every
+                                        // pane swept from 0.80 to 2.00, on both presses, for
+                                        // the one turn his story window grows to the screen
+                                        // bottom and selects `BottomPlan::Frame`. His 72-run
+                                        // status bar cuts the pole in two and the piece above
+                                        // it is entirely within the art.
+                                        //
+                                        // What it did there: crop the flank columns from the
+                                        // band's top down to the ART's bottom — 387 native rows
+                                        // — and stretch that into the band's 234 device px.
+                                        // Vertical magnification 0.60 against the frame's 1.35,
+                                        // measured at the user's 108x50 pane, so the whole pole
+                                        // appeared squashed into the banner's height in each
+                                        // top corner while the pole below it drew correctly.
+                                        // §5 of the pipeline document predicted exactly this:
+                                        // it stretches into the band's device box with no
+                                        // aspect constraint at all.
+                                        //
+                                        // There is no correct use left to keep. The arm can
+                                        // only fire where extension is impossible (nothing
+                                        // recognised to extend) or unnecessary (the art already
+                                        // covers the band); in the first case a stretch invents
+                                        // rows by distorting the ones there are, and in the
+                                        // second it distorts rows that were already complete.
+                                        // Both fall to the plain crop below, which is the
+                                        // frame's own magnification by construction.
                                         } else {
                                             // SQ-0818: the plain crop, one image per TILE.
                                             // `art_tiles` is the identity on a side flank,
@@ -1821,7 +1835,13 @@ fn render_node(
                             for (ext, ink) in &divider_exts {
                                 match ink {
                                     BorderInk::Band(crop) => gr.draw_chrome_band_stretched(
-                                        picker, &canvas, *ext, *crop, crate::render::graphics::BandSlot::DividerExtension, buf,
+                                        picker,
+                                        &canvas,
+                                        *ext,
+                                        *crop,
+                                        crate::render::graphics::BandSlot::DividerExtension,
+                                        crate::render::graphics::BandFit::DividerExtension,
+                                        buf,
                                     ),
                                     // SQ-0779: the character stands in ONE column — its own,
                                     // `col` — and the rest of the extension is the native text
@@ -4540,41 +4560,14 @@ fn menu_strip_below_story(
         .any(|t| !t.text.trim().is_empty() && (t.y.max(1) as u32 - 1) >= story_bottom)
 }
 
-/// SQ-0511: the native crop a stretched side flank `band` samples. Its columns are
-/// the flank's native columns (band device x-range inverted through the uniform
-/// `scale`, so the horizontal factor stays `s`); its rows run from the flank art's
-/// top (the band device top inverted through the same scale — continuous with the
-/// top band above) down to `native_bottom` (the flank art's bottom for a Frame, the
-/// story bottom for a Menu). Returns `None` when the crop is empty. `native` bounds
-/// the crop to the canvas.
-fn flank_crop(
-    band: Rect,
-    pane: Rect,
-    scale: &crate::render::v6_layout::Scale,
-    cell_px: (u16, u16),
-    native_bottom: u32,
-    native: (u16, u16),
-) -> Option<(u32, u32, u32, u32)> {
-    let cw = cell_px.0.max(1) as f32;
-    let ch = cell_px.1.max(1) as f32;
-    let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
-    let inv_x = |cell: u16| (((cell.saturating_sub(pane.x)) as f32 * cw - scale.off_x as f32) / s).round().max(0.0) as u32;
-    let inv_y = |cell: u16| (((cell.saturating_sub(pane.y)) as f32 * ch - scale.off_y as f32) / s).round().max(0.0) as u32;
-    let nx0 = inv_x(band.x).min(native.0 as u32);
-    let nx1 = inv_x(band.right()).min(native.0 as u32);
-    let ny0 = inv_y(band.y).min(native.1 as u32);
-    let ny1 = native_bottom.min(native.1 as u32);
-    if nx1 <= nx0 || ny1 <= ny0 {
-        return None;
-    }
-    Some((nx0, ny0, nx1 - nx0, ny1 - ny0))
-}
-
 /// SQ-0698: the native geometry a side flank band occupies — its columns
 /// `[x0, x1)`, the native row its top maps back to, and how many native rows its
-/// device height is worth at the UNIFORM scale. Read back through `scale`
-/// exactly as [`flank_crop`] reads it, so a tiled band and a stretched one agree
-/// on where the flank is; only the vertical factor differs between them.
+/// device height is worth at the UNIFORM scale.
+///
+/// It had a sibling, `flank_crop`, which read the same band back through the same
+/// scale and then ran its rows down to the ARTWORK's bottom however tall the band
+/// was — the source for SQ-0511's Frame-plan stretch. SQ-0898 removed that arm, and
+/// this is now the only way a flank band's native box is derived.
 ///
 /// **And where that native box LANDS**, in device pixels relative to the band's
 /// own top-left ([`FlankBox::dest`]). The two travel together because they are one

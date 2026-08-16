@@ -790,8 +790,10 @@ the artwork *only when the artwork is smaller*, worst in the foreground rocks an
 the dithered shadow.
 
 So the filter is now chosen by direction, per axis, at every one of the places art
-is resampled: the raster composite, the hybrid ring's bands, and the stretched
-flanks. An axis that grows gets nearest; an axis that shrinks gets an area filter
+is resampled: the raster composite, the hybrid ring's bands, and the two pictures
+that are fitted to a box of their own rather than to the frame's letterbox grid — a
+menu flank's panel and a divider extended down a reclaimed gap. An axis that grows
+gets nearest; an axis that shrinks gets an area filter
 whose kernel is as wide as the ratio, so the dither *fuses* into the colour it was
 always standing in for. The two axes are decided separately because a band can grow
 on one while it shrinks on the other — that is exactly what an elongated frame
@@ -1227,7 +1229,18 @@ session-only switch that never touches your saved config:
   is within one native pixel of the frame's one scale, and there is a test that says
   so at panes above *and* below 1:1 — the defect lived for as long as it did because
   every pane anyone had checked magnified, and above 1:1 the arithmetic agrees by
-  luck. The
+  luck. "Never stretched into it" took a third pass, because one stretch was still
+  live and the test could not see it: the exemption that lets a menu panel and an
+  extended divider off the one-magnification rule was keyed on the *function* that
+  draws them, so a third caller of that function — the last vertical stretch, kept
+  for a case nobody could reach — inherited the exemption in silence. It fires
+  wherever a flank needs no extension at all, which on Arthur is the piece of pole
+  above his status bar, every pane from 0.8:1 to 2:1, on both presses: 400 native
+  rows crushed into the banner's 252 pixels, 0.63 vertical against the frame's 1.35,
+  which is why his top corners showed a whole squashed pole while the pole below
+  them was fine. That arm is gone; those flanks are a plain crop of the same scaled
+  screen everything else is cut from, and the exemption now names the two sites that
+  hold it rather than the routine they happen to share. The
   three recipes are per title, because the artwork is: the mechanism is a port of
   Bocfel's `draw_border.cpp`, which Spatterlight ships, and which hard-codes per
   game *and* per platform for the same reason. It can afford to, because it draws

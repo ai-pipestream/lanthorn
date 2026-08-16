@@ -515,18 +515,37 @@ type V6Job = std::thread::JoinHandle<Option<V6Ready>>;
 /// a seam. The other kind is not on that grid at all and its magnification is
 /// chosen for other reasons; there are exactly two, both deliberate and both
 /// documented where they are made.
+///
+/// **The exemption is keyed on the SITE, not on the drawing function** (SQ-0898,
+/// second round). It used to be the latter: [`GraphicsRender::draw_chrome_band_stretched`]
+/// recorded `Fitted` unconditionally, so every caller of it — present and future —
+/// was exempt from the gate by construction. Two of its callers were the deliberate
+/// exceptions below; the THIRD was the Frame-plan flank stretch, which inherited
+/// their exemption silently and drew Arthur's banner-row poles at 0.60 vertical
+/// against the frame's 1.35 for as long as it lived. A caller now names which of
+/// these it is, and anything that does not name an exception is held to the frame's
+/// magnification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BandFit {
     /// On the letterbox grid: `device == native · s`, to within the half native
     /// pixel that whole-pixel sources cost. Asserted across the corpus and a pane
     /// sweep by `v6_band_tiling::every_band_draws_at_the_frames_one_magnification`.
     Letterbox,
-    /// Deliberately not: the Menu-plan flank PANEL, whose picture is re-centred and
-    /// quantized to whole CELLS by `aspect_cells` (SQ-0547) — it is a picture in a
-    /// panel, not a window onto the screen — and the divider EXTENSION, which
-    /// replicates ONE native row down a gap (SQ-0511) and so has no meaningful
-    /// vertical factor at all.
-    Fitted,
+    /// The Menu-plan flank PANEL, whose picture is re-centred and quantized to whole
+    /// CELLS by `aspect_cells` (SQ-0547). It is a picture in a panel, not a window
+    /// onto the screen, so the frame's scale is not what decides its size.
+    MenuPanel,
+    /// The divider EXTENSION, which replicates ONE native row down a reclaimed gap
+    /// (SQ-0511) and so has no meaningful vertical factor at all.
+    DividerExtension,
+}
+
+impl BandFit {
+    /// Is this band claiming to show the game's screen on the frame's letterbox
+    /// grid — i.e. is it one the "one frame, one magnification" gate applies to?
+    pub fn on_the_letterbox_grid(self) -> bool {
+        matches!(self, BandFit::Letterbox)
+    }
 }
 
 /// Where a band's source belongs INSIDE that band, in device pixels from the
@@ -1627,6 +1646,12 @@ impl GraphicsRender {
     /// (whose pixels sit ABOVE the flank crop) leaves the flank's cached upload fresh
     /// (SQ-0514 property preserved), and the crop native rect is folded in so the
     /// stretch factor itself is part of the key.
+    ///
+    /// `fit` is the caller's own claim about what this band is, and it is a
+    /// parameter rather than a constant because that is what SQ-0898's second round
+    /// turned on: recorded here as `Fitted` for everybody, it exempted every caller
+    /// of this function from the one-magnification gate, including the one that was
+    /// wrong. See [`BandFit`].
     pub fn draw_chrome_band_stretched(
         &mut self,
         picker: &Picker,
@@ -1634,6 +1659,7 @@ impl GraphicsRender {
         band: Rect,
         crop: (u32, u32, u32, u32),
         slot: BandSlot,
+        fit: BandFit,
         buf: &mut Buffer,
     ) {
         let (cx, cy, cw_n, ch_n) = crop;
@@ -1743,7 +1769,7 @@ impl GraphicsRender {
                     sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
                     resample_note(cw_n, ch_n, bw, bh),
                 ));
-                self.note_band_mag(band, BandFit::Fitted, (cw_n, ch_n), (bw, bh));
+                self.note_band_mag(band, fit, (cw_n, ch_n), (bw, bh));
                 self.remember_band_id(key, id);
                 self.note_op(GraphicsOp::Place {
                     target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),

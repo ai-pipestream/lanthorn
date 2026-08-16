@@ -85,6 +85,23 @@ const SPECIMENS: &[Specimen] = &[
     Specimen { title: "Arthur", file: "Arthur - The Quest for Excalibur.adf", release: 54, serial: "890606", turns: 12 },
     Specimen { title: "Shogun", file: "James Clavell's Shogun.adf", release: 295, serial: "890321", turns: 12 },
     Specimen { title: "Zork Zero", file: "zork0-r393-s890714.z6", release: 393, serial: "890714", turns: 12 },
+    // SQ-0898: BOTH Arthur presses again, at the turn count that reaches the
+    // Frame-plan flank STRETCH. Appended rather than filed beside their neighbours
+    // because four cases below index this table positionally.
+    //
+    // **Five turns, not twelve, and that is the whole reproduction.** The plan is
+    // `Frame` only while the story window reaches the screen bottom, and Arthur
+    // sizes window 0 to the text he is about to print: it is `(28, 208, 584, 192)`
+    // — bottom 400 — for exactly one frame, and settles at 128 (release 74) or 96
+    // (the Amiga) from the next turn on. Every other case in this file drives past
+    // it. Both presses do this on the same turn, so the fixture is a turn count and
+    // not a medium, and `arthur-r74-s890714.z6` joins the table because the two
+    // presses draw the flank differently once they get there: release 74's
+    // content-derived flank columns are 30 native px, a bare pole his 72-run status
+    // bar cuts in two, so the upper piece lies wholly inside the artwork and
+    // `flank_tiled_source` correctly declines to extend it.
+    Specimen { title: "Arthur@5", file: "Arthur - The Quest for Excalibur.adf", release: 54, serial: "890606", turns: 5 },
+    Specimen { title: "Arthur@5", file: "arthur-r74-s890714.z6", release: 74, serial: "890714", turns: 5 },
 ];
 
 /// v6 stories with no side border art of these shapes. None of them may grow a
@@ -105,7 +122,10 @@ const UNAFFECTED: &[&str] = &[
 /// pane whose letterbox leaves vertical slack past the artwork, and where it does
 /// not, "must be TILED" is not a property of a correct render. See
 /// [`MINIFYING_PANES`] for the half that was missing.
-const PANES: &[(u16, u16)] = &[(100, 40), (115, 61), (117, 64), (120, 90)];
+/// `(108, 50)` is the user's own reported pane (scale 1.35), the one that reaches
+/// the Frame-plan flank STRETCH — see [`SPECIMENS`] on why Arthur's second press
+/// had to join this file for it.
+const PANES: &[(u16, u16)] = &[(100, 40), (108, 50), (115, 61), (117, 64), (120, 90)];
 
 /// Panes BELOW scale 1, swept by the cases about magnification (SQ-0898).
 ///
@@ -588,9 +608,21 @@ fn a_flank_has_no_gap_between_its_tiled_pieces() {
 /// much of it the artwork reaches): Arthur's poles come back at 6.35 and 7.20 device
 /// pixels adrift at `(70, 19)`, and every other pane in the list stays clean —
 /// which is also the proof that this is the pane that reproduces.
+///
+/// **The exemption is keyed on the SITE, and that took a second round of SQ-0898.**
+/// As first written this case exempted every band whose fit was not `Letterbox`,
+/// and the fit was recorded inside `draw_chrome_band_stretched` as a constant — so
+/// the exemption belonged to the DRAWING FUNCTION, and every caller of it, present
+/// and future, was outside the gate by construction. Two callers were the intended
+/// exceptions. The third was the Frame-plan flank stretch, which drew Arthur's
+/// banner-row poles at 0.63 vertical against the frame's 1.35 while this case
+/// reported green. A caller now names its own fit and only two named sites are
+/// exempt. FALSIFIED a second time, by restoring that arm: `Arthur@5 [release 54] at
+/// 100x40 (scale 1.2500): band 5x13 at (0,0) draws 40x234 device px from 32x400
+/// native px — 1.2500/0.5850`, and the same on release 74 and at every other pane in
+/// both lists.
 #[test]
 fn every_band_draws_at_the_frames_one_magnification() {
-    use app::render::graphics::BandFit;
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for sp in SPECIMENS {
@@ -605,7 +637,14 @@ fn every_band_draws_at_the_frames_one_magnification() {
             // destination's own rounding still costs a whole one.
             let tol = scale.max(1.0);
             for &(r, fit, src, dst) in &mags {
-                if fit != BandFit::Letterbox {
+                // The exemption is keyed on the SITE that drew the band, never on
+                // the FUNCTION that drew it (SQ-0898, second round). `BandFit` used
+                // to be a two-state answer recorded inside
+                // `draw_chrome_band_stretched`, so the Menu panel, the divider
+                // extension and the Frame-plan flank stretch — three unrelated
+                // decisions sharing one drawing routine — were exempt together, and
+                // the third was the defect this case exists for.
+                if !fit.on_the_letterbox_grid() {
                     continue;
                 }
                 let off_x = dst.0 as f32 - src.0 as f32 * scale;
@@ -642,8 +681,10 @@ fn every_band_draws_at_the_frames_one_magnification() {
 /// The statement is unchanged and is still a RELATION — every band maps its native
 /// columns to the pane at ONE factor, whatever that factor is. That is weaker than
 /// [`every_band_draws_at_the_frames_one_magnification`] above and is kept anyway,
-/// because it makes no reference to [`app::render::graphics::BandFit`]: a band
-/// wrongly tagged `Fitted` would escape the absolute gate and not this one.
+/// because it makes no reference to [`app::render::graphics::BandFit`]: a band that
+/// claims one of the two named exemptions it is not entitled to would escape the
+/// absolute gate and not this one. That is not hypothetical — a band claiming an
+/// exemption it had not earned IS the second half of SQ-0898.
 #[test]
 fn side_art_and_top_plate_share_one_horizontal_scale() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
@@ -961,6 +1002,11 @@ fn each_specimen_is_recognised_as_its_own_layout() {
         ("Arthur", BorderArt::ArthurPoles, (11u32, 379u32)),
         ("Shogun", BorderArt::ShogunSinglePiece, (0, 336)),
         ("Zork Zero", BorderArt::ZorkZeroPillars, (0, 400)),
+        // The two SQ-0898 entries. Release 54's poles are the same rows whatever
+        // turn they are read on; release 74's sit four native rows lower and end
+        // four higher.
+        ("Arthur@5", BorderArt::ArthurPoles, (11, 379)),
+        ("Arthur@5", BorderArt::ArthurPoles, (16, 384)),
     ];
     for (sp, (_, want, want_rows)) in SPECIMENS.iter().zip(expected) {
         let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };

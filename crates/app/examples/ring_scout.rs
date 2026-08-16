@@ -387,7 +387,7 @@ fn scout(
             let off = (dst.0 as f32 - src.0 as f32 * scale.s)
                 .abs()
                 .max((dst.1 as f32 - src.1 as f32 * scale.s).abs());
-            let bad = matches!(fit, app::render::graphics::BandFit::Letterbox) && off > scale.s.max(1.0);
+            let bad = fit.on_the_letterbox_grid() && off > scale.s.max(1.0);
             println!(
                 "    mag {:<20} {}x{}px from {}x{}n = {:.4}/{:.4} vs s={:.4}  → {off:.2} device px  [{fit:?}]{}",
                 fmt(*r), dst.0, dst.1, src.0, src.1,

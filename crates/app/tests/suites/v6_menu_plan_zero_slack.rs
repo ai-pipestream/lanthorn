@@ -153,9 +153,9 @@ fn boot(file: &str, release: u16, serial: &str, turns: usize) -> Option<GameSess
 
 /// How one side-flank band was drawn, read off the render's own band log rather
 /// than by re-implementing the pipeline. `stretched` under a Menu plan is
-/// [`menu_flank_panel`]'s dest — the Frame plan's `flank_crop` is the only other
-/// stretched flank arm and it cannot run here — and `tiled` is the side-border
-/// tiler this quest is about keeping away from a picture panel.
+/// [`menu_flank_panel`]'s dest, and since SQ-0898 removed the Frame plan's own
+/// stretch arm it is the ONLY way a flank is drawn stretched at all; `tiled` is the
+/// side-border tiler this quest is about keeping away from a picture panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Draw {
     Panel,
