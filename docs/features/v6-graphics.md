@@ -1192,6 +1192,21 @@ session-only switch that never touches your saved config:
   column is never mistaken for the column. The wider of that and the story box's
   leftover wins, and where the artwork claims columns the story window declared, the
   window gives them up.
+  And *at the edge* is part of that sentence. A run counts only if it starts within
+  one of the game's own text cells of the edge it is claimed for, and a run stopped
+  by the canvas's own midpoint — which is where the scan is bounded, because two
+  flanks meeting would leave no screen between them — is not a measurement of a
+  column at all. Arthur's Apple II press is the frame that made the omission
+  visible: release 63 shows a single illustration painting native columns 250–389
+  and nothing else, so the run in from the left and the run in from the right were
+  the same picture read from opposite sides. Each flank came back 253 native pixels
+  wide — 39 terminal columns at a 98×37 pane, 67 at 169×62 — and the sliver of
+  picture inside it was then tiled down the whole column, so the artwork repeated
+  down both flanks at every pane size and a tall pane simply showed more copies of
+  it. That frame now has no flanks: its illustration is drawn once, in the band
+  above the story, at the frame's own magnification. Arthur's four-pixel gutter
+  still counts as a pole at the edge, because a frame is authored on the game's text
+  grid and its ink may sit anywhere inside its own eight pixels.
   Two things fall out that used to be impossible. Zork Zero's pillar is one image at
   one scale down the whole pane, and the seam is simply gone. And the same title on
   two presses now lays out the same: Shogun's credits screen puts window 0 at
@@ -1464,6 +1479,19 @@ session-only switch that never touches your saved config:
   frame's `┐`, its `┘` and the rule down that side all reach the pane's last column
   instead of leaving a blank one beside it. Everything inside the screen, every
   interior divider included, keeps the column its own run maps to.
+  A rule is found by **ink**, not by opacity. The probe that locates one grows an
+  opaque run outward from the story window's edge, and a window's *page* — the
+  colour the game asked to present on, flooded behind everything while game colours
+  are honoured — is opaque everywhere. Journey's Apple II press (release 77, serial
+  890616) is where that told: its rule stands at native columns 72–80, the run
+  reported 0–80, and what came back was an 83-pixel-wide crop *through the
+  illustration*, replicated down the entire left column — 738 device pixels out of
+  a single native row at the 171×50 terminal it was reported from, and drawn after
+  the picture, so on top of it. The player got vertical bands where the artwork
+  belongs. The probe now reads the canvas as the game *painted* it, before any page
+  is flooded: the rule comes back as the character it is and is stamped, and the
+  picture beside it survives. With game colours declined the same frame was correct
+  throughout, which is the kind of split a single-mode test cannot see.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively. Its default ink/page follow the theme; where the
