@@ -176,8 +176,15 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
-    let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
-    let mut s = GameSession::new_with_trace(
+    // `startup.rs`'s own chain, `native_std_window` included. Without that step a
+    // press whose art is not 640x400 is told it has a 640x400 screen, and the GAME
+    // lays its windows out to fit it — so every rect the case then measures belongs
+    // to a screen the player never sees. Arthur's and Journey's ProDOS releases are
+    // both 560x384 presses, and both read as 640x400 here until this was added.
+    let v6_screen_px =
+        picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
+    let v6_art_scale = picts.art_scale();
+    let mut s = GameSession::new_with_art_scale(
         bytes,
         true,
         false,
@@ -185,7 +192,9 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
         false,
         picture_dims,
         v6_screen_px,
+        v6_art_scale,
         profile.default_colours(),
+        None,
         None,
     )
     .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
@@ -1816,10 +1825,18 @@ fn the_raster_composite_leaves_a_command_menu_alone() {
 /// `journey_s1.dsk` is the same release off the same press, and it is here
 /// because a five-disk set and a single `.po` image are two mounts of one build
 /// and either could have diverged.
+/// The MENU frame — two turns in, where the player answers the restore question
+/// and the verb menu comes up — is the one the defect was reported from, and it is
+/// a different screen from the gameplay frame four turns in. Both are here: a turn
+/// count is part of the specimen, not an incidental, and this case was blind to its
+/// own reproduction for want of two rows in this table.
 const JOURNEY_MEDIA: &[Specimen] = &[
+    Specimen { title: "Journey ProDOS@2", file: "Journey.po", release: 77, serial: "890616", turns: 2 },
+    Specimen { title: "Journey ProDOS@2", file: "journey_s1.dsk", release: 77, serial: "890616", turns: 2 },
     Specimen { title: "Journey ProDOS", file: "Journey.po", release: 77, serial: "890616", turns: 4 },
     Specimen { title: "Journey ProDOS", file: "journey_s1.dsk", release: 77, serial: "890616", turns: 4 },
     Specimen { title: "Journey IBM", file: "journey-r83-s890706.z6", release: 83, serial: "890706", turns: 4 },
+    Specimen { title: "Journey IBM@2", file: "journey-r83-s890706.z6", release: 83, serial: "890706", turns: 2 },
     Specimen { title: "Journey Amiga", file: "Journey - The Quest Begins.adf", release: 30, serial: "890322", turns: 2 },
 ];
 
@@ -1946,101 +1963,23 @@ fn a_divider_extension_replicates_a_rule_and_never_a_picture() {
     }
 }
 
-// ── 12. A picture in the middle of the screen is not a flank (SQ-0899) ───────
-
-/// Arthur's ProDOS press, on both the mounts that carry it.
-const PRODOS_ARTHUR: &[Specimen] = &[
-    Specimen { title: "Arthur ProDOS", file: "Arthur.po", release: 63, serial: "890622", turns: 6 },
-    Specimen { title: "Arthur ProDOS", file: "Arthur Quest 4 Excalibur.2mg", release: 63, serial: "890622", turns: 6 },
-];
-
-/// A flank is a column of side artwork AT THE PANE'S EDGE — art that touches
-/// neither edge is not one (SQ-0899).
-///
-/// `flank_art_columns` reduces "the first contiguous opaque run in from each
-/// edge" over every native row and keeps the narrowest, which is what tells a
-/// side column from the banner above it. It never asked whether the run it kept
-/// REACHED the edge, and on `stories/Arthur.po` (**release 63, serial 890622**,
-/// booted as `AppleIIgs` off ProDOS) nothing does: this frame is a single
-/// illustration painting native columns 250..389 and nothing else, so the run in
-/// from the left and the run in from the right were the same picture, read from
-/// opposite sides. Each flank came back **253 native px** — 39 cells at a 98x37
-/// pane, 67 at 169x62 — and `flank_source` then TILED the sliver of picture
-/// inside it down the whole column, which is the banner repeating down the flank
-/// this quest was reported as. It is present at every pane size; a tall one only
-/// shows more repeats.
-///
-/// Asserted as: no tiled band on this frame at all, and the illustration still
-/// drawn. The second half matters — a flank that claims nothing would pass the
-/// first half by drawing an empty screen.
-#[test]
-fn a_picture_in_the_middle_of_the_screen_is_not_a_flank() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
-    let panes: Vec<(u16, u16)> = all_panes().collect();
-    let mut ran = 0;
-    for sp in PRODOS_ARTHUR {
-        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
-        drive(&mut s, sp.turns);
-        let model = s.screen();
-        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items);
-        let layout = app::render::v6_layout::classify_windows(items);
-        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
-        // The case is only worth anything on the frame it is about: a picture
-        // standing clear of both edges. Pin it, so a later change to Arthur's
-        // intro cannot turn this into a vacuous pass.
-        let inked = |x: u32| (0..gfx.height()).any(|y| gfx.get_pixel(x, y)[3] >= 128);
-        let left = (0..gfx.width()).find(|&x| inked(x)).expect("this frame paints something");
-        let right = (0..gfx.width()).rev().find(|&x| inked(x)).expect("this frame paints something");
-        assert!(
-            left > 200 && right + 200 < gfx.width(),
-            "{} [release {}] after {} turns: the art runs {left}..={right} of {} native columns — \
-             this case needs the frame whose illustration stands clear of BOTH edges",
-            sp.title,
-            sp.release,
-            sp.turns,
-            gfx.width(),
-        );
-        for &(w, h) in &panes {
-            for honor in [true, false] {
-                let state = render_state_with(honor);
-                let area = Rect::new(0, 0, w, h);
-                let mut buf = Buffer::empty(area);
-                let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
-                let bands = parse_bands(&state.graphics_render.borrow().band_log);
-                for b in &bands {
-                    assert!(
-                        !b.tiled,
-                        "{} [release {}] at {w}x{h}, honor_game_colours={honor}: band {b:?} is \
-                         TILED. Nothing on this frame is a side column, so the only way to reach \
-                         a tiled flank is to have mistaken the centred illustration for one",
-                        sp.title,
-                        sp.release,
-                    );
-                }
-                // …and the picture is still drawn: the pane column its own centre
-                // maps to must be covered by some band.
-                let c = ((left + right) / 2) as f32 * scale_of(native, (w, h)) / 8.0;
-                let c = c as u16;
-                assert!(
-                    bands.iter().any(|b| (b.at.0..b.at.0 + b.cells.0).contains(&c)),
-                    "{} [release {}] at {w}x{h}, honor_game_colours={honor}: no band covers pane \
-                     column {c}, where the illustration's own centre maps — the flank stopped \
-                     claiming those cells and nothing else picked them up",
-                    sp.title,
-                    sp.release,
-                );
-                ran += 1;
-            }
-        }
-    }
-    if stories_dir().join(PRODOS_ARTHUR[0].file).exists() {
-        assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
-    }
-}
-
-/// The frame's letterbox factor at one pane, at this suite's 8x18 cell.
-fn scale_of(native: (u16, u16), pane: (u16, u16)) -> f32 {
-    app::render::v6_layout::uniform_scale(native, (pane.0 as u32 * 8, pane.1 as u32 * 18)).s
-}
-
+// ── 12. Arthur's ProDOS flank — WITHDRAWN, see SQ-0899 ───────────────────────
+//
+// A case stood here asserting that Arthur's ProDOS press has no side columns,
+// because its frame is a single illustration standing clear of both edges. That
+// frame does not exist. It was measured through a `boot()` that skipped
+// `native_std_window`, so the story was told it had a 640x400 screen; release 63
+// is a 560x384 press, and on its own screen this frame is the ordinary gameplay
+// frame with poles at both edges. The case's own non-vacuity guard is what caught
+// it once the helper above was fixed — "the art runs 0..=559 of 560 native
+// columns".
+//
+// The function's contract is still pinned, synthetically, by
+// `render::screen::tests::a_flanks_columns_come_from_the_narrowest_row_of_its_art`.
+// What is NOT pinned, and is the real defect SQ-0899 reports, is the flank's tile
+// SOURCE: at the user's 129x60 pane the band at rows 21..60 composes native rows
+// 0..381 of the column and draws them starting at device row 378, so the banner
+// cap at the column's top is painted a second time partway down the flank. Above
+// a taller pane the composition runs to 586 native rows on a 384-row screen and
+// the repeat is unmistakable. That needs a fix before it can have a test, and it
+// must be measured on the 560x384 screen the app actually gives it.

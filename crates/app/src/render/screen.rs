@@ -5255,6 +5255,32 @@ fn flank_border_extension(
     if cnx1 <= cnx0 {
         return None;
     }
+    // SQ-0883: and it must be a RULE. This band replicates ONE native row down the
+    // whole flank — the ring's single licensed anisotropy — and that is only
+    // invisible because a rule is uniform down its length. A crop wider than a rule
+    // is a slice of something else, and stretching it paints that slice over the
+    // column in bands.
+    //
+    // The probe above reads ink rather than window pages (the first half of this
+    // quest), but ink is not only the frame: `blit_paint_ground` puts the game's own
+    // PAINTED runs into the same layer, deliberately (SQ-0706), and a game that
+    // paints a ground across the flank hands the run the same uninterrupted walk a
+    // page did. Journey's ProDOS press (release 77, its menu frame) is that shape —
+    // window 1 is a full-screen grid carrying 65 paint runs — and the run came back
+    // **252 native px**, 31 text cells, cropped at row 144 straight through the
+    // illustration and stretched to 464x972 device px over the entire left half of
+    // the pane. Measured at the user's own 129x60 pane; it is in their
+    // `/dump-windows` and in `ring_scout --story stories/Journey.po --keys n --taps 2`.
+    //
+    // So the licence is granted on the crop's own width instead of on what the probe
+    // walked through, which no future flooding of that layer can widen: one native
+    // text cell, plus the terminal column each end's outward rounding above can add.
+    // Every real border in the corpus is a reverse-video space or a box glyph, and
+    // both live inside one cell by construction.
+    let widest = FONT_W + 2 * (cw / s).ceil() as u32;
+    if cnx1 - cnx0 > widest {
+        return None;
+    }
     Some((ext, BorderInk::Band((cnx0, mid, cnx1 - cnx0, 1))))
 }
 

@@ -230,15 +230,26 @@ fn scout(
     let profile = app::interpreter::InterpreterProfile::resolve(p, None, None, disk_image);
     zvm::screen::set_palette(profile.palette());
     let dims = picts.all_pict_dims();
-    let std_win = picts.std_window().or_else(|| profile.std_window());
+    // The screen size the game is TOLD it has, by `startup.rs`'s own chain. The
+    // `native_std_window` step is not optional decoration: it is the archive's own
+    // picture space, and it is the only step that answers for a press whose art is
+    // not 640x400. Arthur's ProDOS release 63 is such a press — the app gives it a
+    // 560x384 screen, and a boot that skips this step hands it 640x400 instead, so
+    // the GAME lays its own windows out differently and every rect measured
+    // afterwards describes a screen the player never sees. `art_scale` rides along
+    // for the same reason (SQ-0790): a 320-wide plate is drawn at (2,2).
+    let std_win = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
+    let art_scale = picts.art_scale();
     println!(
-        "  booted as {:?}{}  ·  release {} serial {}",
+        "  booted as {:?}{}  ·  release {} serial {}  ·  screen {}  art scale {:?}",
         profile,
         disk_image.map(|m| format!(" off {m:?}")).unwrap_or_default(),
         u16::from_be_bytes([bytes[2], bytes[3]]),
         String::from_utf8_lossy(&bytes[0x12..0x18]),
+        std_win.map_or("(none)".into(), |(w, h)| format!("{w}x{h}")),
+        art_scale,
     );
-    let mut s = GameSession::new_with_trace(
+    let mut s = GameSession::new_with_art_scale(
         bytes,
         true,
         false,
@@ -246,7 +257,9 @@ fn scout(
         false,
         dims,
         std_win,
+        art_scale,
         profile.default_colours(),
+        None,
         None,
     )
     .map_err(|e| format!("boot: {e:?}"))?;
@@ -260,20 +273,27 @@ fn scout(
     let tap_count = taps.unwrap_or(if no_tap { 0 } else { 6 });
     let stop_at_line = taps.is_none();
     for _ in 0..tap_count {
-        match s.pending_input() {
+        let r = match s.pending_input() {
             InputKind::Line => {
-                let _ = s.submit("");
+                let r = s.submit("");
                 if stop_at_line {
                     break;
                 }
+                Some(r.transcript)
             }
             InputKind::Char => {
                 let b = keys.bytes().next().unwrap_or(13);
-                let _ = s.submit_char(b);
+                Some(s.submit_char(b).transcript)
             }
-            InputKind::Event => {
-                let _ = s.submit("");
-            }
+            InputKind::Event => Some(s.submit("").transcript),
+        };
+        // Arthur and Journey both open on "restore a saved position?", and a story
+        // still sitting on that question is not a frame worth measuring — the intro
+        // is what gets reported, at every tap count, forever. The same answer the
+        // suites' `drive()` gives (`v6_side_border_tiling.rs`), so the instrument and
+        // the tests walk the same path to the same screen.
+        if r.is_some_and(|t| t.to_lowercase().contains("y or n")) {
+            let _ = s.submit_char(b'n');
         }
     }
 
