@@ -51,6 +51,7 @@ fn main() {
     let mut pane_cells = (98u16, 37u16);
     let mut cell_px = (8u16, 18u16);
     let mut turns = 0usize;
+    let mut no_tap = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -59,6 +60,7 @@ fn main() {
                 i += 1;
             }
             "--all" => all = true,
+            "--no-tap" => no_tap = true,
             "--turns" => {
                 if let Some(v) = args.get(i + 1) {
                     turns = v.parse().unwrap_or(0);
@@ -100,7 +102,7 @@ fn main() {
 
     for (path, keys) in targets {
         println!("═══ {path}");
-        match scout(&path, &keys, pane_cells, cell_px, turns) {
+        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
@@ -145,8 +147,14 @@ fn scout(
     pane_cells: (u16, u16),
     cell_px: (u16, u16),
     turns: usize,
+    no_tap: bool,
 ) -> Result<(), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    // Disk images (.adf/.po/.2mg/.dsk) are mounted, not read — a medium carries a
+    // different RELEASE, not the same story on other media (CLAUDE.md).
+    let bytes = match app::hints::load_mounted_story(std::path::Path::new(path)) {
+        Ok((loaded, _)) => loaded.bytes().to_vec(),
+        Err(e) => return Err(format!("{path}: {e:?}")),
+    };
     if bytes.first() != Some(&6) {
         return Err("not a v6 story".into());
     }
@@ -159,8 +167,10 @@ fn scout(
     s.flush_boot_pictures();
     let _ = s.take_transcript();
 
-    // Tap through the intro to a frame that has a ring on it.
-    for _ in 0..6 {
+    // Tap through the intro to a frame that has a ring on it — unless asked to
+    // report the BOOT frame as it stands, which is the only way to see a screen the
+    // router sends to the composite before a viewport is ever computed.
+    for _ in 0..(if no_tap { 0 } else { 6 }) {
         match s.pending_input() {
             InputKind::Line => {
                 let _ = s.submit("");
@@ -197,9 +207,10 @@ fn scout(
         let vp_box = v6::story_viewport_box(lay.story, &sc, pane_cells, cell_px);
         let g = v6::build_graphics_canvas(&lay.chrome, nat);
         let vp_clear = clear_viewport_cells(lay.story, &g, &sc, pane_cells, cell_px);
-        if vp_box != vp_clear {
+        {
             println!(
-                "  turn {t}: (b) DIFFERS — box {}x{}@({},{}) vs content {}x{}@({},{}); declared {:?} -> clear {:?}",
+                "  turn {t}: {} box {}x{}@({},{}) content {}x{}@({},{}); win0 {:?} -> clear {:?}",
+                if vp_box == vp_clear { "same  " } else { "DIFFERS" },
                 vp_box.width, vp_box.height, vp_box.x, vp_box.y,
                 vp_clear.width, vp_clear.height, vp_clear.x, vp_clear.y,
                 lay.story.map(|w| (w.x_px, w.y_px, w.w_px, w.h_px)),
