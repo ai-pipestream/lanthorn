@@ -1643,7 +1643,7 @@ fn render_node(
                         // a 117x64 terminal. The Menu plan is excluded: Journey's frame
                         // is glyphs, not artwork (SQ-0750), and its flank is a picture
                         // column centred in a panel rather than a border to extend.
-                        let tiled_flanks: Vec<(Rect, image::RgbaImage)> = if matches!(plan, BottomPlan::Menu) {
+                        let tiled_flanks: Vec<(Rect, TiledFlank)> = if matches!(plan, BottomPlan::Menu) {
                             Vec::new()
                         } else {
                             strips
@@ -1759,10 +1759,14 @@ fn render_node(
                                         if let Some((bg, fill, dest, crop)) = panel {
                                             fill_pane_page(fill, bg, buf);
                                             gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, crate::render::graphics::BandSlot::Art, buf);
-                                        } else if let Some(img) = tiled_flanks.iter().find(|(sr, _)| sr == r).map(|(_, i)| i) {
+                                        } else if let Some((img, dest)) = tiled_flanks.iter().find(|(sr, _)| sr == r).map(|(_, i)| i) {
                                             // SQ-0698: a recognised side border, tiled to
-                                            // the band's own height at the uniform scale.
-                                            gr.draw_chrome_band_image(picker, img, *r, crate::render::graphics::BandSlot::Art, buf);
+                                            // the band's own height at the uniform scale —
+                                            // and placed at the device rect its native box
+                                            // maps to, so the magnification IS the uniform
+                                            // scale rather than whatever a fit to the band
+                                            // would have produced (SQ-0898).
+                                            gr.draw_chrome_band_image(picker, img, *r, *dest, crate::render::graphics::BandSlot::Art, buf);
                                         // SQ-0894 measured this arm and KEPT it, with the
                                         // result recorded because it is not the obvious one:
                                         // disabling it passes the FULL gate, 5555 tests. That
@@ -2111,11 +2115,51 @@ fn render_node(
                         }
                         for row_runs in in_box.values_mut() {
                             row_runs.sort_by_key(|t| t.x);
-                            for t in merge_strip_fragments(row_runs) {
+                            let cw = cell_px.0.max(1) as f32;
+                            // Pane-relative cell → absolute buffer cell.
+                            let run_col = |t: &crate::engine::PxText| {
                                 let px = t.x.max(1) as f32 - 1.0;
-                                let cw = cell_px.0.max(1) as f32;
-                                // Pane-relative cell → absolute buffer cell.
-                                let col = area.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
+                                area.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32
+                            };
+                            let merged = merge_strip_fragments(row_runs);
+                            // SQ-0898: the cells this row's GLYPH runs occupy, so a
+                            // BLANK run cannot erase one.
+                            //
+                            // This is SQ-0727's rule, at the one text site that never
+                            // got it — reused rather than restated, exactly as SQ-0892
+                            // reused `merge_strip_fragments` here. A run is POSITIONED
+                            // through the ring scale but its characters then advance ONE
+                            // TERMINAL COLUMN each, and the two rates coincide only where
+                            // a column is one native 8px text cell. Below that (a pane
+                            // whose scale is under 1) a group is WIDER in cells than its
+                            // native span, so the blank the game painted immediately
+                            // after it — abutting it in native pixels, and therefore
+                            // covering nothing of it — maps to a column INSIDE it.
+                            //
+                            // MEASURED on Shogun's boot menu, `shogun-r322-s890706.z6`,
+                            // pane 76x46 at 8x18 (scale 0.95): `START the game` is placed
+                            // as 14 columns from 28, and the game's trailing space at
+                            // native x=346 — one native cell past the group's last, which
+                            // ends at 346 — mapped to column 41 and painted a space over
+                            // the final `e`. Likewise `RESTORE a saved gam` and `QUIT the
+                            // gam`, on both presses. At scale 1.225 the group UNDER-runs
+                            // instead and the blank lands clear, which is why a corpus
+                            // checked at 100x40 saw nothing.
+                            //
+                            // A blank run carries no glyphs and in NATIVE pixels only
+                            // ever covers whitespace the glyph run drew itself, so it may
+                            // still paint the cells no glyph run claimed (a selection bar
+                            // extending past its label) and must skip the rest.
+                            let ink: Vec<(i32, i32)> = merged
+                                .iter()
+                                .filter(|t| !t.text.trim().is_empty())
+                                .map(|t| {
+                                    let c = run_col(t);
+                                    (c, c + t.text.chars().count() as i32)
+                                })
+                                .collect();
+                            for t in &merged {
+                                let col = run_col(t);
                                 // SQ-0892: the ROW is the run's own native text row
                                 // counted from the story box's first — one terminal row
                                 // each — not its native pixel through the ring scale.
@@ -2159,7 +2203,19 @@ fn render_node(
                                 if max_w > 0 {
                                     // Untrusted game text (SQ-0639).
                                     let text = crate::render::blank_control_chars(&t.text);
-                                    buf.set_stringn(col as u16, row as u16, text.as_ref(), max_w, style);
+                                    if t.text.trim().is_empty() {
+                                        // Cell by cell, so the parts of a bar that reach
+                                        // past every label still paint (SQ-0898).
+                                        for (n, ch) in text.chars().take(max_w).enumerate() {
+                                            let c = col + n as i32;
+                                            if ink.iter().any(|&(lo, hi)| c >= lo && c < hi) {
+                                                continue;
+                                            }
+                                            buf.set_stringn(c as u16, row as u16, ch.encode_utf8(&mut [0u8; 4]), 1, style);
+                                        }
+                                    } else {
+                                        buf.set_stringn(col as u16, row as u16, text.as_ref(), max_w, style);
+                                    }
                                 }
                             }
                         }
@@ -4519,22 +4575,75 @@ fn flank_crop(
 /// device height is worth at the UNIFORM scale. Read back through `scale`
 /// exactly as [`flank_crop`] reads it, so a tiled band and a stretched one agree
 /// on where the flank is; only the vertical factor differs between them.
+///
+/// **And where that native box LANDS**, in device pixels relative to the band's
+/// own top-left ([`FlankBox::dest`]). The two travel together because they are one
+/// decision: a native span and the device span it occupies at the frame's scale.
+/// Returning only the native half is what shipped SQ-0898 — the caller clipped the
+/// source to the art that exists and handed it to an unclipped destination, so the
+/// resize absorbed the difference as a change of magnification. See
+/// [`crate::render::graphics::GraphicsRender::draw_chrome_band_image`] for the
+/// measurement.
+struct FlankBox {
+    /// Native columns `[x0, x1)` of the game's screen this band shows.
+    x0: u32,
+    x1: u32,
+    /// The native row the band's visible top maps back to, and how many native
+    /// rows it is worth at `scale.s`. `top + rows` may run PAST the game's screen:
+    /// that is the flank extension, and supplying more rows of art is the one thing
+    /// a tiled flank may do that a crop may not.
+    top: u32,
+    rows: u32,
+    /// Where `[x0, x1) × rows` belongs inside the band, in device pixels from the
+    /// band's top-left. `w ≈ (x1 - x0) · s` and `h ≈ rows · s`, so drawing the
+    /// source into it is the frame's own magnification by construction.
+    dest: crate::render::graphics::BandDest,
+}
+
 fn flank_native_box(
     band: Rect,
     pane: Rect,
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     native: (u16, u16),
-) -> (u32, u32, u32, u32) {
+) -> FlankBox {
     let cw = cell_px.0.max(1) as f32;
     let ch = cell_px.1.max(1) as f32;
     let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
-    let inv_x = |cell: u16| (((cell.saturating_sub(pane.x)) as f32 * cw - scale.off_x as f32) / s).round().max(0.0) as u32;
-    let x0 = inv_x(band.x).min(native.0 as u32);
-    let x1 = inv_x(band.right()).min(native.0 as u32);
-    let top = (((band.y.saturating_sub(pane.y)) as f32 * ch - scale.off_y as f32) / s).round().max(0.0) as u32;
-    let rows = ((band.height as f32 * ch) / s).round().max(0.0) as u32;
-    (x0, x1, top, rows)
+    // The band's own device span, and the span the game's scaled screen occupies
+    // inside the pane — the same `off + round(native · s)` box the plain crop reads
+    // its pixels out of, so the two agree on where the artwork's edge is.
+    let rel_x0 = band.x.saturating_sub(pane.x) as f32 * cw;
+    let rel_y0 = band.y.saturating_sub(pane.y) as f32 * ch;
+    let (bw, bh) = (band.width as f32 * cw, band.height as f32 * ch);
+    let art_x0 = scale.off_x as f32;
+    let art_x1 = art_x0 + (native.0 as f32 * s).round();
+    let art_y0 = scale.off_y as f32;
+    // Horizontally the flank is bounded by the artwork: there are no native columns
+    // outside the game's screen, so the letterbox margin beside it is margin, and
+    // stretching into it is what SQ-0898 was. Vertically it is bounded only ABOVE:
+    // below, the per-title recipe generates as many rows as the band asks for, which
+    // is what "tiled, not stretched" means and why this costs nothing to satisfy.
+    let dx0 = rel_x0.max(art_x0);
+    let dx1 = (rel_x0 + bw).min(art_x1).max(dx0);
+    let dy0 = rel_y0.max(art_y0);
+    let dy1 = (rel_y0 + bh).max(dy0);
+    let x0 = ((dx0 - art_x0) / s).round().max(0.0) as u32;
+    let x1 = (((dx1 - art_x0) / s).round().max(0.0) as u32).min(native.0 as u32).max(x0);
+    let top = ((dy0 - art_y0) / s).round().max(0.0) as u32;
+    let rows = ((dy1 - dy0) / s).round().max(0.0) as u32;
+    FlankBox {
+        x0,
+        x1,
+        top,
+        rows,
+        dest: (
+            (dx0 - rel_x0).round().max(0.0) as u32,
+            (dy0 - rel_y0).round().max(0.0) as u32,
+            (dx1 - dx0).round().max(0.0) as u32,
+            (dy1 - dy0).round().max(0.0) as u32,
+        ),
+    }
 }
 
 /// SQ-0698: which border layout — if any — this side flank band is showing.
@@ -4550,13 +4659,17 @@ fn flank_border_art(
     native: (u16, u16),
     gfx: &image::RgbaImage,
 ) -> Option<crate::render::v6_border::BorderArt> {
-    let (x0, x1, _, _) = flank_native_box(band, pane, scale, cell_px, native);
-    if x1 <= x0 {
+    let b = flank_native_box(band, pane, scale, cell_px, native);
+    if b.x1 <= b.x0 {
         return None;
     }
-    let art = crate::render::v6_border::art_extent(gfx, x0, x1);
-    crate::render::v6_border::recognize(gfx, x0, x1, art, native.1 as u32)
+    let art = crate::render::v6_border::art_extent(gfx, b.x0, b.x1);
+    crate::render::v6_border::recognize(gfx, b.x0, b.x1, art, native.1 as u32)
 }
+
+/// The pixels one tiled flank band ships, and where inside the band they go
+/// (SQ-0898). They travel together because the pair IS the magnification.
+type TiledFlank = (image::RgbaImage, crate::render::graphics::BandDest);
 
 /// SQ-0698: the tiled native source for one side flank band, or `None` when its
 /// art is unrecognised or already covers the band.
@@ -4571,13 +4684,17 @@ fn flank_tiled_source(
     native: (u16, u16),
     canvas: &image::RgbaImage,
     gfx: &image::RgbaImage,
-) -> Option<image::RgbaImage> {
-    let (x0, x1, top, rows) = flank_native_box(band, pane, scale, cell_px, native);
-    if x1 <= x0 || rows == 0 {
+) -> Option<TiledFlank> {
+    let b = flank_native_box(band, pane, scale, cell_px, native);
+    if b.x1 <= b.x0 || b.rows == 0 {
         return None;
     }
-    let art = crate::render::v6_border::art_extent(gfx, x0, x1);
-    crate::render::v6_border::flank_source(canvas, gfx, x0, x1, art, native.1 as u32, top, rows)
+    let art = crate::render::v6_border::art_extent(gfx, b.x0, b.x1);
+    // The destination rides along with the pixels: the source is `[x0, x1) × rows`
+    // of native art and `dest` is exactly where that lands at the frame's scale, so
+    // the draw has no size left to choose (SQ-0898).
+    crate::render::v6_border::flank_source(canvas, gfx, b.x0, b.x1, art, native.1 as u32, b.top, b.rows)
+        .map(|img| (img, b.dest))
 }
 
 /// SQ-0793: extend the side border art down the RASTER composite, in place.

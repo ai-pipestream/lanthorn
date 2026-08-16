@@ -1036,6 +1036,19 @@ session-only switch that never touches your saved config:
   laid out in the game's *own* text grid rather than line by line through the
   picture's scale, so the nine lines share one centre again instead of drifting up
   to five columns apart.
+  Grouping the stream fixed the scattering and left one tail. A run is placed
+  through the picture's scale but then advances one terminal *column* per
+  character, and the two rates only agree where a column is exactly one eight-pixel
+  game character. Below that — any pane smaller than the game's own 640×400 screen —
+  a group of glyphs is wider in columns than the game meant it to be, so the blank
+  the game painted immediately after it, which in game pixels touches it without
+  covering any of it, maps to a column *inside* it. `START the game` came out
+  `START the gam`, and `RESTORE a saved gam`, and `QUIT the gam`, with the final
+  letter painted over by a space. A blank run carries no glyphs and in game pixels
+  only ever covers whitespace the glyph run drew itself, so it now paints the cells
+  no glyph claimed — the parts of a selection bar that reach past its label — and
+  skips the rest. Above 1:1 the group *under*-runs instead and the blank lands
+  clear, which is why this only ever showed on a small terminal.
 - **More than one scrolling text window.** A v6 game may run several flowing-prose
   windows at once — advent.z6's `style` opens one across the top of the screen and
   keeps playing in another below it. Both are wrap+scroll, so both stream through
@@ -1198,7 +1211,23 @@ session-only switch that never touches your saved config:
   worth knowing: the side art keeps the header plate's horizontal factor, so the
   frame still meets exactly at its corners at every pane width; and Arthur's flanks
   are no longer cut off at the row his poles happen to stop (native 379 of 400,
-  which on a 64-row pane left the frame standing open down its lower half). The
+  which on a 64-row pane left the frame standing open down its lower half).
+  "At every pane width" took a second pass to earn. A tiled flank asks for the
+  native box its band covers, and there is nothing outside the game's screen to
+  ask for — so on a pane wide enough that the letterbox leaves a margin at the
+  edges, the flank got a source narrower than it wanted and the resize quietly made
+  up the difference by changing the magnification. Measured on Arthur at a 70×19
+  pane, where the letterbox leaves six device pixels down each side: the pole below
+  his status bar drew 30 native columns across all 32 pixels of its band, 1.07 per
+  native pixel where the banner beside it was at 0.855, and six pixels to the left
+  of it — a fragment in each top corner, at a slightly wrong size, not quite lined
+  up with anything. Now the destination travels with the source: a flank lands on
+  exactly the device pixels its native box maps to, and the margin beside it stays
+  margin, the same margin the banner above it already leaves. Every band on a frame
+  is within one native pixel of the frame's one scale, and there is a test that says
+  so at panes above *and* below 1:1 — the defect lived for as long as it did because
+  every pane anyone had checked magnified, and above 1:1 the arithmetic agrees by
+  luck. The
   three recipes are per title, because the artwork is: the mechanism is a port of
   Bocfel's `draw_border.cpp`, which Spatterlight ships, and which hard-codes per
   game *and* per platform for the same reason. It can afford to, because it draws

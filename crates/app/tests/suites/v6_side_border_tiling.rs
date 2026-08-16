@@ -99,7 +99,35 @@ const UNAFFECTED: &[&str] = &[
 
 /// Pane sizes swept. The last is the deliberately TALL one, where the stretch
 /// factor this work removes was largest.
+///
+/// Every one of them MAGNIFIES: 1.25, 1.4375, 1.4625, 1.5. That is a precondition
+/// for most of this file and not an oversight — a flank only has to be tiled at a
+/// pane whose letterbox leaves vertical slack past the artwork, and where it does
+/// not, "must be TILED" is not a property of a correct render. See
+/// [`MINIFYING_PANES`] for the half that was missing.
 const PANES: &[(u16, u16)] = &[(100, 40), (115, 61), (117, 64), (120, 90)];
+
+/// Panes BELOW scale 1, swept by the cases about magnification (SQ-0898).
+///
+/// Everything in this file was checked above scale 1 until SQ-0898, and the
+/// blindness that bought was double. A minifying pane is the only place a flank's
+/// SOURCE is clipped by the artwork's edge while its DESTINATION is not, which is
+/// the defect; and `scale_halo` is zero at or above 1, so the band log's `native`
+/// field — which every case here parses — only tells the truth where it cannot
+/// matter. Two defects shipped through this suite for that reason alone.
+///
+/// `(76, 46)` is the user's own 78x49 terminal at an 8x18 cell (scale 0.95).
+/// `(70, 19)` is the pane they reported the visible corner fragment on, and it is
+/// the only pane in either list wide enough for its height that the letterbox
+/// leaves a HORIZONTAL margin (`off_x = 6`) — which is what made the fragment six
+/// device pixels wide there and sub-pixel everywhere else.
+const MINIFYING_PANES: &[(u16, u16)] = &[(76, 46), (70, 19)];
+
+/// Both lists: for the cases that assert a magnification, which is a property of
+/// every pane rather than of a pane with slack.
+fn all_panes() -> impl Iterator<Item = (u16, u16)> {
+    PANES.iter().chain(MINIFYING_PANES).copied()
+}
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -293,6 +321,33 @@ fn frame(session: &GameSession, pane: (u16, u16)) -> (Buffer, Vec<Band>, (u16, u
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
     let native = app::render::v6_layout::native_extent(items);
     (buf, bands, native)
+}
+
+/// One band's magnification, taken from the render's structured record rather
+/// than parsed back out of the log (SQ-0898): the band's rect, whether it claims
+/// to be on the letterbox grid at all, and the sizes that went into its resample
+/// — source in NATIVE pixels, destination in DEVICE pixels.
+///
+/// [`parse_bands`] cannot answer this and the difference is the whole of SQ-0898.
+/// A plain crop's `native` field in the log is a HASH FOOTPRINT carrying the area
+/// filter's halo, so below scale 1 it reads two or three pixels wider than the
+/// crop and neighbouring bands appear to overlap where they in fact partition the
+/// scaled canvas exactly. At or above scale 1 the halo is zero and the two agree,
+/// which is precisely why every case in this file was written against the log and
+/// every one of them passed while the defect was on screen.
+/// The magnifications one frame drew at, beside the frame's own letterbox scale.
+fn frame_mags(session: &GameSession, pane: (u16, u16)) -> (Vec<app::render::graphics::BandMag>, f32) {
+    let model = session.screen();
+    let state = render_state();
+    let area = Rect::new(0, 0, pane.0, pane.1);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let pane_dev = (pane.0 as u32 * 8, pane.1 as u32 * 18);
+    let s = app::render::v6_layout::uniform_scale(native, pane_dev).s;
+    let mags = state.graphics_render.borrow().band_mags.clone();
+    (mags, s)
 }
 
 /// The bands that are SIDE flanks.
@@ -508,23 +563,102 @@ fn a_flank_has_no_gap_between_its_tiled_pieces() {
 /// The relation asserted is between the bands actually drawn: every one of them,
 /// side flanks and the full-width top plate alike, maps its native columns to
 /// the pane at one horizontal factor.
+/// **ONE FRAME, ONE MAGNIFICATION** — the whole class, in one assertion (SQ-0898).
+///
+/// The two cases below it assert the same thing as a RELATION between bands, from
+/// the band log, at panes that all magnify. This asserts it as a PROPERTY, against
+/// the frame's own letterbox scale, from the render's structured record, at panes
+/// that minify as well. It is strictly stronger on every axis, and each of those
+/// three differences is one of the reasons the defect got through:
+///
+///   * a relation is satisfied by every band being wrong together;
+///   * the log's `native` is a halo'd hash footprint below scale 1 ([`BandMag`]);
+///   * the flank's source is clipped by the artwork's edge only when the pane is
+///     LARGER than the scaled screen on one axis, i.e. only below scale 1.
+///
+/// The property: every band showing the game's screen lands at `s` device pixels
+/// per native pixel, on both axes. The extension changes WHAT a flank draws — rows
+/// of art past the ones the game painted — never at what magnification, which is
+/// the difference between tiling a column and stretching it.
+///
+/// The tolerance is one native pixel. A source is whole pixels and a destination is
+/// whole device pixels, so half a native pixel of rounding is unavoidable on each;
+/// anything beyond that is a piece placed somewhere the frame's scale does not put
+/// it. FALSIFIED by restoring the pre-SQ-0898 destination (the whole band, however
+/// much of it the artwork reaches): Arthur's poles come back at 6.35 and 7.20 device
+/// pixels adrift at `(70, 19)`, and every other pane in the list stays clean —
+/// which is also the proof that this is the pane that reproduces.
+#[test]
+fn every_band_draws_at_the_frames_one_magnification() {
+    use app::render::graphics::BandFit;
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for sp in SPECIMENS {
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        ran += 1;
+        for (w, h) in all_panes() {
+            let (mags, scale) = frame_mags(&s, (w, h));
+            assert!(!mags.is_empty(), "{} at {w}x{h}: no bands drawn", sp.title);
+            // One native pixel, and never less than one device pixel — at a
+            // minifying pane a native pixel is worth less than a device one and the
+            // destination's own rounding still costs a whole one.
+            let tol = scale.max(1.0);
+            for &(r, fit, src, dst) in &mags {
+                if fit != BandFit::Letterbox {
+                    continue;
+                }
+                let off_x = dst.0 as f32 - src.0 as f32 * scale;
+                let off_y = dst.1 as f32 - src.1 as f32 * scale;
+                assert!(
+                    off_x.abs() <= tol && off_y.abs() <= tol,
+                    "{} [release {}] at {w}x{h} (scale {scale:.4}): band {}x{} at ({},{}) draws \
+                     {}x{} device px from {}x{} native px — {:.4}/{:.4} px per native px, where the \
+                     frame's own letterbox scale is {scale:.4}. Its far edge sits {off_x:.2}/{off_y:.2} \
+                     device px from where every other piece of this screen puts it, and a column drawn \
+                     in two pieces at two magnifications is a visible seam.\nall bands: {mags:?}",
+                    sp.title,
+                    sp.release,
+                    r.width, r.height, r.x, r.y,
+                    dst.0, dst.1, src.0, src.1,
+                    dst.0 as f32 / src.0.max(1) as f32,
+                    dst.1 as f32 / src.1.max(1) as f32,
+                );
+            }
+        }
+    }
+    assert!(ran > 0 || !stories_dir().exists(), "no border specimen present — every case skipped");
+}
+
+/// SQ-0898 retargeted this onto [`frame_mags`] and widened it to
+/// [`MINIFYING_PANES`]. It read the factor as `cells x 8 / src.0` out of the band
+/// LOG, and on a plain crop the log's `native` is a hash footprint carrying the
+/// area filter's halo — zero at or above scale 1, two or three pixels below it. At
+/// Arthur's `(76, 46)` that reads 0.865 for a band the render draws at 0.950,
+/// against 0.941 for the flank beside it: a 9% "disagreement" between two pieces
+/// that agree to a third of a pixel. Left on the log this case could not be given
+/// a minifying pane at all, because it would fail on frames that are correct.
+///
+/// The statement is unchanged and is still a RELATION — every band maps its native
+/// columns to the pane at ONE factor, whatever that factor is. That is weaker than
+/// [`every_band_draws_at_the_frames_one_magnification`] above and is kept anyway,
+/// because it makes no reference to [`app::render::graphics::BandFit`]: a band
+/// wrongly tagged `Fitted` would escape the absolute gate and not this one.
 #[test]
 fn side_art_and_top_plate_share_one_horizontal_scale() {
-    const CELL_W: f32 = 8.0;
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     for sp in SPECIMENS {
         let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
         drive(&mut s, sp.turns);
-        for &(w, h) in PANES {
-            let (_, bands, _) = frame(&s, (w, h));
-            assert!(!bands.is_empty(), "{} at {w}x{h}: no bands drawn", sp.title);
-            let factors: Vec<f32> =
-                bands.iter().map(|b| b.cells.0 as f32 * CELL_W / b.src.0.max(1) as f32).collect();
+        for (w, h) in all_panes() {
+            let (mags, _) = frame_mags(&s, (w, h));
+            assert!(!mags.is_empty(), "{} at {w}x{h}: no bands drawn", sp.title);
+            let factors: Vec<f32> = mags.iter().map(|(_, _, src, dst)| dst.0 as f32 / src.0.max(1) as f32).collect();
             let (lo, hi) = factors.iter().fold((f32::MAX, 0.0f32), |(lo, hi), f| (lo.min(*f), hi.max(*f)));
             assert!(
                 hi - lo < 0.06 * hi,
                 "{} [release {}] at {w}x{h}: the bands disagree on the horizontal factor \
-                 ({lo:.3}..{hi:.3}) — the side art no longer aligns with the header plate",
+                 ({lo:.3}..{hi:.3}) — the side art no longer aligns with the header plate\n{mags:?}",
                 sp.title,
                 sp.release
             );
@@ -537,27 +671,33 @@ fn side_art_and_top_plate_share_one_horizontal_scale() {
 /// the letterbox slack happened to be — measured here at 1.84 vertical against
 /// 1.26 horizontal on Shogun at a 100x40 pane, and 2.2x against 1.0x on Zork
 /// Zero at 117x64. Tiling fills the same space at the art's own aspect.
+///
+/// Retargeted onto [`frame_mags`] and widened to [`MINIFYING_PANES`] with its
+/// neighbour above, for the same reason: read off the band log's halo'd `native`,
+/// Arthur's banner-row flank crop at `(76, 46)` reads 0.865 horizontal against
+/// 0.938 vertical and looks anisotropic, when a crop of the one scaled canvas
+/// cannot be anisotropic — it copies device pixels 1:1 out of an image that was
+/// resized once, isotropically.
 #[test]
 fn no_side_flank_is_stretched_out_of_aspect() {
-    const CELL: (f32, f32) = (8.0, 18.0);
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     for sp in SPECIMENS {
         let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
         drive(&mut s, sp.turns);
-        for &(w, h) in PANES {
-            let (_, bands, _) = frame(&s, (w, h));
-            for b in &bands {
+        for (w, h) in all_panes() {
+            let (mags, _) = frame_mags(&s, (w, h));
+            for &(r, fit, src, dst) in &mags {
                 // A one-row band is a rounding artefact of its own height, not a
                 // statement about scale; skip it rather than loosen the bound.
-                if b.cells.1 <= 1 {
+                if r.height <= 1 {
                     continue;
                 }
-                let hx = b.cells.0 as f32 * CELL.0 / b.src.0.max(1) as f32;
-                let vy = b.cells.1 as f32 * CELL.1 / b.src.1.max(1) as f32;
+                let hx = dst.0 as f32 / src.0.max(1) as f32;
+                let vy = dst.1 as f32 / src.1.max(1) as f32;
                 assert!(
                     (hx - vy).abs() < 0.06 * hx.max(vy),
-                    "{} [release {}] at {w}x{h}: band {b:?} is anisotropic — \
-                     horizontal {hx:.3}, vertical {vy:.3}",
+                    "{} [release {}] at {w}x{h}: band {r:?} [{fit:?}] {src:?}n -> {dst:?}px is \
+                     anisotropic — horizontal {hx:.3}, vertical {vy:.3}",
                     sp.title,
                     sp.release
                 );

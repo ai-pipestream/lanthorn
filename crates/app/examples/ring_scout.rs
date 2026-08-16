@@ -15,6 +15,14 @@
 //!   is the SQ-0892 view: a run is POSITIONED through the scale but ADVANCES one
 //!   terminal column per character, and these are the numbers that argument turns
 //!   on;
+//! * `--bands`, the ring AS DRAWN: the strips the renderer classified, the band
+//!   log the graphics layer wrote, and — the reason this exists — each band's
+//!   MAGNIFICATION beside the frame's own letterbox scale (SQ-0898). One frame,
+//!   one magnification: a column drawn in two pieces at two factors is a seam, and
+//!   it is invisible in the rects. Do not read the band log's `native` field for
+//!   this; on a crop it is a hash footprint carrying the area filter's halo, so
+//!   below scale 1 it reads several pixels wide and neighbouring bands look like
+//!   they overlap where they partition the canvas exactly;
 //! * the GEOMETRIC ring, `pane − viewport`, which is the baseline the shipped
 //!   content-carved ring is read against — not the ring itself.
 //!
@@ -22,7 +30,13 @@
 //! cargo run -q -p app --example ring_scout -- --story stories/zork0-r393-s890714.z6
 //! cargo run -q -p app --example ring_scout -- --all --size 100x40
 //! cargo run -q -p app --example ring_scout -- --story "stories/James Clavell's Shogun.adf" --taps 1 --runs
+//! cargo run -q -p app --example ring_scout -- --story stories/arthur-r74-s890714.z6 \
+//!     --keys n --taps 12 --bands --size 70x19
 //! ```
+//!
+//! `--keys` is the byte answered to a CHARACTER read while tapping through the
+//! intro; `--all` takes each title's own from the corpus table unless this
+//! overrides it. Arthur needs `n` for his "restore a saved position?" question.
 //!
 //! `--size` is the PANE in cells (default 98x37, what a 100x40 terminal leaves
 //! after the app frame — the size §5's captures were measured at); `--cell` is the
@@ -58,6 +72,8 @@ fn main() {
     let mut turns = 0usize;
     let mut no_tap = false;
     let mut runs = false;
+    let mut bands = false;
+    let mut keys_override: Option<String> = None;
     let mut taps: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
@@ -67,8 +83,13 @@ fn main() {
                 i += 1;
             }
             "--all" => all = true,
+            "--keys" => {
+                keys_override = args.get(i + 1).cloned();
+                i += 1;
+            }
             "--no-tap" => no_tap = true,
             "--runs" => runs = true,
+            "--bands" => bands = true,
             "--taps" => {
                 if let Some(v) = args.get(i + 1) {
                     taps = v.parse().ok();
@@ -99,9 +120,12 @@ fn main() {
     }
 
     let targets: Vec<(String, String)> = if all {
-        CORPUS.iter().map(|(s, k)| (s.to_string(), k.to_string())).collect()
+        CORPUS
+            .iter()
+            .map(|(s, k)| (s.to_string(), keys_override.clone().unwrap_or_else(|| k.to_string())))
+            .collect()
     } else if let Some(s) = story {
-        vec![(s, String::new())]
+        vec![(s, keys_override.clone().unwrap_or_default())]
     } else {
         eprintln!("ring_scout: pass --story <file> or --all");
         std::process::exit(2);
@@ -116,7 +140,7 @@ fn main() {
 
     for (path, keys) in targets {
         println!("═══ {path}");
-        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, taps) {
+        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, bands, taps) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
@@ -163,6 +187,7 @@ fn scout(
     turns: usize,
     no_tap: bool,
     want_runs: bool,
+    want_bands: bool,
     taps: Option<usize>,
 ) -> Result<(), String> {
     // Disk images (.adf/.po/.2mg/.dsk) are mounted, not read — a medium carries a
@@ -320,6 +345,55 @@ fn scout(
                     t.text,
                 );
             }
+        }
+    }
+
+    // SQ-0898: the ring as it is actually DRAWN — the strips the renderer classified
+    // and the band log the graphics layer wrote, at this pane. The band log is the
+    // only place a piece's native source and its device destination are reported
+    // side by side, which is the pair the two extents must agree on: `native WxH`
+    // (a crop of the shared scaled canvas, at the frame's one scale) against
+    // `source WxH · resample A->B` (a caller-composed image, resized into the
+    // band's cell box). A magnification that differs between two pieces of one
+    // column is the defect this flag exists to catch, so it must be measurable
+    // without a terminal.
+    if want_bands {
+        let mut st = app::state::AppState::default();
+        st.colors = app::colors::ColorScheme::terminal_default();
+        st.game_picker = Some(app::render::graphics::kitty_picker(cell_px.0, cell_px.1));
+        st.config.v6_render = app::config::V6RenderMode::Hybrid;
+        let mut buf = ratatui::buffer::Buffer::empty(pane);
+        app::render::screen::render_story_pane(&model, false, None, &st, pane, &mut buf);
+        println!("  RING AS DRAWN:");
+        for c in st.v6_cell_map.borrow().iter() {
+            if c.label.starts_with("strip:") || c.label.starts_with("menu:") {
+                let (x, y, w, h) = c.cells;
+                println!("    {} {}", c.label, fmt(Rect::new(x, y, w, h)));
+            }
+        }
+        for line in &st.graphics_render.borrow().band_log {
+            println!("    {line}");
+        }
+        // ONE FRAME, ONE MAGNIFICATION. Every band's device-per-native factor against
+        // the frame's own letterbox scale, with the worst offender named: a column
+        // drawn in two pieces at two magnifications is the seam SQ-0894 removed and
+        // the corner fragment SQ-0898 is about, and neither is visible in the rects.
+        let mags = st.graphics_render.borrow().band_mags.clone();
+        for (r, fit, src, dst) in &mags {
+            // How far the piece's far edge sits from where the frame's one scale puts
+            // it, in device pixels: `|dst − src·s|` on the worse axis. Whole native
+            // pixels cost up to half of one, so the honest allowance is one native
+            // pixel (`s` device px, floored at 1 for a minifying pane).
+            let off = (dst.0 as f32 - src.0 as f32 * scale.s)
+                .abs()
+                .max((dst.1 as f32 - src.1 as f32 * scale.s).abs());
+            let bad = matches!(fit, app::render::graphics::BandFit::Letterbox) && off > scale.s.max(1.0);
+            println!(
+                "    mag {:<20} {}x{}px from {}x{}n = {:.4}/{:.4} vs s={:.4}  → {off:.2} device px  [{fit:?}]{}",
+                fmt(*r), dst.0, dst.1, src.0, src.1,
+                dst.0 as f32 / src.0 as f32, dst.1 as f32 / src.1 as f32, scale.s,
+                if bad { "   <-- DRIFT" } else { "" },
+            );
         }
     }
 

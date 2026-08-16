@@ -170,7 +170,18 @@ fn is_menu_screen(session: &GameSession) -> bool {
     seen.contains("START") && seen.contains("RESTORE") && seen.contains("QUIT")
 }
 
-const PANES: &[(u16, u16)] = &[(100, 40), (80, 30), (159, 61)];
+/// Pane sizes swept, at an 8x18 cell.
+///
+/// The last two are BELOW scale 1 and SQ-0898 added them, because the first three
+/// are 1.25, 1.0 and 1.9875 and nothing here had ever been asked a question that
+/// only a minifying pane can answer. A run is positioned through the ring scale
+/// and then advances one terminal COLUMN per character, so above 1 a group of
+/// glyphs under-runs its own native span and below 1 it over-runs it — and the
+/// menu lost its last character to a blank the game painted after it on every
+/// pane in the second regime and none in the first. `(76, 46)` is the user's own
+/// 78x49 terminal; `(78, 26)` is the same regime at a different aspect, so a
+/// single accident of arithmetic cannot cover both.
+const PANES: &[(u16, u16)] = &[(100, 40), (80, 30), (159, 61), (76, 46), (78, 26)];
 
 // ── 1. The reported symptom, stated directly ────────────────────────────────
 

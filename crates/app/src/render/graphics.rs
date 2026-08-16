@@ -505,6 +505,40 @@ struct V6Ready {
 /// time, and `poll_v6_job` installs its result (see `spawn_v6_encode`).
 type V6Job = std::thread::JoinHandle<Option<V6Ready>>;
 
+/// SQ-0898: whether a band claims to be showing the game's screen ON the frame's
+/// letterbox grid, or is a picture deliberately fitted to a box of its own.
+///
+/// The distinction exists because "one frame, one magnification" is a property of
+/// the FIRST kind and a category error about the second. Every band that shows the
+/// v6 screen — a full-width banner tile, a flank crop, a tiled flank extension — is
+/// a window onto one canvas scaled by one factor, and two of them at two factors is
+/// a seam. The other kind is not on that grid at all and its magnification is
+/// chosen for other reasons; there are exactly two, both deliberate and both
+/// documented where they are made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BandFit {
+    /// On the letterbox grid: `device == native · s`, to within the half native
+    /// pixel that whole-pixel sources cost. Asserted across the corpus and a pane
+    /// sweep by `v6_band_tiling::every_band_draws_at_the_frames_one_magnification`.
+    Letterbox,
+    /// Deliberately not: the Menu-plan flank PANEL, whose picture is re-centred and
+    /// quantized to whole CELLS by `aspect_cells` (SQ-0547) — it is a picture in a
+    /// panel, not a window onto the screen — and the divider EXTENSION, which
+    /// replicates ONE native row down a gap (SQ-0511) and so has no meaningful
+    /// vertical factor at all.
+    Fitted,
+}
+
+/// Where a band's source belongs INSIDE that band, in device pixels from the
+/// band's own top-left: `(x, y, w, h)` (SQ-0898). The rest of the band is
+/// transparent, exactly as a crop leaves the letterbox margin transparent.
+pub type BandDest = (u32, u32, u32, u32);
+
+/// One entry of [`GraphicsRender::band_mags`]: the band's cell rect, what it
+/// claims to be, its source in NATIVE pixels, and its destination in DEVICE
+/// pixels. The magnification is `dst / src`.
+pub type BandMag = (Rect, BandFit, (u32, u32), (u32, u32));
+
 /// Which of a frame's draws a cached chrome band belongs to (SQ-0755).
 ///
 /// A band's cache key is the cell rect it is drawn at — but one rect can legitimately
@@ -560,6 +594,32 @@ pub struct GraphicsRender {
     /// stale placement, a failed upload, or a band that was never drawn at all. The
     /// answers cannot be inferred from the geometry, which is why this exists.
     pub band_log: Vec<String>,
+    /// SQ-0898: what each band of the last v6 frame was actually resampled from and
+    /// to — `(band cell rect, what it claims to be, source WxH in NATIVE px,
+    /// destination WxH in DEVICE px)`. The magnification is `dst / src`; the sizes
+    /// are kept rather than the ratio so a reader can also ask "how far from where
+    /// the frame's scale puts it does this land?", which is `|dst − src·s|` and the
+    /// only form of the question that is in pixels a viewer could see.
+    ///
+    /// Taken from the numbers that went INTO the resample. The band log's `native`
+    /// field cannot answer this: on a crop it is a hash footprint carrying the area
+    /// filter's halo (see [`scale_halo`]), so it reads several pixels wider than the
+    /// crop and neighbouring bands appear to overlap when they partition the canvas
+    /// exactly.
+    ///
+    /// **One frame, one magnification.** Every piece of the game's screen — a
+    /// full-width banner tile, a flank crop, a tiled flank extension — lands at the
+    /// frame's letterbox scale on both axes. The extension changes WHAT is drawn
+    /// (rows of art past the ones the game painted, per the per-title recipe); it
+    /// must never change the magnification it is drawn at. Two pieces of one column
+    /// at two magnifications is exactly the seam SQ-0894 removed, and the corner
+    /// fragment SQ-0898 is about.
+    ///
+    /// A `/dump-windows` reader can see this in the band log, but only by dividing
+    /// numbers in their head, and the two defects this exists for both shipped
+    /// because nobody did. Recorded structurally so a test can assert the whole
+    /// class at once.
+    pub band_mags: Vec<BandMag>,
     /// How many chrome bands have been ENCODED (uploaded) since launch (SQ-0587).
     /// The band log only shows the latest frame; this shows whether an upload ever
     /// happened across an event like a restore. Dump it either side: if the number
@@ -1248,7 +1308,18 @@ impl GraphicsRender {
     /// Start a fresh band log — and op log (SQ-0590) — for this frame.
     pub fn begin_band_log(&mut self) {
         self.band_log.clear();
+        self.band_mags.clear();
         self.ops.clear();
+    }
+
+    /// Record what magnification one band drew at (SQ-0898) — see [`Self::band_mags`].
+    /// `src`/`dst` are the sizes that went into the resample, in native and device
+    /// pixels; a zero on either side means there was nothing to measure.
+    fn note_band_mag(&mut self, band: Rect, fit: BandFit, src: (u32, u32), dst: (u32, u32)) {
+        if src.0 == 0 || src.1 == 0 {
+            return;
+        }
+        self.band_mags.push((band, fit, src, dst));
     }
 
     /// Record one unit of protocol traffic (SQ-0590), bounded by [`OPS_MAX`] so a
@@ -1510,6 +1581,13 @@ impl GraphicsRender {
                     },
                     resample_note(nw, nh, sw, sh),
                 ));
+                // The crop's magnification is the whole canvas's, on both axes, and
+                // it cannot be anything else: this band copies device pixels 1:1 out
+                // of the ONE frame-shared `sw x sh` scaled canvas (SQ-0514). Anything
+                // outside the canvas stays transparent, so the letterbox margin is
+                // margin here rather than art stretched into it. Recorded from the
+                // resize's own sizes so the reading is a measurement, not a promise.
+                self.note_band_mag(band, BandFit::Letterbox, (nw, nh), (sw, sh));
                 self.remember_band_id(key, id);
                 self.note_op(GraphicsOp::Place {
                     target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
@@ -1665,6 +1743,7 @@ impl GraphicsRender {
                     sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
                     resample_note(cw_n, ch_n, bw, bh),
                 ));
+                self.note_band_mag(band, BandFit::Fitted, (cw_n, ch_n), (bw, bh));
                 self.remember_band_id(key, id);
                 self.note_op(GraphicsOp::Place {
                     target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
@@ -1683,12 +1762,27 @@ impl GraphicsRender {
     ///
     /// The side border extension ([`crate::render::v6_border`]) tiles a flank's
     /// art downward past the native screen bottom, so its source does not exist
-    /// in the canvas and cannot be named as a crop. `src` is resized to the
-    /// band's device box exactly as [`Self::draw_chrome_band_stretched`] resizes
-    /// a crop — and because the caller sizes `src` at the uniform letterbox
-    /// scale, that resize is 1:1 in aspect: the flank keeps the same horizontal
-    /// factor as the top plate above it, which is the user's rule for a title
-    /// that has top artwork, and plain scaling for one that does not.
+    /// in the canvas and cannot be named as a crop.
+    ///
+    /// `dest` is where inside the band, in device pixels relative to the band's
+    /// own top-left, `src` belongs — **the letterbox image of `src`'s native box
+    /// at the frame's scale**, computed by the caller from the same mapping the
+    /// plain crop uses ([`crate::render::screen`]'s `flank_native_box`). The rest
+    /// of the band stays transparent, exactly as a crop leaves the letterbox
+    /// margin transparent.
+    ///
+    /// It used to be the whole band, and that was SQ-0898's defect. The caller
+    /// clipped the SOURCE to the art it has — a flank cannot read native columns
+    /// left of zero, and there are none to its left when the pane is wider than
+    /// the scaled screen — and then handed the clipped source to a destination
+    /// nobody had clipped, so the resize made up the difference by changing the
+    /// magnification. MEASURED on Arthur at a 70x19 pane (`off_x = 6`, scale
+    /// 0.855): the pole's 30 native columns were resized into the band's full
+    /// 32 device px — 1.067 px per native px against the canvas's 0.855, and
+    /// shifted 6 px left of the crop directly above it, which is the corner
+    /// fragment the user reported as "not scaled to match". At `off_x = 0` the
+    /// clip is a no-op and the same code looks perfect, which is why this
+    /// survived a corpus checked at one pane size.
     ///
     /// Shares the per-band cache with the other two draws (one entry per band
     /// rect + slot), so it participates in [`Self::retain_chrome_bands`]. The
@@ -1699,6 +1793,7 @@ impl GraphicsRender {
         picker: &Picker,
         src: &image::RgbaImage,
         band: Rect,
+        dest: BandDest,
         slot: BandSlot,
         buf: &mut Buffer,
     ) {
@@ -1709,6 +1804,13 @@ impl GraphicsRender {
         let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
         let bw = band.width as u32 * cw;
         let bh = band.height as u32 * ch;
+        // Clamped rather than trusted: a destination outside the band would panic
+        // the blit, and the caller's rounding is device-pixel arithmetic.
+        let (dx, dy) = (dest.0.min(bw), dest.1.min(bh));
+        let (dw, dh) = (dest.2.min(bw - dx), dest.3.min(bh - dy));
+        if dw == 0 || dh == 0 {
+            return;
+        }
 
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1716,11 +1818,22 @@ impl GraphicsRender {
         (src.width(), src.height()).hash(&mut h);
         src.as_raw().hash(&mut h);
         (bw, bh).hash(&mut h);
+        (dx, dy, dw, dh).hash(&mut h);
         let hash = h.finish();
         let key = (slot as u8, band.x, band.y, band.width, band.height);
         let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
         if !fresh {
-            let scaled = resize_directional(src, bw, bh);
+            let scaled = resize_directional(src, dw, dh);
+            // The band is `dest` and transparent everywhere else. When `dest` IS the
+            // band — every pane where the letterbox leaves no margin beside this
+            // flank — the copy is skipped and the bytes are what they always were.
+            let scaled = if (dx, dy, dw, dh) == (0, 0, bw, bh) {
+                scaled
+            } else {
+                let mut band_img = image::RgbaImage::new(bw, bh);
+                image::imageops::replace(&mut band_img, &scaled, dx as i64, dy as i64);
+                band_img
+            };
             let img = image::DynamicImage::ImageRgba8(scaled);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
@@ -1751,8 +1864,8 @@ impl GraphicsRender {
         let after = std::mem::take(&mut self.deletes_after_place);
         let placed = self.chrome_bands.get(&key).map(|(_, proto, _)| {
             let sz = proto.size();
-            let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
-            (dest, sz, place_protocol_with(proto, dest, buf, &pending, &after))
+            let at = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
+            (at, sz, place_protocol_with(proto, at, buf, &pending, &after))
         });
         if !matches!(placed, Some((_, _, Some(_)))) {
             self.pending_deletes = pending;
@@ -1761,21 +1874,22 @@ impl GraphicsRender {
             self.pending_deletes.push_str(&after);
         }
         match placed {
-            Some((dest, sz, id)) => {
+            Some((placed_at, sz, id)) => {
                 let (blank, run, run_at) = blank_rows(src);
                 self.band_log.push(format!(
-                    "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · blank rows {}, longest run {} at {} · {}",
+                    "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · into {dw}x{dh}px at ({dx},{dy}) of {bw}x{bh} · blank rows {}, longest run {} at {} · {}",
                     band.width, band.height, band.x, band.y,
                     if fresh { "cache HIT" } else { "encoded" },
-                    sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
+                    sz.width, sz.height, placed_at.width, placed_at.height, placed_at.x, placed_at.y,
                     src.width(), src.height(),
                     blank, run, run_at,
-                    resample_note(src.width(), src.height(), bw, bh),
+                    resample_note(src.width(), src.height(), dw, dh),
                 ));
+                self.note_band_mag(band, BandFit::Letterbox, (src.width(), src.height()), (dw, dh));
                 self.remember_band_id(key, id);
                 self.note_op(GraphicsOp::Place {
                     target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                    at: (dest.x, dest.y, dest.width, dest.height),
+                    at: (placed_at.x, placed_at.y, placed_at.width, placed_at.height),
                 });
             }
             None => self.band_log.push(format!(
