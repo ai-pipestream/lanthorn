@@ -1,30 +1,35 @@
-//! Scout the v6 hybrid ring's band tiling, current vs. proposed (SQ-0894).
+//! Scout what the v6 hybrid ring is working from, for a real frame (SQ-0894/0892).
 //!
-//! The ring is defined as `pane − viewport` by [`v6_layout::chrome_bands`], with
-//! the TOP and BOTTOM bands spanning the full pane width — so they own the
-//! corners, and each flank only gets the story viewport's vertical extent. That
-//! definition is why a flank column is composed of up to three pieces drawn by
-//! two different routines at three magnifications (§5 of
-//! `docs/superpowers/specs/2026-08-15-v6-render-pipeline.md`, measured).
+//! It draws no pixels and negotiates no terminal: it boots the story headlessly,
+//! takes the same `ScreenModel` the renderer gets, and runs the same layout
+//! primitives. That makes it the cheapest of the three render-testing layers — reach
+//! for `examples/pty_capture` when the model looks right and the screen does not.
 //!
-//! SQ-0894's proposal is to invert which axis is full: flanks span the whole pane
-//! height and own the corners, top/bottom span only the viewport's columns. It is
-//! still an exact, non-overlapping tiling of `pane − viewport` — but the flank
-//! becomes ONE rect, which is the "flank is one object" the quest asks for.
+//! What it reports:
 //!
-//! This prints both tilings for a real frame so the change can be judged against
-//! measurements rather than argued from the diagram. It draws no pixels and
-//! negotiates no terminal: it boots the story headlessly, takes the same
-//! `ScreenModel` the renderer gets, and runs the same layout primitives.
+//! * the story viewport, by the declared window BOX and by what the art leaves
+//!   CLEAR (SQ-0894 step (b)) — the two agreed on every corpus frame, and this is
+//!   how that is re-measured rather than taken on trust;
+//! * `--runs`, every chrome text run with its native origin, the sub-cell remainder
+//!   of its mapped device column, and the column per-run rounding puts it in. This
+//!   is the SQ-0892 view: a run is POSITIONED through the scale but ADVANCES one
+//!   terminal column per character, and these are the numbers that argument turns
+//!   on;
+//! * the GEOMETRIC ring, `pane − viewport`, which is the baseline the shipped
+//!   content-carved ring is read against — not the ring itself.
 //!
 //! ```sh
 //! cargo run -q -p app --example ring_scout -- --story stories/zork0-r393-s890714.z6
 //! cargo run -q -p app --example ring_scout -- --all --size 100x40
+//! cargo run -q -p app --example ring_scout -- --story "stories/James Clavell's Shogun.adf" --taps 1 --runs
 //! ```
 //!
 //! `--size` is the PANE in cells (default 98x37, what a 100x40 terminal leaves
 //! after the app frame — the size §5's captures were measured at); `--cell` is the
 //! terminal cell in pixels (default 8x18, what the capture harness negotiates).
+//! `--taps N` presses exactly N keys, which is how a screen BETWEEN the splash and
+//! gameplay is reached (Shogun's credits/menu is one tap in); `--no-tap` reports the
+//! boot frame; `--turns N` then plays N turns, reporting the viewport at each.
 
 use app::engine::Engine;
 use app::render::v6_layout as v6;
@@ -52,6 +57,8 @@ fn main() {
     let mut cell_px = (8u16, 18u16);
     let mut turns = 0usize;
     let mut no_tap = false;
+    let mut runs = false;
+    let mut taps: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -61,6 +68,13 @@ fn main() {
             }
             "--all" => all = true,
             "--no-tap" => no_tap = true,
+            "--runs" => runs = true,
+            "--taps" => {
+                if let Some(v) = args.get(i + 1) {
+                    taps = v.parse().ok();
+                }
+                i += 1;
+            }
             "--turns" => {
                 if let Some(v) = args.get(i + 1) {
                     turns = v.parse().unwrap_or(0);
@@ -102,7 +116,7 @@ fn main() {
 
     for (path, keys) in targets {
         println!("═══ {path}");
-        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap) {
+        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, taps) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
@@ -148,6 +162,8 @@ fn scout(
     cell_px: (u16, u16),
     turns: usize,
     no_tap: bool,
+    want_runs: bool,
+    taps: Option<usize>,
 ) -> Result<(), String> {
     // Disk images (.adf/.po/.2mg/.dsk) are mounted, not read — a medium carries a
     // different RELEASE, not the same story on other media (CLAUDE.md).
@@ -170,11 +186,15 @@ fn scout(
     // Tap through the intro to a frame that has a ring on it — unless asked to
     // report the BOOT frame as it stands, which is the only way to see a screen the
     // router sends to the composite before a viewport is ever computed.
-    for _ in 0..(if no_tap { 0 } else { 6 }) {
+    let tap_count = taps.unwrap_or(if no_tap { 0 } else { 6 });
+    let stop_at_line = taps.is_none();
+    for _ in 0..tap_count {
         match s.pending_input() {
             InputKind::Line => {
                 let _ = s.submit("");
-                break;
+                if stop_at_line {
+                    break;
+                }
             }
             InputKind::Char => {
                 let b = keys.bytes().next().unwrap_or(13);
@@ -258,62 +278,77 @@ fn scout(
         println!("      native: declared {sw:?} -> clear ({l},{t},{w},{h})");
     }
 
-    let old = v6::chrome_bands(pane, viewport);
-    let new = proposed_bands(pane, viewport);
+    // SQ-0892: every chrome run with the numbers the quantization argument turns on
+    // — native origin, the sub-cell remainder of its mapped device x, and the cell
+    // per-run rounding puts it in. Grouped by native text row, which is the key the
+    // grouping rule is a refinement of.
+    if want_runs {
+        use std::collections::BTreeMap;
+        let cw = cell_px.0.max(1) as f32;
+        let mut rows: BTreeMap<u16, Vec<(&app::engine::PxText, u16)>> = BTreeMap::new();
+        for it in &layout.chrome {
+            if let app::engine::WinNode::Grid(g) = &it.node {
+                for t in &g.px_texts {
+                    rows.entry(t.y).or_default().push((t, it.w_px));
+                }
+            }
+        }
+        for it in items.iter() {
+            let kind = match &it.node {
+                app::engine::WinNode::Grid(g) => format!("Grid({} runs)", g.px_texts.len()),
+                app::engine::WinNode::Buffer(b) => format!("Buffer(primary={})", b.primary),
+                app::engine::WinNode::Graphics(_) => "Graphics".into(),
+                _ => "other".into(),
+            };
+            println!("    win {}x{}@({},{}) {kind}", it.w_px, it.h_px, it.x_px, it.y_px);
+        }
+        println!("  RUNS ({} native rows):", rows.len());
+        for (y, mut rr) in rows {
+            rr.sort_by_key(|(t, _)| t.x);
+            println!("    native y={y}  (y-1)%16={}", (y.max(1) - 1) % 16);
+            for (t, win_w) in rr {
+                let px = t.x.max(1) as f32 - 1.0;
+                let dev = (scale.off_x as f32 + px * scale.s) / cw;
+                println!(
+                    "      x={:<4} n={:<3} win_w={:<4}({:>3}%) dev={:<8.3} cell={:<4} {:?}",
+                    t.x,
+                    t.text.chars().count(),
+                    win_w,
+                    win_w as u32 * 100 / native.0.max(1) as u32,
+                    dev,
+                    dev.round() as i32,
+                    t.text,
+                );
+            }
+        }
+    }
 
-    println!("  CURRENT ({} bands, top/bottom own the corners):", old.len());
-    for (role, b) in &old {
+    // The GEOMETRIC ring, `pane − viewport`. This is NOT what ships: SQ-0894 carves
+    // the ring from CONTENT (`screen::content_ring_bands`, private to the render
+    // module), so this is the baseline that rule is read against, not the answer.
+    //
+    // This block used to print an "axis-inverted" tiling beside it as PROPOSED —
+    // flanks full pane height owning the corners. SQ-0894 MEASURED that proposal and
+    // rejected it: it tiles exactly on all eight corpus frames and still breaks two,
+    // cutting Arthur's full-width status row three ways and swallowing the left 37
+    // columns of Journey's verb menu. It is gone rather than left printing, because a
+    // scout that offers a known-wrong answer under the heading "PROPOSED" is worse
+    // than one that offers none (SQ-0892).
+    let bands = v6::chrome_bands(pane, viewport);
+    println!("  GEOMETRIC ring ({} bands, pane − viewport):", bands.len());
+    for (role, b) in &bands {
         println!("    {:<22} {}", format!("{role:?}"), fmt(*b));
     }
-    println!("  PROPOSED ({} bands, flanks own the corners, full pane height):", new.len());
-    for (role, b) in &new {
-        println!("    {role:<22} {}", fmt(*b));
-    }
-
-    // The property that must hold either way: an exact, non-overlapping tiling.
     let pane_area = pane.width as u32 * pane.height as u32;
     let vp_area = viewport.width as u32 * viewport.height as u32;
-    let old_area: u32 = old.iter().map(|(_, r)| r.width as u32 * r.height as u32).sum();
-    let new_area: u32 = new.iter().map(|(_, r)| r.width as u32 * r.height as u32).sum();
+    let area: u32 = bands.iter().map(|(_, r)| r.width as u32 * r.height as u32).sum();
     println!(
-        "  tiling check: pane {pane_area} − viewport {vp_area} = {} · current {old_area} · proposed {new_area}{}",
+        "  tiling check: pane {pane_area} − viewport {vp_area} = {} · bands {area}{}",
         pane_area - vp_area,
-        if old_area == pane_area - vp_area && new_area == pane_area - vp_area { " ✓" } else { "  ✗ MISMATCH" },
+        if area == pane_area - vp_area { " ✓" } else { "  ✗ MISMATCH" },
     );
-
-    // What the flank column gains. Under the current tiling the cells above and
-    // below the viewport in a flank's columns belong to the full-width top/bottom
-    // bands, drawn by a different routine off a different source — the seam.
-    if let (Some(l_old), Some(l_new)) = (
-        old.iter().find(|(role, _)| *role == v6::BandRole::LeftFlank).map(|(_, r)| *r),
-        new.iter().find(|(r, _)| *r == "left flank"),
-    ) {
-        let stolen = l_new.1.height.saturating_sub(l_old.height);
-        println!(
-            "  left flank: {} rows now, {} proposed — {stolen} row(s) currently drawn by the full-width bands",
-            l_old.height, l_new.1.height,
-        );
-    }
     println!();
     Ok(())
-}
-
-/// SQ-0894's proposed tiling: flanks span the FULL PANE HEIGHT and own the
-/// corners; top/bottom span only the viewport's columns. Same exact tiling of
-/// `pane − viewport`, opposite corner ownership.
-fn proposed_bands(pane: Rect, viewport: Rect) -> Vec<(&'static str, Rect)> {
-    let vx = viewport.x.clamp(pane.x, pane.right());
-    let vy = viewport.y.clamp(pane.y, pane.bottom());
-    let vr = viewport.right().clamp(vx, pane.right());
-    let vb = viewport.bottom().clamp(vy, pane.bottom());
-    let mut out = vec![
-        ("left flank", Rect::new(pane.x, pane.y, vx - pane.x, pane.height)),
-        ("right flank", Rect::new(vr, pane.y, pane.right() - vr, pane.height)),
-        ("top", Rect::new(vx, pane.y, vr - vx, vy - pane.y)),
-        ("bottom", Rect::new(vx, vb, vr - vx, pane.bottom() - vb)),
-    ];
-    out.retain(|(_, r)| r.width > 0 && r.height > 0);
-    out
 }
 
 fn fmt(r: Rect) -> String {
