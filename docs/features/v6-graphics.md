@@ -1139,6 +1139,39 @@ session-only switch that never touches your saved config:
   the band; at a short pane the same arithmetic ran the other way and clipped the
   menu's last line off the screen entirely. The menu now ends exactly where the
   screen does, at every pane shape and on both releases.
+  **A flank is where the frame's side artwork is, not what the story box left
+  over.** The ring used to be defined as *pane minus story viewport*, which meant a
+  flank had no existence of its own: it was whatever fell in the third or fourth
+  rectangle of that subtraction, so its vertical extent was the story window's by
+  definition and the same column was drawn in up to three pieces by two different
+  routines off two different canvases. Zork Zero's left pillar came out as six rows
+  of a full-width top band cropped at 1.2250 and thirty-one rows of a side band
+  resampled at 1.2308 by 1.2237 — half a pixel of shear, on a join the eye missed
+  only because both halves happened to be reading the same continuous artwork.
+  Now the ring is carved from what the chrome *contains*. A flank's rows are every
+  contiguous run it may own, stopping at chrome text that stands in *its own
+  columns*, at a bar the game draws edge to edge, at a secondary prose panel, and at
+  a bottom command menu — and the frame's two flanks are then held to the same row
+  set, because they are one object drawn twice and nothing about the pane may make
+  them disagree. (Shogun is why: his status band sits at native x 46..594, exactly
+  between the two ornaments, and its first glyph is at 49. At one pane size the left
+  ornament's last column and that glyph round into the *same* terminal column and the
+  text wins it, while the right ornament's columns are clear — one top corner
+  ornament, the other bare.) Its columns come from the artwork itself — for each
+  native row, the first contiguous opaque run in from each edge, taking the
+  narrowest such run over the whole picture, so that a banner or a capital above the
+  column is never mistaken for the column. The wider of that and the story box's
+  leftover wins, and where the artwork claims columns the story window declared, the
+  window gives them up.
+  Two things fall out that used to be impossible. Zork Zero's pillar is one image at
+  one scale down the whole pane, and the seam is simply gone. And the same title on
+  two presses now lays out the same: Shogun's credits screen puts window 0 at
+  `548×64` on the IBM Blorb and at the full `640×64` on the Amiga floppy, which used
+  to mean ornaments on one and none at all on the other — the frame is identical in
+  both, and now so is the ring. (Both of those screens still take the pixel
+  composite for an unrelated reason — the game prints its menu one character at a
+  time through a one-pixel caret window — so the ring's answer for them is measured,
+  not yet on screen.)
   **Side border art is TILED down the flank, never stretched into it.** Three
   titles frame their story window with artwork drawn for a 320×200 screen —
   Arthur's poles, Shogun's single-piece border, Zork Zero's pillars — and a modern

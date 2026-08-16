@@ -498,7 +498,10 @@ fn journey_pixel_band_canvas_excludes_menu_keeps_divider() {
     assert!(divider_ink_before > 200, "the vertical divider is inked before carving ({divider_ink_before} rows)");
 
     // Carve the menu rows out — exactly what screen.rs feeds the pixel bands.
-    v6::clear_text_rows(&mut canvas, &menu_tops);
+    // The menu band spans the pane, so its strip's native columns are the whole
+    // screen — the span `screen.rs` passes for any full-width strip (SQ-0894).
+    let carve: Vec<(u16, u32, u32)> = menu_tops.iter().map(|&t| (t, 0, u32::MAX)).collect();
+    v6::clear_text_rows(&mut canvas, &carve);
 
     // Every carved menu row is now fully transparent.
     for &top in &menu_tops {

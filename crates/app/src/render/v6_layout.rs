@@ -1025,17 +1025,6 @@ fn fill_explicit_bg_rows(
     }
 }
 
-/// SQ-0504: carve the native rows occupied by pure-TEXT chrome runs out of `canvas`
-/// (make them fully transparent). Those rows render as crisp terminal CELLS in the
-/// hybrid path, so their rasterized ink must not survive into the pixel bands built
-/// from this canvas: a sub-cell letterbox-scale boundary otherwise samples the top
-/// slice of a status/menu glyph into the neighbouring ART band and shows the raster
-/// bar BEHIND the cells. Clearing them also decouples each art band's content hash
-/// from the menu text, so navigating the menu re-encodes only genuinely changed art
-/// (picture column, status panel), not every band. `run_tops` are each cleared run's
-/// native top-y (`y - 1`); every run spans `FONT_H`. On-art status (Zork0's banner
-/// ribbon) is an art strip, never a text run, so it is never passed here and stays
-/// imaged.
 /// SQ-0779: the COLUMN analogue of [`clear_text_rows`] — erase the native columns of
 /// a border the ring stamps as a CHARACTER, over `rows` (`[y0, y1)`).
 ///
@@ -1066,13 +1055,30 @@ pub fn clear_text_columns(canvas: &mut RgbaImage, cols: &[(u32, u32)], rows: (u3
     }
 }
 
-pub fn clear_text_rows(canvas: &mut RgbaImage, run_tops: &[u16]) {
+/// SQ-0504: carve the native rows occupied by pure-TEXT chrome runs out of `canvas`
+/// (make them fully transparent). Those rows render as crisp terminal CELLS in the
+/// hybrid path, so their rasterized ink must not survive into the pixel bands built
+/// from this canvas: a sub-cell letterbox-scale boundary otherwise samples the top
+/// slice of a status/menu glyph into the neighbouring ART band and shows the raster
+/// bar BEHIND the cells. Clearing them also decouples each art band's content hash
+/// from the menu text, so navigating the menu re-encodes only genuinely changed art
+/// (picture column, status panel), not every band. Each entry is a cleared run's
+/// native top-y (`y - 1`) and its OWNING STRIP's native `[x0, x1)` columns; every run
+/// spans `FONT_H`. On-art status (Zork0's banner ribbon) is an art strip, never a
+/// text run, so it is never passed here and stays imaged.
+///
+/// SQ-0894: the columns, because a text strip need no longer span the pane. When a
+/// flank owns the ornament columns THROUGH a band of chrome text — Shogun's credits
+/// are centred and never approach the frame — a full-width carve would erase the
+/// flank's own source pixels on exactly those rows and hole the ornament. For a strip
+/// that does span the pane this is byte-identical to the old carve.
+pub fn clear_text_rows(canvas: &mut RgbaImage, runs: &[(u16, u32, u32)]) {
     let (w, h) = (canvas.width(), canvas.height());
-    for &top in run_tops {
+    for &(top, x0, x1) in runs {
         let y0 = top as u32;
         let y1 = (y0 + FONT_H).min(h);
         for y in y0..y1 {
-            for x in 0..w {
+            for x in x0.min(w)..x1.min(w) {
                 canvas.put_pixel(x, y, Rgba([0, 0, 0, 0]));
             }
         }

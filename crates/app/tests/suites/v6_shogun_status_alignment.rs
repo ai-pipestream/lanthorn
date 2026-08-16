@@ -155,15 +155,46 @@ fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
     (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
 }
 
-/// The terminal row and column a status label was stamped at.
+/// The terminal row and COLUMN a status label was stamped at.
+///
+/// Column, not byte offset. `str::find` answers in bytes, which is the same number
+/// only while every cell on the row holds an ASCII glyph — and a status row that
+/// crosses the frame's own ornament does not: SQ-0894 lets a flank own the band's
+/// rows in its own columns, so the row begins with half-block art (`▀`/`▄`, three
+/// bytes each) and every byte offset past it is inflated by two per glyph. That is
+/// what this suite's swept assertion caught first, and it was measuring the ruler,
+/// not the thing: the two labels really do share column 64 at an 81x30 pane, and
+/// their byte offsets are 74 and 76 because the two rows begin with five and six
+/// art glyphs.
 fn find_label(buf: &Buffer, area: Rect, label: &str) -> Option<(u16, usize)> {
-    (0..area.height).find_map(|y| row_text(buf, area, y).find(label).map(|c| (y, c)))
+    let want: Vec<char> = label.chars().collect();
+    (0..area.height).find_map(|y| {
+        let row: Vec<char> = row_text(buf, area, y).chars().collect();
+        row.windows(want.len()).position(|w| w == want.as_slice()).map(|c| (y, c))
+    })
 }
 
 /// The rightmost inked column of a terminal row — where the row's right-justified
-/// field ENDS. The band is flooded with spaces, so "inked" is "not a space".
+/// field ENDS. The band is flooded with spaces, so "inked" is "not a space"; the
+/// frame's own ornament is not the row's ink either (see [`find_label`]).
 fn right_edge(buf: &Buffer, area: Rect, y: u16) -> Option<usize> {
-    row_text(buf, area, y).rfind(|c: char| c != ' ')
+    let row: Vec<char> = row_text(buf, area, y).chars().collect();
+    row.iter().rposition(|&c| c != ' ' && !is_frame_art(c))
+}
+
+/// A half-block the ring drew for the frame's side artwork, not a glyph the game
+/// printed.
+///
+/// Block Elements ONLY (U+2580..U+259F), deliberately — this is NOT `screen.rs`'s
+/// `is_box_glyph`, which starts at U+2500 and takes in Box Drawing as well. Widening
+/// it to match would be a defect: Box Drawing is exactly what a v6 game prints when
+/// it draws its frame with CHARACTERS rather than artwork (Journey's `│` rules under
+/// the Amiga profile, which SQ-0750 keeps as glyphs on purpose), and those are the
+/// row's own ink. What the half-block backend emits for a rasterised image is `▀`
+/// and `▄` and nothing else, so the narrow range is the one that separates "the ring
+/// drew this" from "the game printed this".
+fn is_frame_art(c: char) -> bool {
+    ('\u{2580}'..='\u{259F}').contains(&c)
 }
 
 // ── The defect, swept ─────────────────────────────────────────────────────────

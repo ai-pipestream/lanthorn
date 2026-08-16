@@ -532,8 +532,22 @@ fn shogun_hybrid_status_band_floods_game_background() {
     // Every cell from the first glyph to the last on the band row — INCLUDING the
     // gaps BETWEEN Erasmus, SHOGUN and Score — must carry that game background, not
     // the theme backdrop. Pre-fix the gaps kept the theme `base` bg.
-    let first = text.find(|c: char| c != ' ').expect("band row has glyphs") as u16;
-    let last = text.rfind(|c: char| c != ' ').expect("band row has glyphs") as u16;
+    // SQ-0894: the band's OWN glyphs, not the row's first ink. The game's status
+    // window is native x 46..594 — exactly the span BETWEEN the frame's two ornament
+    // columns (0..46 and 594..640) — and a flank now owns those columns down every
+    // row of art it may have, this one included, so the row begins and ends with the
+    // ornament's half-blocks. Those cells are the frame; the band is what is between
+    // them, and it is the band's flood this case is about. (`char` indices, not byte
+    // offsets, for the same reason: a half-block is three bytes.)
+    // Block Elements only (U+2580..U+259F): what the half-block backend emits for a
+    // rasterised image. NOT `screen.rs`'s `is_box_glyph`, which begins at U+2500 and
+    // would also swallow Box Drawing — the characters a game prints when it draws its
+    // own frame with glyphs, which are the row's ink and not the ring's.
+    let is_frame_art = |c: char| ('\u{2580}'..='\u{259F}').contains(&c);
+    let own = |c: char| c != ' ' && !is_frame_art(c);
+    let cells: Vec<char> = text.chars().collect();
+    let first = cells.iter().position(|&c| own(c)).expect("band row has glyphs") as u16;
+    let last = cells.iter().rposition(|&c| own(c)).expect("band row has glyphs") as u16;
     // Sanity: the glyph cells themselves are on the game's white bg.
     assert_eq!(
         buf.cell((first, band_y)).unwrap().bg,
@@ -1007,5 +1021,100 @@ fn shogun_prose_emphasis_reaches_the_raster_faces() {
     let (s, r) = (lit(&styled), lit(&roman));
     for &(x, y) in s.difference(&r) {
         assert!(x > 0 && r.contains(&(x - 1, y)), "styled pixel ({x},{y}) is not a +1 shift of the roman face");
+    }
+}
+
+/// SQ-0894: Shogun's two ornaments are one strip each and cover the SAME rows.
+///
+/// A frame's two side columns are one object drawn twice, so nothing about the pane
+/// may make them disagree about where they start and stop. Two separate mechanisms
+/// could, and this case guards both.
+///
+/// **One strip each.** Before this quest a flank's vertical extent was the story
+/// viewport's by definition, so the rows above and below it in the same columns
+/// belonged to the full-width top and bottom bands — one column composed of up to
+/// three pieces, drawn by two different routines off two different canvases.
+///
+/// **The same rows.** The row rule is per side, and the two sides can disagree for a
+/// reason that has nothing to do with the artwork. Shogun's status band sits at
+/// native x 46..594 — exactly between the ornaments — and its first glyph is at
+/// native 49. At a 98x37 pane the left ornament ends at 7.04 cells and that glyph
+/// lands at 7.35: the SAME terminal column, so the text wins it and the left flank
+/// yields the band's rows, while the right flank's last run ends clear of its columns
+/// and it takes them. That put ornament in one top corner and bare ground under the
+/// band's flood in the other. `content_ring_bands` intersects the two row sets for
+/// exactly this reason.
+///
+/// FALSIFY by removing that intersection (the `if left_cols.1 > left_cols.0 && …`
+/// block in `content_ring_bands`): the right strip comes back `8x37 at (90,0)`
+/// against the left's `8x35 at (0,2)`, and the case reports the row spans differing.
+#[test]
+fn shogun_ornament_columns_are_one_strip_and_span_the_same_rows() {
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    for _ in 0..6 {
+        match session.pending_input() {
+            InputKind::Line => {
+                session.submit("look");
+            }
+            InputKind::Char => {
+                session.submit_char(13);
+            }
+            InputKind::Event => {
+                session.submit("");
+            }
+        }
+    }
+    let model = session.screen();
+
+    for honor in [true, false] {
+        for &(w, h) in &[(98u16, 37u16), (100u16, 40u16), (120u16, 45u16)] {
+            let mut state = app::state::AppState::default();
+            state.colors = app::colors::ColorScheme::terminal_default();
+            #[allow(deprecated)] // `from_fontsize`: a headless test has no terminal to query.
+            let picker =
+                ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
+            state.game_picker = Some(picker);
+            state.config.v6_render = app::config::V6RenderMode::Hybrid;
+            state.config.honor_game_colours = honor;
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+            let map = state.v6_cell_map.borrow();
+            // A flank is a NARROW side column; the full-width top/bottom bands are
+            // art strips too and are not what this case is about. Each entry is the
+            // strip's `(x, y, width, height)` in cells; only its row span is asserted.
+            let rows = |right_hand: bool| -> Vec<(u16, u16)> {
+                map.iter()
+                    .filter(|r| r.label.starts_with("strip:art") && !r.label.contains("skipped"))
+                    .map(|r| r.cells)
+                    .filter(|c| c.2 * 3 < w && (c.0 * 2 > w) == right_hand)
+                    .map(|c| (c.1, c.1 + c.3))
+                    .collect()
+            };
+            let (left, right) = (rows(false), rows(true));
+            assert_eq!(
+                (left.len(), right.len()),
+                (1, 1),
+                "honor={honor} {w}x{h}: each ornament is ONE strip, not one piece per band edge; \
+                 got left {left:?} right {right:?}"
+            );
+            assert_eq!(
+                left, right,
+                "honor={honor} {w}x{h}: the frame's two ornaments are one object drawn twice, so \
+                 they start and stop on the same rows"
+            );
+        }
     }
 }

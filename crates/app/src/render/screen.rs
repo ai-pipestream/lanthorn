@@ -1028,6 +1028,41 @@ fn render_node(
                             .filter(|pw| matches!(&pw.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
                             .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area, 0))
                             .collect();
+                        // SQ-0894, step (b) becoming live: the FLANK claims its columns
+                        // first and the text region is what is left. A flank is a column of
+                        // the frame's own side artwork at the pane's edge whether or not the
+                        // story window happened to leave room for it, so where the art runs
+                        // past the story box the box gives those columns up.
+                        //
+                        // Not via `story_clear_native`, which is the other half of step (b)
+                        // and measures OVERLAP: on the frame that motivates this the art and
+                        // the story box are ADJACENT, not overlapping (Shogun's Amiga credits
+                        // screen paints its ornaments down to native y=335 and puts window 0
+                        // at y=336), so the overlap test correctly finds nothing to inset and
+                        // the columns still have to come from somewhere. They come from here.
+                        let (art_left, art_right) = flank_art_columns(&gfx, &scale, cell_px, area);
+                        let viewport = {
+                            let x = viewport.x.max(art_left).min(viewport.right());
+                            let r = viewport.right().min(art_right).max(x);
+                            if r > x {
+                                Rect::new(x, viewport.y, r - x, viewport.height)
+                            } else {
+                                viewport
+                            }
+                        };
+                        // Which native rows are BARS the game draws edge to edge (SQ-0515).
+                        // Only the keys are read here, so the style arguments are
+                        // immaterial — the styles themselves belong to the cell path, which
+                        // resolves them against its own theme base.
+                        let bar_rows: std::collections::HashSet<u16> = full_width_flood_rows(
+                            &layout.chrome,
+                            native.0,
+                            ratatui::style::Style::default(),
+                            state.config.honor_game_colours,
+                            &state.colors,
+                        )
+                        .into_keys()
+                        .collect();
                         // SQ-0894: the ring is carved by what the chrome CONTAINS, not as
                         // the story viewport's complement, so each flank is one column over
                         // every contiguous row of art it may own.
@@ -1040,6 +1075,7 @@ fn render_node(
                             panels: &panel_rects,
                             gfx: &gfx,
                             runs: &chrome_runs,
+                            bar_rows: &bar_rows,
                         };
                         let bands = content_ring_bands(area, viewport, menu.is_some(), &row_oracle);
                         // SQ-0505: in the Menu plan the bottom band IS the command
@@ -1191,7 +1227,7 @@ fn render_node(
                         // `matches!(plan, BottomPlan::Frame)`, so the Menu arm could never
                         // be selected — while its comment described the case as live.
                         let flank_native_bottom = native.1 as u32;
-                        let mut strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs);
+                        let mut strips = decompose_chrome_strips(&ring_bands, &row_oracle);
                         // An ART strip with no actual art behind it draws a rasterized
                         // slice of the chrome canvas — which carries TEXT too, so on a
                         // text-only v6 story (advent) that is pure noise painted over the
@@ -1395,11 +1431,30 @@ fn render_node(
                         // art, not every band). Beside-story runs — Journey's vertical
                         // picture/text divider — are NOT text strips, so they stay in
                         // the side band's ring untouched.
-                        let text_run_tops: Vec<u16> = strips
+                        // SQ-0894: over the strip's OWN native columns. A strip that spans
+                        // the pane still carves the whole row (every strip on the corpus
+                        // does, so this is byte-identical there); one a flank has narrowed
+                        // must not erase the flank's source pixels beside it.
+                        let strip_native_cols = |r: Rect| -> (u32, u32) {
+                            if r.x <= area.x && r.right() >= area.right() {
+                                return (0, u32::MAX);
+                            }
+                            let inv = |c: u16| {
+                                ((c.saturating_sub(area.x) as f32 * cell_px.0.max(1) as f32
+                                    - scale.off_x as f32)
+                                    / scale.s.max(0.001))
+                                .max(0.0) as u32
+                            };
+                            (inv(r.x), inv(r.right()))
+                        };
+                        let text_run_tops: Vec<(u16, u32, u32)> = strips
                             .iter()
                             .chain(menu_strips.iter())
                             .flat_map(|s| match s {
-                                ChromeStrip::Text(_, runs) => runs.iter().map(|t| t.y.max(1) - 1).collect::<Vec<_>>(),
+                                ChromeStrip::Text(r, runs) => {
+                                    let (x0, x1) = strip_native_cols(*r);
+                                    runs.iter().map(|t| (t.y.max(1) - 1, x0, x1)).collect::<Vec<_>>()
+                                }
                                 ChromeStrip::Art(..) => Vec::new(),
                             })
                             .collect();
@@ -5171,6 +5226,11 @@ struct ChromeRowOracle<'a, 'b> {
     panels: &'a [Rect],
     gfx: &'a image::RgbaImage,
     runs: &'a [&'b crate::engine::PxText],
+    /// The NATIVE rows [`full_width_flood_rows`] calls bars — a run's row is in here
+    /// when every run on it belongs to a grid window spanning ≥90% of the game
+    /// screen and the game either asked for reverse video or the window is a status
+    /// STRIP. SQ-0515's own rule, reused rather than restated (SQ-0894).
+    bar_rows: &'a std::collections::HashSet<u16>,
 }
 
 impl<'b> ChromeRowOracle<'_, 'b> {
@@ -5246,6 +5306,56 @@ impl<'b> ChromeRowOracle<'_, 'b> {
         crate::render::v6_layout::region_has_opaque(self.gfx, x0, y0, (x1 - x0).max(1), h)
     }
 
+    /// The pane columns a run's glyphs occupy — `[first, last_exclusive)`.
+    ///
+    /// One terminal column per character, from the run's scale-mapped origin: the
+    /// same two rates [`draw_chrome_text_strip`] stamps at, so "does this run stand
+    /// in those columns" is asked here exactly as the draw answers it.
+    fn run_cols(&self, t: &crate::engine::PxText) -> (i32, i32) {
+        let (c, _) = run_cell(t, self.scale, self.cell_px, self.pane);
+        (c, c + t.text.chars().count().max(1) as i32)
+    }
+
+    /// Does this run stand in `cols`?
+    fn reaches(&self, t: &crate::engine::PxText, cols: (u16, u16)) -> bool {
+        let (c0, c1) = self.run_cols(t);
+        c1 > cols.0 as i32 && c0 < cols.1 as i32
+    }
+
+    /// Chrome TEXT on `row` that stands in `cols` — the only text that can stop a
+    /// flank from owning the row (SQ-0894).
+    ///
+    /// The rule used to be "any chrome text anywhere on this row", which is a
+    /// statement about the row and not about the flank. MEASURED on Shogun's
+    /// credits screen (`shogun-r322-s890706.z6`, release 322): the nine credit runs
+    /// are CENTRED at native x 105..537 and the frame's ornament columns are native
+    /// 0..46 and 594..640, so the two never meet — yet the row veto cut the flank in
+    /// two and left the ornaments as `8x3` and `8x24` with the credits' ten rows
+    /// between them.
+    ///
+    /// A row whose runs sit OVER art is not text at all (`class` says `Art`) and has
+    /// never blocked anything; that stays true.
+    ///
+    /// A BAR blocks whatever its glyphs do. `full_width_flood_rows` (SQ-0515) is the
+    /// existing, derived answer to "is this row a ribbon the game draws edge to edge
+    /// or a block of text standing in the middle of the screen", and the distinction
+    /// it already makes is exactly the one a flank needs: Arthur's status window is
+    /// 584 of 640 native columns and reads as one solid ribbon whose glyphs stop well
+    /// short of both ends, so it reaches the poles even though its text does not;
+    /// Shogun's credits are a 432-column block and reach nothing. Without this clause
+    /// Arthur's ribbon comes back holed at both ends
+    /// (`arthur_hybrid_status_row_is_solid_terminal_bar` measured the holes at cells
+    /// 0..3 and 76..79 of an 80-column pane), which is the first of the three
+    /// regressions the earlier attempt at this relaxation hit.
+    fn blocked(&self, row: u16, cols: (u16, u16)) -> bool {
+        match self.class(row) {
+            RowClass::Text(rr) => rr
+                .iter()
+                .any(|t| self.bar_rows.contains(&((t.y.max(1) - 1) / 16)) || self.reaches(t, cols)),
+            _ => false,
+        }
+    }
+
     /// SQ-0508's bridge, asked of the whole pane rather than of one band: an EMPTY
     /// row whose nearest non-empty neighbours above AND below are both chrome TEXT
     /// belongs to that text panel. It is a blank row the letterbox scale opened
@@ -5256,36 +5366,40 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     /// row 1 split the band in two, and the second line moved from row 1 to row 2 —
     /// "Erasmus/SHOGUN/Score" on one row, halfblock frame art across the next, and
     /// "Bridge/Moves" below that.
-    fn bridged(&self, row: u16) -> bool {
+    ///
+    /// SQ-0894: the bridge follows the same relaxation as the veto it serves — a
+    /// gap row is only bridged away from a flank when the text rows it sits between
+    /// are text this flank must yield to. A blank row between two rows of CENTRED
+    /// credits is, in the ornament's own columns, just more ornament.
+    fn bridged(&self, row: u16, cols: (u16, u16)) -> bool {
         if !matches!(self.class(row), RowClass::Empty) {
             return false;
         }
-        let non_empty = |mut r: u16, up: bool| -> Option<RowClass<'b>> {
+        let neighbour = |mut r: u16, up: bool| -> bool {
             loop {
                 if up {
                     if r <= self.pane.y {
-                        return None;
+                        return false;
                     }
                     r -= 1;
                 } else {
                     r += 1;
                     if r >= self.pane.bottom() {
-                        return None;
+                        return false;
                     }
                 }
-                let c = self.class(r);
-                if !matches!(c, RowClass::Empty) {
-                    return Some(c);
+                if !matches!(self.class(r), RowClass::Empty) {
+                    return self.blocked(r, cols);
                 }
             }
         };
-        let is_text = |c: Option<RowClass>| matches!(c, Some(RowClass::Text(_)));
-        is_text(non_empty(row, true)) && is_text(non_empty(row, false))
+        neighbour(row, true) && neighbour(row, false)
     }
 
-    /// Whether a FLANK spanning `cols` may own `row`: the row must carry no chrome
-    /// TEXT (nor be a blank row BETWEEN chrome text rows) and belong to no prose
-    /// panel, AND this flank's own columns must actually have art on it.
+    /// Whether a FLANK spanning `cols` may own `row`: the row must belong to no
+    /// prose panel, carry no chrome TEXT IN THOSE COLUMNS (nor be a blank row
+    /// between two such text rows), AND this flank's own columns must actually have
+    /// art on it.
     ///
     /// The art half is not redundant. Without it a flank extends over bare ground,
     /// which changes the rect `flank_borders` scans for the frame's border columns
@@ -5295,14 +5409,93 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     /// 162 drawn beside the real `│` glyph at col 163, which is the doubled rule
     /// `journey_flank_border_is_drawn_at_the_letterbox_scale` exists to forbid.
     fn flankable(&self, row: u16, cols: (u16, u16)) -> bool {
-        if !matches!(self.class(row), RowClass::Art | RowClass::Empty) {
+        if matches!(self.class(row), RowClass::Panel) {
             return false;
         }
-        if self.bridged(row) {
+        if self.blocked(row, cols) || self.bridged(row, cols) {
             return false;
         }
         cols.1 > cols.0 && self.region_has_art(Rect::new(cols.0, row, cols.1 - cols.0, 1))
     }
+}
+
+/// The pane columns the frame's own SIDE ARTWORK occupies at each edge, as
+/// `(left_end, right_start)` in pane-absolute cells (SQ-0894).
+///
+/// Step (a) of this quest made a flank's ROWS content-derived and left its COLUMNS
+/// as `pane.x..viewport.x` and `viewport.right()..pane.right()` — still "whatever
+/// the story box leaves". That is why the same title, the same medium and the same
+/// artwork can have flanks or not depending only on where the game put window 0:
+/// MEASURED on `James Clavell's Shogun.adf` (release 295, serial 890321), window 0
+/// is `548x368 at (47,33)` in play and `640x64 at (0,336)` at the credits screen, so
+/// `pane − viewport` has side rects in one and none in the other. The ornaments are
+/// the same ornaments either way.
+///
+/// So ask the art. For each native row, take the first CONTIGUOUS opaque run in from
+/// each edge, and keep the NARROWEST end over all such rows. Narrowest, because a
+/// side column is as wide as the art is where it is narrowest — a banner or a
+/// capital above it is wider (Zork Zero's banner spans all 640 columns; Arthur's
+/// header spans 28..612 with the poles beside it) and must not be mistaken for the
+/// column hanging below. It is the same reduction `v6_border::painted_widths` makes
+/// to tell a pillar from a slab, read from the pane edge instead of as a span.
+///
+/// MEASURED across the corpus at 98x37 / 8x18 (native px, then cells):
+///
+/// | frame | left run-end | right run-start | cells | today's flank |
+/// |---|---|---|---|---|
+/// | Zork Zero | 62 | 580 | 10 / 88 | 14 / 85 |
+/// | Arthur, in play | 10 | 630 | 2 / 96 | 5 / 94 |
+/// | Shogun, in play | 46 | 594 | 8 / 90 | 8 / 90 |
+/// | Shogun, credits (Blorb r322) | 46 | 594 | 8 / 90 | 8 / 90 |
+/// | Shogun, credits (Amiga r295) | 46 | 594 | 8 / 90 | **none** |
+/// | Journey | 226 | — | 35 / — | 37 / 97 |
+///
+/// The caller takes the WIDER of this and the story box's leftover, which is why
+/// every row of that table except the Amiga credits screen leaves the corpus exactly
+/// where it stands: art that stops short of the story box does not shrink a flank
+/// (the cells between the two are chrome and the flank is still their owner), and art
+/// that runs past it grows one. Under-claiming is therefore safe and over-claiming is
+/// not, which is the whole reason the statistic is a minimum.
+fn flank_art_columns(
+    gfx: &image::RgbaImage,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+) -> (u16, u16) {
+    let (w, h) = (gfx.width(), gfx.height());
+    let mid = w / 2;
+    if mid == 0 || h == 0 {
+        return (pane.x, pane.right());
+    }
+    let opaque = |x: u32, y: u32| gfx.get_pixel(x, y)[3] >= 128;
+    let (mut left, mut right): (Option<u32>, Option<u32>) = (None, None);
+    for y in 0..h {
+        if let Some(first) = (0..mid).find(|&x| opaque(x, y)) {
+            let mut end = first;
+            while end < mid && opaque(end, y) {
+                end += 1;
+            }
+            left = Some(left.map_or(end, |m: u32| m.min(end)));
+        }
+        if let Some(last) = (mid..w).rev().find(|&x| opaque(x, y)) {
+            let mut start = last + 1;
+            while start > mid && opaque(start - 1, y) {
+                start -= 1;
+            }
+            right = Some(right.map_or(start, |m: u32| m.max(start)));
+        }
+    }
+    // Native → pane cells through the ring's own letterbox scale, rounded OUTWARD
+    // so a flank covers the art's last pixel rather than clipping it, and never
+    // past the pane's middle: two flanks meeting would leave no screen at all.
+    let cw = cell_px.0.max(1) as f32;
+    let dev = |n: u32| (scale.off_x as f32 + n as f32 * scale.s) / cw;
+    let half = pane.x + pane.width / 2;
+    let to_col = |v: f32| pane.x.saturating_add(v.clamp(0.0, pane.width as f32) as u16);
+    (
+        left.map_or(pane.x, |n| to_col(dev(n).ceil()).clamp(pane.x, half)),
+        right.map_or(pane.right(), |n| to_col(dev(n).floor()).clamp(half, pane.right())),
+    )
 }
 
 /// The chrome ring carved by CONTENT rather than as `pane − viewport` (SQ-0894).
@@ -5377,18 +5570,49 @@ fn content_ring_bands(
     };
     let left_cols = (pane.x, vx);
     let right_cols = (vr, pane.right());
-    let owned: Vec<(bool, bool)> = (pane.y..pane.bottom())
+    let mut owned: Vec<(bool, bool)> = (pane.y..pane.bottom())
         .map(|row| (own(left_cols, row), own(right_cols, row)))
         .collect();
+    // A FRAME's two flanks own the same rows. Where the two scans disagree, neither
+    // takes the row.
+    //
+    // The scans can disagree for a reason that has nothing to do with the artwork,
+    // and on the corpus that is the only reason they ever do. Shogun's status band
+    // sits at native x 46..594 — exactly between his two ornaments — and its first
+    // glyph is at native 49. At 98x37 the left ornament ends at 7.04 cells and that
+    // glyph lands at 7.35: the SAME terminal column, so the text wins it and the left
+    // flank yields the row, while the right flank (whose last run ends clear of it)
+    // takes it. MEASURED: the right ornament ran to the pane's first row level with
+    // Score/Moves and the left started three rows down, so one top corner carried
+    // ornament and the other bare ground under the band's flood. The frame read as
+    // lopsided on a screen that was already right.
+    //
+    // Intersecting is deliberately the conservative repair, and it cannot cost
+    // anything that ever shipped: before this quest NO row outside the story
+    // viewport's own span belonged to a flank at all, and rows inside that span are
+    // unconditionally owned by both sides above. So the intersection can only give
+    // back rows step (a) added, never take away rows the old ring drew. The corpus
+    // agrees on every frame either way — Zork Zero, Arthur, Journey and both Shogun
+    // credits presses all have their two flanks owning identical row sets — so this
+    // moves exactly the one frame it is for.
+    //
+    // Only when BOTH sides have columns: a frame with one flank (or none) must not
+    // have its single ornament intersected against an empty side.
+    if left_cols.1 > left_cols.0 && right_cols.1 > right_cols.0 {
+        for o in &mut owned {
+            let both = o.0 && o.1;
+            *o = (both, both);
+        }
+    }
     let at = |row: u16| owned.get((row - pane.y) as usize).copied().unwrap_or((false, false));
-    let owns = |row: u16| { let (l, r) = at(row); l || r };
 
     let mut out: Vec<(BandRole, Rect)> = Vec::new();
 
     // One flank rect per maximal run of rows that side owns — the flank is ONE
-    // object over each run, not one piece per band edge. Each side runs its own
-    // scan: the two need not agree, and on Journey they do not (its left flank is a
-    // half-screen picture column, its right eight native pixels of border).
+    // object over each run, not one piece per band edge. Each side still runs its own
+    // scan: the two flanks differ in WIDTH even where they agree on rows, and on
+    // Journey they differ by a lot (its left flank is a half-screen picture column,
+    // its right eight native pixels of border).
     for (role, cols, pick) in [
         (BandRole::LeftFlank, left_cols, 0usize),
         (BandRole::RightFlank, right_cols, 1usize),
@@ -5411,23 +5635,24 @@ fn content_ring_bands(
         }
     }
 
-    // Top and bottom, split by whether the flanks took the row: narrowed to the
-    // viewport's columns where they did, full pane width where they did not.
+    // Top and bottom, split by whether the flanks took the row: each SIDE gives up
+    // its own columns where its own flank took the row, and keeps them where it did
+    // not. Asked per side rather than "either side took it", because the two scans
+    // need not agree — Journey's left flank is a half-screen picture column and its
+    // right is eight native pixels of border, and a row one owns and the other does
+    // not would otherwise leave the other side's columns with no owner at all.
     let band_runs = |role: BandRole, y0: u16, y1: u16, out: &mut Vec<(BandRole, Rect)>| {
         let mut r = y0;
         while r < y1 {
-            let taken = owns(r);
+            let taken = at(r);
             let start = r;
-            while r < y1 && owns(r) == taken {
+            while r < y1 && at(r) == taken {
                 r += 1;
             }
-            let rect = if taken {
-                Rect::new(vx, start, vr.saturating_sub(vx), r - start)
-            } else {
-                Rect::new(pane.x, start, pane.width, r - start)
-            };
-            if rect.width > 0 && rect.height > 0 {
-                out.push((role, rect));
+            let x0 = if taken.0 { vx } else { pane.x };
+            let x1 = if taken.1 { vr } else { pane.right() };
+            if x1 > x0 {
+                out.push((role, Rect::new(x0, start, x1 - x0, r - start)));
             }
         }
     };
@@ -5453,16 +5678,8 @@ fn content_ring_bands(
 /// ABOVE the cells, so the panel's text vanished behind stray rasterized banner.
 fn decompose_chrome_strips<'a>(
     bands: &[(crate::render::v6_layout::BandRole, Rect)],
-    pane: Rect,
-    scale: &crate::render::v6_layout::Scale,
-    cell_px: (u16, u16),
-    story: &crate::engine::PositionedWindow,
-    overlay_bottom: i32,
-    panels: &[Rect],
-    gfx: &image::RgbaImage,
-    runs: &[&'a crate::engine::PxText],
+    oracle: &ChromeRowOracle<'_, 'a>,
 ) -> Vec<ChromeStrip<'a>> {
-    let oracle = ChromeRowOracle { pane, scale, cell_px, story, overlay_bottom, panels, gfx, runs };
     let mut out = Vec::new();
     for (role, band) in bands {
         // A FLANK is never text — one Art strip. Asked by role since SQ-0894: the
@@ -6478,6 +6695,85 @@ mod tests {
             assert!((1..=cap).contains(&cols), "cap {cap}: {cols} columns");
             assert!((1..=12).contains(&rows), "cap {cap}: {rows} rows");
         }
+    }
+
+    /// SQ-0894: a side column is as wide as the art is where it is NARROWEST, so a
+    /// banner or a capital above it never widens the answer.
+    ///
+    /// This is the load-bearing decision in [`flank_art_columns`] and the reason the
+    /// caller can safely take the wider of it and the story box's leftover: the
+    /// statistic can only under-claim, never over-claim, and over-claiming is what
+    /// would swallow the screen. Story-free, so it holds in CI where the gitignored
+    /// fixtures are absent and every real-game measurement skips.
+    ///
+    /// The three shapes are the three the corpus actually has, each reduced to its
+    /// geometry (measured native columns in the doc comment on the function):
+    ///
+    /// - **Shogun** — one slab at each edge, transparent between, every row the same.
+    /// - **Zork Zero** — pillars, under a banner spanning the WHOLE screen width. The
+    ///   banner rows offer the full half-canvas; the pillar rows offer 72.
+    /// - **Arthur** — poles, beside a header that starts exactly where the pole ends,
+    ///   with no gap between them. The header rows therefore offer one contiguous run
+    ///   from the pole straight across the screen, and only the pole-only rows say 28.
+    ///   No gutter is needed for the rule to work, which is the point of taking a
+    ///   minimum rather than looking for a break in the ink.
+    ///
+    /// FALSIFY by taking the maximum, or the run over the whole canvas rather than
+    /// per row: Zork Zero answers 320/320 and Arthur 320/320 — both flanks meeting in
+    /// the middle of the screen, with no story left between them.
+    #[test]
+    fn a_flanks_columns_come_from_the_narrowest_row_of_its_art() {
+        const W: u32 = 640;
+        const H: u32 = 400;
+        let opaque = image::Rgba([1u8, 2, 3, 255]);
+        let paint = |c: &mut image::RgbaImage, x0: u32, x1: u32, y0: u32, y1: u32| {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    c.put_pixel(x, y, opaque);
+                }
+            }
+        };
+        // Scale 1.0, no letterbox offset, an 8x18 cell: the native→cell arithmetic is
+        // a plain divide, so the expected numbers are readable.
+        let scale = crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 };
+        let pane = Rect::new(0, 0, 80, 30);
+        let columns = |c: &image::RgbaImage| flank_art_columns(c, &scale, (8, 18), pane);
+
+        // No art at all: the flank has nothing to say and the whole pane is left to
+        // the caller's own answer.
+        let bare = image::RgbaImage::new(W, H);
+        assert_eq!(columns(&bare), (pane.x, pane.right()), "an empty canvas claims no columns");
+
+        // Shogun: 46-wide ornament at each edge, all 400 rows.
+        let mut shogun = image::RgbaImage::new(W, H);
+        paint(&mut shogun, 0, 46, 0, H);
+        paint(&mut shogun, 594, W, 0, H);
+        assert_eq!(columns(&shogun), (6, 74), "46 native → ceil(46/8)=6; 594 → floor(594/8)=74");
+
+        // Zork Zero: pillars under a full-width banner.
+        let mut zork = image::RgbaImage::new(W, H);
+        paint(&mut zork, 0, W, 0, 72); // the banner, edge to edge
+        paint(&mut zork, 0, 72, 72, H); // left pillar
+        paint(&mut zork, 566, W, 72, H); // right pillar
+        assert_eq!(
+            columns(&zork),
+            (9, 70),
+            "the banner spans the screen and must not widen the pillars: 72 → ceil(72/8)=9, \
+             566 → floor(566/8)=70"
+        );
+
+        // Arthur: poles ABUTTING a header, plus the transparent gutter at the very edge
+        // his artwork really has.
+        let mut arthur = image::RgbaImage::new(W, H);
+        paint(&mut arthur, 4, 28, 0, 384); // left pole
+        paint(&mut arthur, 612, 636, 0, 384); // right pole
+        paint(&mut arthur, 28, 612, 0, 192); // header, flush against both poles
+        assert_eq!(
+            columns(&arthur),
+            (4, 76),
+            "the header abuts the poles, so its rows offer one run clear across the screen; \
+             only the pole-only rows are narrow: 28 → ceil(28/8)=4, 612 → floor(612/8)=76"
+        );
     }
 
     /// SQ-0818's whole safety argument, as a property: the tiles of a band PARTITION
