@@ -5,6 +5,13 @@
 //! primitives. That makes it the cheapest of the three render-testing layers — reach
 //! for `examples/pty_capture` when the model looks right and the screen does not.
 //!
+//! It boots through the same profile chain `startup.rs` does — the medium the mount
+//! resolved picks the machine, which picks the palette, the interpreter number, the
+//! standard window and the default colours (SQ-0901). It prints the profile and the
+//! RELEASE it is holding on every line of output, because a disk image is a different
+//! build and not the same story on other media (CLAUDE.md), and a disagreement
+//! between this and a `/dump-windows` capture should be visible rather than deduced.
+//!
 //! What it reports:
 //!
 //! * the story viewport, by the declared window BOX and by what the art leaves
@@ -191,19 +198,47 @@ fn scout(
     taps: Option<usize>,
 ) -> Result<(), String> {
     // Disk images (.adf/.po/.2mg/.dsk) are mounted, not read — a medium carries a
-    // different RELEASE, not the same story on other media (CLAUDE.md).
-    let bytes = match app::hints::load_mounted_story(std::path::Path::new(path)) {
-        Ok((loaded, _)) => loaded.bytes().to_vec(),
+    // different RELEASE, not the same story on other media (CLAUDE.md). The mount's
+    // second answer is the medium THIS story came off, which on a hybrid disc is not
+    // the image's own format (SQ-0876) — so it is what the profile resolves from.
+    let p = std::path::Path::new(path);
+    let (bytes, disk_image) = match app::hints::load_mounted_story(p) {
+        Ok((loaded, medium)) => (loaded.bytes().to_vec(), medium),
         Err(e) => return Err(format!("{path}: {e:?}")),
     };
     if bytes.first() != Some(&6) {
         return Err("not a v6 story".into());
     }
-    let mut picts = app::graphics::PictSource::resolve(std::path::Path::new(path), None);
+    // SQ-0901: boot the way `startup.rs` does. Passing `interpreter_number: None`
+    // and skipping `set_palette` measured a frame the renderer never draws — a
+    // 172-native-px flank on the Amiga Arthur where the app renders a 30px pole —
+    // and an instrument that silently disagrees with the app on a whole class of
+    // media is worse than no instrument at all.
+    let mut picts = app::graphics::PictSource::resolve(p, None);
+    // No tier-3 archive is named here, so the machine comes from the medium alone.
+    let profile = app::interpreter::InterpreterProfile::resolve(p, None, None, disk_image);
+    zvm::screen::set_palette(profile.palette());
     let dims = picts.all_pict_dims();
-    let std_win = picts.std_window();
-    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, std_win, None, None)
-        .map_err(|e| format!("boot: {e:?}"))?;
+    let std_win = picts.std_window().or_else(|| profile.std_window());
+    println!(
+        "  booted as {:?}{}  ·  release {} serial {}",
+        profile,
+        disk_image.map(|m| format!(" off {m:?}")).unwrap_or_default(),
+        u16::from_be_bytes([bytes[2], bytes[3]]),
+        String::from_utf8_lossy(&bytes[0x12..0x18]),
+    );
+    let mut s = GameSession::new_with_trace(
+        bytes,
+        true,
+        false,
+        profile.interpreter_number(),
+        false,
+        dims,
+        std_win,
+        profile.default_colours(),
+        None,
+    )
+    .map_err(|e| format!("boot: {e:?}"))?;
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();
     let _ = s.take_transcript();
