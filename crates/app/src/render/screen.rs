@@ -857,6 +857,15 @@ fn render_node(
                         // The painted ground goes under the ring's art and glyphs
                         // and before the pages claim the rest (SQ-0706).
                         v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
+                        // SQ-0883: the INK layer, frozen — art, glyph ink and painted
+                        // ground, before any window's PAGE floods the rest. The border
+                        // probe below reads THIS: a page is a colour a window was told
+                        // to present on, not something the game drew, and a probe that
+                        // cannot tell the two apart measures a flank's whole width as
+                        // its border rule. `build_chrome_canvas` freezes its own art
+                        // layer one step earlier for the same reason (SQ-0727/0500):
+                        // opaque is not painted.
+                        let ink = canvas.clone();
                         if state.config.honor_game_colours {
                             v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
                             // …and the story window's own page under the pixels the
@@ -1506,7 +1515,7 @@ fn render_node(
                                     let bottom = if glyph_borders_only { r.bottom() } else { viewport.bottom() };
                                     let ext = |which| {
                                         flank_border_extension(
-                                            *r, area, viewport, &scale, cell_px, story, native, &canvas, &gfx,
+                                            *r, area, viewport, &scale, cell_px, story, native, &ink, &gfx,
                                             &chrome_runs, bottom, which,
                                         )
                                         .filter(|(_, ink)| !glyph_borders_only || matches!(ink, BorderInk::Glyph { .. }))
@@ -5025,6 +5034,21 @@ enum FlankBorder {
 /// uses for its own corner, so the rule cannot land a column off the `┌` it hangs
 /// from — and it is one column wide by construction, where the band's cell span can
 /// be two and would have stamped a double rule.
+///
+/// SQ-0883: `ink` is the chrome canvas as the game PAINTED it — art, glyph ink and
+/// painted ground — frozen before any window's page floods the rest. It is not the
+/// canvas the band is cut from, and the difference is the whole of this quest. The
+/// probe grows a contiguous opaque run outward from the story's edge, and a page
+/// fill is opaque everywhere: on `stories/Journey.po` (the ProDOS press, release 77
+/// serial 890616, booted as `AppleIIgs`) the AppleIIgs profile presents its picture
+/// window on a page, so the run that should have stopped on the frame's rule at
+/// native x 72..80 ran the full width of the flank, 0..80. Measured at a 169x47
+/// pane: an 83x1 crop THROUGH the illustration, replicated down 738 device pixels
+/// over the whole left column — the artwork replaced by a smear of one of its own
+/// rows. `honor_game_colours = false` skips the flood and was correct throughout,
+/// which is why one mode saw it and the other did not. Classify from what was
+/// painted, cut from what is presented: the same pairing [`flank_tiled_source`]
+/// makes between `gfx` and the chrome canvas.
 #[allow(clippy::too_many_arguments)]
 fn flank_border_extension(
     band: Rect,
@@ -5034,7 +5058,7 @@ fn flank_border_extension(
     cell_px: (u16, u16),
     story: &crate::engine::PositionedWindow,
     native: (u16, u16),
-    canvas: &image::RgbaImage,
+    ink: &image::RgbaImage,
     gfx: &image::RgbaImage,
     runs: &[&crate::engine::PxText],
     menu_top_row: u16,
@@ -5043,14 +5067,14 @@ fn flank_border_extension(
     let cw = cell_px.0.max(1) as f32;
     let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
     let sy0 = story.y_px as u32;
-    let sy1 = (story.y_px as u32 + story.h_px as u32).min(canvas.height());
+    let sy1 = (story.y_px as u32 + story.h_px as u32).min(ink.height());
     if sy1 <= sy0 {
         return None;
     }
     // A mid-story native row: the border column is inked here regardless of where the
     // picture (which may not span the full column height) begins or ends.
     let mid = sy0 + (sy1 - sy0) / 2;
-    let opaque = |x: u32, y: u32| x < canvas.width() && y < canvas.height() && canvas.get_pixel(x, y)[3] >= 128;
+    let opaque = |x: u32, y: u32| x < ink.width() && y < ink.height() && ink.get_pixel(x, y)[3] >= 128;
     // The divider/border is the contiguous opaque native column run abutting the story
     // box edge on this flank (left flank → run ending at the story's left edge; right
     // flank → run starting at the story's right edge), sampled at that mid-story row.
@@ -5227,7 +5251,7 @@ fn flank_border_extension(
     let inv_x =
         |cell: u16| ((((cell.saturating_sub(pane.x)) as f32 * cw) - scale.off_x as f32) / s).round().max(0.0) as u32;
     let cnx0 = inv_x(dcell0).min(dnx0);
-    let cnx1 = inv_x(dcell1).max(dnx1).min(canvas.width());
+    let cnx1 = inv_x(dcell1).max(dnx1).min(ink.width());
     if cnx1 <= cnx0 {
         return None;
     }
@@ -5725,6 +5749,35 @@ impl<'b> ChromeRowOracle<'_, 'b> {
 /// (the cells between the two are chrome and the flank is still their owner), and art
 /// that runs past it grows one. Under-claiming is therefore safe and over-claiming is
 /// not, which is the whole reason the statistic is a minimum.
+///
+/// SQ-0899: and the run must REACH the edge it is claimed for. "The first opaque run
+/// in from the edge" is not the same sentence as "a column of side artwork **at the
+/// pane's edge**", which is what the caller asks for and what a flank is; a picture
+/// standing alone in the middle of the screen answers the first and is not the
+/// second. MEASURED as the closest ink to either edge, native px, on the frame each
+/// title shows after its intro:
+///
+/// | frame | nearest the left edge | nearest the right |
+/// |---|---|---|
+/// | Zork Zero (r393) | **0** | **639** |
+/// | Shogun (r322 Blorb, r295 Amiga) | **0** | **639** |
+/// | Arthur (r74 IBM, r54 Amiga) | 6 | 633 |
+/// | Journey (r83 IBM / r77 ProDOS / r30 Amiga) | 6 / 7 / 22 | — |
+/// | **Arthur (r63 ProDOS, `Arthur.po` and the 2mg)** | **250** | **389** |
+///
+/// "Reaches" is within one native text CELL, which is the allowance `seek_ink` makes
+/// for the same reason a column over: a frame is authored on the game's text grid and
+/// its ink may sit anywhere inside its own eight pixels, so Arthur's four-pixel gutter
+/// is a pole at the edge and not a picture away from it. Nothing in the corpus needs a
+/// finer judgement than that. The ProDOS Arthur is not close to the line: its frame is
+/// a centred illustration painting native columns 250..389 and NOTHING else, so the
+/// run in from each edge was the same picture, read from both sides. That made each
+/// flank 253 native px — 39 cells at a 98x37 pane, 67 at 169x62 — and `flank_source`
+/// then TILED the sliver of picture inside it down the whole column, which is the
+/// banner repeating down the flank that quest reports. Requiring contact costs the
+/// corpus nothing: the two frames whose art runs past the story box (Zork Zero's and
+/// Shogun's) touch their edges exactly, and every other title's claim was already the
+/// narrower of the two the caller maxes, so it never decided a flank.
 fn flank_art_columns(
     gfx: &image::RgbaImage,
     scale: &crate::render::v6_layout::Scale,
@@ -5754,6 +5807,28 @@ fn flank_art_columns(
             right = Some(right.map_or(start, |m: u32| m.max(start)));
         }
     }
+    // SQ-0899, the two ways a run is not a side column. The reduction above stays over
+    // EVERY row in both cases — narrowing it to the rows that qualify would re-admit
+    // the banner it exists to exclude, and takes Zork Zero's left column from 62
+    // native px to 72 — so each is a separate question asked of the edge afterwards.
+    //
+    // It REACHED THE MIDDLE, where the scan is bounded because a flank may not pass
+    // it. Then the bound is what stopped the run, not the art, and the measurement
+    // says nothing about a column's width. mysterious01's frame is one picture over
+    // the whole screen: both runs come back at the middle, which is not two flanks
+    // meeting but one image, and it was only ever harmless because the caller's own
+    // `r > x` test threw the pair away — a symmetry the contact test below breaks the
+    // moment it answers for one edge and not the other.
+    //
+    // It NEVER TOUCHED THE EDGE it is claimed for (see the table above).
+    const FONT_W: u32 = 8;
+    let reaches = |from: u32, inward: i32| {
+        (0..h).any(|y| (0..FONT_W as i32).any(|d| opaque((from as i32 + d * inward) as u32, y)))
+    };
+    let (left, right) = (
+        left.filter(|&e| e < mid).filter(|_| reaches(0, 1)),
+        right.filter(|&s| s > mid).filter(|_| reaches(w - 1, -1)),
+    );
     // Native → pane cells through the ring's own letterbox scale, rounded OUTWARD
     // so a flank covers the art's last pixel rather than clipping it, and never
     // past the pane's middle: two flanks meeting would leave no screen at all.
@@ -7058,6 +7133,33 @@ mod tests {
             (4, 76),
             "the header abuts the poles, so its rows offer one run clear across the screen; \
              only the pole-only rows are narrow: 28 → ceil(28/8)=4, 612 → floor(612/8)=76"
+        );
+
+        // SQ-0899, the two shapes that are not flanks at all. Arthur's ProDOS press is
+        // the first and mysterious01 the second, and each was read as a pair of side
+        // columns before this: the first tiled a sliver of the picture down 67 cells of
+        // both flanks, and the second is only harmless today because both its answers
+        // land on the pane's middle and the caller throws the pair away.
+        // Hollow, as the real plate is: its narrowest rows offer a THREE-pixel run, so
+        // the reduction has a plausibly column-shaped answer to hand back and only the
+        // distance from the edge tells it apart from a pole.
+        let mut centred = image::RgbaImage::new(W, H);
+        paint(&mut centred, 250, 253, 104, 296); // the illustration's left stroke
+        paint(&mut centred, 387, 390, 104, 296); // …and its right
+        paint(&mut centred, 250, 390, 104, 108); // its top edge, solid across
+        assert_eq!(
+            columns(&centred),
+            (pane.x, pane.right()),
+            "a picture in the MIDDLE of the screen is not a side column, however narrow the \
+             run in from the edge makes it look"
+        );
+        let mut full = image::RgbaImage::new(W, H);
+        paint(&mut full, 0, W, 0, H); // one picture over the whole screen
+        assert_eq!(
+            columns(&full),
+            (pane.x, pane.right()),
+            "a run that reaches the canvas MIDDLE was stopped by the scan's own bound, not by \
+             the art, and says nothing about a column's width"
         );
     }
 

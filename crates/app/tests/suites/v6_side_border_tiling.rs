@@ -1807,3 +1807,240 @@ fn the_raster_composite_leaves_a_command_menu_alone() {
     }
 }
 
+// ── 11. A rule is a rule, not a picture (SQ-0883) ────────────────────────────
+
+/// Journey's four presses, for the flank's own vertical RULE.
+///
+/// The ProDOS pair is the fixture SQ-0883 was reported on; the other two are the
+/// controls that say whether a defect is Apple-specific or medium-general.
+/// `journey_s1.dsk` is the same release off the same press, and it is here
+/// because a five-disk set and a single `.po` image are two mounts of one build
+/// and either could have diverged.
+const JOURNEY_MEDIA: &[Specimen] = &[
+    Specimen { title: "Journey ProDOS", file: "Journey.po", release: 77, serial: "890616", turns: 4 },
+    Specimen { title: "Journey ProDOS", file: "journey_s1.dsk", release: 77, serial: "890616", turns: 4 },
+    Specimen { title: "Journey IBM", file: "journey-r83-s890706.z6", release: 83, serial: "890706", turns: 4 },
+    Specimen { title: "Journey Amiga", file: "Journey - The Quest Begins.adf", release: 30, serial: "890322", turns: 2 },
+];
+
+/// One band the render drew as a DIVIDER EXTENSION: the cells it covers and the
+/// native crop it replicates down them.
+///
+/// Parsed here rather than through [`parse_bands`] because the slot is the whole
+/// question — an extension is the one draw in the ring allowed to magnify
+/// vertically without bound, and that licence is only sound for a column that is
+/// uniform down its whole length.
+fn divider_extensions(log: &[String]) -> Vec<(Rect, (u32, u32))> {
+    log.iter()
+        .filter(|l| l.contains("[DividerExtension"))
+        .filter_map(|l| {
+            let rest = l.strip_prefix("band ")?;
+            let (dims, rest) = rest.split_once('@')?;
+            let (w, h) = dims.split_once('x')?;
+            let (at, rest) = rest.strip_prefix('(')?.split_once(')')?;
+            let (x, y) = at.split_once(',')?;
+            let src = rest.rsplit_once("· native ")?.1;
+            let (sw, sh) = src.split_once('@')?.0.split_once('x')?;
+            Some((
+                Rect::new(x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?),
+                (sw.parse().ok()?, sh.parse().ok()?),
+            ))
+        })
+        .collect()
+}
+
+/// Every ART band's cell rect, off the same log.
+fn art_band_rects(log: &[String]) -> Vec<Rect> {
+    log.iter()
+        .filter(|l| l.contains("[Art,"))
+        .filter_map(|l| {
+            let rest = l.strip_prefix("band ")?;
+            let (dims, rest) = rest.split_once('@')?;
+            let (w, h) = dims.split_once('x')?;
+            let (at, _) = rest.strip_prefix('(')?.split_once(')')?;
+            let (x, y) = at.split_once(',')?;
+            Some(Rect::new(x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?))
+        })
+        .collect()
+}
+
+/// A divider extension replicates ONE native row down a whole column, so the
+/// column it replicates must be a RULE (SQ-0883).
+///
+/// The extension is the ring's one licensed anisotropy: a 1-native-row crop
+/// stretched the full height of the flank, invisible precisely because the
+/// game's rule is uniform down its length. Point it at anything else and the
+/// vertical magnification — 738 device pixels out of one native row, at the
+/// 171x50 terminal this was reported from — smears that row down the column.
+///
+/// It found something else on `stories/Journey.po` (**release 77, serial
+/// 890616**, booted as `AppleIIgs` off ProDOS), because the run that locates the
+/// rule was grown across the PAGE `honor_game_colours` floods behind every
+/// window rather than across the game's own ink. The rule is at native x 72..80;
+/// the run reported **0..80**, the whole flank. What came back was an **83x1
+/// crop through the illustration**, stretched over the entire left column — the
+/// artwork replaced by vertical bands of its own row 152 — and drawn AFTER the
+/// picture, so it buried it. Both readings are asserted:
+///
+/// (a) the source may be no wider than the game's own text cell plus the two
+///     terminal columns the crop's outward rounding can add, which is the widest
+///     a rule can honestly be at any scale;
+/// (b) no extension may overlap an ART band, which is SQ-0779's ruling read the
+///     other way round — if a game draws a border the artwork does not overlap
+///     it, and neither does the border overlap the artwork.
+///
+/// Both `honor_game_colours` modes, because only one of them was ever wrong: the
+/// page flood is what the probe walked through, so the theme-only mode drew this
+/// frame correctly throughout and a single-mode case would have passed.
+#[test]
+fn a_divider_extension_replicates_a_rule_and_never_a_picture() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let panes: Vec<(u16, u16)> = all_panes().collect();
+    let mut ran = 0;
+    for sp in JOURNEY_MEDIA {
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        for &(w, h) in &panes {
+            for honor in [true, false] {
+                let state = render_state_with(honor);
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+                let log = state.graphics_render.borrow().band_log.clone();
+                let scale = app::render::v6_layout::uniform_scale(native, (w as u32 * 8, h as u32 * 18)).s;
+                // One native text cell, plus the terminal column the crop's own
+                // outward rounding can add at each end.
+                let widest = 8.0 + 2.0 * (8.0 / scale).ceil();
+                let arts = art_band_rects(&log);
+                for (rect, (sw, sh)) in divider_extensions(&log) {
+                    assert!(
+                        sh == 1 && sw as f32 <= widest,
+                        "{} [release {}] at {w}x{h}, honor_game_colours={honor}: the divider \
+                         extension at {rect:?} replicates a {sw}x{sh} native crop down {} cells. \
+                         A rule is at most {widest} native px wide at this scale ({scale:.4}); \
+                         anything wider is a slice of the picture smeared down the flank",
+                        sp.title,
+                        sp.release,
+                        rect.height,
+                    );
+                    for a in &arts {
+                        assert!(
+                            a.intersection(rect).area() == 0,
+                            "{} [release {}] at {w}x{h}, honor_game_colours={honor}: the divider \
+                             extension at {rect:?} covers the art band at {a:?} — the rule is \
+                             drawn after the picture, so an overlap is the picture buried",
+                            sp.title,
+                            sp.release,
+                        );
+                    }
+                }
+                ran += 1;
+            }
+        }
+    }
+    if stories_dir().join(JOURNEY_MEDIA[0].file).exists() {
+        assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
+    }
+}
+
+// ── 12. A picture in the middle of the screen is not a flank (SQ-0899) ───────
+
+/// Arthur's ProDOS press, on both the mounts that carry it.
+const PRODOS_ARTHUR: &[Specimen] = &[
+    Specimen { title: "Arthur ProDOS", file: "Arthur.po", release: 63, serial: "890622", turns: 6 },
+    Specimen { title: "Arthur ProDOS", file: "Arthur Quest 4 Excalibur.2mg", release: 63, serial: "890622", turns: 6 },
+];
+
+/// A flank is a column of side artwork AT THE PANE'S EDGE — art that touches
+/// neither edge is not one (SQ-0899).
+///
+/// `flank_art_columns` reduces "the first contiguous opaque run in from each
+/// edge" over every native row and keeps the narrowest, which is what tells a
+/// side column from the banner above it. It never asked whether the run it kept
+/// REACHED the edge, and on `stories/Arthur.po` (**release 63, serial 890622**,
+/// booted as `AppleIIgs` off ProDOS) nothing does: this frame is a single
+/// illustration painting native columns 250..389 and nothing else, so the run in
+/// from the left and the run in from the right were the same picture, read from
+/// opposite sides. Each flank came back **253 native px** — 39 cells at a 98x37
+/// pane, 67 at 169x62 — and `flank_source` then TILED the sliver of picture
+/// inside it down the whole column, which is the banner repeating down the flank
+/// this quest was reported as. It is present at every pane size; a tall one only
+/// shows more repeats.
+///
+/// Asserted as: no tiled band on this frame at all, and the illustration still
+/// drawn. The second half matters — a flank that claims nothing would pass the
+/// first half by drawing an empty screen.
+#[test]
+fn a_picture_in_the_middle_of_the_screen_is_not_a_flank() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let panes: Vec<(u16, u16)> = all_panes().collect();
+    let mut ran = 0;
+    for sp in PRODOS_ARTHUR {
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+        // The case is only worth anything on the frame it is about: a picture
+        // standing clear of both edges. Pin it, so a later change to Arthur's
+        // intro cannot turn this into a vacuous pass.
+        let inked = |x: u32| (0..gfx.height()).any(|y| gfx.get_pixel(x, y)[3] >= 128);
+        let left = (0..gfx.width()).find(|&x| inked(x)).expect("this frame paints something");
+        let right = (0..gfx.width()).rev().find(|&x| inked(x)).expect("this frame paints something");
+        assert!(
+            left > 200 && right + 200 < gfx.width(),
+            "{} [release {}] after {} turns: the art runs {left}..={right} of {} native columns — \
+             this case needs the frame whose illustration stands clear of BOTH edges",
+            sp.title,
+            sp.release,
+            sp.turns,
+            gfx.width(),
+        );
+        for &(w, h) in &panes {
+            for honor in [true, false] {
+                let state = render_state_with(honor);
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+                let bands = parse_bands(&state.graphics_render.borrow().band_log);
+                for b in &bands {
+                    assert!(
+                        !b.tiled,
+                        "{} [release {}] at {w}x{h}, honor_game_colours={honor}: band {b:?} is \
+                         TILED. Nothing on this frame is a side column, so the only way to reach \
+                         a tiled flank is to have mistaken the centred illustration for one",
+                        sp.title,
+                        sp.release,
+                    );
+                }
+                // …and the picture is still drawn: the pane column its own centre
+                // maps to must be covered by some band.
+                let c = ((left + right) / 2) as f32 * scale_of(native, (w, h)) / 8.0;
+                let c = c as u16;
+                assert!(
+                    bands.iter().any(|b| (b.at.0..b.at.0 + b.cells.0).contains(&c)),
+                    "{} [release {}] at {w}x{h}, honor_game_colours={honor}: no band covers pane \
+                     column {c}, where the illustration's own centre maps — the flank stopped \
+                     claiming those cells and nothing else picked them up",
+                    sp.title,
+                    sp.release,
+                );
+                ran += 1;
+            }
+        }
+    }
+    if stories_dir().join(PRODOS_ARTHUR[0].file).exists() {
+        assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
+    }
+}
+
+/// The frame's letterbox factor at one pane, at this suite's 8x18 cell.
+fn scale_of(native: (u16, u16), pane: (u16, u16)) -> f32 {
+    app::render::v6_layout::uniform_scale(native, (pane.0 as u32 * 8, pane.1 as u32 * 18)).s
+}
+

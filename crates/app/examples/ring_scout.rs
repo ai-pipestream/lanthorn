@@ -51,6 +51,13 @@
 //! `--taps N` presses exactly N keys, which is how a screen BETWEEN the splash and
 //! gameplay is reached (Shogun's credits/menu is one tap in); `--no-tap` reports the
 //! boot frame; `--turns N` then plays N turns, reporting the viewport at each.
+//!
+//! `--no-game-colours` renders `--bands` with `honor_game_colours` off. The two modes
+//! are separate baselines and always have been (CLAUDE.md), and the ring is not the
+//! same picture in both: honouring the game's colours floods every window's PAGE, and
+//! SQ-0883 lived entirely in the flooded one — the shipped default — while the other
+//! mode was correct throughout. An instrument that can only see one of them will
+//! report a frame as clean at the very moment it is broken for the user.
 
 use app::engine::Engine;
 use app::render::v6_layout as v6;
@@ -78,6 +85,7 @@ fn main() {
     let mut cell_px = (8u16, 18u16);
     let mut turns = 0usize;
     let mut no_tap = false;
+    let mut honor_colours = true;
     let mut runs = false;
     let mut bands = false;
     let mut keys_override: Option<String> = None;
@@ -95,6 +103,7 @@ fn main() {
                 i += 1;
             }
             "--no-tap" => no_tap = true,
+            "--no-game-colours" => honor_colours = false,
             "--runs" => runs = true,
             "--bands" => bands = true,
             "--taps" => {
@@ -147,7 +156,7 @@ fn main() {
 
     for (path, keys) in targets {
         println!("═══ {path}");
-        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, bands, taps) {
+        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, bands, taps, honor_colours) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
@@ -186,6 +195,7 @@ fn parse_pair(s: &str) -> Option<(u16, u16)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scout(
     path: &str,
     keys: &str,
@@ -196,6 +206,7 @@ fn scout(
     want_runs: bool,
     want_bands: bool,
     taps: Option<usize>,
+    honor_colours: bool,
 ) -> Result<(), String> {
     // Disk images (.adf/.po/.2mg/.dsk) are mounted, not read — a medium carries a
     // different RELEASE, not the same story on other media (CLAUDE.md). The mount's
@@ -397,6 +408,7 @@ fn scout(
         st.colors = app::colors::ColorScheme::terminal_default();
         st.game_picker = Some(app::render::graphics::kitty_picker(cell_px.0, cell_px.1));
         st.config.v6_render = app::config::V6RenderMode::Hybrid;
+        st.config.honor_game_colours = honor_colours;
         let mut buf = ratatui::buffer::Buffer::empty(pane);
         app::render::screen::render_story_pane(&model, false, None, &st, pane, &mut buf);
         println!("  RING AS DRAWN:");
