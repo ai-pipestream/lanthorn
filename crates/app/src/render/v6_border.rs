@@ -126,6 +126,73 @@ fn painted_widths(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32)) -> Opti
     (hi > 0).then_some((lo, hi))
 }
 
+/// Does this flank repeat an ORNAMENT — two or more full-width bands of the same
+/// height, spaced down the column (SQ-0899)?
+///
+/// [`painted_widths`] reduces a column to its narrowest and widest row and throws
+/// away where those rows are. That is enough to tell a pillar from a slab, and not
+/// enough to tell a pillar from a POLE: both narrow, and the difference is that a
+/// capital happens once at the head of its pillar where an ornament recurs down a
+/// pole. Measured as the run-length profile of each column's painted span, on the
+/// frame each title draws:
+///
+/// | flank | span profile, top to bottom | full-width bands |
+/// |---|---|---|
+/// | Arthur, ProDOS (r63) | `8x4 17x34 8x30 17x34 8x32 17x34 8x216` | 34, 34, 34 |
+/// | Arthur, Amiga (r54) | `6x4 11x34 6x30 11x34 6x32 11x34 6x200` | 34, 34, 34 |
+/// | Arthur, DOS (r74) | `6x4 11x34 6x30 11x34 6x32 11x34 4x200` | 34, 34, 34 |
+/// | Zork Zero, castle (MCGA/EGA/Amiga) | `17x82 3x292 …foot` | 82 |
+/// | Zork Zero, CGA castle | 39 runs, widest at 17 for 2–10 rows | none |
+/// | Zork Zero, Amiga plate 7 left | `86x44 84x8 86x20 68x2 72x54 …` | 44, 20 |
+/// | Zork Zero, Amiga plate 7 right | `86x74 72x8 70x2 70x58 …` | 74 |
+///
+/// Arthur's ornaments are **thirty-four rows on every press he has**, which is
+/// what makes them one repeated drawing rather than a silhouette that happens to
+/// touch full width twice. On a 560x384 ProDOS screen his poles reach both edges,
+/// so the inset that identifies him everywhere else reads 0 and he was handed Zork
+/// Zero's masonry — the ornament tiled down the plain shaft, which is the "banner
+/// repeating down the flank" SQ-0899 reports.
+///
+/// **Equal heights, and not merely two of them, and that is the whole subtlety.**
+/// A bare count of full-width bands classifies Zork Zero's own Amiga plate 7 as a
+/// pole on its LEFT crop and a pillar on its RIGHT, because that scene border is
+/// organic art whose silhouette wanders back to full width at 44 rows and again at
+/// 20. One plate is one symmetric drawing and its two crops must classify alike —
+/// `v6_archive_border_sweep`'s property 6, SQ-0845 — and that sweep is what caught
+/// it across sixty-eight flanks. Two bands of unequal height are a coastline; two
+/// of the same height are a repeat.
+///
+/// The height floor keeps CGA out: Zork Zero's CGA pillar is dithered and its span
+/// oscillates to full width for two to ten rows the whole way down its capital, so
+/// a floorless reading finds six bands there. A band thinner than a text row is
+/// dither, not architecture. This test only ever REMOVES a flank from the pillar
+/// recipe, so answering `false` is the conservative side of it.
+fn repeats_an_ornament(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), hi: u32) -> bool {
+    let x1 = x1.min(canvas.width());
+    let (mut heights, mut run) = (Vec::new(), 0u32);
+    for y in art.0..art.1.min(canvas.height()) {
+        let (mut first, mut last) = (None, 0);
+        for x in x0..x1 {
+            if canvas.get_pixel(x, y)[3] >= 128 {
+                first.get_or_insert(x);
+                last = x;
+            }
+        }
+        if first.is_some_and(|f| last - f + 1 >= hi) {
+            run += 1;
+        } else {
+            if run >= V6_TEXT_ROW {
+                heights.push(run);
+            }
+            run = 0;
+        }
+    }
+    if run >= V6_TEXT_ROW {
+        heights.push(run);
+    }
+    heights.len() >= 2 && heights.windows(2).all(|w| w[0] == w[1])
+}
+
 /// Classify a flank from the shape of its own native columns.
 ///
 /// `art` is `(first, last_exclusive)` opaque native row within columns
@@ -220,7 +287,10 @@ pub fn recognize(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), native_h
     }
     let (lo, hi) = painted_widths(canvas, x0, x1, art)?;
     let inset = top + native_h.saturating_sub(bottom);
-    if inset <= V6_TEXT_ROW && lo * 10 < hi * 9 {
+    // …and the wide part does not RECUR. A capital sits at the head of its pillar;
+    // an ornament of one height repeats down a pole, and a column carrying several is
+    // Arthur's however flush it sits. See [`repeats_an_ornament`] — SQ-0899.
+    if inset <= V6_TEXT_ROW && lo * 10 < hi * 9 && !repeats_an_ornament(canvas, x0, x1, art, hi) {
         return Some(BorderArt::ZorkZeroPillars);
     }
     if top == 0 && hi >= SINGLE_PIECE_MIN_WIDTH {

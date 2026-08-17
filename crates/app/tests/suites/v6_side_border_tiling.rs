@@ -1963,6 +1963,158 @@ fn a_divider_extension_replicates_a_rule_and_never_a_picture() {
     }
 }
 
+// ── 12. Extending a flank lengthens its shaft and adds nothing (SQ-0899) ─────
+
+/// One flank whose SHAPE is pinned: the columns it occupies in from each edge,
+/// and how many full-width bands its artwork carries.
+///
+/// The width is measured, not guessed — it is the whole flank on every entry, so
+/// a window this wide sees the art and nothing beside it. Shogun is absent by
+/// design: its border is a slab two dozen columns wide, a different recipe, and
+/// cases 1–10 above already measure its extension.
+struct FlankShape {
+    title: &'static str,
+    file: &'static str,
+    release: u16,
+    serial: &'static str,
+    turns: usize,
+    cols: u32,
+    bands: u32,
+}
+
+const FLANK_SHAPES: &[FlankShape] = &[
+    // Arthur's three ornaments, on every press he has. The ProDOS release is the
+    // one SQ-0899 was reported on and the only one whose poles reach both screen
+    // edges, because its screen is 560x384 where the others are 640x400.
+    FlankShape { title: "Arthur ProDOS", file: "Arthur.po", release: 63, serial: "890622", turns: 6, cols: 17, bands: 3 },
+    FlankShape { title: "Arthur ProDOS", file: "Arthur Quest 4 Excalibur.2mg", release: 63, serial: "890622", turns: 6, cols: 17, bands: 3 },
+    FlankShape { title: "Arthur Amiga", file: "Arthur - The Quest for Excalibur.adf", release: 54, serial: "890606", turns: 6, cols: 17, bands: 3 },
+    FlankShape { title: "Arthur DOS", file: "arthur-r74-s890714.z6", release: 74, serial: "890714", turns: 6, cols: 17, bands: 3 },
+    // Zork Zero's one capital, the shape the pillar recipe is FOR.
+    FlankShape { title: "Zork Zero DOS", file: "zork0-r393-s890714.z6", release: 393, serial: "890714", turns: 6, cols: 17, bands: 1 },
+    FlankShape { title: "Zork Zero Amiga", file: "Zork Zero - The Revenge of Megaboz.adf", release: 366, serial: "890323", turns: 6, cols: 17, bands: 1 },
+];
+
+/// Count the maximal runs of rows whose painted span reaches `hi` — the flank's
+/// own widest row — with NO minimum height.
+///
+/// Deliberately re-implemented here rather than called out of `v6_border`: a test
+/// that shares the implementation's statistic agrees with it however wrong it is
+/// (CLAUDE.md). This reads pixels and counts, and nothing else.
+///
+/// The absent height floor is the point, and it is why the first draft of this
+/// case passed against the defect it was written for. `v6_border` needs a floor —
+/// Zork Zero's CGA pillar is dithered and its span oscillates to full width for
+/// two rows at a time the whole way down its capital, so a bare count there reads
+/// 6 where the architecture is 1. A floor is right for CLASSIFYING one column in
+/// isolation and wrong here, where the same column is compared with itself before
+/// and after extension: any band the generated rows add is a defect at any
+/// height, and Arthur's reprinted ornament comes out **twelve** rows tall against
+/// the thirty-four of the real ones.
+fn full_width_bands(img: &image::RgbaImage, x0: u32, x1: u32, rows: std::ops::Range<u32>) -> u32 {
+    let span = |y: u32| {
+        let (mut first, mut last) = (None, 0u32);
+        for x in x0..x1.min(img.width()) {
+            if img.get_pixel(x, y)[3] >= 128 {
+                first.get_or_insert(x);
+                last = x;
+            }
+        }
+        first.map_or(0, |f| last - f + 1)
+    };
+    let rows = rows.start..rows.end.min(img.height());
+    let hi = rows.clone().map(span).max().unwrap_or(0);
+    if hi == 0 {
+        return 0;
+    }
+    let (mut bands, mut run) = (0, 0);
+    for y in rows {
+        if span(y) >= hi {
+            if run == 0 {
+                bands += 1;
+            }
+            run += 1;
+        } else {
+            run = 0;
+        }
+    }
+    bands
+}
+
+/// Extending a flank down a tall pane LENGTHENS ITS SHAFT. It never adds a band
+/// the artwork does not have (SQ-0899).
+///
+/// This is the invariant behind every per-title recipe in `v6_border`, stated
+/// without reference to any of them: whatever a title's border is made of, a pane
+/// taller than the art gets more of the plain part, not another copy of the
+/// decorated part. A recipe that stamps a capital, an ornament or a mirrored
+/// section into the generated rows breaks it, and that is visible on screen as
+/// the frame's ornament repeating down the side.
+///
+/// It caught Arthur's ProDOS press (**release 63, serial 890622**, `AppleIIgs` off
+/// ProDOS). Its poles are painted to both edges of its own 560x384 screen, so the
+/// INSET that identifies Arthur everywhere else — 32 native px on the Amiga and
+/// DOS presses, against a 400-row screen — reads 0, and `recognize` handed him
+/// Zork Zero's masonry. Composed to the 586 rows a 129x60 pane asks for, his
+/// flank came back
+///
+/// ```text
+///   8x4 17x34 8x30 17x34 8x32 17x34 8x380 17x12 8x26
+/// ```
+///
+/// — a FOURTH 17-wide band, twelve rows of it, printed over the plain shaft near
+/// the bottom, where his artwork has three. That is the "banner repeating down
+/// the flank" the quest reports. With the ornament count in `recognize` the same
+/// composition is `8x4 17x34 8x30 17x34 8x32 17x34 8x418`: the shaft grows from
+/// 216 rows to 418 and nothing else moves.
+///
+/// The band counts are asserted outright as well as compared, so a change that
+/// quietly stopped finding the ornaments would fail here rather than pass by
+/// making both sides zero.
+#[test]
+fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for sp in FLANK_SHAPES {
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("{}: v6 Layered root", sp.title) };
+        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items);
+        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+        let w = native.0 as u32;
+        for (edge, x0, x1) in [("left", 0, sp.cols), ("right", w - sp.cols, w)] {
+            let art = app::render::v6_border::art_extent(&gfx, x0, x1);
+            assert!(art.1 > art.0, "{} [{}] {edge}: this frame paints no flank", sp.title, sp.release);
+            let before = full_width_bands(&gfx, x0, x1, art.0..art.1);
+            assert_eq!(
+                before, sp.bands,
+                "{} [release {}] {edge} flank: the ARTWORK carries {before} full-width band(s),                  not the {} this case is pinned to — the frame moved, so the comparison below                  would be measuring the wrong thing",
+                sp.title, sp.release, sp.bands,
+            );
+            // The 586 rows a 129x60 pane at an 8x18 cell asks of a 560x384 screen —
+            // the pane SQ-0899 was reported from, and taller than every art here.
+            const DESIRED: u32 = 586;
+            let Some(img) = app::render::v6_border::flank_source(
+                &gfx, &gfx, x0, x1, art, native.1 as u32, 0, DESIRED,
+            ) else {
+                panic!("{} [{}] {edge}: no extension for a pane taller than the art", sp.title, sp.release)
+            };
+            let after = full_width_bands(&img, 0, sp.cols, 0..img.height());
+            assert_eq!(
+                after, before,
+                "{} [release {}] {edge} flank extended to {DESIRED} rows: {after} full-width                  band(s) where the artwork has {before}. Extending a flank lengthens its shaft;                  a band that appears only in the generated rows is the frame's ornament reprinted                  down the side",
+                sp.title, sp.release,
+            );
+            ran += 1;
+        }
+    }
+    if stories_dir().join(FLANK_SHAPES[0].file).exists() {
+        assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
+    }
+}
+
 // ── 12. Arthur's ProDOS flank — WITHDRAWN, see SQ-0899 ───────────────────────
 //
 // A case stood here asserting that Arthur's ProDOS press has no side columns,
