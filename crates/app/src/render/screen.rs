@@ -1544,9 +1544,14 @@ fn render_node(
                         // frame art ends at native 45 and its status window starts at 46,
                         // three columns the strip's first whole cell does not reach and the
                         // flank's source does. See `clear_text_rows_except_art`.
+                        // …and the PAINT surface is the other half of the oracle: a game
+                        // that draws with `draw_picture` rather than publishing a
+                        // Graphics window has artwork `gfx` cannot see at all (scopa's
+                        // deck cards).
                         v6::clear_text_rows_except_art(
                             &mut canvas,
                             &gfx,
+                            state.v6_paint.borrow().as_deref(),
                             &text_run_tops.iter().map(|&(top, _, _)| top).collect::<Vec<_>>(),
                         );
                         let base = v6_machine_page(state, state.colors.theme.get("upper_window").style);

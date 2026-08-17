@@ -1100,9 +1100,32 @@ pub fn clear_text_columns(canvas: &mut RgbaImage, cols: &[(u32, u32)], rows: (u3
 /// are the frame's, so a flank's ornament cannot be holed — that hole is precisely
 /// what SQ-0894 added the column span to prevent, and gating on the art canvas keeps
 /// the protection without needing the cell rect to be the boundary.
-pub fn clear_text_rows_except_art(canvas: &mut RgbaImage, art: &RgbaImage, rows: &[u16]) {
+///
+/// **`paint` is the other half of that oracle and is not optional.**
+/// [`build_graphics_canvas`] is `blit_chrome_graphics` and nothing else, so it knows
+/// only about art a game published as a `Graphics` window's display list. A game that
+/// DRAWS instead — `draw_picture` into a window, which reaches the ring as the paint
+/// surface [`blit_paint_ground`] lays down (SQ-0706) — has artwork this canvas cannot
+/// see. `stories/scopa.z6` is that game: its start page shows three cards for the
+/// available decks and has **no Graphics window at all**, so its art canvas is empty
+/// while its paint surface carries 28,296 opaque pixels, 8,256 of them on rows
+/// carrying chrome text. Asked of the art canvas alone this carve erased them — the
+/// cards themselves — which is the regression the user caught within the hour. Both
+/// oracles, or a painting game loses its artwork wherever a status run shares a row
+/// with it.
+pub fn clear_text_rows_except_art(
+    canvas: &mut RgbaImage,
+    art: &RgbaImage,
+    paint: Option<&RgbaImage>,
+    rows: &[u16],
+) {
     let (w, h) = (canvas.width(), canvas.height());
-    let is_art = |x: u32, y: u32| x < art.width() && y < art.height() && art.get_pixel(x, y)[3] >= 128;
+    let opaque_in = |c: &RgbaImage, x: u32, y: u32| {
+        x < c.width() && y < c.height() && c.get_pixel(x, y)[3] >= 128
+    };
+    let is_art = |x: u32, y: u32| {
+        opaque_in(art, x, y) || paint.is_some_and(|p| opaque_in(p, x, y))
+    };
     for &top in rows {
         let y0 = top as u32;
         for y in y0..(y0 + FONT_H).min(h) {
@@ -1842,7 +1865,7 @@ mod tests {
                 canvas.put_pixel(x, y, Rgba([80, 80, 80, 255]));
             }
         }
-        clear_text_rows_except_art(&mut canvas, &art, &[0]);
+        clear_text_rows_except_art(&mut canvas, &art, None, &[0]);
         let op = |c: &RgbaImage, x: u32, y: u32| c.get_pixel(x, y)[3] >= 128;
 
         assert!(
@@ -1860,6 +1883,51 @@ mod tests {
         assert!(
             (0..native.0).all(|x| op(&canvas, x, FONT_H + 1) == (x < ART_END || x >= WINDOW_X0)),
             "a row below the carved one is exactly as it was"
+        );
+    }
+
+    /// Artwork the game DREW is spared too, and `build_graphics_canvas` cannot see it
+    /// (SQ-0902).
+    ///
+    /// That canvas is `blit_chrome_graphics` and nothing else, so it knows only about
+    /// art published as a `Graphics` window's display list. `stories/scopa.z6` has NO
+    /// Graphics window at all — its start page draws three cards for the available
+    /// decks with `draw_picture`, which reaches the ring as the paint surface
+    /// (SQ-0706) — so its art canvas is empty while its paint surface carries 28,296
+    /// opaque pixels, 8,256 of them on rows carrying chrome text. Gated on the art
+    /// canvas alone this carve erased the cards.
+    #[test]
+    fn the_carve_spares_artwork_the_game_painted_rather_than_published() {
+        let native = (640u32, 400u32);
+        // No Graphics window: the art canvas is empty, exactly as scopa's is.
+        let art = RgbaImage::new(native.0, native.1);
+        // A painted card, overlapping the first text row.
+        let mut paint = RgbaImage::new(native.0, native.1);
+        for y in 0..40 {
+            for x in 100..180 {
+                paint.put_pixel(x, y, Rgba([200, 30, 30, 255]));
+            }
+        }
+        // The chrome canvas as the ring builds it: paint ground first (SQ-0706), then
+        // a status window rasterised over the rest of the row.
+        let mut canvas = RgbaImage::new(native.0, native.1);
+        blit_paint_ground(&mut canvas, Some(&paint));
+        for y in 0..FONT_H {
+            for x in 0..native.0 {
+                if canvas.get_pixel(x, y)[3] == 0 {
+                    canvas.put_pixel(x, y, Rgba([80, 80, 80, 255]));
+                }
+            }
+        }
+        clear_text_rows_except_art(&mut canvas, &art, Some(&paint), &[0]);
+        let op = |x: u32, y: u32| canvas.get_pixel(x, y)[3] >= 128;
+        assert!(
+            (100..180).all(|x| op(x, 4)),
+            "the painted card survives the carve on a row that also carries chrome text"
+        );
+        assert!(
+            (0..100).all(|x| !op(x, 4)) && (180..native.0).all(|x| !op(x, 4)),
+            "and the rasterised status cells beside it are still cleared"
         );
     }
 
