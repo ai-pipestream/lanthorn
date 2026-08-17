@@ -995,15 +995,29 @@ session-only switch that never touches your saved config:
   tests for two particular shapes had quietly stood in for the one fact that
   mattered. Both shapes are special cases of it, and the general rule moves no other
   title: crisp terminal cells are worth having, but not at the price of the picture.
-  A third way to have no ring: the story window's **own** picture is left out of the
-  band canvas on purpose (it belongs inside the story viewport, blitted there as a
-  float), which is right only while the picture is inside the window it belongs to.
-  fmvpoker breaks that without redrawing anything — choosing *Change Current Bet*
-  hands the read to its bottom panel, so the panel becomes the story window and the
-  window still holding the poker table stops being one. The table then belonged to
-  neither half and was drawn by nobody, and the frame vanished for as long as the
-  player took to type a bet. A picture painting outside its own story window goes to
-  the composite too. No other v6 title's picture ever leaves its story window.
+  **Art the game paints inside its story window now has somewhere to go.** For a
+  long time hybrid's story region was terminal cells and nothing else: a picture
+  drawn into window 0 belonged to neither half of the screen — no band carried it,
+  because the ring is what lies *outside* the story viewport, and no viewport showed
+  it, because a viewport shows text. Prose was drawn straight over artwork the
+  player could not see. The story viewport is now cut from what the art *leaves*:
+  the window is inset past any frame artwork touching its edges, then reduced to the
+  largest rectangle the window's own picture painted no pixel of. Everything outside
+  the viewport already belongs to the ring, so the picture is drawn there, by the
+  same machinery that draws the frame — and where the picture leaves no room for
+  text at all, the whole pane becomes ring and no transcript is drawn on that frame,
+  which is what the game itself intended when it erased the screen, drew, and waited
+  for a keypress. A picture in one corner of the story window costs the prose that
+  corner and nothing else; the rest of the region stays crisp glyphs.
+
+  That capability retired the fourth way a frame could have no ring. fmvpoker used
+  to lose its whole frame for as long as the player took to type a bet: choosing
+  *Change Current Bet* hands the read to its bottom panel, and while babelmap
+  treated that panel as the story window, the window still holding the poker table
+  stopped being one and the table was drawn by nobody. Two separate fixes have since
+  removed that — a display panel the game declares is not its transcript never
+  becomes the story window, and a picture reaching outside its own window now lands
+  in the ring like any other pixel — so the special case for it is gone.
   Not every v6 game *has* a story window to ring, though. scopa's card table
   streams no prose at all — its screen is three grid windows and a table drawn out
   of filled rectangles, with two button labels on top — and a ring around nothing

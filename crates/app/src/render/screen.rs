@@ -4347,6 +4347,58 @@ enum BottomPlan {
 /// The tradeoff is real and deliberate: a frame that stops taking the ring renders
 /// as a pixel image instead of crisp terminal cells. It is still the right trade,
 /// because the alternative for such a frame is not crisper art — it is no art.
+///
+/// ## SQ-0897: the three surviving arms, and why each survives
+///
+/// SQ-0896 gave the ring somewhere to put these pixels — the viewport is cut from
+/// what the art LEAVES, so art the game painted inside window 0 lands in the ring
+/// like any other pixel. That is the precondition for retiring these, and one of
+/// them went (see the SQ-0739 paragraph above). The other three were driven on the
+/// fixtures they were written for and KEPT. Each reason is a measurement, not a
+/// judgement about tidiness.
+///
+/// **`art_paints_anything` (SQ-0725) — kept. The ring reads a title card as a
+/// border rule.** Retiring it moves exactly ONE title: MEASURED with the arm
+/// disabled, `ring_scout --all --no-tap --turns 8`, Arthur's intro plate and
+/// Journey's title fall through to `art_fills_screen` and every fmvpoker frame to
+/// `art_encloses_screen`, so only mysterious01 changes route — and mysterious01 is
+/// the title this arm was written for. What the ring then draws is wrong. Its two
+/// 512x192 cards stack down the left of a 640x400 screen, so the content-carved ring
+/// makes them ONE 79x37 side flank over the whole pane, and a flank goes through the
+/// border-extension recipe: the band log reads `[Art, tiled] source 516x544 native
+/// px` for 384 rows of artwork, i.e. 160 native rows of picture invented below the
+/// second card, drawn across the letterbox margins the Letterbox plan meant to leave
+/// bare. Extending a picture column as though it were a side rule is exactly the
+/// mistake SQ-0819 excluded the Menu plan from `tiled_flanks` to avoid — Journey's
+/// picture column is not a border either. Retiring this arm needs the ring to tell a
+/// picture column from a border column; that is a change to `v6_border` and
+/// `tiled_flanks`, not to this router, and it must land first.
+///
+/// **`art_fills_screen` — kept, and it is not shadowed by the arm above.** It decides
+/// nothing on today's corpus, because every frame whose art fills the screen has that
+/// art on window 0's own plate and the first arm answers for it. But this arm reads
+/// CHROME art too, which the first never looks at, and a full-screen chrome BACKDROP
+/// under a full-screen story window is the one shape SQ-0896 deliberately declines:
+/// its inset floor hands such a window its declared box back rather than let four
+/// converging edges eat a story region, so the viewport is the whole pane, the ring
+/// is empty, and without this arm the backdrop would not be drawn at all. Retiring it
+/// would reintroduce SQ-0570's original symptom on the one shape SQ-0896 does not
+/// cover. Separately, for a full-bleed PLATE there is nothing for the ring to add:
+/// such a frame carries no text to keep crisp (`story_prose_box` returns `None` and
+/// hybrid renders no transcript on it), so the ring would ship the same picture in N
+/// band uploads that raster ships in one image.
+///
+/// **`art_encloses_screen` (SQ-0729) — kept, because it is not only a routing test.**
+/// [`story_window_is_a_canvas`] reuses this exact predicate, deliberately, so the two
+/// cannot drift — and the CANVAS reading of window 0 (its live runs painted at the
+/// coordinates the game's own `set_cursor` named, with no transcript at all) exists
+/// on the raster path alone, in `draw_story_canvas_runs`. Route fmvpoker to the ring
+/// and it gets a scrolling re-render of everything window 0 ever printed, wrapped
+/// into the 594x158 hole in its poker table — which is the reading SQ-0729 measured
+/// as wrong, and how its dealt hand came to overwrite the line the player needs.
+/// Retiring this arm needs the canvas reading on the ring path first.
+///
+/// `picture_takeover_arms_across_the_corpus` pins the census these verdicts rest on.
 fn picture_takeover(
     story: &crate::engine::PositionedWindow,
     chrome: &[&crate::engine::PositionedWindow],
