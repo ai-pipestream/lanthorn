@@ -369,6 +369,32 @@ fn scout(
         println!("      native: declared {sw:?} -> clear ({l},{t},{w},{h})");
     }
 
+    // SQ-0896: the same question asked of an oracle that ALSO carries the story
+    // window's own plate. `build_graphics_canvas` is chrome-only by construction —
+    // `classify_windows` sets a `win == 0` Graphics aside as `story_gfx` so the ring
+    // does not carry it — so art the game painted INSIDE window 0 is invisible to
+    // the clear probe above, and that is the capability gap: hybrid opens its
+    // transcript viewport straight over the plate and never draws a pixel of it.
+    //
+    // The plate is NOT asked for by insetting the edges — `story_clear_native`
+    // cannot see a picture that touches none of them, and cannot see one that
+    // touches all four either (fmvpoker's hollow 640x400 table insets to width 0).
+    // Raster's own composition is the right one and is reused rather than restated:
+    // inset past the FRAME art with the chrome-only oracle above, then ask
+    // `story_prose_box` for the largest rectangle of what is left that the PLATE
+    // painted no pixel of — `None` when the plate owns the screen (SQ-0707), which
+    // for the ring means the whole pane is chrome and no transcript belongs here.
+    let plate = layout.story_gfx.map(|pw| (pw.x_px, pw.y_px, pw.w_px, pw.h_px));
+    let prose = native_clear.and_then(|c| v6::story_prose_box(c, layout.story_gfx));
+    println!(
+        "      plate {plate:?}  ->  prose {prose:?}{}",
+        match (native_clear, prose) {
+            (Some(a), Some(b)) if a == b => "   [no change]",
+            (None, None) => "   [no story window]",
+            _ => "   <-- DIFFERS",
+        }
+    );
+
     // SQ-0892: every chrome run with the numbers the quantization argument turns on
     // — native origin, the sub-cell remainder of its mapped device x, and the cell
     // per-run rounding puts it in. Grouped by native text row, which is the key the
