@@ -464,13 +464,17 @@ fn scout(
                 let px = t.x.max(1) as f32 - 1.0;
                 let dev = (scale.off_x as f32 + px * scale.s) / cw;
                 println!(
-                    "      x={:<4} n={:<3} win_w={:<4}({:>3}%) dev={:<8.3} cell={:<4} {:?}",
+                    "      x={:<4} n={:<3} win_w={:<4}({:>3}%) dev={:<8.3} cell={:<4} \
+                     style={:#06b} fg={:?} bg={:?} {:?}",
                     t.x,
                     t.text.chars().count(),
                     win_w,
                     win_w as u32 * 100 / native.0.max(1) as u32,
                     dev,
                     dev.round() as i32,
+                    t.style,
+                    t.fg,
+                    t.bg,
                     t.text,
                 );
             }

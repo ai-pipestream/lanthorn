@@ -6885,8 +6885,36 @@ fn merge_strip_fragments(row_runs: &[&crate::engine::PxText]) -> Vec<crate::engi
         blank_px = 0;
         group.push(t);
     }
-    out.extend(merge_row_fragments(&group, 4));
-    out.extend(merge_row_fragments(&blanks, 4));
+    // SQ-0900: the blanks still held at the end of the row get the SAME decision an
+    // interior blank gets, rather than being flushed on their own.
+    //
+    // A blank is held back because only the next inked run can say whether it was a
+    // word space or a field gap. A TRAILING blank never gets that run, and emitting
+    // it separately positions it by its own native x through the ring's scale while
+    // the group beside it advances one terminal column per character — two rates that
+    // coincide only where a terminal cell is one native 8px cell (SQ-0892). Shogun's
+    // boot menu is the measured case: `"START the game "` arrives as sixteen
+    // single-character runs at native x 235..347, all `style=0b0001` reverse video
+    // with identical colours and every one abutting, so the fifteen up to `"game"`
+    // merge and the final space does not. At a 129x60 pane the group runs to column
+    // 62 and the loose space lands at column **70** — a lone reverse-video block
+    // stranded eight columns past the item, with the gap widening as the pane grows.
+    // Below scale 1 the same run produced the opposite symptom, landing ON the
+    // group's last cell and erasing the `e` of "game" (SQ-0898, fixed separately by
+    // forbidding a blank to erase a glyph — that fix addresses the COLLISION and this
+    // one the PLACEMENT, and both are wanted).
+    //
+    // Not suppressed, merged: the space keeps painting, still reverse video, still one
+    // cell wide, because Shogun's selection bar IS made of reverse-video blanks and
+    // they are real ink (SQ-0499/SQ-0515). A trailing blank WIDER than one cell is
+    // still a field gap and still keeps its own position, exactly as before.
+    if blank_px > FIELD_GAP_PX {
+        out.extend(merge_row_fragments(&group, 4));
+        out.extend(merge_row_fragments(&blanks, 4));
+    } else {
+        group.extend(blanks.iter().copied());
+        out.extend(merge_row_fragments(&group, 4));
+    }
     out
 }
 
@@ -7151,6 +7179,79 @@ fn place_anchored_row(
 
 #[cfg(test)]
 mod tests {
+
+    // ── merge_strip_fragments, trailing blanks (SQ-0900) ─────────────────────
+
+    /// One reverse-video character run at native `x`, the shape Shogun's boot menu
+    /// emits: `style = 1`, default colours, one 8px cell wide.
+    fn rv(x: u16, s: &str) -> crate::engine::PxText {
+        crate::engine::PxText { y: 337, x, text: s.into(), style: 1, fg: 0, bg: 0 }
+    }
+
+    /// A trailing blank that ABUTS its group joins it, so the group's own advance
+    /// places it (SQ-0900).
+    ///
+    /// A blank is held back because only the next INKED run can say whether it was a
+    /// word space or a field gap. A trailing blank never gets that run, and the old
+    /// flush emitted it alone — positioned by its own native x through the ring's
+    /// scale, while the group beside it advances one terminal column per character.
+    /// The two rates coincide only where a terminal cell is one native 8px cell, so
+    /// the stranded space drifted further out the wider the pane got: MEASURED on
+    /// `stories/shogun-r322-s890706.z6` at a 129x60 pane, `"START the game "` arrives
+    /// as sixteen abutting single-character runs at native x 235..347 and the loose
+    /// space landed at column 70 against the group's last column 62.
+    ///
+    /// Merged, not suppressed — the space is still in the text, still reverse video,
+    /// because the selection bar IS reverse-video blanks (SQ-0499/SQ-0515).
+    #[test]
+    fn a_trailing_blank_that_abuts_its_group_is_placed_by_the_group() {
+        let runs: Vec<crate::engine::PxText> = "START the game "
+            .chars()
+            .enumerate()
+            .map(|(i, c)| rv(235 + 8 * i as u16, &c.to_string()))
+            .collect();
+        let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+        let merged = merge_strip_fragments(&refs);
+        assert_eq!(
+            merged.iter().map(|t| (t.x, t.text.clone())).collect::<Vec<_>>(),
+            vec![(235, "START the game ".to_string())],
+            "the whole item is ONE run at the group's origin — a trailing space emitted \
+             separately is positioned by the scale and strands past the item"
+        );
+        assert_eq!(merged[0].style, 1, "and it is still reverse video");
+    }
+
+    /// A trailing blank WIDER than one cell is a field gap and keeps its own
+    /// position, which is the distinction the held-back blanks exist to make.
+    ///
+    /// Pinned beside the case above because the fix is a decision about these blanks,
+    /// and a fix that merged every trailing blank regardless of width would pass that
+    /// case and quietly fold a right-anchored field onto the left one.
+    #[test]
+    fn a_wide_trailing_blank_is_a_field_gap_and_keeps_its_place() {
+        let runs = [rv(235, "SCORE"), rv(275, "    ")];
+        let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+        let merged = merge_strip_fragments(&refs);
+        assert_eq!(
+            merged.iter().map(|t| (t.x, t.text.clone())).collect::<Vec<_>>(),
+            vec![(235, "SCORE".to_string()), (275, "    ".to_string())],
+            "four blank cells past the group is a field gap, not a word space"
+        );
+    }
+
+    /// An INTERIOR blank was always merged, and still is — this is the behaviour the
+    /// trailing case is being made consistent with, so it is pinned rather than
+    /// assumed.
+    #[test]
+    fn an_interior_word_space_still_merges() {
+        let runs = [rv(235, "the"), rv(259, " "), rv(267, "game")];
+        let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+        assert_eq!(
+            merge_strip_fragments(&refs).iter().map(|t| (t.x, t.text.clone())).collect::<Vec<_>>(),
+            vec![(235, "the game".to_string())],
+        );
+    }
+
     use super::*;
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;

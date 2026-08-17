@@ -334,3 +334,87 @@ fn a_menu_takeover_with_no_art_still_takes_the_cell_path() {
          SQ-0484 put it on — got {path:?}"
     );
 }
+
+// ── 4. No stranded reverse-video block past a menu item (SQ-0900) ───────────
+
+/// The columns a menu row PAINTS are contiguous.
+///
+/// Shogun prints each item through a 1px caret window one glyph at a time, in
+/// reverse video, and finishes with a reverse-video SPACE — so the row's painted
+/// extent is the item plus one cell and nothing else. That space is a held-back
+/// blank: `merge_strip_fragments` cannot tell a word space from a field gap until
+/// the next inked run arrives, and a TRAILING blank never gets one, so it used to be
+/// flushed as its own run. Emitted alone it is positioned by its own native x
+/// through the ring's scale while the group beside it advances one terminal column
+/// per character, and the two rates only agree where a terminal cell is one native
+/// 8px cell — so above 85 columns the space stranded past the item and the gap
+/// widened as the pane grew. MEASURED at 129x60 on release 322: the group ended at
+/// column 62 and the loose space landed at column 70.
+///
+/// Asserted as CONTIGUITY rather than as a column number, because the item's own
+/// width is an implementation detail of the scale and the gap is the defect. Both
+/// `honor_game_colours` modes and every pane in `PANES`, which straddles scale 1 —
+/// below it the same run produced the opposite symptom, landing on the group's last
+/// cell and erasing the `e` of "game" (SQ-0898). A fix for one must not reintroduce
+/// the other, so both regimes are swept here.
+#[test]
+fn a_menu_row_paints_one_contiguous_stretch() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for r in RENDITIONS {
+        let Some(session) = boot(r) else { continue };
+        if !is_menu_screen(&session) {
+            continue;
+        }
+        for &pane in PANES {
+            for honor in [true, false] {
+                let (buf, _) = frame(&session, app::config::V6RenderMode::Hybrid, honor, pane);
+                // The rows carrying the items, found by their own text.
+                for y in 0..pane.1 {
+                    let row: String = (0..pane.0).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                    if !(row.contains("START the") || row.contains("RESTORE a") || row.contains("QUIT the")) {
+                        continue;
+                    }
+                    // The defect is a BLANK glyph carrying a painted background,
+                    // sitting away from the item — the reverse-video space. The
+                    // flank artwork also paints this row on the Amiga and IBM
+                    // presses, but it paints half-block GLYPHS (`▀▄`), so keying on
+                    // a blank symbol separates the bar from the border rather than
+                    // fighting it.
+                    // The reverse-video bar is a MODIFIER, not a colour: measured on
+                    // this row, `bg` is one uniform grey across the whole menu panel
+                    // (columns 8..=91 at a 100x40 pane) and only `Modifier::REVERSED`
+                    // marks the item. Keying on it separates the bar from the flank
+                    // artwork and the panel page in one step.
+                    use ratatui::style::Modifier;
+                    let rv: Vec<u16> = (0..pane.0)
+                        .filter(|&x| buf[(x, y)].modifier.contains(Modifier::REVERSED))
+                        .collect();
+                    // Only the SELECTED item carries the bar; the other two rows have
+                    // no reversed cells at all and are vacuously fine.
+                    if rv.is_empty() {
+                        continue;
+                    }
+                    let (first, last) = (rv[0], rv[rv.len() - 1]);
+                    assert_eq!(
+                        rv.len() as u16,
+                        last - first + 1,
+                        "{} [release {}] at {}x{}, honor={honor}, row {y}: the reverse-video \
+                         columns are {rv:?} — not one contiguous bar from {first} to {last}. The \
+                         hole then a lone reversed cell is the item's trailing space placed by \
+                         its own native x instead of by the group it belongs to (SQ-0900).\n \
+                         row: {row:?}",
+                        r.file,
+                        r.release,
+                        pane.0,
+                        pane.1,
+                    );
+                    ran += 1;
+                }
+            }
+        }
+    }
+    if stories_dir().join(RENDITIONS[1].file).exists() {
+        assert!(ran > 0, "the fixtures are present but no menu row was found — check the premise");
+    }
+}
