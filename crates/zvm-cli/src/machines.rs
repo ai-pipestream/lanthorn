@@ -148,6 +148,27 @@ const ABSENT: &str = "  1   what declining a number already falls through to; wh
   11  no fixture and no sourced constant; anything here would be guesswork.
 ";
 
+/// The process-wide palette, as a lock the TESTS take.
+///
+/// [`swatch`] borrows `zvm::screen::set_palette` per row and hands it straight back,
+/// which its own doc argues is safe because "nothing else is running: `--machines`
+/// prints and exits before a story is read". True of the binary; **false of the test
+/// harness**. `cargo test` runs every test in one process on many threads, so a test
+/// resolving a palette-dependent colour can read the table's borrowed palette instead
+/// of its own — measured as `#737373` where §8.3.1's medium grey is `#8C8C8C`, which
+/// is the Amiga's value for the same number.
+///
+/// This is why CI failed where the local gate did not: `cargo nextest run` gives every
+/// test its own PROCESS, so no test can see another's global state and the race is
+/// structurally invisible to it. CI runs `cargo test`. Both are right about their own
+/// model; a process-global needs a lock to be safe under either.
+///
+/// Held by every test that WRITES the palette — which is every test calling [`table`]
+/// or [`swatch`], not only the one that calls `set_palette` outright — and by every
+/// test that READS a palette-resolved colour (`screen.rs`'s two colour cases).
+#[cfg(test)]
+pub(crate) static PALETTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +176,7 @@ mod tests {
     /// Every modelled machine appears, with its number and its name.
     #[test]
     fn the_table_lists_every_machine_zvm_models() {
+        let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
         let t = table();
         for m in MACHINES {
             assert!(t.contains(m.name), "{} is missing from the table", m.name);
@@ -179,6 +201,7 @@ mod tests {
     /// global pens, and the IBM PC is the only one that declines a colour pair.
     #[test]
     fn every_member_of_the_profile_reaches_the_output() {
+        let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
         let t = table();
         let row = |name: &str| {
             t.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("no {name} row")).to_string()
@@ -213,6 +236,7 @@ mod tests {
     /// and the Amiga's page comes back `#5A5A5A`.
     #[test]
     fn each_row_resolves_its_colours_through_its_own_palette() {
+        let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(swatch(12, Palette::Standard), "#5A5A5A", "§8.3.1's dark grey");
         assert_eq!(swatch(12, Palette::Amiga), "#424242", "the Amiga's own");
         assert_eq!(swatch(9, Palette::Standard), swatch(9, Palette::Amiga), "…and 9 agrees");
@@ -225,6 +249,7 @@ mod tests {
     /// Borrowing the process palette to resolve a row hands it straight back.
     #[test]
     fn printing_the_table_leaves_the_active_palette_where_it_found_it() {
+        let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
         zvm::screen::set_palette(Palette::Amiga);
         let _ = table();
         assert_eq!(zvm::screen::palette(), Palette::Amiga);
@@ -236,6 +261,7 @@ mod tests {
     /// The declines are printed too, and are exactly the numbers with no row.
     #[test]
     fn the_numbers_with_no_row_are_named_and_argued() {
+        let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
         let t = table();
         for (n, name) in [(1u8, "DECSystem-20"), (8, "Commodore 64"), (11, "Tandy Color")] {
             assert!(t.contains(&format!("{n} ({name})")), "{name} must be listed as absent");

@@ -59,7 +59,7 @@ use app::session::{GameSession, InputKind};
 
 /// `zvm::screen::set_palette` is process-global (an Amiga medium loads the Amiga
 /// palette), so no two cases here may boot side by side.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The build the report is about: the Amiga release floppy.
 const AMIGA_RELEASE: &str = "James Clavell's Shogun.adf";

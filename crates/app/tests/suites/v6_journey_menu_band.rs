@@ -53,7 +53,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global, so no two cases here may boot at once.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// A rect as `/dump-windows` records it: `(x, y, w, h)`.
 type Quad = (u16, u16, u16, u16);

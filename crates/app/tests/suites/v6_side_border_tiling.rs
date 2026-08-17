@@ -64,7 +64,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global (an Amiga medium loads the
 /// Amiga palette), so no two cases here may boot at once.
-static PALETTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// One border specimen: the exact build it was measured on, and the layout its
 /// flanks must be recognised as.

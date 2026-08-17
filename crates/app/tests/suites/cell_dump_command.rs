@@ -37,7 +37,7 @@ use ratatui::style::Color;
 
 /// `zvm::screen::set_palette` is process-global, so two profiles must not boot side
 /// by side.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The pane the capture is taken at.
 const PANE: Rect = Rect { x: 0, y: 0, width: 115, height: 61 };

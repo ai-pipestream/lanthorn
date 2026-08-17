@@ -61,7 +61,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global (a profile's colour numbers resolve
 /// through it), so a case that boots one profile must not run beside the other.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga release floppy the report was filed against — release 295 / serial
 /// 890321, a DIFFERENT BUILD from the bare story file below.

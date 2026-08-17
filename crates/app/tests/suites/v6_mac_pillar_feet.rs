@@ -51,7 +51,7 @@ const RELEASE: u16 = 296;
 const SERIAL: &[u8] = b"881019";
 
 /// `zvm::screen::set_palette` is process-global, so no two cases boot at once.
-static PALETTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 fn mac_disk() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/Zork Zero Disk.image");

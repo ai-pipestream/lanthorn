@@ -37,7 +37,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global, so profile-booting cases serialise.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 fn palette_lock() -> MutexGuard<'static, ()> {
     PALETTE.lock().unwrap_or_else(|e| e.into_inner())

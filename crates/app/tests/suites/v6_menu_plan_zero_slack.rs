@@ -58,7 +58,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global (an Amiga medium loads the Amiga
 /// palette), so no two cases here may boot at once.
-static PALETTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The kitty-ish font cell the sweep runs at. `Picker::halfblocks()` reports a 1x2
 /// cell — a layout regime that reproduces no scale defect at all (the SQ-0548

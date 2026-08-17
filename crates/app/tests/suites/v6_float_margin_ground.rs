@@ -51,7 +51,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global, so two profiles must not boot
 /// side by side (nextest gives each test its own process; `cargo test` does not).
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga release floppy the defect was reported on.
 const AMIGA_RELEASE: &str = "Zork Zero - The Revenge of Megaboz.adf";

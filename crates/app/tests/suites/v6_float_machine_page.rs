@@ -69,7 +69,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global, so two profiles must not boot
 /// side by side (nextest gives each test its own process; `cargo test` does not).
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Macintosh release disk the defect was reported on: Zork Zero r296/881019.
 const MAC_DISK: &str = "Zork Zero Disk.image";

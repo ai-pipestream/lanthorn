@@ -46,7 +46,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global, so these cases serialise against each
 /// other exactly as the other Journey suites do.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga floppy, and the build it must be.
 const FIXTURE: &str = "Journey - The Quest Begins.adf";

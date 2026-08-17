@@ -54,7 +54,7 @@ use app::session::{GameSession, InputKind};
 
 /// `zvm::screen::set_palette` is process-global, so no two cases here may boot
 /// at once. Same guard, same reason, as `real_media_releases.rs`.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The compilation *Beyond Zork* is on, and which release it must be. Opening
 /// this disk gives you Beyond Zork because `BEYZORK.T` is 262144 bytes against

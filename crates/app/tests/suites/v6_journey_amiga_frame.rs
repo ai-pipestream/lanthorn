@@ -58,7 +58,7 @@ use ratatui::layout::Rect;
 /// `zvm::screen::set_palette` is process-global (the profile's colour numbers
 /// resolve through it), so a case that boots one profile must not run beside a
 /// case that boots the other.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// Pane widths swept by every case: the game's own 80 columns, where the cell
 /// path's 1:1 chrome and the proportional transcript happen to agree, and five

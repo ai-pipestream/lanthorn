@@ -51,7 +51,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global, so no two renditions may boot at
 /// once (the same lock `v6_shogun_menu_ground` takes, for the same reason).
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The five-volume 5.25-inch ProDOS press, named by the exact build it carries.
 const APPLE: (&str, u16, &str) = ("shogun_s1.dsk", 311, "890510");

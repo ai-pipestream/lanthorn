@@ -56,7 +56,7 @@ use app::session::{GameSession, InputKind, TurnResult};
 
 /// `zvm::screen::set_palette` is process-global, so no two renditions may boot at
 /// once (shared with the other Shogun suites' reasoning).
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 struct Rendition {
     file: &'static str,

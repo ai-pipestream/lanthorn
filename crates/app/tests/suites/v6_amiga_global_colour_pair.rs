@@ -68,7 +68,7 @@ use zvm::screen::ZColour;
 /// `zvm::screen::set_palette` is process-global (the profile's colour numbers
 /// resolve through it), so a case that boots one profile must not run beside a
 /// case that boots the other.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")

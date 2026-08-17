@@ -41,7 +41,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global, so the releases must not boot side
 /// by side.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga release, still on its release floppy — r295/890321, and the build the
 /// report is about. `InterpreterProfile::resolve` reads the medium, so this is a

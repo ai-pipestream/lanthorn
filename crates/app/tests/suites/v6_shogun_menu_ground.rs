@@ -48,7 +48,7 @@ use ratatui::layout::Rect;
 
 /// `zvm::screen::set_palette` is process-global (an Amiga medium loads the Amiga
 /// palette), so no two renditions may boot at once.
-static PALETTE: Mutex<()> = Mutex::new(());
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// One press of Shogun, by the exact build it carries.
 struct Rendition {
