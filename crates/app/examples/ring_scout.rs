@@ -52,6 +52,11 @@
 //! gameplay is reached (Shogun's credits/menu is one tap in); `--no-tap` reports the
 //! boot frame; `--turns N` then plays N turns, reporting the viewport at each.
 //!
+//! `--cmd <text>` is the LINE submitted by each `--turns` step, default `look`. A
+//! frame is a fixture and some of them are only reachable by a specific command —
+//! Zork Zero's full-screen map is `--turns 1 --cmd map`, and driving blank lines
+//! reaches an intro card and often nothing else (CLAUDE.md).
+//!
 //! `--no-game-colours` renders `--bands` with `honor_game_colours` off. The two modes
 //! are separate baselines and always have been (CLAUDE.md), and the ring is not the
 //! same picture in both: honouring the game's colours floods every window's PAGE, and
@@ -90,6 +95,7 @@ fn main() {
     let mut bands = false;
     let mut keys_override: Option<String> = None;
     let mut taps: Option<usize> = None;
+    let mut cmd: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -110,6 +116,10 @@ fn main() {
                 if let Some(v) = args.get(i + 1) {
                     taps = v.parse().ok();
                 }
+                i += 1;
+            }
+            "--cmd" => {
+                cmd = args.get(i + 1).cloned();
                 i += 1;
             }
             "--turns" => {
@@ -156,7 +166,7 @@ fn main() {
 
     for (path, keys) in targets {
         println!("═══ {path}");
-        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, bands, taps, honor_colours) {
+        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, bands, taps, honor_colours, cmd.as_deref()) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
@@ -207,6 +217,7 @@ fn scout(
     want_bands: bool,
     taps: Option<usize>,
     honor_colours: bool,
+    cmd: Option<&str>,
 ) -> Result<(), String> {
     // Disk images (.adf/.po/.2mg/.dsk) are mounted, not read — a medium carries a
     // different RELEASE, not the same story on other media (CLAUDE.md). The mount's
@@ -303,7 +314,7 @@ fn scout(
     for t in 0..=turns {
         if t > 0 {
             match s.pending_input() {
-                InputKind::Line => { let _ = s.submit("look"); }
+                InputKind::Line => { let _ = s.submit(cmd.unwrap_or("look")); }
                 InputKind::Char => { let _ = s.submit_char(13); }
                 InputKind::Event => { let _ = s.submit(""); }
             }
@@ -319,13 +330,24 @@ fn scout(
         let g = v6::build_graphics_canvas(&lay.chrome, nat);
         let vp_clear = clear_viewport_cells(lay.story, &g, &sc, pane_cells, cell_px);
         {
+            // SQ-0897: the routing arm per FRAME, not just for the final one — a
+            // hatch's reachability is a property of the frames a title passes
+            // through, and a title is on the ring at one turn and off it at the
+            // next (Arthur alternates plate/prose screens through his whole intro).
+            let arm = lay.story.and_then(|w| {
+                app::render::screen::picture_takeover_reason(w, &lay.chrome, lay.story_gfx, nat)
+            });
+            let prose = v6::story_clear_native(lay.story, &g)
+                .and_then(|c| v6::story_prose_box(c, lay.story_gfx));
             println!(
-                "  turn {t}: {} box {}x{}@({},{}) content {}x{}@({},{}); win0 {:?} -> clear {:?}",
+                "  turn {t}: {} box {}x{}@({},{}) content {}x{}@({},{}); win0 {:?} -> clear {:?} prose {:?} [{}]",
                 if vp_box == vp_clear { "same  " } else { "DIFFERS" },
                 vp_box.width, vp_box.height, vp_box.x, vp_box.y,
                 vp_clear.width, vp_clear.height, vp_clear.x, vp_clear.y,
                 lay.story.map(|w| (w.x_px, w.y_px, w.w_px, w.h_px)),
                 v6::story_clear_native(lay.story, &g),
+                prose,
+                arm.unwrap_or("ring"),
             );
         }
     }
@@ -368,6 +390,47 @@ fn scout(
         let sw = layout.story.map(|s| (s.x_px, s.y_px, s.w_px, s.h_px));
         println!("      native: declared {sw:?} -> clear ({l},{t},{w},{h})");
     }
+
+    // SQ-0896: the same question asked of an oracle that ALSO carries the story
+    // window's own plate. `build_graphics_canvas` is chrome-only by construction —
+    // `classify_windows` sets a `win == 0` Graphics aside as `story_gfx` so the ring
+    // does not carry it — so art the game painted INSIDE window 0 is invisible to
+    // the clear probe above, and that is the capability gap: hybrid opens its
+    // transcript viewport straight over the plate and never draws a pixel of it.
+    //
+    // The plate is NOT asked for by insetting the edges — `story_clear_native`
+    // cannot see a picture that touches none of them, and cannot see one that
+    // touches all four either (fmvpoker's hollow 640x400 table insets to width 0).
+    // Raster's own composition is the right one and is reused rather than restated:
+    // inset past the FRAME art with the chrome-only oracle above, then ask
+    // `story_prose_box` for the largest rectangle of what is left that the PLATE
+    // painted no pixel of — `None` when the plate owns the screen (SQ-0707), which
+    // for the ring means the whole pane is chrome and no transcript belongs here.
+    let plate = layout.story_gfx.map(|pw| (pw.x_px, pw.y_px, pw.w_px, pw.h_px));
+    let prose = native_clear.and_then(|c| v6::story_prose_box(c, layout.story_gfx));
+    println!(
+        "      plate {plate:?}  ->  prose {prose:?}{}",
+        match (native_clear, prose) {
+            (Some(a), Some(b)) if a == b => "   [no change]",
+            (None, None) => "   [no story window]",
+            _ => "   <-- DIFFERS",
+        }
+    );
+
+    // SQ-0897: and WHICH `picture_takeover` hatch, if any, keeps this frame off the
+    // ring. Retiring them one at a time needs the arm named, not a boolean — the
+    // four are OR'd over one frame and `art_paints_anything` subsumes the two shapes
+    // below it, so "the gate is closed" says nothing about which arm shut it.
+    let takeover = layout.story.and_then(|s| {
+        app::render::screen::picture_takeover_reason(s, &layout.chrome, layout.story_gfx, native)
+    });
+    println!(
+        "      picture_takeover: {}",
+        match takeover {
+            Some(arm) => format!("{arm}  -->  RASTER (the ring never runs on this frame)"),
+            None => "none  -->  the ring".to_string(),
+        }
+    );
 
     // SQ-0892: every chrome run with the numbers the quantization argument turns on
     // — native origin, the sub-cell remainder of its mapped device x, and the cell

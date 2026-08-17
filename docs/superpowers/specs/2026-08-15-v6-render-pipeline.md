@@ -688,3 +688,55 @@ is why the flank has no representation of its own, why four separate escape hatc
 "pixels the ring cannot hold", why a sixty-line walk is needed to give one row back to a flank,
 and why the same column is drawn by two images at three magnifications with half a pixel of shear
 between them.
+
+---
+
+## 8. Addendum, 2026-08-16 — what SQ-0896 and SQ-0897 changed
+
+The body above is left exactly as written; this records where it has stopped being
+true, so a reader is not sent to the old answer.
+
+**§3(b) — "available but unused" is now "used".** Hybrid derives its story viewport
+from `story_text_native` (`v6_layout.rs`), which is `story_clear_native` past the
+frame art followed by `story_prose_box` for what window 0's own plate leaves. The
+oracle question §3(b) flagged is settled the way raster settles it: the inset is
+measured against the ART-ONLY chrome canvas, and the plate is measured separately by
+the largest-free-rectangle sweep, never fed to the inset. That split is not
+cosmetic — MEASURED, fmvpoker's hollow 640x400 table insets to `(320,54,0,322)`,
+width zero, while the sweep finds the `(22,234,594,158)` hole the game prints in;
+and Arthur's centred 584x392 plate touches no edge at all, so only the sweep sees it.
+
+One deliberate limit, which §3(b) did not anticipate: the inset is **advisory**. An
+inset leaving less than one 8x16 text cell is discarded and the window keeps its
+declared box, because four edges converging on nothing is a BACKDROP swallowing the
+window rather than a measurement of the text region. Raster's own floor, reused.
+
+**§4's judgement on `picture_takeover` — one of four retired, three kept.** The
+judgement that all four are one statement was right about the *statement* and wrong
+about the *arms*. `story_plate_escapes_story_window` is gone (SQ-0746 removed its
+premise, SQ-0896 its need). The other three were each disabled and driven:
+
+- `art_paints_anything` — kept. Disabling it moves mysterious01 alone, and the ring
+  reads its two 512x192 title cards as one 79x37 side FLANK and runs them through the
+  border-extension recipe (`[Art, tiled] source 516x544 native px` for 384 rows of
+  art). §5.3's warning about a picture column being treated as a border, one title over.
+- `art_fills_screen` — kept. It is the only arm reading CHROME art on a frame the
+  advisory-inset floor hands its declared box back to, i.e. a full-screen backdrop
+  under a full-screen story window. Nothing else would draw it.
+- `art_encloses_screen` — kept. `story_window_is_a_canvas` reuses it, and the canvas
+  reading of window 0 lives on the raster path alone.
+
+**§6, finding 1 is void twice over.** `story_viewport` was deleted by SQ-0894, and
+the shrink-until-clear step it stood for is now live in hybrid through
+`story_text_native`.
+
+**New instrument.** `picture_takeover_reason` names the arm that fired, `ring_scout`
+prints it per frame, and `picture_takeover_arms_across_the_corpus` pins the census.
+Four OR'd predicates cannot be audited with a boolean: they are tried in order, first
+match wins, and §4's own reading of them as interchangeable is what that hides.
+
+**Unmeasured, and named so.** Zork Zero's `map` — §1's opening example and one of
+SQ-0896's acceptance frames — could not be driven headlessly: `--turns 1 --cmd map`
+leaves window 0 at its ordinary `(86,78,468,320)` on release 393, so whatever reaches
+the full-screen map takeover is further into the game than a scout can walk. Every
+claim above about that frame is inference from the code, not measurement.

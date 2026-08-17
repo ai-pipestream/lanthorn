@@ -1467,27 +1467,100 @@ pub fn story_clear_native(
 // call — is untouched. Reinstate this wrapper from the commit that removed it if
 // hybrid ever needs the cell-space answer.
 
+/// The NATIVE rect hybrid cuts its story viewport out of — the story window
+/// reduced to what the ART leaves it (SQ-0896).
+///
+/// This is step (b) of the user's ordering — *"determine the valid text region from
+/// what the panels leave"* — for the HYBRID path, and it is raster's own two-step
+/// composition rather than a new rule:
+///
+/// 1. [`story_clear_native`] insets the window edge by edge past the FRAME art. Its
+///    oracle is `frame_art`, which must be the art-only chrome canvas
+///    ([`build_graphics_canvas`]) and not the full chrome canvas — rasterised glyphs
+///    are opaque too, and measured against them Shogun's declared 548x64 box comes
+///    back 548x16 (SQ-0728).
+/// 2. [`story_prose_box`] then takes the largest rectangle of what is left that the
+///    story window's OWN plate painted no pixel of. Edge insetting cannot do this
+///    job: a centred plate touches no edge, and fmvpoker's hollow 640x400 table
+///    touches all four and insets to width 0 — MEASURED, `clear (320,54,0,322)`.
+///
+/// The inset is ADVISORY and the plate is AUTHORITATIVE, and the floor between them
+/// is raster's own (`w >= FONT_W && h >= FONT_H`, one full text cell — `screen.rs`
+/// applies it to the same call). An inset that leaves less than one cell is not a
+/// measurement of the text region: it is the frame art being a BACKDROP rather than
+/// a border, and the four edges converging on nothing from all sides at once.
+/// MEASURED on `hybrid_v6_model` — a 320x200 fully opaque chrome window with window
+/// 0 at (43,39,234,160) — where the interleaved inset runs to width 0 and would take
+/// a story region hybrid has drawn prose into since Lane H. Such a window keeps its
+/// declared box, exactly as it does today.
+///
+/// `None` means the PLATE owns the screen and no prose belongs on this frame at all
+/// (SQ-0707: the game erases, draws and waits on a `read_char`, so the narration is
+/// its own picture-less screen). For the ring that means the whole pane is chrome:
+/// there is no viewport to carve around, so `pane − viewport` is the pane.
+///
+/// Why this is the capability hybrid was missing: `classify_windows` sets a `win == 0`
+/// Graphics aside as `story_gfx` precisely so the chrome ring does NOT carry it, and
+/// hybrid then opened its transcript viewport over the raw window box — straight over
+/// the plate, which no band covered and no viewport could show. Deriving the viewport
+/// from what the art leaves puts that art OUTSIDE the viewport, and everything outside
+/// the viewport is already the ring's, drawn by machinery that has worked since
+/// SQ-0505. Nothing new draws pixels; the ring simply gets given the ones it was
+/// structurally denied.
+pub fn story_text_native(
+    story: Option<&PositionedWindow>,
+    frame_art: &RgbaImage,
+    story_gfx: Option<&PositionedWindow>,
+) -> Option<(u32, u32, u32, u32)> {
+    let s = story?;
+    let declared = (s.x_px as u32, s.y_px as u32, s.w_px as u32, s.h_px as u32);
+    let inset = story_clear_native(story, frame_art)
+        .filter(|&(_, _, w, h)| w >= FONT_W && h >= FONT_H)
+        .unwrap_or(declared);
+    story_prose_box(inset, story_gfx)
+}
+
 /// The story viewport cell rect (relative to the pane's top-left cell) for the
 /// HYBRID render mode: the win0 box (`story` x_px/y_px/w_px/h_px, native game
 /// pixels) mapped through the letterbox [`Scale`] to device pixels, then quantized
 /// to whole cells rounding INWARD (ceil the top-left, floor the bottom-right) so
-/// no surrounding chrome cell overlaps the terminal story region. Unlike
-/// [`story_viewport`], this does NOT inset around opaque chrome pixels — the raw
-/// window box is the viewport, and the chrome ring is drawn around it. Falls back
-/// to the full pane when there is no story window.
+/// no surrounding chrome cell overlaps the terminal story region. This does NOT
+/// inset around opaque chrome pixels — see [`story_text_native`], which is what the
+/// ring feeds [`native_viewport_box`] with. Falls back to the full pane when there
+/// is no story window.
 pub fn story_viewport_box(
     story: Option<&PositionedWindow>,
     scale: &Scale,
     pane_cells: (u16, u16),
     cell_px: (u16, u16),
 ) -> ratatui::layout::Rect {
-    let Some(story) = story else {
+    native_viewport_box(
+        story.map(|s| (s.x_px as u32, s.y_px as u32, s.w_px as u32, s.h_px as u32)),
+        scale,
+        pane_cells,
+        cell_px,
+    )
+}
+
+/// [`story_viewport_box`] for a native rect that is not a window's own box — the
+/// text region [`story_text_native`] derived from what the art leaves (SQ-0896).
+///
+/// Quantizes exactly as the window-box form does, because it IS the same step: the
+/// only thing that changed is which native rectangle the terminal viewport is cut
+/// from. `None` falls back to the full pane, matching "no story window".
+pub fn native_viewport_box(
+    rect: Option<(u32, u32, u32, u32)>,
+    scale: &Scale,
+    pane_cells: (u16, u16),
+    cell_px: (u16, u16),
+) -> ratatui::layout::Rect {
+    let Some((rx, ry, rw, rh)) = rect else {
         return ratatui::layout::Rect { x: 0, y: 0, width: pane_cells.0, height: pane_cells.1 };
     };
-    let left = story.x_px as f32;
-    let top = story.y_px as f32;
-    let right = (story.x_px as u32 + story.w_px as u32) as f32;
-    let bottom = (story.y_px as u32 + story.h_px as u32) as f32;
+    let left = rx as f32;
+    let top = ry as f32;
+    let right = (rx + rw) as f32;
+    let bottom = (ry + rh) as f32;
 
     let dev_left = scale.off_x as f32 + left * scale.s;
     let dev_top = scale.off_y as f32 + top * scale.s;
@@ -1783,6 +1856,141 @@ mod tests {
             node: WinNode::Graphics(GraphicsWindow { win: 0, canvas, version: 0, upscale: false }),
         };
         assert_eq!(story_prose_box((0, 0, 640, 400), Some(&plate)), Some((0, 0, 640, 400)));
+    }
+
+    // ── story_text_native (SQ-0896) ──────────────────────────────────────────
+
+    /// A story window at a native box, for the clear/prose composition.
+    fn story_box(x: u16, y: u16, w: u16, h: u16) -> PositionedWindow {
+        PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w, h_px: h,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        }
+    }
+
+    /// A native canvas with `rect` painted opaque, standing in for frame art.
+    fn art_canvas(native: (u32, u32), rect: (u32, u32, u32, u32)) -> RgbaImage {
+        let mut c = RgbaImage::new(native.0, native.1);
+        for y in rect.1..(rect.1 + rect.3).min(native.1) {
+            for x in rect.0..(rect.0 + rect.2).min(native.0) {
+                c.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+            }
+        }
+        c
+    }
+
+    /// The no-art case, which is every corpus frame that reaches the ring today:
+    /// nothing to inset past and no plate, so the derived rect IS the declared
+    /// window box and the hybrid viewport does not move.
+    #[test]
+    fn story_text_native_is_the_declared_box_when_no_art_touches_it() {
+        let story = story_box(86, 78, 468, 320);
+        let empty = RgbaImage::new(640, 400);
+        assert_eq!(story_text_native(Some(&story), &empty, None), Some((86, 78, 468, 320)));
+    }
+
+    /// Frame art overlapping the window's top edge insets it, exactly as raster's
+    /// `story_clear_native` call does — this is the step the ring never took.
+    ///
+    /// The side columns come in too, and that is [`story_clear_native`]'s documented
+    /// INTERLEAVED inset rather than a surprise: each edge advances one pixel per
+    /// round, so while the top is still walking down through a 32-row banner the left
+    /// and right edges are walking inward through the same banner's own row range.
+    /// They stop the round the top clears it. Pinned here because hybrid now shares
+    /// the rule with raster, and a full-width banner OVERLAPPING window 0 would cost
+    /// the prose 31 columns a side — no corpus frame does that (every v6 title places
+    /// window 0 to fit its own frame; SQ-0894 measured clear == declared on all of
+    /// them), but the next one that does will land here first.
+    #[test]
+    fn story_text_native_insets_past_frame_art_on_an_edge() {
+        let story = story_box(0, 0, 640, 400);
+        let banner = art_canvas((640, 400), (0, 0, 640, 32));
+        assert_eq!(story_text_native(Some(&story), &banner, None), Some((31, 32, 578, 368)));
+    }
+
+    /// The half edge insetting cannot reach: a plate CENTRED in the window touches
+    /// no edge, so `story_clear_native` returns the whole box and only
+    /// `story_prose_box` can see it. Arthur's intro geometry — the plate wins.
+    #[test]
+    fn story_text_native_yields_to_a_centred_plate_edge_insetting_cannot_see() {
+        let story = story_box(0, 0, 640, 400);
+        let empty = RgbaImage::new(640, 400);
+        let plate = plate_at(28, 4, 584, 392);
+        assert_eq!(
+            story_clear_native(Some(&story), &empty),
+            Some((0, 0, 640, 400)),
+            "the inset is blind to a plate that touches no edge — that is the gap"
+        );
+        assert_eq!(story_text_native(Some(&story), &empty, Some(&plate)), None);
+    }
+
+    /// …and the other half it cannot reach: a HOLLOW plate touching all four edges
+    /// insets to nothing (fmvpoker's 640x400 poker table — MEASURED as
+    /// `clear (320,54,0,322)` against an oracle carrying the plate), while the
+    /// largest-free-rectangle sweep finds the hole the game prints in. This is why
+    /// the plate belongs to `story_prose_box` and never to the inset's oracle.
+    #[test]
+    fn story_text_native_finds_the_hole_in_a_frame_shaped_plate() {
+        let story = story_box(0, 0, 640, 400);
+        let empty = RgbaImage::new(640, 400);
+        let mut canvas = RgbaImage::from_pixel(640, 400, Rgba([1, 2, 3, 255]));
+        for y in 100..300 {
+            for x in 40..600 {
+                canvas.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+            }
+        }
+        let plate = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(GraphicsWindow {
+                win: 0, canvas: Arc::new(canvas), version: 0, upscale: false,
+            }),
+        };
+        assert_eq!(story_text_native(Some(&story), &empty, Some(&plate)), Some((40, 100, 560, 200)));
+    }
+
+    /// Both steps at once, and in the right order: art insets the window, then the
+    /// plate is measured against what the inset LEFT — not against the raw box. The
+    /// plate's right edge is at native 200 and the prose starts there; the box's own
+    /// right edge is 541 because the banner pulled it in (see the note above), which
+    /// is what "measured against the inset box" means.
+    #[test]
+    fn story_text_native_measures_the_plate_against_the_inset_box() {
+        let story = story_box(0, 0, 640, 400);
+        let banner = art_canvas((640, 400), (0, 0, 640, 100));
+        let plate = plate_at(0, 100, 200, 300);
+        assert_eq!(story_text_native(Some(&story), &banner, Some(&plate)), Some((200, 100, 341, 300)));
+    }
+
+    /// Frame art that swallows the WHOLE window is a backdrop, not a border: the
+    /// interleaved inset converges on nothing, and the window keeps its declared box
+    /// rather than losing a story region hybrid has always drawn prose into. This is
+    /// `hybrid_v6_model`'s geometry — the synthetic frame three render tests are
+    /// built on — and it is what separates the advisory inset from the authoritative
+    /// plate.
+    #[test]
+    fn story_text_native_keeps_the_declared_box_when_art_swallows_the_whole_window() {
+        let story = story_box(43, 39, 234, 160);
+        let solid = art_canvas((320, 200), (0, 0, 320, 200));
+        assert_eq!(
+            story_clear_native(Some(&story), &solid),
+            Some((122, 119, 76, 0)),
+            "the inset converges on a zero-height sliver when every edge is opaque"
+        );
+        assert_eq!(story_text_native(Some(&story), &solid, None), Some((43, 39, 234, 160)));
+    }
+
+    /// `native_viewport_box` quantizes a derived rect exactly as the window-box
+    /// form quantizes a window's own — same step, different rectangle.
+    #[test]
+    fn native_viewport_box_matches_story_viewport_box_on_the_same_rect() {
+        let story = story_box(86, 78, 468, 320);
+        let scale = Scale { s: 1.225, off_x: 0, off_y: 88 };
+        assert_eq!(
+            native_viewport_box(Some((86, 78, 468, 320)), &scale, (98, 37), (8, 18)),
+            story_viewport_box(Some(&story), &scale, (98, 37), (8, 18)),
+        );
     }
 
     #[test]
