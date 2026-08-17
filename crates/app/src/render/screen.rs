@@ -4301,12 +4301,26 @@ enum BottomPlan {
 /// fill the screen, and mysterious01's plate reached neither the right edge nor
 /// (at the time) the top one. That last exception is the SQ-0725 arm below.
 ///
-/// SQ-0739: a third way to have no ring to draw. The ring's bands are cropped from
-/// the CHROME canvas, and the story window's own plate is deliberately not in it —
-/// it belongs to the story and is blitted inside the story viewport instead. That
-/// holds only while the plate is inside the window it belongs to. When it is not,
-/// the escaping art is in neither place: no band carries it and no viewport shows
-/// it. See [`story_plate_escapes_story_window`].
+/// SQ-0739 ADDED A FOURTH ARM AND SQ-0897 RETIRED IT. `story_plate_escapes_story_window`
+/// asked whether the story window's plate painted outside the window it is the plate
+/// OF — the frame where fmvpoker's bottom panel became the window the game read
+/// through while window 0 still held the 640x400 poker table, so the art was in
+/// neither the ring nor the viewport. Two things killed it, and either would have
+/// been enough:
+///
+/// * SQ-0746 removed its premise. Reading through a panel the game declares is NOT
+///   its transcript (attribute 2 clear) never made that panel the story window, so
+///   window 0 never stops being it and the plate never escapes anything. The frame
+///   is carried by the enclosure arm below, exactly as at the menu.
+/// * SQ-0896 removed its need. The ring's canvas and its art oracle now carry the
+///   story window's own plate at its own native origin, wherever that is, and the
+///   viewport is cut from what the plate LEAVES — so a plate reaching outside the
+///   window lands in the ring like any other pixel.
+///
+/// MEASURED before removal, `ring_scout --all --no-tap --turns 8` at a 98x37 pane:
+/// the predicate answered false on every frame of all eight titles. Its own corpus
+/// test (`no_corpus_plate_escapes_its_story_window`) had asserted exactly that since
+/// SQ-0746, and the bet-panel case it was written for asserted it on that very frame.
 ///
 /// SQ-0725 GENERALISED THE FIRST TWO ARMS INTO ONE. Both were proxies for a fact
 /// the premise already states outright: `blit_story_gfx` is reachable from the
@@ -4339,11 +4353,39 @@ fn picture_takeover(
     story_gfx: Option<&crate::engine::PositionedWindow>,
     native: (u16, u16),
 ) -> bool {
-    (story_covers_screen(story, native)
-        && (art_paints_anything(story_gfx, native)
-            || art_fills_screen(chrome, story_gfx, native)
-            || art_encloses_screen(chrome, story_gfx, native)))
-        || story_plate_escapes_story_window(story, story_gfx)
+    picture_takeover_reason(story, chrome, story_gfx, native).is_some()
+}
+
+/// WHICH hatch fires, for instruments and tests (SQ-0897).
+///
+/// Retiring these one at a time needs a way to say "this frame is here because of
+/// THIS arm", and a boolean cannot. Four OR'd predicates over the same frame are
+/// not four separate facts on the corpus — `art_paints_anything` subsumes both of
+/// the shapes below it — so "the gate is closed" says nothing about which arm shut
+/// it. Ordered as the boolean evaluates, first match wins, so the name is the arm
+/// that actually decided.
+///
+/// `ring_scout` prints this on every frame it scouts. Reachability is not something
+/// to infer from a green gate: SQ-0894 disabled an arm, passed all 5553 tests, and
+/// the arm was live — the corpus simply had no fixture that reached it.
+pub fn picture_takeover_reason(
+    story: &crate::engine::PositionedWindow,
+    chrome: &[&crate::engine::PositionedWindow],
+    story_gfx: Option<&crate::engine::PositionedWindow>,
+    native: (u16, u16),
+) -> Option<&'static str> {
+    if story_covers_screen(story, native) {
+        if art_paints_anything(story_gfx, native) {
+            return Some("art_paints_anything");
+        }
+        if art_fills_screen(chrome, story_gfx, native) {
+            return Some("art_fills_screen");
+        }
+        if art_encloses_screen(chrome, story_gfx, native) {
+            return Some("art_encloses_screen");
+        }
+    }
+    None
 }
 
 /// Does the story window's own plate paint anything at all (SQ-0725)?
@@ -4363,52 +4405,6 @@ fn art_paints_anything(
         (0..N).any(|ix| {
             let x = native.0 as u32 * (2 * ix + 1) / (2 * N);
             painted(x, y)
-        })
-    })
-}
-
-/// SQ-0739: does the STORY window's own plate paint outside the story window's box?
-///
-/// Hybrid splits the screen in two: the chrome ring carries every pixel outside the
-/// story viewport, and the story viewport is terminal cells with the story window's
-/// own plate blitted into it as a float. `classify_windows` sets that plate aside as
-/// `story_gfx` precisely so the ring does NOT carry it — which is right exactly as
-/// long as the plate lives inside the window it is the plate OF.
-///
-/// fmvpoker breaks that assumption without redrawing anything. Choosing "Change
-/// Current Bet" makes its 594x156 bottom panel the window the game reads input
-/// through, so the panel becomes the primary Buffer and window 0 — still holding
-/// the 640x400 poker table drawn into it — stops being the story window. The table
-/// did not move; the story window did. The plate then paints across the whole
-/// screen while the story viewport is one panel at the bottom, so the frame belongs
-/// to neither half: `build_chrome_canvas` never sees it (it is not chrome) and the
-/// viewport is far too small to show it. The ring came up with a canvas of ZERO
-/// opaque pixels and the player's frame vanished for the duration of the bet — the
-/// same "frame falls away, just text" symptom this function was written for.
-///
-/// Cheap first: a plate the story window's box CONTAINS cannot escape it, which is
-/// every corpus frame that has a plate at all (Arthur's intro, Journey's title,
-/// mysterious01 and fmvpoker's own steady state all publish the plate at exactly the
-/// story window's box). Only when the boxes disagree is the alpha sampled, and then
-/// on a coarse grid — a plate that reaches outside reaches by whole bands, never by
-/// a stray pixel.
-pub fn story_plate_escapes_story_window(
-    story: &crate::engine::PositionedWindow,
-    story_gfx: Option<&crate::engine::PositionedWindow>,
-) -> bool {
-    let Some(pw) = story_gfx else { return false };
-    let crate::engine::WinNode::Graphics(gw) = &pw.node else { return false };
-    let (px0, py0) = (pw.x_px as u32, pw.y_px as u32);
-    let (px1, py1) = (px0 + gw.canvas.width(), py0 + gw.canvas.height());
-    let (sx0, sy0) = (story.x_px as u32, story.y_px as u32);
-    let (sx1, sy1) = (sx0 + story.w_px as u32, sy0 + story.h_px as u32);
-    if px0 >= sx0 && py0 >= sy0 && px1 <= sx1 && py1 <= sy1 {
-        return false;
-    }
-    const STEP: usize = 4;
-    (py0..py1).step_by(STEP).any(|y| {
-        (px0..px1).step_by(STEP).any(|x| {
-            (x < sx0 || x >= sx1 || y < sy0 || y >= sy1) && gw.canvas.get_pixel(x - px0, y - py0)[3] >= 128
         })
     })
 }

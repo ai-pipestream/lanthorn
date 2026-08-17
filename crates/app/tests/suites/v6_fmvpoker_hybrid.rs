@@ -61,8 +61,18 @@
 //! With the story viewport reduced to one bottom panel, the escaping art was in
 //! neither half — no band carried it and no viewport showed it — so hybrid built a
 //! ring canvas of ZERO opaque pixels and the player's frame disappeared while they
-//! typed. `fmvpoker_bet_entry_keeps_its_frame` is the guard, and
-//! `no_corpus_plate_escapes_its_story_window` is the corpus half.
+//! typed. `fmvpoker_bet_entry_keeps_its_frame` is the guard.
+//!
+//! **…and the arm that fixed it is gone** (SQ-0897). SQ-0746 removed its premise:
+//! reading through a panel the game declares is NOT its transcript never made that
+//! panel the story window, so window 0 never stops being it and nothing escapes.
+//! SQ-0896 removed its need: the ring's canvas and its art oracle now carry window
+//! 0's plate at its own native origin wherever that is. MEASURED false on every
+//! frame of all eight corpus titles before removal — its own corpus test had
+//! asserted exactly that since SQ-0746. That test is now
+//! `picture_takeover_arms_across_the_corpus`, which records which arm carries each
+//! frame instead of which one does not, because a boolean cannot say why a frame is
+//! where it is when four predicates are OR'd over it.
 //!
 //! `stories/fmvpoker.blb` is a byte-identical copy of `stories/Zork0.blb`: the
 //! original release ships Zork Zero's picture file renamed to FMVPOKER.EG1, so the
@@ -302,10 +312,18 @@ fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
         (0, 0, 640, 400),
         "premise (honor={honor}): the game redrew nothing — the plate has not moved"
     );
-    assert!(
-        !app::render::screen::story_plate_escapes_story_window(story, Some(plate)),
-        "premise (honor={honor}): with the story window where it belongs the plate is inside it \
-         again, so the SQ-0739 escape arm is not what carries this frame"
+    // …so this frame is carried by an arm that asks about the PLATE, not about a
+    // plate that escaped. SQ-0897 retired the escape arm outright: SQ-0746 left it
+    // nothing to catch (the assertion here used to be `!story_plate_escapes_story_window`)
+    // and SQ-0896 left it nothing to do, since the ring's canvas and art oracle now
+    // carry window 0's plate at its own native origin wherever that is. Naming the arm
+    // rather than negating a retired one means a future retirement that moves this
+    // frame fails HERE, with the arm that moved it in the message.
+    assert_eq!(
+        app::render::screen::picture_takeover_reason(story, &layout.chrome, Some(plate), native),
+        Some("art_paints_anything"),
+        "premise (honor={honor}): the bet frame takes the composite because window 0's own \
+         plate paints, which is the same arm that carries the menu"
     );
 
     assert_eq!(
@@ -345,39 +363,69 @@ fn fmvpoker_bet_entry_keeps_its_frame_theme_only() {
     fmvpoker_bet_entry_keeps_its_frame(false);
 }
 
-/// The corpus half of SQ-0739: a story window's plate escaping it is the exception,
-/// not the rule, so the new arm of `picture_takeover` must fire for nobody else.
+/// SQ-0897's central measurement: WHICH `picture_takeover` arm carries each corpus
+/// frame — the census the hatches are retired against, one at a time.
 ///
-/// Every corpus frame that publishes a plate at all publishes it at EXACTLY the story
-/// window's box — Arthur's intro, Journey's title, mysterious01 and fmvpoker's own
-/// steady state — which is the containment the predicate short-circuits on. The rest
-/// have no window-0 graphics to escape with.
-#[test]
-fn no_corpus_plate_escapes_its_story_window() {
-    for game in [
-        "zork0-r393-s890714.z6",
-        "arthur-r74-s890714.z6",
-        "shogun-r322-s890706.z6",
-        "journey-r83-s890706.z6",
-        "advent.z6",
-        "scopa.z6",
-        "mysterious01.z6",
-        "fmvpoker.z6",
-    ] {
-        let Some((mut session, mut state)) = boot(game, true) else { continue };
+/// Four OR'd predicates over one frame are not four independent facts. They are
+/// tried in order and the first match wins, so a hatch can be perfectly correct and
+/// never decide anything, and "the gate is closed" says nothing about which arm shut
+/// it. SQ-0894 disabled an arm, passed all 5553 tests, and the arm was live — the
+/// corpus simply had no fixture that reached it. This is the guard against reading
+/// that shape backwards: it records the arms actually observed and fails when the
+/// set changes, so a retirement that silently moves a title says so.
+///
+/// MEASURED with `ring_scout --all --no-tap --turns 8` at a 98x37 pane and pinned
+/// here over the same eight frames, both `honor_game_colours` modes (routing does
+/// not read colours, and pinning both is what stops that quietly becoming untrue):
+///
+/// | title | arms observed over 8 frames |
+/// |---|---|
+/// | zork0, shogun, scopa, advent | ring only |
+/// | arthur | `art_paints_anything` on his intro plate, ring on the prose screens |
+/// | journey | `art_paints_anything` on its title, ring from gameplay on |
+/// | mysterious01 | `art_paints_anything` on every frame |
+/// | fmvpoker | ring at boot, `art_paints_anything` from the table on |
+///
+/// `art_fills_screen` and `art_encloses_screen` decide NOTHING on this corpus: every
+/// frame whose art fills or encloses the screen has that art on window 0's own
+/// plate, which the first arm answers for. That is shadowing, not death — both ask
+/// about CHROME art too, which the first arm never looks at — and it is why they are
+/// kept; see `picture_takeover`'s own doc for the reasoning.
+fn picture_takeover_arms_across_the_corpus(honor: bool) {
+    use std::collections::BTreeSet;
+    let expected: &[(&str, &[&str])] = &[
+        ("zork0-r393-s890714.z6", &["ring"]),
+        ("arthur-r74-s890714.z6", &["ring", "art_paints_anything"]),
+        ("shogun-r322-s890706.z6", &["ring"]),
+        ("journey-r83-s890706.z6", &["ring", "art_paints_anything"]),
+        ("advent.z6", &["ring"]),
+        ("scopa.z6", &["ring"]),
+        ("mysterious01.z6", &["art_paints_anything"]),
+        ("fmvpoker.z6", &["ring", "art_paints_anything"]),
+    ];
+    for (game, want) in expected {
+        let Some((mut session, mut state)) = boot(game, honor) else { continue };
+        let mut seen: BTreeSet<&'static str> = BTreeSet::new();
         for step in 0..8 {
             {
                 let model = session.screen();
                 let WinNode::Layered(items) = &model.root else { panic!("{game}: v6 Layered root") };
+                let native = app::render::v6_layout::native_extent(items);
                 let layout = app::render::v6_layout::classify_windows(items);
-                if let Some(story) = layout.story {
-                    assert!(
-                        !app::render::screen::story_plate_escapes_story_window(story, layout.story_gfx),
-                        "{game} frame {step}: its story window's plate paints outside the story \
-                         window's box, so this title now falls through to the raster composite \
-                         instead of the hybrid ring — a pixel image where it used to have crisp \
-                         terminal cells (SQ-0739)"
-                    );
+                match layout.story {
+                    Some(story) => {
+                        seen.insert(
+                            app::render::screen::picture_takeover_reason(
+                                story, &layout.chrome, layout.story_gfx, native,
+                            )
+                            .unwrap_or("ring"),
+                        );
+                    }
+                    // No story window is not a ring frame either way — it is the
+                    // no-story exit — but it is not a takeover, so it reads as ring.
+                    None => {
+                        seen.insert("ring");
+                    }
                 }
             }
             let r = match session.pending_input() {
@@ -388,7 +436,26 @@ fn no_corpus_plate_escapes_its_story_window() {
             app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
             *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
         }
+        let want: BTreeSet<&str> = want.iter().copied().collect();
+        let got: BTreeSet<&str> = seen.iter().copied().collect();
+        assert_eq!(
+            got, want,
+            "{game} (honor={honor}): the arms carrying its first eight frames changed. A \
+             retirement that moves a title from the composite to the ring is a mode change \
+             every v6 player would see, so it belongs in a quest with a fixture, not in a \
+             passing gate."
+        );
     }
+}
+
+#[test]
+fn picture_takeover_arms_across_the_corpus_honoring_game_colours() {
+    picture_takeover_arms_across_the_corpus(true);
+}
+
+#[test]
+fn picture_takeover_arms_across_the_corpus_theme_only() {
+    picture_takeover_arms_across_the_corpus(false);
 }
 
 /// fmvpoker's bottom menu row, as the game lays it out.
