@@ -848,6 +848,17 @@ fn render_node(
                             }
                         }
                         let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                        // SQ-0896: …and the STORY window's own plate, which the chrome
+                        // canvas excludes by construction — `classify_windows` sets a
+                        // `win == 0` Graphics aside as `story_gfx` so the ring does not
+                        // carry it. That was right while the ring could only draw outside
+                        // the story window; now the viewport is cut from what the art
+                        // leaves, the ring covers the plate's cells and needs its pixels
+                        // to crop. Blitted with the chrome ART layer, before the painted
+                        // ground and before any window's page, which is the painter's
+                        // order the game itself used (SQ-0706): the plate is something the
+                        // game DREW, and a page is a colour it was told to present on.
+                        v6::blit_story_gfx(&mut canvas, layout.story_gfx);
                         // SQ-0704: a chrome window that named its own page paints it
                         // into its unpainted pixels here (ZMSD §8.8.3.2), so the ring
                         // bands ship self-contained instead of leaving the icons'
@@ -902,7 +913,46 @@ fn render_node(
                         // The scale FACTOR is unchanged by the SQ-0505 anchoring
                         // below (only the vertical offset moves), so publish it now.
                         state.v6_image_scale.set(scale_center.s);
-                        let gfx = v6::build_graphics_canvas(&layout.chrome, native);
+                        // SQ-0896: TWO art canvases, and the difference between them is
+                        // the whole of this quest.
+                        //
+                        // `frame_art` is the chrome-only artwork — the frame the game drew
+                        // AROUND its story window — and it is the oracle the inset must
+                        // use: `story_clear_native` walks the window's edges in until none
+                        // of them touches an opaque pixel, and measuring that against
+                        // anything carrying the story's own plate would inset the window
+                        // out of its own backdrop (fmvpoker's hollow table comes back
+                        // width 0). Rasterised glyphs are excluded for the same reason
+                        // they always were (SQ-0500/0728): opaque is not artwork.
+                        //
+                        // `gfx` is that PLUS the story window's own plate, and it is what
+                        // every downstream stage asks "is there art here?" of. It has to
+                        // carry the plate, because the bands that now cover the plate exist
+                        // only by the viewport having given those cells up — and an Art
+                        // strip whose oracle says there is nothing behind it is skipped and
+                        // never drawn (`strip_has_art`). Without this the ring would lose
+                        // the prose area AND still draw no picture.
+                        let frame_art = v6::build_graphics_canvas(&layout.chrome, native);
+                        // Step (b) of the user's ordering, for the region the ring never
+                        // owned: the story viewport is cut from what the ART leaves, not
+                        // from the raw window box. `None` = the plate owns the screen and
+                        // no prose belongs on this frame (SQ-0707), which for the ring
+                        // means the whole pane is chrome.
+                        let vp_native = v6::story_text_native(Some(story), &frame_art, layout.story_gfx);
+                        let plate_owns_screen = vp_native.is_none();
+                        // Fall back to the declared box so every stage below still has a
+                        // native rectangle to reason about; the empty viewport is applied
+                        // once, after the plans and the overlay push, so a plan cannot
+                        // divide by a zero-height story region on the way there.
+                        let vp_native = vp_native.unwrap_or((
+                            story.x_px as u32,
+                            story.y_px as u32,
+                            story.w_px as u32,
+                            story.h_px as u32,
+                        ));
+                        let mut gfx = frame_art;
+                        v6::blit_story_gfx(&mut gfx, layout.story_gfx);
+                        let gfx = gfx;
                         let chrome_runs: Vec<&crate::engine::PxText> = layout
                             .chrome
                             .iter()
@@ -935,7 +985,7 @@ fn render_node(
                         let top_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: 0 };
                         let (scale, viewport, menu) = match plan {
                             BottomPlan::Letterbox => {
-                                let vp = v6::story_viewport_box(Some(story), &scale_center, (area.width, area.height), cell_px);
+                                let vp = v6::native_viewport_box(Some(vp_native), &scale_center, (area.width, area.height), cell_px);
                                 (scale_center, Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height), None)
                             }
                             // Extend (Arthur) and Frame (Zork0/Shogun) top-anchor the
@@ -944,13 +994,13 @@ fn render_node(
                             // treated — Extend blanks them, Frame stretches them (the
                             // reclaim block below branches on the plan).
                             BottomPlan::Extend | BottomPlan::Frame => {
-                                let vp = v6::story_viewport_box(Some(story), &top_scale, (area.width, area.height), cell_px);
+                                let vp = v6::native_viewport_box(Some(vp_native), &top_scale, (area.width, area.height), cell_px);
                                 let (x, y) = (area.x + vp.x, area.y + vp.y);
                                 (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
                             }
                             BottomPlan::Menu => {
                                 let menu_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
-                                let vp = v6::story_viewport_box(Some(story), &top_scale, (area.width, area.height), cell_px);
+                                let vp = v6::native_viewport_box(Some(vp_native), &top_scale, (area.width, area.height), cell_px);
                                 let (x, y) = (area.x + vp.x, area.y + vp.y);
                                 // SQ-0765: the MENU is the fixed-height window here, and the
                                 // art and the story take what is left above it — the
@@ -1025,6 +1075,20 @@ fn render_node(
                             }
                             None => viewport,
                         };
+                        // SQ-0896: the plate owns the screen — no prose box survives it, so
+                        // there is no story region at all and the ring gets the whole pane.
+                        // An empty viewport is not a special case for anything downstream:
+                        // `content_ring_bands` carves `pane − viewport` and a zero-height
+                        // viewport makes that the pane, which then decomposes into Art and
+                        // Text strips by exactly the rules a top band already uses. The one
+                        // thing that must not happen is rendering a transcript into it; see
+                        // the guard on `render_node` below, which mirrors raster returning
+                        // no scroll metrics for the same frame.
+                        let viewport = if plate_owns_screen {
+                            Rect::new(area.x, area.y, area.width, 0)
+                        } else {
+                            viewport
+                        };
                         // SQ-0500: a full-width chrome band (top/bottom) is carved
                         // into horizontal strips — an ART strip (opaque frame
                         // graphics behind it) keeps the scaled pixel RING; a
@@ -1090,7 +1154,7 @@ fn render_node(
                             pane: area,
                             scale: &scale,
                             cell_px,
-                            story,
+                            story_native: vp_native,
                             overlay_bottom,
                             panels: &panel_rects,
                             gfx: &gfx,
@@ -1347,7 +1411,13 @@ fn render_node(
                             let ch = cell_px.1.max(1) as f32;
                             let sc = scale.s.max(0.001);
                             let inv_y = |row: u16| ((row.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / sc;
-                            let story_bottom = (story.y_px as i32 + story.h_px as i32) as f32;
+                            // SQ-0896: the walk is about the QUANTIZATION REMAINDER of the
+                            // rect the viewport was cut from, so it reads `vp_native` and
+                            // not the declared window box. On every corpus frame the two
+                            // are the same rectangle; where a plate or frame art has moved
+                            // the viewport, the remainder is beside the viewport's own edge
+                            // and nowhere else.
+                            let story_bottom = (vp_native.1 + vp_native.3) as f32;
                             let mut gap_top = viewport.y;
                             if flank_at(&strips, viewport.y, true) {
                                 while gap_top > area.y {
@@ -1365,7 +1435,7 @@ fn render_node(
                                     // reach the screen unwritten). Anything else is real chrome and
                                     // stops the walk, as does a TEXT strip, whose runs are the
                                     // game's own.
-                                    let remainder = (inv_y(r.y) + inv_y(r.y + 1)) / 2.0 >= story.y_px as f32;
+                                    let remainder = (inv_y(r.y) + inv_y(r.y + 1)) / 2.0 >= vp_native.1 as f32;
                                     if !remainder && strip_has_art(&r) {
                                         break;
                                     }
@@ -1946,7 +2016,18 @@ fn render_node(
                             gr.record_hybrid_click_map(area, click_scale, native, cell_px, text_rows);
                         }
                         // The story window as real terminal text (primary-Buffer path).
-                        let metrics = render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);
+                        //
+                        // …unless there is no story region at all: a plate that leaves no
+                        // prose box owns the screen, and rasterizing the scrollback onto it
+                        // would paint the PREVIOUS screen's text across the art (SQ-0707,
+                        // which raster learned the hard way). Report no metrics, exactly as
+                        // raster does on the same frame, so the scrollbar and the [more]
+                        // machinery agree that nothing is showing. SQ-0896.
+                        let metrics = if viewport.width == 0 || viewport.height == 0 {
+                            None
+                        } else {
+                            render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors)
+                        };
                         // SQ-0584: a chrome window the game ERASED more recently than it
                         // printed prose is an opaque panel over the story — advent.z6's
                         // `help` splits window 1 to 160px, erases it and paints a menu
@@ -1972,7 +2053,16 @@ fn render_node(
                             map.push(rec("path:hybrid-ring", (0, 0, 0, 0), area));
                             state.note_v6_path("hybrid-ring");
                             map.push(rec("pane", (0, 0, 0, 0), area));
-                            map.push(rec("viewport", (story.x_px, story.y_px, story.w_px, story.h_px), viewport));
+                            // SQ-0896: the NATIVE rect beside the viewport is the one it
+                            // was actually cut from — the window reduced to what the art
+                            // leaves it. The declared window box is on the `story` line
+                            // below, so a frame where the two differ says so in the dump
+                            // instead of leaving it to be deduced.
+                            map.push(rec(
+                                "viewport",
+                                (vp_native.0 as u16, vp_native.1 as u16, vp_native.2 as u16, vp_native.3 as u16),
+                                viewport,
+                            ));
                             map.push(V6CellRect {
                                 label: "scale".into(),
                                 native: ((scale.s * 100.0) as u16, scale.off_y as u16, cell_px.0, cell_px.1),
@@ -2131,12 +2221,18 @@ fn render_node(
                                 for t in &g.px_texts {
                                     let px = t.x.max(1) as f32 - 1.0;
                                     let py = t.y.max(1) as f32 - 1.0;
-                                    if px < story.x_px as f32
-                                        || px >= (story.x_px + story.w_px) as f32
-                                        || py < story.y_px as f32
-                                        || py >= (story.y_px + story.h_px) as f32
+                                    // SQ-0896: the boundary is the rect the VIEWPORT was
+                                    // cut from, not the declared window box. They are the
+                                    // same rectangle on every corpus frame; where the art
+                                    // has moved the viewport, a run in the gap between them
+                                    // is on the ring's side and the ring draws it — stamping
+                                    // it here as well would draw it twice.
+                                    if px < vp_native.0 as f32
+                                        || px >= (vp_native.0 + vp_native.2) as f32
+                                        || py < vp_native.1 as f32
+                                        || py >= (vp_native.1 + vp_native.3) as f32
                                     {
-                                        continue; // outside the story box → already in the ring
+                                        continue; // outside the story region → already in the ring
                                     }
                                     in_box.entry(t.y).or_default().push(t);
                                 }
@@ -2216,7 +2312,7 @@ fn render_node(
                                 // first row, by construction.
                                 let row = viewport.y as i32
                                     + (t.y.max(1) as i32 - 1) / 16
-                                    - (story.y_px as i32) / 16;
+                                    - (vp_native.1 as i32) / 16;
                                 if row < viewport.y as i32
                                     || row >= viewport.bottom() as i32
                                     || col < viewport.x as i32
@@ -5540,7 +5636,11 @@ struct ChromeRowOracle<'a, 'b> {
     pane: Rect,
     scale: &'a crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
-    story: &'a crate::engine::PositionedWindow,
+    /// The native rect the terminal story viewport was cut from — the story window
+    /// reduced to what the art leaves it (`story_text_native`, SQ-0896), not the
+    /// declared window box. A run between the two is on the ring's side of the
+    /// boundary now, so this is the rect "above or below the story" has to mean.
+    story_native: (u32, u32, u32, u32),
     overlay_bottom: i32,
     panels: &'a [Rect],
     gfx: &'a image::RgbaImage,
@@ -5567,8 +5667,8 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     /// are inside the box by native coordinates, but the caller has reserved their
     /// rows out of the story viewport, so they belong to the band like any other bar.
     fn below_or_above(&self, t: &crate::engine::PxText) -> bool {
-        let story_top = self.story.y_px as i32;
-        let story_bottom = self.story.y_px as i32 + self.story.h_px as i32;
+        let story_top = self.story_native.1 as i32;
+        let story_bottom = (self.story_native.1 + self.story_native.3) as i32;
         let py = t.y.max(1) as i32 - 1;
         py >= story_bottom
             || py + 16 <= story_top
@@ -9676,6 +9776,200 @@ mod tests {
             (start + 1, start + 2),
             "the three items keep the game's own consecutive rows:\n{screen}"
         );
+    }
+
+    /// SQ-0896: art the game painted INSIDE its story window, on a frame that takes
+    /// the ring today — the capability gap, and the one case that needs no routing
+    /// change to demonstrate.
+    ///
+    /// Native 320x200. A chrome FRAME (win 7) painted only in the 20px border, so
+    /// the ring has real content and `story_clear_native` finds nothing overlapping
+    /// window 0. Window 0 is (40,40,240,120) — inset from every screen edge, so
+    /// `story_covers_screen` is false and none of `picture_takeover`'s arms fire.
+    /// Inside it, a `win == 0` Graphics plate covering the LEFT HALF of the window.
+    ///
+    /// Before this quest the viewport was the raw window box: the transcript opened
+    /// straight over the plate, and the plate reached the screen through nothing —
+    /// `classify_windows` sets it aside as `story_gfx` so the chrome canvas never
+    /// carries it, and `blit_story_gfx` was reachable from the RASTER path alone. The
+    /// prose was drawn over art the player could not see.
+    ///
+    /// Now the viewport is cut from what the art LEAVES, so the plate's columns are
+    /// outside it — and everything outside the viewport is the ring's, drawn by
+    /// machinery that has not changed.
+    #[derive(Clone, Copy, Debug)]
+    enum PlateSide {
+        Left,
+        Top,
+    }
+
+    fn plate_in_story_window_model(with_plate: bool, side: PlateSide) -> ScreenModel {
+        // A chrome frame: opaque 20px border, hollow middle. Not a backdrop — the
+        // inset must find nothing to take off window 0.
+        let mut frame = image::RgbaImage::new(320, 200);
+        for (x, y, px) in frame.enumerate_pixels_mut() {
+            if x < 20 || y < 20 || x >= 300 || y >= 180 {
+                *px = image::Rgba([40, 30, 20, 255]);
+            }
+        }
+        let chrome = PositionedWindow {
+            x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(crate::engine::GraphicsWindow {
+                win: 7, canvas: std::sync::Arc::new(frame), version: 1, upscale: false,
+            }),
+        };
+        // The story window's OWN plate, in a colour nothing else on the screen uses:
+        // either the left half of window 0 (which the ring carves off as a FLANK) or
+        // its top half (a full-width TOP band). The two reach the screen through
+        // different draw arms — a flank composes its own source image, a full-width
+        // strip is a straight crop of the frame-shared scaled canvas — so both have
+        // to be exercised or half the fix is untested.
+        let (pw_px, ph_px) = match side {
+            PlateSide::Left => (120u16, 120u16),
+            PlateSide::Top => (240, 60),
+        };
+        let plate_img = image::RgbaImage::from_pixel(
+            pw_px as u32, ph_px as u32, image::Rgba([200, 10, 120, 255]),
+        );
+        let plate = PositionedWindow {
+            x: 5, y: 2, w: 15, h: 15, x_px: 40, y_px: 40, w_px: pw_px, h_px: ph_px,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(crate::engine::GraphicsWindow {
+                win: 0, canvas: std::sync::Arc::new(plate_img), version: 1, upscale: false,
+            }),
+        };
+        let story = PositionedWindow {
+            x: 5, y: 2, w: 30, h: 15, x_px: 40, y_px: 40, w_px: 240, h_px: 120,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        let mut items = vec![chrome];
+        if with_plate {
+            items.push(plate);
+        }
+        items.push(story);
+        ScreenModel {
+            root: WinNode::Layered(items),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (40, 25),
+        }
+    }
+
+    /// Render `plate_in_story_window_model` and report the story viewport's columns
+    /// and whether the plate's ink reached the pane.
+    fn plate_frame_probe(with_plate: bool, honor: bool, side: PlateSide) -> (Rect, bool) {
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = crate::config::V6RenderMode::Hybrid;
+        state.config.honor_game_colours = honor;
+        state.push_transcript("HELLO STORY WORLD");
+
+        let model = plate_in_story_window_model(with_plate, side);
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let metrics = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+
+        // Non-vacuity: this frame must actually reach the ring. If a future change to
+        // `picture_takeover` diverts it, every number below would describe a screen
+        // the ring never drew.
+        let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+        assert_eq!(path, "hybrid-ring", "plate={with_plate} honor={honor} {side:?}: the fixture is a RING frame");
+        assert!(metrics.is_some(), "plate={with_plate} honor={honor} {side:?}: the ring rendered a transcript");
+
+        let geom = state.transcript_geom.get().expect("the transcript has geometry");
+        let plate_ink = image::Rgba([200u8, 10, 120, 255]);
+        let painted = (0..area.height).any(|y| {
+            (0..area.width).any(|x| {
+                let c = buf.cell((x, y)).unwrap();
+                [c.fg, c.bg].iter().any(|col| {
+                    matches!(col, ratatui::style::Color::Rgb(r, g, b)
+                        if *r == plate_ink[0] && *g == plate_ink[1] && *b == plate_ink[2])
+                })
+            })
+        });
+        (geom.area, painted)
+    }
+
+    /// Both `honor_game_colours` modes (CLAUDE.md): the plate is something the game
+    /// DREW, so it belongs on the screen whether or not its palette is honoured, and
+    /// a colour area pinned in one mode only has masked every game-colour regression
+    /// this project has had.
+    ///
+    /// A/B on ONE frame rather than against a computed cell number: the same model
+    /// with and without the plate, on each of the two edges. That is what makes the
+    /// assertion mean what it says — the viewport moved BECAUSE of the plate — and it
+    /// carries its own falsification, since reverting the ring's use of
+    /// `story_text_native` makes the two viewports identical and leaves the plate
+    /// unpainted.
+    ///
+    /// FALSIFIED, both halves, on the honor=true case:
+    /// * viewport from the declared box instead of `story_text_native` →
+    ///   `bare (5, 34) vs plated (5, 34)` — the plate makes no difference and the
+    ///   transcript opens straight over it, which is the reported gap;
+    /// * `blit_story_gfx` off the ring's band canvas → the TOP case loses its ink
+    ///   ("the plate is drawn by the ring"), while the LEFT case survives, because a
+    ///   flank composes its source from the art canvas and a full-width strip crops
+    ///   the band canvas. That asymmetry is exactly why both sides are tested.
+    fn plate_in_story_window_case(honor: bool, side: PlateSide) {
+        let (bare, bare_painted) = plate_frame_probe(false, honor, side);
+        let (plated, plate_painted) = plate_frame_probe(true, honor, side);
+
+        assert!(!bare_painted, "honor={honor} {side:?}: nothing paints the plate's ink with no plate");
+        match side {
+            PlateSide::Left => {
+                assert!(
+                    plated.x > bare.x,
+                    "honor={honor}: the story viewport starts at the plate's right edge, not \
+                     the window's left edge — the text region is what the art LEAVES \
+                     (SQ-0896). bare {bare:?} vs plated {plated:?}"
+                );
+                assert_eq!(
+                    (plated.right(), plated.y, plated.bottom()),
+                    (bare.right(), bare.y, bare.bottom()),
+                    "honor={honor}: only the edge the plate stands on moves; nothing is \
+                     rasterised that the art did not demand (SQ-0750). \
+                     bare {bare:?} vs plated {plated:?}"
+                );
+            }
+            PlateSide::Top => {
+                assert!(
+                    plated.y > bare.y,
+                    "honor={honor}: the story viewport starts BELOW the plate. \
+                     bare {bare:?} vs plated {plated:?}"
+                );
+                assert_eq!(
+                    (plated.x, plated.right(), plated.bottom()),
+                    (bare.x, bare.right(), bare.bottom()),
+                    "honor={honor}: only the edge the plate stands on moves. \
+                     bare {bare:?} vs plated {plated:?}"
+                );
+            }
+        }
+        assert!(
+            plate_painted,
+            "honor={honor} {side:?}: the story window's own plate is drawn by the ring. \
+             Before SQ-0896 no band covered these cells and `blit_story_gfx` was reachable \
+             from the RASTER path alone, so hybrid drew the prose over a picture it never drew."
+        );
+    }
+
+    #[test]
+    fn hybrid_ring_draws_art_the_game_painted_inside_the_story_window() {
+        plate_in_story_window_case(true, PlateSide::Left);
+        plate_in_story_window_case(true, PlateSide::Top);
+    }
+
+    #[test]
+    fn hybrid_ring_draws_art_inside_the_story_window_with_game_colours_off() {
+        plate_in_story_window_case(false, PlateSide::Left);
+        plate_in_story_window_case(false, PlateSide::Top);
     }
 
     /// SQ-0515: a chrome grid window carrying `px_texts`, for the flood discriminator.
