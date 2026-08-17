@@ -1538,7 +1538,17 @@ fn render_node(
                                 ChromeStrip::Art(..) => Vec::new(),
                             })
                             .collect();
-                        v6::clear_text_rows(&mut canvas, &text_run_tops);
+                        // SQ-0902: over the whole native width, keeping every pixel the
+                        // ART canvas accounts for. The strip's own column span cannot
+                        // express a boundary inside a cell, and Shogun's is one — its
+                        // frame art ends at native 45 and its status window starts at 46,
+                        // three columns the strip's first whole cell does not reach and the
+                        // flank's source does. See `clear_text_rows_except_art`.
+                        v6::clear_text_rows_except_art(
+                            &mut canvas,
+                            &gfx,
+                            &text_run_tops.iter().map(|&(top, _, _)| top).collect::<Vec<_>>(),
+                        );
                         let base = v6_machine_page(state, state.colors.theme.get("upper_window").style);
                         // SQ-0511 fix: in the Menu plan the side flanks are drawn at the
                         // UNIFORM scale (aspect preserved — Journey's left picture column

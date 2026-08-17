@@ -1072,6 +1072,49 @@ pub fn clear_text_columns(canvas: &mut RgbaImage, cols: &[(u32, u32)], rows: (u3
 /// are centred and never approach the frame — a full-width carve would erase the
 /// flank's own source pixels on exactly those rows and hole the ornament. For a strip
 /// that does span the pane this is byte-identical to the old carve.
+/// SQ-0902: the same carve, over the columns a strip's own cell rect does NOT reach,
+/// keeping every pixel the ART canvas accounts for.
+///
+/// [`clear_text_rows`] carves a text strip's rows over the strip's own native column
+/// span, which is its cell rect mapped back through the letterbox scale. A cell rect
+/// cannot express a boundary that falls inside a cell, and the game's does: on
+/// `stories/shogun-r322-s890706.z6` the frame art ends at native x **45** and the
+/// status window begins at native x **46**, which at a 129x60 pane is 5 device pixels
+/// into the flank's last terminal column. So the strip's carve starts at native 49 —
+/// the inverse of its first whole cell — and native 46..48 keep the rasterised cell
+/// backgrounds `build_chrome_canvas` painted for the status window. The flank band's
+/// source reaches native 50 at that pane, so it sampled them and drew a sliver of the
+/// status line inside the frame, immediately left of the crisp glyphs. MEASURED at
+/// 2, 6, 4 and 3 native columns of over-reach at 80x24, 98x37, 129x60 and 169x47 —
+/// scale-dependent, which is why the sliver's thickness changed as the pane was
+/// resized (the user's *"a little bit of rastered text between the score and
+/// flanks"*).
+///
+/// The rule this states is SQ-0750's, once more: on a row the ring draws with GLYPHS,
+/// the canvas keeps artwork and nothing else. A window's page, its rasterised cell
+/// backgrounds and its glyph strokes are all the text path's business, wherever they
+/// fall, so a band that happens to overlap them samples clear pixels instead.
+///
+/// `art` is the art-only canvas ([`build_graphics_canvas`]) and is what makes this
+/// safe to apply past a strip's own columns: it is the oracle that says which pixels
+/// are the frame's, so a flank's ornament cannot be holed — that hole is precisely
+/// what SQ-0894 added the column span to prevent, and gating on the art canvas keeps
+/// the protection without needing the cell rect to be the boundary.
+pub fn clear_text_rows_except_art(canvas: &mut RgbaImage, art: &RgbaImage, rows: &[u16]) {
+    let (w, h) = (canvas.width(), canvas.height());
+    let is_art = |x: u32, y: u32| x < art.width() && y < art.height() && art.get_pixel(x, y)[3] >= 128;
+    for &top in rows {
+        let y0 = top as u32;
+        for y in y0..(y0 + FONT_H).min(h) {
+            for x in 0..w {
+                if !is_art(x, y) {
+                    canvas.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+    }
+}
+
 pub fn clear_text_rows(canvas: &mut RgbaImage, runs: &[(u16, u32, u32)]) {
     let (w, h) = (canvas.width(), canvas.height());
     for &(top, x0, x1) in runs {
@@ -1758,6 +1801,68 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
 
 #[cfg(test)]
 mod tests {
+
+    // ── clear_text_rows_except_art (SQ-0902) ─────────────────────────────────
+
+    /// A carve gated on the ART canvas reaches the pixels a strip's own cell rect
+    /// cannot, and still cannot hole the frame.
+    ///
+    /// Shogun's measured geometry, on `stories/shogun-r322-s890706.z6` two turns in:
+    /// the frame art ends at native x **45**, the status window begins at native x
+    /// **46**, and at a 129x60 pane the strip's first whole cell inverts to native
+    /// **49** — so `clear_text_rows`, whose span is that cell rect, left native 46..48
+    /// carrying the rasterised cell backgrounds `build_chrome_canvas` paints for the
+    /// status window. The flank band's source reaches native 50 at that pane, sampled
+    /// them, and drew a sliver of the status line inside the frame.
+    ///
+    /// Both halves are asserted, because the fix is only correct if it does more AND
+    /// less: it must clear 46..48, which the old span missed, and it must leave the
+    /// frame art at 0..45 alone, which a full-width carve would have destroyed — that
+    /// hole is what SQ-0894 added the column span to prevent, and the art canvas is
+    /// what replaces the cell rect as the guard.
+    #[test]
+    fn the_carve_reaches_past_a_strips_cells_and_still_spares_the_art() {
+        const ART_END: u32 = 46; // exclusive — art occupies 0..45
+        const WINDOW_X0: u32 = 46;
+        let native = (640u32, 400u32);
+        // The art-only canvas: a full-height frame column, as Shogun's slab is.
+        let mut art = RgbaImage::new(native.0, native.1);
+        for y in 0..native.1 {
+            for x in 0..ART_END {
+                art.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+            }
+        }
+        // The chrome canvas: that art, plus the status window rasterised opaque from
+        // its own left edge to the screen's right. Shogun's is 32px — TWO text rows —
+        // and only the first is carved here, so the second proves the carve is
+        // row-scoped and a flank keeps its source below it.
+        let mut canvas = art.clone();
+        for y in 0..(2 * FONT_H) {
+            for x in WINDOW_X0..native.0 {
+                canvas.put_pixel(x, y, Rgba([80, 80, 80, 255]));
+            }
+        }
+        clear_text_rows_except_art(&mut canvas, &art, &[0]);
+        let op = |c: &RgbaImage, x: u32, y: u32| c.get_pixel(x, y)[3] >= 128;
+
+        assert!(
+            (WINDOW_X0..native.0).all(|x| !op(&canvas, x, 4)),
+            "every column the status window rasterised is clear on a row the ring draws \
+             with glyphs — including native {WINDOW_X0}..49, which the strip's own cell \
+             rect never reached and the flank's source did"
+        );
+        assert!(
+            (0..ART_END).all(|x| op(&canvas, x, 4)),
+            "and the frame's own art survives the carve, all the way to its last column"
+        );
+        // Rows the strip does not own are untouched, so a flank keeps its source
+        // everywhere else.
+        assert!(
+            (0..native.0).all(|x| op(&canvas, x, FONT_H + 1) == (x < ART_END || x >= WINDOW_X0)),
+            "a row below the carved one is exactly as it was"
+        );
+    }
+
     use super::*;
     use crate::engine::{BorderPref, BufferWindow, GraphicsWindow, GridCell, GridWindow, PxText};
     use std::sync::Arc;
