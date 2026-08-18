@@ -10,3 +10,11 @@ license.workspace = true
 # no external dependencies of its own, so this costs the CLIs nothing.
 blorb = { path = "../blorb" }
 crossterm = "0.29"
+
+# SQ-0909: `pin.rs` claims that a scroll region discards the lines that scroll out
+# of it UNLESS its top margin is row 1 — which is the entire basis of `--pin
+# bottom`. That is measured against Ghostty's core rather than repeated as
+# folklore. TESTS ONLY: no CLI binary may gain it.
+[dev-dependencies]
+qwertty-term-vt = "0.4.0"
+

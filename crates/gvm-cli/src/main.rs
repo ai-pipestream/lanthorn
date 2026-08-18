@@ -186,9 +186,11 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
                         if !sgr.is_empty() { print!("\x1b[0m"); }
                         print!("\r\n"); // close the echoed line before the terminal goes back
                         let _ = io::Write::flush(&mut io::stdout());
-                        // No renderer prefix: this path can't reach the backend;
-                        // the shared restore drops the scroll region (SQ-0634).
-                        cli_host::restore_and_exit("", 0);
+                        // This path cannot reach the backend, so the teardown comes
+                        // from the shared helper: drop the region AND park the
+                        // cursor below everything. Resetting without moving left the
+                        // shell prompt in the middle of the story (SQ-0913).
+                        cli_host::restore_and_exit(&cli_host::leave_and_park_now(), 0);
                     }
                     KeyCode::Char(c) => {
                         buf.push(c);
@@ -266,7 +268,7 @@ fn read_char_input(stdin_is_tty: bool) -> (u32, String) {
                     {
                         print!("\r\n");
                         let _ = io::Write::flush(&mut io::stdout());
-                        cli_host::restore_and_exit("", 0);
+                        cli_host::restore_and_exit(&cli_host::leave_and_park_now(), 0);
                     }
                     break decode_glk_keycode(k.code);
                 }
@@ -873,7 +875,7 @@ fn main() {
     // The page-background release is no longer honor-gated: OSC 111 restores the
     // terminal's own default, so sending it when no colour was honoured is a
     // no-op, and the Ctrl-C path had already reached that conclusion.
-    guard.restore("");
+    guard.restore(&cli_host::leave_and_park_now());
 
     if let Some(trace) = machine.take_fault_trace() {
         for line in trace.to_lines() {

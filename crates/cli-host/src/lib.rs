@@ -26,6 +26,7 @@ pub mod line;
 pub mod menu;
 pub mod mode;
 pub mod pager;
+pub mod pin;
 pub mod score;
 pub mod storage;
 pub mod term;
@@ -38,6 +39,10 @@ pub use input::{key_press, read_byte_or_eof, read_byte_stdin, read_line_or_eof, 
 pub use menu::{Emission, MENU_COMMAND, MenuBlock, MenuTracker, NavKey, Typed, is_menu_request};
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
 pub use pager::{Pager, wait_for_keypress};
+pub use pin::{
+    PIN_COMMAND, Pin, enter_region, leave_and_park, leave_and_park_now, leave_region, pin_request,
+    pinned_origin,
+};
 pub use score::{ScoreWatch, score_in_status};
 pub use storage::{
     DiskBuild, disk_story_key, game_dir, game_dir_with_key, resolve_save_input, story_key,

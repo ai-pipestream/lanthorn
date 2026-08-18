@@ -144,13 +144,18 @@ fn style_wrap(s: &str, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, 
 
 /// Set the scroll region to rows `[top, bottom]` and park the cursor at its
 /// bottom-left (so subsequent buffer output scrolls inside it).
+///
+/// Kept local rather than taken from `cli_host::pin` because Glk layouts are
+/// arbitrary — this places a band between two explicit rows, where the shared helper
+/// places N rows of chrome at one end or the other. `leave_region` and the exit
+/// teardown ARE shared; see [`super::pin_note`].
 fn enter_region(top: u32, bottom: u32) -> String {
     format!("\x1b[{top};{bottom}r\x1b[{bottom};1H")
 }
 
 /// Reset the scroll region to the whole screen.
 fn leave_region() -> String {
-    "\x1b[r".to_string()
+    cli_host::leave_region()
 }
 
 /// One status-grid cell: character + Glk style + resolved colour + rendered

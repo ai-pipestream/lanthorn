@@ -585,6 +585,8 @@ struct Args {
     honor_colours: bool,
     interpreter: Option<u8>,
     volume: Option<u8>,
+    /// `--pin <top|bottom>` (or `--scrollback`): where the fixed rows sit.
+    pin: cli_host::Pin,
 }
 
 /// Every option `zvm-cli` accepts. The scanner in `cli_host::args` applies the
@@ -608,6 +610,8 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::valued(&["--interpreter", "-I"]),
     cli_host::Opt::valued(&["--data-dir"]),
     cli_host::Opt::valued(&["--story"]),
+    cli_host::Opt::valued(&["--pin"]),
+    cli_host::Opt::flag(&["--scrollback"]),
 ];
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -640,6 +644,15 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         // rather than refusing to start.
         interpreter: m.value("--interpreter").and_then(|v| v.parse::<u8>().ok()),
         volume: m.value("--volume").and_then(|v| v.parse::<u8>().ok()).map(|v| v.min(100)),
+        // `--scrollback` is the same request said the other way round — the
+        // placement is the mechanism, the history is what a player actually wants —
+        // on the `--screen-reader`/`--plain` precedent. An explicit `--pin` wins,
+        // and a bad value falls back to the default rather than refusing to start,
+        // as `--interpreter` does above.
+        pin: m
+            .value("--pin")
+            .and_then(cli_host::Pin::parse)
+            .unwrap_or(if m.has("--scrollback") { cli_host::Pin::Bottom } else { cli_host::Pin::Top }),
     })
 }
 
@@ -738,7 +751,7 @@ fn read_char_input(
                     {
                         print!("\r\n");
                         let _ = io::stdout().flush();
-                        cli_host::restore_and_exit(&crate::screen::leave_region(), 0);
+                        cli_host::restore_and_exit(&view.leave(), 0);
                     }
                     break (decode_keycode(k.code), last_resize, false);
                 }
@@ -1012,7 +1025,7 @@ fn read_line_raw(
                         // The scroll region is this renderer's own teardown, so it
                         // rides along as the prefix; everything after it is the
                         // shared restore.
-                        cli_host::restore_and_exit(&crate::screen::leave_region(), 0);
+                        cli_host::restore_and_exit(&view.leave(), 0);
                     }
                     KeyCode::Char(c) => {
                         buf.push(c);
@@ -1150,13 +1163,8 @@ Arguments:
 
 Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
-  /pin                  Toggle whether a TALL upper window (a menu, a form,
-                        BeyondZork's compass) is pinned in place. Pinned, it stays
-                        in view but the terminal keeps no scrollback, because lines
-                        scrolled out of a pinned region are discarded rather than
-                        remembered. Flowing, it is printed into the transcript when
-                        it changes and everything reaches your scrollback. A
-                        one-row status bar always flows; it is chrome, not content.
+  /pin [top|bottom]     Move the status line / upper window between the top of the
+                        screen and the bottom; bare /pin swaps. See --pin.
   /menu                 Re-read the open menu, host-numbered. In --screen-reader
                         mode a menu keypress is a whole typed line, so /menu —
                         and a bare item number, which jumps to that item — work
@@ -1187,6 +1195,20 @@ Options:
                         what it found and stops rather than blocking.
       --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
       --no-more         Disable [MORE] paging on long output (alias: --no-page)
+      --pin <top|bottom> Where the status line and upper window are pinned.
+                        Default top, where Infocom put them.
+
+                        Pinning at the BOTTOM is what gets you terminal scrollback,
+                        and the reason is not obvious: a terminal only archives a
+                        line that scrolls off the TOP of the screen, which it judges
+                        by the scroll region's top margin. Pinned at the top, the
+                        region starts at row 2, nothing ever leaves the screen, and
+                        every line you have read is discarded. Pinned at the bottom
+                        the region starts at row 1 again, so the story scrolls into
+                        your terminal's own history — with its wheel, its selection
+                        and its search. Nothing is buffered by babelmap either way.
+                        Swap it mid-game with /pin.
+      --scrollback      Alias for --pin bottom, named for what it is for.
       --no-timed-input  Ignore timed-input interrupts
       --no-game-colours Ignore the game's set_colour / true-colour output
                         (also honoured: NO_COLOR)
@@ -1456,6 +1478,7 @@ fn main() {
         term_rows,
         term_cols,
     );
+    view.set_pin(args.pin);
     // Screen-reader mode only, and for the same reason: on a TTY the menu is
     // painted in place and nothing repeats, and a plain pipe is a transcript
     // that must stay byte-identical (SQ-0609).
@@ -1626,11 +1649,19 @@ fn main() {
                     // within one session: pinned while you read BeyondZork's
                     // compass, released while you scroll back through what you
                     // just did.
-                    if r.0.trim().eq_ignore_ascii_case("/pin") {
-                        let text = if view.toggle_pin() {
-                            "[pinned: a tall upper window stays in view; no scrollback while it is up]"
-                        } else {
-                            "[flowing: everything scrolls into the terminal's own history]"
+                    // `/pin` moves the status line and upper window between the
+                    // top of the screen and the bottom, on the same host-answered
+                    // precedent (SQ-0909). It is a runtime toggle and not only a
+                    // launch flag because the reason to move it changes within one
+                    // session: at the top while you play, at the bottom when you
+                    // want to scroll back over what you just read.
+                    if let Some(want) = cli_host::pin_request(&r.0, view.pin()) {
+                        let text = match want {
+                            Some(p) => {
+                                view.set_pin(p);
+                                p.note()
+                            }
+                            None => "[/pin takes top or bottom, or nothing to swap]",
                         };
                         print_host_answer(&mut machine, text);
                         continue;
