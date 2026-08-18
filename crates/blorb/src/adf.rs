@@ -50,6 +50,12 @@ const T_LIST: u32 = 16;
 const T_DATA: u32 = 8;
 /// `ST_FILE` — the secondary type marking a header as a plain file.
 const ST_FILE: u32 = 0xFFFF_FFFD;
+/// Secondary type of a **directory** header block. The block scan walks these to
+/// give each file its parent, because a bare filename does not identify a story on
+/// a disk that stores every game under Infocom's one conventional name (SQ-0908).
+const ST_USERDIR: u32 = 2;
+/// The parent-directory block pointer, in a file or directory header.
+const PARENT: usize = BSIZE - 12;
 
 /// Offset of the FIRST data-block pointer; the table runs DOWNWARDS from here.
 const DATA_TABLE_TOP: usize = BSIZE - 204;
@@ -78,6 +84,15 @@ pub enum AdfError {
 pub struct AdfEntry {
     /// The AmigaDOS filename, exactly as stored (no extension convention).
     pub name: String,
+    /// The file's full path from the volume root, `Dir/Sub/Name`, or just the name
+    /// when it sits at the root (SQ-0908).
+    ///
+    /// A bare filename does not identify a story on an Amiga release disk: *The Lost
+    /// Treasures of Infocom* disk 1 carries THREE files called `Story.Data`, one each
+    /// under `Spellbreaker`, `Sorcerer` and `Enchanter`, and a caller asking for
+    /// "Story.Data" got whichever the block scan reached first. The path is what makes
+    /// a row on that disk name its own game.
+    pub path: String,
     /// Size in bytes, from the header block.
     pub size: usize,
     /// Block number of this file's header block.
@@ -148,9 +163,41 @@ impl Adf {
                 continue;
             }
             let Some(name) = read_name(b) else { continue };
-            out.push(AdfEntry { name, size: be32(b, BSIZE - 188) as usize, header: n });
+            out.push(AdfEntry {
+                path: self.path_of(&name, be32(b, PARENT) as usize),
+                name,
+                size: be32(b, BSIZE - 188) as usize,
+                header: n,
+            });
         }
         out
+    }
+
+    /// `name` prefixed by every directory above it, `Dir/Sub/Name` (SQ-0908).
+    ///
+    /// The block scan finds files wherever they live and never learns the tree, so
+    /// the parent chain is walked here instead: a header block's `BSIZE-12` longword
+    /// is its containing directory's block, and the walk stops at the root
+    /// (whose secondary type is 1, not `ST_USERDIR`) or at anything that is not a directory header. Bounded by the
+    /// image's block count, because a corrupt disk could chain a cycle.
+    fn path_of(&self, name: &str, mut parent: usize) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for _ in 0..=self.image.len() / BSIZE {
+            let Some(b) = self.block(parent) else { break };
+            if be32(b, 0) != T_HEADER || be32(b, BSIZE - 4) != ST_USERDIR {
+                break; // the root block, or not a directory at all
+            }
+            // Same self-reference the file scan trusts: a header names its own block.
+            if be32(b, 4) as usize != parent {
+                break;
+            }
+            let Some(dir) = read_name(b) else { break };
+            parts.push(dir);
+            parent = be32(b, PARENT) as usize;
+        }
+        parts.reverse();
+        parts.push(name.to_string());
+        parts.join("/")
     }
 
     /// Read a file's bytes. `None` if its block chain is broken or runs short
@@ -199,8 +246,21 @@ impl Adf {
     /// Read a file by name (case-insensitive), for callers that already know
     /// what they want. Prefer [`Adf::story`] / [`Adf::pictures`], which
     /// identify by content.
+    ///
+    /// The full PATH is tried first and the bare name second (SQ-0908). A path is
+    /// unique on the volume where a name need not be — *The Lost Treasures of
+    /// Infocom* disk 1 carries three files called `Story.Data`, under `Spellbreaker`,
+    /// `Sorcerer` and `Enchanter` — so a caller that was shown paths by
+    /// [`crate::medium::MountedDisk::contents`] can ask for exactly the one it means.
+    /// The name fallback keeps every caller that hands over a bare filename working,
+    /// including the `--pictures` door, and answers as it always did: the first match
+    /// in block order.
     pub fn read_named(&self, name: &str) -> Option<Vec<u8>> {
-        let e = self.files.iter().find(|e| e.name.eq_ignore_ascii_case(name))?;
+        let e = self
+            .files
+            .iter()
+            .find(|e| e.path.eq_ignore_ascii_case(name))
+            .or_else(|| self.files.iter().find(|e| e.name.eq_ignore_ascii_case(name)))?;
         self.read(e)
     }
 
@@ -389,10 +449,82 @@ pub(crate) mod tests {
     /// Number of blocks on a real 880 KB DD floppy.
     const DD_BLOCKS: usize = 1760;
 
+    /// A file's PATH names its directory, and that is what tells three files called
+    /// `Story.Data` apart (SQ-0908).
+    ///
+    /// *The Lost Treasures of Infocom* is the release this is about: every game on it
+    /// lives in its own directory under Infocom's one conventional filename, so disk 3
+    /// carries `Suspended/Story.Data`, `Starcross/Story.Data`,
+    /// `Hitchhiker/Story.Data`, `Stationfall/Story.Data`, `Planetfall/Story.Data` and
+    /// `Infidel/Story.Data`. The block scan finds files wherever they live and never
+    /// walked the tree, so all six were reported as `Story.Data` and a caller asking
+    /// for one got whichever the scan reached first — picking Hitchhiker's off the
+    /// browser launched Suspended.
+    ///
+    /// Both halves are asserted: the paths are distinct AND `read_named` hands back
+    /// the file each one names. Nesting is two deep, because a parent chain that
+    /// stops one level up would still pass a flat pair of directories.
+    #[test]
+    fn a_files_path_names_the_directory_it_lives_in() {
+        for ffs in [false, true] {
+            let mut b = DiskBuilder::new(ffs);
+            let suspended = b.add_dir("Suspended", 0);
+            let hitchhiker = b.add_dir("Hitchhiker", 0);
+            let deep = b.add_dir("Extra", hitchhiker);
+            b.add_file_in(suspended, "Story.Data", b"SUSPENDED-BYTES");
+            b.add_file_in(hitchhiker, "Story.Data", b"HITCHHIKER-BYTES");
+            b.add_file_in(deep, "Story.Data", b"NESTED-BYTES");
+            b.add_file("Disk.info", b"root-level");
+            let adf = Adf::mount(b.image).expect("a synthetic AmigaDOS image mounts");
+
+            let mut paths: Vec<&str> = adf.files().iter().map(|e| e.path.as_str()).collect();
+            paths.sort_unstable();
+            assert_eq!(
+                paths,
+                vec![
+                    "Disk.info",
+                    "Hitchhiker/Extra/Story.Data",
+                    "Hitchhiker/Story.Data",
+                    "Suspended/Story.Data",
+                ],
+                "ffs={ffs}: every file is named by the directory it lives in, and a file at \
+                 the root is named by itself",
+            );
+
+            // …and asking for a path gets THAT file, which is the whole point.
+            assert_eq!(
+                adf.read_named("Hitchhiker/Story.Data").as_deref(),
+                Some(&b"HITCHHIKER-BYTES"[..]),
+                "ffs={ffs}: the path resolves to its own file",
+            );
+            assert_eq!(
+                adf.read_named("Suspended/Story.Data").as_deref(),
+                Some(&b"SUSPENDED-BYTES"[..]),
+                "ffs={ffs}",
+            );
+            assert_eq!(
+                adf.read_named("Hitchhiker/Extra/Story.Data").as_deref(),
+                Some(&b"NESTED-BYTES"[..]),
+                "ffs={ffs}: two levels deep",
+            );
+            // The bare-name fallback still answers, for callers that hand over a
+            // filename — the `--pictures` door — and answers as it always did.
+            assert!(
+                adf.read_named("Story.Data").is_some(),
+                "ffs={ffs}: a bare name still resolves, to the first match in block order",
+            );
+        }
+    }
+
+
+
     /// Builder for a synthetic disk image, so the codec tests need no fixture.
     struct DiskBuilder {
         image: Vec<u8>,
         next: usize,
+        /// The block [`DiskBuilder::add_file`] last wrote a header into, so
+        /// [`DiskBuilder::add_file_in`] can point it at a parent afterwards.
+        last_header: usize,
     }
 
     impl DiskBuilder {
@@ -401,7 +533,7 @@ pub(crate) mod tests {
             image[0..3].copy_from_slice(b"DOS");
             image[3] = u8::from(ffs);
             // Files start after the root block (880), like a real disk.
-            DiskBuilder { image, next: 881 }
+            DiskBuilder { image, next: 881, last_header: 0 }
         }
 
         fn put32(&mut self, block: usize, off: usize, v: u32) {
@@ -414,8 +546,32 @@ pub(crate) mod tests {
         }
 
         /// Write a file, spilling into extension blocks the way AmigaDOS does.
+        /// Write a DIRECTORY header and return its block, for the parent chain
+        /// (SQ-0908). `parent` is 0 for a directory sitting at the volume root.
+        fn add_dir(&mut self, name: &str, parent: usize) -> usize {
+            let b = self.next;
+            self.next += 1;
+            self.put32(b, 0, T_HEADER);
+            self.put32(b, 4, b as u32);
+            self.put32(b, BSIZE - 4, ST_USERDIR);
+            self.put32(b, PARENT, parent as u32);
+            let at = b * BSIZE + BSIZE - 80;
+            self.image[at] = name.len() as u8;
+            self.image[at + 1..at + 1 + name.len()].copy_from_slice(name.as_bytes());
+            b
+        }
+
+        /// [`Self::add_file`], inside a directory.
+        fn add_file_in(&mut self, dir: usize, name: &str, data: &[u8]) {
+            self.add_file(name, data);
+            // `add_file` took the block it was standing on; point it at its parent.
+            let header = self.last_header;
+            self.put32(header, PARENT, dir as u32);
+        }
+
         fn add_file(&mut self, name: &str, data: &[u8]) {
             let header = self.next;
+            self.last_header = header;
             self.next += 1;
             let payload = if self.ffs() { BSIZE } else { BSIZE - OFS_DATA_HEADER };
             let chunks: Vec<&[u8]> = if data.is_empty() {

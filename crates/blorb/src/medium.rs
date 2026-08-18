@@ -1131,7 +1131,12 @@ impl Volume for Adf {
     }
 
     fn contents(&self) -> Vec<(String, Vec<u8>)> {
-        self.files().iter().filter_map(|e| self.read(e).map(|b| (e.name.clone(), b))).collect()
+        // The PATH, not the bare name (SQ-0908): an Amiga release disk stores every
+        // game under Infocom's one conventional filename, so `Story.Data` appears once
+        // per game directory and a caller handed the basename got whichever the block
+        // scan reached first. `Hfs` and `Iso9660` already report full paths; this is
+        // the format that did not.
+        self.files().iter().filter_map(|e| self.read(e).map(|b| (e.path.clone(), b))).collect()
     }
 
     fn read_named(&self, name: &str) -> Option<Vec<u8>> {
