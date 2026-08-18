@@ -519,9 +519,18 @@ const FORMATS: &[Format] = &[
         // only symptom is a disc that is silently absent from the story list
         // while opening it by name works fine.
         //
+        // `dc42` is the fourth, and it is the same argument a fourth time (SQ-0910).
+        // DiskCopy 4.2 is the wrapper this row already unwraps; `.dc42` is simply
+        // what the tool's own images are called when the archive does not shorten
+        // it to `.image`. The five *Lost Treasures of Infocom* Macintosh discs wear
+        // it, and every one of them mounted here while a directory scan skipped the
+        // file before its bytes were ever looked at — SQ-0849's defect verbatim,
+        // and its only symptom is a disc silently missing from the story list while
+        // opening it by name works.
+        //
         // A spelling is still claimed when a medium wears it — and `.iso` is
         // what this medium wears everywhere it is distributed.
-        extensions: &["image", "bin", "iso"],
+        extensions: &["image", "bin", "iso", "dc42"],
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
         pages_across_images: false,
