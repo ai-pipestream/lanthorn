@@ -71,5 +71,7 @@ mod shogun_dict_words;
 #[path = "suites/wizard_sniffer.rs"]
 mod wizard_sniffer;
 
+#[path = "suites/palette_lock_discipline.rs"]
+mod palette_lock_discipline;
 #[path = "suites/native_disk_sound.rs"]
 mod native_disk_sound;

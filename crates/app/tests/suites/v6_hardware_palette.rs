@@ -38,6 +38,15 @@ use app::interpreter::InterpreterProfile;
 use app::session::{GameSession, InputKind};
 use blorb::infocom_pics::{InfocomPics, Rgb, CGA_PALETTE, DEFAULT_PALETTE, EGA_PALETTE};
 
+/// `zvm::screen::set_palette` is process-global, and `boot_named` sets it, so no two
+/// cases that stand up a session run at once (SQ-0905).
+///
+/// This suite is the only palette user in its group binary today, so it races nothing
+/// right now. The lock is the point regardless: the next suite added to `v6_state`
+/// collides with no warning, and a suite should not have to audit its binary-mates.
+/// The two archive-only cases take nothing, because they touch no process state.
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
+
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -140,6 +149,7 @@ fn ega_tent_closure() -> BTreeSet<Rgb> {
 /// olive the report describes.
 #[test]
 fn zork_zeros_ega_frame_is_drawn_in_ega_brown_not_dark_yellow() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     for honor_game_colours in [true, false] {
         let Some(session) = boot("zork0.eg1", honor_game_colours) else { return };
         let seen = frame_colours(&session);
@@ -180,6 +190,7 @@ fn zork_zeros_ega_frame_is_drawn_in_ega_brown_not_dark_yellow() {
 /// `(0, 170, 0)` and `(0, 170, 170)` and nothing else.
 #[test]
 fn zork_zeros_cga_frame_is_black_and_white() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     for honor_game_colours in [true, false] {
         let Some(session) = boot("zork0.cg1", honor_game_colours) else { return };
         let seen = frame_colours(&session);
@@ -233,6 +244,7 @@ fn a_hardware_palette_archive_has_no_adaptive_pictures() {
 /// of the EGA card's four levels showing through.
 #[test]
 fn the_mcga_and_amiga_renditions_are_untouched() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     for archive in ["zork0.mg1", "zork0.pic"] {
         let Some(raw) = read(archive) else { continue };
         let pics = InfocomPics::parse(raw).expect("parses");
@@ -284,6 +296,7 @@ fn the_mcga_and_amiga_renditions_are_untouched() {
 /// costs Shogun its whole right border.
 #[test]
 fn a_two_colour_rendition_is_told_the_interpreter_has_no_colours() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     use zvm::screen::ZColour;
 
     // The premise: told it has colours, the game sets the same pair whatever the
@@ -434,6 +447,7 @@ fn flank_pixels(session: &GameSession) -> (u64, u64) {
 /// so they must still decline colours exactly as they did.
 #[test]
 fn shoguns_flanks_survive_the_rule_that_spared_them() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     for archive in ["shogun.cg1", "shogun.eg1"] {
         let Some(pics) = read(archive).map(|r| InfocomPics::parse(r).expect("parses")) else {
             continue;

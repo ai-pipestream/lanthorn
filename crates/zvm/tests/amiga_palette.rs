@@ -6,6 +6,16 @@
 //! sharing its binary; here there is nothing else to perturb, and the flip is
 //! confined to one `#[test]` that puts it back.
 //!
+//! **Re-checked under SQ-0905 and the argument holds**, which is worth recording
+//! because the app's suites did NOT survive the same check and now take a shared
+//! lock. Three cases here: both `set_palette` calls and every assertion that reads
+//! the global — `palette`, `standard_true_colour`, `grey_rgb` — sit inside
+//! `the_palette_defaults_to_standard_and_moves_every_resolver_together`. The other
+//! two touch only `amiga_true_colour` and `zmsd_true_colour`, which are pure tables
+//! and read no process state, so cargo's parallel threads have nothing to race over.
+//! Add a case here that reads the global and that stops being true; `zvm` takes zero
+//! external dependencies, so the lock would have to be a local `std::sync::Mutex`.
+//!
 //! The values are read out of the Amiga Version 6 interpreter binaries on
 //! Infocom's own **release floppies** in `stories/` — not from any modern
 //! reconstruction, and (since SQ-0822) not from the leaked `amiga/yzip1.c`
