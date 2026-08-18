@@ -17,11 +17,13 @@
 //! the ZSCII default Unicode table (155–223, ZMSD §3.8.5) includes `œ`/`Œ`
 //! which fall outside `font8x8`'s Latin-1-only extended-Latin set.
 //! Note that this file is reached only from the **v6** paths (`screen.rs` and
-//! `v6_layout.rs`), so the runic entries are defensive: BeyondZork is v5 and its
-//! runes are drawn by the terminal's own font from the codepoints
-//! `font3_translate` returns, never from here. If you are chasing how a rune looks
-//! on screen, the answer is that table and the user's font, not these bitmaps
-//! (SQ-0915).
+//! `v6_layout.rs`). BeyondZork — the game that actually prints runes — is v5, so
+//! ITS runes come from the terminal's own font via the codepoints
+//! `font3_translate` returns and never from here. Font 3 does still reach this
+//! file, though: *Journey* is v6 and ships `Char.data`, which is **byte-identical**
+//! to BeyondZork's `Graphic.Data` (sha1 `ae8977231608`) — the same 8×8 font-3
+//! font — so its box-drawing half is live in the raster path. The runic half is
+//! the part no known title exercises here (SQ-0915).
 //!
 //! `EXTRA_GLYPHS` below supplies ORIGINAL 8×8 bitmaps for exactly those gaps,
 //! hand-drawn for this pass — not sourced from any font, ROM, or existing
