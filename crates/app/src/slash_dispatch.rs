@@ -238,20 +238,16 @@ pub(crate) fn dispatch_slash_outcome(
                 disk_sounds: state.disk_sounds.len(),
                 ..Default::default()
             };
-            // Same precedence the play path uses: a Blorb a person filed beside the
-            // story wins, and the medium's own sounds answer when it does not
-            // (SQ-0907). Resolved to owned bytes first so the borrow of `state` ends
-            // before the mutable one for playback.
-            let picked: Option<(Vec<u8>, blorb::SoundKind, Option<String>)> = state
-                .sound_blorb
-                .as_ref()
-                .and_then(|b| b.sound(n))
-                .map(|(bytes, kind)| (bytes.to_vec(), kind, None))
-                .or_else(|| {
-                    u16::try_from(n).ok().and_then(|e| state.disk_sounds.get(&e)).map(|s| {
-                        (s.aiff.clone(), blorb::SoundKind::Aiff, Some(s.name.clone()))
-                    })
-                });
+            // The DIAGNOSTIC must resolve exactly as the play path does or it
+            // answers a question nobody asked, so both go through `resolve_sound`
+            // (SQ-0914). Copied to owned bytes so the borrow of `state` ends before
+            // the mutable one for playback.
+            let picked: Option<(Vec<u8>, blorb::SoundKind, Option<String>)> = u16::try_from(n)
+                .ok()
+                .and_then(|e| {
+                    app::state::resolve_sound(&state.disk_sounds, state.sound_blorb.as_ref(), e)
+                })
+                .map(|(bytes, kind, name)| (bytes.to_vec(), kind, name.map(str::to_string)));
             if let Some((bytes, kind, from_medium)) = picked {
                 report.resource = Some((kind, bytes.len()));
                 report.from_medium = from_medium;

@@ -334,3 +334,44 @@ fn the_macintosh_release_bends_the_shared_heartbeat() {
     assert_eq!(s[&8].rate, 12902, "S8 states 10240 Hz, M8 asks for four semitones up");
     assert_eq!(s[&14].rate, 11611, "S14 states 9216 Hz, M14 asks for the same four");
 }
+
+/// **The medium outranks a Blorb, on the shipped configuration** (SQ-0914).
+///
+/// This is not hypothetical: `stories/Sherlock.blb` sits beside the Sherlock floppy
+/// in the same directory, `blorb::resolve_resource_blorb` finds it, and until this
+/// quest it won — so playing that ADF played the Blorb and confirmed nothing about
+/// the disk. The two sources are distinguishable by rate, which is what makes the
+/// pick observable here rather than merely asserted: the floppy states 18430 Hz for
+/// effect 11 and the Blorb states 13032, because the Blorb's author baked in a pitch
+/// model that is not the interpreter's (see `Pitch` and the case above).
+///
+/// Falsified by swapping the arms of `app::state::resolve_sound`, which returns the
+/// Blorb's bytes and fails the byte-equality assertion.
+#[test]
+fn the_medium_outranks_a_blorb_filed_beside_the_story() {
+    let adf = stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf");
+    if !adf.is_file() {
+        eprintln!("SKIP: gitignored Sherlock floppy absent");
+        return;
+    }
+    let Some((blb, blb_path)) = blorb::resolve_resource_blorb(&adf) else {
+        eprintln!("SKIP: gitignored stories/Sherlock.blb absent, so there is no contest to settle");
+        return;
+    };
+    // The premise: both sources really do offer this effect, or the case is vacuous.
+    assert!(blb.sound(11).is_some(), "{} should carry effect 11", blb_path.display());
+    let disk = app::native_sound::from_medium(&adf);
+    assert_eq!(disk[&11].rate, 18430, "the floppy's own header");
+
+    let (bytes, kind, from_medium) =
+        app::state::resolve_sound(&disk, Some(&blb), 11).expect("effect 11 resolves");
+    assert_eq!(from_medium, Some("heart"), "the DISK answered, and says which sample");
+    assert_eq!(kind, blorb::SoundKind::Aiff);
+    assert_eq!(bytes, &disk[&11].aiff[..], "byte for byte the disk's, not the Blorb's");
+    assert_ne!(
+        bytes,
+        blb.sound(11).expect("asserted above").0,
+        "the two renditions differ, which is why the precedence is observable at all",
+    );
+}
+

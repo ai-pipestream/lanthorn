@@ -1286,7 +1286,12 @@ Amiga floppy or anywhere else.
   *The Lurking Horror* and *Sherlock*, shipped their effects as raw Infocom sample
   files on the release disk, years before Blorb existed. Mount one of those disks and
   babelmap plays them: no `.blb` beside the story, no conversion step, nothing to
-  fetch. It reads the disk's own index rather than guessing from filenames — which
+  fetch. **The disk wins over a `.blb` filed beside it** — the same way artwork
+  already resolves, and for the same reason: the disk is the rendition Infocom
+  pressed, and a Blorb is somebody's later re-rendering of it, sometimes at
+  audibly different pitches. `/play-sound` says which source answered, and names
+  a Blorb that is present but outranked rather than leaving you wondering.
+  It reads the disk's own index rather than guessing from filenames — which
   matters, because *Sherlock*'s samples are called `armor`, `growl` and `violin.bin`,
   and three separate effects share one `heart` recording. Both the Amiga floppies and
   the Macintosh `/MAC/SOUND` layout of the *Lost Treasures* CD are understood, and

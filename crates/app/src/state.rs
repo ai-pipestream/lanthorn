@@ -962,12 +962,12 @@ pub fn format_sound_resource_list(
     blorb: Option<&blorb::Blorb>,
     disk: &std::collections::HashMap<u16, crate::native_sound::DiskSound>,
 ) -> Vec<String> {
-    // The medium's own sounds are listed first when there is no Blorb, because on
-    // the two games that have them that is the whole inventory (SQ-0907).
-    let Some(blorb) = blorb else {
-        if disk.is_empty() {
-            return vec!["no sound blorb resolved, and none on the medium".to_string()];
-        }
+    // The MEDIUM is listed when it has anything, because it is what will play
+    // (SQ-0914) — and on the two games that have sounds at all it is the whole
+    // inventory. A Blorb that is present but outranked is still worth a line: a
+    // listing that silently omits it would leave a person wondering why the `.blb`
+    // they filed made no difference.
+    if !disk.is_empty() {
         let mut effects: Vec<&crate::native_sound::DiskSound> = disk.values().collect();
         effects.sort_by_key(|s| s.effect);
         let mut lines = vec![format!("{} sound effect(s) on the medium:", effects.len())];
@@ -977,7 +977,18 @@ pub fn format_sound_resource_list(
                 s.effect, s.name, s.rate, s.frames
             ));
         }
+        if let Some(b) = blorb {
+            let n = b.resources().iter().filter(|r| &r.usage == b"Snd ").count();
+            if n > 0 {
+                lines.push(format!(
+                    "a sound blorb is also resolved ({n} resource(s)), and is NOT used:                      the disk's own sounds outrank it",
+                ));
+            }
+        }
         return lines;
+    }
+    let Some(blorb) = blorb else {
+        return vec!["no sound blorb resolved, and none on the medium".to_string()];
     };
     let sounds: Vec<_> = blorb.resources().iter().filter(|r| &r.usage == b"Snd ").collect();
     if sounds.is_empty() {
@@ -995,6 +1006,43 @@ pub fn format_sound_resource_list(
         lines.push(format!("  #{}  {}  {} bytes  {playable}", r.number, sound_kind_label(kind), r.len));
     }
     lines
+}
+
+/// Which source answers for sound effect `n`, and what to hand the mixer.
+///
+/// **The medium outranks a Blorb (SQ-0914).** A release disk is the rendition
+/// Infocom pressed; a `.blb` beside the story is somebody's later re-rendering of
+/// it, and on the two games that have both we have measured the Blorb disagreeing
+/// with the disk's own header — `Sherlock.blb` states 13032 Hz for effect 11 where
+/// the floppy states 18430, because its author baked in a pitch model that is not
+/// the interpreter's. Graphics has always resolved this way round:
+/// [`crate::graphics::PictSource::resolve`] takes the disk's release art and only
+/// falls back to a resource Blorb. Sound was the one inconsistency.
+///
+/// A free function rather than a method because `play_turn_sounds` is already
+/// holding `&mut self.audio`, and disjoint field borrows are what let it read the
+/// other two fields at the same time. One definition, so the play path and the
+/// `/play-sound` diagnostic cannot drift — a diagnostic that resolves differently
+/// from the thing it diagnoses is worse than none.
+///
+/// The third element is the sample's own name when the medium answered, which is
+/// what the report prints and what tells a person which source they are hearing.
+///
+/// The KIND comes back rather than a decodable format, and a Blorb resource is
+/// returned even when nothing here can decode it: `/play-sound` distinguishes
+/// "found, but not decodable" from "not found at all", and collapsing the two would
+/// blind the diagnostic to a real and reportable state. The medium's own sounds are
+/// always AIFF, having been wrapped as one on the way out of the container.
+pub fn resolve_sound<'a>(
+    disk: &'a std::collections::HashMap<u16, crate::native_sound::DiskSound>,
+    blorb: Option<&'a blorb::Blorb>,
+    n: u16,
+) -> Option<(&'a [u8], blorb::SoundKind, Option<&'a str>)> {
+    if let Some(s) = disk.get(&n) {
+        return Some((&s.aiff, blorb::SoundKind::Aiff, Some(s.name.as_str())));
+    }
+    let (bytes, kind) = blorb?.sound(u32::from(n))?;
+    Some((bytes, kind, None))
 }
 
 /// Step-by-step report for the `/play-sound <n>` diagnostic, built by the
@@ -1024,13 +1072,21 @@ pub fn format_play_sound_report(r: &PlaySoundReport) -> Vec<String> {
         if r.enable_sound { "on" } else { "off (attempting playback anyway — diagnostic)" }
     ));
     lines.push(format!("audio backend: {}", if r.backend_present { "present" } else { "NONE" }));
-    lines.push(format!("sound blorb: {}", if r.blorb_present { "resolved" } else { "NONE" }));
-    // A Blorb is not the only source — the two Infocom games that use sound ship it
-    // on the release disk, and saying only "sound blorb: NONE" over a story whose
-    // medium carries fourteen effects is a report that misleads (SQ-0907).
+    // The medium is listed FIRST because it is consulted first (SQ-0914), and a
+    // report whose order disagrees with the resolution order is a report that
+    // misleads — which is the same defect SQ-0907 fixed by mentioning the medium at
+    // all, over a story whose disk carries fourteen effects.
     lines.push(format!(
         "medium sounds: {}",
         if r.disk_sounds == 0 { "none".to_string() } else { format!("{} effect(s)", r.disk_sounds) }
+    ));
+    lines.push(format!(
+        "sound blorb: {}",
+        match (r.blorb_present, r.disk_sounds > 0) {
+            (true, true) => "resolved, outranked by the medium",
+            (true, false) => "resolved",
+            (false, _) => "NONE",
+        }
     ));
     let Some((kind, len)) = r.resource else {
         lines.push(format!("resource #{}: NOT FOUND in either source", r.number));
@@ -3023,23 +3079,13 @@ impl AppState {
                     }
                     1 => {} // prepare: decode on start
                     _ => {
-                        // A Blorb answers first — a `.blb` a person filed beside the
-                        // story is their own choice of rendition. Failing that, the
-                        // medium's own sounds (SQ-0907), already decoded to AIFF so
-                        // both sources reach the mixer the same way.
-                        let from_blorb = self
-                            .sound_blorb
-                            .as_ref()
-                            .and_then(|b| b.sound(n as u32))
-                            .and_then(|(bytes, kind)| {
-                                sound_kind_to_format(kind).map(|fmt| (bytes, fmt))
+                        // One definition of which source wins, shared with the
+                        // `/play-sound` diagnostic — see `resolve_sound`.
+                        let played = resolve_sound(&self.disk_sounds, self.sound_blorb.as_ref(), n)
+                            .and_then(|(bytes, kind, _)| {
+                                sound_kind_to_format(kind)
+                                    .and_then(|fmt| backend.play_sample(bytes, fmt, ev.volume, ev.repeats))
                             });
-                        let played = match from_blorb {
-                            Some((bytes, fmt)) => backend.play_sample(bytes, fmt, ev.volume, ev.repeats),
-                            None => self.disk_sounds.get(&n).and_then(|s| {
-                                backend.play_sample(&s.aiff, audio::SoundFormat::Aiff, ev.volume, ev.repeats)
-                            }),
-                        };
                         if let Some(id) = played {
                             self.sound_ids.insert(n, id);
                             if ev.routine != 0 {
@@ -6784,28 +6830,105 @@ mod play_sound_tests {
         assert_eq!(lines, vec!["no sound blorb resolved, and none on the medium".to_string()]);
     }
 
-    /// With no Blorb but a medium that carries sounds, the list is the medium's —
-    /// which on the two Infocom games that use sound is the whole inventory
-    /// (SQ-0907). Saying only "no sound blorb resolved" over a disk holding fourteen
-    /// effects is a report that misleads, and that is what the user saw.
-    #[test]
-    fn resource_list_falls_back_to_the_medium() {
+    /// One effect on the medium, named the way the disk names it.
+    fn disk_with(effect: u16, name: &str, rate: u32, aiff: Vec<u8>)
+        -> std::collections::HashMap<u16, crate::native_sound::DiskSound>
+    {
         let mut disk = std::collections::HashMap::new();
         disk.insert(
-            3u16,
+            effect,
             crate::native_sound::DiskSound {
-                effect: 3,
-                name: "armor".to_string(),
-                rate: 15360,
+                effect,
+                name: name.to_string(),
+                rate,
                 frames: 33280,
-                aiff: Vec::new(),
+                aiff,
             },
         );
+        disk
+    }
+
+    /// With no Blorb, the list is the medium's — which on the two Infocom games that
+    /// use sound is the whole inventory (SQ-0907). Saying only "no sound blorb
+    /// resolved" over a disk holding fourteen effects is a report that misleads, and
+    /// that is what the user saw.
+    #[test]
+    fn resource_list_leads_with_the_medium() {
+        let disk = disk_with(3, "armor", 15360, Vec::new());
         let lines = format_sound_resource_list(None, &disk);
         assert_eq!(lines[0], "1 sound effect(s) on the medium:");
         assert!(lines[1].contains("#3"), "{:?}", lines[1]);
         assert!(lines[1].contains("armor"), "the sample's own name is what a person recognises");
         assert!(lines[1].contains("15360 Hz"));
+    }
+
+    /// With BOTH, the medium is the inventory and the Blorb is named as outranked
+    /// (SQ-0914).
+    ///
+    /// The second half matters as much as the first: `stories/Sherlock.blb` sits
+    /// beside the Sherlock floppy, so this is the shipped configuration, and a
+    /// listing that silently omitted the Blorb would leave a person wondering why
+    /// the file they filed made no difference.
+    #[test]
+    fn resource_list_says_when_a_blorb_is_present_but_outranked() {
+        let disk = disk_with(3, "armor", 15360, Vec::new());
+        let bytes = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 3, b"FORM", b"aiffbytes")]);
+        let blorb = blorb::Blorb::parse(bytes).unwrap();
+        let lines = format_sound_resource_list(Some(&blorb), &disk);
+        assert_eq!(lines[0], "1 sound effect(s) on the medium:");
+        assert!(lines[1].contains("armor"));
+        let last = lines.last().expect("a line about the blorb");
+        assert!(last.contains("NOT used"), "{last:?}");
+        assert!(last.contains("outrank"), "{last:?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("sound resource(s):")),
+            "the Blorb's inventory is not the inventory: {lines:?}",
+        );
+    }
+
+    // ── resolve_sound ───────────────────────────────────────────────────────
+
+    /// **The medium outranks a Blorb** (SQ-0914), which is the whole policy.
+    ///
+    /// Both sources carry effect 3 here, as they really do for *Sherlock* and *The
+    /// Lurking Horror*, and the disk's bytes are the ones that come back. Falsified
+    /// by swapping the two arms of `resolve_sound`, which returns the Blorb's.
+    #[test]
+    fn resolve_sound_prefers_the_medium_over_a_blorb() {
+        let disk = disk_with(3, "armor", 15360, b"DISKAIFF".to_vec());
+        let bytes = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 3, b"FORM", b"blorbaiff")]);
+        let blorb = blorb::Blorb::parse(bytes).unwrap();
+        let (got, kind, name) = resolve_sound(&disk, Some(&blorb), 3).expect("effect 3 resolves");
+        assert_eq!(got, b"DISKAIFF", "the disk is the rendition Infocom pressed");
+        assert_eq!(kind, blorb::SoundKind::Aiff);
+        assert_eq!(name, Some("armor"), "the report says which source answered");
+    }
+
+    /// A Blorb still answers where the disk has nothing — the policy is precedence,
+    /// not exclusion, and a story with no medium at all is the ordinary case.
+    #[test]
+    fn resolve_sound_falls_through_to_a_blorb_and_reports_nothing_for_neither() {
+        let disk = disk_with(3, "armor", 15360, b"DISKAIFF".to_vec());
+        let bytes = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 5, b"OGGV", b"oggdata!")]);
+        let blorb = blorb::Blorb::parse(bytes).unwrap();
+        let (got, kind, name) = resolve_sound(&disk, Some(&blorb), 5).expect("effect 5 resolves");
+        assert_eq!(got, b"oggdata!");
+        assert_eq!(kind, blorb::SoundKind::Ogg);
+        assert_eq!(name, None, "no medium name, because the medium did not answer");
+
+        assert!(resolve_sound(&disk, Some(&blorb), 9).is_none(), "in neither source");
+        assert!(resolve_sound(&Default::default(), None, 3).is_none(), "no sources at all");
+    }
+
+    /// An undecodable Blorb resource comes back rather than reading as absent, so
+    /// `/play-sound` can tell "found, but not decodable" from "not found at all".
+    #[test]
+    fn resolve_sound_returns_a_resource_it_cannot_decode() {
+        let bytes = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 9, b"WEIR", b"whatever")]);
+        let blorb = blorb::Blorb::parse(bytes).unwrap();
+        let (_, kind, _) = resolve_sound(&Default::default(), Some(&blorb), 9).expect("still found");
+        assert_eq!(kind, blorb::SoundKind::Other);
+        assert!(sound_kind_to_format(kind).is_none(), "and the caller is what decides it is unplayable");
     }
 
     #[test]
