@@ -2515,7 +2515,37 @@ fn render_node(
             // metrics/scrollback. (SQ-0186)
             {
                 let layout = crate::render::v6_layout::classify_windows(items);
-                let status_style = state.colors.theme.get("upper_window").style;
+                // SQ-0906: chrome that names no background of its own sits on the page
+                // the GAME dressed the screen with — the story window's own background.
+                //
+                // This style is the base for all three of this path's stampings: the
+                // erase fields (`draw_erase_fills`, whose `ErasedFill` carries `bg = 0`
+                // for "the page default"), the anchored status band, and the painted
+                // screen that draws a menu's items. It was the bare theme style, so an
+                // inherited background resolved to the THEME's — black — however the
+                // game had dressed the screen a cell away.
+                //
+                // Amiga Zork Zero's DEFINE menu is the frame that showed it (release 366,
+                // serial 890323). Reached by keys until a line read, `define`, then one
+                // character to clear "[Hit any key to continue.]", it is routed here
+                // rather than to the hybrid ring by `has_menu && hybrid && !menu_over_art`.
+                // Its story window is black on `Standard(10)`, light grey; all 526 of its
+                // single-character runs name a foreground of black and no background at
+                // all; and its window carries an `ErasedFill`. So the fill and every run
+                // alike took the theme's black and the menu rendered black on black — the
+                // user's *"very dark and in general doesn't look correct"*.
+                //
+                // Gated on `honor_game_colours`, because a page the game chose is a game
+                // colour: with colours declined the theme owns this exactly as before.
+                let status_style = {
+                    let s = state.colors.theme.get("upper_window").style;
+                    match state.config.honor_game_colours.then(|| {
+                        crate::render::v6_layout::story_bg_rgba(layout.story, &state.colors)
+                    }) {
+                        Some(Some(p)) => s.bg(ratatui::style::Color::Rgb(p[0], p[1], p[2])),
+                        _ => s,
+                    }
+                };
                 // Native screen width in cells (v6 screens vary — Zork0 is
                 // 320px/40 cells, others differ) sets the anchor thresholds.
                 let (native_w, native_h) = crate::render::v6_layout::native_extent(items);

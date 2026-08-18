@@ -137,7 +137,11 @@ fn boot(f: &Floppy, profile: InterpreterProfile, honor: bool) -> Option<GameSess
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
-    let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
+    // `startup.rs`'s own chain, `native_std_window` included — this suite boots disk
+    // media exclusively, and a press whose art is not 640x400 is otherwise told it has
+    // a 640x400 screen and lays its own windows out to fit (CLAUDE.md, SQ-0901).
+    let v6_screen_px =
+        picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
     let mut s = GameSession::new_with_trace(
         bytes,
         honor,
@@ -894,3 +898,113 @@ fn a_game_that_named_its_own_pair_still_types_in_that_pair() {
         );
     }
 }
+
+// ── The page an inherited channel resolves to (SQ-0906) ─────────────────────
+
+/// Chrome that names no background sits on the page the GAME dressed the screen
+/// with, not on the theme's.
+///
+/// Zork Zero's DEFINE menu is the frame. Its story window is black on
+/// `Standard(10)`, light grey; all 526 of the menu's single-character runs name a
+/// foreground of black and **no background at all**; and the menu window carries an
+/// `ErasedFill`, whose `bg = 0` means "the page default". Every one of those
+/// inherited the THEME's black, so the menu rendered black on black.
+///
+/// Three things this case has to get right, each of which cost an attempt:
+///
+/// * **A picker.** `AppState::default()` has none, so `render_story_pane` logs
+///   `"cell — no image protocol"` and never enters the v6 arm at all. A colour case
+///   without one measures the fallback and passes against any defect. Halfblocks, so
+///   the bands land in the pane's own cells and their grounds are readable here.
+/// * **The right path.** This frame does NOT reach the hybrid ring — it is routed by
+///   `has_menu && hybrid && !menu_over_art` to the cell path, which has its own base
+///   style. A fix aimed at the ring changes nothing here, and `v6_story_page` is
+///   only published on the ring, so it is the wrong oracle. Asserted on the pane's
+///   own CELLS instead.
+/// * **The drive, by pending input.** `boot` leaves the game wherever twelve blank
+///   turns land it, and `define` is only accepted at a line read.
+///
+/// Arthur and Journey ride along as the control: on this same profile they dress no
+/// story background, so nothing about them may move.
+#[test]
+fn chrome_inherits_the_page_the_game_dressed() {
+    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for (f, to_menu) in [(&ZORK_ZERO, true), (&ARTHUR, false), (&JOURNEY, false)] {
+        let Some(mut s) = boot(f, InterpreterProfile::Amiga, true) else { continue };
+        let label = ctx(f, InterpreterProfile::Amiga, true);
+        if to_menu {
+            for _ in 0..8 {
+                if matches!(s.pending_input(), InputKind::Line) {
+                    break;
+                }
+                let _ = s.submit_char(13);
+            }
+            let said = s.submit("define").transcript;
+            assert!(
+                said.to_lowercase().contains("key to define"),
+                "{label}: premise — `define` did not open the key-definition menu: {said:?}",
+            );
+            let _ = s.submit_char(b' ');
+        }
+        let model = app::engine::Engine::screen(&s);
+        let app::engine::WinNode::Layered(items) = &model.root else { panic!("{label}: Layered") };
+        let dressed = app::render::v6_layout::story_bg_rgba(
+            app::render::v6_layout::classify_windows(items.as_slice()).story,
+            &app::colors::ColorScheme::terminal_default(),
+        );
+
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        let area = Rect::new(0, 0, 98, 37);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // Every ground an INKED cell sits on.
+        let grounds: std::collections::BTreeSet<String> = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| !buf[(x, y)].symbol().trim().is_empty())
+            .map(|(x, y)| format!("{:?}", buf[(x, y)].bg))
+            .collect();
+        let theme_ground = format!("{:?}", app::colors::ColorScheme::terminal_default().theme.get("upper_window").style.bg);
+
+        match dressed {
+            Some(p) => {
+                let page = format!("{:?}", ratatui::style::Color::Rgb(p[0], p[1], p[2]));
+                assert!(
+                    grounds.contains(&page),
+                    "{label}: the game dressed this screen in {page} and NO inked cell sits on \
+                     it. Grounds seen: {grounds:?}",
+                );
+                assert!(
+                    !grounds.contains(&theme_ground),
+                    "{label}: inked cells sit on the theme's ground {theme_ground} while the game \
+                     dressed the screen in {page} — that is the DEFINE menu coming back black on \
+                     black. Grounds seen: {grounds:?}",
+                );
+            }
+            // The control, and it is a statement about the FIXTURE rather than about
+            // the pane: these titles dress no page of their own on this profile, which
+            // is exactly why `status_style` cannot move for them. Asserted rather than
+            // assumed, because the day one of them starts dressing a page is the day
+            // this case has to be re-read. (Their panes are not a useful oracle here —
+            // Arthur's frame is all image bands and has no inked cell at all.)
+            None => assert!(
+                app::render::v6_layout::story_bg_rgba(
+                    app::render::v6_layout::classify_windows(items.as_slice()).story,
+                    &state.colors,
+                )
+                .is_none(),
+                "{label}: this control now dresses a page of its own, so it is no longer a \
+                 control — re-read what the inherited ground should be for it",
+            ),
+        }
+        ran += 1;
+    }
+    if stories_dir().join(ZORK_ZERO.file).exists() {
+        assert!(ran > 0, "the fixtures are present but nothing ran");
+    }
+}
+
