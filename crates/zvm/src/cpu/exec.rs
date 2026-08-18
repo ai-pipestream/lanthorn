@@ -4672,10 +4672,16 @@ impl Machine {
 ///   code 92 ('\\') → U+2191 ↑  (cursor up)
 ///   code 93 (']')  → U+2193 ↓  (cursor down)
 ///
-/// Codes not assigned in the table (71–74) map to U+FFFD (replacement character),
-/// matching bocfel's treatment of unassigned entries.
+/// Codes 71–74 are unassigned in that table, and bocfel renders them as U+FFFD.
+/// **We do not**, because the Amiga release draws them: the font Infocom shipped
+/// with *Beyond Zork* (`Graphic.Data`, an 8×8 Amiga disk font on *Lost Treasures*
+/// disk 5) inks a single corner pixel for each, so they are the faint members of
+/// the room-corner family at 63–66 and map to the matching quadrant blocks.
+/// `crates/app/tests/suites/font3_shipped_font.rs` reads that font off the floppy
+/// and fails if any code the Amiga inks resolves to a replacement character
+/// (SQ-0915).
 /// Codes outside 32..=126 are not handled here; the caller passes them through.
-fn font3_translate(ch: char) -> char {
+pub fn font3_translate(ch: char) -> char {
     let code = ch as u32;
     match code {
         32  => '\u{0020}', // (space)
@@ -4720,8 +4726,16 @@ fn font3_translate(ch: char) -> char {
         68  => '\u{2597}', // ▗
         69  => '\u{2596}', // ▖
         70  => '\u{2598}', // ▘
-        // 71-74: not assigned in the bocfel/§16 table → replacement character
-        71..=74 => '\u{FFFD}',
+        // 71-74: absent from the bocfel/§16 table, but the Amiga release DRAWS
+        // them — one pixel in a corner of the cell, one glyph per corner, read
+        // off the font Infocom shipped (SQ-0915). Same room-corner family as
+        // 63-66, so the quadrant blocks are the honest approximation; U+FFFD was
+        // simply wrong, and put a replacement character on screen where the
+        // Amiga drew a corner mark.
+        71  => '\u{259D}', // ▝ (the shipped glyph inks the upper-RIGHT corner)
+        72  => '\u{2597}', // ▗ (lower-right)
+        73  => '\u{2596}', // ▖ (lower-left)
+        74  => '\u{2598}', // ▘ (upper-left)
         75  => '\u{2594}', // ▔
         76  => '\u{2581}', // ▁
         77  => '\u{258F}', // ▏
