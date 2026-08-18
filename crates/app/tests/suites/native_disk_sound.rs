@@ -74,12 +74,23 @@ fn blorb_sounds(path: &Path) -> Option<std::collections::HashMap<u32, Rendered>>
 /// every effect the two sources share, the frame count and every sample byte must
 /// agree — and they do, on all fourteen: 3, 4, 6–13, 15–18.
 ///
-/// The RATES are recorded rather than reconciled. Six of the fourteen agree; on the
-/// other eight the Blorb reads LOWER — effect 3 says 9676 Hz against the disk's
-/// 15360 — and no consistent ratio relates them, so it is not a units error or a
-/// pitch transposition anyone here has explained. That Blorb is one person's
-/// rendition; the disk's header is what the Amiga itself was handed, so the disk
-/// wins and the divergence is pinned as data instead of averaged away.
+/// **And the rates are the disk's, shifted by whole semitones** — which is the
+/// finding that overturned this case's first reading (SQ-0912).
+///
+/// Eight of the fourteen rates disagree with the disk's header, always lower, and
+/// that was first recorded here as one person's rendition diverging from the machine.
+/// It is not. Disassembling the Amiga interpreter Infocom shipped shows `ioa_Period`
+/// computed from three constants — `1.05946309` (2^(1/12), the equal-tempered
+/// semitone), `1000.0`, and `3579.49` (the NTSC Amiga clock in kHz) — so the note in
+/// each effect's `.mid` file is applied to the rate as a power of the semitone ratio.
+/// The Blorb simply BAKED THAT IN, which is the only way to express a pitched sample
+/// as plain AIFF.
+///
+/// Asserted as the relation, over all fourteen: `12·log(disk ÷ blorb) / log(2)` is a
+/// whole number. Thirteen come out at 8.000, 1.000, 7.000 or 0.000 to three decimals.
+/// Effect 17 is the exception at 0.896 and is pinned as such rather than smoothed —
+/// its disk rate of 32910 Hz is past what Paula can clock a channel at, so something
+/// clamped, and knowing WHICH is worth more than an assertion that tolerates it.
 #[test]
 fn the_decoded_samples_are_the_blorbs_samples() {
     let (Some(disk), blb) = (lurking(), stories_dir().join("Lurking.blb")) else {
@@ -117,22 +128,25 @@ fn the_decoded_samples_are_the_blorbs_samples() {
         }
     }
     differing.sort_unstable();
+    // Every disagreement is a whole number of equal-tempered semitones, which is the
+    // interpreter's own `1.05946309` applied to the rate — not a rendering error.
+    const SEMITONE: f64 = 1.059_463_09;
+    let mut ragged = Vec::new();
+    for &(effect, disk, blorb) in &differing {
+        let semis = (f64::from(disk) / f64::from(blorb)).ln() / SEMITONE.ln();
+        if (semis - semis.round()).abs() >= 0.01 {
+            ragged.push((effect, disk, blorb, (semis * 1000.0).round() / 1000.0));
+        }
+    }
     assert_eq!(
-        differing,
-        vec![
-            (3u16, 15360u32, 9676u32),
-            (4, 20480, 12902),
-            (6, 18430, 11610),
-            (7, 18430, 11610),
-            (8, 18430, 17396),
-            (9, 18430, 17396),
-            (12, 20480, 13669),
-            (17, 32910, 31250),
-        ],
-        "the rate disagreements moved. Six agree and these eight do not, the Blorb always \
-         lower; if that set changes, re-read which source is right before touching either",
+        ragged,
+        vec![(17u16, 32910u32, 31250u32, 0.896)],
+        "every rate the Blorb states should be the disk's shifted by a WHOLE number of \
+         semitones (SQ-0912). Effect 17 is the one known exception — 32910 Hz is past what \
+         Paula can clock a channel at, so something clamped. Anything else appearing here \
+         means the pitch model is wrong, not that the Blorb is.",
     );
-    assert_eq!(same_rate, 6, "and the rest agree exactly");
+    assert_eq!(same_rate, 6, "six effects are played at their recorded pitch, so their rates agree");
 }
 
 /// The index is what carries the effect numbers, and a naming convention is not a
