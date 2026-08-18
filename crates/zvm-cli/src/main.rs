@@ -1150,6 +1150,13 @@ Arguments:
 
 Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
+  /pin                  Toggle whether a TALL upper window (a menu, a form,
+                        BeyondZork's compass) is pinned in place. Pinned, it stays
+                        in view but the terminal keeps no scrollback, because lines
+                        scrolled out of a pinned region are discarded rather than
+                        remembered. Flowing, it is printed into the transcript when
+                        it changes and everything reaches your scrollback. A
+                        one-row status bar always flows; it is chrome, not content.
   /menu                 Re-read the open menu, host-numbered. In --screen-reader
                         mode a menu keypress is a whole typed line, so /menu —
                         and a bare item number, which jumps to that item — work
@@ -1386,7 +1393,9 @@ fn main() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{e}");
-            std::process::exit(1);
+            // Past the guard, and `process::exit` runs no destructors, so the
+            // guard's Drop never fires — restore explicitly (SQ-0913).
+            cli_host::restore_and_exit(&crate::screen::leave_region(), 1);
         }
     };
     machine.set_honor_game_colours(honor);
@@ -1544,7 +1553,8 @@ fn main() {
                     Ok(m) => m,
                     Err(e) => {
                         eprintln!("{e}");
-                        std::process::exit(1);
+                        // As above: past the guard, so restore explicitly.
+                        cli_host::restore_and_exit(&crate::screen::leave_region(), 1);
                     }
                 };
                 machine.set_honor_game_colours(honor);
@@ -1608,6 +1618,21 @@ fn main() {
                     if cli_host::is_menu_request(&r.0) {
                         let text = view.menu_listing().unwrap_or_else(|| NO_MENU.to_string());
                         print_host_answer(&mut machine, text.trim_end());
+                        continue;
+                    }
+                    // `/pin` trades a pinned upper window for terminal scrollback,
+                    // on the same host-answered precedent (SQ-0909). It is a
+                    // toggle rather than a launch flag because the answer changes
+                    // within one session: pinned while you read BeyondZork's
+                    // compass, released while you scroll back through what you
+                    // just did.
+                    if r.0.trim().eq_ignore_ascii_case("/pin") {
+                        let text = if view.toggle_pin() {
+                            "[pinned: a tall upper window stays in view; no scrollback while it is up]"
+                        } else {
+                            "[flowing: everything scrolls into the terminal's own history]"
+                        };
+                        print_host_answer(&mut machine, text);
                         continue;
                     }
                     break r;

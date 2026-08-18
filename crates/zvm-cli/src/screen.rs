@@ -210,6 +210,29 @@ use zvm::cpu::exec::Machine;
 /// line, which is the same region by another name).
 const SOURCE_UPPER: u32 = 0;
 
+/// How tall an upper window must be before it is PINNED with a scroll region
+/// (SQ-0909).
+///
+/// Pinning and scrollback are the same mechanism seen from two sides. A terminal
+/// only pushes a line into its history when the FULL screen scrolls; a line that
+/// scrolls out of a DECSTBM region is discarded. So confining the screen to keep a
+/// status bar in view silently costs the player every line of narrative that has
+/// scrolled past — measured in `tests/scroll_region_eats_scrollback.rs` against a
+/// real terminal model, where a pinned run reaches history zero times.
+///
+/// The line drawn here is the one this file already draws for
+/// [`ScreenView::quiet_status_line`]: **one row is chrome, taller is content.** A
+/// v3 status line is one row by definition and a v4+ game splitting a single row is
+/// drawing the same thing, so it flows with the transcript and the terminal keeps
+/// the history. Anything taller is a menu, a form or a panel the game means you to
+/// read — Planetfall's InvisiClues, Lost Pig's HELP, Bureaucracy's licence form,
+/// BeyondZork's stats and compass — and that pins, exactly as before. While one of
+/// those is up you are reading it, not scrolling back through prose.
+///
+/// The region is dropped and re-established as the upper window grows and shrinks,
+/// which is sound: history resumes the moment it is dropped (same test).
+const PIN_MIN_ROWS: u16 = 2;
+
 /// Tracks the pinned top-region state and produces the bytes to emit before an
 /// input prompt: an ANSI scroll-region update on a TTY, or a deduped inline
 /// plain-text block when piped.
@@ -247,6 +270,15 @@ pub struct ScreenView {
     /// that sees the inline block; `main` reaches it through
     /// [`ScreenView::menu`](Self::menu) and friends for `/menu` and number jumps.
     menu: cli_host::MenuTracker,
+    /// Whether a tall upper window may pin (SQ-0909). Toggled by `/pin`.
+    ///
+    /// The height rule cannot settle every case on its own. An InvisiClues menu is
+    /// TRANSIENT — it pins while you read it and releases when it closes — but
+    /// BeyondZork's stats-and-compass panel is permanent chrome, so pinning it costs
+    /// scrollback for the whole game. Which of those you want is not a property of
+    /// the window; it is what the player is doing at that moment, so it is theirs to
+    /// say, at the moment they care.
+    pin_content: bool,
     term_rows: u16,
     /// Tracked terminal width, kept current on resize. The v3 status bar is
     /// padded to exactly this: hard-coding `DEFAULT_COLS` made the reverse-video
@@ -276,12 +308,21 @@ impl ScreenView {
             quiet_status_line,
             menus: false,
             menu: cli_host::MenuTracker::new(),
+            pin_content: true,
             term_rows,
             term_cols,
             active_rows: 0,
             last_block: None,
             pending_erase_shift: false,
         }
+    }
+
+    /// Let tall upper windows pin, or make everything flow (`/pin`). Returns the
+    /// new state. The next frame acts on it: turning it off leaves any live region
+    /// through `render`'s ordinary enter/leave path, so history resumes at once.
+    pub fn toggle_pin(&mut self) -> bool {
+        self.pin_content = !self.pin_content;
+        self.pin_content
     }
 
     /// Turn menu recognition on (screen-reader mode only — SQ-0609).
@@ -390,9 +431,13 @@ impl ScreenView {
             // erase; read and clear it now.
             let erase_shift = self.pending_erase_shift;
             self.pending_erase_shift = false;
-            if top != self.active_rows {
-                let delta = top as i32 - self.active_rows as i32;
-                if erase_shift && delta > 0 && top >= 2 {
+            // Pin CONTENT, let CHROME flow — see `PIN_MIN_ROWS`. `active_rows` is
+            // what is pinned, which is no longer simply what the game has drawn.
+            let pin = self.pin_content && top >= PIN_MIN_ROWS;
+            let want = if pin { top } else { 0 };
+            if want != self.active_rows {
+                let delta = want as i32 - self.active_rows as i32;
+                if erase_shift && delta > 0 && pin {
                     // A game cleared the screen, then redrew a multi-row upper
                     // window (e.g. BeyondZork's stats + compass) and streamed its
                     // short lower-window prompt right after the clear — before
@@ -424,15 +469,15 @@ impl ScreenView {
                     out.push_str(&format!("\x1b[{delta}B")); // CUD: follow content
                     out.push_str(&enter_region(top, self.term_rows));
                 } else {
-                    out.push_str(&if top == 0 {
+                    out.push_str(&if want == 0 {
                         leave_region()
                     } else {
-                        enter_region(top, self.term_rows)
+                        enter_region(want, self.term_rows)
                     });
                 }
-                self.active_rows = top;
+                self.active_rows = want;
             }
-            if top > 0 {
+            if pin {
                 out.push_str("\x1b7"); // DECSC save cursor
                 for (i, row) in rows_ansi.iter().enumerate() {
                     // position, paint bg, clear-to-EOL (fills with bg), then row
@@ -440,6 +485,17 @@ impl ScreenView {
                     out.push_str(row);
                 }
                 out.push_str("\x1b8"); // DECRC restore cursor
+            } else if top > 0 {
+                // Unpinned chrome goes INTO the transcript, which is what puts it —
+                // and everything above it — into the terminal's own history. Deduped
+                // against the last one, so a status bar that did not change does not
+                // repeat; a v3 bar carries `Moves: N` and so changes every turn,
+                // which is the point of it being there.
+                let block = Self::inline_block(rows_plain, rows_ansi);
+                if !block.is_empty() && self.last_block.as_deref() != Some(block.as_str()) {
+                    self.last_block = Some(block.clone());
+                    out.push_str(&block);
+                }
             }
             out
         } else {
@@ -481,6 +537,31 @@ impl ScreenView {
                 cli_host::Emission::Nothing => String::new(),
             }
         }
+    }
+
+    /// The upper window as lines to print into the transcript, in the game's own
+    /// colours (SQ-0909).
+    ///
+    /// Emptiness is judged from the PLAIN rows and the text taken from the ANSI
+    /// ones: a styled row is padded to the terminal width inside its SGR run, so
+    /// trimming it as text would cut the reset off the end and leak the status
+    /// bar's colours into the narrative below. The padding is kept for the same
+    /// reason it exists on the pinned path — a status bar spans the width.
+    ///
+    /// `\r\n` rather than `\n` because this can be written while the input editor
+    /// has the terminal in raw mode, where a bare newline would step down without
+    /// returning to column 1.
+    fn inline_block(rows_plain: &[String], rows_ansi: &[String]) -> String {
+        let mut n = rows_plain.len().min(rows_ansi.len());
+        while n > 0 && rows_plain[n - 1].trim_end().is_empty() {
+            n -= 1;
+        }
+        let mut out = String::new();
+        for row in rows_ansi.iter().take(n) {
+            out.push_str(row);
+            out.push_str("\x1b[0m\r\n");
+        }
+        out
     }
 
     /// The pinned region's current text, unconditionally — no dedupe, no TTY
@@ -547,12 +628,106 @@ impl ScreenView {
 
     /// Restore the terminal at quit.
     pub fn leave(&mut self) -> String {
-        if self.is_tty && self.active_rows > 0 {
-            self.active_rows = 0;
-            format!("{}\x1b[{};1H", leave_region(), self.term_rows)
-        } else {
-            String::new()
+        if !self.is_tty {
+            return String::new();
         }
+        let was_pinned = self.active_rows > 0;
+        self.active_rows = 0;
+        // The region reset is UNCONDITIONAL (SQ-0913). It was gated on having
+        // pinned something, which is the wrong question twice over: a region set
+        // by a path this view did not record survives the gate, and `CSI r` is a
+        // no-op when none is set, so there is nothing to save by asking.
+        let region = leave_region();
+        if was_pinned {
+            // Text filled the screen under the pinned rows, so the bottom row is
+            // where the shell should carry on from.
+            format!("{region}\x1b[{};1H", self.term_rows)
+        } else {
+            // Nothing was pinned, so the cursor is sitting wherever the game left
+            // its prompt — mid-screen, mid-paragraph. Returning without moving it
+            // hands the shell that spot, and the next prompt is drawn INTO the
+            // story text. Start a fresh line instead. This is the reported symptom
+            // in SQ-0913, and it got commoner with SQ-0909: a one-row status bar no
+            // longer pins anything, so `was_pinned` is now false for most games.
+            format!("{region}\r\n")
+        }
+    }
+}
+
+/// The premise behind the pin rule, proved against a real terminal (SQ-0909).
+///
+/// The claim these tests protect is that a DECSTBM region DISCARDS the lines that
+/// scroll out of it, so pinning a status bar silently costs the player the history
+/// of everything they have read. That is the sort of thing repeated as folklore, and
+/// it is the entire justification for [`PIN_MIN_ROWS`], so it is measured.
+///
+/// The witness is `qwertty-term-vt`, Ghostty's terminal core ported to Rust — the
+/// same second opinion `app` uses for image placement (SQ-0764). Checking our own
+/// renderer against our own decoder would only prove it agrees with itself. The
+/// bytes come from [`enter_region`] / [`leave_region`] rather than from literals, so
+/// a change to either is a change to what is being proved.
+#[cfg(test)]
+mod scrollback_tests {
+    use super::{enter_region, leave_region};
+    use qwertty_term_vt::stream::{Stream, TerminalHandler};
+    use qwertty_term_vt::terminal::{Options, Terminal};
+
+    const COLS: u16 = 40;
+    const ROWS: u16 = 10;
+
+    /// Feed `bytes` to a fresh terminal and report how many rows reached history.
+    fn scrollback_after(bytes: &str) -> usize {
+        let t = Terminal::new(Options {
+            cols: COLS,
+            rows: ROWS,
+            max_scrollback: 10_000,
+            ..Default::default()
+        });
+        let mut stream = Stream::new(TerminalHandler::new(t));
+        stream.feed(bytes.as_bytes());
+        stream.handler.terminal.snapshot_window(0).scrollback_len
+    }
+
+    /// Enough lines to push the screen well past its height.
+    fn narrative(n: usize) -> String {
+        (0..n).map(|i| format!("line {i}\r\n")).collect()
+    }
+
+    /// **Unpinned, the terminal keeps the history itself** — which is why this
+    /// feature stores nothing on our side.
+    #[test]
+    fn a_full_screen_scroll_fills_the_terminals_own_history() {
+        let got = scrollback_after(&narrative(usize::from(ROWS) * 3));
+        assert!(
+            got >= usize::from(ROWS),
+            "a {ROWS}-row screen fed {} lines should have pushed rows to history, got {got}",
+            usize::from(ROWS) * 3,
+        );
+    }
+
+    /// **Pinned, the same lines are thrown away.** This is the cost the height rule
+    /// exists to avoid paying for a one-row status bar.
+    #[test]
+    fn a_scroll_region_throws_the_same_lines_away() {
+        let pinned = format!("{}{}", enter_region(1, ROWS), narrative(usize::from(ROWS) * 3));
+        assert_eq!(
+            scrollback_after(&pinned),
+            0,
+            "lines scrolled out of a DECSTBM region should reach no history at all",
+        );
+    }
+
+    /// Dropping the region lets history resume, which is what makes `/pin` a
+    /// toggle a player can use mid-session rather than a launch-time decision.
+    #[test]
+    fn dropping_the_region_lets_history_resume() {
+        let mut s = format!("{}{}", enter_region(1, ROWS), narrative(usize::from(ROWS) * 2));
+        s.push_str(&leave_region());
+        s.push_str(&narrative(usize::from(ROWS) * 2));
+        assert!(
+            scrollback_after(&s) >= usize::from(ROWS),
+            "history should resume once the region is dropped",
+        );
     }
 }
 
@@ -592,14 +767,45 @@ mod view_tests {
         assert_eq!(second, "", "unchanged region dedupes to empty");
     }
 
+    /// A ONE-ROW status bar flows with the transcript and pins nothing (SQ-0909),
+    /// so the terminal keeps the history — which is the whole point.
     #[test]
-    fn tty_enters_region_then_resets_on_leave() {
+    fn tty_lets_a_one_row_status_bar_flow_instead_of_pinning_it() {
         let (p, a) = v3_rows();
         let mut v = ScreenView::new(true, false, false, 24, 80);
         let f = v.render(1, &p, &a, "");
-        assert!(f.contains("\x1b[2;24r"), "sets scroll region: {f:?}");
-        assert!(f.contains("\x1b[7m"), "v3 status bar is reverse-video: {f:?}");
+        assert!(!f.contains(";24r"), "no DECSTBM for one row of chrome: {f:?}");
+        assert!(f.contains("West of House"), "the bar is printed into the transcript: {f:?}");
+        assert!(f.contains("\x1b[7m"), "v3 status bar keeps its reverse-video: {f:?}");
+        assert!(f.ends_with("\r\n"), "and ends a line, so the story follows below it: {f:?}");
+        let same = v.render(1, &p, &a, "");
+        assert_eq!(same, "", "an unchanged bar does not repeat");
+    }
+
+    /// A TALL upper window still pins, exactly as before — that is the menu, the
+    /// form, the InvisiClues panel.
+    #[test]
+    fn tty_still_pins_a_tall_upper_window_and_resets_on_leave() {
+        let rows = vec!["  Chapter One".to_string(); 6];
+        let mut v = ScreenView::new(true, false, false, 24, 80);
+        let f = v.render(6, &rows, &rows, "");
+        assert!(f.contains("\x1b[7;24r"), "sets a scroll region below the six rows: {f:?}");
         assert!(v.leave().contains("\x1b[r"), "leave resets region");
+    }
+
+    /// `/pin` releases a pinned window mid-session, and the release goes out
+    /// immediately rather than waiting for the window to change.
+    #[test]
+    fn toggling_the_pin_off_drops_a_live_region() {
+        let rows = vec!["  Chapter One".to_string(); 6];
+        let mut v = ScreenView::new(true, false, false, 24, 80);
+        assert!(v.render(6, &rows, &rows, "").contains("\x1b[7;24r"), "pinned to begin with");
+        assert!(!v.toggle_pin(), "/pin turns it off");
+        let out = v.render(6, &rows, &rows, "");
+        assert!(out.contains("\x1b[r"), "the live region is dropped: {out:?}");
+        assert!(out.contains("Chapter One"), "and the window flows into the transcript instead: {out:?}");
+        assert!(v.toggle_pin(), "/pin turns it back on");
+        assert!(v.render(6, &rows, &rows, "").contains("\x1b[7;24r"), "and it pins again");
     }
 
     /// A menu-shaped upper window: a header, then items with `>` on one of them.
@@ -751,8 +957,13 @@ mod view_tests {
         assert!(out.ends_with("\x1b[H"), "erase homes the cursor: {out:?}");
         // After erase the region is considered inactive, so the next frame
         // re-establishes it.
+        // A one-row bar no longer pins at all, so the frame that follows an erase
+        // simply prints it (SQ-0909); a TALL window is what re-establishes a region.
         let re = v.render(1, &p, &a, "");
-        assert!(re.contains("\x1b[2;24r"), "next frame re-enters the region: {re:?}");
+        assert!(!re.contains(";24r"), "a one-row bar does not re-enter a region: {re:?}");
+        let rows = vec!["  Chapter One".to_string(); 6];
+        let tall = v.render(6, &rows, &rows, "");
+        assert!(tall.contains("\x1b[7;24r"), "a tall window does: {tall:?}");
     }
 
     #[test]
@@ -763,9 +974,9 @@ mod view_tests {
 
     #[test]
     fn tty_dropping_to_zero_rows_resets_region() {
-        let (p, a) = v3_rows();
+        let rows = vec!["  Chapter One".to_string(); 6];
         let mut v = ScreenView::new(true, false, false, 24, 80);
-        let _ = v.render(1, &p, &a, ""); // activate region
+        let _ = v.render(6, &rows, &rows, ""); // activate region
         let out = v.render(0, &[], &[], "");
         assert!(out.contains("\x1b[r"), "dropping to 0 rows resets region: {out:?}");
     }
@@ -803,7 +1014,8 @@ mod view_tests {
         let _ = v.erase(ZColour::Default, true);
         let out = v.render(1, &p, &a, "");
         assert!(!out.contains("\x1b[1T"), "1-row status line is not shifted: {out:?}");
-        assert!(out.contains("\x1b[2;24r"), "still pins the status region: {out:?}");
+        assert!(!out.contains(";24r"), "and pins nothing — one row is chrome (SQ-0909): {out:?}");
+        assert!(out.contains("West of House"), "it is printed instead: {out:?}");
     }
 
     #[test]
