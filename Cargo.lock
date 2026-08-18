@@ -3922,5 +3922,6 @@ dependencies = [
  "buildinfo",
  "cli-host",
  "crossterm",
+ "qwertty-term-vt",
  "zvm",
 ]
