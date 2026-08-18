@@ -3,6 +3,9 @@
 
 pub mod adf;
 pub mod amiga_font;
+pub mod bitmap_font;
+pub mod mac_font;
+pub mod resource_fork;
 pub mod bpal;
 /// The container a disc's filesystem sits inside — raw CD sectors and the Apple
 /// Partition Map. Private because it is a wrapper rather than a reader: what it

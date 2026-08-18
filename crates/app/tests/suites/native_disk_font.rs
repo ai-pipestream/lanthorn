@@ -13,7 +13,7 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
-fn font_on(disk: &str) -> Option<blorb::amiga_font::AmigaFont> {
+fn font_on(disk: &str) -> Option<blorb::bitmap_font::BitmapFont> {
     let path = stories_dir().join(disk);
     if !path.is_file() {
         eprintln!("SKIP: gitignored floppy absent: {disk}");
@@ -123,4 +123,115 @@ fn shogun_and_zork_zero_carry_no_font() {
             blorb::amiga_font::from_volume(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())));
         assert!(got.is_none(), "{disk} carries no font, but one parsed");
     }
+}
+
+/// **Macintosh resource forks are readable, and the v6 releases keep a font there**
+/// (SQ-0911).
+///
+/// `hfs.rs` read only data forks until this quest, on the correct grounds that
+/// Infocom keeps its story and its artwork in them. It keeps its FONTS in the
+/// resource fork, which is what reopened that decision — see SQ-0916 for what the
+/// fonts turned out to be good for, which is less than hoped.
+///
+/// Zork Zero's Macintosh floppy is the fixture because it is a plain HFS volume: the
+/// forks on the *Lost Treasures* CD are ISO9660 associated files, which
+/// `iso9660.rs` skips by design and which this does not exercise.
+#[test]
+fn the_macintosh_floppy_carries_a_font_in_its_resource_fork() {
+    let path = stories_dir().join("Zork Zero Disk.image");
+    if !path.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium absent");
+        return;
+    }
+    let hfs = blorb::hfs::Hfs::mount(std::fs::read(&path).expect("readable")).expect("mounts");
+
+    // The application is ALL resource fork — zero data bytes — which is the case
+    // that would read as an empty file if only data forks were reachable.
+    let app_entry = hfs
+        .files()
+        .iter()
+        .find(|e| e.file_type == *b"APPL")
+        .expect("the volume carries an application");
+    assert_eq!(app_entry.size, 0, "a Macintosh application is all resource fork");
+    assert!(app_entry.resource_size > 30_000, "and the fork is substantial");
+
+    let fork = hfs.read_resource(app_entry).expect("the resource fork reads");
+    assert_eq!(fork.len(), app_entry.resource_size, "the whole fork, not a prefix");
+    let rf = blorb::resource_fork::ResourceFork::parse(&fork).expect("parses as a resource fork");
+    assert!(rf.types.len() > 5, "an application carries many types: {}", rf.types.len());
+    assert!(!rf.of_type(b"CODE").is_empty(), "an application has CODE");
+
+    // The payload this quest was reopened for.
+    let font = blorb::mac_font::from_fork(&rf).expect("a FONT resource with a bitmap");
+    assert_eq!((font.width, font.height), (7, 15), "the body face");
+    assert_eq!(font.baseline, 12, "ascent");
+    assert!(font.glyphs.len() > 200, "covers the Mac roman range");
+    let a = font.glyph(b'A').expect("'A'");
+    assert_eq!(a.rows.len(), 15);
+    assert_ne!(a.rows.iter().fold(0, |x, r| x | r), 0, "'A' is drawn");
+    assert!(font.glyph(b' ').expect("space").rows.iter().all(|&r| r == 0), "the space is blank");
+
+    // The family-name record (id ≡ 0 mod 128) carries no bitmap and must be refused
+    // rather than parsed into a zero-sized font.
+    let family = rf.of_type(b"FONT").iter().find(|r| r.id % 128 == 0);
+    if let Some(r) = family {
+        assert!(blorb::mac_font::parse(&r.data).is_none(), "FONT {} is a family record", r.id);
+    }
+}
+
+/// The Macintosh font is **fixed-pitch across printable ASCII, at 7** — and that is
+/// still one pixel narrower than babelmap's cell (SQ-0916).
+///
+/// This case exists because the first reading of this font was wrong twice. It was
+/// called proportional (true only if you count the accented high range, which no
+/// game prints), and it was previewed without its left side bearings, which flushed
+/// every glyph left and made evenly-advanced text look raggedly letter-spaced. With
+/// the bearings applied the spacing is uniform — it is simply one pixel loose per
+/// character, because the v6 cell is 8.
+///
+/// So the obstacle to drawing with these glyphs is not the font. It is that using
+/// them properly needs the font's METRICS as well, which is a change to what
+/// `$26`/`$27` tell the game and moves every window the game lays out. Pinned so
+/// that stays measured rather than remembered.
+#[test]
+fn the_macintosh_font_is_fixed_pitch_but_narrower_than_our_cell() {
+    let path = stories_dir().join("Zork Zero Disk.image");
+    if !path.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium absent");
+        return;
+    }
+    let hfs = blorb::hfs::Hfs::mount(std::fs::read(&path).expect("readable")).expect("mounts");
+    let font = hfs
+        .files()
+        .iter()
+        .filter(|e| e.resource_size > 0)
+        .filter_map(|e| hfs.read_resource(e))
+        .filter_map(|f| blorb::resource_fork::ResourceFork::parse(&f))
+        .find_map(|rf| blorb::mac_font::from_fork(&rf))
+        .expect("a Macintosh FONT");
+
+    let widths: std::collections::BTreeSet<u8> = (33u8..=126)
+        .filter_map(|c| font.glyph(c))
+        .filter(|g| g.rows.iter().any(|&r| r != 0))
+        .map(|g| g.width)
+        .collect();
+    assert_eq!(
+        widths,
+        std::collections::BTreeSet::from([7]),
+        "every printable character advances by the same 7 — this is a fixed-pitch face \
+         over the range a game prints, whatever the accented high range does",
+    );
+    assert!(
+        widths.iter().all(|&w| w < 8),
+        "and it is NARROWER than babelmap's 8px cell, so drawing with it at that cell \
+         costs a pixel of tracking on every character: {widths:?}",
+    );
+
+    // The bearings really are applied: a narrow glyph is not flush against column 0.
+    let l = font.glyph(b'l').expect("'l'");
+    assert!(
+        l.rows.iter().filter(|&&r| r != 0).all(|r| r & 0x80 == 0),
+        "'l' should sit inside its advance, not flush left: {:02X?}",
+        l.rows,
+    );
 }

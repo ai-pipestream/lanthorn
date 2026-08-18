@@ -164,11 +164,16 @@ const FIL_FL_NUM: usize = 20; // filFlNum — the file's CNID
 const FIL_LG_LEN: usize = 26; // filLgLen — data fork logical length
 const FIL_R_LG_LEN: usize = 36; // filRLgLen — resource fork logical length
 const FIL_EXT_REC: usize = 74; // filExtRec — first three data-fork extents
+const FIL_R_EXT_REC: usize = 86; // filRExtRec — first three RESOURCE-fork extents
 const FILE_REC_LEN: usize = 102;
 
-/// `xkrFkType` for a data fork. (A resource fork is `0xFF`; this reader reads
-/// only data forks, so an overflow record for one is skipped.)
+/// `xkrFkType` for a data fork.
 const FORK_DATA: u8 = 0x00;
+/// `xkrFkType` for a resource fork (SQ-0911). Both are kept now: a Macintosh
+/// release keeps its story and artwork in data forks, which is why this reader
+/// ignored resource forks for a long time — but it keeps its FONTS in the
+/// resource fork, and those are worth reading.
+const FORK_RSRC: u8 = 0xFF;
 /// Bytes of extents-overflow key ahead of the record's own data.
 const XKR_LEN: usize = 7;
 
@@ -199,9 +204,8 @@ pub struct HfsEntry {
     pub name: String,
     /// Data-fork size in bytes, from the catalog record.
     pub size: usize,
-    /// Resource-fork size in bytes. Reported so a listing can say what a file
-    /// is — a Macintosh application is *all* resource fork — but not read: an
-    /// Infocom release keeps its story and its artwork in data forks.
+    /// Resource-fork size in bytes; a Macintosh application is *all* resource
+    /// fork. Read it with [`Hfs::read_resource`].
     pub resource_size: usize,
     /// The Finder type, e.g. `INdf` for Infocom's data files, `APPL` for an
     /// application.
@@ -216,6 +220,8 @@ pub struct HfsEntry {
     /// `JOURNEY FOLDER` and `ZORK ZERO` are the only things telling three files
     /// called `STORY.DATA` apart.
     pub dirs: Vec<String>,
+    /// The first three RESOURCE-fork extents; any more live in the overflow file.
+    pub rsrc_extents: ExtentRecord,
     /// The first three data-fork extents; any more live in the overflow file.
     extents: ExtentRecord,
 }
@@ -268,8 +274,9 @@ pub struct Hfs {
     alloc_count: usize,
     name: String,
     files: Vec<HfsEntry>,
-    /// Extents overflow records for data forks, as `(cnid, first block, extents)`.
-    overflow: Vec<(u32, u16, ExtentRecord)>,
+    /// Extents overflow records, as `(cnid, fork type, first block, extents)`.
+    /// Both fork types are kept; the reader picks by [`FORK_DATA`]/[`FORK_RSRC`].
+    overflow: Vec<(u32, u8, u16, ExtentRecord)>,
 }
 
 impl Hfs {
@@ -320,7 +327,7 @@ impl Hfs {
         hfs.overflow = overflow_records(&xt);
         let ct = extent_record(&mdb, MDB_CT_EXT_REC);
         let catalog = hfs
-            .read_fork(CATALOG_CNID, ct, be32(&mdb, MDB_CT_FL_SIZE) as usize)
+            .read_fork(CATALOG_CNID, FORK_DATA, ct, be32(&mdb, MDB_CT_FL_SIZE) as usize)
             .ok_or(HfsError::NotHfs)?;
         hfs.files = catalog_files(&catalog);
         Ok(hfs)
@@ -371,7 +378,7 @@ impl Hfs {
 
     /// Read one data fork whole: its first three extents, then as many overflow
     /// records as it takes. `None` when the chain runs short of `size`.
-    fn read_fork(&self, cnid: u32, first: ExtentRecord, size: usize) -> Option<Vec<u8>> {
+    fn read_fork(&self, cnid: u32, fork: u8, first: ExtentRecord, size: usize) -> Option<Vec<u8>> {
         let mut out = self.read_extents(&first, size);
         // Each pass consumes one extent record, and a fork cannot need more of
         // them than the overflow file holds in total.
@@ -383,8 +390,10 @@ impl Hfs {
             // Overflow records are keyed by the fork-relative allocation block
             // the record starts at, which is exactly what has been read so far.
             let next = u16::try_from(out.len() / self.alloc_size).ok()?;
-            let (_, _, extents) =
-                self.overflow.iter().find(|(id, abn, _)| *id == cnid && *abn == next)?;
+            let (_, _, _, extents) = self
+                .overflow
+                .iter()
+                .find(|(id, fk, abn, _)| *id == cnid && *fk == fork && *abn == next)?;
             let more = self.read_extents(extents, size - out.len());
             if more.is_empty() {
                 return None;
@@ -397,7 +406,24 @@ impl Hfs {
     /// Read a file's data fork. `None` if its extents are broken or run short of
     /// the size the catalog declares.
     pub fn read(&self, entry: &HfsEntry) -> Option<Vec<u8>> {
-        self.read_fork(entry.id, entry.extents, entry.size)
+        self.read_fork(entry.id, FORK_DATA, entry.extents, entry.size)
+    }
+
+    /// Read a file's RESOURCE fork (SQ-0911). `None` when it has none, or when
+    /// its extents are broken or run short of the size the catalog declares.
+    ///
+    /// A Macintosh file is two forks, and until this quest only the data one was
+    /// readable — a correct choice while the only things wanted were the story and
+    /// the artwork, which Infocom keeps in data forks. The v6 releases keep their
+    /// **bitmap fonts** in the resource fork, and `FONT` 1033 is fixed-pitch, so it
+    /// is the one font in the whole corpus that fits babelmap's cell model (the
+    /// Amiga's is proportional — see `blorb::amiga_font`).
+    ///
+    /// The bytes come back raw. [`crate::resource_fork`] turns them into resources.
+    pub fn read_resource(&self, entry: &HfsEntry) -> Option<Vec<u8>> {
+        (entry.resource_size > 0)
+            .then(|| self.read_fork(entry.id, FORK_RSRC, entry.rsrc_extents, entry.resource_size))
+            .flatten()
     }
 
     /// Read a file by path or by bare name (case-insensitive), for callers that
@@ -692,18 +718,18 @@ fn extent_record(b: &[u8], off: usize) -> ExtentRecord {
 
 /// Every data-fork record in the extents overflow file, as
 /// `(cnid, first fork-relative allocation block, extents)`.
-fn overflow_records(tree: &[u8]) -> Vec<(u32, u16, ExtentRecord)> {
+fn overflow_records(tree: &[u8]) -> Vec<(u32, u8, u16, ExtentRecord)> {
     let mut out = Vec::new();
     for rec in leaf_records(tree) {
         if usize::from(rec[0]) < XKR_LEN || rec.len() < XKR_LEN + 1 + 12 {
             continue;
         }
-        if rec[1] != FORK_DATA {
+        if rec[1] != FORK_DATA && rec[1] != FORK_RSRC {
             continue;
         }
         // The key is `xkrKeyLen` plus that many bytes; the data follows, and
         // both halves are word-aligned by construction (7 + 1 is even).
-        out.push((be32(rec, 2), be16(rec, 6), extent_record(rec, XKR_LEN + 1)));
+        out.push((be32(rec, 2), rec[1], be16(rec, 6), extent_record(rec, XKR_LEN + 1)));
     }
     out
 }
@@ -754,6 +780,7 @@ fn catalog_files(tree: &[u8]) -> Vec<HfsEntry> {
             creator: [d[FIL_CREATOR], d[FIL_CREATOR + 1], d[FIL_CREATOR + 2], d[FIL_CREATOR + 3]],
             id: be32(d, FIL_FL_NUM),
             extents: extent_record(d, FIL_EXT_REC),
+            rsrc_extents: extent_record(d, FIL_R_EXT_REC),
         });
     }
     out
