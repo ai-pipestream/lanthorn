@@ -2,6 +2,7 @@
 //! container. Exposes the embedded executable and a generic resource accessor.
 
 pub mod adf;
+pub mod amiga_font;
 pub mod bpal;
 /// The container a disc's filesystem sits inside — raw CD sectors and the Apple
 /// Partition Map. Private because it is a wrapper rather than a reader: what it

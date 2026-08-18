@@ -75,5 +75,7 @@ mod wizard_sniffer;
 mod palette_lock_discipline;
 #[path = "suites/font3_shipped_font.rs"]
 mod font3_shipped_font;
+#[path = "suites/native_disk_font.rs"]
+mod native_disk_font;
 #[path = "suites/native_disk_sound.rs"]
 mod native_disk_sound;

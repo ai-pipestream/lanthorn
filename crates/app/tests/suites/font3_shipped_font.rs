@@ -27,6 +27,10 @@
 //! is unambiguously wrong whatever your rendering budget, which is drawing nothing
 //! recognisable at all where the machine drew ink.
 //!
+//! The parser is `blorb::amiga_font`, shared with `native_disk_font.rs` — this suite
+//! carried its own copy until SQ-0916 gave the loader a production one, and two
+//! parsers for one format is exactly how a fixture and its reader drift apart.
+//!
 //! Fixtures are gitignored, so every case skips vacuously when one is absent.
 
 use std::path::PathBuf;
@@ -35,77 +39,8 @@ fn treasures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../treasures")
 }
 
-/// An 8×8 glyph as one byte per row, MSB leftmost.
-type Glyph = [u8; 8];
-
-/// The parsed font: `LoChar` and one glyph per code.
-struct AmigaFont {
-    lo: u8,
-    glyphs: Vec<Glyph>,
-}
-
-impl AmigaFont {
-    fn glyph(&self, code: u8) -> Option<Glyph> {
-        self.glyphs.get(usize::from(code).checked_sub(usize::from(self.lo))?).copied()
-    }
-}
-
-/// Parse an Amiga disk font out of an AmigaDOS hunk file.
-///
-/// Layout, from `<diskfont/diskfont.h>` and `<graphics/text.h>`: a four-byte
-/// `moveq #0,d0 / rts` stub, then `DiskFontHeader` — a 14-byte `Node`, `dfh_FileID`
-/// (`0x0F80`, which is the signature checked here), `dfh_Revision`, `dfh_Segment`,
-/// and a 32-byte name — then `TextFont`, whose own 20-byte `Message` precedes
-/// `tf_YSize`. Glyph rows are stored as one long bitmap per row, `tf_Modulo` bytes
-/// wide; `tf_CharLoc` is an array of `(bit offset, bit width)` pairs, one per code.
-fn parse_amiga_font(raw: &[u8]) -> Option<AmigaFont> {
-    let be16 = |o: usize| -> Option<u16> {
-        Some(u16::from_be_bytes([*raw.get(o)?, *raw.get(o + 1)?]))
-    };
-    let be32 = |o: usize| -> Option<u32> {
-        Some(u32::from_be_bytes([*raw.get(o)?, *raw.get(o + 1)?, *raw.get(o + 2)?, *raw.get(o + 3)?]))
-    };
-    // Skip the hunk header: HUNK_HEADER, an empty resident-library list, the table
-    // size and first/last hunk, one size per hunk, then HUNK_CODE and its length.
-    if be32(0)? != 0x0000_03F3 || be32(4)? != 0 {
-        return None;
-    }
-    let hunks = be32(16)?.checked_sub(be32(12)?)?.checked_add(1)? as usize;
-    let body = 20 + hunks * 4 + 8;
-    let at = |o: usize| body + o;
-
-    if be16(at(0x12))? != 0x0F80 {
-        return None; // not DFH_ID, so not a disk font
-    }
-    const TF: usize = 0x3A; // 4-byte stub + DiskFontHeader up to and including dfh_Name
-    let (ysize, xsize) = (be16(at(TF + 20))?, be16(at(TF + 24))?);
-    let (lo, hi) = (*raw.get(at(TF + 32))?, *raw.get(at(TF + 33))?);
-    let (chardata, modulo, charloc) =
-        (be32(at(TF + 34))? as usize, be16(at(TF + 38))? as usize, be32(at(TF + 40))? as usize);
-    if ysize != 8 || xsize != 8 || hi < lo {
-        return None;
-    }
-
-    let mut glyphs = Vec::new();
-    for i in 0..=usize::from(hi - lo) {
-        let (off, wid) = (be16(at(charloc + i * 4))? as usize, be16(at(charloc + i * 4 + 2))? as usize);
-        let mut g = [0u8; 8];
-        for (y, row) in g.iter_mut().enumerate() {
-            for x in 0..wid.min(8) {
-                let bit = off + x;
-                let byte = *raw.get(at(chardata + y * modulo + bit / 8))?;
-                if byte & (0x80 >> (bit % 8)) != 0 {
-                    *row |= 0x80 >> x;
-                }
-            }
-        }
-        glyphs.push(g);
-    }
-    Some(AmigaFont { lo, glyphs })
-}
-
 /// `Graphic.Data` off the Beyond Zork volume of the Amiga *Lost Treasures* set.
-fn shipped_font() -> Option<AmigaFont> {
+fn shipped_font() -> Option<blorb::amiga_font::AmigaFont> {
     let disk = treasures_dir().join("Lost Treasures of Infocom, The_Disk5.adf");
     if !disk.is_file() {
         eprintln!("SKIP: gitignored Lost Treasures disk 5 absent");
@@ -117,7 +52,8 @@ fn shipped_font() -> Option<AmigaFont> {
         .contents()
         .into_iter()
         .find(|(n, _)| n.rsplit('/').next().is_some_and(|f| f.eq_ignore_ascii_case("Graphic.Data")))?;
-    let font = parse_amiga_font(&bytes).expect("Graphic.Data should parse as an Amiga disk font");
+    let font = blorb::amiga_font::AmigaFont::parse(&bytes)
+        .expect("Graphic.Data should parse as an Amiga disk font");
     Some(font)
 }
 
@@ -128,11 +64,14 @@ fn shipped_font() -> Option<AmigaFont> {
 #[test]
 fn beyond_zorks_graphic_data_is_an_eight_by_eight_font_covering_font_three() {
     let Some(font) = shipped_font() else { return };
+    assert_eq!((font.width, font.height), (8, 8), "font 3 is the 8x8 set");
     assert_eq!(font.lo, 32, "font 3 starts at the space");
     for code in 32u8..=126 {
         assert!(font.glyph(code).is_some(), "no glyph for font-3 code {code}");
     }
-    let inked = (32u8..=126).filter(|&c| font.glyph(c).is_some_and(|g| g != [0; 8])).count();
+    let inked = (32u8..=126)
+        .filter(|&c| font.glyph(c).is_some_and(|g| g.rows.iter().any(|&r| r != 0)))
+        .count();
     assert!(inked >= 80, "only {inked} of 95 codes carry ink — this is not font 3");
 }
 
@@ -157,7 +96,7 @@ fn every_code_the_amiga_draws_translates_to_something_drawable() {
     let mut lost = Vec::new();
     for code in 32u8..=126 {
         let Some(glyph) = font.glyph(code) else { continue };
-        if glyph == [0; 8] || code == EMPTY_METER_BAR {
+        if glyph.rows.iter().all(|&r| r == 0) || code == EMPTY_METER_BAR {
             continue; // the machine draws nothing, so a space is a faithful answer
         }
         let ch = zvm::cpu::exec::font3_translate(char::from(code));
@@ -167,7 +106,7 @@ fn every_code_the_amiga_draws_translates_to_something_drawable() {
     }
     // …and the exception has to keep earning itself: if 79 ever stops being the
     // rails-only glyph, the reasoning above no longer applies to it.
-    let bar = font.glyph(EMPTY_METER_BAR).expect("code 79 is in range");
+    let bar = &font.glyph(EMPTY_METER_BAR).expect("code 79 is in range").rows;
     assert_eq!(
         bar.iter().filter(|&&r| r == 0xFF).count(),
         2,
@@ -192,8 +131,8 @@ fn every_code_the_amiga_draws_translates_to_something_drawable() {
 #[test]
 fn the_shipped_glyphs_agree_with_the_table_where_the_shape_is_unambiguous() {
     let Some(font) = shipped_font() else { return };
-    let ink = |code: u8| font.glyph(code).unwrap_or([0; 8]);
-    let any = |g: Glyph, rows: std::ops::Range<usize>, mask: u8| {
+    let ink = |code: u8| font.glyph(code).map_or_else(|| vec![0u8; 8], |g| g.rows.clone());
+    let any = |g: Vec<u8>, rows: std::ops::Range<usize>, mask: u8| {
         rows.into_iter().any(|y| g[y] & mask != 0)
     };
 
@@ -208,9 +147,9 @@ fn the_shipped_glyphs_agree_with_the_table_where_the_shape_is_unambiguous() {
     );
     assert_eq!(ink(38).iter().filter(|&&r| r == 0xFF).count(), 1, "code 38 (─) is one full row");
     // 54 is the solid block, 32 and 37 are blank.
-    assert_eq!(ink(54), [0xFF; 8], "code 54 (█) is the full cell");
-    assert_eq!(ink(32), [0; 8], "code 32 is the space");
-    assert_eq!(ink(37), [0; 8], "code 37 is blank in the table and blank on the disk");
+    assert_eq!(ink(54), vec![0xFF; 8], "code 54 (█) is the full cell");
+    assert_eq!(ink(32), vec![0u8; 8], "code 32 is the space");
+    assert_eq!(ink(37), vec![0u8; 8], "code 37 is blank in the table and blank on the disk");
     // 71-74 are the corner pixels the table used to lose: one corner each, and each
     // a DIFFERENT corner, which is what makes four separate codepoints necessary.
     for (code, row, mask, corner) in
@@ -223,7 +162,7 @@ fn the_shipped_glyphs_agree_with_the_table_where_the_shape_is_unambiguous() {
     }
     // The 26 runes all carry ink and all land in Unicode's runic block.
     for code in 97u8..=122 {
-        assert_ne!(ink(code), [0; 8], "rune at code {code} should be drawn");
+        assert_ne!(ink(code), vec![0u8; 8], "rune at code {code} should be drawn");
         let ch = zvm::cpu::exec::font3_translate(char::from(code)) as u32;
         assert!(
             (0x16A0..=0x16F8).contains(&ch) || (0x15BE..=0x15BE).contains(&ch),
