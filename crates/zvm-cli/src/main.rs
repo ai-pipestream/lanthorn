@@ -38,6 +38,11 @@ mod media;
 struct CliSound {
     backend: audio::AudioBackend,
     blorb: Option<blorb::Blorb>,
+    /// Sounds the story's own MEDIUM carries, by effect number, already wrapped as
+    /// AIFF (SQ-0907). The two Infocom games that use sound ship it on the release
+    /// disk rather than in a Blorb, and the CLI plays from the same source the TUI
+    /// does — `blorb::infocom_sound::from_volume` is shared so the two cannot drift.
+    disk: HashMap<u16, Vec<u8>>,
     ids: HashMap<u16, audio::SoundId>,
     routines: HashMap<audio::SoundId, u16>,
 }
@@ -67,14 +72,21 @@ fn play_cli_sounds(cs: &mut CliSound, events: &[zvm::cpu::exec::SoundEvent]) {
                 3 => { if let Some(id) = cs.ids.remove(&n) { cs.backend.stop(id); } }
                 1 => {}
                 _ => {
-                    if let Some(blorb) = &cs.blorb {
-                        if let Some((bytes, kind)) = blorb.sound(n as u32) {
-                            if let Some(fmt) = sound_kind_to_format(kind) {
-                                if let Some(id) = cs.backend.play_sample(bytes, fmt, ev.volume, ev.repeats) {
-                                    cs.ids.insert(n, id);
-                                    if ev.routine != 0 { cs.routines.insert(id, ev.routine); }
-                                }
-                            }
+                    // A Blorb answers first — a `.blb` filed beside the story is the
+                    // player's own choice of rendition — and the medium's own sounds
+                    // answer when it does not (SQ-0907).
+                    let picked = cs
+                        .blorb
+                        .as_ref()
+                        .and_then(|b| b.sound(n as u32))
+                        .and_then(|(bytes, kind)| {
+                            sound_kind_to_format(kind).map(|fmt| (bytes.to_vec(), fmt))
+                        })
+                        .or_else(|| cs.disk.get(&n).map(|a| (a.clone(), audio::SoundFormat::Aiff)));
+                    if let Some((bytes, fmt)) = picked {
+                        if let Some(id) = cs.backend.play_sample(&bytes, fmt, ev.volume, ev.repeats) {
+                            cs.ids.insert(n, id);
+                            if ev.routine != 0 { cs.routines.insert(id, ev.routine); }
                         }
                     }
                 }
@@ -1384,9 +1396,31 @@ fn main() {
             }
             None => None,
         };
+        // The medium's own `Sound/` directory, when the story came off a disk.
+        let disk: HashMap<u16, Vec<u8>> = match std::fs::read(&story_path)
+            .ok()
+            .and_then(|raw| blorb::medium::MountedDisk::mount(raw).ok())
+        {
+            Some(d) => {
+                let files = d.contents();
+                let found = blorb::infocom_sound::from_volume(
+                    files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
+                );
+                if !found.is_empty() {
+                    eprintln!(
+                        "zvm: {} sound effect(s) on the medium ({})",
+                        found.len(),
+                        found.keys().map(u16::to_string).collect::<Vec<_>>().join(", "),
+                    );
+                }
+                found.into_iter().map(|(e, (_, s))| (e, s.to_aiff())).collect()
+            }
+            None => HashMap::new(),
+        };
         Some(CliSound {
             backend: audio::AudioBackend::new(volume),
             blorb,
+            disk,
             ids: HashMap::new(),
             routines: HashMap::new(),
         })

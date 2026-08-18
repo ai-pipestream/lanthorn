@@ -225,7 +225,7 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::PlaySound(None) => {
-            for line in app::state::format_sound_resource_list(state.sound_blorb.as_ref()) {
+            for line in app::state::format_sound_resource_list(state.sound_blorb.as_ref(), &state.disk_sounds) {
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
@@ -235,16 +235,30 @@ pub(crate) fn dispatch_slash_outcome(
                 enable_sound: state.config.enable_sound,
                 backend_present: state.audio.is_some(),
                 blorb_present: state.sound_blorb.is_some(),
+                disk_sounds: state.disk_sounds.len(),
                 ..Default::default()
             };
-            if let Some(blorb) = &state.sound_blorb {
-                if let Some((bytes, kind)) = blorb.sound(n) {
-                    report.resource = Some((kind, bytes.len()));
-                    if let Some(fmt) = app::state::sound_kind_to_format(kind) {
-                        report.format = Some(fmt);
-                        if let Some(backend) = state.audio.as_mut() {
-                            report.sound_id = backend.play_sample(bytes, fmt, 8, 1);
-                        }
+            // Same precedence the play path uses: a Blorb a person filed beside the
+            // story wins, and the medium's own sounds answer when it does not
+            // (SQ-0907). Resolved to owned bytes first so the borrow of `state` ends
+            // before the mutable one for playback.
+            let picked: Option<(Vec<u8>, blorb::SoundKind, Option<String>)> = state
+                .sound_blorb
+                .as_ref()
+                .and_then(|b| b.sound(n))
+                .map(|(bytes, kind)| (bytes.to_vec(), kind, None))
+                .or_else(|| {
+                    u16::try_from(n).ok().and_then(|e| state.disk_sounds.get(&e)).map(|s| {
+                        (s.aiff.clone(), blorb::SoundKind::Aiff, Some(s.name.clone()))
+                    })
+                });
+            if let Some((bytes, kind, from_medium)) = picked {
+                report.resource = Some((kind, bytes.len()));
+                report.from_medium = from_medium;
+                if let Some(fmt) = app::state::sound_kind_to_format(kind) {
+                    report.format = Some(fmt);
+                    if let Some(backend) = state.audio.as_mut() {
+                        report.sound_id = backend.play_sample(&bytes, fmt, 8, 1);
                     }
                 }
             }

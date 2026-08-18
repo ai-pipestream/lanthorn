@@ -945,6 +945,20 @@ pub(crate) fn boot_story(
     // release 221 / serial 870918 against a release 219 / serial 870912 story —
     // sits beside a LOOSE story and is exempt under the rule's second arm, which
     // is where a person's own filing is allowed to answer the question.
+    // SQ-0907: sounds the story's own medium carries, for the two Infocom games that
+    // use them off a release disk. Read once, here, because a sound has to start on
+    // the turn the game asks for it.
+    state.disk_sounds = app::native_sound::from_medium(&story_path);
+    if !state.disk_sounds.is_empty() {
+        let mut effects: Vec<u16> = state.disk_sounds.keys().copied().collect();
+        effects.sort_unstable();
+        eprintln!(
+            "babelmap: {} sound effect{} on the medium ({})",
+            effects.len(),
+            if effects.len() == 1 { "" } else { "s" },
+            effects.iter().map(u16::to_string).collect::<Vec<_>>().join(", "),
+        );
+    }
     state.sound_blorb = match app::graphics::resource_blorb(&story_path).found {
         Some((b, path)) => {
             let count = |usage: &[u8; 4]| b.resources().iter().filter(|r| &r.usage == usage).count();

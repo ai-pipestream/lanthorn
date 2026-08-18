@@ -958,9 +958,26 @@ pub fn sound_kind_label(k: blorb::SoundKind) -> &'static str {
 
 /// Format the `Snd ` resources of a (possibly absent) sound Blorb for the
 /// `/play-sound` diagnostic's list mode (no argument).
-pub fn format_sound_resource_list(blorb: Option<&blorb::Blorb>) -> Vec<String> {
+pub fn format_sound_resource_list(
+    blorb: Option<&blorb::Blorb>,
+    disk: &std::collections::HashMap<u16, crate::native_sound::DiskSound>,
+) -> Vec<String> {
+    // The medium's own sounds are listed first when there is no Blorb, because on
+    // the two games that have them that is the whole inventory (SQ-0907).
     let Some(blorb) = blorb else {
-        return vec!["no sound blorb resolved".to_string()];
+        if disk.is_empty() {
+            return vec!["no sound blorb resolved, and none on the medium".to_string()];
+        }
+        let mut effects: Vec<&crate::native_sound::DiskSound> = disk.values().collect();
+        effects.sort_by_key(|s| s.effect);
+        let mut lines = vec![format!("{} sound effect(s) on the medium:", effects.len())];
+        for s in effects {
+            lines.push(format!(
+                "  #{}  {} — {} Hz, {} frames  playable",
+                s.effect, s.name, s.rate, s.frames
+            ));
+        }
+        return lines;
     };
     let sounds: Vec<_> = blorb.resources().iter().filter(|r| &r.usage == b"Snd ").collect();
     if sounds.is_empty() {
@@ -988,6 +1005,11 @@ pub struct PlaySoundReport {
     pub enable_sound: bool,
     pub backend_present: bool,
     pub blorb_present: bool,
+    /// How many sounds the story's own MEDIUM offers (SQ-0907), so the report says
+    /// where a sound came from — or that neither source has one.
+    pub disk_sounds: usize,
+    /// The medium's own sample answered, rather than a Blorb resource.
+    pub from_medium: Option<String>,
     pub resource: Option<(blorb::SoundKind, usize)>,
     pub format: Option<audio::SoundFormat>,
     pub sound_id: Option<audio::SoundId>,
@@ -1003,11 +1025,24 @@ pub fn format_play_sound_report(r: &PlaySoundReport) -> Vec<String> {
     ));
     lines.push(format!("audio backend: {}", if r.backend_present { "present" } else { "NONE" }));
     lines.push(format!("sound blorb: {}", if r.blorb_present { "resolved" } else { "NONE" }));
+    // A Blorb is not the only source — the two Infocom games that use sound ship it
+    // on the release disk, and saying only "sound blorb: NONE" over a story whose
+    // medium carries fourteen effects is a report that misleads (SQ-0907).
+    lines.push(format!(
+        "medium sounds: {}",
+        if r.disk_sounds == 0 { "none".to_string() } else { format!("{} effect(s)", r.disk_sounds) }
+    ));
     let Some((kind, len)) = r.resource else {
-        lines.push(format!("resource #{}: NOT FOUND", r.number));
+        lines.push(format!("resource #{}: NOT FOUND in either source", r.number));
         return lines;
     };
-    lines.push(format!("resource #{}: found, kind={:?}, {len} bytes", r.number, kind));
+    match &r.from_medium {
+        Some(name) => lines.push(format!(
+            "effect #{}: found on the medium as {name}, {len} bytes of {kind:?}",
+            r.number
+        )),
+        None => lines.push(format!("resource #{}: found, kind={:?}, {len} bytes", r.number, kind)),
+    }
     let Some(format) = r.format else {
         lines.push("format: not decodable".to_string());
         return lines;
@@ -2243,6 +2278,10 @@ pub struct AppState {
     pub audio: Option<audio::AudioBackend>,
     /// The Blorb holding this story's `Snd ` resources, resolved at launch.
     pub sound_blorb: Option<blorb::Blorb>,
+    /// Sounds the story's own MEDIUM carries, by effect number (SQ-0907). Populated
+    /// at launch for a story mounted off a release disk; empty for a loose file.
+    /// Consulted only when no Blorb answers, so a `.blb` beside the story still wins.
+    pub disk_sounds: std::collections::HashMap<u16, crate::native_sound::DiskSound>,
     /// Playing sampled sounds keyed by Z-machine sound number (for `effect` 3 stop).
     pub sound_ids: std::collections::HashMap<u16, audio::SoundId>,
     /// Finish-routines to fire when a sampled sound ends, keyed by its SoundId.
@@ -2785,6 +2824,7 @@ impl Default for AppState {
             sound_pulse: None,
             audio: None,
             sound_blorb: None,
+            disk_sounds: Default::default(),
             sound_ids: std::collections::HashMap::new(),
             sound_routines: std::collections::HashMap::new(),
             glulx_channels: std::collections::HashMap::new(),
@@ -2983,16 +3023,27 @@ impl AppState {
                     }
                     1 => {} // prepare: decode on start
                     _ => {
-                        if let Some(blorb) = &self.sound_blorb {
-                            if let Some((bytes, kind)) = blorb.sound(n as u32) {
-                                if let Some(fmt) = sound_kind_to_format(kind) {
-                                    if let Some(id) = backend.play_sample(bytes, fmt, ev.volume, ev.repeats) {
-                                        self.sound_ids.insert(n, id);
-                                        if ev.routine != 0 {
-                                            self.sound_routines.insert(id, ev.routine);
-                                        }
-                                    }
-                                }
+                        // A Blorb answers first — a `.blb` a person filed beside the
+                        // story is their own choice of rendition. Failing that, the
+                        // medium's own sounds (SQ-0907), already decoded to AIFF so
+                        // both sources reach the mixer the same way.
+                        let from_blorb = self
+                            .sound_blorb
+                            .as_ref()
+                            .and_then(|b| b.sound(n as u32))
+                            .and_then(|(bytes, kind)| {
+                                sound_kind_to_format(kind).map(|fmt| (bytes, fmt))
+                            });
+                        let played = match from_blorb {
+                            Some((bytes, fmt)) => backend.play_sample(bytes, fmt, ev.volume, ev.repeats),
+                            None => self.disk_sounds.get(&n).and_then(|s| {
+                                backend.play_sample(&s.aiff, audio::SoundFormat::Aiff, ev.volume, ev.repeats)
+                            }),
+                        };
+                        if let Some(id) = played {
+                            self.sound_ids.insert(n, id);
+                            if ev.routine != 0 {
+                                self.sound_routines.insert(id, ev.routine);
                             }
                         }
                     }
@@ -6729,15 +6780,39 @@ mod play_sound_tests {
 
     #[test]
     fn resource_list_no_blorb_reports_none_resolved() {
-        let lines = format_sound_resource_list(None);
-        assert_eq!(lines, vec!["no sound blorb resolved".to_string()]);
+        let lines = format_sound_resource_list(None, &Default::default());
+        assert_eq!(lines, vec!["no sound blorb resolved, and none on the medium".to_string()]);
+    }
+
+    /// With no Blorb but a medium that carries sounds, the list is the medium's —
+    /// which on the two Infocom games that use sound is the whole inventory
+    /// (SQ-0907). Saying only "no sound blorb resolved" over a disk holding fourteen
+    /// effects is a report that misleads, and that is what the user saw.
+    #[test]
+    fn resource_list_falls_back_to_the_medium() {
+        let mut disk = std::collections::HashMap::new();
+        disk.insert(
+            3u16,
+            crate::native_sound::DiskSound {
+                effect: 3,
+                name: "armor".to_string(),
+                rate: 15360,
+                frames: 33280,
+                aiff: Vec::new(),
+            },
+        );
+        let lines = format_sound_resource_list(None, &disk);
+        assert_eq!(lines[0], "1 sound effect(s) on the medium:");
+        assert!(lines[1].contains("#3"), "{:?}", lines[1]);
+        assert!(lines[1].contains("armor"), "the sample's own name is what a person recognises");
+        assert!(lines[1].contains("15360 Hz"));
     }
 
     #[test]
     fn resource_list_no_snd_resources() {
         let bytes = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")]);
         let blorb = blorb::Blorb::parse(bytes).unwrap();
-        let lines = format_sound_resource_list(Some(&blorb));
+        let lines = format_sound_resource_list(Some(&blorb), &Default::default());
         assert_eq!(lines, vec!["no Snd resources".to_string()]);
     }
 
@@ -6750,7 +6825,7 @@ mod play_sound_tests {
             (b"Snd ", 9, b"WEIR", b"whatever"),
         ]);
         let blorb = blorb::Blorb::parse(bytes).unwrap();
-        let lines = format_sound_resource_list(Some(&blorb));
+        let lines = format_sound_resource_list(Some(&blorb), &Default::default());
         assert_eq!(lines[0], "3 sound resource(s):");
         let three = lines.iter().find(|l| l.contains("#3")).unwrap();
         assert!(three.contains("AIFF") && three.contains("playable") && !three.contains("not decodable"));
@@ -6765,6 +6840,8 @@ mod play_sound_tests {
     #[test]
     fn report_resource_not_found() {
         let r = PlaySoundReport {
+            disk_sounds: 0,
+            from_medium: None,
             number: 42,
             enable_sound: true,
             backend_present: true,
@@ -6780,6 +6857,8 @@ mod play_sound_tests {
     #[test]
     fn report_undecodable_kind_stops_before_playback() {
         let r = PlaySoundReport {
+            disk_sounds: 0,
+            from_medium: None,
             number: 9,
             enable_sound: true,
             backend_present: true,
@@ -6796,6 +6875,8 @@ mod play_sound_tests {
     #[test]
     fn report_success_shows_sound_id() {
         let r = PlaySoundReport {
+            disk_sounds: 0,
+            from_medium: None,
             number: 3,
             enable_sound: true,
             backend_present: true,
@@ -6811,6 +6892,8 @@ mod play_sound_tests {
     #[test]
     fn report_backend_none_when_playback_fails() {
         let r = PlaySoundReport {
+            disk_sounds: 0,
+            from_medium: None,
             number: 3,
             enable_sound: true,
             backend_present: true,
@@ -6826,6 +6909,8 @@ mod play_sound_tests {
     #[test]
     fn report_notes_disabled_gate() {
         let r = PlaySoundReport {
+            disk_sounds: 0,
+            from_medium: None,
             number: 3,
             enable_sound: false,
             backend_present: true,

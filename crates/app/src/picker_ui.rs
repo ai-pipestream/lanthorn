@@ -2730,6 +2730,33 @@ fn draw_info_panel(
         }
     }
 
+    // Sounds the MEDIUM carries (SQ-0907), which no Blorb block above can show: the
+    // two Infocom games that use sound ship it on the release disk as an
+    // Infocom-native container, not as `Snd ` resources. Listed with the sample's own
+    // name because that is what a person recognises — Sherlock's are `armor`,
+    // `growl`, `splash` — and with the rate the disk states.
+    if let Some(a) = aux {
+        if !a.disk_sounds.is_empty() {
+            lines.push((String::new(), story_info_value));
+            lines.push((format!("Sound on the medium ({})", a.disk_sounds.len()), story_info_label));
+            for s in &a.disk_sounds {
+                lines.push((
+                    format!(
+                        " #{}  {} — {} Hz · {} ({})",
+                        s.effect,
+                        s.name,
+                        s.rate,
+                        human_size(s.frames as u64),
+                        // Effects 11, 12 and 13 of Sherlock are all `heart` at
+                        // different pitches, so the sample name alone can repeat.
+                        "8-bit mono",
+                    ),
+                    story_info_value,
+                ));
+            }
+        }
+    }
+
     // Wrap every logical line to the panel's content width (SQ-0861). One row
     // per line clipped anything wider than the panel — the file line the report
     // named, but equally the IFID, `Saves · <dir>`, `Sidecars:`, and every save,
@@ -3935,6 +3962,7 @@ mod tests {
             sidecars: vec!["default.aux"],
             art_candidates: vec![],
             art_in_use: None,
+            disk_sounds: Vec::new(),
         };
         // Wide enough that the resource detail suffix and the save-summary row aren't clipped.
         let area = Rect::new(0, 0, 100, 25);
@@ -4532,6 +4560,7 @@ mod tests {
             sidecars: vec![],
             art_candidates: vec![],
             art_in_use: None,
+            disk_sounds: Vec::new(),
         };
         let area = Rect::new(0, 0, 60, 16);
         let mut buf = Buffer::empty(area);
@@ -4576,6 +4605,7 @@ mod tests {
             art_candidates: candidates.clone(),
             // What the game's own config.toml names, so the panel can mark it.
             art_in_use: Some("zork0.mg1".into()),
+            disk_sounds: Vec::new(),
         };
         // Tall enough that the block is on screen without scrolling.
         let area = Rect::new(0, 0, 62, 40);
@@ -4629,6 +4659,7 @@ mod tests {
             sidecars: vec![],
             art_candidates: candidates,
             art_in_use: Some("arthur.eg1".into()),
+            disk_sounds: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 40);
         let mut buf = Buffer::empty(area);
@@ -4665,6 +4696,7 @@ mod tests {
             sidecars: vec![],
             art_candidates: vec![],
             art_in_use: Some("FMVPOKER.EG1".into()),
+            disk_sounds: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 30);
         let mut buf = Buffer::empty(area);

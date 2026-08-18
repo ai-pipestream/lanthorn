@@ -316,6 +316,12 @@ pub struct StoryAux {
     /// The archive the game's own `config.toml` names, if any — so the panel can
     /// say which of the detected renditions is actually in force.
     pub art_in_use: Option<String>,
+    /// Sound effects the story's own MEDIUM carries (SQ-0907), sorted by effect
+    /// number — the same [`crate::native_sound::from_medium`] the launch path plays
+    /// from, so the panel cannot claim a sound the game will not get.
+    ///
+    /// Display-only here, exactly like `art_candidates`: it ends at a human's eyes.
+    pub disk_sounds: Vec<crate::native_sound::DiskSound>,
 }
 
 /// Resolve the lazy aux for one story. `data_base` is the storage base
@@ -354,6 +360,11 @@ pub fn resolve_aux(
         entry.meta.disk_entry.as_deref(),
     );
     let art_in_use = crate::styles::read_per_game_pictures(&game_dir);
+    // Same tier as the artwork scan above, and for the same reason: it mounts the
+    // medium, which the panel must not do on every frame.
+    let mut disk_sounds: Vec<crate::native_sound::DiskSound> =
+        crate::native_sound::from_medium(&entry.path).into_values().collect();
+    disk_sounds.sort_by_key(|s| s.effect);
     StoryAux {
         assoc_blorb,
         saves,
@@ -364,6 +375,7 @@ pub fn resolve_aux(
         sidecars,
         art_candidates,
         art_in_use,
+        disk_sounds,
     }
 }
 
