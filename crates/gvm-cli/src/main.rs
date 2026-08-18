@@ -678,6 +678,19 @@ Options:
                         of it.
       --show-status     Narrate the status bar whenever the story updates it,
                         undoing --screen-reader's quietening.
+      --pin <top|bottom> Where stacked grid windows (the status bar, a menu) are
+                        pinned. Default top, where the game asked for them.
+
+                        Pinning at the BOTTOM is what gets you terminal scrollback:
+                        a terminal only archives a line that scrolls off the TOP of
+                        the screen, judged by the scroll region's top margin, so
+                        chrome at the top means nothing ever leaves and every line
+                        you have read is discarded. Honoured for the ordinary
+                        layout — grids stacked above one full-width story window —
+                        and ignored for anything Glk arranges differently, such as
+                        a side-by-side split or a graphics window, which have no
+                        top and bottom to swap.
+      --scrollback      Alias for --pin bottom, named for what it is for.
       --no-game-colours Ignore the game's Glk stylehint colours
                         (also honoured: NO_COLOR)
       --no-more         Disable [MORE] paging on long output (alias: --no-page)
@@ -698,6 +711,8 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
     cli_host::Opt::valued(&["--data-dir"]),
+    cli_host::Opt::valued(&["--pin"]),
+    cli_host::Opt::flag(&["--scrollback"]),
 ];
 
 fn main() {
@@ -761,6 +776,16 @@ fn main() {
     // (SQ-0612); taller grids — menus, forms — always come through.
     backend.set_quiet_status_line(mode.plain() && !m.has("--show-status"));
     backend.set_story_only(m.has("--story-only"));
+    // `--pin bottom` (alias `--scrollback`) puts stacked chrome at the bottom, which
+    // is what lets the terminal keep history — see `cli_host::pin`. Honoured only
+    // for the ordinary stacked layout; anything Glk arranges differently stays where
+    // it was put (`glk_term::swap_bands`). A bad value falls back to the default
+    // rather than refusing to start, as zvm-cli's does.
+    backend.set_pin(
+        m.value("--pin")
+            .and_then(cli_host::Pin::parse)
+            .unwrap_or(if m.has("--scrollback") { cli_host::Pin::Bottom } else { cli_host::Pin::Top }),
+    );
     // Screen-reader mode only: on a TTY the menu is painted in place and nothing
     // repeats, and a plain pipe is a transcript that must stay byte-identical
     // (SQ-0609).

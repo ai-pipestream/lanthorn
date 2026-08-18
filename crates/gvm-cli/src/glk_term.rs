@@ -608,6 +608,10 @@ pub struct TerminalBackend {
     /// avoid re-emitting `enter_region` (which parks the cursor at the bottom-left)
     /// on an unchanged re-layout, which would yank the cursor to column 0 mid-line.
     region_bounds: (u32, u32),
+    /// Where stacked chrome is pinned, and so whether the terminal keeps history
+    /// (SQ-0909). Set from `--pin` / `--scrollback`; `Top` leaves Glk's own geometry
+    /// untouched.
+    pin: cli_host::Pin,
     /// Whether the screen has been initialized (cleared) once.
     started: bool,
     /// A command just read via line input, awaiting deferred echo resolution on
@@ -622,6 +626,13 @@ pub struct TerminalBackend {
 }
 
 impl TerminalBackend {
+    /// Where stacked chrome is pinned. `Bottom` is what gets the player terminal
+    /// scrollback — see `cli_host::pin` for the measurement, and `swap_bands` for
+    /// which layouts can honour it.
+    pub fn set_pin(&mut self, pin: cli_host::Pin) {
+        self.pin = pin;
+    }
+
     /// Build a backend writing to stdout, taking its terminal size from the
     /// device and its "may I emit escapes?" answer from the installed
     /// [`HostMode`] — so `--plain` reaches the renderer, and everything
@@ -665,6 +676,7 @@ impl TerminalBackend {
             tree: None,
             region_set: false,
             region_bounds: (0, 0),
+            pin: cli_host::Pin::default(),
             started: false,
             pending_echo: None,
             debug,
@@ -764,6 +776,7 @@ impl TerminalBackend {
             tree: None,
             region_set: false,
             region_bounds: (0, 0),
+            pin: cli_host::Pin::default(),
             started: false,
             pending_echo: None,
             debug: false,
@@ -1323,7 +1336,17 @@ impl GlkBackend for TerminalBackend {
     // already answers from the model, taking precedence over any backend
     // report. None is the honest "I don't know".
 
+
     fn window_layout(&mut self, wins: &[(u32, WinType, Rect, Option<bool>)]) {
+        // `--pin bottom` moves the chrome to the bottom by rewriting the RECTS here,
+        // once, rather than remapping rows at each of the eleven places that turn a
+        // rect into a screen row. Everything downstream — painting, the vacated-row
+        // erase, the scroll region, the cursor — reads the rects and needs no change,
+        // and under the default placement `swap_bands` is never called, so the
+        // shipped path cannot regress (SQ-0909).
+        let swapped =
+            (self.pin == cli_host::Pin::Bottom).then(|| swap_bands(self.cols, wins)).flatten();
+        let wins: &[LaidOutWin] = swapped.as_deref().unwrap_or(wins);
         if self.debug {
             for (id, ty, r, _border) in wins {
                 let kind = if *ty == WinType::TextGrid { "grid" } else if *ty == WinType::TextBuffer { "buffer" } else { "other" };
@@ -1668,6 +1691,123 @@ impl GlkBackend for TerminalBackend {
     }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+/// One window as the Glk layout hands it over: id, kind, rect, and whether it wants
+/// a border.
+type LaidOutWin = (u32, WinType, Rect, Option<bool>);
+
+/// Swap the stacked grid and buffer bands so the chrome sits at the BOTTOM
+/// (`--pin bottom`, SQ-0909).
+///
+/// Returns the rewritten layout, or `None` when this is not a layout it can safely
+/// move — in which case the caller leaves it alone and the windows stay where Glk
+/// put them. That fallback is the honest half of "basic support": Glk geometry is
+/// arbitrary, and a side-by-side split or a graphics window has no obvious top and
+/// bottom to swap.
+///
+/// The qualifying shape is the ordinary one, which is why most games are fine: one
+/// full-width TextBuffer with full-width TextGrids stacked directly above it, the
+/// two bands contiguous from row 0. Anything else returns `None`.
+fn swap_bands(cols: u32, wins: &[LaidOutWin]) -> Option<Vec<LaidOutWin>> {
+    let mut buffer: Option<Rect> = None;
+    for &(_, ty, r, _) in wins {
+        match ty {
+            WinType::TextBuffer if buffer.is_some() => return None, // more than one
+            WinType::TextBuffer => buffer = Some(r),
+            WinType::TextGrid => {}
+            _ => return None, // graphics, or anything else with a claim on the screen
+        }
+        if r.left != 0 || r.width != cols {
+            return None; // a side-by-side split has no top and bottom to swap
+        }
+    }
+    let buf = buffer?;
+    // Every grid must sit strictly above the buffer, and the bands must be
+    // contiguous from row 0 — otherwise "swap them" is not well defined.
+    let grid_h: u32 = wins
+        .iter()
+        .filter(|(_, ty, _, _)| *ty == WinType::TextGrid)
+        .map(|(_, _, r, _)| r.top + r.height)
+        .max()
+        .unwrap_or(0);
+    if grid_h == 0 || buf.top != grid_h {
+        return None;
+    }
+    Some(
+        wins.iter()
+            .map(|&(id, ty, mut r, b)| {
+                r.top = if ty == WinType::TextBuffer { 0 } else { r.top + buf.height };
+                (id, ty, r, b)
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    fn win(id: u32, ty: WinType, top: u32, height: u32) -> LaidOutWin {
+        (id, ty, Rect { left: 0, top, width: 80, height }, None)
+    }
+
+    /// The ordinary Glk layout — a status grid above one story buffer — swaps, and
+    /// the two bands simply trade places.
+    #[test]
+    fn the_ordinary_stacked_layout_swaps() {
+        let wins = vec![win(1, WinType::TextGrid, 0, 1), win(2, WinType::TextBuffer, 1, 23)];
+        let got = swap_bands(80, &wins).expect("the common case qualifies");
+        assert_eq!(got[0].2.top, 23, "the one-row grid moves to the last row");
+        assert_eq!(got[1].2.top, 0, "and the buffer takes the top");
+        assert_eq!(got[1].2.height, 23, "heights are untouched — only the order changes");
+    }
+
+    /// Two stacked grids (a status bar and a compass, say) move together.
+    #[test]
+    fn several_stacked_grids_move_together() {
+        let wins = vec![
+            win(1, WinType::TextGrid, 0, 1),
+            win(2, WinType::TextGrid, 1, 5),
+            win(3, WinType::TextBuffer, 6, 18),
+        ];
+        let got = swap_bands(80, &wins).expect("still stacked");
+        assert_eq!(got[0].2.top, 18);
+        assert_eq!(got[1].2.top, 19, "the grids keep their order relative to each other");
+        assert_eq!(got[2].2.top, 0);
+    }
+
+    /// Everything else is left exactly where Glk put it, which is the honest half of
+    /// "basic support" — these layouts have no top and bottom to swap.
+    #[test]
+    fn anything_glk_arranges_differently_is_left_alone() {
+        // Side-by-side: not full width.
+        let side = vec![
+            (1, WinType::TextGrid, Rect { left: 0, top: 0, width: 40, height: 24 }, None),
+            (2, WinType::TextBuffer, Rect { left: 40, top: 0, width: 40, height: 24 }, None),
+        ];
+        assert!(swap_bands(80, &side).is_none(), "a left/right split");
+
+        // A graphics window has its own claim on the screen.
+        let gfx = vec![win(1, WinType::Graphics, 0, 6), win(2, WinType::TextBuffer, 6, 18)];
+        assert!(swap_bands(80, &gfx).is_none(), "graphics");
+
+        // Two buffers: which one is the story?
+        let two = vec![win(1, WinType::TextBuffer, 0, 12), win(2, WinType::TextBuffer, 12, 12)];
+        assert!(swap_bands(80, &two).is_none(), "two buffers");
+
+        // Buffer on top already, grid below — nothing to do, and not our shape.
+        let inverted = vec![win(1, WinType::TextBuffer, 0, 23), win(2, WinType::TextGrid, 23, 1)];
+        assert!(swap_bands(80, &inverted).is_none(), "already inverted");
+
+        // A gap between the bands: "swap them" is not well defined.
+        let gap = vec![win(1, WinType::TextGrid, 0, 1), win(2, WinType::TextBuffer, 4, 20)];
+        assert!(swap_bands(80, &gap).is_none(), "non-contiguous");
+
+        // No grid at all: a buffer-only game already scrolls the whole screen.
+        let bare = vec![win(1, WinType::TextBuffer, 0, 24)];
+        assert!(swap_bands(80, &bare).is_none(), "nothing to swap");
     }
 }
 
