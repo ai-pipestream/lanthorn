@@ -1282,6 +1282,18 @@ Amiga floppy or anywhere else.
   resource on demand for verifying the audio path. Both the `app` and `zvm-cli`
   take `--no-sound` to start muted for a single run (leaving `enable_sound`
   untouched); `zvm-cli` also takes `--volume <0-100>`.
+- **Straight off the original floppy** — the two Infocom games that ever used sound,
+  *The Lurking Horror* and *Sherlock*, shipped their effects as raw Infocom sample
+  files on the release disk, years before Blorb existed. Mount one of those disks and
+  babelmap plays them: no `.blb` beside the story, no conversion step, nothing to
+  fetch. It reads the disk's own index rather than guessing from filenames — which
+  matters, because *Sherlock*'s samples are called `armor`, `growl` and `violin.bin`,
+  and three separate effects share one `heart` recording. Both the Amiga floppies and
+  the Macintosh `/MAC/SOUND` layout of the *Lost Treasures* CD are understood, and
+  `/play-sound <n>` fires them the same way it fires a Blorb resource. On the Mac
+  release the disk also says what pitch to play a shared sample at, so *Sherlock*'s
+  heartbeat really does beat faster when the story asks it to — on the Amiga pressing
+  it does not, and babelmap follows each disk rather than averaging them.
 - **Glulx** — Glk sound channels (`glk_schannel_*`) play a Blorb's AIFF/Ogg/MOD
   `Snd ` resources with per-channel volume (including gradual volume ramps) and
   sound-finished notify events, so music and effects behave the way the author

@@ -2,10 +2,11 @@
 //! rather than out of a Blorb (SQ-0907).
 //!
 //! Two Infocom games use sound at all — *The Lurking Horror* and *Sherlock* — and on
-//! the Amiga their disks hold a `Sound/` directory. `blorb::infocom_sound` decodes
-//! the container and hands back AIFF, so what this module produces is
-//! indistinguishable downstream from a Blorb's `Snd ` resource: same decoder, same
-//! volume scaling, same repeats, same finish routine.
+//! the Amiga their disks hold a `Sound/` directory; the Macintosh compilation lays
+//! the same sounds out as `/MAC/SOUND`. `blorb::infocom_sound` decodes either and
+//! hands back AIFF, so what this module produces is indistinguishable downstream from
+//! a Blorb's `Snd ` resource: same decoder, same volume scaling, same repeats, same
+//! finish routine.
 //!
 //! **Effect numbers come from the `sN.nam` INDEX, never from a filename.** On *The
 //! Lurking Horror* every index happens to name `sN.dat`, so the numbering looks like
@@ -31,7 +32,9 @@ pub struct DiskSound {
     /// `violin.bin`. Worth carrying because it is what a person recognises in the
     /// browser's info panel.
     pub name: String,
-    /// Playback rate in Hz, as the disk states it.
+    /// Playback rate in Hz: the disk's own, bent by the effect's pitch file when
+    /// that names two different notes. See `blorb::infocom_sound::Pitch` — on the
+    /// Amiga it never does, so this is the disk's own figure on every Amiga sound.
     pub rate: u32,
     /// Sample count.
     pub frames: usize,
@@ -62,7 +65,7 @@ pub fn from_medium(story_path: &Path) -> HashMap<u16, DiskSound> {
                 DiskSound {
                     effect,
                     name,
-                    rate: snd.rate,
+                    rate: snd.effective_rate(),
                     frames: snd.samples.len(),
                     aiff: snd.to_aiff(),
                 },

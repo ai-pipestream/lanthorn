@@ -33,6 +33,15 @@
 //! the Amiga itself was handed, so [`InfocomSound::rate`] reports the disk's own
 //! figure and the divergence is recorded here rather than reconciled away.
 //!
+//! # The Macintosh lays the same three things out as two files
+//!
+//! `/MAC/SOUND` on *Lost Treasures* disc 2 carries `S<n>` — the identical `.dat`
+//! container, no extension — and, for the four effects whose pitch is not the
+//! sample's own, `M<n>`: the eleven-byte pitch blob with the index appended, so one
+//! file does the work of the Amiga's `.mid` and `.nam` together. An effect with no
+//! `M<n>` plays `S<n>` as itself. See [`Pitch`] for why the Macintosh is the only
+//! place the pitch does anything.
+//!
 //! # Why AIFF comes back out
 //!
 //! [`InfocomSound::to_aiff`] wraps the samples in the container the host already
@@ -53,8 +62,8 @@
 pub struct SoundIndex {
     /// The sample file, relative to the `Sound` directory.
     pub sample: String,
-    /// The pitch file, relative to the same directory. See [`InfocomSound`] on why
-    /// nothing is currently done with it.
+    /// The pitch file, relative to the same directory, or empty when the layout
+    /// carries the pitch inline. See [`Pitch`].
     pub midi: String,
 }
 
@@ -70,6 +79,86 @@ impl SoundIndex {
     }
 }
 
+
+/// The pitch pair in a `sN.mid` — or, on the Macintosh, in the head of an `M<n>`.
+///
+/// Eleven bytes of MIDI-shaped events, the same shape on every file of both games:
+///
+/// ```text
+/// 00 09   90 <note> 40   FF 00 <nn>   90 <base> 00
+/// ```
+///
+/// `00 09` is the byte count of what follows; `90 n 40` is a Note-On on channel 0
+/// at velocity 64; `FF 00 nn` is a meta event whose payload varies (`00 01`, `00
+/// 04`, `00 07`, `80 00`) and reads as a delta time; `90 n 00` is a second event on
+/// the same channel at velocity 0.
+///
+/// # What the interpreter does with it
+///
+/// READ OUT of the 68000 interpreter Infocom shipped, not inferred from the corpus:
+/// hunk 8 of `The Lurking Horror` (42,224 bytes, off *Lost Treasures* disk 4) writes
+/// Paula's `ioa_Period` at file offset `0x4766` from the routine at `0x48da`, which
+/// holds three IEEE 754 doubles — **1.05946309** (2^(1/12)), **1000.0**, and
+/// **3579.49**, the NTSC Amiga colour-burst clock in kHz. The routine takes the rate
+/// as a double and TWO note bytes, one read from the pitch buffer at the cursor and
+/// one from a per-effect field the interpreter captured earlier. So the model is
+/// equal temperament: the rate is scaled by 2^(difference/12).
+///
+/// # The Amiga never actually bends a sound, and that is a finding, not an omission
+///
+/// On **every** pitch file of both sound games — twenty-two of them across *The
+/// Lurking Horror* and *Sherlock* — the two notes are EQUAL, so the ratio is exactly
+/// 1 and the sample plays at the rate its `.dat` states. That is why *Sherlock*'s
+/// `heart`, which effects 11, 12 and 13 all share against pitch files reading 68, 74
+/// and 79, sounds identical for all three on an Amiga: the notes differ between
+/// FILES, not within one, and it is the within-one difference that bends the pitch.
+///
+/// The Macintosh is where the pair comes apart. `/MAC/SOUND/M13` reads note 79
+/// against base 68 for that same heartbeat, and its three siblings hold `base` at 68
+/// while `note` varies — a constant beside a variable, which is what makes `base` the
+/// reference and `note` the thing being asked for.
+///
+/// **The SIGN is not verifiable on the Amiga corpus**, because a unison pair reads
+/// the same either way round; it rests on that Macintosh reading alone, and wants a
+/// reference rendition of the Macintosh release to settle. `stories/Sherlock.blb`
+/// cannot settle it — it shifts exactly these four effects, but by `note − 74`, which
+/// is a third model again and self-inconsistent on effect 13 (SQ-0912).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pitch {
+    /// The Note-On's note: the pitch this effect is asked to sound at.
+    pub note: u8,
+    /// The second event's note — the reference the sample itself is at.
+    pub base: u8,
+}
+
+/// The pitch blob's fixed length, and the offset the Macintosh index follows it at.
+const PITCH: usize = 11;
+
+impl Pitch {
+    /// Parse the eleven-byte blob, or `None` when the bytes are not one.
+    ///
+    /// Trailing bytes are ignored rather than refused, because the Macintosh form is
+    /// this blob with the index appended.
+    pub fn parse(raw: &[u8]) -> Option<Pitch> {
+        let ev = raw.get(..PITCH)?;
+        (be16(ev, 0) == 9 && ev[2] == 0x90 && ev[8] == 0x90)
+            .then_some(Pitch { note: ev[3], base: ev[9] })
+    }
+
+    /// How far the sample is bent, in semitones. Zero on every Amiga file.
+    pub fn semitones(&self) -> i32 {
+        i32::from(self.note) - i32::from(self.base)
+    }
+
+    /// `rate` bent by [`Pitch::semitones`], which is `rate` itself at unison.
+    pub fn scale(&self, rate: u32) -> u32 {
+        match self.semitones() {
+            0 => rate,
+            n => (f64::from(rate) * 2f64.powf(f64::from(n) / 12.0)).round() as u32,
+        }
+    }
+}
+
 /// One decoded Infocom sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfocomSound {
@@ -80,6 +169,10 @@ pub struct InfocomSound {
     pub flags: u16,
     /// Signed 8-bit mono PCM, `frames` bytes.
     pub samples: Vec<u8>,
+    /// The pitch its index pointed at, when there was one. `None` from
+    /// [`InfocomSound::parse`], which reads the container alone; [`from_volume`] is
+    /// what pairs a sample with its pitch file.
+    pub pitch: Option<Pitch>,
 }
 
 /// The fixed header, before the samples.
@@ -110,13 +203,22 @@ impl InfocomSound {
             rate: u32::from(be16(raw, 4)),
             flags: be16(raw, 2),
             samples: raw[HEADER..HEADER + frames].to_vec(),
+            pitch: None,
         })
+    }
+
+    /// The rate this actually plays at: the disk's own, bent by [`Pitch`] when its
+    /// index named a pitch file that is not a unison pair — so, today, the disk's own
+    /// on every Amiga sound and a bent one on four Macintosh effects.
+    pub fn effective_rate(&self) -> u32 {
+        self.pitch.map_or(self.rate, |p| p.scale(self.rate))
     }
 
     /// The same sound as an AIFF `FORM`, for the host's existing decoder.
     ///
-    /// Mono, 8-bit, at [`InfocomSound::rate`] — which is what the samples are, so
-    /// nothing is resampled or requantised here and the payload survives unchanged.
+    /// Mono, 8-bit, at [`InfocomSound::effective_rate`]. Nothing is resampled or
+    /// requantised here — a pitch is a change to the rate the wrapper declares, and
+    /// the payload survives unchanged either way.
     pub fn to_aiff(&self) -> Vec<u8> {
         let n = self.samples.len() as u32;
         let mut out = Vec::with_capacity(self.samples.len() + 64);
@@ -132,7 +234,7 @@ impl InfocomSound {
         out.extend_from_slice(&1u16.to_be_bytes()); // channels
         out.extend_from_slice(&n.to_be_bytes()); // frames
         out.extend_from_slice(&8u16.to_be_bytes()); // bits per sample
-        out.extend_from_slice(&extended80(self.rate));
+        out.extend_from_slice(&extended80(self.effective_rate()));
 
         out.extend_from_slice(b"SSND");
         out.extend_from_slice(&(8 + n).to_be_bytes());
@@ -165,18 +267,23 @@ fn extended80(rate: u32) -> [u8; 10] {
     out
 }
 
-/// Every sound a mounted volume's `Sound/` directory offers, by Z-machine effect
+/// Every sound a mounted volume's sound directory offers, by Z-machine effect
 /// number, as `(sample name, decoded sample)`.
 ///
 /// `files` is whatever the medium reported — [`crate::medium::MountedDisk::contents`]
 /// or any equivalent — as `(path, bytes)`. Lives here rather than in a host so the
 /// TUI and `zvm-cli` cannot drift: both mount their own medium and hand it over.
 ///
-/// **The effect number comes from the `sN.nam` INDEX, never from a filename.** On
-/// *The Lurking Horror* every index happens to name `sN.dat`, so the numbering looks
-/// like a convention; on *Sherlock* the samples are `armor`, `growl`, `splash`,
-/// `violin.bin`, and effects 11, 12 and 13 all name the same `heart` sample at three
-/// different pitches. Keying on filenames finds nothing on that disk.
+/// **The effect number comes from the INDEX, never from a sample's filename.** On
+/// *The Lurking Horror* every `sN.nam` happens to name `sN.dat`, so the numbering
+/// looks like a convention; on *Sherlock* the samples are `armor`, `growl`, `splash`,
+/// `violin.bin`, and effects 11, 12 and 13 all name the same `heart`. Keying on
+/// filenames finds nothing on that disk. The Macintosh's `M<n>` is the same index
+/// with its pitch inlined, and there a sample is genuinely shared under one name:
+/// `M11` and `M13` both point at `S12`.
+///
+/// Two passes, because an index outranks a bare sample: `S12` is effect 12 in its own
+/// right AND the sample `M11` plays, and only the index knows the second fact.
 ///
 /// Effects below 3 are dropped: ZMSD §9 reserves 1 and 2 for the interpreter's own
 /// bleeps, which are synthesised and never sampled.
@@ -184,35 +291,87 @@ pub fn from_volume<'a, I>(files: I) -> std::collections::BTreeMap<u16, (String, 
 where
     I: IntoIterator<Item = (&'a str, &'a [u8])>,
 {
-    let by_path: std::collections::BTreeMap<String, &[u8]> =
-        files.into_iter().map(|(p, b)| (p.to_ascii_lowercase(), b)).collect();
+    let mut by_path: std::collections::BTreeMap<String, (&str, &[u8])> = Default::default();
+    for (p, b) in files {
+        by_path.insert(p.to_ascii_lowercase(), (p, b));
+    }
+    let dir_of = |path: &str| path.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/"));
     let mut out = std::collections::BTreeMap::new();
-    for (path, raw) in &by_path {
-        let Some(effect) = index_effect(path) else { continue };
-        let Some(idx) = SoundIndex::parse(raw) else { continue };
-        // The sample sits beside its index, so resolve against that directory.
-        let dir = path.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/"));
-        let Some(sample) = by_path.get(&format!("{dir}{}", idx.sample.to_ascii_lowercase())) else {
+
+    // Pass 1: the indices, which are what carry a sample name and a pitch.
+    for (path, (_, raw)) in &by_path {
+        let dir = dir_of(path);
+        let (effect, idx, pitch) = match sound_entry(path) {
+            Some(Entry::AmigaIndex(n)) => {
+                let Some(idx) = SoundIndex::parse(raw) else { continue };
+                let pitch = by_path
+                    .get(&format!("{dir}{}", idx.midi.to_ascii_lowercase()))
+                    .and_then(|(_, m)| Pitch::parse(m));
+                (n, idx, pitch)
+            }
+            Some(Entry::MacIndex(n)) => {
+                let Some(pitch) = Pitch::parse(raw) else { continue };
+                let Some(idx) = raw.get(PITCH..).and_then(SoundIndex::parse) else { continue };
+                (n, idx, Some(pitch))
+            }
+            _ => continue,
+        };
+        let Some((_, sample)) = by_path.get(&format!("{dir}{}", idx.sample.to_ascii_lowercase()))
+        else {
             continue;
         };
         let Some(snd) = InfocomSound::parse(sample) else { continue };
-        out.insert(effect, (idx.sample.clone(), snd));
+        out.insert(effect, (idx.sample.clone(), InfocomSound { pitch, ..snd }));
+    }
+
+    // Pass 2: a Macintosh sample no index claimed plays as itself, unbent.
+    for (path, (orig, raw)) in &by_path {
+        let Some(Entry::MacSample(n)) = sound_entry(path) else { continue };
+        if out.contains_key(&n) {
+            continue;
+        }
+        let Some(snd) = InfocomSound::parse(raw) else { continue };
+        let name = orig.rsplit('/').next().unwrap_or(orig).to_string();
+        out.insert(n, (name, snd));
     }
     out
 }
 
-/// The effect number in a `Sound/sN.nam` path, or `None`.
+/// What a path in a sound directory is, and the effect number it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// `Sound/sN.nam` — the AmigaDOS index, naming a sample file and a pitch file.
+    AmigaIndex(u16),
+    /// `SOUND/MN` — the Macintosh index, which inlines the pitch ahead of the name.
+    MacIndex(u16),
+    /// `SOUND/SN` — a Macintosh sample, played as itself when no `MN` claims it.
+    MacSample(u16),
+}
+
+/// Classify a path inside a sound directory, or `None`.
 ///
-/// Matched on the PATH, because the directory is what makes it a sound index rather
+/// Matched on the PATH, because the directory is what makes it a sound file rather
 /// than any other `s3.nam` on the volume — and because until SQ-0908 an AmigaDOS
 /// mount reported no directory at all, so this could not have been written.
-fn index_effect(lower_path: &str) -> Option<u16> {
-    let stem = lower_path.strip_suffix(".nam")?;
+///
+/// The extension is what separates the two layouts, and it has to: `sound/s3.dat` is
+/// an Amiga sample, which its own index already names, while `SOUND/S3` is a
+/// Macintosh one, which nothing else does.
+fn sound_entry(lower_path: &str) -> Option<Entry> {
     if !lower_path.starts_with("sound/") && !lower_path.contains("/sound/") {
         return None;
     }
-    let n: u16 = stem.rsplit('/').next()?.strip_prefix('s')?.parse().ok()?;
-    (n >= 3).then_some(n)
+    let file = lower_path.rsplit('/').next()?;
+    let entry = match file.strip_suffix(".nam") {
+        Some(stem) => Entry::AmigaIndex(stem.strip_prefix('s')?.parse().ok()?),
+        None if file.contains('.') => return None,
+        None if file.starts_with('m') => Entry::MacIndex(file[1..].parse().ok()?),
+        None => Entry::MacSample(file.strip_prefix('s')?.parse().ok()?),
+    };
+    let n = match entry {
+        Entry::AmigaIndex(n) | Entry::MacIndex(n) | Entry::MacSample(n) => n,
+    };
+    (n >= 3).then_some(entry)
 }
 
 #[cfg(test)]
@@ -231,24 +390,29 @@ mod tests {
         v
     }
 
-    /// The index, in both the shapes the two sound games use.
+    /// The index, in both the shapes the two sound games use, and both layouts.
     #[test]
     fn an_index_path_yields_its_effect_number() {
-        assert_eq!(index_effect("sound/s3.nam"), Some(3));
-        assert_eq!(index_effect("sound/s18.nam"), Some(18));
-        assert_eq!(index_effect("lurking/sound/s7.nam"), Some(7), "nested under the game");
+        assert_eq!(sound_entry("sound/s3.nam"), Some(Entry::AmigaIndex(3)));
+        assert_eq!(sound_entry("sound/s18.nam"), Some(Entry::AmigaIndex(18)));
+        assert_eq!(sound_entry("lurking/sound/s7.nam"), Some(Entry::AmigaIndex(7)), "nested under the game");
+        assert_eq!(sound_entry("mac/sound/m11"), Some(Entry::MacIndex(11)), "Macintosh, pitch inlined");
+        assert_eq!(sound_entry("mac/sound/s12"), Some(Entry::MacSample(12)), "Macintosh, bare sample");
     }
 
     /// Everything that is NOT one, which is the half that keeps this off the rest of
-    /// a disk.
+    /// a disk. The extension is what tells the two layouts apart, so an Amiga sample
+    /// must not read as a Macintosh one.
     #[test]
     fn anything_else_is_not_an_index() {
-        assert_eq!(index_effect("sound/s10.dat"), None, "the sample itself");
-        assert_eq!(index_effect("sound/s10.mid"), None, "its pitch file");
-        assert_eq!(index_effect("s3.nam"), None, "outside the Sound directory");
-        assert_eq!(index_effect("sound/story.nam"), None, "not numbered");
-        assert_eq!(index_effect("sound/s1.nam"), None, "1 and 2 are the interpreter's bleeps");
-        assert_eq!(index_effect("sound/s2.nam"), None);
+        assert_eq!(sound_entry("sound/s10.dat"), None, "an Amiga sample, which its index names");
+        assert_eq!(sound_entry("sound/s10.mid"), None, "its pitch file");
+        assert_eq!(sound_entry("s3.nam"), None, "outside the Sound directory");
+        assert_eq!(sound_entry("sound/story.nam"), None, "not numbered");
+        assert_eq!(sound_entry("sound/s1.nam"), None, "1 and 2 are the interpreter's bleeps");
+        assert_eq!(sound_entry("sound/s2.nam"), None);
+        assert_eq!(sound_entry("mac/sound/sherlock"), None, "a name that merely starts with s");
+        assert_eq!(sound_entry("mac/sound/desktop"), None);
     }
 
     /// A whole volume, in the shape Sherlock's disk has: descriptive sample names,
@@ -293,6 +457,95 @@ mod tests {
         );
         assert_eq!(SoundIndex::parse(b""), None);
         assert_eq!(SoundIndex::parse(b"\x01\x00"), None, "no name at all");
+    }
+
+    /// The eleven bytes, in the exact shape both games ship them.
+    ///
+    /// `heart3.mid` is copied out of the *Sherlock* floppy and `M13` out of
+    /// `/MAC/SOUND` on *Lost Treasures* disc 2 — the SAME effect on the two
+    /// platforms, and the pair only comes apart on one of them.
+    #[test]
+    fn a_pitch_file_is_a_pair_of_notes() {
+        let amiga = Pitch::parse(b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x4f\x00").expect("parses");
+        assert_eq!(amiga, Pitch { note: 79, base: 79 }, "Sherlock's heart3.mid");
+        assert_eq!(amiga.semitones(), 0, "a unison pair bends nothing");
+        assert_eq!(amiga.scale(18430), 18430);
+
+        let mac = Pitch::parse(b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x44\x00\x01\x00S12\x00")
+            .expect("the index that follows is ignored, not refused");
+        assert_eq!(mac, Pitch { note: 79, base: 68 }, "/MAC/SOUND/M13");
+        assert_eq!(mac.semitones(), 11);
+        // 9215 * 2^(11/12), the Macintosh S12's stated rate bent to note 79.
+        assert_eq!(mac.scale(9215), 17396);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_pitch_file_are_refused() {
+        assert_eq!(Pitch::parse(b""), None);
+        assert_eq!(Pitch::parse(b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x4f"), None, "ten bytes");
+        assert_eq!(
+            Pitch::parse(b"\x00\x0b\x90\x4f\x40\xff\x00\x04\x90\x4f\x00"),
+            None,
+            "a length that is not nine",
+        );
+        assert_eq!(
+            Pitch::parse(b"\x00\x09\x80\x4f\x40\xff\x00\x04\x90\x4f\x00"),
+            None,
+            "not a Note-On",
+        );
+    }
+
+    /// Every pitch file on both release floppies is a unison pair, so applying the
+    /// pitch leaves Amiga playback exactly where SQ-0907 left it. This is the fact
+    /// that keeps a future Macintosh lane from silently retuning the Amiga.
+    #[test]
+    fn an_amiga_volume_is_unbent_because_its_pitch_files_are_unisons() {
+        let heart = dat(18430, 0, &[1, 2, 3, 4]);
+        let files: Vec<(&str, &[u8])> = vec![
+            ("Sound/s11.nam", b"\x01\x00heart\x00\x00heart1.mid\x00"),
+            ("Sound/heart1.mid", b"\x00\x09\x90\x44\x40\xff\x00\x04\x90\x44\x00"),
+            ("Sound/s13.nam", b"\x01\x00heart\x00\x00heart3.mid\x00"),
+            ("Sound/heart3.mid", b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x4f\x00"),
+            ("Sound/heart", &heart),
+        ];
+        let got = from_volume(files);
+        assert_eq!(got[&11].1.pitch, Some(Pitch { note: 68, base: 68 }), "the pitch is read");
+        assert_eq!(got[&13].1.pitch, Some(Pitch { note: 79, base: 79 }));
+        assert_eq!(got[&11].1.effective_rate(), 18430, "and it changes nothing");
+        assert_eq!(got[&13].1.effective_rate(), 18430);
+        assert_eq!(got[&11].1.effective_rate(), got[&13].1.effective_rate(), "the Amiga plays both alike");
+    }
+
+    /// The Macintosh layout, laid out as `/MAC/SOUND` is: bare `S<n>` samples, and an
+    /// `M<n>` only for the effects whose pitch is not the sample's own.
+    ///
+    /// Effect 12 has no `M12`, so `S12` is effect 12 in its own right; `M11` and `M13`
+    /// both redirect to that same `S12`, which is the whole reason the index cannot be
+    /// skipped in favour of the filename.
+    #[test]
+    fn a_macintosh_volume_bends_the_effects_that_have_an_index() {
+        let s12 = dat(9215, 0x0032, &[1, 2, 3, 4]);
+        let s3 = dat(15360, 0x0132, &[9, 9]);
+        let files: Vec<(&str, &[u8])> = vec![
+            ("MAC/SOUND/S3", &s3),
+            ("MAC/SOUND/S12", &s12),
+            ("MAC/SOUND/M11", b"\x00\x09\x90\x44\x40\xff\x00\x04\x90\x44\x00\x01\x00S12\x00"),
+            ("MAC/SOUND/M13", b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x44\x00\x01\x00S12\x00"),
+            ("MAC/SHERLOCK", b"not a sound"),
+        ];
+        let got = from_volume(files);
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), vec![3, 11, 12, 13]);
+        assert_eq!(got[&3].0, "S3", "a sample no index claimed keeps its own name and case");
+        assert_eq!(got[&11].0, "S12", "the index redirects, and the filename would not have");
+        assert_eq!(got[&12].0, "S12");
+        assert_eq!(got[&13].0, "S12");
+        assert_eq!(got[&11].1.samples, got[&13].1.samples, "one sample, three effects");
+
+        assert_eq!(got[&3].1.effective_rate(), 15360, "unclaimed, so unbent");
+        assert_eq!(got[&12].1.effective_rate(), 9215, "no M12, so unbent");
+        assert_eq!(got[&11].1.effective_rate(), 9215, "M11 is a unison pair");
+        assert_eq!(got[&13].1.effective_rate(), 17396, "M13 asks for note 79 against base 68");
+        assert_eq!(got[&13].1.rate, 9215, "the disk's own figure is still there behind it");
     }
 
     #[test]

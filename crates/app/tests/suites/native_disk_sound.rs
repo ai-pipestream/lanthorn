@@ -4,7 +4,9 @@
 //! Two Infocom games use sound: *The Lurking Horror* and *Sherlock*. On the Amiga
 //! their disks hold a `Sound/` directory — an `sN.nam` index per Z-machine effect,
 //! naming a sample and a pitch file — and the samples are an Infocom container that
-//! nothing else reads.
+//! nothing else reads. The Macintosh compilation lays the same sounds out as
+//! `/MAC/SOUND`, with the pitch inlined into the index; SQ-0912 added that, and it is
+//! the only medium here on which a pitch file bends anything.
 //!
 //! **A format worked out from bytes alone is a guess.** `stories/Lurking.blb` is the
 //! same fourteen effects wrapped as Blorb `Snd ` resources in AIFF, by a third party,
@@ -79,12 +81,18 @@ fn blorb_sounds(path: &Path) -> Option<std::collections::HashMap<u32, Rendered>>
 ///
 /// Eight of the fourteen rates disagree with the disk's header, always lower, and
 /// that was first recorded here as one person's rendition diverging from the machine.
-/// It is not. Disassembling the Amiga interpreter Infocom shipped shows `ioa_Period`
-/// computed from three constants — `1.05946309` (2^(1/12), the equal-tempered
-/// semitone), `1000.0`, and `3579.49` (the NTSC Amiga clock in kHz) — so the note in
-/// each effect's `.mid` file is applied to the rate as a power of the semitone ratio.
-/// The Blorb simply BAKED THAT IN, which is the only way to express a pitched sample
-/// as plain AIFF.
+/// It is not: every disagreement is an exact number of equal-tempered semitones, and
+/// disassembling the Amiga interpreter Infocom shipped shows `ioa_Period` computed
+/// from `1.05946309` (2^(1/12)), `1000.0` and `3579.49` (the NTSC Amiga clock in kHz).
+/// So the Blorb's author baked a pitch in, which is the only way to express a pitched
+/// sample as plain AIFF.
+///
+/// **Whose pitch is a separate question, and this suite does not follow the Blorb.**
+/// The shifts here fit `note − 74` — a fixed reference the disks do not state
+/// anywhere — while the interpreter takes the difference of the pitch file's OWN two
+/// notes, which is a unison on every Amiga file and therefore no shift at all. The
+/// two models disagree, and this case asserts only the part they share: that the gap
+/// is a whole number of semitones. See `blorb::infocom_sound::Pitch`.
 ///
 /// Asserted as the relation, over all fourteen: `12·log(disk ÷ blorb) / log(2)` is a
 /// whole number. Thirteen come out at 8.000, 1.000, 7.000 or 0.000 to three decimals.
@@ -215,4 +223,114 @@ fn every_decoded_sound_is_a_playable_aiff() {
     if lurking().is_some() {
         assert!(ran > 0, "fixtures are present but nothing was decoded");
     }
+}
+
+/// **Every pitch file on both Amiga floppies is a unison pair**, so reading the pitch
+/// leaves Amiga playback exactly where SQ-0907 left it.
+///
+/// This is the finding SQ-0912 came down to, and it is the reason the quest changes no
+/// Amiga rate. The eleven bytes hold two notes; the interpreter divides the rate by
+/// the semitone ratio raised to their difference; and on all twenty-two files across
+/// the two games that difference is zero. *Sherlock*'s `heart` sounds the same for
+/// effects 11, 12 and 13 on an Amiga because the notes differ between FILES (68, 74,
+/// 79) and not within one — and it is the within-one difference that bends a sample.
+///
+/// Pinned over the real floppies rather than a fixture, because the claim is about
+/// what Infocom pressed, and a synthetic unison would only be asserting itself.
+#[test]
+fn every_amiga_pitch_file_is_a_unison_pair() {
+    let disks: Vec<PathBuf> = [
+        lurking(),
+        Some(stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf")).filter(|p| p.is_file()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if disks.is_empty() {
+        eprintln!("SKIP: gitignored Amiga sound floppies absent");
+        return;
+    }
+    let mut seen = 0;
+    for disk in &disks {
+        for f in app::assets::files(disk).into_iter().filter(|f| f.is_on_medium()) {
+            let name = f.name.to_ascii_lowercase();
+            if !name.ends_with(".mid") {
+                continue;
+            }
+            let Some(bytes) = f.into_bytes() else { continue };
+            let pitch = blorb::infocom_sound::Pitch::parse(&bytes)
+                .unwrap_or_else(|| panic!("{name} is a pitch file and should parse: {bytes:02x?}"));
+            assert_eq!(
+                pitch.semitones(),
+                0,
+                "{name} reads note {} against base {} — the first Amiga pitch file that is NOT a \
+                 unison. Amiga playback is only unchanged because they all are (SQ-0912); if this \
+                 fires, the sign of the shift now matters and is NOT settled.",
+                pitch.note,
+                pitch.base,
+            );
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 22 - 14 * usize::from(disks.len() == 1), "twenty-two pitch files across the two games");
+
+    // The consequence, at the level the mixer sees: no rate moved.
+    if let Some(sherlock) = disks.iter().find(|p| p.to_string_lossy().contains("Sherlock")) {
+        let s = app::native_sound::from_medium(sherlock);
+        assert_eq!(
+            (s[&11].rate, s[&12].rate, s[&13].rate),
+            (18430, 18430, 18430),
+            "the three heartbeats play alike on an Amiga, which is what the disk says",
+        );
+    }
+}
+
+/// **The Macintosh is where the pitch pair comes apart** — and the layout is two
+/// files, not three (SQ-0912).
+///
+/// `/MAC/SOUND` on *Lost Treasures* disc 2 carries bare `S<n>` samples in the same
+/// container, and an `M<n>` only for the four effects whose pitch is not the sample's
+/// own: 8, 11, 13 and 14 — exactly the four whose Amiga `.mid` does not read 74.
+/// `M<n>` is the eleven-byte pitch blob with the index appended, so one file does the
+/// work of the Amiga's `.mid` and `.nam` together.
+///
+/// Effect 12 has no `M12`, so `S12` is effect 12 in its own right; `M11` and `M13`
+/// both redirect to that same `S12`. Nothing but the index says so — which is the
+/// same lesson `sherlocks_effects_come_from_the_index_not_from_filenames` teaches on
+/// the Amiga, in a layout where it is even easier to get wrong.
+///
+/// The rates are asserted against the disc's own headers bent by the disc's own
+/// notes, never against `stories/Sherlock.blb`, which follows a different model — see
+/// `the_decoded_samples_are_the_blorbs_samples`.
+#[test]
+fn the_macintosh_release_bends_the_shared_heartbeat() {
+    let iso = treasures_dir().join("LostTreasures2.iso");
+    if !iso.is_file() {
+        eprintln!("SKIP: gitignored Lost Treasures disc 2 absent");
+        return;
+    }
+    let s = app::native_sound::from_medium(&iso);
+    let mut effects: Vec<u16> = s.keys().copied().collect();
+    effects.sort_unstable();
+    assert_eq!(effects, (3..=17).collect::<Vec<u16>>(), "Sherlock's fifteen effects, off /MAC/SOUND");
+
+    // One sample under three effect numbers, which only the M-files reveal.
+    for e in [11u16, 12, 13] {
+        assert_eq!(s[&e].name, "S12", "effect {e} plays the one heartbeat sample");
+    }
+    assert_eq!(s[&11].frames, s[&13].frames);
+    assert_eq!(s[&3].name, "S3", "an effect with no M-file is its own sample, name and case intact");
+
+    // S12's header states 9215 Hz. M11 is a unison, M13 asks for note 79 against
+    // base 68 — eleven semitones, so 9215 · 2^(11/12).
+    assert_eq!(s[&11].rate, 9215, "M11 bends nothing");
+    assert_eq!(s[&12].rate, 9215, "no M12 at all");
+    assert_eq!(s[&13].rate, 17396, "M13 is the one heartbeat that is NOT the other two");
+    assert_ne!(
+        s[&13].rate, s[&11].rate,
+        "the Macintosh is the only medium here where a shared sample plays at two pitches",
+    );
+    // The other two M-files, both note 72 against base 68.
+    assert_eq!(s[&8].rate, 12902, "S8 states 10240 Hz, M8 asks for four semitones up");
+    assert_eq!(s[&14].rate, 11611, "S14 states 9216 Hz, M14 asks for the same four");
 }
