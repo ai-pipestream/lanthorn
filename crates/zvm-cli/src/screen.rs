@@ -839,6 +839,56 @@ mod view_tests {
         assert!(out.contains("\x1b[r"), "dropping to 0 rows resets region: {out:?}");
     }
 
+    /// **A hint menu opens and closes without confusing either placement**
+    /// (SQ-0909).
+    ///
+    /// This is the case that actually exercises the pin: an InvisiClues menu, Lost
+    /// Pig's HELP, Bureaucracy's form — the upper window grows from a one-row status
+    /// bar to a dozen rows and back, mid-session, several times. Under a bottom pin
+    /// the region has to shrink from the TOP edge staying put, which is the opposite
+    /// of what a top pin does, so it is worth asserting rather than assuming.
+    #[test]
+    fn a_hint_menu_opening_and_closing_resizes_the_region_either_way() {
+        let (p1, a1) = v3_rows();
+        let menu: Vec<String> = (0..12).map(|i| format!("  {i} Chapter {i}")).collect();
+
+        for (pin, opened, closed) in [
+            // Top: the region's TOP edge moves, the bottom stays at 24.
+            (Pin::Top, "\x1b[13;24r", "\x1b[2;24r"),
+            // Bottom: the region starts at 1 throughout — which is what keeps the
+            // history working — and its BOTTOM edge moves instead.
+            (Pin::Bottom, "\x1b[1;12r", "\x1b[1;23r"),
+        ] {
+            let mut v = ScreenView::new(true, false, false, 24, 80);
+            v.set_pin(pin);
+            let _ = v.render(1, &p1, &a1, "");
+            let open = v.render(12, &menu, &menu, "");
+            assert!(open.contains(opened), "{pin:?}: menu opens: {open:?}");
+            assert!(open.contains("Chapter 0"), "{pin:?}: and is drawn: {open:?}");
+            // Re-rendering the same menu must not re-enter the region — that would
+            // yank the cursor every frame while the player reads.
+            let again = v.render(12, &menu, &menu, "");
+            assert!(!again.contains(opened), "{pin:?}: settled menu does not re-pin: {again:?}");
+            let shut = v.render(1, &p1, &a1, "");
+            assert!(shut.contains(closed), "{pin:?}: menu closes: {shut:?}");
+        }
+    }
+
+    /// A menu taller than the screen leaves a usable region rather than an inverted
+    /// one — `enter_region` clamps instead of emitting `\x1b[1;0r`.
+    #[test]
+    fn a_full_screen_menu_does_not_invert_the_region() {
+        let rows: Vec<String> = (0..30).map(|i| format!("row {i}")).collect();
+        for pin in [Pin::Top, Pin::Bottom] {
+            let mut v = ScreenView::new(true, false, false, 24, 80);
+            v.set_pin(pin);
+            let out = v.render(30, &rows, &rows, "");
+            assert!(!out.contains(";0r"), "{pin:?}: no zero-height region: {out:?}");
+            // Whatever it pins, the rows it paints must start on the screen.
+            assert!(out.contains("\x1b[1;1H"), "{pin:?}: painting starts on row 1: {out:?}");
+        }
+    }
+
     #[test]
     fn erase_then_multirow_upper_shifts_lower_window() {
         // BeyondZork case: erase, then a game redraws a 12-row upper window with
