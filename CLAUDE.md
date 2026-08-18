@@ -101,6 +101,14 @@ Full detail in `docs/architecture.md`; docs under `docs/features/` track the cod
   - **Persist the recipe, not the result.** Nothing goes into the archive without either its regeneration inputs or a one-line comment saying why the derived artifact is authoritative. Quetzal saves no screen state by design — the standard assumes the *story* repaints after a restore, and a host Save State swaps memory under a game that never learns it happened, so everything the screen needs is ours to carry. Snapshotting an output (canvas PNGs) instead of its inputs (display list + palette) restores something that looks right and cannot be recomputed when the inputs change (SQ-0587/0588).
   - **The archive is backend- and terminal-neutral.** No cell coordinates, font metrics, or picker state in a save — v6 geometry is zvm native pixels, so a save moves between kitty/halfblocks/sixel and between terminal sizes. A restore reconciles the saved screen with the *current* pane (`reconcile_restored_screen_size`), because a restore into a different size is a resize the game never saw.
 
+`machine-screenshots/` holds captures of the retail games running on **real
+machines under emulation** (Amiga, C64/128, Apple IIe, …), committed because they
+are the only thing in the repo that can falsify a question rather than an answer:
+internal measurement tells you whether babelmap does what you asked, never whether
+you asked for the right thing. Reach for one before pinning a v6 geometry or colour
+claim — and name the file in the finding, since a screenshot is a fixture with a
+machine, a release and a moment in the game, exactly like a frame capture.
+
 ## Testing conventions
 
 - Colour/render test areas pin **both** `honor_game_colours` modes (true is the shipped default and primary baseline); single-mode suites have masked regressions before.
