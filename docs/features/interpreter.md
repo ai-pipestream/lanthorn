@@ -1539,6 +1539,57 @@ is off in `--screen-reader` by choice. `gvm-cli` pages only its streaming story
 window; a game using several buffer windows is painted as fixed panels with their
 own scrollback, so there is no bottom of the page to stop at.
 
+## Scrollback in the CLIs, and where the status line sits
+
+`zvm-cli` and `gvm-cli` keep the status line and any grid window fixed while the
+story scrolls beneath — and until recently that quietly cost you the ability to
+scroll back over anything you had read. The reason is a detail of how terminals
+work: **a line is only kept in history when it scrolls off the top of the screen**,
+and a terminal decides that from the top edge of the scrolling region. Pin the
+status bar at the top and the region starts one row down, so nothing ever leaves
+the screen and every line is discarded as it passes.
+
+`--pin bottom` (or its alias **`--scrollback`**, which is what you actually want it
+for) moves the same fixed rows to the bottom of the screen. The region then starts
+at row 1 again and the story scrolls into your terminal's own history — with its
+scroll wheel, its text selection and its search, none of which babelmap could give
+you as convincingly. Nothing is buffered on our side either way; the history was
+always the terminal's, and the only question was whether we were standing in the
+way of it. Swap it mid-game with **`/pin`** (`/pin top`, `/pin bottom`, or bare
+`/pin` to toggle) when you want to read back over what just happened.
+
+The default is `top`, where Infocom put the status line and where a v3 game's
+`Score`/`Moves` belong. Hint menus, forms and BeyondZork's stats-and-compass panel
+move with it and keep working either way — they simply resize the region from the
+other edge.
+
+`gvm-cli` honours it for the ordinary Glk layout: grid windows stacked above one
+full-width story window. Anything a game arranges differently — a side-by-side
+split, a graphics window — has no obvious top and bottom to exchange, so those
+stay exactly where the game put them. `scott-cli` needs none of this: it draws no
+fixed rows at all, so it has always scrolled straight into your terminal's
+history.
+
+## Saving from the command line
+
+The CLIs prompt for a save name, and now show you what you already have rather
+than expecting you to remember:
+
+```
+saves: 1 cellar   2 troll
+Restore from file:
+```
+
+At the **restore** prompt a number picks from that list; anything else is a
+filename exactly as before, so a save you genuinely called `2` is still reachable
+by name. At the **save** prompt a number is *not* a shortcut — there it would mean
+"overwrite that one", and that is a thing worth typing out. The list is shown
+anyway, as a reminder of what you would collide with.
+
+And saving over a name that already exists asks first, naming the save you would
+lose. Anything but an explicit `y` is a no, including a bare Enter, so the
+destructive answer is never the one you get by hesitating.
+
 ## Robustness
 
 When a story faults — out-of-bounds memory, stack under/overflow, an unimplemented

@@ -51,6 +51,61 @@ release and serial, not on the image's filename, because one compilation carries
 six games) and a second copy of a rule with a case in it is a second answer
 waiting to happen. `app::storage` re-exports it rather than restating it.
 
+It owns the **pin placement** for the same reason, and that one is worth setting
+out because the reasoning is not guessable from the code (SQ-0909). Both `zvm-cli`
+and `gvm-cli` keep rows fixed while the story scrolls under them — a v3 status
+bar, a Glk grid window, BeyondZork's compass, an InvisiClues menu — and both did
+it by confining the screen with DECSTBM. The cost was invisible until somebody
+looked for it: **a terminal only archives a line that scrolls off the top of the
+screen, and it judges that by the scroll region's top margin.** Pin at the top and
+the region starts at row 2, so a line leaving row 2 has not left the screen and is
+simply dropped. Every line of narrative the player had read was thrown away to
+keep one status bar in view.
+
+Measured against Ghostty's core, feeding 30 lines to a 10-row screen:
+
+| region | rows reaching history |
+|---|---|
+| none | 21 |
+| rows 2–10, pinned at the **top** | **0** |
+| rows 1–9, pinned at the **bottom** | **22** |
+
+So it is not pinning that costs the history — pinning *at the top* is. Move the
+same rows to the bottom, the region starts at row 1 again, and everything
+scrolling past is archived exactly as it would be with no region at all. That is
+the whole of `--pin bottom` (alias `--scrollback`), and the reason **babelmap
+implements no scrollback of its own**: the history a player wants is the one their
+terminal already keeps, complete with its wheel, its selection and its search, and
+the only question was whether we were preventing it. The alternative — a ring
+buffer, a pager, re-wrapping on resize, SGR replay, and mouse reporting that would
+have *disabled* the terminal's own text selection — would have been more code and
+a worse result.
+
+The default stays `top`, where Infocom put the status line. An earlier attempt
+bought the same history by *unpinning* one-row status bars and letting them flow
+into the transcript; it worked, and it was the wrong trade, because it gave up the
+thing the player looks at every turn to get the thing they occasionally want.
+
+`cli_host::pin` therefore owns the placement, the region helpers, the `/pin`
+parser and the exit teardown; `gvm-cli`'s `enter_region` stays local because it
+confines a band between two explicit rows, where the shared helper places N rows
+of chrome at one end. The measurement lives with the code it justifies, in that
+module's own tests, against `qwertty-term-vt` rather than against our own decoder
+— checking a renderer with the decoder that renders it only proves it agrees with
+itself.
+
+The teardown is shared for a related reason. Dropping the region without moving
+the cursor leaves the shell prompt wherever the game left its `>`, so the next
+prompt is drawn *into* the story text — and the paths that got that wrong were the
+ones that never reach `main`: Ctrl-C and Ctrl-D in raw mode are keypresses rather
+than signals, so nothing else stops the process. Both placements need the same
+treatment, because the bottom row is occupied either way: by the last line of
+story under a top pin, by the chrome itself under a bottom pin.
+
+`scott-cli` needs none of this and takes none of it. It emits no escape sequences
+at all and has no status window to pin, so it always had native scrollback — which
+is the same property that gives it the escape-free `TerminalGuard` below.
+
 It owns none of the drawing. `gvm-cli/glk_term.rs` and `zvm-cli/screen.rs` have
 essentially no logic in common, and `scott-cli` — which emits no escape sequences
 at all — would only pay for machinery it does not need. That last property is
