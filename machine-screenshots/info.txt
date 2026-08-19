@@ -1,1 +1,38 @@
 This directory contains screenshots from various machines running various Infocom retail games (via emulation). This is to capture the official look and feel of these games for comparison purposes.
+
+
+THE DOS CAPTURES (dos-*.png) ARE WHAT PINNED INTERPRETER 6 (SQ-0928)
+
+`zvm::interpreter`'s IBM PC row stated no default page or ink for months, on the
+reasoning that "an IBM PC in a terminal is the player's terminal". These three are
+why it now states blue 6 under white 9 — and why interpreter 6 was the last gap
+SQ-0873 left open, alongside the Atari ST.
+
+  dos-shogun.png     Shogun r322 / Pix 21 / 890706, "IBM Interpreter version 6.68",
+                     at the main menu.  ~44% #0000A1..A6 — EGA blue (#0000AA,
+                     colour 1) with video-scaling jitter — under white text.
+  dos-arthur.png     Arthur r74, mid-game (Churchyard, St Anne's Day, Compline).
+                     40% #0000A1. Same blue.
+  dos-zorkzero.png   Zork Zero at the Banquet Hall. 25.7% #FFFFFF and near-whites:
+                     WHITE, not blue.
+
+The three do not contradict each other, and working out why is the finding. A
+trace of every `@set_colour` each game issues says: Arthur (941 screen ops) and
+Journey name no colour at all; Shogun names one, on a 548x32 status strip; Zork
+Zero names one on a window the size of the screen. So blue is the interpreter's
+own page, games layer per-window pairs on top of it, and only Zork Zero colours a
+window big enough to replace the screen. The user also reports that in the source
+video Zork Zero's BOOT sequence is blue/white before the game runs — i.e. before
+it can have set anything, which is what turns a coincidence into a default.
+
+A DISCARDED CAPTURE, recorded so nobody rediscovers it: an earlier Arthur frame
+from a different walkthrough showed a GREY ground and appeared to refute all of
+this. Arthur names no colour and its art canvas is only 40% opaque (the knotwork
+border), so the grey was neither declared nor drawn. That video was not true DOS
+emulation. **A walkthrough recording is not a machine capture** — it may be a
+modern interpreter reporting itself as an IBM.
+
+What is pinned from these is a section 8.3.1 colour NUMBER, not a shade, so unlike
+the period-look values (SQ-0873) there is no emulator-dependent RGB here to be
+wrong about.
+
