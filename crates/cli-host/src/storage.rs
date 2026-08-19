@@ -248,11 +248,36 @@ pub fn game_dir_with_key(story_path: &Path, data_dir: Option<&str>, key: &str) -
 pub fn resolve_save_input(input: &str, game_dir: &Path) -> PathBuf {
     let t = input.trim();
     if t.contains('/') || t.contains('\\') {
-        PathBuf::from(t)
-    } else {
-        let name = if t.ends_with(".qzl") { t.to_string() } else { format!("{t}.qzl") };
-        game_dir.join(name)
+        return PathBuf::from(t);
     }
+    // The typed extension is matched case-insensitively too, so `cellar.QZL` is
+    // not turned into `cellar.QZL.qzl`.
+    let has_ext = t.len() >= 4 && t[t.len() - 4..].eq_ignore_ascii_case(".qzl");
+    let name = if has_ext { t.to_string() } else { format!("{t}.qzl") };
+    // **An existing file wins, under the spelling it actually has on disk.**
+    //
+    // A case-insensitive filesystem hid a real defect here (SQ-0925).
+    // `existing_saves` accepts `.QZL` as well as `.qzl`, so it lists `auto` for a
+    // file called `auto.QZL`; macOS and Windows then open that file through the
+    // `auto.qzl` spelling built above, and Linux does not. The list offered a save
+    // the restore could not open, on one platform only.
+    //
+    // The scan comes BEFORE the exact check rather than after it, so every platform
+    // returns the same path for the same directory. Resolving to `auto.qzl` on a
+    // filesystem that quietly matches it and to `auto.QZL` on one that does not
+    // would fix the bug and leave a path that reads differently in a prompt, an
+    // error message and an overwrite warning depending on the host.
+    //
+    // A NEW name matches nothing and falls through to the exact `.qzl` spelling,
+    // which is what saving wants.
+    if let Ok(rd) = std::fs::read_dir(game_dir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().eq_ignore_ascii_case(&name) {
+                return e.path();
+            }
+        }
+    }
+    game_dir.join(&name)
 }
 
 /// Every save already in this game's directory, named the way you would type it.
@@ -373,7 +398,16 @@ mod tests {
             vec!["auto".to_string(), "before-maze".to_string(), "cellar".to_string()],
             "sorted case-insensitively, extension stripped, .txt ignored, .QZL kept",
         );
-        // And it really is the inverse.
+        // And it really is the inverse. **Assert the resolved FILENAME, not just
+        // that something is there**: `is_file()` alone passes on macOS and Windows
+        // for the wrong reason, because their filesystems match `auto.qzl` to
+        // `auto.QZL` themselves, and it was failing on Linux for the right one
+        // (SQ-0925).
+        assert_eq!(
+            resolve_save_input("auto", &d).file_name().unwrap(),
+            "auto.QZL",
+            "the list offered `auto`, so it must resolve to the file that produced it",
+        );
         for name in existing_saves(&d) {
             assert!(resolve_save_input(&name, &d).is_file(), "{name} round-trips");
         }
