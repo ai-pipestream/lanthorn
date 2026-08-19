@@ -265,6 +265,20 @@ pub struct Cli {
     #[arg(long)]
     pub no_game_colours: bool,
 
+    /// Present the MACHINE's own default colours even off original media (SQ-0928).
+    ///
+    /// A machine's §8.3.3 pair — the IBM PC's blue under white, the Amiga's grey
+    /// under white — describes a machine, and running a story off its release disk
+    /// makes that description true of the launch. It applies automatically there.
+    /// Opening a bare story file does not: nothing named a machine, so nothing is
+    /// presented and your terminal governs.
+    ///
+    /// Use this when you have named one yourself and mean it:
+    /// `--interpreter 4 --system-colours` gets you the Amiga's page on a plain
+    /// `.z3`. It cannot conjure a machine where none was named.
+    #[arg(long)]
+    pub system_colours: bool,
+
     /// Interpreter number to advertise in the story header (0x1E).
     ///
     /// Games branch on it: Beyond Zork picks character graphics over colour on
@@ -523,6 +537,7 @@ pub(crate) fn default_band_height() -> u16 {
 }
 fn default_honor_game_colours() -> bool { true }
 fn default_period_look() -> bool { true }
+fn default_system_colours() -> bool { false }
 fn default_acceleration() -> bool { true }
 fn default_honor_timed_input() -> bool { true }
 fn default_enable_sound() -> bool { true }
@@ -1185,6 +1200,29 @@ pub struct Config {
     /// profile pins those colours or the terminal supplies them. Never persisted.
     #[serde(skip)]
     pub interpreter_profile: crate::interpreter::InterpreterProfile,
+    /// How that profile was arrived at, which decides whether the machine's own
+    /// colours may be presented (SQ-0928). Inferred with it, never persisted.
+    #[serde(skip)]
+    pub interpreter_source: crate::interpreter::ProfileSource,
+
+    /// Present the MACHINE's own colours even when the story did not come off its
+    /// original media (SQ-0928).
+    ///
+    /// Off by default, and the default is the whole point. A machine's §8.3.3 pair
+    /// is a fact about a machine — the IBM PC's is blue under white, the Amiga's a
+    /// grey under white — and running a story off its release disk makes that fact
+    /// true of the launch. Opening a bare `.z5` does not: `InterpreterProfile`
+    /// answers `IbmPc` there because nothing named a machine, and painting every
+    /// modern Inform story blue on the strength of that would be absurd.
+    ///
+    /// Turning this on says "I know what I am asking for": with `--interpreter 4`
+    /// it gets you the Amiga's page on a bare file, which is what
+    /// `docs/features/interpreter.md` used to promise unconditionally.
+    ///
+    /// It cannot conjure a machine out of nothing — see
+    /// [`ProfileSource::Fallback`](crate::interpreter::ProfileSource::Fallback).
+    #[serde(default = "default_system_colours")]
+    pub system_colours: bool,
     /// The picture archive named for THIS launch — `--pictures`, or a choice the
     /// launch-options dialog made and the user did not persist (SQ-0789/0791).
     ///
@@ -1235,6 +1273,25 @@ pub struct Config {
 }
 
 impl Config {
+    /// The machine's §8.3.3 default page and ink for THIS launch, or `None` when
+    /// this launch has not earned them (SQ-0928).
+    ///
+    /// [`InterpreterProfile::default_colours`](crate::interpreter::InterpreterProfile::default_colours)
+    /// is the machine's own fact and answers the same way for everybody; this is
+    /// the question every renderer and the header seeder should actually ask,
+    /// because a machine reached by falling through is not a machine the player
+    /// is on.
+    ///
+    /// **The story READS this** in `$2C`/`$2D`, so it is not a paint: whatever
+    /// this answers has to be what the screen shows, or a v5+ game asking for the
+    /// default pair is told one thing and shown another.
+    pub fn machine_default_colours(&self) -> Option<(u8, u8)> {
+        self.interpreter_source
+            .licenses_machine_colours(self.system_colours)
+            .then(|| self.interpreter_profile.default_colours())
+            .flatten()
+    }
+
     /// True while `interpreter_number` is still the one a one-run source pinned
     /// — `--interpreter`, the launch-options dialog, or this game's own
     /// sidecar — and nothing has changed it (SQ-0646/0789). A convenience over
@@ -1319,6 +1376,8 @@ impl Default for Config {
             random_seed: None,
             one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
+            interpreter_source: crate::interpreter::ProfileSource::Fallback,
+            system_colours: default_system_colours(),
             pictures_override: None,
             disk_entry: None,
             enable_sound: default_enable_sound(),
@@ -1425,6 +1484,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.show_status_bar = from_file.show_status_bar;
             cfg.honor_game_colours = from_file.honor_game_colours;
             cfg.period_look = from_file.period_look;
+            cfg.system_colours = from_file.system_colours;
             cfg.honor_timed_input = from_file.honor_timed_input;
             cfg.interpreter_number = from_file.interpreter_number;
             cfg.random_seed = from_file.random_seed;
@@ -1482,6 +1542,15 @@ pub fn resolve(cli: &Cli) -> Config {
     if cli.no_game_colours {
         cfg.honor_game_colours = false;
         cfg.one_run.pin(keys::HONOR_GAME_COLOURS, false);
+    }
+
+    // SQ-0928: the opt-in for a machine's own colours off original media. A flag
+    // for the launch you typed it on, like the two above, so it is not written
+    // back — but it needs no one-run pin, because unlike `honor_game_colours`
+    // nothing per-story recomputes it and there is no in-session command to
+    // override.
+    if cli.system_colours {
+        cfg.system_colours = true;
     }
 
     // `--interpreter N` beats the file's `interpreter_number`; absent, the
@@ -1702,6 +1771,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     // the global config to never honour game colours again.
     doc.put("honor_game_colours", cfg.honor_game_colours.into(), cfg.honor_game_colours == def.honor_game_colours);
     doc.put("period_look", cfg.period_look.into(), cfg.period_look == def.period_look);
+    doc.put("system_colours", cfg.system_colours.into(), cfg.system_colours == def.system_colours);
     doc.put("honor_timed_input", cfg.honor_timed_input.into(), cfg.honor_timed_input == def.honor_timed_input);
     doc.put("enable_sound", cfg.enable_sound.into(), cfg.enable_sound == def.enable_sound);
     doc.put("volume", (cfg.volume as i64).into(), cfg.volume == def.volume);
@@ -2073,6 +2143,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number,
             interpreter_version: None,
             pictures: None,
@@ -2154,6 +2225,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2178,6 +2250,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2202,6 +2275,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2481,6 +2555,8 @@ use_defaults = false
             random_seed: None,
             one_run: OneRunOverrides::default(),
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
+            interpreter_source: crate::interpreter::ProfileSource::Fallback,
+            system_colours: default_system_colours(),
             pictures_override: None,
             disk_entry: None,
             enable_sound: true,
@@ -2787,6 +2863,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2809,6 +2886,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2841,6 +2919,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2865,6 +2944,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2890,6 +2970,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: true,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2950,6 +3031,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3003,6 +3085,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3044,6 +3127,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3230,6 +3314,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3282,6 +3367,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             no_game_colours: false,
+            system_colours: false,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,

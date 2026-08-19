@@ -766,15 +766,31 @@ fn machine_reporting_story() -> Vec<u8> {
 fn an_explicit_machine_brings_its_default_colours_with_it() {
     let story = write_temp("machine.z5", &machine_reporting_story());
 
+    // SQ-0928 CHANGED WHAT THIS TEST IS ABOUT, and the change is deliberate.
+    //
+    // A machine's `$2C`/`$2D` describes a MACHINE. Running a story off its release
+    // disk makes that description true of the launch; typing a number does not.
+    // The distinction had no teeth while the IBM PC declined a pair, because the
+    // FALLBACK machine painted nothing — but it states blue under white now, and
+    // `InterpreterProfile` answers `IbmPc` for every story with no medium, so
+    // without the gate `-I 6` (and the plain default) would paint everything blue.
+    //
+    // So a hand-named machine reaches `$1E` and stops there, and `--system-colours`
+    // is how a player says they meant the whole machine.
     for (n, name, want) in [
         (3u8, "Macintosh", "[3/9/2/]"),
         (5, "Atari ST", "[5/9/2/]"),
         (10, "Apple IIgs", "[10/2/9/]"),
     ] {
-        let text = stdout_of(&run(&story, &["-I", &n.to_string()], ""));
+        let named = stdout_of(&run(&story, &["-I", &n.to_string()], ""));
         assert!(
-            text.contains(want),
-            "--interpreter {n} ({name}) must report its own $2C/$2D\n  want: {want}\n   got: {text}"
+            named.contains(&format!("[{n}/2/9/]")),
+            "--interpreter {n} ({name}) names the machine and defers the page\n   got: {named}"
+        );
+        let opted = stdout_of(&run(&story, &["-I", &n.to_string(), "--system-colours"], ""));
+        assert!(
+            opted.contains(want),
+            "--interpreter {n} --system-colours reports its own $2C/$2D\n  want: {want}\n   got: {opted}"
         );
     }
 
@@ -784,7 +800,17 @@ fn an_explicit_machine_brings_its_default_colours_with_it() {
     let cbm = stdout_of(&run(&story, &["-I", "7"], ""));
     let pc = stdout_of(&run(&story, &["-I", "6"], ""));
     assert!(cbm.contains("[7/2/9/]"), "the Commodore declines its pair:\n{cbm}");
-    assert!(pc.contains("[6/2/9/]"), "…which is the IBM PC's answer too:\n{pc}");
+    // SQ-0928: the IBM PC no longer declines — it states blue 6 under white 9 —
+    // but a number NAMED BY HAND is not original media, so the pair is withheld
+    // and the story still sees zvm's own §8.3.2 seed. That is the whole of the
+    // gate: without it, `-I 6` on any story anyone opened would paint it blue.
+    assert!(pc.contains("[6/2/9/]"), "…and a hand-named IBM PC still defers:\n{pc}");
+    // …until the player says they meant it.
+    let pc_opt = stdout_of(&run(&story, &["-I", "6", "--system-colours"], ""));
+    assert!(
+        pc_opt.contains("[6/6/9/]"),
+        "--system-colours advertises the machine's own blue under white:\n{pc_opt}"
+    );
 
     // The override contract (SQ-0839/SQ-0855): `--no-game-colours` declares the
     // interpreter COLOURLESS (§8.3.2), so no machine's page is advertised even
@@ -817,10 +843,15 @@ fn a_story_off_a_floppy_is_told_the_whole_machine() {
     // An Amiga floppy: interpreter 4, and its pair clamped as above.
     let text = stdout_of(&run(&image, &[], ""));
     assert!(text.contains("[4/"), "the medium still picks the machine:\n{text}");
-    // …and `-I` still outranks it, bringing the named machine's page with it —
-    // the number you name is the machine you asked for, whole.
+    // …and `-I` still outranks it for the NUMBER. It no longer brings the named
+    // machine's page on its own (SQ-0928): the disk is what makes a machine true
+    // of a launch, and naming a different one over the top is a request about the
+    // story rather than a statement about where it came from.
     let text = stdout_of(&run(&image, &["-I", "3"], ""));
-    assert!(text.contains("[3/9/2/]"), "-I brings the Macintosh's page too:\n{text}");
+    assert!(text.contains("[3/2/9/]"), "-I names the Macintosh and defers its page:\n{text}");
+    // The whole machine is still one flag away.
+    let text = stdout_of(&run(&image, &["-I", "3", "--system-colours"], ""));
+    assert!(text.contains("[3/9/2/]"), "-I --system-colours brings its page too:\n{text}");
 
     let _ = std::fs::remove_file(&image);
 }

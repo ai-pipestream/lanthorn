@@ -131,7 +131,51 @@ use std::path::Path;
 
 use blorb::infocom_pics::Flavour;
 
-/// The machine lanthorn presents itself to the story as. See the module docs.
+/// How a launch arrived at its [`InterpreterProfile`] — and so whether it may
+/// present that machine's own colours (SQ-0928).
+///
+/// The user's rule: **system colours apply only when the game is run from its
+/// original media.** A machine named by the disk it came off is a fact about the
+/// launch; a machine reached by falling through is not a machine at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfileSource {
+    /// The MEDIUM named it — a release floppy, a DOS image, a hybrid disc's own
+    /// answer for this story. Original media, and the only source that licenses
+    /// the machine's colours on its own.
+    Medium,
+    /// The player named it: `--interpreter N`, `interpreter_number`, or an
+    /// archive whose flavour the medium could not refine. Advertises the byte in
+    /// `$1E`, and licenses the colours only with the opt-in
+    /// (`Config::system_colours`), because a number typed at a bare story file is
+    /// a request about the STORY, not a statement about where it came from.
+    Asked,
+    /// Nothing named a machine, so [`InterpreterProfile::IbmPc`] answered as the
+    /// historical default. **Never** licenses machine colours: this is every
+    /// modern Inform story ever opened, and the IBM PC's own doc has always said
+    /// that here "default" should mean what the player actually sees.
+    ///
+    /// The DEFAULT variant, deliberately: a `Config` that has not resolved a story
+    /// yet has no machine, and the safe answer to "may I paint this?" is no.
+    #[default]
+    Fallback,
+}
+
+impl ProfileSource {
+    /// May this launch present its machine's §8.3.3 pair?
+    ///
+    /// `opt_in` is `Config::system_colours` — the escape hatch for a player who
+    /// wants the Amiga's grey on a bare `.z6`. It cannot rescue [`Self::Fallback`],
+    /// because there is no machine there to be faithful to.
+    pub fn licenses_machine_colours(self, opt_in: bool) -> bool {
+        match self {
+            ProfileSource::Medium => true,
+            ProfileSource::Asked => opt_in,
+            ProfileSource::Fallback => false,
+        }
+    }
+}
+
+/// The machine lanthorn presents itself to the story as/// The machine lanthorn presents itself to the story as. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InterpreterProfile {
     /// Today's behaviour, named: an IBM PC (interpreter 6 on v6, 1 elsewhere),
@@ -252,17 +296,43 @@ impl InterpreterProfile {
         named_art: Option<Flavour>,
         mounted_as: Option<blorb::medium::DiskImage>,
     ) -> Self {
+        Self::resolve_with_source(story_path, configured_interpreter_number, named_art, mounted_as).0
+    }
+
+    /// [`Self::resolve`], and **where the answer came from** (SQ-0928).
+    ///
+    /// The profile alone cannot say whether this launch may present the machine's
+    /// own colours, because [`Self::IbmPc`] is two different answers wearing one
+    /// name: the machine a DOS floppy names, and the thing every story with no
+    /// medium at all falls through to. Paint the first blue and you are being
+    /// faithful; paint the second blue and every modern Inform story comes up blue.
+    ///
+    /// So the source travels with the profile, and [`ProfileSource::licenses_machine_colours`]
+    /// is the question `Config::machine_default_colours` asks of it.
+    pub fn resolve_with_source(
+        story_path: &Path,
+        configured_interpreter_number: Option<u8>,
+        named_art: Option<Flavour>,
+        mounted_as: Option<blorb::medium::DiskImage>,
+    ) -> (Self, ProfileSource) {
         if let Some(n) = configured_interpreter_number {
-            return Self::for_interpreter_number(n);
+            return (Self::for_interpreter_number(n), ProfileSource::Asked);
         }
         let medium = mounted_as.or_else(|| Self::medium(story_path));
+        // A named archive is an INSTRUCTION about which artwork to load, and it
+        // refines to the medium underneath where there is one — so the source is
+        // the medium's when the medium is what settled it, and otherwise the
+        // player's. Naming an `.mg1` beside a bare story file is not original
+        // media and does not license that machine's colours.
         if let Some(flavour) = named_art {
-            return Self::for_art_flavour_on(flavour, medium);
+            let from_medium = medium.and_then(|m| m.interpreter_number()).is_some();
+            let src = if from_medium { ProfileSource::Medium } else { ProfileSource::Asked };
+            return (Self::for_art_flavour_on(flavour, medium), src);
         }
         if let Some(n) = medium.and_then(|m| m.interpreter_number()) {
-            return Self::for_interpreter_number(n);
+            return (Self::for_interpreter_number(n), ProfileSource::Medium);
         }
-        Self::IbmPc
+        (Self::IbmPc, ProfileSource::Fallback)
     }
 
     /// The machine implied by an archive of `flavour` **found on `medium`** —
@@ -391,7 +461,25 @@ impl InterpreterProfile {
     /// below that a story can READ comes through here, so the two front-ends
     /// cannot drift into presenting different machines.
     fn machine(self) -> Option<&'static zvm::interpreter::MachineProfile> {
-        zvm::interpreter::machine(self.interpreter_number()?)
+        zvm::interpreter::machine(self.row_number())
+    }
+
+    /// The §11.1.3 number whose ROW describes this machine.
+    ///
+    /// Not [`Self::interpreter_number`], and the difference is [`Self::IbmPc`]'s
+    /// alone. That knob answers *"what should go in header `$1E`?"* and the IBM PC
+    /// answers `None` on purpose, so zvm's own version rule (Frotz's 6-for-v6,
+    /// 1-otherwise) stays in force and naming the profile cannot change what the
+    /// corpus advertises. But the machine is still the IBM PC, and its row still
+    /// describes it — so a question about the MACHINE has to look 6 up regardless.
+    ///
+    /// Leaving the two conflated made the IBM PC's row unreachable through the
+    /// profile: `machine()` asked for a number the profile declines to state, got
+    /// `None`, and reported that the IBM PC has no palette and no colours — which
+    /// was invisible while the row declined a pair anyway, and became SQ-0928's
+    /// whole feature failing silently the moment it stated one.
+    fn row_number(self) -> u8 {
+        self.interpreter_number().unwrap_or(IBM_PC_INTERPRETER_NUMBER)
     }
 
     /// The release medium at `path`, or `None` when it is not one. The single
@@ -841,8 +929,21 @@ mod tests {
         assert_eq!(p, InterpreterProfile::IbmPc);
         assert_eq!(p.interpreter_number(), None, "defer to zvm's Frotz rule");
         assert_eq!(p.std_window(), None, "defer to the container's Reso chunk");
-        assert_eq!(p.default_colours(), None, "defer to the host terminal");
         assert_eq!(p.palette(), zvm::screen::Palette::Standard, "ZMSD §8.3.1");
+        // SQ-0928 SPLIT THIS ONE KNOB IN TWO, and the split is the quest.
+        //
+        // The MACHINE states blue under white — observed from DOS captures, and a
+        // fact about the IBM PC whoever is asking. The LAUNCH still defers, because
+        // this variant is also what every story with no medium falls through to,
+        // and `ProfileSource::Fallback` licenses nothing. So "no opinion anywhere"
+        // is now false of the machine and true of the default launch, which is
+        // exactly the distinction that lets a DOS floppy be blue without painting
+        // every Inform game blue.
+        assert_eq!(p.default_colours(), Some((6, 9)), "the machine states its pair");
+        assert!(
+            !ProfileSource::Fallback.licenses_machine_colours(true),
+            "…and the launch that merely fell through here never presents it",
+        );
     }
 
     #[test]

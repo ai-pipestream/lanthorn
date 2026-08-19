@@ -363,7 +363,7 @@ fn boot_named(
     let profile = InterpreterProfile::for_art_flavour(pics.flavour());
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::from_native(pics);
-    let honoured = honour && !picts.declines_game_colours(profile);
+    let honoured = honour && !picts.declines_game_colours(profile.default_colours());
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
     let v6_art_scale = picts.art_scale();
@@ -456,9 +456,14 @@ fn shoguns_flanks_survive_the_rule_that_spared_them() {
         let src = PictSource::from_native(pics);
         assert_eq!(profile, InterpreterProfile::IbmPc, "{archive}: a DOS rendition is an IBM PC");
         assert_eq!(
-            src.declines_game_colours(profile),
+            // SQ-0928: a `.cg1`/`.eg1` named beside a bare story file is not
+            // original media, so this launch has no machine pair — which is what
+            // "a PC states no colours of its own" was really asserting. The IBM PC
+            // itself now states blue under white; it just does not reach a launch
+            // that only named an archive.
+            src.declines_game_colours(None),
             src.is_monochrome(),
-            "{archive}: SQ-0806's rule, unmoved — a PC states no colours of its own",
+            "{archive}: SQ-0806's rule, unmoved — this launch named no machine",
         );
 
         for honour in [true, false] {

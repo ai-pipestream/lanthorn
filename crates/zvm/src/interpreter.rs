@@ -103,7 +103,31 @@ pub const ATARI_ST_INTERPRETER_NUMBER: u8 = 5;
 /// actually sees.
 pub const IBM_PC_INTERPRETER_NUMBER: u8 = 6;
 
-/// Commodore 128, from the same §11.1.3 table (SQ-0869) — the one row
+/// The IBM PC's default page: §8.3.1's **blue** (SQ-0928).
+///
+/// Observed rather than read out of Infocom's source, and the observation is
+/// unusually well supported. Three DOS captures — *Shogun* r322 at its menu,
+/// *Arthur* r74 mid-game, *Zork Zero* at the Banquet Hall — plus the report that
+/// Zork Zero's BOOT sequence is blue/white before the game runs, i.e. before it
+/// can have set anything. Against that, a trace of every `@set_colour` each game
+/// issues: Arthur (941 screen ops) and Journey (532) name no colour at all and
+/// are blue; Shogun names one, on a 548x32 status strip, and is blue everywhere
+/// else; Zork Zero names one on a window the size of the screen and is white.
+/// Four games, one rule, no exceptions.
+///
+/// **What is NOT being claimed is a shade.** These are §8.3.1 colour NUMBERS and
+/// they resolve through the palette and the player's theme, so unlike the period
+/// look ([`PeriodLook`]) there is no emulator-dependent RGB here to be wrong about.
+///
+/// **And stating it is not the same as applying it.** The gate is the app's
+/// `Config::machine_default_colours`: this pair belongs to the IBM PC as a machine
+/// a medium named, not to the fallback every story with no medium falls through to.
+pub const IBM_PC_DEFAULT_BACKGROUND: u8 = 6;
+
+/// The IBM PC's default ink: §8.3.1's **white**. See [`IBM_PC_DEFAULT_BACKGROUND`].
+pub const IBM_PC_DEFAULT_FOREGROUND: u8 = 9;
+
+/// Commodore 128, from the same §11.1.3 table (SQ-0869)/// Commodore 128, from the same §11.1.3 table (SQ-0869) — the one row
 /// corroborated by a DISK rather than by an interpreter source tree.
 /// `TRINITY1.D64` opens with the Commodore 128's `CBM` autoboot signature and
 /// boots an interpreter that touches the C128's own MMU register `$FF00` forty
@@ -641,8 +665,15 @@ pub const MACHINES: &[MachineProfile] = &[
     MachineProfile {
         number: IBM_PC_INTERPRETER_NUMBER,
         name: "IBM PC",
-        // Declined on purpose: an IBM PC in a terminal is the player's terminal.
-        default_colours: None,
+        // SQ-0928: blue under white, observed from DOS captures and corroborated
+        // by a trace of which games name colours and which do not. This row used
+        // to decline, on the ground that "an IBM PC in a terminal is the player's
+        // terminal" — which was right about the LAUNCH and wrong about the
+        // MACHINE. The two are separated now: the machine states its pair here,
+        // and the app presents it only when a medium named this machine (see
+        // `IBM_PC_DEFAULT_BACKGROUND`). A bare story file still gets the player's
+        // own terminal, which is what that reasoning was protecting.
+        default_colours: Some((IBM_PC_DEFAULT_BACKGROUND, IBM_PC_DEFAULT_FOREGROUND)),
         palette: Palette::Standard,
         global_colour_pens: false,
         one_screen_palette: false,
@@ -818,7 +849,17 @@ mod tests {
         assert_eq!(pair(MACINTOSH_INTERPRETER_NUMBER), Some((9, 2)), "SetColor := zWHITE*256 + zBLACK");
         assert_eq!(pair(ATARI_ST_INTERPRETER_NUMBER), Some((9, 2)), "DEF_BACK 9 / DEF_FORE 2");
         assert_eq!(pair(APPLE_IIGS_INTERPRETER_NUMBER), Some((2, 9)), "zboot.asm lda #2 / lda #9");
-        assert_eq!(pair(IBM_PC_INTERPRETER_NUMBER), None, "the player's terminal");
+        // SQ-0928: the one pair here that is OBSERVED rather than read out of
+        // Infocom's source — but observed twice over, from DOS captures and from a
+        // trace of which games name colours and which do not. And what is observed
+        // is a §8.3.1 NUMBER, not a shade, so unlike `PeriodLook` there is no
+        // emulator-dependent RGB to be wrong about.
+        //
+        // It used to decline, "the player's terminal" — which was right about the
+        // LAUNCH and wrong about the MACHINE. The two are separated now: the row
+        // states the machine, and a front-end presents it only when a medium named
+        // this machine. A bare story file still gets the player's own terminal.
+        assert_eq!(pair(IBM_PC_INTERPRETER_NUMBER), Some((6, 9)), "blue under white");
         assert_eq!(pair(COMMODORE_128_INTERPRETER_NUMBER), None, "no source read");
         // Only the Amiga loaded a palette of its own.
         let amiga: Vec<_> =

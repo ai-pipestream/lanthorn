@@ -496,6 +496,8 @@ fn build_machine(
     term_cols: u16,
     honor_game_colours: bool,
     interpreter_number: Option<u8>,
+    // May this launch advertise the MACHINE's own `$2C`/`$2D` pair? (SQ-0928)
+    machine_colours: bool,
     // Plain mode: hold the game's prompt back so the status can precede it.
     hold_prompt: bool,
 ) -> Result<Machine, String> {
@@ -547,9 +549,16 @@ fn build_machine(
     // gates it (`startup`'s `host_default_colours`): with colours declined the
     // interpreter has told the story it is colourless (§8.3.2) and has no page
     // of its own to advertise.
+    // SQ-0928: …and the PAIR is gated once more, on where the machine came from.
+    // A machine's `$2C`/`$2D` describes a machine, and running a story off its
+    // release disk makes that description true of the launch. Naming a number by
+    // hand does not — `--interpreter 6` on a bare `.z5` used to advertise the IBM
+    // PC's page, and now that the IBM PC states one (blue under white) that would
+    // paint every story anyone opened that way. `--system-colours` is the opt-in
+    // for a player who named the machine and meant it.
     if let Some(m) = interpreter_number.and_then(zvm::interpreter::machine) {
         zvm::screen::set_palette(m.palette);
-        if honor_game_colours {
+        if honor_game_colours && machine_colours {
             if let Some((bg, fg)) = m.default_colours {
                 machine.set_default_colours(bg, fg);
             }
@@ -585,6 +594,8 @@ struct Args {
     honor_colours: bool,
     /// `--period-look`: dress the screen as the story's own machine did (SQ-0873).
     period_look: bool,
+    /// `--system-colours`: present a named machine's own `$2C`/`$2D` pair (SQ-0928).
+    system_colours: bool,
     interpreter: Option<u8>,
     volume: Option<u8>,
     /// `--pin <top|bottom>` (or `--scrollback`): where the fixed rows sit.
@@ -605,6 +616,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--no-sound"]),
     cli_host::Opt::flag(&["--no-game-colours"]),
     cli_host::Opt::flag(&["--period-look"]),
+    cli_host::Opt::flag(&["--system-colours", "--system-colors"]),
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
@@ -644,6 +656,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         data_dir: m.value("--data-dir").map(str::to_string),
         honor_colours: !m.has("--no-game-colours"),
         period_look: m.has("--period-look"),
+        system_colours: m.has("--system-colours") || m.has("--system-colors"),
         // Lenient, as before: a bad value falls back to the engine default
         // rather than refusing to start.
         interpreter: m.value("--interpreter").and_then(|v| v.parse::<u8>().ok()),
@@ -1274,6 +1287,11 @@ Options:
       --no-timed-input  Ignore timed-input interrupts
       --no-game-colours Ignore the game's set_colour / true-colour output
                         (also honoured: NO_COLOR)
+      --system-colours  Advertise a named machine's own default page and ink
+                        ($2C/$2D). Automatic off release media — that is what the
+                        disk means — so this is only for a machine you named
+                        yourself with -I, on a story that did not come off one.
+                        (alias: --system-colors)
       --period-look     Dress the screen as this story's own machine did: its
                         page and ink, its status band, its cursor shape. Only for
                         a v1-v4 story (colour arrives with v5, so anything shown
@@ -1457,6 +1475,12 @@ fn main() {
     // Frotz's 6-for-v6, 1 otherwise). Same order the TUI's
     // `InterpreterProfile::resolve` applies; only the default moves.
     let interpreter = args.interpreter.or_else(|| medium.and_then(|m| m.interpreter_number()));
+    // SQ-0928: a machine's `$2C`/`$2D` describes a MACHINE, and running a story off
+    // its release disk makes that description true of the launch. Naming a number
+    // by hand does not — and now that the IBM PC states a pair (blue under white),
+    // `-I 6` on a bare `.z5` would otherwise paint it. `--system-colours` is the
+    // opt-in for a player who named the machine and meant it.
+    let machine_colours = args.interpreter.is_none() || args.system_colours;
     // SQ-0872: a number naming a machine `zvm::interpreter` does not model still
     // reaches `$1E` — that is the honest fallback, since the story asked and the
     // standard has an answer — but everything else about the presentation is then
@@ -1479,6 +1503,7 @@ fn main() {
         term_cols,
         honor,
         interpreter,
+        machine_colours,
         mode.plain(),
     ) {
         Ok(m) => m,
@@ -1688,6 +1713,7 @@ fn main() {
                     term_cols,
                     honor,
                     interpreter,
+                    machine_colours,
                     mode.plain(),
                 ) {
                     Ok(m) => m,
@@ -1902,7 +1928,7 @@ mod v6_tests {
     }
 
     fn build(story: Vec<u8>) -> Result<Machine, String> {
-        build_machine(story, false, false, 24, 24, 80, true, None, false)
+        build_machine(story, false, false, 24, 24, 80, true, None, true, false)
     }
 
     /// SQ-0601: v6 is a graphical, mouse-and-menu format this front-end cannot
@@ -2064,7 +2090,7 @@ mod arg_tests {
         for flag in [
             "--story-only", "--lower-only", "--no-status", "--show-status", "--no-aux",
             "--no-more", "--no-page", "--no-timed-input", "--no-sound", "--no-game-colours",
-            "--period-look", "--screen-reader", "--plain",
+            "--period-look", "--system-colours", "--system-colors", "--screen-reader", "--plain",
         ] {
             let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]).expect("valid args");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} should leave the story path alone");
@@ -2544,7 +2570,7 @@ mod centring_tests {
     #[test]
     fn the_width_declared_to_the_story_is_the_width_the_sink_renders_at() {
         for cols in [40u16, 60, 80, 100, 132] {
-            let m = build_machine(v6_tests::story_of_version(5), true, false, 24, 24, cols, true, None, false)
+            let m = build_machine(v6_tests::story_of_version(5), true, false, 24, 24, cols, true, None, true, false)
                 .expect("a v5 story builds");
             assert_eq!(m.mem.read_byte(0x21) as u16, cols, "$21 = screen width in characters (§8.4)");
             assert_eq!(m.mem.read_word(0x22), cols, "$22 = screen width in units (§8.4.3)");
@@ -2563,7 +2589,7 @@ mod centring_tests {
     /// a grid still the old one (SQ-0679, which the app has had all along).
     #[test]
     fn a_resize_retells_the_story_and_retunes_the_sink_together() {
-        let mut m = build_machine(v6_tests::story_of_version(5), true, false, 24, 24, 80, true, None, false)
+        let mut m = build_machine(v6_tests::story_of_version(5), true, false, 24, 24, 80, true, None, true, false)
             .expect("a v5 story builds");
         // A live one-row upper window, as a boot-time `split_window 1` leaves.
         m.screen.upper.resize(1, 80);

@@ -14,6 +14,50 @@ identifies itself without reading its git hash.
 
 ## Unreleased
 
+### Original media brings its machine's colours
+
+Boot *Shogun* off its Amiga floppy and the screen is the Amiga's grey; boot a
+story off a DOS disk and it is the IBM PC's blue under white. That last one is
+new — interpreter 6 used to state no colours at all, on the reasoning that "an
+IBM PC in a terminal is the player's terminal".
+
+That was right about the launch and wrong about the machine, and the two are
+separated now. Three DOS captures — *Shogun*'s menu, *Arthur* mid-game, *Zork
+Zero*'s Banquet Hall — plus *Zork Zero*'s boot being blue **before** the game
+runs, against a trace of every `set_colour` each game issues: *Arthur* (941 screen
+ops) and *Journey* name no colour and are blue; *Shogun* names one, on a 548×32
+status strip, and is blue everywhere else; *Zork Zero* names one on a window the
+size of the screen and is white. Four games, one rule.
+
+**A machine's colours need the medium that names it.** Opening a bare story file
+names no machine — `IbmPc` is just what nothing falls through to — so your
+terminal governs and no modern Inform game turns blue. Naming a number by hand
+advertises it in the header and stops there; add **`--system-colours`** (or
+`system_colours = true`) when you mean the whole machine.
+
+
+### Original media brings its machine's colours
+
+Boot *Shogun* off its Amiga floppy and the screen is the Amiga's grey; boot
+*Zork I* off a DOS disk and it is the IBM PC's blue under white. That last one is
+new: interpreter 6 used to state no colours at all, on the reasoning that "an IBM
+PC in a terminal is the player's terminal".
+
+That reasoning was right about the launch and wrong about the machine, and the two
+are separated now. Three DOS captures — *Shogun*'s menu, *Arthur* mid-game,
+*Zork Zero*'s Banquet Hall — plus *Zork Zero*'s boot being blue **before** the game
+runs, against a trace of every `set_colour` each game issues: *Arthur* (941 screen
+ops) and *Journey* name no colour and are blue, *Shogun* names one on a 548×32
+status strip and is blue everywhere else, *Zork Zero* names one on a window the
+size of the screen and is white. Four games, one rule.
+
+**A machine's colours now need the medium that names it.** Opening a bare story
+file does not name a machine — `IbmPc` is simply what nothing falls through to —
+so your terminal governs, and no modern Inform game turns blue. Naming a number
+by hand advertises it in the header and stops there; add **`--system-colours`**
+(or `system_colours = true`) when you mean the whole machine.
+
+
 ### scott-cli can save and restore
 
 It was the only one of the three players where a session could not be preserved

@@ -302,11 +302,16 @@ fn the_amiga_profile_reports_an_amiga_to_the_game() {
 #[test]
 fn the_ibm_pc_profile_changes_nothing_it_touches() {
     let plain = write_image("ibmpc", &v6_boot_stub_story());
-    let profile = InterpreterProfile::resolve(&plain, None, None, None);
+    let (profile, source) = InterpreterProfile::resolve_with_source(&plain, None, None, None);
     assert_eq!(profile.interpreter_number(), None);
     assert_eq!(profile.std_window(), None);
-    assert_eq!(profile.default_colours(), None);
     assert_eq!(profile.palette(), zvm::screen::Palette::Standard);
+    // SQ-0928: what changes nothing is the LAUNCH, not the machine. This file
+    // named no medium, so the profile fell through here and the source licenses
+    // no colours — the pair the IBM PC states is real and simply out of reach.
+    assert_eq!(source, app::interpreter::ProfileSource::Fallback);
+    assert!(!source.licenses_machine_colours(true), "nothing rescues a fallback");
+    assert_eq!(profile.default_colours(), Some((6, 9)), "the machine's own fact");
 
     // Frotz's rule still supplies $1E, untouched: 6 for Version 6…
     let v6 = GameSession::new_with_trace(
@@ -415,4 +420,71 @@ fn the_profiles_bundle_is_the_zvm_tables_row() {
         assert_eq!(profile.default_colours(), row.default_colours, "{profile:?} $2C/$2D");
         assert_eq!(profile.palette(), row.palette, "{profile:?} palette");
     }
+}
+
+
+// ── SQ-0928: system colours are licensed by the MEDIUM ────────────────────────
+
+/// A machine's §8.3.3 pair describes a MACHINE. Running a story off its release
+/// disk makes that description true of the launch; opening a bare file does not.
+///
+/// This is the case the whole design turns on, and it only became load-bearing
+/// when the IBM PC gained a pair: `InterpreterProfile::resolve` answers `IbmPc`
+/// for every story with no medium — every modern Inform game anyone opens — so
+/// without the gate, blue under white would be painted across the entire
+/// non-Infocom corpus.
+#[test]
+fn only_original_media_licenses_a_machines_own_colours() {
+    use app::interpreter::ProfileSource;
+
+    // A story file with no medium: the fallback, and it can never be licensed —
+    // not even by the opt-in, because there is no machine there to be faithful to.
+    let bare = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../zvm/tests/fixtures/czech.z5");
+    assert!(bare.exists(), "the redistributable fixture is checked in");
+    let (prof, src) = InterpreterProfile::resolve_with_source(&bare, None, None, None);
+    assert_eq!(prof, InterpreterProfile::IbmPc);
+    assert_eq!(src, ProfileSource::Fallback);
+    assert!(!src.licenses_machine_colours(false));
+    assert!(!src.licenses_machine_colours(true), "the opt-in cannot conjure a machine");
+
+    // The machine still STATES its pair — that is a fact about the IBM PC, and
+    // separating the fact from the licence is the point.
+    assert_eq!(prof.default_colours(), Some((6, 9)), "blue under white");
+
+    // A number NAMED BY HAND reaches $1E and stops there, until the player says
+    // they meant the whole machine.
+    let (prof, src) = InterpreterProfile::resolve_with_source(&bare, Some(4), None, None);
+    assert_eq!(prof, InterpreterProfile::Amiga);
+    assert_eq!(src, ProfileSource::Asked);
+    assert!(!src.licenses_machine_colours(false), "a typed number is not original media");
+    assert!(src.licenses_machine_colours(true), "…until --system-colours says so");
+}
+
+/// The same, on a real release disk: the medium licenses it with no flag at all.
+///
+/// Gitignored fixture, so it skips vacuously — with a guard, because a skip that
+/// reads as a pass is worth nothing.
+#[test]
+fn a_release_floppy_licenses_them_with_no_flag() {
+    use app::interpreter::ProfileSource;
+
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+    let mut seen = 0;
+    for (file, want) in [
+        ("Zork I - The Great Underground Empire.adf", InterpreterProfile::Amiga),
+        ("James Clavell's Shogun.adf", InterpreterProfile::Amiga),
+    ] {
+        let path = dir.join(file);
+        if !path.is_file() {
+            eprintln!("SKIP: gitignored disk missing at {}", path.display());
+            continue;
+        }
+        seen += 1;
+        let (prof, src) = InterpreterProfile::resolve_with_source(&path, None, None, None);
+        assert_eq!(prof, want, "{file}");
+        assert_eq!(src, ProfileSource::Medium, "{file} came off original media");
+        assert!(src.licenses_machine_colours(false), "{file}: the disk is the licence");
+        assert!(prof.default_colours().is_some(), "{file}: and the machine states a pair");
+    }
+    assert!(seen > 0, "no release disk present; this case proved nothing");
 }

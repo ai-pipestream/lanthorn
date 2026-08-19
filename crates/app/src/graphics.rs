@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 
-use crate::interpreter::InterpreterProfile;
 
 /// Unpack a Glk 24-bit `0xRRGGBB` color into an opaque RGBA pixel.
 fn rgb(color: u32) -> Rgba<u8> {
@@ -444,8 +443,15 @@ impl PictSource {
     /// page, in one decision (SQ-0838). Turning colours off there does not save
     /// a stencil from a colour the game asked for; it throws away the one machine
     /// whose colours are known, and it cost SQ-0846's status banner its ink.
-    pub fn declines_game_colours(&self, profile: InterpreterProfile) -> bool {
-        self.is_monochrome() && profile.default_colours().is_none()
+    /// `machine_pair` is `Config::machine_default_colours` — the §8.3.3 pair for
+    /// THIS launch, not the profile's own fact (SQ-0928). The distinction is
+    /// load-bearing here: `InterpreterProfile::IbmPc` now states blue under white,
+    /// but it states it as a MACHINE, and a bare story file that merely fell
+    /// through to that variant has no machine at all. Asking the profile directly
+    /// would stop this rule firing for every CGA stencil opened off a plain `.z6`
+    /// — which is precisely the regression SQ-0806/SQ-0860 exist to prevent.
+    pub fn declines_game_colours(&self, machine_pair: Option<(u8, u8)>) -> bool {
+        self.is_monochrome() && machine_pair.is_none()
     }
 
     /// Is this Pict declared adaptive by the container's `APal` chunk (§11.3)?

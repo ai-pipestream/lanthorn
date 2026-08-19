@@ -1092,11 +1092,20 @@ Amiga floppy or anywhere else.
   fitted 68×20 — slightly larger type, and four pixels of slack at the bottom.
   Making the cell a per-machine runtime value reaches into every corner of the
   screen model, and is not something a profile should smuggle in.) Setting
-  `interpreter_number` yourself names the
-  machine outright and outranks both, so `interpreter_number = 4` gets you
-  the whole Amiga rather than just the byte — which is the point: a number that
-  changed what games did without changing the machine it implied was never a
-  useful thing to be able to set.
+  `interpreter_number` yourself names the machine outright and outranks both, so
+  `interpreter_number = 4` gets you the Amiga's palette, its standard window and
+  its §8.3 screen rules rather than just the byte — a number that changed what
+  games did without changing the machine it implied was never a useful thing to
+  be able to set.
+
+  **Its default page and ink are the one part that waits to be asked for**
+  (SQ-0928). A machine's `$2C`/`$2D` pair describes a *machine*, and running a
+  story off its release disk makes that description true of the launch — so off
+  media it applies with no flag at all. Typing a number does not: add
+  **`--system-colours`** (or `system_colours = true`) when you have named one and
+  mean the whole machine. The reason is the IBM PC, which states blue under white
+  and is also what every story with no medium falls through to; without the
+  distinction, opening any modern Inform game would paint it blue.
 
   You can set it per game as well as globally. The
   [launch-options dialog](v6-graphics.md#three-ways-to-say-it) — **Shift-Enter**

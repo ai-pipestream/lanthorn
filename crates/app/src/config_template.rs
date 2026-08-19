@@ -198,6 +198,18 @@ const INTERPRETER: &[Row] = &[
         ],
     ),
     d(
+        "system_colours",
+        "false",
+        &[
+            "Advertise a named machine's own default page and ink ($2C/$2D) even",
+            "when the story did not come off its original media. Automatic off a",
+            "release disk — that is what the disk means — so this is only for a",
+            "machine you named yourself with interpreter_number, on a story that",
+            "did not come off one. It cannot conjure a machine where none was named,",
+            "so an ordinary story file always gets your terminal's own colours.",
+        ],
+    ),
+    d(
         "period_look",
         "true",
         &[

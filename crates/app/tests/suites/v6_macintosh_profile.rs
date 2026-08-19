@@ -129,7 +129,7 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
     let monochrome = picts.is_monochrome();
     // SQ-0806/SQ-0846: two-colour artwork declares the interpreter colourless —
     // but only where the machine has no colours of its own to declare.
-    let honoured = honor_game_colours && !picts.declines_game_colours(profile);
+    let honoured = honor_game_colours && !picts.declines_game_colours(profile.default_colours());
     let default_colours = honoured.then(|| profile.default_colours()).flatten();
     let mut session = GameSession::new_with_art_scale(
         bytes,
@@ -435,13 +435,17 @@ fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
         let picts = PictSource::resolve_with_override(&path, over, None);
         assert_eq!(picts.is_monochrome(), mono, "{archive}: the archive's own EF_MONO flags");
         assert!(
-            !picts.declines_game_colours(InterpreterProfile::Macintosh),
+            !picts.declines_game_colours(InterpreterProfile::Macintosh.default_colours()),
             "{archive}: a machine that states its own defaults keeps them",
         );
         assert_eq!(
-            picts.declines_game_colours(InterpreterProfile::IbmPc),
+            // SQ-0928: `IbmPc` used to BE "a machine with no defaults" and is not
+            // any more — it states blue under white. What has no defaults is a
+            // LAUNCH that never named a machine, which is what this line meant all
+            // along and now has to say outright.
+            picts.declines_game_colours(None),
             mono,
-            "{archive}: the same bytes under a machine with no defaults — SQ-0806, unmoved",
+            "{archive}: the same bytes with no machine named — SQ-0806, unmoved",
         );
     }
     let _ = std::fs::remove_dir_all(&dir);

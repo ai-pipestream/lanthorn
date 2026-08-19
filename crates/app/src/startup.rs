@@ -322,15 +322,20 @@ pub(crate) fn boot_story(
     // Ride with the story for the session: the restart path re-resolves artwork
     // and has no other way to know which game on the disc this is (SQ-0876).
     cfg.disk_entry = disk_entry.map(str::to_string);
-    cfg.interpreter_profile = app::interpreter::InterpreterProfile::resolve(
-        &story_path,
-        cfg.interpreter_number,
-        picture_override.flavour(),
-        // The medium THIS story came off, already resolved by the mount above —
-        // which on a hybrid disc is not the same as the image's own format
-        // (SQ-0876).
-        disk_image,
-    );
+    // SQ-0928: and WHERE the answer came from, which is what decides whether this
+    // launch may present the machine's own colours. `IbmPc` is two answers wearing
+    // one name — the machine a DOS floppy names, and the thing every story with no
+    // medium falls through to — and only the first has a machine to be faithful to.
+    (cfg.interpreter_profile, cfg.interpreter_source) =
+        app::interpreter::InterpreterProfile::resolve_with_source(
+            &story_path,
+            cfg.interpreter_number,
+            picture_override.flavour(),
+            // The medium THIS story came off, already resolved by the mount above —
+            // which on a hybrid disc is not the same as the image's own format
+            // (SQ-0876).
+            disk_image,
+        );
     zvm::screen::set_palette(cfg.interpreter_profile.palette());
     // SQ-0885: an experiment knob for header `$1F`, set beside the palette
     // because it is the same kind of fact — one machine per run — and because
@@ -493,7 +498,7 @@ pub(crate) fn boot_story(
     // wins over both — that declares the interpreter colourless (§8.3.2) and
     // leaves the VM's own black-on-white seed alone.
     let host_default_colours = if cfg.honor_game_colours {
-        cfg.interpreter_profile.default_colours().or_else(|| {
+        cfg.machine_default_colours().or_else(|| {
             app::colors::host_default_colour_pair(
                 cs.theme.get("transcript").style,
                 term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
@@ -629,7 +634,7 @@ pub(crate) fn boot_story(
             // per-story FILES and would otherwise land back on the global base —
             // captured above, BEFORE this ran — undoing both the value and the pin
             // a few lines after they were set.
-            if picts.declines_game_colours(cfg.interpreter_profile) && cfg.honor_game_colours {
+            if picts.declines_game_colours(cfg.machine_default_colours()) && cfg.honor_game_colours {
                 artwork_declines_colours = true;
                 cfg.honor_game_colours = false;
                 cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, false);

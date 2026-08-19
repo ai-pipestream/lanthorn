@@ -98,7 +98,7 @@ pub(crate) fn reset_game(
             // it booted with. `None` for every Blorb-sourced story.
             let v6_art_scale = picts.art_scale();
             let host_default_colours = if state.config.honor_game_colours {
-                profile.default_colours().or_else(|| {
+                state.config.machine_default_colours().or_else(|| {
                     app::colors::host_default_colour_pair(
                         state.colors.theme.get("transcript").style,
                         state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
