@@ -45,7 +45,8 @@ pub use pin::{
 };
 pub use score::{ScoreWatch, score_in_status};
 pub use storage::{
-    DiskBuild, disk_story_key, game_dir, game_dir_with_key, resolve_save_input, story_key,
+    DiskBuild, disk_story_key, existing_saves, game_dir, game_dir_with_key, pick_save,
+    resolve_save_input, save_list_line, story_key,
     story_key_at, story_key_for,
 };
 pub use titles::known_title;

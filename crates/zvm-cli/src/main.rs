@@ -869,7 +869,17 @@ fn aux_flush(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
 
 // ── prompt + read helpers ─────────────────────────────────────────────────────
 
-fn prompt_and_read_line(prompt: &str) -> String {
+/// Prompt for a save/restore filename, listing the saves already in this game's
+/// directory above it (SQ-0918).
+///
+/// A free-text filename with no indication of what exists means remembering what you
+/// called things, at the one moment you cannot look. The list goes ABOVE the prompt
+/// rather than in it, so the prompt itself is unchanged for anyone piping input, and
+/// nothing at all is printed before the first save.
+fn prompt_and_read_line(prompt: &str, saves: &[String]) -> String {
+    if let Some(line) = cli_host::save_list_line(saves) {
+        println!("\n{line}");
+    }
     print!("{}", prompt);
     let _ = io::stdout().flush();
     // EOF here yields an empty filename, which the caller treats as "cancel"
@@ -1739,13 +1749,22 @@ fn main() {
                 // out before the dialog, or it surfaces after — out of order
                 // (the invariant documented at `release_partial`, SQ-0635).
                 release_prompt(&mut machine);
-                let filename = prompt_and_read_line("\nSave to file: ");
+                // The list is a reminder of what you would collide with. A number
+                // is NOT accepted here — see `cli_host::pick_save` on why an
+                // overwrite has to be spelled out.
+                let saves = cli_host::existing_saves(&game_dir);
+                let filename = prompt_and_read_line("Save to file: ", &saves);
                 handle_save_request(&mut machine, &game_dir, filename.trim());
             }
 
             StepResult::RestoreRequest => {
                 release_prompt(&mut machine);
-                let filename = prompt_and_read_line("\nRestore from file: ");
+                let saves = cli_host::existing_saves(&game_dir);
+                let filename = prompt_and_read_line("Restore from file: ", &saves);
+                // A number picks from the list; anything else is a filename exactly
+                // as before, so a save actually called `2` stays reachable.
+                let filename =
+                    cli_host::pick_save(&filename, &saves).map_or(filename.clone(), str::to_string);
                 handle_restore_request(&mut machine, &game_dir, filename.trim());
             }
         }

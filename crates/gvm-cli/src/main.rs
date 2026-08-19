@@ -545,6 +545,12 @@ fn drive(
                 if req.by_prompt || req.name.is_empty() {
                     before_input(machine);
                     release_prompt(machine);
+                    // The saves already here, as a reminder of what you would
+                    // collide with. A number is NOT accepted at a save prompt — see
+                    // `cli_host::pick_save` (SQ-0918).
+                    if let Some(l) = cli_host::save_list_line(&cli_host::existing_saves(game_dir)) {
+                        println!("{l}");
+                    }
                     print!("Save to file: ");
                     let _ = io::Write::flush(&mut io::stdout());
                     let (line, _) = read_line(LineEcho::Shown(String::new()));
@@ -578,10 +584,17 @@ fn drive(
                 if req.by_prompt || req.name.is_empty() {
                     before_input(machine);
                     release_prompt(machine);
+                    let saves = cli_host::existing_saves(game_dir);
+                    if let Some(l) = cli_host::save_list_line(&saves) {
+                        println!("{l}");
+                    }
                     print!("Restore from file: ");
                     let _ = io::Write::flush(&mut io::stdout());
                     let (line, _) = read_line(LineEcho::Shown(String::new()));
-                    let name = line.trim_end_matches(['\n', '\r']);
+                    let typed = line.trim_end_matches(['\n', '\r']);
+                    // A number picks from the list; anything else is a filename
+                    // exactly as before.
+                    let name = cli_host::pick_save(typed, &saves).unwrap_or(typed);
                     if name.is_empty() {
                         machine.complete_restore_failure();
                     } else {

@@ -255,9 +255,147 @@ pub fn resolve_save_input(input: &str, game_dir: &Path) -> PathBuf {
     }
 }
 
+/// Every save already in this game's directory, named the way you would type it.
+///
+/// The exact inverse of [`resolve_save_input`]: that turns `cellar` into
+/// `<game_dir>/cellar.qzl`, this turns the directory back into `["cellar", …]`.
+/// Sorted, so the numbering a prompt shows is stable between turns — a list that
+/// reorders itself under the player is worse than no list (SQ-0918).
+///
+/// Case-insensitive on the extension, because `resolve_save_input` accepts a typed
+/// `.QZL` and a directory can be copied from a case-preserving filesystem. A
+/// directory that does not exist yet — the ordinary state before the first save —
+/// is empty rather than an error.
+pub fn existing_saves(game_dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(game_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let stem = name.get(..name.len().checked_sub(4)?)?;
+            name[stem.len()..].eq_ignore_ascii_case(".qzl").then(|| stem.to_string())
+        })
+        .filter(|stem| !stem.is_empty())
+        .collect();
+    out.sort_by_key(|n| n.to_lowercase());
+    out
+}
+
+/// Resolve what the player typed at a save/restore prompt against a numbered list.
+///
+/// `Some(name)` when the input is a 1-based index into `saves`; `None` for anything
+/// else, which the caller then treats as a filename exactly as before. So a save
+/// legitimately CALLED `2` is still reachable — as `2.qzl`, or with a path — and a
+/// list that is empty can never capture an input.
+///
+/// Deliberately not applied at a SAVE prompt: there a number would mean "overwrite
+/// that one", and silently clobbering a save the player named is the defect SQ-0648
+/// fixed in the TUI. The list is shown there as a reminder of what you would collide
+/// with, not as a way to pick a target.
+pub fn pick_save<'a>(input: &str, saves: &'a [String]) -> Option<&'a str> {
+    let n: usize = input.trim().parse().ok()?;
+    saves.get(n.checked_sub(1)?).map(String::as_str)
+}
+
+/// The one-line reminder a save/restore prompt prints above itself, or `None` when
+/// there is nothing saved yet — in which case a first save looks exactly as it
+/// always did.
+pub fn save_list_line(saves: &[String]) -> Option<String> {
+    (!saves.is_empty()).then(|| {
+        let items: Vec<String> =
+            saves.iter().enumerate().map(|(i, n)| format!("{} {n}", i + 1)).collect();
+        format!("saves: {}", items.join("   "))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── existing_saves / pick_save / save_list_line (SQ-0918) ───────────────
+
+    /// A scratch directory holding `names`, on the same
+    /// pid+thread pattern `the_game_dir_can_actually_be_created_beside_the_story_file`
+    /// uses — nextest gives every test its own process, but `cargo test` does not, so
+    /// the thread id is what keeps two of these apart.
+    fn dir_with(tag: &str, names: &[&str]) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "cli-host-saves-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for n in names {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        d
+    }
+
+    /// The inverse of `resolve_save_input`, and only that: `.qzl` files, named the
+    /// way you would type them back.
+    #[test]
+    fn existing_saves_lists_what_resolve_save_input_would_have_written() {
+        let d = dir_with("mixed", &["cellar.qzl", "before-maze.qzl", "notes.txt", "auto.QZL"]);
+        assert_eq!(
+            existing_saves(&d),
+            vec!["auto".to_string(), "before-maze".to_string(), "cellar".to_string()],
+            "sorted case-insensitively, extension stripped, .txt ignored, .QZL kept",
+        );
+        // And it really is the inverse.
+        for name in existing_saves(&d) {
+            assert!(resolve_save_input(&name, &d).is_file(), "{name} round-trips");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A directory that does not exist yet is the ordinary state before the first
+    /// save, not an error.
+    #[test]
+    fn a_game_with_no_saves_yet_lists_nothing_and_prints_nothing() {
+        let missing = std::path::Path::new("/no/such/game/dir/anywhere");
+        assert!(existing_saves(missing).is_empty());
+        assert_eq!(save_list_line(&[]), None, "a first save looks exactly as it always did");
+    }
+
+    /// A number picks from the list; anything else is a filename, as before.
+    #[test]
+    fn a_number_picks_from_the_list_and_nothing_else_does() {
+        let saves = vec!["cellar".to_string(), "troll".to_string()];
+        assert_eq!(pick_save("1", &saves), Some("cellar"));
+        assert_eq!(pick_save("  2  ", &saves), Some("troll"), "whitespace is trimmed");
+        assert_eq!(pick_save("3", &saves), None, "past the end is a filename");
+        assert_eq!(pick_save("0", &saves), None, "the list is 1-based");
+        assert_eq!(pick_save("cellar", &saves), None, "a name is a name");
+        assert_eq!(pick_save("2x", &saves), None);
+        assert_eq!(pick_save("", &saves), None, "empty is a cancel, not a pick");
+        assert_eq!(pick_save("1", &[]), None, "an empty list can never capture an input");
+    }
+
+    /// A save legitimately CALLED `2` stays reachable, which is why `pick_save` is
+    /// consulted rather than the filename path being replaced.
+    #[test]
+    fn a_save_named_like_a_number_is_still_reachable() {
+        let d = dir_with("numeric", &["2.qzl", "cellar.qzl"]);
+        let saves = existing_saves(&d);
+        assert_eq!(saves, vec!["2".to_string(), "cellar".to_string()]);
+        // Typing `2` picks the FIRST entry, which here happens to be the file `2`.
+        assert_eq!(pick_save("2", &saves), Some("cellar"), "the index wins at the prompt");
+        // …and the file itself is still addressable by its full name.
+        assert!(resolve_save_input("2.qzl", &d).is_file(), "and by name with the extension");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_prompt_line_numbers_them_from_one() {
+        let line = save_list_line(&["cellar".to_string(), "troll".to_string()]).expect("some");
+        assert!(line.starts_with("saves: "), "{line:?}");
+        assert!(line.contains("1 cellar"), "{line:?}");
+        assert!(line.contains("2 troll"), "{line:?}");
+    }
 
     #[test]
     fn story_key_keeps_the_extension_and_sanitizes_the_rest() {
