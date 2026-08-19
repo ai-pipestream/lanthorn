@@ -15,12 +15,16 @@ routed, and de-overlapped automatically, then continuously tidied into a
 readable layout. Three from-scratch, zero-dependency virtual machines under one
 roof; one engine-agnostic mapper that charts them all.
 
-> **Beta software.** lanthorn is cutting its first public beta. The formats that
-> live on your disk between sessions — saves, the `.lanthorn` archive, the
-> sidecars — are now **frozen and version-pinned**, so a future change can't
-> silently corrupt them (see the [save-format policy](docs/release/save-format-policy.md)).
-> The `config.toml` / `style.toml` schemas stay tolerant but may still gain
-> fields. Expect rough edges; report the sharp ones.
+> **Upgrading from babelmap?** The project was renamed in 0.2.0. Move your data
+> once — `mv ~/.babelmap ~/.lanthorn`, then rename `*.babelmap` archives inside it
+> to `*.lanthorn` — and everything loads as before; the formats themselves did not
+> change. See the [changelog](CHANGELOG.md) for the exact commands.
+>
+> The formats that live on your disk between sessions — saves, the `.lanthorn`
+> archive, the sidecars — are **frozen and version-pinned**, so a future change
+> can't silently corrupt them (see the
+> [save-format policy](docs/release/save-format-policy.md)). The `config.toml` /
+> `style.toml` schemas stay tolerant and may still gain fields.
 
 ---
 
@@ -112,15 +116,12 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   contents and connections. → [mapping](docs/features/mapping.md)
 - **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
   columns, per-room compass, illuminated drop-caps) rendered faithfully at an
-  authentic 640×400 with a `hybrid` / `raster` render choice. (The released build
-  also offers a third mode, `frameless`; it is removed in the next release.)
+  authentic 640×400, with a `hybrid` / `raster` render choice.
   → [v6 graphics](docs/features/v6-graphics.md)
-- **Play straight off the original Amiga floppies** — hand lanthorn an `.adf`
-  disk image and it mounts the AmigaDOS filesystem, finds the story *and* its
-  native Infocom picture archive, and plays it as an Amiga would: interpreter
-  number 4, the Amiga palette and default colours, and artwork decoded from the
-  disk's own format rather than a converted Blorb. *Zork Zero*, *Arthur*,
-  *Journey* and *Shogun* boot from the media they shipped on.
+- **Play straight off the original release disks** — Amiga, Macintosh, Apple II,
+  Atari ST, PC, Commodore and the *Lost Treasures* CDs, with the artwork and the
+  sound each disk carries and the machine it came from. See
+  [**Play the original disks**](#play-the-original-disks) below.
   → [interpreter](docs/features/interpreter.md)
 - **Pictures in your terminal** — cover art, in-game Glulx graphics windows, and
   inline images render with your terminal's best protocol (Kitty / iTerm2 /
@@ -134,13 +135,10 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   autocomplete, a `/`-summoned fuzzy **command palette**, an inventory strip,
   command history, notification toasts, and transcript search / filter /
   export. → [interface](docs/features/interface.md)
-- **Three lightweight CLI players & a screen-reader mode** — `zvm-cli`,
-  `gvm-cli`, and `scott-cli` play any story in a bare terminal: no map, no
-  panes, happy in a pipe or a script. `--screen-reader` (automatic under
-  `TERM=dumb`) emits **zero escape sequences**, hands echo and line editing
-  back to the terminal, quiets the ever-changing status line while announcing
-  **score changes** and answering **`/status`** on demand, and drops the
-  `[MORE]` pager; `NO_COLOR` is honored separately as colour-only.
+- **Three lightweight CLI players** — `zvm-cli`, `gvm-cli` and `scott-cli` play
+  any story in a bare terminal, with your scrollback intact and a screen-reader
+  mode that emits zero escape sequences. See
+  [**The command-line players**](#the-command-line-players) below.
   → [interpreter](docs/features/interpreter.md)
 - **Story picker & IFDB** — browse a library as a badged **list** or `g`
   cover-gallery **grid**, with a live metadata info panel, on-demand IFDB fetch
@@ -170,6 +168,103 @@ For the full, exhaustive feature list see **[`docs/features/`](docs/features/)**
 for the standards lanthorn implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
 Treaty of Babel) see **[`docs/standards.md`](docs/standards.md)**; for the crate
 layout and I/O design see **[`docs/architecture.md`](docs/architecture.md)**.
+
+---
+
+## Play the original disks
+
+Hand lanthorn a disk image and it mounts the filesystem, finds the story *and*
+everything shipped beside it, and presents the machine that disk came from —
+interpreter number, palette, default colours and screen rules together, so a
+game that asks what it is running on gets one coherent answer.
+
+```bash
+lanthorn "Zork Zero.adf"                      # an Amiga floppy
+lanthorn "Arthur.po"                          # an Apple II ProDOS volume
+lanthorn "LostTreasures1.iso" --story 3       # a compilation CD
+```
+
+| Medium | Extensions | Presents as |
+|---|---|---|
+| AmigaDOS floppy | `.adf` | Amiga (4) |
+| Macintosh HFS, incl. DiskCopy 4.2 and hybrid CDs | `.image` `.bin` `.iso` `.dc42` | Macintosh (3) |
+| Apple II ProDOS volume | `.2mg` `.po` `.dsk` | Apple IIgs (10) |
+| Apple II raw self-booting press | `.dsk` | Apple IIgs (10) |
+| Atari ST floppy | `.st` | Atari ST (5) |
+| Commodore 1541 | `.d64` | Commodore 128 (7) |
+| PC floppy | `.ima` `.img` | — |
+| ISO 9660 CD-ROM | `.iso` | — |
+
+A dash means the medium states no interpreter number, and whatever default is in
+force stands: a PC floppy *is* your terminal, and an ISO 9660 volume names a disc
+rather than a machine. `--interpreter <n>` overrides any of them.
+
+**A release pressed across several floppies is one game.** Name any single
+volume and the rest are found beside it — *Arthur*'s Apple press keeps its story
+in five segments and its 168 pictures across four disks. The story browser shows
+one row per game, not one per platter, so every story on a compilation is
+reachable and each keeps its own saves.
+
+**The artwork comes off the disk in the disk's own format** — Amiga, Apple II
+(8-byte records, RLE and XOR), the PC archives (LZW and all), and the Macintosh
+monochrome plate — rather than from a converted Blorb. EGA and CGA plates are
+drawn in the colours their card fixed. Where a release offers more than one
+rendition, a dialog, a flag and a key all reach the same choice.
+
+**And the sound.** *The Lurking Horror* and *Sherlock* shipped sampled effects on
+their release disks years before Blorb existed, in a format nothing else reads.
+lanthorn plays them — off the Amiga floppies and off the Macintosh `/MAC/SOUND`
+layout on the *Lost Treasures* CD — including the **pitch**. Each effect names a
+note, each sample states the note it was recorded at, and the gap between the two
+is the bend, so *Sherlock*'s heartbeat really does beat at three speeds from one
+recording. That model was read out of the 68000 interpreter Infocom shipped
+rather than inferred from the files.
+
+**A disk outranks a `.blb` filed beside it**, for sound and graphics alike: the
+disk is the rendition Infocom pressed, and a Blorb is somebody's later
+re-rendering of it — sometimes at audibly different pitches. `/play-sound` says
+which source answered, and names a Blorb that is present but outranked rather
+than leaving you wondering.
+
+→ [interpreter](docs/features/interpreter.md) · [v6 graphics](docs/features/v6-graphics.md)
+
+---
+
+## The command-line players
+
+`zvm-cli`, `gvm-cli` and `scott-cli` play any story in a bare terminal — no map,
+no panes, happy in a pipe or a script. They ship in every release archive
+alongside `lanthorn` itself.
+
+```bash
+zvm-cli zork1.z3                  # play
+zvm-cli "Sherlock.adf"            # release media works here too
+zvm-cli --machines                # what machine is what
+```
+
+- **Your terminal's scrollback works.** The status line and any upper window stay
+  pinned while the story text scrolls into your terminal's own history — so
+  `Shift-PageUp`, the wheel and `tmux` copy-mode reach what the game printed.
+  `--pin top` keeps the classic layout and is the default; `--pin bottom` puts
+  the fixed window *under* the story, which is what lets a terminal archive lines
+  at all. `/pin` moves it mid-game.
+- **Quitting leaves your prompt below the game**, not in the middle of it — on
+  `quit`, on Ctrl-D and on Ctrl-C alike.
+- **The save prompt lists your saves** and a number picks one, so you needn't
+  remember what you called it. Saving over one asks first.
+- **Release media, the same as the TUI.** A disk holding several stories asks
+  with a numbered menu labelled by version, release and serial — the only thing
+  that tells four files called `STORY.DAT` apart — and names them from a bundled
+  titles table where it can. With stdin piped it never prompts into the void.
+- **A screen-reader mode.** `--screen-reader` (automatic under `TERM=dumb`) emits
+  **zero escape sequences**, hands echo and line editing back to the terminal,
+  quiets the ever-changing status line while announcing **score changes** and
+  answering **`/status`** on demand, and drops the `[MORE]` pager. `NO_COLOR` is
+  honoured separately, as colour-only.
+- **`--machines`** prints the ZMSD §11.1.3 machine table zvm holds: every
+  setting per row, each decline argued, and each machine's period look beside it.
+
+→ [interpreter](docs/features/interpreter.md)
 
 ---
 

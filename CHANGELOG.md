@@ -6,42 +6,154 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.1.0-beta.5`) versions every crate and every
-binary's `--version` at once, and carries the pre-release suffix so a build
-identifies which beta it is without reading its git hash.
+version in `Cargo.toml` (currently `0.2.0`) versions every crate and every
+binary's `--version` at once, and carries any pre-release suffix so a build
+identifies itself without reading its git hash.
 
 ---
 
 ## Unreleased
 
-### Added
+---
 
-- **`zvm-cli` plays the original floppy.** Hand the command-line player an Amiga
-  `.adf` release disk and it mounts it and plays what is on it, as the TUI has
-  all along — free, because `blorb`'s AmigaDOS reader takes no dependencies and
-  `zvm-cli` already linked it. A disk carrying more than one story (which the
-  compilations all do) asks at startup with a numbered menu, each line labelled
-  with its Z-machine version, release and serial — the only thing that tells four
-  files called `STORY.DAT` apart. One story opens without asking; a disk with
-  none says what it mounted; and with stdin piped it never prompts into the void,
-  listing the candidates and naming `--story <n|name>` instead.
-- **The map sometimes speaks first.** Twice in a game lanthorn notices that a set
-  of rooms wants a layer of its own and offers to make one. It never acts —
-  layers still come only from a move you asked for. The first case is structural:
-  climb down a trapdoor, wander four rooms of cellar, and climb back *up*, and
-  that is the moment it asks, because the cellar is reachable only through
-  portals and you have finished drawing it. The second is the name — walk into a
-  room the game itself calls a **Maze** from a room that isn't one and it asks at
-  the doorway, once per entrance and never inside, since Zork's maze is fifteen
-  rooms all called "Maze" and asking in each is the nagging this design exists to
-  avoid. The offer is a small modal listing what would travel and where it could
-  go; its three buttons are its three answers, and **whatever you answer is
-  remembered in the map file**: *Not now* re-arms the seam for your next crossing,
-  *Never* silences that passage for good, and folding a layer back into another
-  silences every passage it just closed. `Esc` means *not now*, because declining
-  to answer is not saying no. Accepting a *maze* offer also sets the maze flag —
-  you just confirmed it by accepting a prompt that said so; accepting a
-  structural one sets nothing, because a cellar is not a maze.
+## v0.2.0 — 2026-08-19
+
+**The project is now called lanthorn**, and this release is mostly about one
+idea: playing Infocom's games off the disks they were actually sold on, as the
+machines that shipped them played them — artwork, sound, colours and all. The
+three command-line players got a lot of attention too, chiefly a fix for
+something that had annoyed everyone since the first beta: your terminal's
+scrollback works again.
+
+### Renamed from babelmap
+
+The binary is `lanthorn`. Three things that hold your data moved with it, and
+there is deliberately no migration shim — the formats themselves are unchanged,
+so moving them is two commands:
+
+```sh
+mv ~/.babelmap ~/.lanthorn
+find ~/.lanthorn -name '*.babelmap' \
+  -exec sh -c 'mv "$1" "${1%.babelmap}.lanthorn"' _ {} \;
+```
+
+| was | is |
+|---|---|
+| `~/.babelmap/` | `~/.lanthorn/` |
+| `<ifid>.babelmap` archives | `<ifid>.lanthorn` |
+| `BABELMAP_HOME` (and `_BIN`, `_DEBUG_TERM`, `_TURN_BUDGET_MS`) | `LANTHORN_*` |
+
+The archive format did not change — the old name was never written inside it,
+only on it — so a renamed file loads exactly as before.
+
+### Play the original release media
+
+lanthorn reads the disks Infocom pressed, finds the story *and* everything
+shipped beside it, and presents the machine that disk came from.
+
+- **Eight disk and disc formats.** AmigaDOS `.adf`; Macintosh HFS floppies,
+  including those behind a DiskCopy 4.2 header; Apple II ProDOS `.po` / `.2mg`
+  **and** the raw self-booting DOS 3.3 `.dsk` presses, which have no filesystem
+  at all and are found by the story's own checksum; Atari ST `.st`; PC `.ima` /
+  `.img`; Commodore 1541 `.d64`, whose stories also sit outside the filesystem
+  and span two floppies; and ISO 9660 CD-ROMs, including hybrid discs where the
+  Macintosh partition is a second volume inside the same image.
+- **A release pressed across five floppies mounts as one disk.** Name any single
+  volume and the rest are found beside it — *Arthur*'s Apple press keeps its
+  story in five segments and its 168 pictures across four disks. The story
+  browser shows one row per game rather than one per platter, so every story on
+  a compilation is reachable.
+- **The artwork is decoded from the disk's own format**, not from a converted
+  Blorb: Amiga, Apple II (8-byte records, RLE and XOR), the PC archives (LZW and
+  all), and the Macintosh monochrome plate. EGA and CGA plates are drawn in the
+  colours their card fixed, and an EGA plate's half-width pixels land at half
+  the width. Where a release offers more than one rendition, a dialog, a flag
+  and a key all reach the same choice.
+- **And the sound.** *The Lurking Horror* and *Sherlock* shipped sampled effects
+  on their release disks years before Blorb existed, in a format nothing else
+  reads. lanthorn plays them — from the Amiga floppies and from the Macintosh
+  `/MAC/SOUND` layout on the *Lost Treasures* CD — including the **pitch**: each
+  effect names a note, each sample states the note it was recorded at, and the
+  gap between them is the bend. *Sherlock*'s heartbeat really does beat at three
+  speeds from one recording. The model was read out of the 68000 interpreter
+  Infocom shipped rather than guessed from the files, and it reproduces two
+  independent third-party renderings of these sounds on 27 of the 29 effects
+  they carry.
+- **A disk always outranks a `.blb` filed beside it** — for sound and for
+  graphics alike. The disk is the rendition Infocom pressed; a Blorb is
+  somebody's later re-rendering, sometimes at audibly different pitches.
+  `/play-sound` says which source answered.
+- **The machine comes with the disk.** One table inside `zvm` now carries what
+  each ZMSD §11.1.3 machine *is* — the byte it writes into `$1E`, the default
+  page and ink it reports, the palette its colour numbers resolve through, and
+  the §8.3 screen rules it gets by name — every value sourced out of Infocom's
+  own interpreter for that machine. Both front-ends read it, so the same disk
+  presents the same machine in either. `zvm-cli --machines` prints the whole
+  table, declines included, with each machine's period look beside it.
+
+### The command-line players
+
+`zvm-cli`, `gvm-cli` and `scott-cli` are no longer the poor relations.
+
+- **Your scrollback works.** The status line and upper windows stay pinned while
+  the story text scrolls into your terminal's own history, so `Shift-PageUp`,
+  the mouse wheel and `tmux` copy-mode all reach what the game printed. `--pin
+  top` is the default and keeps the classic layout; `--pin bottom` puts the
+  fixed window under the story, which is what makes a terminal archive lines at
+  all. `/pin` moves it mid-game.
+- **Exiting leaves your terminal where it should be.** The pinned region is
+  released and the prompt lands below it — on `quit`, on Ctrl-D, and on Ctrl-C.
+- **The save prompt shows your saves.** It lists what is already there and a
+  number picks one, so you no longer have to remember what you called it. Saving
+  over an existing file asks first.
+- **`zvm-cli` plays release media too**, with the same mount path as the TUI. A
+  disk holding several stories asks with a numbered menu, each line labelled
+  with its Z-machine version, release and serial — the only thing that tells
+  four files called `STORY.DAT` apart — and names them from a bundled titles
+  table where it can. Piped stdin never prompts into the void.
+- **`--machines`** prints the machine table; **`--interpreter`** (was
+  `--interpreter-number`) picks one; **`--no-game-colours`** is now in every
+  front-end, lanthorn included.
+
+### Version 6 graphics
+
+- **The hybrid renderer is carved by what the chrome contains**, not by the
+  story's complement — so a story window's text region is cut from what the art
+  actually leaves, and prose behind artwork has somewhere to go.
+- **Side borders tile down the flank** rather than stretching into it, and a
+  flank is now identified on both axes.
+- **Raster composes the frame at 640×400.**
+- **Under the Amiga's interpreter number every window shares one colour pair**,
+  as ZMSD §8.3 says of that machine, and the text on screen follows it.
+- **The `frameless` render mode is gone**, along with the picture-side "already
+  on screen" rule that only it needed. `hybrid` and `raster` remain.
+
+### Mapping
+
+- **`move-region <destination> [direction]`** replaces `peel-layer` and
+  `merge-layer`, which were one operation all along. It finds its own seam,
+  anchored on the room you picked, and asks rather than guesses.
+- **The map sometimes speaks first.** Twice in a game lanthorn notices a set of
+  rooms that wants a layer of its own and offers to make one — climbing back out
+  of a cellar you could only reach through a trapdoor, and walking into a room
+  the game itself calls a *Maze*. It never acts on its own; whatever you answer
+  is remembered in the map file.
+
+### Also
+
+- `--interpreter-version` sets header `$1F`, so the byte can be experimented
+  with; *Shogun* prints it.
+- The story pane names the adventure, and its file when the two differ.
+- The scrollbar is colour rather than a glyph, and the story pane's fades away.
+- The story browser's keys joined the one command registry.
+
+### In detail
+
+The entries below were written as the work landed and carry the reasoning behind
+it; the sections above are the summary.
+
+#### Added
+
 - **`move-region <destination> [direction]`**, and it asks rather than guesses.
   Carving a layer off and folding one back turned out to be the same move — *take
   these rooms and put them on that layer* — so there is now one verb for both,
@@ -60,7 +172,7 @@ identifies which beta it is without reading its git hash.
   becomes a connection *between* layers — so a room stranded on a maze layer
   finally has a cure: select it and `move-region main`.
 
-### Changed
+#### Changed
 
 - **`--interpreter-number` is now just `--interpreter`.** `zvm-cli` has always
   called this `-I`/`--interpreter`, and one concept under two names across two
@@ -94,7 +206,7 @@ identifies which beta it is without reading its git hash.
   parenthetical. A story with no resolved title falls back to the bare filename
   rather than an empty `()`.
 
-### Fixed
+#### Fixed
 
 - **A content warning is not somewhere you can stand.** Cragne Manor opens on two
   full-page warnings, each with its title set in the same bold the game uses for a
@@ -136,6 +248,7 @@ identifies which beta it is without reading its git hash.
   The marker now sits where the release is actually reviewed.
 
 ---
+
 
 ## v0.1.0-beta.5 — 2026-08-10
 
