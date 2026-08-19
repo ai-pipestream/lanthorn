@@ -543,6 +543,7 @@ fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
         ink,
         page,
         &state.colors,
+        app::render::v6_layout::TextLayer::All,
     );
     // The banner is found by the text in it, never by a window id.
     let banner = layout

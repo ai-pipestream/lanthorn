@@ -503,6 +503,7 @@ fn zork0_rebus_picture_shows_without_a_text_column() {
         image::Rgba([220, 220, 220, 255]),
         image::Rgba([0, 0, 0, 255]),
         &state.colors,
+        v6::TextLayer::All,
     );
     let clear = v6::story_clear_native(layout.story, &canvas).expect("story window present");
     eprintln!("story_clear_native: {clear:?}");

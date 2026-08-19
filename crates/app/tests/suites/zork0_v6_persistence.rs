@@ -65,7 +65,7 @@ fn composite(session: &GameSession) -> image::RgbaImage {
     let colors = app::colors::ColorScheme::default();
     let default_fg = image::Rgba([220, 220, 220, 255]);
     let default_bg = image::Rgba([0, 0, 0, 255]);
-    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors);
+    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All);
     let main = v6::MainText {
         lines: (0..6).map(|i| format!("story line {i} {}", "x".repeat(20))).collect(),
         styles: Vec::new(),

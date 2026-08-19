@@ -153,6 +153,7 @@ fn journey_menu_rasterizes_into_the_bottom_band() {
         image::Rgba([220, 220, 220, 255]),
         image::Rgba([0, 0, 0, 255]),
         &colors,
+        v6::TextLayer::All,
     );
     // Count opaque ink in the bottom band (native rows 19–24 → y 304..).
     let y0 = 19 * 16u32;
@@ -263,6 +264,7 @@ fn journey_raster_reverse_header_bar_is_solid_body_untouched() {
     let colors = app::colors::ColorScheme::terminal_default();
     let canvas = v6::build_chrome_canvas(
         &layout.chrome, native, image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]), &colors,
+        v6::TextLayer::All,
     );
     let ncols = (canvas.width() / 8) as u32;
     // A whole 8-px cell is "filled" when every pixel column has opaque ink.
@@ -473,6 +475,7 @@ fn journey_pixel_band_canvas_excludes_menu_keeps_divider() {
     let colors = app::colors::ColorScheme::terminal_default();
     let mut canvas = v6::build_chrome_canvas(
         &layout.chrome, native, image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]), &colors,
+        v6::TextLayer::All,
     );
 
     // The menu runs sit BELOW the story box; collect their native tops.
@@ -952,7 +955,7 @@ fn journey_bold_menu_label_rasterizes_emboldened() {
     let bg = image::Rgba([0, 0, 0, 255]);
     let render = |items: &[app::engine::PositionedWindow]| {
         let layout = v6::classify_windows(items);
-        v6::build_chrome_canvas(&layout.chrome, native, fg, bg, &colors)
+        v6::build_chrome_canvas(&layout.chrome, native, fg, bg, &colors, v6::TextLayer::All)
     };
     let with_bold = render(items);
 

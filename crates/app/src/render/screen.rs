@@ -1473,6 +1473,17 @@ fn render_node(
                             };
                             (inv(r.x), inv(r.right()))
                         };
+                        let text_run_tops: Vec<(u16, u32, u32)> = strips
+                            .iter()
+                            .chain(menu_strips.iter())
+                            .flat_map(|s| match s {
+                                ChromeStrip::Text(r, runs) => {
+                                    let (x0, x1) = strip_native_cols(*r);
+                                    runs.iter().map(|t| (t.y.max(1) - 1, x0, x1)).collect::<Vec<_>>()
+                                }
+                                ChromeStrip::Art(..) => Vec::new(),
+                            })
+                            .collect();
                         // ── the chrome CANVAS, built here rather than 650 lines up ──
                         //
                         // SQ-0903. Every classification above — the viewport, the
@@ -1489,7 +1500,13 @@ fn render_node(
                         // just decided to draw with glyphs — is known BEFORE a pixel is
                         // rasterised, so those rows are never painted instead of being
                         // painted and then carved back out.
-                        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                        // SQ-0903: the rows the ring has just decided to draw with
+                        // GLYPHS. `text_run_tops` is that decision, taken a few lines
+                        // up and reaching the canvas builder before it paints rather
+                        // than reaching a carve afterwards.
+                        let glyph_rows: std::collections::HashSet<u16> =
+                            text_run_tops.iter().map(|&(top, _, _)| top).collect();
+                        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows));
                         // SQ-0896: …and the STORY window's own plate, which the chrome
                         // canvas excludes by construction — `classify_windows` sets a
                         // `win == 0` Graphics aside as `story_gfx` so the ring does not
@@ -1543,33 +1560,20 @@ fn render_node(
                                 state.v6_paint.borrow().as_deref(),
                             );
                         }
-                        let text_run_tops: Vec<(u16, u32, u32)> = strips
-                            .iter()
-                            .chain(menu_strips.iter())
-                            .flat_map(|s| match s {
-                                ChromeStrip::Text(r, runs) => {
-                                    let (x0, x1) = strip_native_cols(*r);
-                                    runs.iter().map(|t| (t.y.max(1) - 1, x0, x1)).collect::<Vec<_>>()
-                                }
-                                ChromeStrip::Art(..) => Vec::new(),
-                            })
-                            .collect();
-                        // SQ-0902: over the whole native width, keeping every pixel the
-                        // ART canvas accounts for. The strip's own column span cannot
-                        // express a boundary inside a cell, and Shogun's is one — its
-                        // frame art ends at native 45 and its status window starts at 46,
-                        // three columns the strip's first whole cell does not reach and the
-                        // flank's source does. See `clear_text_rows_except_art`.
-                        // …and the PAINT surface is the other half of the oracle: a game
-                        // that draws with `draw_picture` rather than publishing a
-                        // Graphics window has artwork `gfx` cannot see at all (scopa's
-                        // deck cards).
-                        v6::clear_text_rows_except_art(
-                            &mut canvas,
-                            &gfx,
-                            state.v6_paint.borrow().as_deref(),
-                            &text_run_tops.iter().map(|&(top, _, _)| top).collect::<Vec<_>>(),
-                        );
+                        // SQ-0903: the carve that used to be here is GONE, and the
+                        // proof it is safe is that it had already stopped removing
+                        // anything: `build_chrome_canvas` is now told which rows the
+                        // ring claimed (`glyph_rows`, above) and never paints them, so
+                        // there is nothing left on them to erase. Measured across the
+                        // corpus with the carve still in place — zork0, arthur, shogun,
+                        // journey, advent and mysterious01 all reported **0** pixels
+                        // removed, which is the oracle SQ-0903 asked for.
+                        //
+                        // What it used to do is worth keeping in view, because the rule
+                        // survives even though the code does not: on a row the ring
+                        // draws with GLYPHS, this canvas keeps artwork and nothing else
+                        // (SQ-0750). It is enforced a step earlier now, by not painting,
+                        // rather than a step later by erasing.
                         let base = v6_machine_page(state, state.colors.theme.get("upper_window").style);
                         // SQ-0511 fix: in the Menu plan the side flanks are drawn at the
                         // UNIFORM scale (aspect preserved — Journey's left picture column
@@ -3341,7 +3345,10 @@ pub fn build_v6_raster_canvas(
     let game_ink = if honor { v6::story_fg_rgba(layout.story, &state.colors) } else { None };
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
-    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+    // Raster has no cells to draw text with, so it needs every run imaged: the
+    // empty set is not a default here, it is this path's answer (SQ-0903).
+    let mut canvas =
+        v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::All);
     // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
     // canvas does not draw. The story page below spares them like any chrome text.
     // …and the live input line into whichever of them the player is typing into
@@ -7574,7 +7581,7 @@ mod tests {
         // ── Compose exactly as the raster branch does ────────────────────────
         let native = v6::native_extent(&items);
         let layout = v6::classify_windows(&items);
-        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors);
+        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors, v6::TextLayer::All);
         let chrome_only = canvas.clone(); // pre-fill artwork reference
         let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(page_default);
         let (sx, sy, sw, sh) = v6::story_clear_native(layout.story, &canvas).expect("Zork0 has a story window");
@@ -10952,7 +10959,7 @@ mod tests {
             // Build closure: replicate the raster branch's canvas construction.
             let build = || {
                 let layout = crate::render::v6_layout::classify_windows(&items);
-                let mut canvas = crate::render::v6_layout::build_chrome_canvas(&layout.chrome, native, fg, bg, &state.colors);
+                let mut canvas = crate::render::v6_layout::build_chrome_canvas(&layout.chrome, native, fg, bg, &state.colors, crate::render::v6_layout::TextLayer::All);
                 if let Some((sx, sy, sw, sh)) = crate::render::v6_layout::story_clear_native(layout.story, &canvas) {
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;

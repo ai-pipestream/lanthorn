@@ -858,7 +858,7 @@ pub fn build_graphics_canvas(chrome: &[&PositionedWindow], native: (u16, u16)) -
 fn fill_reverse_row_gaps(
     canvas: &mut RgbaImage,
     art: &RgbaImage,
-    texts: &[PxText],
+    texts: &[&PxText],
     default_fg: Rgba<u8>,
     colors: &ColorScheme,
 ) {
@@ -952,7 +952,7 @@ fn row_flood_bg(runs: &[&PxText], default_bg: Rgba<u8>, colors: &ColorScheme) ->
 /// pixel rows, so each row floods at its own run `y` (`y - 1`, one `FONT_H` tall).
 fn fill_explicit_bg_rows(
     canvas: &mut RgbaImage,
-    texts: &[PxText],
+    texts: &[&PxText],
     ox: u32,
     win_w: u32,
     default_bg: Rgba<u8>,
@@ -1055,89 +1055,28 @@ pub fn clear_text_columns(canvas: &mut RgbaImage, cols: &[(u32, u32)], rows: (u3
     }
 }
 
-/// SQ-0504: carve the native rows occupied by pure-TEXT chrome runs out of `canvas`
-/// (make them fully transparent). Those rows render as crisp terminal CELLS in the
-/// hybrid path, so their rasterized ink must not survive into the pixel bands built
-/// from this canvas: a sub-cell letterbox-scale boundary otherwise samples the top
-/// slice of a status/menu glyph into the neighbouring ART band and shows the raster
-/// bar BEHIND the cells. Clearing them also decouples each art band's content hash
-/// from the menu text, so navigating the menu re-encodes only genuinely changed art
-/// (picture column, status panel), not every band. Each entry is a cleared run's
-/// native top-y (`y - 1`) and its OWNING STRIP's native `[x0, x1)` columns; every run
-/// spans `FONT_H`. On-art status (Zork0's banner ribbon) is an art strip, never a
-/// text run, so it is never passed here and stays imaged.
+/// SQ-0504/SQ-0902, **retired by SQ-0903 and kept only as history.**
 ///
-/// SQ-0894: the columns, because a text strip need no longer span the pane. When a
-/// flank owns the ornament columns THROUGH a band of chrome text — Shogun's credits
-/// are centred and never approach the frame — a full-width carve would erase the
-/// flank's own source pixels on exactly those rows and hole the ornament. For a strip
-/// that does span the pane this is byte-identical to the old carve.
-/// SQ-0902: the same carve, over the columns a strip's own cell rect does NOT reach,
-/// keeping every pixel the ART canvas accounts for.
+/// This carved a text strip's native rows out of the chrome canvas, keeping every
+/// pixel the ART canvas accounted for, because [`build_chrome_canvas`] had already
+/// rasterised glyphs the hybrid ring was about to draw as crisp cells. The rule it
+/// enforced still holds — on a row the ring draws with GLYPHS the canvas keeps
+/// artwork and nothing else (SQ-0750) — but it is enforced by not painting those
+/// rows in the first place ([`TextLayer::SkipGlyphRows`]) rather than by erasing
+/// them afterwards.
 ///
-/// [`clear_text_rows`] carves a text strip's rows over the strip's own native column
-/// span, which is its cell rect mapped back through the letterbox scale. A cell rect
-/// cannot express a boundary that falls inside a cell, and the game's does: on
-/// `stories/shogun-r322-s890706.z6` the frame art ends at native x **45** and the
-/// status window begins at native x **46**, which at a 129x60 pane is 5 device pixels
-/// into the flank's last terminal column. So the strip's carve starts at native 49 —
-/// the inverse of its first whole cell — and native 46..48 keep the rasterised cell
-/// backgrounds `build_chrome_canvas` painted for the status window. The flank band's
-/// source reaches native 50 at that pane, so it sampled them and drew a sliver of the
-/// status line inside the frame, immediately left of the crisp glyphs. MEASURED at
-/// 2, 6, 4 and 3 native columns of over-reach at 80x24, 98x37, 129x60 and 169x47 —
-/// scale-dependent, which is why the sliver's thickness changed as the pane was
-/// resized (the user's *"a little bit of rastered text between the score and
-/// flanks"*).
+/// Rasterise-then-erase was never an oversight; it looked like an ordering
+/// constraint, because the strip classification seemed to need the canvas. It did
+/// not: of the 701 lines between the canvas build and the first read of it, seven
+/// touched `canvas` and all seven were the construction. Moving it down past the
+/// classification was the whole fix.
 ///
-/// The rule this states is SQ-0750's, once more: on a row the ring draws with GLYPHS,
-/// the canvas keeps artwork and nothing else. A window's page, its rasterised cell
-/// backgrounds and its glyph strokes are all the text path's business, wherever they
-/// fall, so a band that happens to overlap them samples clear pixels instead.
-///
-/// `art` is the art-only canvas ([`build_graphics_canvas`]) and is what makes this
-/// safe to apply past a strip's own columns: it is the oracle that says which pixels
-/// are the frame's, so a flank's ornament cannot be holed — that hole is precisely
-/// what SQ-0894 added the column span to prevent, and gating on the art canvas keeps
-/// the protection without needing the cell rect to be the boundary.
-///
-/// **`paint` is the other half of that oracle and is not optional.**
-/// [`build_graphics_canvas`] is `blit_chrome_graphics` and nothing else, so it knows
-/// only about art a game published as a `Graphics` window's display list. A game that
-/// DRAWS instead — `draw_picture` into a window, which reaches the ring as the paint
-/// surface [`blit_paint_ground`] lays down (SQ-0706) — has artwork this canvas cannot
-/// see. `stories/scopa.z6` is that game: its start page shows three cards for the
-/// available decks and has **no Graphics window at all**, so its art canvas is empty
-/// while its paint surface carries 28,296 opaque pixels, 8,256 of them on rows
-/// carrying chrome text. Asked of the art canvas alone this carve erased them — the
-/// cards themselves — which is the regression the user caught within the hour. Both
-/// oracles, or a painting game loses its artwork wherever a status run shares a row
-/// with it.
-pub fn clear_text_rows_except_art(
-    canvas: &mut RgbaImage,
-    art: &RgbaImage,
-    paint: Option<&RgbaImage>,
-    rows: &[u16],
-) {
-    let (w, h) = (canvas.width(), canvas.height());
-    let opaque_in = |c: &RgbaImage, x: u32, y: u32| {
-        x < c.width() && y < c.height() && c.get_pixel(x, y)[3] >= 128
-    };
-    let is_art = |x: u32, y: u32| {
-        opaque_in(art, x, y) || paint.is_some_and(|p| opaque_in(p, x, y))
-    };
-    for &top in rows {
-        let y0 = top as u32;
-        for y in y0..(y0 + FONT_H).min(h) {
-            for x in 0..w {
-                if !is_art(x, y) {
-                    canvas.put_pixel(x, y, Rgba([0, 0, 0, 0]));
-                }
-            }
-        }
-    }
-}
-
+/// **What it cost while it existed is worth recording**, because it is the reason
+/// the boundary bug SQ-0902 fixed could hide at all: a sequence that paints and
+/// then unpaints has two places to be wrong about where the boundary is, and they
+/// were wrong differently. It also cost real work — Journey's carve removed 61,440
+/// pixels per frame, 90% of them outside any run's glyph span, in
+/// `fill_explicit_bg_rows`' full-window flood.
 pub fn clear_text_rows(canvas: &mut RgbaImage, runs: &[(u16, u32, u32)]) {
     let (w, h) = (canvas.width(), canvas.height());
     for &(top, x0, x1) in runs {
@@ -1151,12 +1090,52 @@ pub fn clear_text_rows(canvas: &mut RgbaImage, runs: &[(u16, u32, u32)]) {
     }
 }
 
+/// Rasterise every chrome window into one native-sized canvas.
+///
+/// How much of the TEXT layer this canvas owes pixels for (SQ-0903).
+///
+/// A parameter rather than a flag, and an enum rather than a bare set, because
+/// the two render paths want opposite things and a call site should say which it
+/// is: passing an empty set would be indistinguishable from forgetting.
+#[derive(Debug, Clone, Copy)]
+pub enum TextLayer<'a> {
+    /// Image every run. The **raster** composite has no cells to draw text with,
+    /// so every glyph it will ever show has to be a pixel in this canvas.
+    All,
+    /// Skip these native row TOPS. The **hybrid** ring has already decided to
+    /// draw them with terminal glyphs, so every pixel painted there is one it
+    /// throws away — which is what it used to do, by carving them back out.
+    SkipGlyphRows(&'a std::collections::HashSet<u16>),
+}
+
+impl TextLayer<'_> {
+    fn skips(&self, native_top: u16) -> bool {
+        match self {
+            TextLayer::All => false,
+            TextLayer::SkipGlyphRows(rows) => rows.contains(&native_top),
+        }
+    }
+}
+
+/// Rasterise every chrome window into one native-sized canvas.
+///
+/// `text` says how much of the text layer to image; see [`TextLayer`]. When it
+/// skips a row it skips the row *entirely* — glyph strokes, reverse-row gap fill
+/// and explicit-background flood alike — because two of those three flood a whole
+/// row and Journey's carve was 90% flood.
+///
+/// **Pass 1 — the artwork — is never skipped.** A row the ring draws as glyphs may
+/// still carry art beneath them, and the bands crop that art out of this canvas.
+/// Zork Zero is the case that proves it matters: every one of its chrome runs sits
+/// on the banner ribbon, so it is an Art strip throughout, no row of it is ever a
+/// glyph row, and nothing here is skipped for it (SQ-0750).
 pub fn build_chrome_canvas(
     chrome: &[&PositionedWindow],
     native: (u16, u16),
     default_fg: Rgba<u8>,
     default_bg: Rgba<u8>,
     colors: &ColorScheme,
+    text: TextLayer<'_>,
 ) -> RgbaImage {
     let mut canvas = RgbaImage::new(native.0 as u32, native.1 as u32);
 
@@ -1188,7 +1167,16 @@ pub fn build_chrome_canvas(
         if let WinNode::Grid(g) = &it.node {
             let ox = it.x_px as u32;
             let oy = it.y_px as u32;
-            if !g.px_texts.is_empty() {
+            // SQ-0903: the runs this canvas still owes pixels for. A run whose row
+            // the ring draws with glyphs is skipped here rather than painted and
+            // carved back out — and the filter is applied ONCE, before all three
+            // painters below, because two of them flood a whole ROW. Journey is
+            // why that matters: 90% of what its carve used to remove lay outside
+            // any run's glyph span, in `fill_explicit_bg_rows`' full-window flood.
+            // Skipping only the glyphs would have left it behind.
+            let px_texts: Vec<&PxText> =
+                g.px_texts.iter().filter(|t| !text.skips(t.y.max(1) - 1)).collect();
+            if !px_texts.is_empty() {
                 // A packed colour is EXPLICIT only when the game named a real
                 // colour (see `packed_explicit`): inherited colours + reverse
                 // over frame art (Zork0's ribbon labels) must NOT paint an
@@ -1198,7 +1186,7 @@ pub fn build_chrome_canvas(
                 // Fill pure-reverse-row gaps FIRST, so the glyph loop paints the run
                 // cells on top of them (SQ-0499). Both this fill and the glyph loop
                 // put their over-art question to `art`, never to `canvas`.
-                fill_reverse_row_gaps(&mut canvas, &art, &g.px_texts, default_fg, colors);
+                fill_reverse_row_gaps(&mut canvas, &art, &px_texts, default_fg, colors);
                 // SQ-0519: then flood the full WINDOW width of each explicit-bg,
                 // non-reverse row with its own background, so an explicitly-coloured
                 // status band (Shogun's black-on-white location/score bar) reads as
@@ -1207,9 +1195,9 @@ pub fn build_chrome_canvas(
                 // resolved (a size sentinel would balloon the flood, SQ-0481). The
                 // glyph loop then stamps the runs on top.
                 if (it.w_px as i16) >= 0 {
-                    fill_explicit_bg_rows(&mut canvas, &g.px_texts, ox, it.w_px as u32, default_bg, colors);
+                    fill_explicit_bg_rows(&mut canvas, &px_texts, ox, it.w_px as u32, default_bg, colors);
                 }
-                for t in &g.px_texts {
+                for t in &px_texts {
                     let px0 = t.x.max(1) as u32 - 1;
                     let py = t.y.max(1) as u32 - 1;
                     let (fg, bg) = if t.style & 1 != 0 {
@@ -1259,11 +1247,17 @@ pub fn build_chrome_canvas(
                 continue;
             }
             for row in 0..g.rows {
+                let py = oy + row as u32 * FONT_H;
+                // SQ-0903, the cell-grid half. Same rule, same reason: the ring
+                // draws this row with glyphs, so imaging it here is work whose
+                // only consumer is the carve that used to follow.
+                if text.skips(py as u16) {
+                    continue;
+                }
                 for col in 0..g.cols {
                     let idx = row as usize * g.cols as usize + col as usize;
                     let Some(cell) = g.cells.get(idx) else { continue };
                     let px = ox + col as u32 * FONT_W;
-                    let py = oy + row as u32 * FONT_H;
                     if cell.ch == '\0' || cell.ch == ' ' {
                         if cell.bg != 0 {
                             let b = packed_to_rgba(cell.bg, Rgba([0, 0, 0, 255]), colors);
@@ -1825,11 +1819,8 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
 #[cfg(test)]
 mod tests {
 
-    // ── clear_text_rows_except_art (SQ-0902) ─────────────────────────────────
+    // ── the text layer the ring claims (SQ-0902 → SQ-0903) ───────────────────
 
-    /// A carve gated on the ART canvas reaches the pixels a strip's own cell rect
-    /// cannot, and still cannot hole the frame.
-    ///
     /// Shogun's measured geometry, on `stories/shogun-r322-s890706.z6` two turns in:
     /// the frame art ends at native x **45**, the status window begins at native x
     /// **46**, and at a 129x60 pane the strip's first whole cell inverts to native
@@ -1838,96 +1829,141 @@ mod tests {
     /// status window. The flank band's source reaches native 50 at that pane, sampled
     /// them, and drew a sliver of the status line inside the frame.
     ///
-    /// Both halves are asserted, because the fix is only correct if it does more AND
-    /// less: it must clear 46..48, which the old span missed, and it must leave the
-    /// frame art at 0..45 alone, which a full-width carve would have destroyed — that
-    /// hole is what SQ-0894 added the column span to prevent, and the art canvas is
-    /// what replaces the cell rect as the guard.
+    /// SQ-0903, porting SQ-0902's evidence to the mechanism that replaced it.
+    ///
+    /// On a row the ring draws with GLYPHS the canvas keeps artwork and nothing
+    /// else (SQ-0750). That used to be enforced by rasterising the status window
+    /// and carving it back out; it is enforced now by never painting the row.
+    ///
+    /// **And the subtlety the carve existed for disappears with it.** Shogun's
+    /// frame art ends at native 45 and its status window begins at 46, three
+    /// columns inside the flank's last terminal cell — so a carve scoped to the
+    /// strip's own cell rect left them rasterised and the flank's band sampled a
+    /// sliver of the status line. There are no columns here at all: a row is
+    /// painted or it is not, and a boundary inside a cell has nothing to fall on.
     #[test]
-    fn the_carve_reaches_past_a_strips_cells_and_still_spares_the_art() {
-        const ART_END: u32 = 46; // exclusive — art occupies 0..45
-        const WINDOW_X0: u32 = 46;
-        let native = (640u32, 400u32);
-        // The art-only canvas: a full-height frame column, as Shogun's slab is.
-        let mut art = RgbaImage::new(native.0, native.1);
-        for y in 0..native.1 {
-            for x in 0..ART_END {
-                art.put_pixel(x, y, Rgba([9, 9, 9, 255]));
-            }
-        }
-        // The chrome canvas: that art, plus the status window rasterised opaque from
-        // its own left edge to the screen's right. Shogun's is 32px — TWO text rows —
-        // and only the first is carved here, so the second proves the carve is
-        // row-scoped and a flank keeps its source below it.
-        let mut canvas = art.clone();
-        for y in 0..(2 * FONT_H) {
-            for x in WINDOW_X0..native.0 {
-                canvas.put_pixel(x, y, Rgba([80, 80, 80, 255]));
-            }
-        }
-        clear_text_rows_except_art(&mut canvas, &art, None, &[0]);
-        let op = |c: &RgbaImage, x: u32, y: u32| c.get_pixel(x, y)[3] >= 128;
+    fn a_glyph_row_is_never_painted_and_the_art_under_it_survives() {
+        const ART_END: u32 = 46; // exclusive — the frame slab occupies 0..45
+        let native = (640u16, 400u16);
+        let art_win = PositionedWindow {
+            x: 0, y: 0, w: 6, h: 25, x_px: 0, y_px: 0, w_px: ART_END as u16, h_px: 400,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(GraphicsWindow {
+                win: 7,
+                canvas: {
+                    let mut c = RgbaImage::new(ART_END, 400);
+                    for px in c.pixels_mut() {
+                        *px = Rgba([9, 9, 9, 255]);
+                    }
+                    Arc::new(c)
+                },
+                version: 0,
+                upscale: false,
+            }),
+        };
+        // A status window rasterising two text rows from its own left edge to the
+        // screen's right — Shogun's is 32px, and only the FIRST is a glyph row.
+        let bar = |y: u16| PxText {
+            y, x: ART_END as u16 + 1, text: "X".repeat(74), style: 0,
+            fg: 0x0300_0000, bg: 0x03FF_FFFF,
+        };
+        let status = PositionedWindow {
+            x: 0, y: 0, w: 74, h: 2, x_px: ART_END as u16, y_px: 0, w_px: 592, h_px: 32,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                fill: None,
+                cols: 74, rows: 2, cells: vec![], active_rows: 2, cursor: (0, 0),
+                cursor_active: false, border: BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false,
+                px_texts: vec![bar(1), bar(FONT_H as u16 + 1)],
+            }),
+        };
+        let chrome: Vec<&PositionedWindow> = vec![&art_win, &status];
+        let skip: std::collections::HashSet<u16> = [0u16].into_iter().collect();
+        let canvas = build_chrome_canvas(
+            &chrome, native, Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]),
+            &colors(), TextLayer::SkipGlyphRows(&skip),
+        );
+        let op = |x: u32, y: u32| canvas.get_pixel(x, y)[3] >= 128;
 
         assert!(
-            (WINDOW_X0..native.0).all(|x| !op(&canvas, x, 4)),
-            "every column the status window rasterised is clear on a row the ring draws \
-             with glyphs — including native {WINDOW_X0}..49, which the strip's own cell \
-             rect never reached and the flank's source did"
+            (ART_END..native.0 as u32).all(|x| !op(x, 4)),
+            "the glyph row was never painted — including native {ART_END}..49, the \
+             columns a cell-rect carve could not reach",
         );
         assert!(
-            (0..ART_END).all(|x| op(&canvas, x, 4)),
-            "and the frame's own art survives the carve, all the way to its last column"
+            (0..ART_END).all(|x| op(x, 4)),
+            "and Pass 1's artwork is untouched: a glyph row may still carry art",
         );
-        // Rows the strip does not own are untouched, so a flank keeps its source
-        // everywhere else.
         assert!(
-            (0..native.0).all(|x| op(&canvas, x, FONT_H + 1) == (x < ART_END || x >= WINDOW_X0)),
-            "a row below the carved one is exactly as it was"
+            (ART_END..native.0 as u32).any(|x| op(x, FONT_H + 4)),
+            "the row BELOW it is not a glyph row and is imaged as always",
         );
     }
 
-    /// Artwork the game DREW is spared too, and `build_graphics_canvas` cannot see it
-    /// (SQ-0902).
+    /// Artwork the game DREW survives, and it survives for a structural reason
+    /// rather than by being spared (SQ-0902 → SQ-0903).
     ///
-    /// That canvas is `blit_chrome_graphics` and nothing else, so it knows only about
-    /// art published as a `Graphics` window's display list. `stories/scopa.z6` has NO
-    /// Graphics window at all — its start page draws three cards for the available
-    /// decks with `draw_picture`, which reaches the ring as the paint surface
-    /// (SQ-0706) — so its art canvas is empty while its paint surface carries 28,296
-    /// opaque pixels, 8,256 of them on rows carrying chrome text. Gated on the art
-    /// canvas alone this carve erased the cards.
+    /// `build_graphics_canvas` is `blit_chrome_graphics` and nothing else, so it
+    /// knows only about art published as a `Graphics` window's display list.
+    /// `stories/scopa.z6` has NO Graphics window at all — its start page draws
+    /// three cards with `draw_picture`, which reaches the ring as the paint
+    /// surface (SQ-0706) — so its art canvas is empty while its paint surface
+    /// carries 28,296 opaque pixels, 8,256 of them on rows carrying chrome text.
+    /// The old carve had to be told about the paint surface explicitly or it
+    /// erased the cards, which is the regression the user caught within the hour.
+    ///
+    /// **Nothing has to be told anything now.** Skipping removes only pixels
+    /// `build_chrome_canvas` would have painted, and `blit_paint_ground` runs
+    /// afterwards and is never skipped — so a painting game's artwork is not
+    /// spared from an erasure, it is simply never at risk.
     #[test]
-    fn the_carve_spares_artwork_the_game_painted_rather_than_published() {
-        let native = (640u32, 400u32);
-        // No Graphics window: the art canvas is empty, exactly as scopa's is.
-        let art = RgbaImage::new(native.0, native.1);
-        // A painted card, overlapping the first text row.
-        let mut paint = RgbaImage::new(native.0, native.1);
+    fn a_painting_games_artwork_is_not_at_risk_because_it_lands_after_the_skip() {
+        let native = (640u16, 400u16);
+        let bar = PxText {
+            y: 1, x: 1, text: "X".repeat(80), style: 0, fg: 0x0300_0000, bg: 0x03FF_FFFF,
+        };
+        let status = PositionedWindow {
+            x: 0, y: 0, w: 80, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 16,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                fill: None,
+                cols: 80, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0),
+                cursor_active: false, border: BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false,
+                px_texts: vec![bar],
+            }),
+        };
+        // A painted card overlapping that row — scopa's shape, no Graphics window.
+        let mut paint = RgbaImage::new(native.0 as u32, native.1 as u32);
         for y in 0..40 {
             for x in 100..180 {
                 paint.put_pixel(x, y, Rgba([200, 30, 30, 255]));
             }
         }
-        // The chrome canvas as the ring builds it: paint ground first (SQ-0706), then
-        // a status window rasterised over the rest of the row.
-        let mut canvas = RgbaImage::new(native.0, native.1);
+        let chrome: Vec<&PositionedWindow> = vec![&status];
+        let skip: std::collections::HashSet<u16> = [0u16].into_iter().collect();
+        let mut canvas = build_chrome_canvas(
+            &chrome, native, Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]),
+            &colors(), TextLayer::SkipGlyphRows(&skip),
+        );
+        // The ring's own order: the painted ground goes on after the chrome text
+        // (SQ-0706), which is exactly why the skip cannot reach it.
         blit_paint_ground(&mut canvas, Some(&paint));
-        for y in 0..FONT_H {
-            for x in 0..native.0 {
-                if canvas.get_pixel(x, y)[3] == 0 {
-                    canvas.put_pixel(x, y, Rgba([80, 80, 80, 255]));
-                }
-            }
-        }
-        clear_text_rows_except_art(&mut canvas, &art, Some(&paint), &[0]);
         let op = |x: u32, y: u32| canvas.get_pixel(x, y)[3] >= 128;
+
         assert!(
             (100..180).all(|x| op(x, 4)),
-            "the painted card survives the carve on a row that also carries chrome text"
+            "the painted card is on the canvas, on a row that also carries chrome text",
         );
         assert!(
-            (0..100).all(|x| !op(x, 4)) && (180..native.0).all(|x| !op(x, 4)),
-            "and the rasterised status cells beside it are still cleared"
+            (0..100).all(|x| !op(x, 4)) && (180..native.0 as u32).all(|x| !op(x, 4)),
+            "and the status cells beside it were never painted",
+        );
+        // The art canvas is empty here, as scopa's is — and it no longer matters.
+        assert!(
+            build_graphics_canvas(&chrome, native).pixels().all(|p| p[3] == 0),
+            "no Graphics window: the oracle the old carve depended on sees nothing",
         );
     }
 
@@ -2294,7 +2330,7 @@ mod tests {
         // run has no ink, so probe an inked glyph's fg by asserting SOME cell pixel
         // is the run's red.
         let win = px_text_grid_item("N", 0, packed_std3, 0);
-        let c = build_chrome_canvas(&[&win], (8, 8), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors);
+        let c = build_chrome_canvas(&[&win], (8, 8), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors, TextLayer::All);
         assert!(
             (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == Rgba([239, 0, 0, 255]))),
             "the compass glyph blits in its own spec red, not the default fg"
@@ -2404,12 +2440,12 @@ mod tests {
         };
         // Box tall enough (40): both markers land 1:1 — never squashed.
         let tall = win(40, src.clone());
-        let canvas = build_chrome_canvas(&[&tall], (100, 100), Rgba([0, 0, 0, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let canvas = build_chrome_canvas(&[&tall], (100, 100), Rgba([0, 0, 0, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         assert_eq!(canvas.get_pixel(6, 6)[3], 255, "top-left marker at native (6,6)");
         assert_eq!(canvas.get_pixel(44, 42)[3], 255, "low marker 1:1 at native (44,42)");
         // Box only 5 tall: content past the box clips; nothing squashes into it.
         let short = win(5, src);
-        let canvas = build_chrome_canvas(&[&short], (100, 100), Rgba([0, 0, 0, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let canvas = build_chrome_canvas(&[&short], (100, 100), Rgba([0, 0, 0, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         assert_eq!(canvas.get_pixel(6, 6)[3], 255, "top-left marker inside the box survives");
         assert_eq!(canvas.get_pixel(44, 42)[3], 0, "content below the 5px box is clipped");
         for y in 4..9 {
@@ -2442,7 +2478,7 @@ mod tests {
         }
         let win = graphics_window(0, 0, 20, 20, src);
         let chrome: Vec<&PositionedWindow> = vec![&win];
-        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         assert_eq!(c.get_pixel(0, 0)[3], 255, "border pixel is opaque");
         assert_eq!(c.get_pixel(10, 10)[3], 0, "center is transparent");
     }
@@ -2466,7 +2502,7 @@ mod tests {
         let base_win = graphics_window(4, 4, 8, 8, base);
         let indicator_win = graphics_window(4, 4, 8, 8, indicator);
         let chrome: Vec<&PositionedWindow> = vec![&base_win, &indicator_win];
-        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         assert_eq!(*c.get_pixel(5, 8), color_b, "left half shows the indicator (last-drawn wins)");
         assert_eq!(*c.get_pixel(10, 8), color_a, "right half shows the base through the transparent margin");
     }
@@ -2487,7 +2523,7 @@ mod tests {
         };
         let chrome: Vec<&PositionedWindow> = vec![&win];
         let fg = Rgba([0, 255, 255, 255]);
-        let c = build_chrome_canvas(&chrome, (40, 40), fg, Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (40, 40), fg, Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         // cell (col=2,row=1) native px box: x = 10 + 2·FONT_W(8) = 26..34,
         // y = 4 + 1·FONT_H(16) = 20..36 (non-square 8×16 cell, SQ-0479).
         assert!(
@@ -2533,7 +2569,7 @@ mod tests {
         let canvas = |style: u8| {
             let win = px_text_grid_item("Ab", style, RED, 0);
             let chrome: Vec<&PositionedWindow> = vec![&win];
-            build_chrome_canvas(&chrome, (24, 16), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors())
+            build_chrome_canvas(&chrome, (24, 16), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All)
         };
         let roman = ink(&canvas(0), fg);
         let bold = ink(&canvas(2), fg);
@@ -2557,7 +2593,7 @@ mod tests {
         let render = |style: u8, fg: u32, bg: u32| {
             let win = px_text_grid_item("Ab", style, fg, bg);
             let chrome: Vec<&PositionedWindow> = vec![&win];
-            build_chrome_canvas(&chrome, (24, 16), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors())
+            build_chrome_canvas(&chrome, (24, 16), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All)
         };
         let blue = Rgba([0, 0, 255, 255]);
         // Reversed: the run's fg becomes the block, its bg becomes the ink. The
@@ -2585,7 +2621,7 @@ mod tests {
                 }),
             };
             let chrome: Vec<&PositionedWindow> = vec![&win];
-            build_chrome_canvas(&chrome, (8, 16), Rgba([0, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors())
+            build_chrome_canvas(&chrome, (8, 16), Rgba([0, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All)
         };
         let fg = Rgba([0, 255, 255, 255]);
         let roman = ink(&canvas(0), fg);
@@ -2624,7 +2660,7 @@ mod tests {
     fn px_text_run_fills_its_cell_with_the_explicit_background() {
         let win = px_text_grid_item(" ", 0, RED, BLUE);
         let chrome: Vec<&PositionedWindow> = vec![&win];
-        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         for y in 0..8 {
             for x in 0..8 {
                 assert_eq!(*c.get_pixel(x, y), Rgba([0, 0, 255, 255]), "cell filled with the run's bg (blue) at ({x},{y})");
@@ -2638,7 +2674,7 @@ mod tests {
         // the run's FOREGROUND (red) the fill colour instead of its background.
         let win = px_text_grid_item(" ", 1, RED, BLUE);
         let chrome: Vec<&PositionedWindow> = vec![&win];
-        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         for y in 0..8 {
             for x in 0..8 {
                 assert_eq!(*c.get_pixel(x, y), Rgba([255, 0, 0, 255]), "reverse fill is the run's fg (red) at ({x},{y})");
@@ -2662,11 +2698,11 @@ mod tests {
         let art = graphics_window(0, 0, 8, 8, image::RgbaImage::from_pixel(8, 8, art_color));
         let blank = px_text_grid_item(" ", 1, 0, 0);
         let chrome: Vec<&PositionedWindow> = vec![&art, &blank];
-        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors(), TextLayer::All);
         assert_eq!(*c.get_pixel(4, 4), art_color, "blank reverse glyph over art leaves the art (no block)");
         let inked = px_text_grid_item("X", 1, 0, 0);
         let chrome: Vec<&PositionedWindow> = vec![&art, &inked];
-        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors(), TextLayer::All);
         assert!(
             (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == default_bg)),
             "reverse ink over art draws in the themed default_bg (dark on the art)"
@@ -2686,7 +2722,7 @@ mod tests {
         // its cell with the bar colour (default_fg).
         let gap = px_text_grid_item(" ", 1, 0, 0);
         let chrome: Vec<&PositionedWindow> = vec![&gap];
-        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors(), TextLayer::All);
         for y in 0..8 {
             for x in 0..8 {
                 assert_eq!(*c.get_pixel(x, y), default_fg, "gap cell filled with the bar colour at ({x},{y})");
@@ -2695,7 +2731,7 @@ mod tests {
         // An inked reverse glyph paints the bar (default_fg) with dark (default_bg) ink.
         let glyph = px_text_grid_item("X", 1, 0, 0);
         let chrome: Vec<&PositionedWindow> = vec![&glyph];
-        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors(), TextLayer::All);
         assert!(
             (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == default_fg)),
             "the highlight bar (default_fg) is painted behind the glyph"
@@ -2711,7 +2747,7 @@ mod tests {
         // A run whose game explicitly chose colours DOES paint the swap block.
         let win = px_text_grid_item(" ", 1, RED, BLUE);
         let chrome: Vec<&PositionedWindow> = vec![&win];
-        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([1, 1, 1, 255]), Rgba([2, 2, 2, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([1, 1, 1, 255]), Rgba([2, 2, 2, 255]), &colors(), TextLayer::All);
         assert_eq!(c.get_pixel(4, 4)[3], 255, "explicit reverse paints an opaque block");
     }
 
@@ -2722,7 +2758,7 @@ mod tests {
         // handling existed, so frame art under status text still shows through.
         let win = px_text_grid_item(" ", 0, RED, 0);
         let chrome: Vec<&PositionedWindow> = vec![&win];
-        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         for y in 0..8 {
             for x in 0..8 {
                 assert_eq!(c.get_pixel(x, y)[3], 0, "no bg, no reverse ⇒ transparent at ({x},{y})");
@@ -2790,7 +2826,7 @@ mod tests {
             PxText { y: 1, x: 1, text: "AB".into(), style: 0, fg: z_black, bg: z_white },
             PxText { y: 1, x: 41, text: "CD".into(), style: 0, fg: z_black, bg: z_white },
         ]);
-        let c = build_chrome_canvas(&[&win], (64, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&[&win], (64, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         // px 24 is a gap between run A (px 0..16) and run C (px 40..): flooded white.
         assert_eq!(*c.get_pixel(24, 8), Rgba([255, 255, 255, 255]), "the inter-run gap floods the explicit white");
         // The window's far edge is flooded too — the whole window width is one bar.
@@ -2835,7 +2871,7 @@ mod tests {
                 ],
             }),
         };
-        let c = build_chrome_canvas(&[&win], (640, 400), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&[&win], (640, 400), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         for (row, (left, lx), (right, rx)) in [
             (86u32, ("Denari", 153u32), ("Primiera", 465u32)),
             (145, ("8", 13), ("72", 369)),
@@ -2864,7 +2900,7 @@ mod tests {
         let art_color = Rgba([180, 140, 90, 255]);
         let art = graphics_window(0, 0, 16, 16, image::RgbaImage::from_pixel(16, 16, art_color));
         let letter = band_grid(16, vec![PxText { y: 1, x: 1, text: "N".into(), style: 0, fg: z_red, bg: 0 }]);
-        let c = build_chrome_canvas(&[&art, &letter], (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let c = build_chrome_canvas(&[&art, &letter], (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         // px 12 is the second cell (no ink, no run) — the banner art shows through.
         assert_eq!(*c.get_pixel(12, 8), art_color, "explicit-fg-only run leaves the banner art (no bg flood)");
     }
@@ -2894,7 +2930,7 @@ mod tests {
         let art = graphics_window(0, 0, 16, 8, image::RgbaImage::from_pixel(16, 8, art_color));
         let win = page_grid(16, 16, Some(BLUE));
         let chrome = [&art, &win];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         assert_eq!(c.get_pixel(4, 12)[3], 0, "precondition: the window's lower half is unpainted");
         fill_window_pages(&mut c, &chrome, None, &colors());
         assert_eq!(*c.get_pixel(4, 12), Rgba([0, 0, 255, 255]), "an unpainted pixel takes the window's own page");
@@ -2905,7 +2941,7 @@ mod tests {
     fn window_with_no_page_of_its_own_keeps_todays_transparency() {
         let win = page_grid(16, 16, None);
         let chrome = [&win];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         let before = c.as_raw().clone();
         fill_window_pages(&mut c, &chrome, None, &colors());
         assert_eq!(*c.as_raw(), before, "a window the game gave no colour is left exactly as before");
@@ -2922,7 +2958,7 @@ mod tests {
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
         let chrome = [&full];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         fill_window_pages(&mut c, &chrome, Some(&story), &colors());
         assert_eq!(c.get_pixel(8, 8)[3], 0, "the story box stays clear for the transcript");
         assert_eq!(c.get_pixel(0, 0)[3], 0, "and the covering window is skipped whole, not clipped");
@@ -2934,7 +2970,7 @@ mod tests {
         // colour the game named — `packed_explicit` rejects them.
         let win = page_grid(16, 16, Some(1u32 << 24)); // Standard(0)
         let chrome = [&win];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         fill_window_pages(&mut c, &chrome, None, &colors());
         assert_eq!(c.get_pixel(4, 4)[3], 0, "an inherited colour leaves the window's page to the host");
     }
@@ -2954,7 +2990,7 @@ mod tests {
         // the ground of that drawing rather than a palette preference.
         let win = page_grid(16, 16, Some(BLUE));
         let chrome = [&win];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         fill_painted_window_pages(&mut c, &chrome, None, &colors(), Some(&ground(16, 16, 4, 4)));
         assert_eq!(*c.get_pixel(10, 10), Rgba([0, 0, 255, 255]), "the painted window's page arrives anyway");
     }
@@ -2965,7 +3001,7 @@ mod tests {
         // Zork Zero, Arthur, Shogun, Journey and advent paint no ground at all.
         let win = page_grid(16, 16, Some(BLUE));
         let chrome = [&win];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         let before = c.as_raw().clone();
         // A ground that exists but lies entirely outside this window's box.
         let mut g = image::RgbaImage::new(64, 64);
@@ -2978,7 +3014,7 @@ mod tests {
     fn no_painted_ground_at_all_changes_nothing() {
         let win = page_grid(16, 16, Some(BLUE));
         let chrome = [&win];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         let before = c.as_raw().clone();
         fill_painted_window_pages(&mut c, &chrome, None, &colors(), None);
         assert_eq!(*c.as_raw(), before, "no ground, no exception");
@@ -2994,7 +3030,7 @@ mod tests {
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
         let chrome = [&full];
-        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         fill_painted_window_pages(&mut c, &chrome, Some(&story), &colors(), Some(&ground(16, 16, 4, 4)));
         assert_eq!(c.get_pixel(0, 0)[3], 0, "the story-overlapping window is skipped whole, exactly as when colours are honoured");
     }

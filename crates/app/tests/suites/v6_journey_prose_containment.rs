@@ -251,6 +251,7 @@ fn journeys_frame_border_is_a_single_native_pixel_column() {
             image::Rgba([200, 200, 200, 255]),
             image::Rgba([0, 0, 0, 255]),
             &colors,
+            app::render::v6_layout::TextLayer::All,
         );
         let story = layout.story.expect("Journey publishes a story window at its menu");
         let mid = story.y_px as u32 + (story.h_px as u32) / 2;
