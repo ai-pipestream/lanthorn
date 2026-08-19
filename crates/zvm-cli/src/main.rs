@@ -1085,10 +1085,46 @@ fn read_line_raw(
     if terminator == 13 {
         // Raw mode does not translate Enter to CRLF. Skip for a function-key
         // terminator so the prompt doesn't drift as the game redraws in place.
-        print!("\r\n");
+        //
+        // The newline SCROLLS, and a terminal erases the newly exposed line with
+        // whatever background is in force at that moment. Resetting first — which is
+        // what the line above just did — hands the game's next line the TERMINAL's
+        // default background beyond the text it writes, so exactly one row per turn
+        // came out with a pale tail: the first line the game prints after your
+        // command, which in BeyondZork is the room name. Every later line of the
+        // turn scrolls inside a styled run and is fine, which is what made it look
+        // like a property of room names (SQ-0920).
+        //
+        // Only the BACKGROUND is re-applied, not the whole run: reverse video would
+        // make the erase paint the foreground colour instead.
+        print!(
+            "{}",
+            commit_line_bytes(&screen::bg_sgr(machine.screen.current_bg, machine.honor_game_colours))
+        );
     }
     let _ = io::stdout().flush();
     (buf, terminator, last_resize, aborted)
+}
+
+/// The bytes that close an echoed input line: the game's background, the newline,
+/// then a reset.
+///
+/// The ORDER is the whole point (SQ-0920). That newline scrolls, and a terminal
+/// erases the newly exposed line with whatever background is in force at that
+/// moment, so emitting it after a reset gives the game's next line a tail of the
+/// terminal's own default background beyond the text it writes. Exactly one row per
+/// turn came out that way — the first line printed after the command, which in
+/// BeyondZork is the room name; every later line of the turn scrolls inside a styled
+/// run and looked fine, which is what made it seem like a property of room names.
+///
+/// Only the BACKGROUND is re-applied, never the whole run: reverse video would make
+/// the erase paint the foreground colour across the line instead.
+fn commit_line_bytes(bg: &str) -> String {
+    if bg.is_empty() {
+        "\r\n".to_string()
+    } else {
+        format!("{bg}\r\n\x1b[0m")
+    }
 }
 
 /// One byte of piped input, or a clean exit at true EOF.
@@ -2138,6 +2174,27 @@ mod stdout_tests {
 mod keycode_tests {
     use super::*;
     use crossterm::event::KeyCode;
+
+    // ── commit_line_bytes (SQ-0920) ─────────────────────────────────────────
+
+    /// **The background is applied BEFORE the newline**, because that newline
+    /// scrolls and the terminal erases the exposed line with the background in
+    /// force. Reversed, the game's next line gets a pale tail beyond its text.
+    #[test]
+    fn the_commit_newline_carries_the_games_background() {
+        let out = commit_line_bytes("\x1b[44m");
+        let nl = out.find("\r\n").expect("commits the line");
+        let bg = out.find("\x1b[44m").expect("re-applies the background");
+        assert!(bg < nl, "background must precede the newline that scrolls: {out:?}");
+        assert!(out.ends_with("\x1b[0m"), "and be dropped again after it: {out:?}");
+    }
+
+    /// With no game background there is nothing to re-apply, so the bytes are what
+    /// they always were — a story that never sets a colour is byte-identical.
+    #[test]
+    fn no_game_background_means_no_extra_bytes() {
+        assert_eq!(commit_line_bytes(""), "\r\n");
+    }
 
     #[test]
     fn decode_keycode_printable_ascii() {
