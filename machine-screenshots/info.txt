@@ -36,3 +36,40 @@ What is pinned from these is a section 8.3.1 colour NUMBER, not a shade, so unli
 the period-look values (SQ-0873) there is no emulator-dependent RGB here to be
 wrong about.
 
+
+dos-hitchhiker.png IS THE ONE THAT ANSWERS SQ-0873 FOR INTERPRETER 6
+
+Hitchhiker's r47 / 840914 — **Version 3**, on DOS with a CGA colour display. That
+version matters more than the machine: colour arrives with v5, so a v3 story has
+no colour concept at all and every pixel here is the interpreter's own
+presentation. This is a PERIOD LOOK capture, which is exactly what SQ-0873 lacked
+for interpreter 6 and why that row declines one.
+
+Measured, row- and column-censused rather than sampled:
+
+  body        page #0F009E (92.4% of the frame — EGA/CGA blue), ink #A0A0A0
+  status row  NOT a band: 611 contiguous px of the blue PAGE run through the
+              middle of it (x 132..743 at y=14). The location sits on a grey
+              ground; the labels are ink on the page.
+  and         #A2000D — RED — appears in the status row and NOWHERE else in the
+              frame (0.1% overall). It is in neither channel of the body pair.
+
+TWO THINGS FOLLOW, and the second is a problem for the type as it stands.
+
+1. It corroborates SQ-0928 from a different direction. That quest's evidence is
+   v6 (Shogun, Arthur, Zork Zero); this is v3, a decade of interpreter apart, and
+   the page is the same blue. What v6 games are TOLD in $2C/$2D and what a v3
+   game is SHOWN agree, which is what you would expect of a real default and not
+   of a coincidence.
+
+2. `zvm::interpreter::StatusBand` cannot express this. Its four variants are
+   FullReverse, PerRun, Own{ground,ink} and Ruled. This frame is PerRun in
+   structure — the page shows between the runs — and Own in colour, since red is
+   not the body pair reversed. Adding interpreter 6's period look therefore needs
+   a variant that carries both, or the four have to become two axes. Do not force
+   it into PerRun and lose the red.
+
+CAVEAT worth keeping: the capture is 1159x726, a non-integer scale of a 640x200
+or 720x350 text screen, so glyph edges interpolate and the run boundaries above
+are ±2px. The three COLOURS are unambiguous; the exact cell boundaries are not.
+
