@@ -14,6 +14,26 @@ identifies itself without reading its git hash.
 
 ## Unreleased
 
+### scott-cli can save and restore
+
+It was the only one of the three players where a session could not be preserved
+at all. The reason it stayed invisible is that its own header ran two statements
+together: a Scott Adams adventure has **no save format of its own**, which is
+true, and *therefore the host cannot save*, which does not follow. `scott::Vm`
+has carried `snapshot`/`restore` all along and the TUI has used them all along.
+
+`/save [name]` and `/restore [name]` (alias `/load`), on the `/status` precedent
+— host commands, never passed to the game, exactly as classic ScottFree made
+SAVE GAME and LOAD GAME its interpreter's rather than the adventure's. Leave the
+name off and it lists what you have and asks. Numbers pick at the restore prompt
+and not at the save prompt, an existing name is never overwritten without a `y`,
+and `--data-dir` works as it does in the other two — all the same shared code.
+
+The saves carry **`.sav`, not `.qzl`**: a Quetzal file is the Z-machine's own
+standard format and a Scott snapshot is item locations, flags, counters and the
+lamp. Naming it `.qzl` would be a claim about the bytes that is false. A save
+from a different adventure is refused rather than half-applied.
+
 ### Fixed
 
 - **Quitting a CLI no longer lets your shell draw over the game's last page.**

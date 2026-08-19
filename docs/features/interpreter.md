@@ -1700,6 +1700,42 @@ And saving over a name that already exists asks first, naming the save you would
 lose. Anything but an explicit `y` is a no, including a bare Enter, so the
 destructive answer is never the one you get by hesitating.
 
+### Scott Adams saves too, and it is the host that does it
+
+`zvm-cli` and `gvm-cli` reach those prompts because the *game* asked — `@save` is
+an opcode, and the host is answering it. A Scott Adams adventure has no such
+opcode and no save format of its own, which is true and is not the same as saying
+a Scott session cannot be preserved. Classic ScottFree made SAVE GAME and LOAD
+GAME its own interpreter commands rather than the adventure's, and `scott-cli`
+now does the same:
+
+```
+Tell me what to do ? /save cellar
+Saved to 'tiny_cave.dat.save/cellar.sav'.
+
+Tell me what to do ? /restore
+
+saves: 1 cellar   2 troll
+Restore which ? 1
+```
+
+`/save` and `/restore` (alias `/load`) take a name, or ask for one if you leave it
+off — and asking is what shows you the list. Everything else is the behaviour
+above, shared code and all: numbers pick at the restore prompt and not at the save
+prompt, and an existing name is never overwritten without a `y`. `--data-dir`
+works as it does in the other two.
+
+**The leading slash is what makes this safe.** `save` and `restore` are perfectly
+ordinary things to type at a Scott prompt, and a host that swallowed them would be
+worse than no feature; no adventure parser assigns meaning to `/`.
+
+**And the saves are `.sav`, not `.qzl`.** A Quetzal file is the Z-machine's own
+standard format and a Scott snapshot is nothing of the kind — it is item
+locations, flags, counters and the lamp, written by `scott::Vm`. Naming it `.qzl`
+would be a claim about the bytes that is simply false. A save from a different
+adventure is refused rather than half-applied, too: the item count is checked
+against the loaded game before anything is written.
+
 ## Robustness
 
 When a story faults — out-of-bounds memory, stack under/overflow, an unimplemented

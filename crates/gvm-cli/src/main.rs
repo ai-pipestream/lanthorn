@@ -548,7 +548,7 @@ fn drive(
                     // The saves already here, as a reminder of what you would
                     // collide with. A number is NOT accepted at a save prompt — see
                     // `cli_host::pick_save` (SQ-0918).
-                    if let Some(l) = cli_host::save_list_line(&cli_host::existing_saves(game_dir)) {
+                    if let Some(l) = cli_host::save_list_line(&cli_host::existing_saves(game_dir, cli_host::QUETZAL_EXT)) {
                         println!("{l}");
                     }
                     print!("Save to file: ");
@@ -558,7 +558,7 @@ fn drive(
                     if name.is_empty() {
                         machine.complete_save(false);
                     } else {
-                        let path = cli_host::resolve_save_input(name, game_dir);
+                        let path = cli_host::resolve_save_input(name, game_dir, cli_host::QUETZAL_EXT);
                         // Same guard as zvm-cli: `fs::write` is unconditional, so a
                         // repeated name would silently destroy the earlier save
                         // (SQ-0648's defect, SQ-0918).
@@ -599,7 +599,7 @@ fn drive(
                 if req.by_prompt || req.name.is_empty() {
                     before_input(machine);
                     release_prompt(machine);
-                    let saves = cli_host::existing_saves(game_dir);
+                    let saves = cli_host::existing_saves(game_dir, cli_host::QUETZAL_EXT);
                     if let Some(l) = cli_host::save_list_line(&saves) {
                         println!("{l}");
                     }
@@ -613,7 +613,7 @@ fn drive(
                     if name.is_empty() {
                         machine.complete_restore_failure();
                     } else {
-                        let path = cli_host::resolve_save_input(name, game_dir);
+                        let path = cli_host::resolve_save_input(name, game_dir, cli_host::QUETZAL_EXT);
                         match fs::read(&path) {
                             Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {
                                 eprintln!("[restored from {}]", path.display());
@@ -646,7 +646,11 @@ fn drive(
 /// a game skip its init on relaunch. These names are game-internal (CM's begin
 /// with `_`), keeping them clear of the player's `<name>.qzl` saves.
 fn game_auto_save_path(game_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    game_dir.join(format!("{name}.qzl"))
+    // The named constant rather than a literal, so this cannot drift from what
+    // `cli_host::existing_saves` scans for — the two have to agree, and SQ-0919
+    // made the extension a parameter precisely because it is a claim about the
+    // bytes. These really are Quetzal.
+    game_dir.join(format!("{name}.{}", cli_host::QUETZAL_EXT))
 }
 
 /// Seed the machine's host-managed SavedGame existence index from every
@@ -661,7 +665,7 @@ fn seed_saved_games(machine: &mut Machine, game_dir: &std::path::Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("qzl") {
+        if path.extension().and_then(|e| e.to_str()) != Some(cli_host::QUETZAL_EXT) {
             continue;
         }
         let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {

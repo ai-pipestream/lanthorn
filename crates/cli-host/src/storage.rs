@@ -239,21 +239,46 @@ pub fn game_dir_with_key(story_path: &Path, data_dir: Option<&str>, key: &str) -
     base.join(format!("{key}.save"))
 }
 
+/// The extension a **Quetzal** save carries: the Z-machine's own standard save
+/// format, which `gvm-cli` writes too because Glulx saves are Quetzal chunks in a
+/// different wrapper.
+///
+/// Named rather than spelled out at each call site because it is a *claim about
+/// the bytes*, not a filename convention — see [`SCOTT_EXT`].
+pub const QUETZAL_EXT: &str = "qzl";
+
+/// The extension a **Scott Adams** host snapshot carries (SQ-0919).
+///
+/// Not `.qzl`, and the difference is the whole reason these helpers take an
+/// extension at all. Scott has no game-native save protocol and nothing Quetzal
+/// about it: `scott::Vm::snapshot` writes item locations, flags, counters and the
+/// lamp as little-endian words of its own. Calling that `cellar.qzl` would be a
+/// lie about the format, and it would make a Scott save indistinguishable by name
+/// from a Z-machine one if the two ever shared a directory.
+pub const SCOTT_EXT: &str = "sav";
+
 /// Resolve what the player typed at a save/restore filename prompt.
 ///
-/// A bare name lands in `game_dir` with a `.qzl` extension, so `quick` means
-/// this game's quick save and not a file in whatever directory the shell
-/// happened to be in. Anything carrying a path separator is honoured verbatim,
-/// which is the escape hatch for saving somewhere else on purpose.
-pub fn resolve_save_input(input: &str, game_dir: &Path) -> PathBuf {
+/// A bare name lands in `game_dir` with `ext`, so `quick` means this game's quick
+/// save and not a file in whatever directory the shell happened to be in.
+/// Anything carrying a path separator is honoured verbatim, which is the escape
+/// hatch for saving somewhere else on purpose.
+///
+/// `ext` is the host's own — [`QUETZAL_EXT`] or [`SCOTT_EXT`] — and it travels
+/// with every call because a save's extension states what its bytes ARE. It must
+/// match whatever [`existing_saves`] was asked for, or the list and the resolver
+/// stop being inverses.
+pub fn resolve_save_input(input: &str, game_dir: &Path, ext: &str) -> PathBuf {
     let t = input.trim();
     if t.contains('/') || t.contains('\\') {
         return PathBuf::from(t);
     }
+    let dotted = format!(".{ext}");
     // The typed extension is matched case-insensitively too, so `cellar.QZL` is
     // not turned into `cellar.QZL.qzl`.
-    let has_ext = t.len() >= 4 && t[t.len() - 4..].eq_ignore_ascii_case(".qzl");
-    let name = if has_ext { t.to_string() } else { format!("{t}.qzl") };
+    let has_ext = t.len() >= dotted.len()
+        && t[t.len() - dotted.len()..].eq_ignore_ascii_case(&dotted);
+    let name = if has_ext { t.to_string() } else { format!("{t}{dotted}") };
     // **An existing file wins, under the spelling it actually has on disk.**
     //
     // A case-insensitive filesystem hid a real defect here (SQ-0925).
@@ -268,8 +293,8 @@ pub fn resolve_save_input(input: &str, game_dir: &Path) -> PathBuf {
     // would fix the bug and leave a path that reads differently in a prompt, an
     // error message and an overwrite warning depending on the host.
     //
-    // A NEW name matches nothing and falls through to the exact `.qzl` spelling,
-    // which is what saving wants.
+    // A NEW name matches nothing and falls through to the exact spelling, which is
+    // what saving wants.
     if let Ok(rd) = std::fs::read_dir(game_dir) {
         for e in rd.flatten() {
             if e.file_name().to_string_lossy().eq_ignore_ascii_case(&name) {
@@ -282,26 +307,32 @@ pub fn resolve_save_input(input: &str, game_dir: &Path) -> PathBuf {
 
 /// Every save already in this game's directory, named the way you would type it.
 ///
-/// The exact inverse of [`resolve_save_input`]: that turns `cellar` into
-/// `<game_dir>/cellar.qzl`, this turns the directory back into `["cellar", …]`.
-/// Sorted, so the numbering a prompt shows is stable between turns — a list that
-/// reorders itself under the player is worse than no list (SQ-0918).
+/// The exact inverse of [`resolve_save_input`] **for the same `ext`**: that turns
+/// `cellar` into `<game_dir>/cellar.qzl`, this turns the directory back into
+/// `["cellar", …]`. Sorted, so the numbering a prompt shows is stable between
+/// turns — a list that reorders itself under the player is worse than no list
+/// (SQ-0918).
+///
+/// Passing a different `ext` than the resolver was given breaks that inverse and
+/// is the one way to misuse this pair: the list would offer names the restore
+/// cannot open, which is exactly the shape of the bug SQ-0925 fixed.
 ///
 /// Case-insensitive on the extension, because `resolve_save_input` accepts a typed
 /// `.QZL` and a directory can be copied from a case-preserving filesystem. A
 /// directory that does not exist yet — the ordinary state before the first save —
 /// is empty rather than an error.
-pub fn existing_saves(game_dir: &Path) -> Vec<String> {
+pub fn existing_saves(game_dir: &Path, ext: &str) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(game_dir) else {
         return Vec::new();
     };
+    let dotted = format!(".{ext}");
     let mut out: Vec<String> = rd
         .flatten()
         .filter(|e| e.path().is_file())
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let stem = name.get(..name.len().checked_sub(4)?)?;
-            name[stem.len()..].eq_ignore_ascii_case(".qzl").then(|| stem.to_string())
+            let stem = name.get(..name.len().checked_sub(dotted.len())?)?;
+            name[stem.len()..].eq_ignore_ascii_case(&dotted).then(|| stem.to_string())
         })
         .filter(|stem| !stem.is_empty())
         .collect();
@@ -388,13 +419,51 @@ mod tests {
         d
     }
 
+    /// SQ-0919: **two hosts, two extensions, and neither sees the other's saves.**
+    ///
+    /// This is why the extension is a parameter rather than a constant inside these
+    /// two functions. A Scott snapshot is not Quetzal, so calling it `.qzl` would be
+    /// a lie about the bytes — and worse, `existing_saves` would then list a save
+    /// the other host's restore cannot read. The pair are inverses only for the
+    /// same `ext`, and this is the case that says so.
+    #[test]
+    fn each_hosts_extension_lists_and_resolves_only_its_own() {
+        let d = dir_with("exts", &["cellar.qzl", "cellar.sav", "notes.txt"]);
+
+        assert_eq!(existing_saves(&d, QUETZAL_EXT), vec!["cellar".to_string()]);
+        assert_eq!(existing_saves(&d, SCOTT_EXT), vec!["cellar".to_string()]);
+
+        // Same typed name, two different files — which is the whole point.
+        let q = resolve_save_input("cellar", &d, QUETZAL_EXT);
+        let sc = resolve_save_input("cellar", &d, SCOTT_EXT);
+        assert_ne!(q, sc);
+        assert_eq!(q.extension().unwrap(), "qzl");
+        assert_eq!(sc.extension().unwrap(), "sav");
+
+        // And a name typed WITH the other host's extension is not stripped of it:
+        // `cellar.qzl` asked of the Scott host is a file called `cellar.qzl.sav`,
+        // not a Quetzal save it has no business opening.
+        assert_eq!(
+            resolve_save_input("cellar.qzl", &d, SCOTT_EXT).file_name().unwrap(),
+            "cellar.qzl.sav",
+        );
+
+        // The inverse holds within each extension, which is the property SQ-0925
+        // is about and it must survive the parameterisation.
+        for ext in [QUETZAL_EXT, SCOTT_EXT] {
+            for name in existing_saves(&d, ext) {
+                assert!(resolve_save_input(&name, &d, ext).is_file(), "{name}.{ext} round-trips");
+            }
+        }
+    }
+
     /// The inverse of `resolve_save_input`, and only that: `.qzl` files, named the
     /// way you would type them back.
     #[test]
     fn existing_saves_lists_what_resolve_save_input_would_have_written() {
         let d = dir_with("mixed", &["cellar.qzl", "before-maze.qzl", "notes.txt", "auto.QZL"]);
         assert_eq!(
-            existing_saves(&d),
+            existing_saves(&d, QUETZAL_EXT),
             vec!["auto".to_string(), "before-maze".to_string(), "cellar".to_string()],
             "sorted case-insensitively, extension stripped, .txt ignored, .QZL kept",
         );
@@ -404,12 +473,12 @@ mod tests {
         // `auto.QZL` themselves, and it was failing on Linux for the right one
         // (SQ-0925).
         assert_eq!(
-            resolve_save_input("auto", &d).file_name().unwrap(),
+            resolve_save_input("auto", &d, QUETZAL_EXT).file_name().unwrap(),
             "auto.QZL",
             "the list offered `auto`, so it must resolve to the file that produced it",
         );
-        for name in existing_saves(&d) {
-            assert!(resolve_save_input(&name, &d).is_file(), "{name} round-trips");
+        for name in existing_saves(&d, QUETZAL_EXT) {
+            assert!(resolve_save_input(&name, &d, QUETZAL_EXT).is_file(), "{name} round-trips");
         }
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -419,7 +488,7 @@ mod tests {
     #[test]
     fn a_game_with_no_saves_yet_lists_nothing_and_prints_nothing() {
         let missing = std::path::Path::new("/no/such/game/dir/anywhere");
-        assert!(existing_saves(missing).is_empty());
+        assert!(existing_saves(missing, QUETZAL_EXT).is_empty());
         assert_eq!(save_list_line(&[]), None, "a first save looks exactly as it always did");
     }
 
@@ -442,12 +511,12 @@ mod tests {
     #[test]
     fn a_save_named_like_a_number_is_still_reachable() {
         let d = dir_with("numeric", &["2.qzl", "cellar.qzl"]);
-        let saves = existing_saves(&d);
+        let saves = existing_saves(&d, QUETZAL_EXT);
         assert_eq!(saves, vec!["2".to_string(), "cellar".to_string()]);
         // Typing `2` picks the FIRST entry, which here happens to be the file `2`.
         assert_eq!(pick_save("2", &saves), Some("cellar"), "the index wins at the prompt");
         // …and the file itself is still addressable by its full name.
-        assert!(resolve_save_input("2.qzl", &d).is_file(), "and by name with the extension");
+        assert!(resolve_save_input("2.qzl", &d, QUETZAL_EXT).is_file(), "and by name with the extension");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -463,10 +532,10 @@ mod tests {
     #[test]
     fn an_existing_save_warns_and_names_itself() {
         let d = dir_with("overwrite", &["cellar.qzl"]);
-        let warn = overwrite_warning(&resolve_save_input("cellar", &d)).expect("exists");
+        let warn = overwrite_warning(&resolve_save_input("cellar", &d, QUETZAL_EXT)).expect("exists");
         assert!(warn.contains("'cellar'"), "names the save that would be lost: {warn:?}");
         assert!(warn.contains("(y/N)"), "and shows which answer is the safe one: {warn:?}");
-        assert_eq!(overwrite_warning(&resolve_save_input("troll", &d)), None, "a new name");
+        assert_eq!(overwrite_warning(&resolve_save_input("troll", &d, QUETZAL_EXT)), None, "a new name");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -715,23 +784,23 @@ mod tests {
     #[test]
     fn a_bare_save_name_lands_in_the_game_dir_a_path_does_not() {
         let gd = Path::new("/data/Zork1.z5.save");
-        assert_eq!(resolve_save_input("quick", gd), PathBuf::from("/data/Zork1.z5.save/quick.qzl"));
+        assert_eq!(resolve_save_input("quick", gd, QUETZAL_EXT), PathBuf::from("/data/Zork1.z5.save/quick.qzl"));
         assert_eq!(
-            resolve_save_input("quick.qzl", gd),
+            resolve_save_input("quick.qzl", gd, QUETZAL_EXT),
             PathBuf::from("/data/Zork1.z5.save/quick.qzl"),
             "an extension the player typed is not doubled"
         );
-        assert_eq!(resolve_save_input("/tmp/foo.qzl", gd), PathBuf::from("/tmp/foo.qzl"));
+        assert_eq!(resolve_save_input("/tmp/foo.qzl", gd, QUETZAL_EXT), PathBuf::from("/tmp/foo.qzl"));
         // A RELATIVE path is the case that actually pins the rule: `Path::join`
         // with an absolute path replaces the whole thing, so the absolute case
         // above passes either way and cannot tell a working escape hatch from a
         // broken one.
         assert_eq!(
-            resolve_save_input("saves/foo.qzl", gd),
+            resolve_save_input("saves/foo.qzl", gd, QUETZAL_EXT),
             PathBuf::from("saves/foo.qzl"),
             "a path the player typed is honoured, not reparented into the game dir"
         );
-        assert_eq!(resolve_save_input("  quick  ", gd), PathBuf::from("/data/Zork1.z5.save/quick.qzl"),
+        assert_eq!(resolve_save_input("  quick  ", gd, QUETZAL_EXT), PathBuf::from("/data/Zork1.z5.save/quick.qzl"),
             "trimmed, because the prompt line carries whatever was typed");
     }
 }

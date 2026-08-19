@@ -3,17 +3,27 @@
 // The zero-Glk counterpart to `zvm-cli`/`gvm-cli`: it loads a real Adventure
 // International `.dat` and plays it via stdin/stdout, so a published game can be
 // smoke-tested headlessly by piping a command script in and diffing the
-// transcript. Scott is line-only (no char input, windows, colour, or sound and
-// no in-game save protocol), so the whole host loop is: describe → prompt →
-// read a line → step → print. That is all this binary needs to be.
+// transcript. Scott is line-only — no char input, windows, colour or sound — so
+// the whole host loop is: describe → prompt → read a line → step → print.
 //
-// Usage: scott-cli <adv.dat> [--seed <n>] [--max-turns <n>]
+// **A Scott game has no save protocol of its own; the HOST still saves** (SQ-0919).
+// Those are two different statements and this header used to run them together,
+// which is how the gap stayed invisible for so long: there is no `@save` opcode to
+// intercept because Scott has no such opcode, but `scott::Vm` has carried
+// `snapshot`/`restore` all along and the TUI has used them all along. Classic
+// ScottFree did the same thing — its SAVE GAME and LOAD GAME are the interpreter's
+// commands, not the adventure's — so `/save` and `/restore` here are period-correct
+// as well as useful.
+//
+// Usage: scott-cli <adv.dat> [--seed <n>] [--max-turns <n>] [--data-dir <path>]
 //   --seed <n>       seed the VM's occurrence-roll PRNG for reproducible runs
 //   --max-turns <n>  stop after N commands (a safety cap for scripted input)
+//   --data-dir <p>   where saves live (default: beside the .dat)
 
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 use cli_host::{HostMode, TerminalGuard};
@@ -122,6 +132,9 @@ struct Args {
     seed: Option<u32>,
     max_turns: Option<u64>,
     no_more: bool,
+    /// `--data-dir`: where saves live. `None` puts them beside the `.dat`, which
+    /// is what `cli_host::game_dir` does for the other two hosts.
+    data_dir: Option<String>,
 }
 
 /// Every option `scott-cli` accepts; `cli_host::args` applies the rules.
@@ -132,6 +145,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--no-more", "--no-page"]),
     cli_host::Opt::valued(&["--seed"]),
     cli_host::Opt::valued(&["--max-turns"]),
+    cli_host::Opt::valued(&["--data-dir"]),
 ];
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -153,7 +167,163 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         seed: num("--seed")?.map(|v| v as u32),
         max_turns: num("--max-turns")?,
         no_more: m.has("--no-more"),
+        data_dir: m.value("--data-dir").map(str::to_string),
     })
+}
+
+// ── host commands ─────────────────────────────────────────────────────────────
+
+/// A command the HOST answers, never passed to the game.
+///
+/// The leading slash is what makes interception safe, and the reasoning is
+/// `cli_host::input::is_status_request`'s: any bare word risks shadowing a verb
+/// the adventure defines, and a host that silently eats a real command is worse
+/// than no feature. Scott's parser is two words deep and assigns no meaning to
+/// `/` at all.
+#[derive(Debug, PartialEq, Eq)]
+enum HostCommand {
+    /// Repeat the room block.
+    Status,
+    /// Save; the name may be empty, meaning "ask me".
+    Save(String),
+    /// Restore; likewise.
+    Restore(String),
+}
+
+/// Parse `line` as a host command, or `None` for a game command.
+///
+/// A bare `/save` is not an error — it prompts, which is where the numbered list
+/// of what already exists gets shown. `/save cellar` skips straight to the name,
+/// for a scripted transcript that cannot answer a prompt.
+fn host_command(line: &str) -> Option<HostCommand> {
+    let t = line.trim();
+    if cli_host::input::is_status_request(t) {
+        return Some(HostCommand::Status);
+    }
+    let (verb, rest) = t.split_once(char::is_whitespace).unwrap_or((t, ""));
+    let rest = rest.trim().to_string();
+    match verb.to_ascii_lowercase().as_str() {
+        "/save" => Some(HostCommand::Save(rest)),
+        "/restore" | "/load" => Some(HostCommand::Restore(rest)),
+        _ => None,
+    }
+}
+
+// ── save / restore ────────────────────────────────────────────────────────────
+
+/// Prompt for a save name, listing what already exists above it (SQ-0918).
+///
+/// Reads through [`read_command`] rather than stdin directly, so the raw-mode
+/// editor, the piped echo and the EOF rule are the same ones the game prompt uses
+/// — a filename typed at a TTY must behave like every other line this host reads.
+/// EOF yields an empty string, which every caller treats as a cancel.
+fn prompt_line(
+    out: &mut impl Write,
+    interactive: bool,
+    prompt: &str,
+    saves: &[String],
+) -> String {
+    if let Some(line) = cli_host::save_list_line(saves) {
+        let _ = writeln!(out, "\n{line}");
+    }
+    let _ = write!(out, "{prompt}");
+    let _ = out.flush();
+    read_command(interactive, out).unwrap_or_default()
+}
+
+/// Write `vm`'s snapshot to `name` (or to a name the player is asked for).
+///
+/// The bytes are `scott::Vm::snapshot`'s — item locations, the player's room, the
+/// flags, the counters and the lamp — and they carry `SCOTT_EXT` rather than
+/// `.qzl` because they are not Quetzal and it would be a lie to say they were.
+fn do_save(
+    out: &mut impl Write,
+    interactive: bool,
+    vm: &Vm,
+    game_dir: &Path,
+    name: &str,
+) {
+    let saves = cli_host::existing_saves(game_dir, cli_host::SCOTT_EXT);
+    let typed = if name.is_empty() {
+        prompt_line(out, interactive, "Save as ? ", &saves)
+    } else {
+        name.to_string()
+    };
+    if typed.trim().is_empty() {
+        let _ = writeln!(out, "Save cancelled.");
+        return;
+    }
+    // Deliberately NOT `pick_save`: at a save prompt a number would mean
+    // "overwrite that one", and silently clobbering a save the player named is the
+    // defect SQ-0648 fixed in the TUI. The list is a reminder of what you would
+    // collide with, not a way to choose a target.
+    let path = cli_host::resolve_save_input(&typed, game_dir, cli_host::SCOTT_EXT);
+    if let Some(warning) = cli_host::overwrite_warning(&path) {
+        if !cli_host::is_yes(&prompt_line(out, interactive, &warning, &[])) {
+            let _ = writeln!(out, "Save cancelled.");
+            return;
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    match fs::write(&path, vm.snapshot()) {
+        Ok(()) => {
+            let _ = writeln!(out, "Saved to '{}'.", path.display());
+        }
+        Err(e) => {
+            let _ = writeln!(out, "Save failed: {e}");
+        }
+    }
+}
+
+/// Restore `vm` from `name` (or from a name the player is asked for).
+///
+/// `true` when the VM actually changed, so the caller knows to redraw the room —
+/// a restore that lands you somewhere else and says nothing about it is the one
+/// way this could be worse than not having it.
+///
+/// **A save from a different adventure is refused, not half-applied.**
+/// `Vm::restore` checks the item count against the loaded database before it
+/// writes anything, so pointing this at another game's `.sav` fails cleanly
+/// instead of scattering one adventure's item locations through another's.
+fn do_restore(
+    out: &mut impl Write,
+    interactive: bool,
+    vm: &mut Vm,
+    game_dir: &Path,
+    name: &str,
+) -> bool {
+    let saves = cli_host::existing_saves(game_dir, cli_host::SCOTT_EXT);
+    let typed = if name.is_empty() {
+        prompt_line(out, interactive, "Restore which ? ", &saves)
+    } else {
+        name.to_string()
+    };
+    if typed.trim().is_empty() {
+        let _ = writeln!(out, "Restore cancelled.");
+        return false;
+    }
+    // Here a number DOES pick from the list, which is safe because restoring is
+    // not destructive of anything on disk (SQ-0918).
+    let chosen = cli_host::pick_save(&typed, &saves).map_or(typed.clone(), str::to_string);
+    let path = cli_host::resolve_save_input(&chosen, game_dir, cli_host::SCOTT_EXT);
+    match fs::read(&path) {
+        Ok(bytes) => match vm.restore(&bytes) {
+            Ok(()) => {
+                let _ = writeln!(out, "Restored from '{}'.", path.display());
+                true
+            }
+            Err(()) => {
+                let _ = writeln!(out, "Restore failed: '{}' is not a save for this game.", path.display());
+                false
+            }
+        },
+        Err(e) => {
+            let _ = writeln!(out, "Restore failed: {e}");
+            false
+        }
+    }
 }
 
 const HELP: &str = "\
@@ -166,6 +336,13 @@ Arguments:
 
 Host commands (typed at any prompt, never passed to the game):
   /status         Repeat the room block (location, exits, what is here)
+  /save [name]    Save the game. Bare, it lists what you already have and asks;
+                  with a name it goes straight there (and still asks before
+                  overwriting). Scott has no save format of its own, so these are
+                  the host's own snapshots and carry .sav rather than .qzl.
+  /restore [name] Restore. Bare, it lists your saves and takes a number or a
+                  name. A save from a different adventure is refused rather than
+                  half-applied. Alias: /load
 
 Options:
       --screen-reader Linear plain text (alias: --plain; also selected by
@@ -177,6 +354,8 @@ Options:
                       /status.
       --no-more       Disable [MORE] paging on long output (alias: --no-page)
       --seed <n>      Seed the RNG for reproducible play
+      --data-dir <p>  Where saves live (default: a .save directory beside the
+                      .dat, the same rule zvm-cli and gvm-cli follow)
       --max-turns <n> Stop after n turns (headless/testing)
   -V, --version       Print version and exit
   -h, --help          Print this help and exit
@@ -215,6 +394,9 @@ fn main() {
     if let Some(seed) = args.seed {
         vm.seed_rng(seed);
     }
+    // Saves live where the other two hosts put theirs, by the same rule, so a
+    // player who has learned one has learned all three (SQ-0919).
+    let game_dir: PathBuf = cli_host::game_dir(Path::new(&args.path), args.data_dir.as_deref());
 
     // scott-cli emits no escape sequences at all, so `rich` never comes up here
     // — the only terminal state it touches is raw mode, and until SQ-0605 it had
@@ -286,18 +468,36 @@ fn main() {
         // only when it *changes*, so after a few turns of conversation it has
         // scrolled away (SQ-0610).
         let read = loop {
-            match read_command(interactive, &mut out) {
-                Some(l) if cli_host::input::is_status_request(&l) => {
+            let line = read_command(interactive, &mut out);
+            // Both a real command and end-of-input leave the loop; only a HOST
+            // command goes round again. Keeping EOF as `None` here matters —
+            // turning it into an empty command is the bug that hung the other two
+            // CLIs (SQ-0604/0605).
+            let Some(l) = line else { break None };
+            match host_command(&l) {
+                Some(HostCommand::Status) => {
                     let _ = writeln!(out, "{}", vm.room_block());
-                    let _ = write!(out, "{PROMPT}");
-                    let _ = out.flush();
                 }
-                // Both a real command and end-of-input leave the loop; only the
-                // status request goes round again. Keeping EOF as `None` here
-                // matters — turning it into an empty command is the bug that hung
-                // the other two CLIs (SQ-0604/0605).
-                other => break other,
+                Some(HostCommand::Save(name)) => {
+                    do_save(&mut out, interactive, &vm, &game_dir, &name);
+                }
+                Some(HostCommand::Restore(name)) => {
+                    if do_restore(&mut out, interactive, &mut vm, &game_dir, &name) {
+                        // A restore moves you, and the outer loop only prints the
+                        // room when it CHANGES — which it will not notice from in
+                        // here. Show it now, and record it, so the player is told
+                        // where the restore put them and the outer loop does not
+                        // then print it twice.
+                        let block = vm.room_block();
+                        let _ = writeln!(out, "\n{block}");
+                        last_block = block;
+                    }
+                }
+                // Not ours: hand it to the game.
+                None => break Some(l),
             }
+            let _ = write!(out, "{PROMPT}");
+            let _ = out.flush();
         };
         let Some(line) = read else {
             let _ = writeln!(out); // tidy trailing newline on EOF / quit
@@ -331,6 +531,112 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── host commands (SQ-0919) ───────────────────────────────────────────────
+
+    /// The slash is what makes interception safe, so a bare word must NOT be one.
+    /// `save` and `restore` are perfectly ordinary things to type at a Scott
+    /// prompt — and a host that ate them would be worse than no feature.
+    #[test]
+    fn only_a_slash_makes_a_host_command() {
+        assert_eq!(host_command("/status"), Some(HostCommand::Status));
+        assert_eq!(host_command("/save"), Some(HostCommand::Save(String::new())));
+        assert_eq!(host_command("/save cellar"), Some(HostCommand::Save("cellar".into())));
+        assert_eq!(host_command("/restore"), Some(HostCommand::Restore(String::new())));
+        assert_eq!(host_command("/load deep"), Some(HostCommand::Restore("deep".into())));
+        // Case and surrounding space are the player's, not ours.
+        assert_eq!(host_command("  /SAVE  cellar "), Some(HostCommand::Save("cellar".into())));
+
+        for game in ["save", "restore", "load", "save game", "go north", "", "/", "/quit"] {
+            assert_eq!(host_command(game), None, "{game:?} belongs to the adventure");
+        }
+    }
+
+    // ── save / restore round trip ─────────────────────────────────────────────
+
+    fn tiny_cave() -> Vm {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scott/tests/tiny_cave.dat");
+        let src = fs::read_to_string(&path).expect("the redistributable fixture is checked in");
+        Vm::new(Database::parse(&src).expect("valid .dat"))
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("scott-cli-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The whole feature, end to end: a snapshot taken before a move restores the
+    /// world to before that move.
+    ///
+    /// Both calls are given a NAME, so neither prompts — a test that read stdin
+    /// would hang under nextest, where every case gets its own process and no
+    /// terminal.
+    #[test]
+    fn a_save_restores_the_world_to_where_it_was() {
+        let dir = scratch("roundtrip");
+        let mut vm = tiny_cave();
+        let mut out: Vec<u8> = Vec::new();
+
+        let before = vm.room_block();
+        do_save(&mut out, false, &vm, &dir, "here");
+        assert!(dir.join("here.sav").is_file(), "and it lands under .sav, not .qzl");
+
+        vm.supply_line("GO DOWN");
+        let _ = vm.step();
+        assert_ne!(vm.room_block(), before, "the move has to actually move, or this proves nothing");
+
+        assert!(do_restore(&mut out, false, &mut vm, &dir, "here"));
+        assert_eq!(vm.room_block(), before, "restored to before the move");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **A save from another adventure is refused rather than half-applied.**
+    /// `Vm::restore` checks the item count against the loaded database before it
+    /// writes anything; without that check a mismatched save would scatter one
+    /// game's item locations through another's.
+    #[test]
+    fn a_save_from_a_different_game_is_refused() {
+        let dir = scratch("foreign");
+        let mut vm = tiny_cave();
+        let before = vm.room_block();
+        let mut out: Vec<u8> = Vec::new();
+
+        // A snapshot shaped like one, for a game with a different item count.
+        let mut bogus = 999u32.to_le_bytes().to_vec();
+        bogus.extend(std::iter::repeat_n(0u8, 4096));
+        fs::write(dir.join("alien.sav"), &bogus).unwrap();
+
+        assert!(!do_restore(&mut out, false, &mut vm, &dir, "alien"));
+        assert_eq!(vm.room_block(), before, "and the live game is untouched");
+        assert!(
+            String::from_utf8_lossy(&out).contains("not a save for this game"),
+            "the player is told why: {}",
+            String::from_utf8_lossy(&out)
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An existing name is not silently clobbered. The answer is read from the
+    /// caller, so this pins only that the WARNING is raised for the path
+    /// `do_save` would write — the guard `cli_host::overwrite_warning` provides
+    /// and `zvm-cli` already uses (SQ-0918).
+    #[test]
+    fn saving_over_an_existing_name_has_something_to_warn_about() {
+        let dir = scratch("overwrite");
+        let vm = tiny_cave();
+        let mut out: Vec<u8> = Vec::new();
+        do_save(&mut out, false, &vm, &dir, "twice");
+
+        let path = cli_host::resolve_save_input("twice", &dir, cli_host::SCOTT_EXT);
+        assert!(cli_host::overwrite_warning(&path).is_some(), "the second save must ask first");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn separator_rule_is_sized_to_the_room_block() {

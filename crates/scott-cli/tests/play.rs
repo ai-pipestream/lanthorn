@@ -12,6 +12,14 @@ fn fixture() -> PathBuf {
         .join("../scott/tests/tiny_cave.dat")
 }
 
+/// A fresh empty directory for a case that writes saves.
+fn scratch(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("scott-cli-play-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
 /// Run the binary with `stdin_script` piped in; return captured stdout.
 fn play(stdin_script: &str, extra_args: &[&str]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scott-cli"));
@@ -109,4 +117,93 @@ fn no_score_announcement_without_screen_reader_mode() {
     let script = "take lamp\ndown\nrub lamp\nget idol\nup\ndown\ndown\ndrop idol\n";
     let transcript = play(script, &["--seed", "1"]);
     assert!(!transcript.contains("[Score"), "no announcement by default:\n{transcript}");
+}
+
+// ── host save / restore (SQ-0919) ─────────────────────────────────────────────
+
+/// The real binary, a piped script, and a state change that has to survive it.
+///
+/// Scott has no save protocol of its own, which is not the same as the host being
+/// unable to save — the header used to run those two together and that is how this
+/// stayed missing while the other two CLIs had it. `scott::Vm::snapshot`/`restore`
+/// have been there all along; this is the loop finally reaching them.
+#[test]
+fn a_host_save_and_restore_survive_a_move() {
+    let dir = scratch("roundtrip");
+    let transcript = play(
+        "/save here\ndown\n/restore here\n",
+        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+    );
+
+    assert!(transcript.contains("Saved to"), "the save reports where it went:\n{transcript}");
+    assert!(transcript.contains("Restored from"), "and the restore says so:\n{transcript}");
+
+    // The restore has to SHOW you where it put you. The outer loop only prints the
+    // room when it changes and cannot see a change made from inside the input
+    // loop, so without an explicit redraw the player is silently teleported.
+    let after = transcript.split("Restored from").nth(1).unwrap_or_default();
+    assert!(
+        after.contains("sunlit forest clearing"),
+        "the room is redrawn after a restore:\n{transcript}"
+    );
+
+    // …and it really landed under `.sav`, because these bytes are not Quetzal.
+    let saves: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .flat_map(|e| std::fs::read_dir(e.path()).ok())
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(saves, vec!["here.sav".to_string()], "one save, named honestly");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A number at the restore prompt picks from the listed saves (SQ-0918), and the
+/// list is printed before the prompt so there is something to count.
+#[test]
+fn a_bare_restore_lists_the_saves_and_takes_a_number() {
+    let dir = scratch("bynumber");
+    let transcript = play(
+        "/save alpha\ndown\n/restore\n1\n",
+        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+    );
+    assert!(transcript.contains("saves: 1 alpha"), "the list is shown:\n{transcript}");
+    assert!(transcript.contains("Restored from"), "and the number picked it:\n{transcript}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Saving over a name asks first, and a refusal leaves the earlier save alone —
+/// the guard `zvm-cli` got under SQ-0918, which `scott-cli` had no save to need.
+#[test]
+fn saving_over_a_name_asks_and_a_no_keeps_the_original() {
+    let dir = scratch("overwrite");
+    let transcript = play(
+        "/save keep\n/save keep\nn\n",
+        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+    );
+    assert!(transcript.contains("already exists. Overwrite? (y/N)"), "asks:\n{transcript}");
+    assert!(transcript.contains("Save cancelled."), "and a no is a no:\n{transcript}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A bare word is the adventure's, not ours.** `save` and `restore` are
+/// ordinary things to type at a Scott prompt; a host that swallowed them would be
+/// worse than no feature at all.
+#[test]
+fn an_unslashed_save_still_reaches_the_game() {
+    let dir = scratch("bareword");
+    let transcript = play(
+        "save\n",
+        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+    );
+    assert!(!transcript.contains("Save as ?"), "the host must not claim it:\n{transcript}");
+    assert!(!transcript.contains("Saved to"), "nor save:\n{transcript}");
+    assert!(
+        std::fs::read_dir(&dir).unwrap().flatten().next().is_none(),
+        "and nothing reached disk",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

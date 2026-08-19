@@ -904,7 +904,7 @@ fn handle_save_request(machine: &mut Machine, game_dir: &Path, filename: &str) {
         machine.complete_save(false);
         return;
     }
-    let path = cli_host::resolve_save_input(filename, game_dir);
+    let path = cli_host::resolve_save_input(filename, game_dir, cli_host::QUETZAL_EXT);
     // `fs::write` below is unconditional, so without this a repeated name silently
     // destroys the earlier save — the defect SQ-0648 fixed in the TUI, still live
     // out here (SQ-0918). A refusal is a cancel, which is the same path an empty
@@ -942,7 +942,7 @@ fn handle_restore_request(machine: &mut Machine, game_dir: &Path, filename: &str
         machine.complete_restore_failure();
         return;
     }
-    let path = cli_host::resolve_save_input(filename, game_dir);
+    let path = cli_host::resolve_save_input(filename, game_dir, cli_host::QUETZAL_EXT);
     match fs::read(&path) {
         Ok(data) => match machine.complete_restore_success(&data) {
             Ok(()) => {} // restored; @save descriptor completed forward
@@ -1859,14 +1859,14 @@ fn main() {
                 // The list is a reminder of what you would collide with. A number
                 // is NOT accepted here — see `cli_host::pick_save` on why an
                 // overwrite has to be spelled out.
-                let saves = cli_host::existing_saves(&game_dir);
+                let saves = cli_host::existing_saves(&game_dir, cli_host::QUETZAL_EXT);
                 let filename = prompt_and_read_line("Save to file: ", &saves);
                 handle_save_request(&mut machine, &game_dir, filename.trim());
             }
 
             StepResult::RestoreRequest => {
                 release_prompt(&mut machine);
-                let saves = cli_host::existing_saves(&game_dir);
+                let saves = cli_host::existing_saves(&game_dir, cli_host::QUETZAL_EXT);
                 let filename = prompt_and_read_line("Restore from file: ", &saves);
                 // A number picks from the list; anything else is a filename exactly
                 // as before, so a save actually called `2` stays reachable.
