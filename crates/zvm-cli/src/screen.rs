@@ -126,6 +126,65 @@ pub fn status_text(st: &StatusLine, cols: u16) -> String {
     format!(" {}{}{} ", left, " ".repeat(fill), right)
 }
 
+/// The v1-v3 status row, dressed as `look`'s machine dressed its own (SQ-0873).
+///
+/// `None` — every ordinary run — is the plain full-width reverse this has always
+/// emitted, and so is [`StatusBand::FullReverse`]: the page and the ink are the
+/// terminal's own defaults by the time this is called, so `\x1b[7m` swaps exactly
+/// the machine's pair.
+///
+/// The other three are the reason this function exists.
+/// [`StatusBand::Ruled`] is the Macintosh, which does not distinguish the band by
+/// ground at all and puts solid rules above and below it — one row of underline
+/// is a terminal's whole horizontal-rule vocabulary.
+/// [`StatusBand::Own`] states a pair outright, being neither the body pair nor
+/// its reverse.
+/// [`StatusBand::PerRun`] is the Amiga, where the reversal is applied behind each
+/// RUN of text and the page shows between: measured on `amiga-spellbreaker.png`
+/// as 376 px of page between "Council Chamber" and "Score: 0/0". A run breaks on
+/// two or more spaces, so the single space inside a room name stays inside it —
+/// which is what the capture shows.
+///
+/// Version 4 is inside the period look's range and never reaches here: a v4 story
+/// writes its own upper window and this row is only ever the v1-v3 status line
+/// the interpreter synthesizes.
+pub fn status_band_ansi(text: &str, look: Option<zvm::interpreter::PeriodLook>) -> String {
+    use zvm::interpreter::StatusBand;
+    let reverse = |t: &str| format!("\x1b[7m{t}\x1b[0m");
+    match look.map(|l| l.status) {
+        None | Some(StatusBand::FullReverse) => reverse(text),
+        Some(StatusBand::Ruled) => format!("\x1b[4m{text}\x1b[0m"),
+        Some(StatusBand::Own { ground, ink }) => format!(
+            "\x1b[38;2;{};{};{};48;2;{};{};{}m{text}\x1b[0m",
+            ink.0, ink.1, ink.2, ground.0, ground.1, ground.2
+        ),
+        Some(StatusBand::PerRun) => {
+            let mut out = String::new();
+            let mut rest = text;
+            while !rest.is_empty() {
+                // A gap is THREE or more spaces. Two is what `status_text` puts
+                // between "Score:" and "Moves:", and the Amiga capture reverses
+                // those as one run — the page shows between the LOCATION and the
+                // score, which is the wide fill, and nowhere else.
+                let gap_at = rest.match_indices("   ").map(|(i, _)| i).next();
+                let (run, tail) = match gap_at {
+                    Some(0) => {
+                        let end = rest.find(|c| c != ' ').unwrap_or(rest.len());
+                        out.push_str(&rest[..end]);
+                        rest = &rest[end..];
+                        continue;
+                    }
+                    Some(i) => (&rest[..i], &rest[i..]),
+                    None => (rest, ""),
+                };
+                out.push_str(&reverse(run));
+                rest = tail;
+            }
+            out
+        }
+    }
+}
+
 /// Plain text of one upper-window row, trailing blanks trimmed.
 pub fn upper_row_text(upper: &UpperWindow, row: u16) -> String {
     let mut s = String::new();
@@ -255,6 +314,16 @@ pub struct ScreenView {
     // new upper region (see the shift logic in `render`). Only meaningful right
     // after an `erase_window`, so continuous flow (no erase) is never shifted.
     pending_erase_shift: bool,
+    /// The machine's period look for this run, when `--period-look` asked for one
+    /// and the story is v1-v4 (SQ-0873). `None` everywhere else, which is the
+    /// default and every behaviour below unchanged.
+    ///
+    /// The page and the ink are the TERMINAL's own defaults by then (OSC 11/10,
+    /// set once in `main`), so what is left here is the one thing they cannot
+    /// carry: how that machine set its status line apart. Four of the five
+    /// measured do it four different ways and only the Apple II, the Commodore
+    /// 128 and the Solid Gold Commodore 64 do what this view already did.
+    period_look: Option<zvm::interpreter::PeriodLook>,
 }
 
 impl ScreenView {
@@ -277,7 +346,14 @@ impl ScreenView {
             active_rows: 0,
             last_block: None,
             pending_erase_shift: false,
+            period_look: None,
         }
+    }
+
+    /// Dress the status band as `look`'s machine did (SQ-0873); `None` restores
+    /// the plain reverse-video bar.
+    pub fn set_period_look(&mut self, look: Option<zvm::interpreter::PeriodLook>) {
+        self.period_look = look;
     }
 
     /// Choose where the pinned rows sit. The next frame acts on it: the live region
@@ -353,12 +429,17 @@ impl ScreenView {
 
     /// ANSI rows of the top region (reverse-video bar for v3, per-cell SGR runs
     /// for v4+).
-    fn rows_ansi(machine: &Machine, top: u16, cols: u16) -> Vec<String> {
+    fn rows_ansi(
+        machine: &Machine,
+        top: u16,
+        cols: u16,
+        look: Option<zvm::interpreter::PeriodLook>,
+    ) -> Vec<String> {
         if top == 0 {
             return Vec::new();
         }
         if machine.mem.version() < 4 {
-            vec![format!("\x1b[7m{}\x1b[0m", status_text(&machine.status_line(), cols))]
+            vec![status_band_ansi(&status_text(&machine.status_line(), cols), look)]
         } else {
             (1..=top)
                 .map(|r| {
@@ -381,7 +462,7 @@ impl ScreenView {
         }
         let top = Self::top_rows(machine);
         let plain = Self::rows_plain(machine, top, self.term_cols);
-        let ansi = Self::rows_ansi(machine, top, self.term_cols);
+        let ansi = Self::rows_ansi(machine, top, self.term_cols, self.period_look);
         let bg_paint = bg_sgr(machine.screen.current_bg, machine.honor_game_colours);
         self.render(top, &plain, &ansi, &bg_paint)
     }
@@ -594,6 +675,85 @@ impl ScreenView {
 mod view_tests {
     use super::*;
     use zvm::screen::{StatusLine, StatusRight};
+
+    /// SQ-0873. Four machines, four bands, and only one of them is what this
+    /// view emitted for everybody.
+    #[test]
+    fn the_status_band_is_dressed_as_its_machine_dressed_it() {
+        let look = |n| zvm::interpreter::machine(n).unwrap().period_look.unwrap();
+        let bar = " Council Chamber   Score: 0/0 ";
+
+        // No look, and the Solid Gold C64: the plain full-width reverse, which is
+        // exactly right once the terminal's own defaults ARE the machine's pair.
+        assert_eq!(status_band_ansi(bar, None), format!("\x1b[7m{bar}\x1b[0m"));
+        assert_eq!(
+            status_band_ansi(bar, Some(look(zvm::interpreter::COMMODORE_64_INTERPRETER_NUMBER))),
+            format!("\x1b[7m{bar}\x1b[0m")
+        );
+
+        // The Macintosh rules its band instead of grounding it.
+        assert_eq!(
+            status_band_ansi(bar, Some(look(zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER))),
+            format!("\x1b[4m{bar}\x1b[0m")
+        );
+
+        // The Amiga reverses behind each RUN and lets the page show between —
+        // and the single space inside "Council Chamber" stays inside it.
+        let amiga = status_band_ansi(bar, Some(look(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)));
+        assert_eq!(
+            amiga,
+            "\x1b[7m Council Chamber\x1b[0m   \x1b[7mScore: 0/0 \x1b[0m",
+            "the page shows between the runs"
+        );
+        // …and the two spaces `status_text` puts inside the right-hand field are
+        // NOT a gap: the capture reverses "Score: 0/0" whole.
+        let together = status_band_ansi(
+            " West of House      Score: 0  Moves: 0 ",
+            Some(look(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)),
+        );
+        assert_eq!(
+            together,
+            "\x1b[7m West of House\x1b[0m      \x1b[7mScore: 0  Moves: 0 \x1b[0m"
+        );
+        // Whatever the dressing, the visible text is untouched.
+        assert_eq!(strip_sgr(&amiga), bar);
+    }
+
+    /// The one variant no row uses today, kept because the 1984 Commodore 64
+    /// build is the evidence that a band need not derive from the body pair.
+    #[test]
+    fn an_own_band_states_its_pair_outright() {
+        use zvm::interpreter::{CursorShape, PeriodLook, StatusBand};
+        let look = PeriodLook {
+            page: (0x6C, 0x6C, 0x6C),
+            ink: (0xFF, 0xFF, 0xFF),
+            status: StatusBand::Own { ground: (0, 0, 0), ink: (0x6C, 0x6C, 0x6C) },
+            cursor_shape: CursorShape::Underscore,
+            cursor_colour: (0, 0, 0),
+        };
+        assert_eq!(
+            status_band_ansi("x", Some(look)),
+            "\x1b[38;2;108;108;108;48;2;0;0;0mx\x1b[0m"
+        );
+    }
+
+    /// Drop every SGR sequence, leaving the text a player actually sees.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
 
     /// A hand-built v3 status region (plain + reverse-video ANSI rows).
     fn v3_rows() -> (Vec<String>, Vec<String>) {

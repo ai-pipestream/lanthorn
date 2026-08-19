@@ -971,19 +971,25 @@ Amiga floppy or anywhere else.
   names 2 or 9 outright now gets an Apple instead of an IBM PC wearing an Apple's
   number, which is what the fallback used to hand them.
 
+  **Commodore 64** is the ninth, and it arrived last because it was wrongly
+  refused. It states nothing a story can read — no palette, no `$2C`/`$2D` pair,
+  for exactly the reason the Commodore 128 states none — and it exists for the one
+  thing that *is* measured, its [period look](#the-period-look). The ground for
+  leaving it out had been that a `.d64` is a 1541 image both Commodore machines
+  read, so the disk cannot choose between 7 and 8. True, and the same thing is
+  true of ProDOS and the three Apples, all of which have profiles. A medium that
+  names a family rather than a machine means the number gets **asked for** instead
+  of inferred; it does not mean the machine goes unmodelled. So a `.d64` still
+  selects the 128, and `--interpreter 8` now gets a Commodore 64 rather than an
+  IBM PC wearing its number.
+
   **Two numbers still have no profile, and each is a decline rather than a
   gap**: 1 DECSystem-20 (what declining already falls through to — whether it
   deserves a bundle of its own or is honestly "a terminal, the same as the IBM
   PC" is a decision, not a datum), and 11 Tandy Color (no fixture, no sourced
-  constant — better absent than invented). **8 Commodore 64 was a third and
-  should not have been.** It was declined because a `.d64` is a 1541 image both
-  Commodore machines read, so the disk cannot choose between 7 and 8 — which is
-  true, and is the same thing that is true of ProDOS and the three Apples, all of
-  which have profiles. A medium that names a family rather than a machine means
-  the number gets asked for instead of inferred; it does not mean the machine goes
-  unmodelled. Naming one of the two that remain
+  constant — better absent than invented). Naming either of them
   still writes it into `0x1E`, because the story asked and §11.1.3 has an answer,
-  but everything else about the presentation is the IBM PC's — and `zvm-cli` now
+  but everything else about the presentation is the IBM PC's — and `zvm-cli`
   **says so** on stderr rather than letting the substitution pass unremarked.
 
 - **One machine table, two front-ends.** Everything above that a *story* can read
@@ -1109,6 +1115,9 @@ Amiga floppy or anywhere else.
   terminal. There is no separate switch for that on purpose: `honor_game_colours`
   already decides whether the game's colour choices are honoured at all, so
   turning it off hands the screen back to your theme, profile or no profile.
+  (`period_look` is *not* that switch. It governs a v1–v4 story, which has no
+  colour choices for this paragraph to be about — see
+  [The period look](#the-period-look).)
 
   **The Amiga had two pens, and moving one repaints the screen.** This is the one
   place where claiming to be an Amiga changes not just what a game is *told* but
@@ -1355,6 +1364,93 @@ background through, and a story that thinks it is on a colour display paints ove
 both. See [The colours come with the card](v6-graphics.md#the-colours-come-with-the-card).
 It applies to that story only and is never written back to your config, so
 choosing a `.cg1` once cannot quietly strip the colours from every other game.
+
+## The period look
+
+Colour arrives with **Version 5**. `set_colour` and the `$2C`/`$2D` header bytes
+are v5-and-up, so a Version 1–4 story has no colour concept at all: it never
+sets one, never reads one, never branches on one. Everything above this section
+is about a fact a story can read. This is about the other thing — what the
+*screen* looked like — and for a v1–v4 story that is all there is.
+
+Open *Zork I* off a Commodore disk or *Spellbreaker* off an Amiga floppy and
+lanthorn dresses the story pane as that machine's own interpreter dressed its
+screen: its page and its ink, its status line, and the shape of its cursor. It is
+on by default (`period_look`, in the F2 settings screen right below
+`honor_game_colours`), and it applies only where a machine is actually named —
+off a release disk, or when you set `interpreter_number` yourself.
+
+**Five machines, and not one of the three decisions follows from the others.**
+
+| # | machine | page / ink | status line | cursor |
+|---|---|---|---|---|
+| 2, 9, 10 | Apple II | `#000000` / `#FFFFFF` | full-width reverse | block |
+| 3 | Macintosh | `#FFFFFF` / `#000000` | no ground at all — **rules** | 1px bar, between glyphs |
+| 4 | Amiga | `#074BA1` / `#FFFFFF` | reverse **behind each run**, page showing between | block, `#FF7E1C` |
+| 7 | Commodore 128 | `#000000` / `#55FFFF` | full-width reverse | underscore |
+| 8 | Commodore 64 | `#000000` / `#FFFFFF` | full-width reverse | underscore |
+
+Two of them have a cursor colour that is neither their page nor their ink — the
+Amiga's orange, and the 1984 Commodore 64's black — so it cannot be built out of
+the pair. Four different status behaviours across five machines, so that cannot
+be computed either. And the Amiga's is not a *band*: on `amiga-spellbreaker.png`
+the reversal sits behind "Council Chamber" and behind "Score: 0/0" with 376
+pixels of plain blue page between them.
+
+**These are observations, not sources, and that is a real difference.** Every
+other value on this page is quoted at its constant out of Infocom's own
+interpreter — `st/stx1.s`, `zboot.asm`, `mac/xzip.lst`. These were measured off
+emulator captures in `machine-screenshots/`, row by row, and recorded as what the
+emulator drew. Two of them are values a palette choice could move (the Amiga's
+`#074BA1` is almost certainly Workbench's register `$05A`, which bit-replicates
+to `#0055AA`; the Commodore 64's greys depend on which VIC-II palette you
+believe). Three cannot move at all: the Mac Plus is 1-bit, the C128's VDC is RGBI,
+and the Apple II is monochrome — though "monochrome" there means the *white*
+monitor, and green and amber were as common.
+
+**A period look is a property of the interpreter build as much as of the
+machine.** Two Commodore 64 captures three years apart disagree on all four
+decisions: the 1984 *Hitchhiker's* is white on a grey page with a status band of
+grey on black — neither the body pair nor its reverse — and the 1987 Solid Gold
+*Zork I*, whose banner reads "Interpreter 8 Version J", is white on black with a
+plain reverse. The table has one row per machine and takes the later press.
+
+### What it will not do
+
+- **Anything you styled yourself wins.** A selector named in your `style.toml`,
+  in a `garglk.ini` found beside the story, or in the game's own sidecar is a
+  *choice*, and a choice outranks a machine default — per selector, and counting
+  the role it inherits from. Theme your transcript and the Amiga floppy will not
+  take it back.
+- **Nothing outside the story pane.** The map, the dialogs and the rest of the
+  chrome are lanthorn's, not the machine's. A Commodore's page across the whole
+  application would be dressing up rather than presenting.
+- **`honor_game_colours = false` takes it with it.** That switch is the broad
+  one: you have said "keep my terminal's colours", and painting a blue Amiga page
+  over you would be arguing. It does not work the other way — `period_look` is the
+  narrow key precisely so that declining the *presentation* never costs a v5+
+  story the colours it asked for.
+- **Never for v5 and up.** There the pair on screen is a fact the story can read,
+  and the profile already supplies it out of Infocom's source.
+
+### What a terminal cannot say
+
+The measurements are in pixels and lanthorn draws in cells. The bar and the
+underscore become the glyph that occupies the same part of the cell — `▏` and
+`▁` — and where the caret sits *on* a character the shape stands down entirely,
+because the character has to stay readable while you edit it. The Macintosh's
+rules become one row of underline, which is a terminal's whole horizontal-rule
+vocabulary.
+
+`zvm-cli` has the opposite trade and does better on the cursor. Ask for it with
+**`--period-look`** — **off** by default, because that is your terminal and not a
+pane lanthorn owns, which is the same reasoning that makes the IBM PC decline a
+default colour pair. The page and the ink go through OSC 11 and OSC 10, setting
+the terminal's *own* defaults so that every `ESC[0m` a styled run ends with
+returns to the machine's pair instead of dropping it; the cursor goes through
+DECSCUSR, which states the real shape rather than an approximation. What the CLI
+cannot say is the cursor's *colour*: DECSCUSR carries a shape and nothing else.
+`--no-game-colours` and `NO_COLOR` suppress the whole thing, as they should.
 
 ## Plain text, for screen readers
 

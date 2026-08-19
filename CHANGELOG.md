@@ -14,6 +14,36 @@ identifies itself without reading its git hash.
 
 ## Unreleased
 
+### Pre-colour stories look like the machine that sold them
+
+Colour arrives with Version 5, so a v1–v4 story has no colour concept at all —
+which means everything you see for one is the interpreter's presentation rather
+than something the story asked for. Open *Zork I* off a Commodore disk or
+*Spellbreaker* off an Amiga floppy and lanthorn now dresses the story pane the
+way that machine's own interpreter dressed its screen: its page and ink, its
+status line, and the shape of its cursor.
+
+Five machines are measured, and none of the three decisions follows from the
+others. The Amiga's status line is not a band at all — the reversal sits behind
+each run of text with the blue page showing between them — the Macintosh does not
+distinguish its status line by ground and rules it instead, and two machines have
+a cursor colour that is in neither channel of their body pair.
+
+The values are **observed** from emulator captures of the release disks, not read
+out of Infocom's source as every other value in the machine table is, and
+`zvm-cli --machines` now says so beside them.
+
+- On by default (`period_look`, in the F2 settings screen). Anything you have
+  styled yourself wins, per selector; nothing outside the story pane is touched;
+  `honor_game_colours = false` takes it with it, and never the other way round.
+- `zvm-cli --period-look` — **off** by default there, because that is your
+  terminal rather than a pane lanthorn owns. It paints through OSC 10/11 and
+  draws the machine's real cursor shape with DECSCUSR.
+- `--interpreter 8` finally gets you a **Commodore 64** instead of an IBM PC
+  wearing its number.
+
+See [The period look](docs/features/interpreter.md#the-period-look).
+
 ---
 
 ## v0.2.0 — 2026-08-19

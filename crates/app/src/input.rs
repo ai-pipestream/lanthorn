@@ -4210,17 +4210,18 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         6 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
         7 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
         8 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
-        9 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
-        10 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
-        12 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse = !cs.working.mouse; } }
-        13 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.command_bar = !cs.working.command_bar; } }
-        14 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse_wheel_invert = !cs.working.mouse_wheel_invert; } }
-        15 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_status_bar = !cs.working.show_status_bar; } }
-        16 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.watch_style = !cs.working.watch_style; } }
-        17 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.record_turn_history = !cs.working.record_turn_history; } }
-        20 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hint_skip_screen_warning = !cs.working.hint_skip_screen_warning; } }
-        23 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
-        24 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
+        9 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.period_look = !cs.working.period_look; } }
+        10 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
+        11 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
+        13 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse = !cs.working.mouse; } }
+        14 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.command_bar = !cs.working.command_bar; } }
+        15 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse_wheel_invert = !cs.working.mouse_wheel_invert; } }
+        16 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_status_bar = !cs.working.show_status_bar; } }
+        17 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.watch_style = !cs.working.watch_style; } }
+        18 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.record_turn_history = !cs.working.record_turn_history; } }
+        21 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hint_skip_screen_warning = !cs.working.hint_skip_screen_warning; } }
+        24 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
+        25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
         _ => {}
     }
 }
@@ -4261,8 +4262,8 @@ fn one_run_key_for_row(row: usize) -> Option<&'static str> {
     use crate::config::keys;
     match row {
         8 => Some(keys::HONOR_GAME_COLOURS),
-        10 => Some(keys::ENABLE_SOUND),
-        19 => Some(keys::INTERPRETER_NUMBER),
+        11 => Some(keys::ENABLE_SOUND),
+        20 => Some(keys::INTERPRETER_NUMBER),
         _ => None,
     }
 }
@@ -4282,27 +4283,28 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         6 => config_cycle_background_tidy(&mut working.background_tidy, delta),
         7 => config_cycle_aux_storage(&mut working.aux_storage, delta),
         8 => working.honor_game_colours = !working.honor_game_colours,
-        9 => working.honor_timed_input = !working.honor_timed_input,
-        10 => working.enable_sound = !working.enable_sound,
-        11 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
-        12 => working.mouse = !working.mouse,
-        13 => working.command_bar = !working.command_bar,
-        14 => working.mouse_wheel_invert = !working.mouse_wheel_invert,
-        15 => working.show_status_bar = !working.show_status_bar,
-        16 => working.watch_style = !working.watch_style,
-        17 => working.record_turn_history = !working.record_turn_history,
-        18 => working.undo_levels = (working.undo_levels as i32 + delta).clamp(0, 256) as usize,
+        9 => working.period_look = !working.period_look,
+        10 => working.honor_timed_input = !working.honor_timed_input,
+        11 => working.enable_sound = !working.enable_sound,
+        12 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
+        13 => working.mouse = !working.mouse,
+        14 => working.command_bar = !working.command_bar,
+        15 => working.mouse_wheel_invert = !working.mouse_wheel_invert,
+        16 => working.show_status_bar = !working.show_status_bar,
+        17 => working.watch_style = !working.watch_style,
+        18 => working.record_turn_history = !working.record_turn_history,
+        19 => working.undo_levels = (working.undo_levels as i32 + delta).clamp(0, 256) as usize,
         // Position 0 == None (lanthorn's default); 1..=10 are explicit interpreter numbers.
         // ← from 1 returns to "default"; → from "default" goes to 1.
-        19 => {
+        20 => {
             let pos = (working.interpreter_number.map(|n| n as i32).unwrap_or(0) + delta).clamp(0, 10);
             working.set_interpreter_number(if pos == 0 { None } else { Some(pos as u8) });
         }
-        20 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
-        24 => working.v6_arrow_keys = !working.v6_arrow_keys,
-        21 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
-        22 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
-        23 => config_cycle_v6_render(&mut working.v6_render, delta),
+        21 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
+        25 => working.v6_arrow_keys = !working.v6_arrow_keys,
+        22 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
+        23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
+        24 => config_cycle_v6_render(&mut working.v6_render, delta),
         _ => {}
     }
 }
@@ -5160,7 +5162,12 @@ mod tests {
         // Open the settings screen and work the sound row: on, then off again.
         let mut m = Mapper::default();
         apply_action(Action::OpenConfig, &mut s, &mut m);
-        let sound_row = 10;
+        // By NAME: `config_cycle` matches on the row's position, so a row inserted
+        // above this one retargets a literal at its neighbour (SQ-0873).
+        let sound_row = crate::render::config_screen::CONFIG_ROWS
+            .iter()
+            .position(|(n, _, _)| *n == "enable_sound")
+            .expect("the row exists");
         if let Some(cs) = &mut s.overlays.config_screen {
             config_cycle(&mut cs.working, sound_row, 1);
             config_cycle(&mut cs.working, sound_row, 1);
@@ -5190,7 +5197,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("style.toml"), "[colors]\n\"transcript\" = { fg = \"white\" }\n")
             .unwrap();
-        let honour_row = 8;
+        let honour_row = crate::render::config_screen::CONFIG_ROWS
+            .iter()
+            .position(|(n, _, _)| *n == "honor_game_colours")
+            .expect("the row exists");
 
         // What a boot on a two-colour archive leaves behind (SQ-0806/SQ-0846).
         let seed = |dir: &std::path::Path| {
@@ -10336,16 +10346,24 @@ mod tests {
 
     #[test]
     fn config_cycle_interpreter_number_reaches_default() {
+        // By NAME, not by a literal: `config_cycle` is a match on the row's
+        // position, so inserting any row above this one silently retargets a
+        // hard-coded index at its neighbour (SQ-0873 inserted `period_look` and
+        // this test started cycling `undo_levels` instead).
+        let row = crate::render::config_screen::CONFIG_ROWS
+            .iter()
+            .position(|(n, _, _)| *n == "interpreter_number")
+            .expect("the row exists");
         let mut c = crate::config::Config::default();
         c.interpreter_number = None;
-        config_cycle(&mut c, 19, 1); // default → 1
+        config_cycle(&mut c, row, 1); // default → 1
         assert_eq!(c.interpreter_number, Some(1));
-        config_cycle(&mut c, 19, -1); // 1 → default
+        config_cycle(&mut c, row, -1); // 1 → default
         assert_eq!(c.interpreter_number, None);
-        config_cycle(&mut c, 19, -1); // default clamps, stays default
+        config_cycle(&mut c, row, -1); // default clamps, stays default
         assert_eq!(c.interpreter_number, None);
         for _ in 0..20 {
-            config_cycle(&mut c, 19, 1); // climbs then clamps at 10
+            config_cycle(&mut c, row, 1); // climbs then clamps at 10
         }
         assert_eq!(c.interpreter_number, Some(10));
     }

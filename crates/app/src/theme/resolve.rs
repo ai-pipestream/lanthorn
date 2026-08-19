@@ -219,6 +219,53 @@ impl Theme {
         self.map.get(sel).cloned().unwrap_or_else(|| self.fallback.clone())
     }
 
+    /// Is `sel` still nobody's — neither it nor the `role` it inherits from
+    /// touched by any layer?
+    ///
+    /// A machine default may fill an unclaimed selector and must not overwrite a
+    /// CHOICE, which is the rule SQ-0847 established for the Macintosh's white
+    /// page and SQ-0873's period look reuses. [`Provenance`] is stamped per row
+    /// and does not travel down the parent chain, so a player who recoloured the
+    /// `text` role and left `transcript` alone has still chosen the transcript's
+    /// ink — hence the second argument. Pass the row's registry parent.
+    pub fn unclaimed(&self, sel: &str, role: &str) -> bool {
+        [sel, role].iter().all(|s| {
+            self.map.get(*s).map(|r| r.provenance == Provenance::Default).unwrap_or(true)
+        })
+    }
+
+    /// Patch `style`'s colours into `sel`, if [`Theme::unclaimed`].
+    ///
+    /// A patch, so a style that sets only a background leaves the ink alone —
+    /// which is what the transcript's own meta and warning selectors want from a
+    /// machine's page, having ink of their own that says something lanthorn
+    /// means. Modifiers on `style` are added to whatever the row already carries.
+    pub fn fill_unclaimed(&mut self, sel: &str, role: &str, style: Style) {
+        if !self.unclaimed(sel, role) {
+            return;
+        }
+        if let Some(row) = self.map.get_mut(sel) {
+            row.style = row.style.patch(style);
+        }
+    }
+
+    /// Replace `sel`'s style outright, if [`Theme::unclaimed`].
+    ///
+    /// For the one selector whose registry default is itself a *rendering* rather
+    /// than a colour: `status_bar` ships REVERSED, which is lanthorn's way of
+    /// setting the bar apart. A machine that states its own band has already said
+    /// how it is set apart — and a swapped pair drawn under a REVERSED modifier
+    /// swaps back, which is a full reverse rendered as no reverse at all. So the
+    /// band is stated absolutely and the row's own modifiers go with it.
+    pub fn set_unclaimed(&mut self, sel: &str, role: &str, style: Style) {
+        if !self.unclaimed(sel, role) {
+            return;
+        }
+        if let Some(row) = self.map.get_mut(sel) {
+            row.style = style;
+        }
+    }
+
     /// Non-fatal diagnostics from the resolution pass (empty when clean).
     pub fn warnings(&self) -> &[ThemeWarning] {
         &self.warnings

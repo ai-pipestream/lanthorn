@@ -522,6 +522,7 @@ pub(crate) fn default_band_height() -> u16 {
     crate::render::command_band::DEFAULT_BAND_ROWS
 }
 fn default_honor_game_colours() -> bool { true }
+fn default_period_look() -> bool { true }
 fn default_acceleration() -> bool { true }
 fn default_honor_timed_input() -> bool { true }
 fn default_enable_sound() -> bool { true }
@@ -1110,6 +1111,22 @@ pub struct Config {
     /// window. Set false to use only the configured color scheme.
     #[serde(default = "default_honor_game_colours")]
     pub honor_game_colours: bool,
+    /// When true (default), paint a **v1–v4** story the way its machine's own
+    /// interpreter did — its page and ink, its status band, its cursor (SQ-0873).
+    ///
+    /// Narrower than `honor_game_colours` and deliberately separate from it. A
+    /// v1–v4 story has no colour concept at all (`set_colour` and the `$2C`/`$2D`
+    /// bytes are v5+), so what a machine drew for one is presentation rather than
+    /// a fact the story can read — and declining the presentation must not also
+    /// cost a v5+ story the colours it asked for. `honor_game_colours = false`
+    /// still takes this with it; the reverse does not hold. See
+    /// [`crate::period`], which holds the whole gate and the reasoning.
+    ///
+    /// On by default here and OFF in `zvm-cli`: lanthorn paints a pane it owns,
+    /// and opening Zork I off an `.adf` and having it look like an Amiga is the
+    /// point. The CLI writes into a terminal belonging to the user.
+    #[serde(default = "default_period_look")]
+    pub period_look: bool,
     /// When true (default), honor the Z-machine's timed-input (`read`/`read_char`
     /// `time`+`routine` operands). Set false to treat all reads as untimed.
     #[serde(default = "default_honor_timed_input")]
@@ -1294,6 +1311,7 @@ impl Default for Config {
             text_margin_y: 0,
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
+            period_look: default_period_look(),
             honor_timed_input: default_honor_timed_input(),
             config_file: default_config_file(),
             config_error: None,
@@ -1406,6 +1424,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.show_room_numbers = from_file.show_room_numbers;
             cfg.show_status_bar = from_file.show_status_bar;
             cfg.honor_game_colours = from_file.honor_game_colours;
+            cfg.period_look = from_file.period_look;
             cfg.honor_timed_input = from_file.honor_timed_input;
             cfg.interpreter_number = from_file.interpreter_number;
             cfg.random_seed = from_file.random_seed;
@@ -1682,6 +1701,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     // one story (SQ-0806). Opening Zork Zero's CGA rendition once must not teach
     // the global config to never honour game colours again.
     doc.put("honor_game_colours", cfg.honor_game_colours.into(), cfg.honor_game_colours == def.honor_game_colours);
+    doc.put("period_look", cfg.period_look.into(), cfg.period_look == def.period_look);
     doc.put("honor_timed_input", cfg.honor_timed_input.into(), cfg.honor_timed_input == def.honor_timed_input);
     doc.put("enable_sound", cfg.enable_sound.into(), cfg.enable_sound == def.enable_sound);
     doc.put("volume", (cfg.volume as i64).into(), cfg.volume == def.volume);
@@ -2453,6 +2473,7 @@ use_defaults = false
             show_room_numbers: false,
             show_status_bar: true,
             honor_game_colours: true,
+            period_look: true,
             honor_timed_input: true,
             config_file: default_config_file(),
             config_error: None,

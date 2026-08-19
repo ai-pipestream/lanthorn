@@ -35,6 +35,23 @@ pub fn osc_reset_bg() -> &'static str {
     "\x1b]111\x07"
 }
 
+/// OSC 10: set the terminal's default FOREGROUND to `#rrggbb`.
+///
+/// The symmetric partner of [`osc_set_bg`], and it exists because a machine's
+/// period look (SQ-0873) states an ink as well as a page. Setting the terminal's
+/// own default is the only way to make it stick: every `\x1b[0m` a styled run
+/// ends with returns to the terminal's default rather than to a colour we set
+/// with SGR, so an SGR ink would be dropped by the next reset and a page set
+/// without one leaves the machine's ink to whatever the user's scheme says.
+pub fn osc_set_fg((r, g, b): (u8, u8, u8)) -> String {
+    format!("\x1b]10;#{r:02x}{g:02x}{b:02x}\x07")
+}
+
+/// OSC 110: reset the terminal's default foreground to the user's default.
+pub fn osc_reset_fg() -> &'static str {
+    "\x1b]110\x07"
+}
+
 /// DECSCUSR: force a steady block cursor (SQ-0281 — a box rather than the
 /// terminal's default underline).
 pub fn cursor_steady_block() -> &'static str {
@@ -44,6 +61,31 @@ pub fn cursor_steady_block() -> &'static str {
 /// DECSCUSR: restore the terminal's default cursor shape.
 pub fn cursor_reset() -> &'static str {
     "\x1b[0 q"
+}
+
+/// DECSCUSR: a steady underline cursor.
+///
+/// The other two steady shapes exist for SQ-0873's period look, where the shape
+/// is the machine's rather than lanthorn's: DECSCUSR's 2/4/6 map exactly onto the
+/// block, underscore and bar `zvm::interpreter::CursorShape` records, so a CLI
+/// player gets the real cursor rather than an approximation. `zvm-cli` does the
+/// mapping, keeping the Z-machine's vocabulary out of a host shared with the
+/// Glulx and Scott Adams front-ends. The TUI cannot use any of this — it hides
+/// the terminal's cursor and draws its own caret into a cell, where the shape has
+/// to become a glyph (see `app::period`).
+///
+/// The cursor's COLOUR is not expressible: DECSCUSR states a shape and nothing
+/// else, and OSC 12 is far less widely honoured than the OSC 10/11 pair the page
+/// and ink go through. Two of the five machines measured have a cursor colour
+/// that is neither their page nor their ink — the Amiga's orange, the 1984
+/// Commodore 64's black — and that is what a CLI player loses.
+pub fn cursor_steady_underline() -> &'static str {
+    "\x1b[4 q"
+}
+
+/// DECSCUSR: a steady bar (I-beam) cursor. See [`cursor_steady_underline`].
+pub fn cursor_steady_bar() -> &'static str {
+    "\x1b[6 q"
 }
 
 /// The escape to emit for a page-bg transition from `prev` to `cur` (both are
@@ -81,7 +123,7 @@ pub fn end_raw_mode() {
 /// band. `CSI r` with no parameters resets the region to the full screen and is
 /// a no-op when none was set, so it belongs in the unconditional restore.
 pub fn restore_bytes() -> String {
-    format!("\x1b[r\x1b[0m{}{}", osc_reset_bg(), cursor_reset())
+    format!("\x1b[r\x1b[0m{}{}{}", osc_reset_bg(), osc_reset_fg(), cursor_reset())
 }
 
 /// Leave raw mode and put the terminal back.

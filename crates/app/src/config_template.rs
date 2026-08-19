@@ -198,6 +198,18 @@ const INTERPRETER: &[Row] = &[
         ],
     ),
     d(
+        "period_look",
+        "true",
+        &[
+            "Paint a v1-v4 story the way its own machine's interpreter did: that",
+            "machine's page and ink, its status band, and the shape and colour of",
+            "its cursor. Measured off emulator captures of the release disks, so it",
+            "applies only when the story came off one (or you named --interpreter).",
+            "Narrower than honor_game_colours, which takes this with it when off.",
+            "A colour you set yourself in style.toml always wins.",
+        ],
+    ),
+    d(
         "honor_timed_input",
         "true",
         &["Honour the Z-machine's timed input. Set false to treat every read as untimed."],

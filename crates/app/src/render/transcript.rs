@@ -75,6 +75,43 @@ pub(crate) fn cursor_style(text_style: Style, game_input: Option<Style>) -> Styl
     }
 }
 
+/// Draw the input caret into `cell`.
+///
+/// `over_text` is true when the caret sits ON something — mid-line, or over the
+/// completion hint's first glyph — in which case the glyph is kept and only the
+/// style applies, so the text stays readable while it is edited.
+///
+/// **The machine's own caret when there is one** (SQ-0873). Not one of the five
+/// interpreters measured draws the reverse-video block a terminal front-end
+/// gives by default: three shapes across the five, and on two of them the
+/// cursor's colour is neither the page nor the ink, so it cannot be built out of
+/// the pair either. [`crate::period`] holds the shapes and what a cell grid can
+/// and cannot say about them; with no period look in force this is exactly the
+/// behaviour it always had.
+fn draw_caret(
+    cell: &mut ratatui::buffer::Cell,
+    over_text: bool,
+    look: Option<zvm::interpreter::PeriodLook>,
+    text_style: Style,
+    game_input: Option<Style>,
+) {
+    match (look, over_text) {
+        (Some(l), true) => {
+            cell.set_style(crate::period::caret_over_text(&l));
+        }
+        (Some(l), false) => {
+            let (glyph, style) = crate::period::caret_cell(&l);
+            cell.set_symbol(glyph).set_style(style);
+        }
+        (None, true) => {
+            cell.set_style(cursor_style(text_style, game_input));
+        }
+        (None, false) => {
+            cell.set_symbol(" ").set_style(cursor_style(text_style, game_input));
+        }
+    }
+}
+
 // ── Pure helpers (testable without Machine) ────────────────────────────────────
 
 /// The field values available to status-bar segment templates for one turn.
@@ -1807,6 +1844,17 @@ fn render_status_content(
         filter,
     };
 
+    // SQ-0873: on the Amiga the status line is not a band at all — the reversal
+    // is applied per RUN of text and the page shows between them (376 px of it in
+    // `amiga-spellbreaker.png`, between "Council Chamber" and "Score: 0/0"). So
+    // the row's fill above is the machine's page and the segments carry the
+    // reverse. Every other machine's band is uniform, `status_run_style` answers
+    // `None`, and the segments inherit the base exactly as they always did.
+    let run_base = state
+        .period_look
+        .and_then(|l| crate::period::status_run_style(&l))
+        .unwrap_or(base);
+
     // Resolve + style + drop hidden segments.
     let visible: Vec<(String, Style, crate::colors::Align)> = state
         .colors
@@ -1814,7 +1862,7 @@ fn render_status_content(
         .segments
         .iter()
         .filter_map(|seg| {
-            resolve_placeholders(&seg.text, &fields).map(|txt| (txt, base.patch(seg.style), seg.align))
+            resolve_placeholders(&seg.text, &fields).map(|txt| (txt, run_base.patch(seg.style), seg.align))
         })
         .collect();
 
@@ -1892,17 +1940,11 @@ fn render_input_content(
         let cursor_x = text_x + crate::textwidth::cols_of_chars(input_trunc, state.input.cursor.min(drawn)) as u16;
         if cursor_x < region.right() {
             if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
-                // Mid-line, underscore the char the caret sits ON rather than replacing it — the
-                // text must stay readable while you edit it.
-                let style = cursor_style(text_style, game_input);
                 // Mid-line, or sitting on the ghost's first glyph (SQ-0542): keep
                 // the symbol and just restyle, so the text — and the hint — stay
                 // readable under the caret.
-                if state.input.cursor < drawn || ghost.is_some() {
-                    cell.set_style(style);
-                } else {
-                    cell.set_symbol(" ").set_style(style);
-                }
+                let over_text = state.input.cursor < drawn || ghost.is_some();
+                draw_caret(cell, over_text, state.period_look, text_style, game_input);
             }
         }
     }
@@ -2398,15 +2440,11 @@ fn render_middle(
                 + crate::textwidth::cols_of_chars(input_trunc, state.input.cursor.min(drawn)) as u16;
             if cursor_x < body_area.right() {
                 if let Some(cell) = buf.cell_mut((cursor_x, row_y)) {
-                    let style = cursor_style(text_style, game_input);
-                    // Mid-line, or over the ghost's first glyph: reverse-video the
-                    // char the caret sits on (keep it readable); at the end of the
-                    // line with no hint: draw the "_" block.
-                    if state.input.cursor < drawn || ghost.is_some() {
-                        cell.set_style(style);
-                    } else {
-                        cell.set_symbol(" ").set_style(style);
-                    }
+                    // Mid-line, or over the ghost's first glyph: restyle the char
+                    // the caret sits on (keep it readable); at the end of the line
+                    // with no hint: draw the caret's own shape.
+                    let over_text = state.input.cursor < drawn || ghost.is_some();
+                    draw_caret(cell, over_text, state.period_look, text_style, game_input);
                 }
             }
         }
@@ -4644,6 +4682,16 @@ mod tests {
         assert_eq!(cs.bg, Some(Color::Rgb(255, 255, 255)), "keeps game bg (swapped by terminal)");
     }
 
+    /// The first row of `buf` whose text contains `needle`, or `None`.
+    fn find_row(buf: &Buffer, area: Rect, needle: &str) -> Option<u16> {
+        (area.y..area.bottom()).find(|&y| {
+            (area.x..area.right())
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                .collect::<String>()
+                .contains(needle)
+        })
+    }
+
     #[test]
     fn render_transcript_cursor_shown_when_focused() {
         let machine = minimal_machine();
@@ -4663,6 +4711,132 @@ mod tests {
             cursor_cell.modifier.contains(Modifier::REVERSED),
             "cursor cell should have REVERSED modifier"
         );
+    }
+
+    /// SQ-0873. Not one of the five machines measured draws the reverse-video
+    /// block a terminal front-end gives by default: the Commodores put a single
+    /// scanline on the cell's bottom row, the Macintosh a one-pixel caret in the
+    /// gap after the last glyph. The cell-grid analogue is the glyph occupying
+    /// the same eighth of the cell.
+    #[test]
+    fn the_caret_takes_its_machines_shape_under_a_period_look() {
+        let machine = minimal_machine();
+        for (number, glyph) in [
+            (zvm::interpreter::COMMODORE_64_INTERPRETER_NUMBER, "▁"),
+            (zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER, "▏"),
+            (zvm::interpreter::AMIGA_INTERPRETER_NUMBER, " "),
+        ] {
+            let look = zvm::interpreter::machine(number).unwrap().period_look.unwrap();
+            let mut state = AppState::default();
+            state.config.command_bar = true;
+            state.input.set("hi", true);
+            state.focus = Focus::Game;
+            state.period_look = Some(look);
+
+            let area = Rect::new(0, 0, 40, 5);
+            let mut buf = Buffer::empty(area);
+            render_transcript(
+                &crate::session::status_model_from_machine(&machine),
+                None,
+                &state,
+                area,
+                &mut buf,
+                None,
+            );
+
+            let cell = buf.cell((4, 4)).expect("cursor cell should exist");
+            assert_eq!(cell.symbol(), glyph, "interpreter {number} draws its own caret");
+            assert!(
+                !cell.modifier.contains(Modifier::REVERSED),
+                "interpreter {number}: the shape is stated outright, not by reversing the theme"
+            );
+        }
+    }
+
+    /// …and with no period look in force the caret is exactly what it always was.
+    /// The shape is the machine's; a story with no machine keeps the theme's.
+    #[test]
+    fn without_a_period_look_the_caret_is_the_structural_block() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = true;
+        state.input.set("hi", true);
+        state.focus = Focus::Game;
+        assert!(state.period_look.is_none());
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+        let cell = buf.cell((4, 4)).expect("cursor cell should exist");
+        assert_eq!(cell.symbol(), " ");
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+    }
+
+    /// The point of the whole feature: the prose sits on the machine's page in
+    /// the machine's ink, and the line being typed sits on the same page rather
+    /// than punching the theme's through it.
+    #[test]
+    fn the_body_and_the_input_line_stand_on_the_machines_page() {
+        let machine = minimal_machine();
+        let look = zvm::interpreter::machine(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)
+            .unwrap()
+            .period_look
+            .unwrap();
+        let mut state = AppState::default();
+        state.period_look = Some(look);
+        crate::period::apply_to_theme(&mut state.colors.theme, &look);
+        state.transcript = vec!["West of House".to_string()];
+        state.transcript_kinds = vec![crate::state::TranscriptKind::Story];
+        state.input.set("open mailbox", true);
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(
+            &crate::session::status_model_from_machine(&machine),
+            None,
+            &state,
+            area,
+            &mut buf,
+            None,
+        );
+
+        let page = Color::Rgb(look.page.0, look.page.1, look.page.2);
+        let ink = Color::Rgb(look.ink.0, look.ink.1, look.ink.2);
+        let prose = find_row(&buf, area, "West of House").expect("the prose is on screen");
+        assert_eq!(buf.cell((0, prose)).unwrap().bg, page, "the prose stands on the page");
+        assert_eq!(buf.cell((0, prose)).unwrap().fg, ink, "in the machine's ink");
+        let typed = find_row(&buf, area, "open mailbox").expect("the typed line is on screen");
+        assert_eq!(buf.cell((0, typed)).unwrap().bg, page, "and so does what you are typing");
+    }
+
+    /// SQ-0873. The Amiga's status line is not a band: the reversal is applied
+    /// per RUN of text and the PAGE shows between the runs. Every other measured
+    /// machine's band is uniform, so this is the one case the theme alone cannot
+    /// express and the renderer has to know about.
+    #[test]
+    fn the_amiga_status_line_reverses_behind_its_text_and_shows_the_page_between() {
+        let machine = minimal_machine();
+        let look = zvm::interpreter::machine(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)
+            .unwrap()
+            .period_look
+            .unwrap();
+        let mut state = AppState::default();
+        state.period_look = Some(look);
+        crate::period::apply_to_theme(&mut state.colors.theme, &look);
+
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = Buffer::empty(area);
+        let status = crate::session::status_model_from_machine(&machine);
+        render_transcript(&status, None, &state, area, &mut buf, None);
+
+        let page = Color::Rgb(look.page.0, look.page.1, look.page.2);
+        let ink = Color::Rgb(look.ink.0, look.ink.1, look.ink.2);
+        let row: Vec<Color> = (area.x..area.right())
+            .map(|x| buf.cell((x, 0)).expect("status row").bg)
+            .collect();
+        assert!(row.contains(&page), "the page shows between the runs");
+        assert!(row.contains(&ink), "and each run is reversed onto the ink");
     }
 
     #[test]

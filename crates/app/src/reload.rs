@@ -157,6 +157,23 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         state.colors.theme = resolve_theme_layered(&gs, &global, &garglk_decls, &per_game);
     }
 
+    // SQ-0873: and under all of it, the machine's own screen — but only for a
+    // v1-v4 story, which has no colour concept for the theme to be overriding.
+    // Recomputed here rather than at startup because both of its inputs move: the
+    // theme was just rebuilt (so a `style.toml` edit that claims the transcript
+    // must take the page back from the machine on the very next reload), and
+    // `honor_game_colours` was recomputed a few lines above. `crate::period` holds
+    // the gate and the composition rules.
+    state.period_look = crate::period::resolve(
+        state.config.interpreter_profile,
+        state.config.period_look,
+        state.config.honor_game_colours,
+        state.story_zversion,
+    );
+    if let Some(look) = state.period_look {
+        crate::period::apply_to_theme(&mut state.colors.theme, &look);
+    }
+
     // SQ-0700/SQ-0703: the frame STYLES still live on `ColorScheme` (the renderers
     // frame and reserve from them), but the file they are written in is the new
     // schema, where the selectors sit in `[elements]` and land in the theme just

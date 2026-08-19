@@ -12,6 +12,15 @@ use crate::state::AppState;
 /// tooltip under the list). Rows are addressed by index in the edit helpers
 /// (`config_toggle_or_edit` / `config_cycle` in `input.rs`) and in
 /// `config_row_value` below — APPEND new rows, never reorder.
+///
+/// **Or insert one and renumber all FOUR matches together**, which is what
+/// SQ-0873 did to put `period_look` beside the switch it is narrower than. They
+/// are `config_row_value` here, and `config_toggle_or_edit`, `config_cycle` and
+/// `one_run_key_for_row` in `input.rs`; miss one and a row silently edits its
+/// neighbour. Nothing catches that — `config_row_count_matches_config_rows_len`
+/// checks the COUNT, and the count is right either way. Two tests were reaching
+/// their row by literal index and started editing the row below it; both now
+/// look it up by name, which is the pattern to copy.
 pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("user_dir",             ConfigRowKind::Path, "Where lanthorn keeps saves, maps, and settings (default ~/.lanthorn)."),
     ("auto_load",            ConfigRowKind::Bool, "Resume your last session automatically on launch."),
@@ -22,6 +31,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("background_tidy",      ConfigRowKind::Enum, "When to re-tidy the map as rooms appear: off / every_room / on_overlap / debounced."),
     ("aux_storage",          ConfigRowKind::Enum, "Where Z-machine v5 auxiliary save data lives: ask / archive / global."),
     ("honor_game_colours",   ConfigRowKind::Bool, "Let games pick their own colours; off = your theme owns every colour."),
+    ("period_look",          ConfigRowKind::Bool, "Paint a v1-v4 story the way its machine's own interpreter did — its page, ink, status band and cursor (only off a release disk, and only if you have not themed those yourself)."),
     ("honor_timed_input",    ConfigRowKind::Bool, "Let real-time games run timed-input interrupts (clocks, countdowns, the bomb in Border Zone)."),
     ("enable_sound",         ConfigRowKind::Bool, "Play sound effects and music."),
     ("volume",               ConfigRowKind::Num,  "Master volume, 0-100. Use ← / → to adjust."),
@@ -219,25 +229,26 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
             crate::config::AuxStorage::Global => "global".to_string(),
         },
         8 => bool_str(cfg.honor_game_colours),
-        9 => bool_str(cfg.honor_timed_input),
-        10 => bool_str(cfg.enable_sound),
-        11 => cfg.volume.to_string(),
-        12 => bool_str(cfg.mouse),
-        13 => bool_str(cfg.command_bar),
-        14 => bool_str(cfg.mouse_wheel_invert),
-        15 => bool_str(cfg.show_status_bar),
-        16 => bool_str(cfg.watch_style),
-        17 => bool_str(cfg.record_turn_history),
-        18 => cfg.undo_levels.to_string(),
-        19 => cfg.interpreter_number.map(|n| n.to_string()).unwrap_or_else(|| "default".to_string()),
-        20 => bool_str(cfg.hint_skip_screen_warning),
-        21 => cfg.text_margin_x.to_string(),
-        22 => cfg.text_margin_y.to_string(),
-        23 => match cfg.v6_render {
+        9 => bool_str(cfg.period_look),
+        10 => bool_str(cfg.honor_timed_input),
+        11 => bool_str(cfg.enable_sound),
+        12 => cfg.volume.to_string(),
+        13 => bool_str(cfg.mouse),
+        14 => bool_str(cfg.command_bar),
+        15 => bool_str(cfg.mouse_wheel_invert),
+        16 => bool_str(cfg.show_status_bar),
+        17 => bool_str(cfg.watch_style),
+        18 => bool_str(cfg.record_turn_history),
+        19 => cfg.undo_levels.to_string(),
+        20 => cfg.interpreter_number.map(|n| n.to_string()).unwrap_or_else(|| "default".to_string()),
+        21 => bool_str(cfg.hint_skip_screen_warning),
+        22 => cfg.text_margin_x.to_string(),
+        23 => cfg.text_margin_y.to_string(),
+        24 => match cfg.v6_render {
             crate::config::V6RenderMode::Hybrid => "hybrid".to_string(),
             crate::config::V6RenderMode::Raster => "raster".to_string(),
         },
-        24 => bool_str(cfg.v6_arrow_keys),
+        25 => bool_str(cfg.v6_arrow_keys),
         _ => String::new(),
     }
 }

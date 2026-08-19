@@ -187,6 +187,20 @@ pub enum InterpreterProfile {
     /// sourced the way the other three were: out of Infocom's own Commodore
     /// interpreter, not out of the hardware's reputation.
     Commodore128,
+    /// A Commodore 64: **interpreter 8, and a period look** (SQ-0873).
+    ///
+    /// As thin as [`Self::Commodore128`] on everything a story can read, and for
+    /// the same reasons — no Infocom Commodore interpreter has been read, so the
+    /// palette and the `$2C`/`$2D` pair are declined rather than invented. What
+    /// it adds is the one thing that IS measured: the machine's own screen, off
+    /// `machine-screenshots/c64-zork1-solidgold.png`, whose banner reads
+    /// "Interpreter 8 Version J".
+    ///
+    /// **No medium selects it.** A `.d64` is a 1541 image both Commodore machines
+    /// read, so `blorb::medium` answers 7 and this variant is reached only by
+    /// naming 8 outright — exactly the route [`Self::AppleIIe`] exists for on a
+    /// ProDOS volume that cannot name which of the family pressed it.
+    Commodore64,
     /// An Apple IIe: **interpreter 2, and otherwise the [`Self::AppleIIgs`]
     /// bundle exactly** (SQ-0872).
     ///
@@ -361,6 +375,7 @@ impl InterpreterProfile {
             ATARI_ST_INTERPRETER_NUMBER => Some(Self::AtariSt),
             IBM_PC_INTERPRETER_NUMBER => Some(Self::IbmPc),
             COMMODORE_128_INTERPRETER_NUMBER => Some(Self::Commodore128),
+            COMMODORE_64_INTERPRETER_NUMBER => Some(Self::Commodore64),
             APPLE_IIC_INTERPRETER_NUMBER => Some(Self::AppleIIc),
             APPLE_IIGS_INTERPRETER_NUMBER => Some(Self::AppleIIgs),
             _ => None,
@@ -409,6 +424,7 @@ impl InterpreterProfile {
             Self::AtariSt => Some(ATARI_ST_INTERPRETER_NUMBER),
             Self::AppleIIgs => Some(APPLE_IIGS_INTERPRETER_NUMBER),
             Self::Commodore128 => Some(COMMODORE_128_INTERPRETER_NUMBER),
+            Self::Commodore64 => Some(COMMODORE_64_INTERPRETER_NUMBER),
             Self::AppleIIe => Some(APPLE_IIE_INTERPRETER_NUMBER),
             Self::AppleIIc => Some(APPLE_IIC_INTERPRETER_NUMBER),
         }
@@ -579,7 +595,8 @@ impl InterpreterProfile {
             | Self::AppleIIe
             | Self::AppleIIc
             | Self::AppleIIgs
-            | Self::Commodore128 => None,
+            | Self::Commodore128
+            | Self::Commodore64 => None,
             Self::Amiga => Some(AMIGA_STD_WINDOW),
             Self::Macintosh => Some(MACINTOSH_STD_WINDOW),
         }
@@ -604,6 +621,23 @@ impl InterpreterProfile {
     /// screen is the hardware's reputation, not evidence (SQ-0869).
     pub fn default_colours(self) -> Option<(u8, u8)> {
         self.machine()?.default_colours
+    }
+
+    /// What this machine's screen LOOKED LIKE for a story that has no opinion
+    /// about it — the page and ink, how the status line was set apart, and the
+    /// shape and colour of the input cursor (SQ-0873).
+    ///
+    /// **A different kind of claim to [`Self::default_colours`], which is why it
+    /// is a different knob.** That pair is a fact the story can read, sourced
+    /// from Infocom's own code; this is presentation, observed off the emulator
+    /// captures in `machine-screenshots/`. [`zvm::interpreter::PeriodLook`] states
+    /// the provenance and what it costs.
+    ///
+    /// Answering here is not the same as applying it. Colour arrives with Version
+    /// 5, so a period look belongs only to a v1–v4 story — the gate is
+    /// [`crate::period::resolve`], and this knob only says what the machine has.
+    pub fn period_look(self) -> Option<zvm::interpreter::PeriodLook> {
+        self.machine()?.period_look
     }
 
     /// The palette the story's colour NUMBERS resolve through.
@@ -754,8 +788,8 @@ impl InterpreterProfile {
 /// future divergence fails there rather than in a game.
 pub use zvm::interpreter::{
     AMIGA_INTERPRETER_NUMBER, APPLE_IIC_INTERPRETER_NUMBER, APPLE_IIE_INTERPRETER_NUMBER,
-    APPLE_IIGS_INTERPRETER_NUMBER, ATARI_ST_INTERPRETER_NUMBER, COMMODORE_128_INTERPRETER_NUMBER,
-    IBM_PC_INTERPRETER_NUMBER, MACINTOSH_INTERPRETER_NUMBER,
+    APPLE_IIGS_INTERPRETER_NUMBER, ATARI_ST_INTERPRETER_NUMBER, COMMODORE_64_INTERPRETER_NUMBER,
+    COMMODORE_128_INTERPRETER_NUMBER, IBM_PC_INTERPRETER_NUMBER, MACINTOSH_INTERPRETER_NUMBER,
 };
 
 /// The §8.3.3 default colour pairs, from [`zvm::interpreter`] — each quoted at
@@ -1016,12 +1050,18 @@ mod tests {
         // `zboot.asm` has seeded the one page all three share.
         assert_eq!(InterpreterProfile::for_interpreter_number(2), InterpreterProfile::AppleIIe);
         assert_eq!(InterpreterProfile::for_interpreter_number(9), InterpreterProfile::AppleIIc);
+        // **And 8 joined it** (SQ-0873). The Commodore 64 states nothing a story
+        // can read — no palette, no `$2C`/`$2D` pair, for want of an Infocom
+        // Commodore interpreter to read them out of — but it has a measured period
+        // look, and a variant is what a profile needs to carry one. No medium
+        // selects it: a `.d64` is a 1541 image both Commodore machines read, so 8
+        // is reached only by asking for it.
+        assert_eq!(InterpreterProfile::for_interpreter_number(8), InterpreterProfile::Commodore64);
         // Every other number is served by the IBM PC bundle, the historical
-        // default: 1 the DECSystem-20, 8 the Commodore 64, 11 the Tandy Color.
-        // Each is absent for a stated reason — see `zvm::interpreter::MACHINES`
-        // — and each is stated here so the gap is visible rather than assumed
-        // closed.
-        for n in [1u8, 8, 11] {
+        // default: 1 the DECSystem-20, 11 the Tandy Color. Each is absent for a
+        // stated reason — see `zvm::interpreter::MACHINES` — and each is stated
+        // here so the gap is visible rather than assumed closed.
+        for n in [1u8, 11] {
             assert_eq!(
                 InterpreterProfile::for_interpreter_number(n),
                 InterpreterProfile::IbmPc,
@@ -1074,6 +1114,7 @@ mod tests {
             InterpreterProfile::AppleIIe,
             InterpreterProfile::AppleIIc,
             InterpreterProfile::Commodore128,
+            InterpreterProfile::Commodore64,
         ] {
             let Some(n) = p.interpreter_number() else {
                 // Only the IBM PC declines a number, and it does so because its

@@ -525,6 +525,11 @@ pub(crate) fn boot_story(
     // per-story files — so the fact has to travel with the state, not just the
     // value. Always `false` for a non-Z-code engine: no Infocom archive is in play.
     let mut artwork_declines_colours = false;
+    // The story's Version, for SQ-0873's period look — which belongs only to a
+    // v1-v4 story, since colour arrives with v5 and anything shown before it is
+    // presentation rather than a fact the story can read. `None` for Glulx and
+    // Scott Adams, which have no §11.1.3 machine to have a look of.
+    let mut story_zversion: Option<u8> = None;
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
@@ -706,6 +711,7 @@ pub(crate) fn boot_story(
                 );
             }
             s.machine.undo_cap = cfg.undo_levels;
+            story_zversion = Some(s.machine.mem.version());
             Box::new(s)
         }
         app::hints::LoadedStory::Glulx(bytes) => {
@@ -919,6 +925,11 @@ pub(crate) fn boot_story(
     // same reason — the reload below re-reads the per-story files, and neither of
     // them knows what archive was loaded.
     state.artwork_declines_colours = artwork_declines_colours;
+    // SQ-0873: and the story's Version, which `reload_style` needs to decide
+    // whether this launch gets its machine's period look. Same reason as the two
+    // above — the reload re-derives from the config and the per-story files, and
+    // neither of them knows what engine was built or what it opened.
+    state.story_zversion = story_zversion;
     state.config = cfg;
 
     // Debug trace (trace feature): start a fresh log for this run and arm the

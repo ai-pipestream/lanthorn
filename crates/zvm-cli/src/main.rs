@@ -583,6 +583,8 @@ struct Args {
     no_sound: bool,
     data_dir: Option<String>,
     honor_colours: bool,
+    /// `--period-look`: dress the screen as the story's own machine did (SQ-0873).
+    period_look: bool,
     interpreter: Option<u8>,
     volume: Option<u8>,
     /// `--pin <top|bottom>` (or `--scrollback`): where the fixed rows sit.
@@ -602,6 +604,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--no-timed-input"]),
     cli_host::Opt::flag(&["--no-sound"]),
     cli_host::Opt::flag(&["--no-game-colours"]),
+    cli_host::Opt::flag(&["--period-look"]),
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
@@ -640,6 +643,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         no_sound: m.has("--no-sound"),
         data_dir: m.value("--data-dir").map(str::to_string),
         honor_colours: !m.has("--no-game-colours"),
+        period_look: m.has("--period-look"),
         // Lenient, as before: a bad value falls back to the engine default
         // rather than refusing to start.
         interpreter: m.value("--interpreter").and_then(|v| v.parse::<u8>().ok()),
@@ -1270,6 +1274,13 @@ Options:
       --no-timed-input  Ignore timed-input interrupts
       --no-game-colours Ignore the game's set_colour / true-colour output
                         (also honoured: NO_COLOR)
+      --period-look     Dress the screen as this story's own machine did: its
+                        page and ink, its status band, its cursor shape. Only for
+                        a v1-v4 story (colour arrives with v5, so anything shown
+                        for one is presentation), and only where the medium or -I
+                        names a machine we have a capture of. Off by default —
+                        this is your terminal, not a pane we own; lanthorn turns
+                        it on. Suppressed by --no-game-colours and NO_COLOR.
       --no-sound        Disable sound (bleeps + sampled audio)
       --volume <0-100>  Set the master volume
   -I, --interpreter <n> Set the Z-machine interpreter number (ZMSD 11.1.3:
@@ -1482,6 +1493,50 @@ fn main() {
     machine.set_sound_available(sound_enabled);
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
+    // SQ-0873: `--period-look` — dress the terminal as this story's own machine
+    // did. Every clause of the gate below is load-bearing:
+    //
+    // - **v1-v4 only.** `set_colour` and the `$2C`/`$2D` header bytes are v5+, so
+    //   a v1-v4 story has no colour concept for a page to be the DEFAULT of, and
+    //   what a machine drew for one is presentation. For v5+ the machine's own
+    //   pair is already seeded above, out of Infocom's source, as a fact the story
+    //   can read — a different claim entirely, and this must not touch it.
+    // - **`honor`**, which is `--no-game-colours` and `NO_COLOR` folded together
+    //   a hundred lines up. A player who said "keep my terminal's colours" is not
+    //   answered by painting it a different colour of our own choosing.
+    // - **a TTY, and not plain mode.** Escapes into a pipe are noise, and plain
+    //   mode exists so a screen reader sees none at all.
+    // - **a machine with a capture.** `period_look` is `None` for the Atari ST and
+    //   the IBM PC, which have none, and for a number that names no row.
+    //
+    // The page and ink go through OSC 11/10 — the TERMINAL's own defaults, not
+    // SGR — because every styled run ends with `\x1b[0m` and would otherwise drop
+    // an SGR ink on the floor. The cursor goes through DECSCUSR, which states the
+    // real shape rather than an approximation of it; `cli_host::term` records what
+    // that cannot say (the colour).
+    let period_look = machine
+        .mem
+        .version()
+        .le(&4)
+        .then(|| interpreter.and_then(zvm::interpreter::machine))
+        .flatten()
+        .and_then(|m| m.period_look)
+        .filter(|_| args.period_look && honor && stdout_is_tty && !mode.plain());
+    if let Some(look) = period_look {
+        use zvm::interpreter::CursorShape;
+        print!(
+            "{}{}{}",
+            cli_host::osc_set_bg(look.page),
+            cli_host::osc_set_fg(look.ink),
+            match look.cursor_shape {
+                CursorShape::Block => cli_host::cursor_steady_block(),
+                CursorShape::Underscore => cli_host::cursor_steady_underline(),
+                CursorShape::Bar => cli_host::cursor_steady_bar(),
+            }
+        );
+        let _ = io::stdout().flush();
+    }
+
     let mut sound: Option<CliSound> = if sound_enabled {
         let blorb = match blorb::resolve_resource_blorb(&story_path) {
             Some((b, path)) => {
@@ -1537,6 +1592,10 @@ fn main() {
         term_cols,
     );
     view.set_pin(args.pin);
+    // SQ-0873: the status band is the one part of a period look the terminal's
+    // own defaults cannot carry — four of the five machines set it apart in four
+    // different ways, and only one of those is `\x1b[7m`.
+    view.set_period_look(period_look);
     // Screen-reader mode only, and for the same reason: on a TTY the menu is
     // painted in place and nothing repeats, and a plain pipe is a transcript
     // that must stay byte-identical (SQ-0609).
@@ -2005,7 +2064,7 @@ mod arg_tests {
         for flag in [
             "--story-only", "--lower-only", "--no-status", "--show-status", "--no-aux",
             "--no-more", "--no-page", "--no-timed-input", "--no-sound", "--no-game-colours",
-            "--screen-reader", "--plain",
+            "--period-look", "--screen-reader", "--plain",
         ] {
             let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]).expect("valid args");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} should leave the story path alone");
@@ -2089,6 +2148,8 @@ mod arg_tests {
 
         assert!(p(&["g"]).honor_colours);
         assert!(!p(&["--no-game-colours", "g"]).honor_colours);
+        assert!(!p(&["g"]).period_look, "off by default: this is the user's terminal");
+        assert!(p(&["--period-look", "g"]).period_look);
 
         assert_eq!(p(&["-I", "4", "g"]).interpreter, Some(4));
         assert_eq!(p(&["--interpreter", "3", "g"]).interpreter, Some(3));

@@ -209,6 +209,8 @@ const LOOK_INTRO: &str = "2. WHAT THE SCREEN LOOKED LIKE - presentation for a v1
    OBSERVED from emulator captures in machine-screenshots/, not read out of
    Infocom's source as the pairs above are. A dash is a machine with no
    capture, not a machine with no look.
+   Ask for it with --period-look (off by default here, on in lanthorn); the
+   cursor's SHAPE is drawn with DECSCUSR, its colour cannot be.
 ";
 
 const LEGEND: &str = "\

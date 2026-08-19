@@ -54,6 +54,8 @@ mod interpreter_profile;
 mod launch_options;
 #[path = "suites/picture_override.rs"]
 mod picture_override;
+#[path = "suites/period_look_media.rs"]
+mod period_look_media;
 #[path = "suites/real_media_releases.rs"]
 mod real_media_releases;
 #[path = "suites/story_identity_sweep.rs"]

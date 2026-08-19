@@ -51,6 +51,7 @@ pub use storage::{
 };
 pub use titles::known_title;
 pub use term::{
-    TerminalGuard, cursor_reset, cursor_steady_block, end_raw_mode, osc_reset_bg, osc_set_bg,
-    page_bg_escape, restore_and_exit, restore_terminal, rgb24,
+    TerminalGuard, cursor_reset, cursor_steady_bar, cursor_steady_block, cursor_steady_underline,
+    end_raw_mode, osc_reset_bg, osc_reset_fg, osc_set_bg, osc_set_fg, page_bg_escape,
+    restore_and_exit, restore_terminal, rgb24,
 };

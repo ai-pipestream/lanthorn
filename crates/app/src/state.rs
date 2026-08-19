@@ -2554,6 +2554,25 @@ pub struct AppState {
     /// deliberate choice outranks a guess.
     pub artwork_declines_colours: bool,
 
+    /// The story's Z-machine Version, or `None` for an engine that has no such
+    /// byte (Glulx, Scott Adams). Captured at startup (SQ-0873).
+    ///
+    /// Read by `reload_style` for one question: does this launch get its
+    /// machine's period look? Colour arrives with v5, so the look belongs to a
+    /// v1-v4 story and to nothing else — see [`crate::period`]. On state rather
+    /// than re-read from the engine because the reload runs on `AppState` alone,
+    /// exactly as `honor_game_colours_base` above does.
+    pub story_zversion: Option<u8>,
+
+    /// The machine's period look for this launch, or `None` — the resolved
+    /// answer, recomputed by `reload_style` whenever the theme is (SQ-0873).
+    ///
+    /// The colours of it are already folded into `colors.theme`; what stays here
+    /// is what a theme cannot carry: the status band's *behaviour* (the Amiga
+    /// reverses behind each run and lets the page show between) and the input
+    /// cursor's shape.
+    pub period_look: Option<zvm::interpreter::PeriodLook>,
+
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
@@ -2857,6 +2876,8 @@ impl Default for AppState {
             honor_game_colours_base: true,
             no_game_colours_cli: false,
             artwork_declines_colours: false,
+            story_zversion: None,
+            period_look: None,
             transcript_scroll: 0,
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,
