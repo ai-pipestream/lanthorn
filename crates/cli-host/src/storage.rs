@@ -311,6 +311,34 @@ pub fn save_list_line(saves: &[String]) -> Option<String> {
     })
 }
 
+/// The confirmation a save prompt owes the player when the name they typed already
+/// exists, or `None` when it does not (SQ-0918).
+///
+/// `fs::write` is unconditional, so both CLIs silently clobbered — the same defect
+/// SQ-0648 fixed in the TUI, which prompts and defaults to Cancel. Naming the
+/// EXISTING save rather than echoing what was just typed is deliberate there and
+/// here: the two can differ, and what the player needs to know is what they are
+/// about to lose.
+///
+/// The reading is left to the caller because the three hosts read input in three
+/// different ways — cooked stdin, a raw-mode editor, a Glk line request — and this
+/// module has no business picking one.
+pub fn overwrite_warning(path: &Path) -> Option<String> {
+    path.is_file().then(|| {
+        let name = path.file_stem().unwrap_or_default().to_string_lossy();
+        format!("'{name}' already exists. Overwrite? (y/N) ")
+    })
+}
+
+/// Whether an answer to [`overwrite_warning`] is a yes.
+///
+/// Anything else — including a bare Enter and EOF — is a no, so the destructive
+/// branch is never the one you reach by not answering. That matches the TUI's
+/// dialog, which opens with Cancel focused.
+pub fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +423,27 @@ mod tests {
         assert!(line.starts_with("saves: "), "{line:?}");
         assert!(line.contains("1 cellar"), "{line:?}");
         assert!(line.contains("2 troll"), "{line:?}");
+    }
+
+    /// A name that exists warns; one that does not goes straight through.
+    #[test]
+    fn an_existing_save_warns_and_names_itself() {
+        let d = dir_with("overwrite", &["cellar.qzl"]);
+        let warn = overwrite_warning(&resolve_save_input("cellar", &d)).expect("exists");
+        assert!(warn.contains("'cellar'"), "names the save that would be lost: {warn:?}");
+        assert!(warn.contains("(y/N)"), "and shows which answer is the safe one: {warn:?}");
+        assert_eq!(overwrite_warning(&resolve_save_input("troll", &d)), None, "a new name");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Only an explicit yes is a yes — the destructive branch must not be the one
+    /// you reach by not answering.
+    #[test]
+    fn only_an_explicit_yes_overwrites() {
+        assert!(is_yes("y") && is_yes("Y") && is_yes("yes") && is_yes("  YES  "));
+        for no in ["", " ", "n", "no", "cellar", "yep", "1"] {
+            assert!(!is_yes(no), "{no:?} is not a yes");
+        }
     }
 
     #[test]

@@ -901,6 +901,18 @@ fn handle_save_request(machine: &mut Machine, game_dir: &Path, filename: &str) {
         return;
     }
     let path = cli_host::resolve_save_input(filename, game_dir);
+    // `fs::write` below is unconditional, so without this a repeated name silently
+    // destroys the earlier save — the defect SQ-0648 fixed in the TUI, still live
+    // out here (SQ-0918). A refusal is a cancel, which is the same path an empty
+    // filename already takes, so the game is told the save failed rather than being
+    // left waiting.
+    if let Some(warning) = cli_host::overwrite_warning(&path) {
+        if !cli_host::is_yes(&prompt_and_read_line(&warning, &[])) {
+            println!("Save cancelled.");
+            machine.complete_save(false);
+            return;
+        }
+    }
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }

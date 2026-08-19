@@ -116,6 +116,42 @@ fn a_number_at_the_save_prompt_is_a_filename() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **Saving over an existing name asks first, and a refusal keeps the old save.**
+///
+/// `fs::write` is unconditional, so before SQ-0918 a repeated name destroyed the
+/// earlier save without a word — the defect SQ-0648 fixed in the TUI while the CLIs
+/// kept it. Anything but an explicit yes is a no, so the destructive branch is never
+/// the one you reach by not answering.
+///
+/// Falsified by removing the `overwrite_warning` guard, after which the second save
+/// succeeds and this case sees "Saved to" twice.
+#[test]
+fn saving_over_an_existing_name_asks_first() {
+    let Some(story) = story() else {
+        eprintln!("SKIP: gitignored Zork I fixture absent");
+        return;
+    };
+    // Save `cellar`, then try again and decline with a bare Enter.
+    let dir = scratch("declined");
+    let out = run(&story, &dir, "\n\nsave\ncellar\nsave\ncellar\n\nquit\ny\n");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("'cellar' already exists. Overwrite? (y/N)"),
+        "the second save warns, naming what would be lost:\n{text}",
+    );
+    assert!(text.contains("Save cancelled."), "and a bare Enter declines:\n{text}");
+    assert_eq!(text.matches("Saved to").count(), 1, "only the first save wrote:\n{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // …and an explicit yes goes through.
+    let dir = scratch("accepted");
+    let out = run(&story, &dir, "\n\nsave\ncellar\nsave\ncellar\ny\nquit\ny\n");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text.matches("Saved to").count(), 2, "y overwrites:\n{text}");
+    assert_eq!(walk(&dir), vec!["cellar.qzl".to_string()], "and there is still one save");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every `.qzl` under `dir`, at any depth — the game directory is nested under the
 /// data dir by a key this test has no reason to know.
 fn walk(dir: &Path) -> Vec<String> {

@@ -559,6 +559,21 @@ fn drive(
                         machine.complete_save(false);
                     } else {
                         let path = cli_host::resolve_save_input(name, game_dir);
+                        // Same guard as zvm-cli: `fs::write` is unconditional, so a
+                        // repeated name would silently destroy the earlier save
+                        // (SQ-0648's defect, SQ-0918).
+                        let mut proceed = true;
+                        if let Some(warning) = cli_host::overwrite_warning(&path) {
+                            print!("{warning}");
+                            let _ = io::Write::flush(&mut io::stdout());
+                            let (answer, _) = read_line(LineEcho::Shown(String::new()));
+                            proceed = cli_host::is_yes(&answer);
+                        }
+                        if !proceed {
+                            eprintln!("[save cancelled]");
+                            machine.complete_save(false);
+                            continue;
+                        }
                         std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("."))).ok();
                         let ok = fs::write(&path, machine.save_quetzal()).is_ok();
                         if ok {
