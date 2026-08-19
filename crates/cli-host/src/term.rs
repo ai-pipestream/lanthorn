@@ -123,7 +123,21 @@ pub fn end_raw_mode() {
 /// band. `CSI r` with no parameters resets the region to the full screen and is
 /// a no-op when none was set, so it belongs in the unconditional restore.
 pub fn restore_bytes() -> String {
-    format!("\x1b[r\x1b[0m{}{}{}", osc_reset_bg(), osc_reset_fg(), cursor_reset())
+    // `\x1b7`/`\x1b8` (DECSC/DECRC) wrap the region reset because **DECSTBM homes
+    // the cursor**, on reset exactly as on set. `pin::enter_region` already knows
+    // this and wraps its own; this one did not, and it lands AFTER
+    // `pin::leave_and_park` has carefully put the cursor on the bottom row — so the
+    // park was undone every time and the shell drew its prompt at row 1, on top of
+    // the last page of the game. Measured under `--pin bottom`: the shell's own
+    // output overwrote the final screen character by character (`$ ls` over
+    // `line 13`) instead of scrolling it away, so that page never reached history
+    // at all. Wrapped, the exit behaves exactly like a program that set no region.
+    format!(
+        "\x1b7\x1b[r\x1b8\x1b[0m{}{}{}",
+        osc_reset_bg(),
+        osc_reset_fg(),
+        cursor_reset()
+    )
 }
 
 /// Leave raw mode and put the terminal back.
@@ -264,7 +278,13 @@ mod tests {
         let b = restore_bytes();
         // SQ-0634: without this, the panic-path guard and every restore that
         // relied on restore_bytes left a confined DECSTBM scroll region behind.
-        assert!(b.starts_with("\x1b[r"), "scroll region dropped first: {b:?}");
+        assert!(b.starts_with("\x1b7\x1b[r\x1b8"), "scroll region dropped first: {b:?}");
+        // …and DECSC/DECRC around it, because DECSTBM homes the cursor on RESET as
+        // well as on set. Bare, it undid `pin::leave_and_park`'s park a moment
+        // after it happened, and the shell then drew its prompt over the game's
+        // last page instead of below it — see `restore_bytes`. `pin.rs` measures
+        // the consequence.
+        assert!(!b.starts_with("\x1b[r"), "a bare region reset homes the cursor: {b:?}");
         assert!(b.contains("\x1b[0m"), "styling cleared: {b:?}");
         assert!(b.contains(osc_reset_bg()), "page background released: {b:?}");
         assert!(b.ends_with(cursor_reset()), "cursor shape restored last: {b:?}");

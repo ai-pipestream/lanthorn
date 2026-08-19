@@ -14,6 +14,17 @@ identifies itself without reading its git hash.
 
 ## Unreleased
 
+### Fixed
+
+- **Quitting a CLI no longer lets your shell draw over the game's last page.**
+  Under `--pin bottom` the final screen never reached scrollback: the teardown
+  parked the cursor on the bottom row and then reset the scroll region, and
+  `CSI r` homes the cursor on reset just as it does on set — so the park was
+  undone a moment after it happened and the shell's prompt landed on row 1,
+  writing over the story character by character (`$ ls` on top of the last line
+  you read). Those rows could then never scroll off, so they entered history as
+  the shell's output rather than as the story's.
+
 ### Pre-colour stories look like the machine that sold them
 
 Colour arrives with Version 5, so a v1–v4 story has no colour concept at all —

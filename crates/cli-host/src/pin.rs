@@ -26,6 +26,31 @@
 //!
 //! **Nothing is buffered on our side either way.** The scrollback a player wants is
 //! the one their terminal already keeps; the only question is whether we prevent it.
+//!
+//! # Moving the frozen rows DOWN does not help, and neither does an overlay
+//!
+//! The obvious next idea is to freeze the status one row lower and leave the top
+//! row free for text to scroll off through. It archives nothing: the terminal is
+//! not asking whether row 1 is empty, it is asking whether the REGION's top margin
+//! is row 1, and a line leaving a region whose top is row 3 is destroyed rather
+//! than passed up through the rows above it. DECSTBM gives exactly one contiguous
+//! region, so anything frozen above the story puts that margin at 2 or more. Same
+//! oracle, same 30 lines: rows 3..10 with the status at row 2 archives **0**, and
+//! writing to row 1 every turn still archives **0**.
+//!
+//! Dropping the region and repainting the status at row 1 by absolute positioning
+//! is worse than useless. It archives 21 rows, and all 21 of them are the status
+//! bar: the repaint overwrites each line of prose a moment before it scrolls off,
+//! so the history is a stack of identical status lines and the story is gone.
+//! Making that safe means restoring row 1's real content before every scroll,
+//! which means tracking what is on screen — the buffering the sentence above says
+//! we do not do.
+//!
+//! **So the bottom is not a placement preference, it is the only place a frozen
+//! row can live if the player is to keep any history at all.** A status line at
+//! the top and real scrollback are mutually exclusive; the way to have both is to
+//! stop freezing it and print it inline with the turn it describes, which is what
+//! the non-TTY path already does.
 
 use std::fmt;
 
@@ -188,6 +213,32 @@ mod tests {
         stream.handler.terminal.snapshot_window(0).scrollback_len
     }
 
+    /// The rows that actually reached history, oldest first.
+    ///
+    /// `scrollback_after` counts; this reads. The distinction matters for the
+    /// overlay case below, where the count looks like a success and the contents
+    /// are the whole finding. Scrolling the viewport back by the history's own
+    /// length puts the window over the oldest rows.
+    fn archived(bytes: &str) -> Vec<String> {
+        let t = Terminal::new(Options {
+            cols: COLS,
+            rows: ROWS,
+            max_scrollback: 10_000,
+            ..Default::default()
+        });
+        let mut stream = Stream::new(TerminalHandler::new(t));
+        stream.feed(bytes.as_bytes());
+        let n = stream.handler.terminal.snapshot_window(0).scrollback_len;
+        stream
+            .handler
+            .terminal
+            .snapshot_window(n)
+            .window
+            .iter()
+            .map(|r| r.cells.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+            .collect()
+    }
+
     /// Enough lines to push the screen well past its height.
     fn narrative(n: usize) -> String {
         (0..n).map(|i| format!("line {i}\r\n")).collect()
@@ -220,6 +271,105 @@ mod tests {
         assert!(
             scrollback_after(&s) >= usize::from(ROWS),
             "a top margin of 1 archives what scrolls past it",
+        );
+    }
+
+    /// **Freezing the rows one row DOWN is not a way out**, and this is the case
+    /// that says so — it is the first thing anyone proposes on reading the two
+    /// above. The terminal is not asking whether row 1 is free, it is asking
+    /// whether the REGION's top margin is row 1, so a line leaving a region that
+    /// starts at row 3 is destroyed rather than passed up through the free rows.
+    #[test]
+    fn a_frozen_row_below_the_top_one_archives_nothing_either() {
+        // Status at row 2, region 3..N, row 1 deliberately left empty.
+        let free = format!("\x1b7\x1b[3;{ROWS}r\x1b8{}", narrative(usize::from(ROWS) * 3));
+        assert_eq!(scrollback_after(&free), 0, "a free top row is just a free top row");
+
+        // …and writing to it every turn changes nothing: it is outside the region.
+        let mut used = format!("\x1b7\x1b[3;{ROWS}r\x1b8");
+        for i in 0..usize::from(ROWS) * 3 {
+            used.push_str(&format!("line {i}\r\n"));
+            used.push_str("\x1b7\x1b[1;1Htop row\x1b[2;1H[STATUS]\x1b8");
+        }
+        assert_eq!(scrollback_after(&used), 0, "the region decides, not the occupancy");
+    }
+
+    /// **And dropping the region to repaint the status by hand is worse than
+    /// useless**, which the row COUNT alone would hide: it archives a full screen
+    /// of history, every row of it the status bar.
+    ///
+    /// The repaint overwrites each line of prose a moment before it scrolls off,
+    /// so what reaches history is the overlay rather than the story. Making it
+    /// safe means restoring row 1's real content before every scroll — tracking
+    /// what is on screen, which is exactly what these CLIs do not do.
+    #[test]
+    fn an_overlay_with_no_region_archives_the_status_bar_instead_of_the_story() {
+        let mut s = String::new();
+        for i in 0..usize::from(ROWS) * 3 {
+            s.push_str(&format!("line {i}\r\n"));
+            s.push_str("\x1b7\x1b[1;1H[STATUS]\x1b8");
+        }
+        assert!(scrollback_after(&s) >= usize::from(ROWS), "it archives, all right");
+        let kept = archived(&s);
+        assert!(
+            kept.iter().all(|r| r == "[STATUS]"),
+            "every archived row should be the overlay, not prose: {kept:?}"
+        );
+    }
+
+    /// **The exit has to leave the last page where the shell will scroll it away,
+    /// not where the shell will draw on top of it.**
+    ///
+    /// `leave_and_park` parks the cursor on the bottom row for exactly that
+    /// reason — and `term::restore_bytes` runs immediately after it, resetting the
+    /// scroll region. DECSTBM **homes the cursor** on reset as well as on set, so
+    /// while that reset was bare it yanked the cursor back to row 1 and undid the
+    /// park every single time. The shell then wrote its prompt over the game's
+    /// final screen character by character (`$ ls` landing on top of `line 13`),
+    /// which is worse than losing it: those rows can never scroll off, so they
+    /// reach history as the shell's output rather than as the story's.
+    ///
+    /// Reported under `--pin bottom`, where it is most visible because that is the
+    /// placement whose whole point is keeping history.
+    #[test]
+    fn quitting_leaves_the_last_page_for_the_shell_to_scroll_not_to_overwrite() {
+        let mut session = format!("{}{}", enter_region(1, ROWS, Pin::Bottom), narrative(20));
+        session.push_str(&leave_and_park(ROWS));
+        session.push_str(&crate::term::restore_bytes());
+        let before = scrollback_after(&session);
+
+        // Now the shell does what a shell does.
+        let after = format!("{session}$ ls\r\na\r\nb\r\n");
+        assert!(
+            scrollback_after(&after) > before,
+            "the shell's own output must push the game's last page into history",
+        );
+
+        // And it must APPEND, not overwrite: no surviving row may be a shell line
+        // welded onto a story line, which is the signature of a homed cursor.
+        let t = Terminal::new(Options {
+            cols: COLS,
+            rows: ROWS,
+            max_scrollback: 10_000,
+            ..Default::default()
+        });
+        let mut stream = Stream::new(TerminalHandler::new(t));
+        stream.feed(after.as_bytes());
+        let screen: Vec<String> = stream
+            .handler
+            .terminal
+            .snapshot_window(0)
+            .window
+            .iter()
+            .map(|r| r.cells.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+            .collect();
+        assert!(
+            screen.contains(&"$ ls".to_string()),
+            "the prompt lands on a row of its own: {screen:?}",
+        );
+        assert!(
+            !screen.iter().any(|r| r.starts_with("$ ls") && r.len() > 4),
+            "a row that is the prompt WELDED to story text means the park was undone: {screen:?}",
         );
     }
 
