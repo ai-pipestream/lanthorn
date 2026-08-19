@@ -1301,7 +1301,9 @@ Amiga floppy or anywhere else.
   it does not, and babelmap follows each disk rather than averaging them. The two
   machines also disagree about where silence sits in a sample byte, and the header
   does not say which — so the layout decides it, checked against the one effect both
-  discs press from the same master.
+  discs press from the same master. The Mac goes further and fades each sample in and
+  out from its speaker's rest position, which babelmap unwinds rather than reproduces:
+  played back literally on a modern output that ramp is a click at each end.
 - **Glulx** — Glk sound channels (`glk_schannel_*`) play a Blorb's AIFF/Ogg/MOD
   `Snd ` resources with per-channel volume (including gradual volume ramps) and
   sound-finished notify events, so music and effects behave the way the author

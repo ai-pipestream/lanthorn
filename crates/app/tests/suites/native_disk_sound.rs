@@ -345,6 +345,40 @@ fn the_macintosh_payload_is_offset_binary() {
         eprintln!("NOTE: gitignored stories/Sherlock.blb absent, so the third link is unchecked");
     }
 
+    // **No pop.** A Macintosh sample opens and closes at the machine's rest level
+    // rather than at its DC, and a flat 0x80 turns both ramps into an excursion to
+    // full negative — a click at each end (SQ-0922). Every effect must start and end
+    // at silence; with the ramp left in, thirteen of the fifteen read -128 here.
+    for e in 3..=17u16 {
+        let s = pcm(&mac[&e]);
+        // Widened to i32 before abs: the value this is guarding against is exactly
+        // -128, and `i8::abs` overflows on it.
+        let (first, last) = (i32::from(s[0] as i8), i32::from(s[s.len() - 1] as i8));
+        assert!(
+            first.abs() < 32 && last.abs() < 32,
+            "effect {e} steps to {first}/{last} against silence at its ends",
+        );
+    }
+
+    // **And nothing but the ramp differs between the masters**, which is what says the
+    // trapezoid is the whole story rather than a shape that merely fits. Outside a
+    // ramp of `rate / 150` samples, a same-length effect is byte-identical to the
+    // Amiga's — so the bytes that disagreed under a flat 0x80 were the ramp and only
+    // the ramp: 204 of them for effect 3 against N = 102, 128 for effect 9 against 64.
+    // Effect 8 is left out because it is already asserted identical in FULL above,
+    // which is stronger; and because it is the one effect here with an `M` file, so
+    // its reported rate is the bent one and would not measure the ramp in the file.
+    for e in [3u16, 4, 5, 6, 9, 15, 16] {
+        let (m, a) = (pcm(&mac[&e]), pcm(&amiga[&e]));
+        assert_eq!(m.len(), a.len(), "effect {e} is the same master at the same rate");
+        // Rounded up, because the ramp reaches full drive on the sample that first
+        // divides out to 128 — 103 at 15360 Hz, not 102.
+        let n = (mac[&e].rate as usize).div_ceil(150);
+        let body = |i: usize| i >= n && m.len() - 1 - i >= n;
+        let differing = (0..m.len()).filter(|&i| body(i) && m[i] != a[i]).count();
+        assert_eq!(differing, 0, "effect {e} differs from the Amiga in {differing} frames outside the ramp");
+    }
+
     // And the statistic that holds where the masters differ: silence is at zero.
     for e in 3..=17u16 {
         let mean = |s: &app::native_sound::DiskSound| {

@@ -45,9 +45,11 @@
 //!
 //! **The header is the same; the payload underneath it is not.** The Macintosh writes
 //! its samples as offset binary, silence at `0x80`, and nothing in the ten bytes
-//! records that — see [`Encoding`], which is also where the evidence lives. Four of
-//! *Sherlock*'s fifteen effects are a half-rate decimation on this disc as well, so a
-//! Macintosh sample is not simply its Amiga twin in another sign convention.
+//! records that — see [`Encoding`], which is also where the evidence lives. It also
+//! opens and closes each sample with a ramp to `0x00`, the rest position of a unipolar
+//! output, which a bipolar one has to undo rather than reproduce. Four of *Sherlock*'s
+//! fifteen effects are a half-rate decimation on this disc as well, so a Macintosh
+//! sample is not simply its Amiga twin in another sign convention.
 //!
 //! # Why AIFF comes back out
 //!
@@ -197,7 +199,9 @@ impl Pitch {
 pub enum Encoding {
     /// Silence at `0x00`, as AmigaDOS writes it and as an 8-bit AIFF defines it.
     Signed,
-    /// Silence at `0x80`, as `/MAC/SOUND` writes it.
+    /// Silence at `0x80`, as `/MAC/SOUND` writes it — while the channel is driven.
+    /// A Macintosh sample also ramps to and from `0x00`, the machine's true rest
+    /// level, at each end; `to_signed` is where that is undone and evidenced.
     OffsetBinary,
 }
 
@@ -226,6 +230,63 @@ fn be16(b: &[u8], at: usize) -> u16 {
     u16::from_be_bytes([b[at], b[at + 1]])
 }
 
+/// The Macintosh's anti-click ramp, as a fraction of a second at each end of a
+/// sample. See [`to_signed`].
+const MAC_RAMP_HZ: u64 = 150;
+
+/// Turn an offset-binary payload into the signed PCM [`InfocomSound::samples`]
+/// promises, undoing the Macintosh's ramp on the way.
+///
+/// Subtracting a flat `0x80` is only right in the middle. **A Macintosh sample has
+/// two different silences**: `0x80` while the channel is driven, and `0x00` when it
+/// is not — the machine's sound output is a unipolar PWM whose rest position is no
+/// pulse at all, so a sample that began at its DC would slam the speaker off its rest
+/// position and click. Thirteen of *Sherlock*'s fifteen effects therefore open at
+/// `0x00`, ramp linearly up to full drive, play, and ramp back down.
+///
+/// Subtract a flat `0x80` from that and both ramps become an excursion to full
+/// NEGATIVE — a pop at the start and another at the end, which is what a bipolar
+/// output makes of a bias the Macintosh needed and we do not (SQ-0922). Subtracting
+/// the ramp instead leaves `env·(sample − 0x80)`: the same fade, about silence.
+///
+/// # The ramp is 1/150 s, measured and not assumed
+///
+/// The Macintosh master is the Amiga master times a trapezoid, and that is checkable
+/// because seven of *Sherlock*'s effects are the same recording at the same rate on
+/// both discs. Fitting the ramp length against those seven puts `rate ÷ N` inside
+/// `[149.97, 151.11]` on every one, so 150 is the only round figure that fits all
+/// of them; effect 9 then reconstructs from the Amiga's bytes with **zero error**,
+/// and the rest to within one or two counts in 256.
+///
+/// The tell that nothing else differs between the masters: read as a flat `0x80`, the
+/// number of bytes by which a Macintosh effect disagrees with its Amiga twin is
+/// exactly TWICE the fitted ramp length — 204 for effect 3 against `N` = 102, 128 for
+/// effect 9 against 64 — and zero outside the ramps.
+///
+/// # Two effects have no ramp, and are left alone
+///
+/// Effects 8 and 14 open and close mid-signal (`0x93`, `0x9F`), so the mastering pass
+/// missed them and they click on a Macintosh too. They are recognised by the only
+/// signature that cannot fire by accident: a ramped file begins AND ends at exactly
+/// full negative, which no recording does.
+fn to_signed(samples: &mut [u8], rate: u32) {
+    let n = samples.len();
+    let ramped = n > 2 && samples[0] == 0 && samples[n - 1] == 0;
+    let rate = u64::from(rate.max(1));
+    for (i, b) in samples.iter_mut().enumerate() {
+        // Flat 0x80 in the body, and in a ramped file a linear approach to it over
+        // the first and last `rate / 150` samples. Integer throughout: the ramp is
+        // `128 · min(i, n−1−i) / (rate / 150)`, rearranged to keep the division last.
+        let bias = if ramped {
+            let k = i.min(n - 1 - i) as u64;
+            (128 * k * MAC_RAMP_HZ / rate).min(128) as i32
+        } else {
+            128
+        };
+        *b = (i32::from(*b) - bias).clamp(-128, 127) as i8 as u8;
+    }
+}
+
 impl InfocomSound {
     /// Parse a `Sound/sN.dat` or a `/MAC/SOUND/S<n>`, or `None` when the bytes are
     /// not one.
@@ -250,8 +311,7 @@ impl InfocomSound {
         }
         let mut samples = raw[HEADER..HEADER + frames].to_vec();
         if encoding == Encoding::OffsetBinary {
-            // Offset binary and two's complement differ by exactly the sign bit.
-            samples.iter_mut().for_each(|b| *b ^= 0x80);
+            to_signed(&mut samples, u32::from(be16(raw, 4)));
         }
         Some(InfocomSound { rate: u32::from(be16(raw, 4)), flags: be16(raw, 2), samples, pitch: None })
     }
@@ -631,6 +691,49 @@ mod tests {
         ];
         let got = from_volume(files);
         assert_eq!(got[&11].1.samples, vec![0x00, 0x80, 0xFF, 0x7F]);
+    }
+
+    /// A ramped Macintosh sample decodes to silence at both ends, not to a pop.
+    ///
+    /// Built the way the disc builds one — the signal times a trapezoid that opens and
+    /// closes at the rest level — so what is asserted is that the decode inverts it:
+    /// `env·(sample − 0x80)`, which is zero where `env` is.
+    #[test]
+    fn a_ramped_macintosh_sample_comes_back_faded_about_silence() {
+        // 1500 Hz makes the ramp exactly 10 samples, so the arithmetic is checkable
+        // by hand: 1500 / 150.
+        const RATE: u16 = 1500;
+        const N: i32 = 10;
+        let n = 30i32;
+        let signal = 20i32; // a constant +20 tone, so the envelope is all that varies
+        let raw: Vec<u8> = (0..n)
+            .map(|i| {
+                let env = i.min(n - 1 - i).min(N);
+                (((128 + signal) * env) / N) as u8
+            })
+            .collect();
+        let s = InfocomSound::parse(&dat(RATE, 0x0132, &raw), Encoding::OffsetBinary).expect("parses");
+        let out: Vec<i32> = s.samples.iter().map(|&b| i32::from(b as i8)).collect();
+
+        assert_eq!(out[0], 0, "opens at silence, where a flat 0x80 would give -128");
+        assert_eq!(out[n as usize - 1], 0, "and closes there");
+        assert_eq!(out[15], signal, "the body is the signal itself, unscaled");
+        // In between, the signal faded — the ramp the Macintosh wanted, about zero.
+        for i in 0..N {
+            assert_eq!(out[i as usize], signal * i / N, "sample {i} is the signal times the envelope");
+        }
+    }
+
+    /// The two effects the mastering pass missed keep the flat conversion.
+    ///
+    /// A ramped file opens AND closes at exactly full negative; a recording does not,
+    /// so this is what separates them. Getting it wrong the other way would push
+    /// effects 8 and 14 off silence rather than onto it.
+    #[test]
+    fn an_unramped_macintosh_sample_is_converted_flat() {
+        let raw = [0x93u8, 0x40, 0xC0, 0x85];
+        let s = InfocomSound::parse(&dat(1500, 0x0032, &raw), Encoding::OffsetBinary).expect("parses");
+        assert_eq!(s.samples, vec![0x13, 0xC0, 0x40, 0x05], "every byte is just its sign bit flipped");
     }
 
     #[test]
