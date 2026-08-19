@@ -187,17 +187,25 @@ lanthorn "LostTreasures1.iso" --story 3       # a compilation CD
 | Medium | Extensions | Presents as |
 |---|---|---|
 | AmigaDOS floppy | `.adf` | Amiga (4) |
-| Macintosh HFS, incl. DiskCopy 4.2 and hybrid CDs | `.image` `.bin` `.iso` `.dc42` | Macintosh (3) |
+| Macintosh HFS floppy, incl. DiskCopy 4.2 | `.image` `.dc42` | Macintosh (3) |
 | Apple II ProDOS volume | `.2mg` `.po` `.dsk` | Apple IIgs (10) |
 | Apple II raw self-booting press | `.dsk` | Apple IIgs (10) |
 | Atari ST floppy | `.st` | Atari ST (5) |
 | Commodore 1541 | `.d64` | Commodore 128 (7) |
 | PC floppy | `.ima` `.img` | — |
-| ISO 9660 CD-ROM | `.iso` | — |
+| CD-ROM, incl. hybrid Mac/PC discs | `.iso` `.bin` | Macintosh (3) or —, per file |
 
-A dash means the medium states no interpreter number, and whatever default is in
-force stands: a PC floppy *is* your terminal, and an ISO 9660 volume names a disc
-rather than a machine. `--interpreter <n>` overrides any of them.
+**A CD-ROM is not a machine**, which is why its row names two. The *Lost
+Treasures* discs carry the Macintosh and DOS builds in one filesystem, so a
+single answer would be wrong for half the disc: a file Apple's ISO 9660
+extension identifies as a Macintosh one is played as a Macintosh, and a file it
+does not leaves whatever rule is already in force. A dash is that — no number
+stated, the current default stands, which for a PC floppy is simply your
+terminal. `--interpreter <n>` overrides any of them.
+
+(The extension column is what a *scan* offers to open, not a claim about the
+bytes: several formats share a spelling, and what a volume actually **is** gets
+decided by reading it.)
 
 **A release pressed across several floppies is one game.** Name any single
 volume and the rest are found beside it — *Arthur*'s Apple press keeps its story
@@ -242,14 +250,20 @@ zvm-cli "Sherlock.adf"            # release media works here too
 zvm-cli --machines                # what machine is what
 ```
 
-- **Your terminal's scrollback works.** The status line and any upper window stay
-  pinned while the story text scrolls into your terminal's own history — so
-  `Shift-PageUp`, the wheel and `tmux` copy-mode reach what the game printed.
-  `--pin top` keeps the classic layout and is the default; `--pin bottom` puts
-  the fixed window *under* the story, which is what lets a terminal archive lines
-  at all. `/pin` moves it mid-game.
-- **Quitting leaves your prompt below the game**, not in the middle of it — on
-  `quit`, on Ctrl-D and on Ctrl-C alike.
+- **`--pin bottom` gives you your terminal's scrollback back.** A terminal only
+  files a line into its history when the line scrolls off the **top of the
+  screen** — so pinning the status line up there, which is what every interpreter
+  has always done, means nothing the game prints is ever archived. Put the fixed
+  window *under* the story instead and the story text scrolls off the top
+  normally: `Shift-PageUp`, the wheel and `tmux` copy-mode all reach what the
+  game printed, with no scrollback buffer of our own in the way.
+
+  `--pin top` remains the **default** and keeps the classic layout — and, being
+  the classic layout, it archives nothing. `/pin` swaps them mid-game, so you can
+  play with the bar on top and drop it to the bottom when you want to scroll
+  back. Whichever you choose, quitting releases the pinned region and leaves your
+  shell prompt below the game rather than in the middle of it — on `quit`, on
+  Ctrl-D and on Ctrl-C alike.
 - **The save prompt lists your saves** and a number picks one, so you needn't
   remember what you called it. Saving over one asks first.
 - **Release media, the same as the TUI.** A disk holding several stories asks

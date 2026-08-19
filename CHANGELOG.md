@@ -95,12 +95,15 @@ shipped beside it, and presents the machine that disk came from.
 
 `zvm-cli`, `gvm-cli` and `scott-cli` are no longer the poor relations.
 
-- **Your scrollback works.** The status line and upper windows stay pinned while
-  the story text scrolls into your terminal's own history, so `Shift-PageUp`,
-  the mouse wheel and `tmux` copy-mode all reach what the game printed. `--pin
-  top` is the default and keeps the classic layout; `--pin bottom` puts the
-  fixed window under the story, which is what makes a terminal archive lines at
-  all. `/pin` moves it mid-game.
+- **`--pin bottom` gives you your terminal's scrollback back.** A terminal files
+  a line into its history only when that line scrolls off the **top of the
+  screen**, so a status line pinned up there — what every interpreter has always
+  done, and what `--pin top` still does as the default — means nothing the game
+  prints is ever archived. Measured: with the fixed window on top, **zero** rows
+  reach history; with it on the bottom they all do. `--pin bottom` puts the fixed
+  window under the story, and `Shift-PageUp`, the mouse wheel and `tmux`
+  copy-mode then reach what the game printed, with no scrollback buffer of our
+  own in the way. `/pin` swaps them mid-game.
 - **Exiting leaves your terminal where it should be.** The pinned region is
   released and the prompt lands below it — on `quit`, on Ctrl-D, and on Ctrl-C.
 - **The save prompt shows your saves.** It lists what is already there and a
