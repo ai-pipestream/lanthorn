@@ -830,13 +830,15 @@ fn a_story_off_a_floppy_is_told_the_whole_machine() {
 /// the presentation is then the IBM PC's, and SQ-0872 exists because a silent
 /// substitution is indistinguishable from a supported machine.
 ///
-/// 8 is the Commodore 64, 11 the Tandy Color, 1 the DECSystem-20: each absent
-/// for a stated reason (see `zvm::interpreter::MACHINES`), and each announced.
+/// 11 is the Tandy Color and 1 the DECSystem-20: each absent for a stated reason
+/// (see `zvm::interpreter::MACHINES`), and each announced. **8 used to be in this
+/// list and is not** — the Commodore 64 gained a row in SQ-0873, so asking for it
+/// is now asking for a machine zvm models rather than reaching for a gap.
 #[test]
 fn an_unmodelled_machine_says_so_instead_of_quietly_becoming_an_ibm_pc() {
     let story = write_temp("unmodelled.z5", &machine_reporting_story());
 
-    for n in [1u8, 8, 11] {
+    for n in [1u8, 11] {
         let out = run(&story, &["-I", &n.to_string()], "");
         let err = stderr_of(&out);
         assert!(

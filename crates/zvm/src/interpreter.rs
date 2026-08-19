@@ -112,6 +112,13 @@ pub const IBM_PC_INTERPRETER_NUMBER: u8 = 6;
 pub const COMMODORE_128_INTERPRETER_NUMBER: u8 = 7;
 
 /// Apple IIc, from the same §11.1.3 table and the same `MACHINE:` routine as
+/// §11.1.3's Commodore 64.
+///
+/// No medium selects it — a `.d64` is a 1541 image both Commodore machines read —
+/// so it is reached by asking for it, exactly as the Apple IIe and IIc are on a
+/// ProDOS volume that cannot name which of the family pressed it.
+pub const COMMODORE_64_INTERPRETER_NUMBER: u8 = 8;
+
 /// [`APPLE_IIE_INTERPRETER_NUMBER`] — `IIcID EQU 9 ; ][c Yzip`.
 pub const APPLE_IIC_INTERPRETER_NUMBER: u8 = 9;
 
@@ -383,13 +390,22 @@ pub enum StatusBand {
 /// the Apple II is monochrome — though "monochrome" there means a WHITE-phosphor
 /// rendering, and green and amber monitors were as common.
 ///
-/// # The Commodore 64, measured and homeless
+/// # The Commodore 64 is the row this field argued into existence
 ///
-/// `c64-hitchhiker.png` gives page `#6C6C6C`, ink `#FFFFFF`, a `StatusBand::Own`
-/// of black under grey, and a black 8x1 underscore cursor. It is recorded here and
-/// nowhere else, because [`MACHINES`] has no interpreter-8 row — a `.d64` is a 1541
-/// image both Commodore machines read, so the medium cannot choose between 7 and 8.
-/// If that row ever arrives, its period look is already measured.
+/// Interpreter 8 had no row when it was first measured; see [`MACHINES`] for why
+/// that was wrong. Its values come from `c64-zork1-solidgold.png`, whose banner
+/// reads "Interpreter 8 Version J" — the machine naming its own number.
+///
+/// **Two C64 captures disagree, and the row follows the later one.**
+/// `c64-hitchhiker.png` (1984) is a GREY page `#6C6C6C` under white ink with a
+/// status band of `#6C6C6C` on `#000000` — neither the body pair nor its reverse,
+/// which is the case [`StatusBand::Own`] exists for and the only measured instance
+/// of it. The Solid Gold press (release 52, serial 871125) is black under white
+/// with a plain full-width reverse. One machine, one publisher, two looks three
+/// years apart: the period look is a property of the interpreter BUILD as much as
+/// the machine, and this table has one row per machine. `Own` is kept because the
+/// earlier build is evidence that a band need not be derivable, whether or not the
+/// row that reported it still does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeriodLook {
     /// The body's ground.
@@ -542,13 +558,21 @@ pub struct MachineProfile {
 /// **The gaps are deliberate and each is a decline.** 1 (DECSystem-20) is absent
 /// because it is what declining a number already falls through to, and whether it
 /// deserves a bundle of its own or is honestly "a terminal, the same as the IBM
-/// PC" is a decision rather than a datum. 8 (Commodore 64) is absent because a
-/// `.d64` is a 1541 image both Commodore machines read, so the medium cannot
-/// choose between 7 and 8, and no Infocom Commodore interpreter has been read for
-/// either machine's v5 default pair (SQ-0869) — though the C64's *period look* has
-/// been measured, and [`PeriodLook`] records it against the day that row exists.
-/// 11 (Tandy Color) is absent because there is no fixture and no sourced constant,
-/// and anything written here would be guesswork — better absent than invented.
+/// PC" is a decision rather than a datum. 11 (Tandy Color) is absent because there
+/// is no fixture and no sourced constant, and anything written here would be
+/// guesswork — better absent than invented.
+///
+/// **8 (Commodore 64) used to be absent and should not have been.** The stated
+/// reason was that a `.d64` is a 1541 image both Commodore machines read, so the
+/// medium cannot choose between 7 and 8 — which is true, and is not a reason for a
+/// row to be missing. ProDOS cannot choose between 2, 9 and 10 either, and all
+/// three of those have rows; a medium that names a family rather than a machine
+/// means the number is asked for rather than inferred, not that the machine goes
+/// unmodelled. The other half of the old reason — no Infocom Commodore interpreter
+/// read for a v5 pair — is equally true of the Commodore 128, which has a row and
+/// declines [`MachineProfile::default_colours`]; declining is what a row is FOR.
+/// SQ-0873 then measured the C64's period look, giving it more evidence than
+/// several rows that already existed.
 ///
 /// [`machine`] answering `None` is therefore meaningful: it says "this number
 /// names a machine I do not model", which a front-end can report instead of
@@ -648,6 +672,30 @@ pub const MACHINES: &[MachineProfile] = &[
         }),
     },
     MachineProfile {
+        number: COMMODORE_64_INTERPRETER_NUMBER,
+        name: "Commodore 64",
+        // Declined for the same reason the C128's is: no Infocom Commodore
+        // interpreter has been read for a v5 story's default pair (SQ-0869).
+        default_colours: None,
+        palette: Palette::Standard,
+        global_colour_pens: false,
+        one_screen_palette: false,
+        v6_screen_page: false,
+        // c64-zork1-solidgold.png: Zork I release 52 / serial 871125, whose own
+        // banner reads "Interpreter 8 Version J" — the machine naming itself, which
+        // is as direct a statement of the number as this table has anywhere.
+        //
+        // Black page, white ink, and the status line a plain full-width reverse
+        // running x 37..522 with no interior gap wider than a glyph.
+        period_look: Some(PeriodLook {
+            page: (0x00, 0x00, 0x00),
+            ink: (0xFF, 0xFF, 0xFF),
+            status: StatusBand::FullReverse,
+            cursor_shape: CursorShape::Underscore,
+            cursor_colour: (0xFF, 0xFF, 0xFF),
+        }),
+    },
+    MachineProfile {
         number: APPLE_IIC_INTERPRETER_NUMBER,
         name: "Apple IIc",
         default_colours: Some((APPLE_DEFAULT_BACKGROUND, APPLE_DEFAULT_FOREGROUND)),
@@ -713,7 +761,7 @@ mod tests {
     /// *by accident* — say by widening a match — is what this catches.
     #[test]
     fn the_unmodelled_numbers_answer_none_rather_than_a_substitute() {
-        for n in [0u8, 1, 8, 11, 12, 255] {
+        for n in [0u8, 1, 11, 12, 255] {
             assert!(machine(n).is_none(), "interpreter {n} is not modelled and must say so");
         }
     }

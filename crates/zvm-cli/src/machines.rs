@@ -80,7 +80,7 @@ fn cursor(look: &PeriodLook) -> String {
 /// because it is a different KIND of claim — see the module docs.
 fn period_looks() -> String {
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
-    let mut s = format!("\n{PERIOD_INTRO}\n");
+    let mut s = format!("\n{LOOK_INTRO}\n");
     s.push_str(&format!(
         "  {:>2}  {:<name_w$}  {:<7}  {:<7}  {:<18}  {}\n",
         "#", "machine", "page", "ink", "status line", "cursor"
@@ -128,10 +128,7 @@ fn colours(m: &MachineProfile) -> String {
 
 /// The whole table, ready to print.
 pub fn table() -> String {
-    let mut s = String::from(
-        "ZMSD §11.1.3 machine profiles — what zvm models, in number order.\n\
-         Colours are resolved through each machine's OWN palette (§8.3.1.1).\n\n",
-    );
+    let mut s = format!("ZMSD §11.1.3 machine profiles — what zvm models, in number order.\n\n{TOLD_INTRO}\n");
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     s.push_str(&format!(
         "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {}\n",
@@ -188,14 +185,30 @@ const NUMBERED: &[(u8, &str)] = &[
     (11, "Tandy Color"),
 ];
 
-/// The period-look block's header. Written as a plain literal for the reason
-/// [`ABSENT`] is: a `"\` continuation eats the newline AND the indent after it,
-/// so an indented continuation line silently loses its leading spaces.
-const PERIOD_INTRO: &str = "Period look - what the machine's own screen looked like to a v1-v4 story,
-which has no colour concept for the columns above to be the default OF.
-OBSERVED from emulator captures in machine-screenshots/, not read out of
-Infocom's source as the pairs above are: presentation, not a fact a story
-can read. A dash is a machine with no capture, not a machine with no look.
+/// The two blocks' headers, and why there are two.
+///
+/// **They are two different kinds of claim and must not be read as one table.**
+/// The first is what the STORY IS TOLD — header bytes and §8.3 rules, every value
+/// read out of Infocom's own source. The second is what the SCREEN LOOKED LIKE,
+/// every value observed from an emulator capture. Merging them would put a sourced
+/// constant and an observation in the same row under the same authority, and would
+/// also run past 160 columns; keeping them apart is what lets each say where it
+/// came from. Numbering them is what stops the second looking like an accident.
+///
+/// Written as plain literals for the reason [`ABSENT`] is: a `"\` continuation eats
+/// the newline AND the indent after it, so an indented continuation line silently
+/// loses its leading spaces.
+const TOLD_INTRO: &str = "1. WHAT THE STORY IS TOLD - the header bytes and the section 8.3 screen rules,
+   each value read out of Infocom's own interpreter source.
+   Colours are resolved through each machine's OWN palette (section 8.3.1.1).
+";
+
+/// See [`TOLD_INTRO`].
+const LOOK_INTRO: &str = "2. WHAT THE SCREEN LOOKED LIKE - presentation for a v1-v4 story, which has no
+   colour concept for the pairs above to be the default OF.
+   OBSERVED from emulator captures in machine-screenshots/, not read out of
+   Infocom's source as the pairs above are. A dash is a machine with no
+   capture, not a machine with no look.
 ";
 
 const LEGEND: &str = "\
@@ -212,10 +225,6 @@ palette         colours repaint everything already drawn, border art included.
 // keeps and the block would come out ragged.
 const ABSENT: &str = "  1   what declining a number already falls through to; whether it deserves a
       bundle or is honestly \"a terminal, the same as the IBM PC\" is a decision.
-  8   a .d64 is a 1541 image BOTH Commodore machines read, so the medium cannot
-      choose between 7 and 8, and no Infocom Commodore interpreter has been read
-      for a v5 default pair. Its PERIOD LOOK is measured and waiting for the row:
-      page #6C6C6C, ink #FFFFFF, status #6C6C6C on #000000, underscore #000000.
   11  no fixture and no sourced constant; anything here would be guesswork.
 ";
 
@@ -395,7 +404,7 @@ mod tests {
     fn the_numbers_with_no_row_are_named_and_argued() {
         let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
         let t = table();
-        for (n, name) in [(1u8, "DECSystem-20"), (8, "Commodore 64"), (11, "Tandy Color")] {
+        for (n, name) in [(1u8, "DECSystem-20"), (11, "Tandy Color")] {
             assert!(t.contains(&format!("{n} ({name})")), "{name} must be listed as absent");
         }
         for m in MACHINES {

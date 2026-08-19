@@ -971,12 +971,17 @@ Amiga floppy or anywhere else.
   names 2 or 9 outright now gets an Apple instead of an IBM PC wearing an Apple's
   number, which is what the fallback used to hand them.
 
-  **Three numbers still have no profile, and each is a decline rather than a
+  **Two numbers still have no profile, and each is a decline rather than a
   gap**: 1 DECSystem-20 (what declining already falls through to — whether it
   deserves a bundle of its own or is honestly "a terminal, the same as the IBM
-  PC" is a decision, not a datum), 8 Commodore 64 (no Infocom Commodore
-  interpreter has been read for either Commodore), and 11 Tandy Color (no
-  fixture, no sourced constant — better absent than invented). Naming one of them
+  PC" is a decision, not a datum), and 11 Tandy Color (no fixture, no sourced
+  constant — better absent than invented). **8 Commodore 64 was a third and
+  should not have been.** It was declined because a `.d64` is a 1541 image both
+  Commodore machines read, so the disk cannot choose between 7 and 8 — which is
+  true, and is the same thing that is true of ProDOS and the three Apples, all of
+  which have profiles. A medium that names a family rather than a machine means
+  the number gets asked for instead of inferred; it does not mean the machine goes
+  unmodelled. Naming one of the two that remain
   still writes it into `0x1E`, because the story asked and §11.1.3 has an answer,
   but everything else about the presentation is the IBM PC's — and `zvm-cli` now
   **says so** on stderr rather than letting the substitution pass unremarked.
