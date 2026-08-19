@@ -141,6 +141,7 @@ fn chrome(session: &mut GameSession) -> image::RgbaImage {
         Rgba([200, 200, 200, 255]),
         Rgba([0, 0, 0, 255]),
         &app::colors::ColorScheme::terminal_default(),
+        app::render::v6_layout::TextLayer::All,
     )
 }
 

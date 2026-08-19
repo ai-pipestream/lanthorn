@@ -944,7 +944,7 @@ fn shogun_raster_status_band_floods_game_white() {
     let colors = app::colors::ColorScheme::default();
     let default_fg = Rgba([220, 220, 220, 255]);
     let default_bg = Rgba([0, 0, 0, 255]);
-    let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors);
+    let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All);
 
     // Gather the status band's runs: chrome grid runs on native row 0 (px y=1), the
     // "SHOGUN" title row, a non-reverse black-on-white band (bg = z-colour 9,
