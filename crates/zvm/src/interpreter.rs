@@ -287,6 +287,142 @@ pub const APPLE_DEFAULT_FOREGROUND: u8 = 9;
 
 /// Everything zvm knows about one ZMSD §11.1.3 machine.
 ///
+/// The shape a machine's own interpreter drew its input cursor as (SQ-0873).
+///
+/// Three forms across five machines, and **none of them is what "invert the cell
+/// under the cursor" gives** — which is what a terminal front-end draws by default
+/// and what babelmap drew before this. Measured off the captures in
+/// `machine-screenshots/`, cell sizes included, so the proportions are the
+/// machine's rather than a guess at them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    /// One pixel wide and a line tall, in the gap AFTER the last glyph rather than
+    /// over a cell — the Macintosh insertion caret.
+    ///
+    /// Measured on three captures across two Mac models: `mac-zork1.jpg` (Mac Plus,
+    /// 16 rows) and `mac-arthur.jpg` / `mac-zorkzero.jpg` (colour, 13 rows). A scan
+    /// for isolated tall thin runs finds exactly one candidate per frame.
+    Bar,
+    /// A solid block filling the cell, or nearly: 7x14 of a 7x16 cell on the Apple
+    /// II (`appleiie-planetfall.png`), a full 8x16 on the Amiga
+    /// (`amiga-spellbreaker.png`, `amiga-lurking.png`).
+    Block,
+    /// One scanline on the cell's bottom row — 8x1 on both Commodores
+    /// (`c64-hitchhiker.png`, `c128-trinity.png`).
+    Underscore,
+}
+
+/// How a machine's own interpreter set the status line apart from the story
+/// (SQ-0873).
+///
+/// **Five machines, four behaviours, and not one of them derives from the body
+/// pair** — which is the finding that shaped [`PeriodLook`]. A field carrying only
+/// a page and an ink could express none of the last three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusBand {
+    /// The body pair swapped, across the full width. The Apple II and the
+    /// Commodore 128.
+    FullReverse,
+    /// The body pair swapped, but only behind each RUN of text — the page shows
+    /// between them.
+    ///
+    /// The Amiga, and the reason this variant exists. Row-censused across
+    /// `amiga-spellbreaker.png` at mid-band: 47..182 white behind "Council
+    /// Chamber", **376 px of page**, then 559..680 white behind "Score: 0/0".
+    PerRun,
+    /// A ground and ink of its own, which are neither the body pair nor its
+    /// reverse.
+    ///
+    /// The Commodore 64: a black ground under grey characters where its body is
+    /// white on grey. A true reverse would be a white ground with grey characters,
+    /// and black is a colour the body never uses as a ground at all.
+    Own {
+        /// The band's ground.
+        ground: (u8, u8, u8),
+        /// The band's characters.
+        ink: (u8, u8, u8),
+    },
+    /// No distinguishing ground; the band is separated from the story by rules.
+    ///
+    /// The Macintosh, which draws the status line in the body's own white-under-
+    /// black and puts solid black rules above and below it.
+    Ruled,
+}
+
+/// What a machine's screen LOOKED LIKE, for a story that has no opinion about it.
+///
+/// # Why this is a separate field and not more of `default_colours`
+///
+/// **Colour arrives with Version 5.** `set_colour` and the `$2C`/`$2D` header bytes
+/// are v5+, so a v1-v4 story has no colour concept at all: it never sets, never
+/// reads, never branches. Anything shown for one is the interpreter's presentation.
+/// [`MachineProfile::default_colours`] is the opposite kind of claim — a fact the
+/// story can read, sourced from Infocom's own code (`mac/xzip.lst`, `zboot.asm`,
+/// `st/stx1.s`) — and the two must not be confused. Hence two fields.
+///
+/// **And the two genuinely differ.** The Amiga's row reports 12/9, a grey page under
+/// white ink, from its v5-era interpreter; its v3 interpreter draws a BLUE page. The
+/// Commodore 64's grey page cannot be expressed as a §8.3.1 colour number at all
+/// (2..9 contain no grey, and `clamp_default_colour` accepts 10..12 only for v6), so
+/// reusing `default_colours` would have silently clamped it to black. Two of five.
+///
+/// # Provenance, and the standard it does NOT meet
+///
+/// Every value here is **observed from an emulator capture in
+/// `machine-screenshots/`**, row-censused rather than sampled, not read out of
+/// Infocom's source. The rest of this table meets a documented-source standard and
+/// this field does not, by the user's explicit decision (SQ-0873) to go with the
+/// captures in hand rather than chase emulator names, versions and palette settings.
+///
+/// What that costs is bounded and worth stating: the Amiga's `#074BA1` and the
+/// Commodore 64's `#6C6C6C` are values a palette choice can move — `#074BA1` is not
+/// a bit-replicated OCS value (those widen to `0x00, 0x11, ... 0xFF`), so the
+/// underlying register is almost certainly Workbench's `$05A`, which replicates to
+/// `#0055AA`; what is recorded is what the emulator drew. The other rows cannot
+/// move: the Mac Plus is 1-bit, the C128's VDC is RGBI (0/85/170/255 exactly), and
+/// the Apple II is monochrome — though "monochrome" there means a WHITE-phosphor
+/// rendering, and green and amber monitors were as common.
+///
+/// # The Commodore 64, measured and homeless
+///
+/// `c64-hitchhiker.png` gives page `#6C6C6C`, ink `#FFFFFF`, a `StatusBand::Own`
+/// of black under grey, and a black 8x1 underscore cursor. It is recorded here and
+/// nowhere else, because [`MACHINES`] has no interpreter-8 row — a `.d64` is a 1541
+/// image both Commodore machines read, so the medium cannot choose between 7 and 8.
+/// If that row ever arrives, its period look is already measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeriodLook {
+    /// The body's ground.
+    pub page: (u8, u8, u8),
+    /// The body's characters.
+    pub ink: (u8, u8, u8),
+    /// How the status line was set apart. Never derivable from the pair above.
+    pub status: StatusBand,
+    /// The input cursor's shape.
+    pub cursor_shape: CursorShape,
+    /// The input cursor's colour, which on two of five machines is **neither the
+    /// page nor the ink** — the Amiga's orange and the Commodore 64's black.
+    pub cursor_colour: (u8, u8, u8),
+}
+
+/// The Apple II family's period look, shared by interpreters 2, 9 and 10.
+///
+/// Measured on `appleiie-planetfall.png` (Planetfall r29, v3, 560x384 = 80 columns
+/// at 1x2). Shared across the three rows for the same reason they already share
+/// [`APPLE_DEFAULT_BACKGROUND`] and [`APPLE_DEFAULT_FOREGROUND`]: one Infocom
+/// interpreter, one 80-column text screen. The capture cannot say which of the
+/// three machines ran it, and treating that as three separate declines would lose a
+/// measurement to a distinction the interpreter itself does not draw.
+///
+/// White on black is the white-monitor rendering; see [`PeriodLook`].
+const APPLE_PERIOD_LOOK: PeriodLook = PeriodLook {
+    page: (0x00, 0x00, 0x00),
+    ink: (0xFF, 0xFF, 0xFF),
+    status: StatusBand::FullReverse,
+    cursor_shape: CursorShape::Block,
+    cursor_colour: (0xFF, 0xFF, 0xFF),
+};
+
 /// A row is the machine's *bundle*: the byte it writes into `$1E`, the page and
 /// ink it reports in `$2C`/`$2D`, the palette its colour numbers resolve through,
 /// and the §8.3 screen rules the standard gives it by name. Any member a row
@@ -307,8 +443,17 @@ pub struct MachineProfile {
     /// IBM PC declines because a PC in a terminal IS the player's terminal, so
     /// "default" should mean what the player sees. The Commodore 128 declines
     /// because nothing in hand states the pair Infocom's Commodore interpreter
-    /// reported, and the machine's famous light-blue-on-blue boot screen is the
-    /// hardware's reputation rather than the interpreter's evidence (SQ-0869).
+    /// reported for a v5 story (SQ-0869).
+    ///
+    /// That second decline stands, but its old wording no longer does. It used to
+    /// read that "the machine's famous light-blue-on-blue boot screen is the
+    /// hardware's reputation rather than the interpreter's evidence"; SQ-0873 then
+    /// measured the machine, and Infocom's interpreter draws light CYAN on BLACK,
+    /// which is neither the reputation nor anything like it. What that measurement
+    /// cannot do is fill this field, because it was taken on *Trinity* — a v4
+    /// story, which has no colour concept for a default pair to be the default OF.
+    /// It lives in [`MachineProfile::period_look`] instead, which is the whole
+    /// point of that field being separate.
     pub default_colours: Option<(u8, u8)>,
     /// The palette this machine's colour NUMBERS resolve to true colours through
     /// (ZMSD §8.3.1.1, which makes it an interpreter choice rather than a law).
@@ -380,6 +525,16 @@ pub struct MachineProfile {
     /// one on is one measurement's work: find a title whose border art and scene
     /// art carry different palettes, and look.
     pub one_screen_palette: bool,
+    /// What this machine's screen LOOKED like, for a story with no opinion about
+    /// it — presentation, not a fact the story can read. See [`PeriodLook`],
+    /// which is also where the provenance and its limits are stated.
+    ///
+    /// `None` is a decline for want of a capture, not a claim that the machine
+    /// had no look: the Atari ST and the IBM PC have none in
+    /// `machine-screenshots/` at all. The IBM row may well decline permanently,
+    /// for the same reason its [`default_colours`](Self::default_colours) does —
+    /// what a PC looked like was the display adapter's answer, not Infocom's.
+    pub period_look: Option<PeriodLook>,
 }
 
 /// Every §11.1.3 machine zvm models, in number order.
@@ -390,9 +545,10 @@ pub struct MachineProfile {
 /// PC" is a decision rather than a datum. 8 (Commodore 64) is absent because a
 /// `.d64` is a 1541 image both Commodore machines read, so the medium cannot
 /// choose between 7 and 8, and no Infocom Commodore interpreter has been read for
-/// either machine's colours (SQ-0869). 11 (Tandy Color) is absent because there
-/// is no fixture and no sourced constant, and anything written here would be
-/// guesswork — better absent than invented.
+/// either machine's v5 default pair (SQ-0869) — though the C64's *period look* has
+/// been measured, and [`PeriodLook`] records it against the day that row exists.
+/// 11 (Tandy Color) is absent because there is no fixture and no sourced constant,
+/// and anything written here would be guesswork — better absent than invented.
 ///
 /// [`machine`] answering `None` is therefore meaningful: it says "this number
 /// names a machine I do not model", which a front-end can report instead of
@@ -406,6 +562,7 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        period_look: Some(APPLE_PERIOD_LOOK),
     },
     MachineProfile {
         number: MACINTOSH_INTERPRETER_NUMBER,
@@ -415,6 +572,16 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: true,
+        // mac-zork1.jpg: Zork I r88/840726 on a Mac Plus, screen 512x342. A 1-bit
+        // screen, so no palette can move these; the status line is set apart by
+        // rules rather than by ground, and the caret is 1px by the line height.
+        period_look: Some(PeriodLook {
+            page: (0xFF, 0xFF, 0xFF),
+            ink: (0x00, 0x00, 0x00),
+            status: StatusBand::Ruled,
+            cursor_shape: CursorShape::Bar,
+            cursor_colour: (0x00, 0x00, 0x00),
+        }),
     },
     MachineProfile {
         number: AMIGA_INTERPRETER_NUMBER,
@@ -424,6 +591,17 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: true,
         one_screen_palette: true,
         v6_screen_page: true,
+        // amiga-spellbreaker.png (r87/860904) and amiga-lurking.png, both v3 and
+        // both giving the identical palette in 7-8 exact colours. Note the page
+        // is BLUE where default_colours above reports 12/9, a grey — the v3 and
+        // v5 interpreters differ, which is the whole reason this field exists.
+        period_look: Some(PeriodLook {
+            page: (0x07, 0x4B, 0xA1),
+            ink: (0xFF, 0xFF, 0xFF),
+            status: StatusBand::PerRun,
+            cursor_shape: CursorShape::Block,
+            cursor_colour: (0xFF, 0x7E, 0x1C),
+        }),
     },
     MachineProfile {
         number: ATARI_ST_INTERPRETER_NUMBER,
@@ -433,6 +611,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        // Declined: no capture. stories/ holds Infocom Compilation 1-9 (19xx)(-).st.
+        period_look: None,
     },
     MachineProfile {
         number: IBM_PC_INTERPRETER_NUMBER,
@@ -443,16 +623,29 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        // Declined: no capture, and a PC's look was its display adapter's answer.
+        period_look: None,
     },
     MachineProfile {
         number: COMMODORE_128_INTERPRETER_NUMBER,
         name: "Commodore 128",
-        // Declined: no Infocom Commodore interpreter has been read (SQ-0869).
+        // Declined: no Infocom Commodore interpreter has been read for a v5
+        // story's default pair (SQ-0869). The measured look is period_look below.
         default_colours: None,
         palette: Palette::Standard,
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        // c128-trinity.png: Trinity (v4) at the first prompt, two colours exactly.
+        // #55FFFF is RGBI light cyan on the nose, so this row is as close to
+        // palette-independent as an emulator capture gets.
+        period_look: Some(PeriodLook {
+            page: (0x00, 0x00, 0x00),
+            ink: (0x55, 0xFF, 0xFF),
+            status: StatusBand::FullReverse,
+            cursor_shape: CursorShape::Underscore,
+            cursor_colour: (0x55, 0xFF, 0xFF),
+        }),
     },
     MachineProfile {
         number: APPLE_IIC_INTERPRETER_NUMBER,
@@ -462,6 +655,7 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        period_look: Some(APPLE_PERIOD_LOOK),
     },
     MachineProfile {
         number: APPLE_IIGS_INTERPRETER_NUMBER,
@@ -471,6 +665,7 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        period_look: Some(APPLE_PERIOD_LOOK),
     },
 ];
 
@@ -581,5 +776,83 @@ mod tests {
         let amiga: Vec<_> =
             MACHINES.iter().filter(|m| m.palette != Palette::Standard).map(|m| m.number).collect();
         assert_eq!(amiga, vec![AMIGA_INTERPRETER_NUMBER]);
+    }
+
+    /// **A period look is not a `default_colours` pair**, and the two rows where
+    /// they diverge are the reason the field exists (SQ-0873).
+    ///
+    /// The Amiga reports 12/9 — a GREY page — from its v5-era interpreter, and its
+    /// v3 interpreter draws a blue one. The Commodore 128 reports nothing at all and
+    /// yet has a measured look. If a later change ever makes one derivable from the
+    /// other, this case is what should stop it.
+    #[test]
+    fn the_period_look_is_not_the_default_pair() {
+        let amiga = machine(AMIGA_INTERPRETER_NUMBER).expect("modelled");
+        assert_eq!(amiga.default_colours, Some((12, 9)), "grey page, white ink, from v5");
+        let look = amiga.period_look.expect("measured on two v3 floppies");
+        assert_eq!(look.page, (0x07, 0x4B, 0xA1), "and the v3 interpreter's page is BLUE");
+        // Grey is 10..12 in §8.3.1; whatever blue resolves to, it is not that.
+        assert_ne!(look.page.0, look.page.1, "a grey has equal channels; this does not");
+
+        let c128 = machine(COMMODORE_128_INTERPRETER_NUMBER).expect("modelled");
+        assert_eq!(c128.default_colours, None, "no v5 source was ever read");
+        assert!(c128.period_look.is_some(), "which did not stop the machine being measured");
+    }
+
+    /// The three sub-decisions are independent — the finding that fixed this
+    /// field's shape. Five machines produced four status behaviours and three
+    /// cursor shapes, and neither follows from the body pair.
+    #[test]
+    fn the_status_band_and_cursor_do_not_follow_from_the_body_pair() {
+        let look = |n| machine(n).expect("modelled").period_look.expect("measured");
+        let (apple, mac, amiga, c128) = (
+            look(APPLE_IIE_INTERPRETER_NUMBER),
+            look(MACINTOSH_INTERPRETER_NUMBER),
+            look(AMIGA_INTERPRETER_NUMBER),
+            look(COMMODORE_128_INTERPRETER_NUMBER),
+        );
+        // Four measured machines, three distinct status behaviours between them.
+        assert_eq!(apple.status, StatusBand::FullReverse);
+        assert_eq!(c128.status, StatusBand::FullReverse);
+        assert_eq!(mac.status, StatusBand::Ruled, "rules, not a ground");
+        assert_eq!(amiga.status, StatusBand::PerRun, "the page shows between the runs");
+
+        // Three cursor shapes, and the Macintosh's bar is the one no cell-inverting
+        // front-end would ever draw.
+        assert_eq!(mac.cursor_shape, CursorShape::Bar);
+        assert_eq!(apple.cursor_shape, CursorShape::Block);
+        assert_eq!(amiga.cursor_shape, CursorShape::Block);
+        assert_eq!(c128.cursor_shape, CursorShape::Underscore);
+
+        // And on two machines the cursor's colour is neither the page nor the ink,
+        // so it cannot be dropped and recomputed.
+        assert!(
+            amiga.cursor_colour != amiga.page && amiga.cursor_colour != amiga.ink,
+            "the Amiga's cursor is orange on a blue page under white ink",
+        );
+        assert_eq!(c128.cursor_colour, c128.ink, "…but the C128's is simply its ink");
+    }
+
+    /// Declines are declines, and the ones here are for want of a capture rather
+    /// than for want of a decision. Fails when someone fills a row by inference.
+    #[test]
+    fn the_machines_with_no_capture_decline() {
+        let missing: Vec<_> =
+            MACHINES.iter().filter(|m| m.period_look.is_none()).map(|m| m.number).collect();
+        assert_eq!(
+            missing,
+            vec![ATARI_ST_INTERPRETER_NUMBER, IBM_PC_INTERPRETER_NUMBER],
+            "only the two machines with nothing in machine-screenshots/ decline",
+        );
+        // The Apple family shares one measurement, exactly as it shares one pair.
+        let apples: Vec<_> = [
+            APPLE_IIE_INTERPRETER_NUMBER,
+            APPLE_IIC_INTERPRETER_NUMBER,
+            APPLE_IIGS_INTERPRETER_NUMBER,
+        ]
+        .into_iter()
+        .map(|n| machine(n).expect("modelled").period_look)
+        .collect();
+        assert!(apples.windows(2).all(|w| w[0] == w[1]), "one interpreter, one text screen");
     }
 }

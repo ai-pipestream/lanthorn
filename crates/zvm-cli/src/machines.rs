@@ -3,10 +3,10 @@
 //! [`zvm::interpreter::MACHINES`] is what both front-ends present a story as
 //! (SQ-0872), and until now the only way to read it was to open the source. A
 //! machine is a *bundle* — the byte in `$1E`, the page and ink in `$2C`/`$2D`,
-//! the palette those colour numbers resolve through, and two §8.3 screen rules —
-//! and a bundle whose members disagree is exactly the defect that quest was
-//! filed for. Printing all of it side by side is what makes that checkable
-//! without a debugger and without a game.
+//! the palette those colour numbers resolve through, three §8.3 screen rules and
+//! the period look — and a bundle whose members disagree is exactly the defect
+//! that quest was filed for. Printing all of it side by side is what makes that
+//! checkable without a debugger and without a game.
 //!
 //! # Generated, never transcribed
 //!
@@ -15,6 +15,14 @@
 //! copy kept by hand goes stale and then lies. Adding a machine to
 //! `zvm::interpreter` reaches this output with no edit here, and REMOVING a
 //! field would fail to compile rather than quietly stop being printed.
+//!
+//! **Adding one used to slip through, and no longer does.** `period_look` was
+//! added to the profile and this output kept printing without it, past a test
+//! whose stated job was to catch exactly that — it checked a few distinctive
+//! values by hand, so a new member was invisible to it.
+//! `every_member_of_the_profile_reaches_the_output` now destructures the struct
+//! exhaustively, with no `..`, so the next field fails to COMPILE here until
+//! someone decides what column it gets.
 //!
 //! # Why the colours are shown resolved
 //!
@@ -38,8 +46,58 @@
 //! table, and it lives in `app::interpreter` where a file can be read.
 //! `zvm-cli` plays no v6 story anyway.
 
-use zvm::interpreter::MACHINES;
+use zvm::interpreter::{CursorShape, MachineProfile, PeriodLook, StatusBand, MACHINES};
 use zvm::screen::{rgb15_to_888, standard_true_colour, Palette};
+
+/// `#RRGGBB` for a measured true colour, which needs no palette — a period look
+/// is observed rather than resolved through §8.3.1.
+fn hex((r, g, b): (u8, u8, u8)) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+/// How the machine set its status line apart, in a column's width.
+fn status(band: StatusBand) -> String {
+    match band {
+        StatusBand::FullReverse => "reversed".to_string(),
+        StatusBand::PerRun => "reversed per run".to_string(),
+        StatusBand::Own { ground, ink } => format!("{} on {}", hex(ink), hex(ground)),
+        StatusBand::Ruled => "ruled, same ground".to_string(),
+    }
+}
+
+/// The cursor, as shape and colour — neither derivable from the other, and on
+/// two machines the colour is neither the page nor the ink.
+fn cursor(look: &PeriodLook) -> String {
+    let shape = match look.cursor_shape {
+        CursorShape::Bar => "bar",
+        CursorShape::Block => "block",
+        CursorShape::Underscore => "underscore",
+    };
+    format!("{shape} {}", hex(look.cursor_colour))
+}
+
+/// The period-look table, which is a second block rather than four more columns
+/// because it is a different KIND of claim — see the module docs.
+fn period_looks() -> String {
+    let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
+    let mut s = format!("\n{PERIOD_INTRO}\n");
+    s.push_str(&format!(
+        "  {:>2}  {:<name_w$}  {:<7}  {:<7}  {:<18}  {}\n",
+        "#", "machine", "page", "ink", "status line", "cursor"
+    ));
+    s.push_str(&format!("  {}\n", "-".repeat(name_w + 48)));
+    for m in MACHINES {
+        let (page, ink, band, cur) = match &m.period_look {
+            Some(l) => (hex(l.page), hex(l.ink), status(l.status), cursor(l)),
+            None => ("-".into(), "-".into(), "-".into(), "no capture".into()),
+        };
+        s.push_str(&format!(
+            "  {:>2}  {:<name_w$}  {page:<7}  {ink:<7}  {band:<18}  {cur}\n",
+            m.number, m.name,
+        ));
+    }
+    s
+}
 
 /// `#RRGGBB` for standard colour number `n` **through `palette`**, or a dash
 /// when the number has no true-colour equivalent (§8.3.7's sentinels).
@@ -59,7 +117,7 @@ fn swatch(n: u8, palette: Palette) -> String {
 /// One machine's page and ink, as `bg=N #RRGGBB fg=N #RRGGBB` — or why it has
 /// none. A `None` here is a DECLINE with two different meanings, and the table
 /// says which by naming the machine rather than by inventing a pair.
-fn colours(m: &zvm::interpreter::MachineProfile) -> String {
+fn colours(m: &MachineProfile) -> String {
     match m.default_colours {
         Some((bg, fg)) => {
             format!("bg {bg:>2} {}   fg {fg:>2} {}", swatch(bg, m.palette), swatch(fg, m.palette))
@@ -97,6 +155,7 @@ pub fn table() -> String {
         ));
     }
     s.push_str(&format!("\n{LEGEND}"));
+    s.push_str(&period_looks());
     // The gaps are the other half of the table: `machine()` answering None says
     // "a machine I do not model", and a reader who cannot see which numbers
     // those are cannot tell that from an oversight.
@@ -129,6 +188,16 @@ const NUMBERED: &[(u8, &str)] = &[
     (11, "Tandy Color"),
 ];
 
+/// The period-look block's header. Written as a plain literal for the reason
+/// [`ABSENT`] is: a `"\` continuation eats the newline AND the indent after it,
+/// so an indented continuation line silently loses its leading spaces.
+const PERIOD_INTRO: &str = "Period look - what the machine's own screen looked like to a v1-v4 story,
+which has no colour concept for the columns above to be the default OF.
+OBSERVED from emulator captures in machine-screenshots/, not read out of
+Infocom's source as the pairs above are: presentation, not a fact a story
+can read. A dash is a machine with no capture, not a machine with no look.
+";
+
 const LEGEND: &str = "\
 global pens     §8.3's Amiga rule: one pair of text pens for the whole screen,
                 so a set_colour moves the screen rather than one window.
@@ -144,7 +213,9 @@ palette         colours repaint everything already drawn, border art included.
 const ABSENT: &str = "  1   what declining a number already falls through to; whether it deserves a
       bundle or is honestly \"a terminal, the same as the IBM PC\" is a decision.
   8   a .d64 is a 1541 image BOTH Commodore machines read, so the medium cannot
-      choose between 7 and 8, and no Infocom Commodore interpreter has been read.
+      choose between 7 and 8, and no Infocom Commodore interpreter has been read
+      for a v5 default pair. Its PERIOD LOOK is measured and waiting for the row:
+      page #6C6C6C, ink #FFFFFF, status #6C6C6C on #000000, underscore #000000.
   11  no fixture and no sourced constant; anything here would be guesswork.
 ";
 
@@ -190,15 +261,17 @@ mod tests {
         }
     }
 
-    /// **Every field of the profile is printed.** The struct is the contract;
-    /// a member added to it and not to the table is the failure this catches,
-    /// and it is the whole reason the command exists rather than a hand-kept
-    /// summary of a few interesting columns.
+    /// **Every field of the profile is printed**, and the check is mechanical.
     ///
-    /// Checked by naming a machine that answers distinctively on each member:
-    /// the Amiga is the only row with a palette of its own and the only one with
-    /// global pens, the Macintosh is the only one that is v6 screen page WITHOUT
-    /// global pens, and the IBM PC is the only one that declines a colour pair.
+    /// The struct is the contract, and a member added to it and not to this output
+    /// is the failure this catches. It did not catch `period_look`: the test used to
+    /// name a few machines that answer distinctively and assert on those, which says
+    /// nothing at all about a member nobody thought to add an assertion for.
+    ///
+    /// The exhaustive `let` destructure below — no `..` — is what makes it real. Add
+    /// a field to `MachineProfile` and this stops COMPILING until someone decides
+    /// which column it belongs in. The per-value assertions that follow are then
+    /// worth something, because the binding list is guaranteed complete.
     #[test]
     fn every_member_of_the_profile_reaches_the_output() {
         let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
@@ -206,20 +279,79 @@ mod tests {
         let row = |name: &str| {
             t.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("no {name} row")).to_string()
         };
+
+        for m in MACHINES {
+            // Exhaustive on purpose. Adding a member breaks the build here.
+            let MachineProfile {
+                number,
+                name,
+                default_colours,
+                palette,
+                global_colour_pens,
+                v6_screen_page,
+                one_screen_palette,
+                period_look,
+            } = *m;
+            let rows: Vec<&str> = t.lines().filter(|l| l.contains(name)).collect();
+            assert!(!rows.is_empty(), "{name} has no row");
+            let all = rows.join("\n");
+            assert!(all.contains(&number.to_string()), "{name}: number");
+            match default_colours {
+                Some((bg, fg)) => assert!(
+                    all.contains(&format!("bg {bg:>2}")) && all.contains(&format!("fg {fg:>2}")),
+                    "{name}: default_colours {bg}/{fg} not in\n{all}",
+                ),
+                None => assert!(all.contains("the player's own terminal"), "{name}: a decline says so"),
+            }
+            let palette_name = match palette {
+                Palette::Standard => "standard",
+                Palette::Amiga => "Amiga",
+            };
+            assert!(all.contains(palette_name), "{name}: palette");
+            // The three booleans share one spelling, so count rather than search:
+            // the machine table row holds exactly these three yes/no columns.
+            let want = usize::from(global_colour_pens)
+                + usize::from(v6_screen_page)
+                + usize::from(one_screen_palette);
+            assert_eq!(rows[0].matches("yes").count(), want, "{name}: screen rules\n{all}");
+            match period_look {
+                Some(l) => {
+                    assert!(all.contains(&hex(l.page)), "{name}: period page");
+                    assert!(all.contains(&hex(l.ink)), "{name}: period ink");
+                    assert!(all.contains(&status(l.status)), "{name}: status band");
+                    assert!(all.contains(&cursor(&l)), "{name}: cursor");
+                }
+                None => assert!(all.contains("no capture"), "{name}: a period decline says so"),
+            }
+        }
+
+        // …and the distinctive rows still read the way they should.
         let amiga = row("Amiga");
-        assert!(amiga.contains(" 4 "), "number");
-        assert!(amiga.contains("bg 12") && amiga.contains("fg  9"), "default_colours: {amiga}");
-        assert!(amiga.contains("Amiga  "), "palette named: {amiga}");
         assert_eq!(amiga.matches("yes").count(), 3, "global pens, v6 page AND one palette: {amiga}");
-
         let mac = row("Macintosh");
-        assert!(mac.contains("bg  9") && mac.contains("fg  2"), "default_colours: {mac}");
-        assert!(mac.contains("standard"), "palette: {mac}");
-        assert_eq!(mac.matches("yes").count(), 1, "v6 page only — not global pens, not one palette: {mac}");
-
+        assert_eq!(mac.matches("yes").count(), 1, "v6 page only: {mac}");
         let pc = row("IBM PC");
-        assert!(pc.contains("the player's own terminal"), "a decline says so: {pc}");
         assert_eq!(pc.matches("yes").count(), 0, "no screen rules: {pc}");
+    }
+
+    /// The period look is printed as its own block, and says it is observed rather
+    /// than sourced — the distinction the whole field rests on (SQ-0873).
+    #[test]
+    fn the_period_look_block_states_where_it_came_from() {
+        let _g = super::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+        let t = table();
+        assert!(t.contains("OBSERVED from emulator captures"), "provenance is stated");
+        assert!(t.contains("machine-screenshots/"), "and says where to look");
+        // Three cursor shapes and three status behaviours reach the reader.
+        for s in ["bar #000000", "block #FF7E1C", "underscore #55FFFF"] {
+            assert!(t.contains(s), "cursor {s} missing:\n{t}");
+        }
+        for s in ["reversed per run", "ruled, same ground"] {
+            assert!(t.contains(s), "status {s} missing");
+        }
+        // A machine with no capture is a decline, not a blank.
+        let st = t.lines().find(|l| l.contains("Atari ST") && l.contains("no capture"));
+        assert!(st.is_some(), "the ST's period row must say why it is empty");
     }
 
     /// The colours are resolved through the row's OWN palette, which is the
