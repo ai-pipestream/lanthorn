@@ -135,13 +135,14 @@ fn overpaint_lead_cells(s: &mut String) {
 mod protocol {
     use super::*;
     use crate::pty_stream::oracle::{self, Origin};
+    use crate::pty_stream::driver;
 
     /// The baseline: a run with its lead cell intact is an image, and the oracle
     /// says where. Without this direction the next test would pass for a
     /// terminal that never resolves anything at all.
     #[test]
     fn a_run_with_its_lead_cell_intact_resolves_to_the_expected_placement() {
-        let res = oracle::resolve(full_frame(ID_HIGH, HIGH_164).as_bytes(), COLS, ROWS, CELL_W, CELL_H);
+        let res = oracle::resolve(full_frame(ID_HIGH, HIGH_164).as_bytes(), COLS, ROWS, CELL_W, CELL_H, Some((driver::ANSWERED_FG, driver::ANSWERED_BG)));
 
         assert_eq!(
             res.placements.len(),
@@ -186,7 +187,7 @@ mod protocol {
     fn a_run_whose_lead_cell_was_overpainted_resolves_to_nothing() {
         let mut bytes = full_frame(ID_HIGH, HIGH_164);
         overpaint_lead_cells(&mut bytes);
-        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H);
+        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H, Some((driver::ANSWERED_FG, driver::ANSWERED_BG)));
 
         assert!(
             res.placements.is_empty(),
@@ -225,7 +226,7 @@ mod protocol {
         for row in 0..ART_ROWS {
             bytes.push_str(&placeholder_row(row, HIGH_164));
         }
-        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H);
+        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H, Some((driver::ANSWERED_FG, driver::ANSWERED_BG)));
 
         assert_eq!(res.placements.len(), 1, "{}", res.describe_placements());
         let p = &res.placements[0];
@@ -250,7 +251,7 @@ mod protocol {
         let id: u32 = ID_HIGH & oracle::ID_MASK;
         let mut bytes = full_frame(id, D[0]);
         overpaint_lead_cells(&mut bytes);
-        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H);
+        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H, Some((driver::ANSWERED_FG, driver::ANSWERED_BG)));
 
         assert_eq!(res.placements.len(), 1, "the truncated id still resolves: {}", res.describe_placements());
         let p = &res.placements[0];
@@ -276,7 +277,7 @@ mod protocol {
                 ART_LEFT + 1
             ));
         }
-        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H);
+        let res = oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H, Some((driver::ANSWERED_FG, driver::ANSWERED_BG)));
 
         assert!(res.placements.is_empty(), "paint is not a placement");
         for col in ART_LEFT..ART_LEFT + ART_COLS {
@@ -315,7 +316,7 @@ mod emitter {
     use app::engine::GraphicsWindow;
     use app::render::graphics::{GraphicsRender, kitty_picker};
 
-    use crate::pty_stream::oracle;
+    use crate::pty_stream::{driver, oracle};
 
     const COLS: u16 = 40;
     const ROWS: u16 = 12;
@@ -370,7 +371,7 @@ mod emitter {
 
     /// Resolve everything written so far the way a terminal would.
     fn resolve(sink: &Sink) -> oracle::Resolved {
-        oracle::resolve(&sink.0.borrow(), COLS, ROWS, u32::from(CELL_W), u32::from(CELL_H))
+        oracle::resolve(&sink.0.borrow(), COLS, ROWS, u32::from(CELL_W), u32::from(CELL_H), Some((driver::ANSWERED_FG, driver::ANSWERED_BG)))
     }
 
     /// Draw the art, and nothing else.
@@ -548,7 +549,7 @@ mod emitter {
 /// and fails both z-order tests in opposite directions.
 mod raster {
     use super::*;
-    use crate::pty_stream::{oracle, raster};
+    use crate::pty_stream::{driver, oracle, raster};
 
     /// The screen's fill where nothing was written: `qwertty-term-vt`'s default
     /// palette entry 0, which is Ghostty's `Name::Black` — NOT pure black. Every
@@ -585,7 +586,7 @@ mod raster {
     }
 
     fn draw(bytes: &str) -> image::RgbaImage {
-        raster::render(&oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H))
+        raster::render(&oracle::resolve(bytes.as_bytes(), COLS, ROWS, CELL_W, CELL_H, Some((driver::ANSWERED_FG, driver::ANSWERED_BG))))
     }
 
     fn px(canvas: &image::RgbaImage, x: u32, y: u32) -> [u8; 4] {
@@ -804,6 +805,7 @@ mod real_capture {
             cap.spec.rows,
             u32::from(cap.spec.cell_w),
             u32::from(cap.spec.cell_h),
+            Some((driver::ANSWERED_FG, driver::ANSWERED_BG)),
         );
 
         assert!(

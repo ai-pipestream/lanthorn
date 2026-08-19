@@ -29,6 +29,31 @@ pub enum Key {
     Wait(Duration),
 }
 
+/// The default foreground this harness answers **OSC 10** with.
+///
+/// A capture only carries the app→terminal direction, so the reply we type back
+/// is not in the bytes the oracle resolves. That makes these two constants the
+/// only record of what terminal the app thought it was talking to, and
+/// `oracle::resolve` has to be handed them or its picture is of a different
+/// terminal than the one lanthorn was answering (SQ-0929).
+pub const ANSWERED_FG: [u8; 3] = [0xC0, 0xC0, 0xC0];
+
+/// The default background this harness answers **OSC 11** with.
+///
+/// It matches the emulator palette's own entry 0, which is what an unpainted cell
+/// is filled with — and that agreement is the whole point. While it did not
+/// agree, the harness told lanthorn "my background is #000000", lanthorn dutifully
+/// painted its chrome cells #000000, and the rasteriser drew every unpainted cell
+/// #1D1F21. The result was a black rectangle floating on grey in every v6 capture:
+/// a defect that existed nowhere but in the instrument, and that cost a long
+/// investigation of the renderer before anyone read this file.
+pub const ANSWERED_BG: [u8; 3] = [0x1D, 0x1F, 0x21];
+
+/// An `OSC <n>;rgb:rrrr/gggg/bbbb` reply, in the doubled-hex form terminals use.
+fn osc_colour_reply(osc: u8, [r, g, b]: [u8; 3]) -> String {
+    format!("\x1b]{osc};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07")
+}
+
 impl Key {
     /// Parse the ad-hoc key spelling used by the example's `--keys`:
     /// `cr esc tab space bs up down left right home end pgup pgdn f1..f4`,
@@ -343,8 +368,16 @@ impl Responder {
                 format!("\x1b[4;{};{}t", self.rows * h, self.cols * w),
             ),
             ("window size in cells", b"\x1b[18t".as_slice(), format!("\x1b[8;{};{}t", self.rows, self.cols)),
-            ("default foreground (OSC 10)", b"\x1b]10;?\x07".as_slice(), "\x1b]10;rgb:c0c0/c0c0/c0c0\x07".to_string()),
-            ("default background (OSC 11)", b"\x1b]11;?\x07".as_slice(), "\x1b]11;rgb:0000/0000/0000\x07".to_string()),
+            (
+                "default foreground (OSC 10)",
+                b"\x1b]10;?\x07".as_slice(),
+                osc_colour_reply(10, ANSWERED_FG),
+            ),
+            (
+                "default background (OSC 11)",
+                b"\x1b]11;?\x07".as_slice(),
+                osc_colour_reply(11, ANSWERED_BG),
+            ),
             ("cursor position report", b"\x1b[6n".as_slice(), "\x1b[1;1R".to_string()),
             ("keyboard protocol flags", b"\x1b[?u".as_slice(), "\x1b[?0u".to_string()),
             // Last, because every probe ends with it and the reply is the app's

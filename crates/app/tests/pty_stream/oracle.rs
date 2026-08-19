@@ -214,14 +214,27 @@ pub struct Colors {
 }
 
 impl Colors {
-    fn from_window(win: &SnapshotWindow) -> Colors {
+    /// `answered` is the `(fg, bg)` pair the DRIVER replied to the app's OSC 10/11
+    /// probe with (SQ-0929).
+    ///
+    /// It has to be passed in because it cannot be recovered: a capture holds the
+    /// app→terminal direction only, so the reply we typed back is not among the
+    /// bytes being resolved. Without it this fell back to the emulator palette's
+    /// own entry 0 and drew a screen belonging to a different terminal than the
+    /// one lanthorn was told about — see [`crate::driver::ANSWERED_BG`] for what
+    /// that manufactured.
+    ///
+    /// A default the APP set dynamically still wins, because that one really is in
+    /// the stream and is the app overriding what it was told.
+    fn from_window(win: &SnapshotWindow, answered: Option<([u8; 3], [u8; 3])>) -> Colors {
         let mut palette = [[0u8; 3]; 256];
         for (dst, src) in palette.iter_mut().zip(win.palette.iter()) {
             *dst = [src.r, src.g, src.b];
         }
+        let (afg, abg) = answered.unwrap_or((palette[7], palette[0]));
         Colors {
-            default_fg: win.default_fg.map_or(palette[7], |c| [c.r, c.g, c.b]),
-            default_bg: win.default_bg.map_or(palette[0], |c| [c.r, c.g, c.b]),
+            default_fg: win.default_fg.map_or(afg, |c| [c.r, c.g, c.b]),
+            default_bg: win.default_bg.map_or(abg, |c| [c.r, c.g, c.b]),
             palette,
         }
     }
@@ -315,7 +328,17 @@ struct Grid {
 /// special handling — but a capture that outlived the app's exit from the
 /// alternate screen resolves against the primary screen, which is empty. That is
 /// the truth about those bytes, not a fault in this function.
-pub fn resolve(bytes: &[u8], cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> Resolved {
+/// `answered` is the `(fg, bg)` the driver replied to OSC 10/11 with; see
+/// [`Colors::from_window`]. `None` falls back to the emulator palette, which is
+/// right only for a stream nobody answered a probe for.
+pub fn resolve(
+    bytes: &[u8],
+    cols: u16,
+    rows: u16,
+    cell_w: u32,
+    cell_h: u32,
+    answered: Option<([u8; 3], [u8; 3])>,
+) -> Resolved {
     let mut t = Terminal::new(Options { cols, rows, max_scrollback: 10_000, ..Default::default() });
     // Pixel geometry is not a constructor argument; these are public fields and
     // the kitty model reads them directly.
@@ -344,7 +367,7 @@ pub fn resolve(bytes: &[u8], cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> 
             };
         }
     }
-    let colors = Colors::from_window(&win);
+    let colors = Colors::from_window(&win, answered);
 
     let grid = Grid { cols, rows, cell_w, cell_h, window_top: win.window_top };
     let placements = resolve_rects(&t, grid, &mut cells);
