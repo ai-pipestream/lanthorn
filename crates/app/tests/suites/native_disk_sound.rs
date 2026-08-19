@@ -5,14 +5,16 @@
 //! their disks hold a `Sound/` directory — an `sN.nam` index per Z-machine effect,
 //! naming a sample and a pitch file — and the samples are an Infocom container that
 //! nothing else reads. The Macintosh compilation lays the same sounds out as
-//! `/MAC/SOUND`, with the pitch inlined into the index; SQ-0912 added that, and it is
-//! the only medium here on which a pitch file bends anything.
+//! `/MAC/SOUND`, with the pitch inlined into the index.
 //!
-//! **A format worked out from bytes alone is a guess.** `stories/Lurking.blb` is the
-//! same fourteen effects wrapped as Blorb `Snd ` resources in AIFF, by a third party,
-//! and it is what turns this from reverse-engineering into verification: the frames
-//! this decoder produces must be byte-identical to the ones in that Blorb. That check
-//! is the whole point of the suite and is why the decoder was trusted at all.
+//! **A format worked out from bytes alone is a guess.** `stories/Lurking.blb` and
+//! `stories/Sherlock.blb` are these same effects wrapped as Blorb `Snd ` resources in
+//! AIFF, by a third party, and they are what turn this from reverse-engineering into
+//! verification: the frames must be byte-identical, and — since SQ-0923 read the pitch
+//! model out of the Amiga interpreter rather than guessing it from the corpus — the
+//! rates must agree too, which they do on 27 of the 29 effects the two Blorbs carry.
+//! That pair of checks is the whole point of the suite and is why the decoder is
+//! trusted at all.
 //!
 //! Fixtures are gitignored, so every case skips vacuously when one is absent.
 
@@ -114,7 +116,7 @@ fn the_decoded_samples_are_the_blorbs_samples() {
     assert_eq!(ours.len(), 14, "the disk states fourteen effects");
     assert_eq!(reference.len(), 14, "and the Blorb renders the same fourteen");
 
-    let (mut same_rate, mut differing) = (0, Vec::new());
+    let mut same_rate = 0;
     for (&effect, sound) in &ours {
         let want = reference
             .get(&u32::from(effect))
@@ -131,30 +133,12 @@ fn the_decoded_samples_are_the_blorbs_samples() {
         );
         if sound.rate == want.rate {
             same_rate += 1;
-        } else {
-            differing.push((effect, sound.rate, want.rate));
         }
     }
-    differing.sort_unstable();
-    // Every disagreement is a whole number of equal-tempered semitones, which is the
-    // interpreter's own `1.05946309` applied to the rate — not a rendering error.
-    const SEMITONE: f64 = 1.059_463_09;
-    let mut ragged = Vec::new();
-    for &(effect, disk, blorb) in &differing {
-        let semis = (f64::from(disk) / f64::from(blorb)).ln() / SEMITONE.ln();
-        if (semis - semis.round()).abs() >= 0.01 {
-            ragged.push((effect, disk, blorb, (semis * 1000.0).round() / 1000.0));
-        }
-    }
-    assert_eq!(
-        ragged,
-        vec![(17u16, 32910u32, 31250u32, 0.896)],
-        "every rate the Blorb states should be the disk's shifted by a WHOLE number of \
-         semitones (SQ-0912). Effect 17 is the one known exception — 32910 Hz is past what \
-         Paula can clock a channel at, so something clamped. Anything else appearing here \
-         means the pitch model is wrong, not that the Blorb is.",
-    );
-    assert_eq!(same_rate, 6, "six effects are played at their recorded pitch, so their rates agree");
+    // The rates themselves are `the_pitch_model_reproduces_both_blorbs`' business, and
+    // it asserts them exactly rather than as a whole-semitone relation. What is left
+    // here is the container: the frames and the bytes.
+    assert_eq!(same_rate, 13, "thirteen of the fourteen agree outright; effect 17 is capped");
 }
 
 /// The index is what carries the effect numbers, and a naming convention is not a
@@ -225,64 +209,79 @@ fn every_decoded_sound_is_a_playable_aiff() {
     }
 }
 
-/// **Every pitch file on both Amiga floppies is a unison pair**, so reading the pitch
-/// leaves Amiga playback exactly where SQ-0907 left it.
+/// **The pitch model reproduces both Blorbs, effect for effect** — which is what
+/// overturned SQ-0912's reading that the Amiga never bends a sound (SQ-0923).
 ///
-/// This is the finding SQ-0912 came down to, and it is the reason the quest changes no
-/// Amiga rate. The eleven bytes hold two notes; the interpreter divides the rate by
-/// the semitone ratio raised to their difference; and on all twenty-two files across
-/// the two games that difference is zero. *Sherlock*'s `heart` sounds the same for
-/// effects 11, 12 and 13 on an Amiga because the notes differ between FILES (68, 74,
-/// 79) and not within one — and it is the within-one difference that bends a sample.
+/// The rate a sound plays at is `rate · 2^(((note − transposition) − base)/12)`, where
+/// `note` and its channel's transposition come from the `.mid` and `base` comes from
+/// the SAMPLE's header — the low byte of the flags word, which this suite recorded as
+/// not understood for as long as the unison reading stood. See
+/// `blorb::infocom_sound::Pitch` for the disassembly it was read out of.
 ///
-/// Pinned over the real floppies rather than a fixture, because the claim is about
-/// what Infocom pressed, and a synthetic unison would only be asserting itself.
+/// **This case is the corpus-wide check, and it is why the model is trusted.**
+/// `stories/Lurking.blb` and `stories/Sherlock.blb` are a third party's renderings of
+/// these same effects, and the decoded rate matches them EXACTLY on 27 of the 29
+/// effects they carry: all eighteen the model leaves unbent, and all nine it bends.
+/// The old reading agreed on the eighteen and disagreed on all nine — the shape of a
+/// model that is right only when the answer happens to be zero.
+///
+/// Two effects are excluded, both known-anomalous before this quest:
+///
+/// * *Lurking Horror* 17 states 32910 Hz, which needs a Paula period of 109 — past the
+///   hardware's minimum of 124 before any bend is applied. It is capped, and the Blorb
+///   carries its own guess at what that sounded like.
+/// * *Sherlock* 13's Blorb entry is a differently-trimmed take — 13,989 frames against
+///   its siblings' 13,999 — and its rate matches note 72 where the disk says 79. Two
+///   independent signs of one botched entry, so it is not evidence either way.
 #[test]
-fn every_amiga_pitch_file_is_a_unison_pair() {
-    let disks: Vec<PathBuf> = [
-        lurking(),
-        Some(stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf")).filter(|p| p.is_file()),
+fn the_pitch_model_reproduces_both_blorbs() {
+    let sherlock = stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf");
+    let cases: Vec<(PathBuf, PathBuf, u16)> = [
+        lurking().map(|d| (d, stories_dir().join("Lurking.blb"), 17u16)),
+        sherlock.is_file().then(|| (sherlock.clone(), stories_dir().join("Sherlock.blb"), 13u16)),
     ]
     .into_iter()
     .flatten()
+    .filter(|(_, b, _)| b.is_file())
     .collect();
-    if disks.is_empty() {
-        eprintln!("SKIP: gitignored Amiga sound floppies absent");
+    if cases.is_empty() {
+        eprintln!("SKIP: gitignored Amiga sound floppies or their Blorbs absent");
         return;
     }
-    let mut seen = 0;
-    for disk in &disks {
-        for f in app::assets::files(disk).into_iter().filter(|f| f.is_on_medium()) {
-            let name = f.name.to_ascii_lowercase();
-            if !name.ends_with(".mid") {
+    let (mut agreed, mut bent) = (0, 0);
+    for (disk, blb, anomaly) in &cases {
+        let sounds = app::native_sound::from_medium(disk);
+        let rendered = blorb_sounds(blb).expect("the Blorb parses");
+        for (effect, s) in &sounds {
+            let Some(r) = rendered.get(&u32::from(*effect)) else { continue };
+            if effect == anomaly {
                 continue;
             }
-            let Some(bytes) = f.into_bytes() else { continue };
-            let pitch = blorb::infocom_sound::Pitch::parse(&bytes)
-                .unwrap_or_else(|| panic!("{name} is a pitch file and should parse: {bytes:02x?}"));
             assert_eq!(
-                pitch.semitones(),
-                0,
-                "{name} reads note {} against base {} — the first Amiga pitch file that is NOT a \
-                 unison. Amiga playback is only unchanged because they all are (SQ-0912); if this \
-                 fires, the sign of the shift now matters and is NOT settled.",
-                pitch.note,
-                pitch.base,
+                s.rate, r.rate,
+                "{}: effect {effect} decodes to {} Hz against the Blorb's {}",
+                disk.file_name().unwrap().to_string_lossy(),
+                s.rate,
+                r.rate,
             );
-            seen += 1;
+            agreed += 1;
         }
     }
-    assert_eq!(seen, 22 - 14 * usize::from(disks.len() == 1), "twenty-two pitch files across the two games");
+    assert_eq!(agreed, if cases.len() == 2 { 27 } else { 13 }, "every shared effect but the two anomalies");
 
-    // The consequence, at the level the mixer sees: no rate moved.
-    if let Some(sherlock) = disks.iter().find(|p| p.to_string_lossy().contains("Sherlock")) {
-        let s = app::native_sound::from_medium(sherlock);
+    // Non-vacuity: the model must actually BEND things, or it is the old one wearing
+    // a new name. Nine of the twenty-nine, and the three that share one recording.
+    if let Some((disk, _, _)) = cases.iter().find(|(d, _, _)| d.to_string_lossy().contains("Sherlock")) {
+        let s = app::native_sound::from_medium(disk);
         assert_eq!(
             (s[&11].rate, s[&12].rate, s[&13].rate),
-            (18430, 18430, 18430),
-            "the three heartbeats play alike on an Amiga, which is what the disk says",
+            (13032, 18430, 24601),
+            "Sherlock's three heartbeats are one recording at three pitches, not one sound thrice",
         );
+        assert_eq!(s[&11].name, s[&13].name, "and it really is the one recording");
+        bent += 2;
     }
+    assert!(bent > 0 || cases.len() == 1);
 }
 
 /// The payload under a `/MAC/SOUND` header is **offset binary**, and the Amiga's is
@@ -429,18 +428,48 @@ fn the_macintosh_release_bends_the_shared_heartbeat() {
     assert_eq!(s[&11].frames, s[&13].frames);
     assert_eq!(s[&3].name, "S3", "an effect with no M-file is its own sample, name and case intact");
 
-    // S12's header states 9215 Hz. M11 is a unison, M13 asks for note 79 against
-    // base 68 — eleven semitones, so 9215 · 2^(11/12).
-    assert_eq!(s[&11].rate, 9215, "M11 bends nothing");
-    assert_eq!(s[&12].rate, 9215, "no M12 at all");
-    assert_eq!(s[&13].rate, 17396, "M13 is the one heartbeat that is NOT the other two");
-    assert_ne!(
-        s[&13].rate, s[&11].rate,
-        "the Macintosh is the only medium here where a shared sample plays at two pitches",
-    );
-    // The other two M-files, both note 72 against base 68.
-    assert_eq!(s[&8].rate, 12902, "S8 states 10240 Hz, M8 asks for four semitones up");
-    assert_eq!(s[&14].rate, 11611, "S14 states 9216 Hz, M14 asks for the same four");
+    // S12 states 9215 Hz and base note 50, and its three effects ask for notes 68, 74
+    // and 79 — the same three the Amiga floppy asks for, so the same three pitches.
+    // The Macintosh master is half-rate throughout, so every figure here is half the
+    // floppy's and every PITCH is identical (SQ-0923).
+    assert_eq!(s[&11].rate, 6516, "M11 asks for note 68: 68 - 24 - 50 = -6 semitones");
+    assert_eq!(s[&12].rate, 9215, "no M12 at all, so the sample plays as itself");
+    assert_eq!(s[&13].rate, 12301, "M13 asks for note 79: +5");
+    assert_ne!(s[&13].rate, s[&11].rate, "one recording, three pitches");
+    // The other two M-files, both note 72 — two semitones down, like the floppy's.
+    assert_eq!(s[&8].rate, 9123, "S8 states 10240 Hz, M8 asks for note 72");
+    assert_eq!(s[&14].rate, 8211, "S14 states 9216 Hz — half the floppy's, give or take — and M14 the same note");
+
+    // The whole point of the medium comparison: the Macintosh and the floppy agree on
+    // PITCH even though they disagree on rate, because the master was decimated.
+    let adf = stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf");
+    if adf.is_file() {
+        let a = app::native_sound::from_medium(&adf);
+        // Effect 8's Macintosh master is full-rate, so its figure matches outright;
+        // 11-14 are the half-rate decimations, so theirs is half over half the frames,
+        // which is the same sound. Within a few Hz rather than exactly, because S14's
+        // header states 9216 where the floppy states 18430 — one Hz off a true halving,
+        // which the bend then multiplies up.
+        assert_eq!(a[&8].rate, s[&8].rate, "effect 8 is not decimated on either disc");
+        for e in [11u16, 12, 13, 14] {
+            let drift = a[&e].rate.abs_diff(s[&e].rate * 2);
+            assert!(
+                drift <= 4,
+                "effect {e}: the floppy's {} Hz should be twice the Macintosh's {} Hz over twice \
+                 the frames — the same sound — but drifts by {drift}",
+                a[&e].rate,
+                s[&e].rate,
+            );
+            // Twice the frames give or take a dozen — the decimation drops a few at the
+            // tail rather than halving exactly.
+            assert!(
+                a[&e].frames.abs_diff(s[&e].frames * 2) <= 16,
+                "effect {e}: {} floppy frames against {} Macintosh ones",
+                a[&e].frames,
+                s[&e].frames,
+            );
+        }
+    }
 }
 
 /// **The medium outranks a Blorb, on the shipped configuration** (SQ-0914).
@@ -469,7 +498,7 @@ fn the_medium_outranks_a_blorb_filed_beside_the_story() {
     // The premise: both sources really do offer this effect, or the case is vacuous.
     assert!(blb.sound(11).is_some(), "{} should carry effect 11", blb_path.display());
     let disk = app::native_sound::from_medium(&adf);
-    assert_eq!(disk[&11].rate, 18430, "the floppy's own header");
+    assert_eq!(disk[&11].rate, 13032, "the floppy's 18430 Hz header bent six semitones down");
 
     let (bytes, kind, from_medium) =
         app::state::resolve_sound(&disk, Some(&blb), 11).expect("effect 11 resolves");

@@ -32,9 +32,10 @@ pub struct DiskSound {
     /// `violin.bin`. Worth carrying because it is what a person recognises in the
     /// browser's info panel.
     pub name: String,
-    /// Playback rate in Hz: the disk's own, bent by the effect's pitch file when
-    /// that names two different notes. See `blorb::infocom_sound::Pitch` — on the
-    /// Amiga it never does, so this is the disk's own figure on every Amiga sound.
+    /// Playback rate in Hz: the disk's own, bent by the effect's pitch file against
+    /// the note the sample states it was recorded at, and capped at what Paula can
+    /// clock. Nine of the twenty-nine effects across the two games are bent — see
+    /// `blorb::infocom_sound::Pitch`, which is where the model and its evidence live.
     pub rate: u32,
     /// Sample count.
     pub frames: usize,

@@ -16,11 +16,18 @@
 //! | offset | field |
 //! |---|---|
 //! | 0 | byte count of everything after this field — the file's length less 2 |
-//! | 2 | flags; observed `0x003C`, `0x013C`, `0x0032`, `0x0132` |
+//! | 2 | repeat count — Paula's `ioa_Cycles`; 0 or 1 on every file |
+//! | 3 | the note this sample is recorded at; 50 or 60 on every file |
 //! | 4 | sample rate in Hz |
 //! | 6 | zero on every file measured |
 //! | 8 | frame count |
 //! | 10 | `frames` bytes of samples |
+//!
+//! Bytes 2 and 3 were recorded as one opaque `flags` word until SQ-0923 read the
+//! interpreter and found it writing the first into the audio request and comparing the
+//! second against the pitch file's note. `flags` is still exposed as a word because
+//! that is how it was measured, with [`InfocomSound::cycles`] and
+//! [`InfocomSound::base_note`] over it.
 //!
 //! **Verified against a reference rendition rather than reverse-engineered alone.**
 //! `stories/Lurking.blb` is the same fourteen effects wrapped as Blorb `Snd `
@@ -29,10 +36,10 @@
 //! **byte-identical** to its `SSND` payload. The length field equals the file size
 //! less two on every one, which is what makes it a usable signature.
 //!
-//! The rates agree on seven of the fourteen and differ on the rest, always with the
-//! Blorb reading LOWER. That Blorb is a third-party rendition; this header is what
-//! the Amiga itself was handed, so [`InfocomSound::rate`] reports the disk's own
-//! figure and the divergence is recorded here rather than reconciled away.
+//! Eight of the fourteen rates differ from the Blorb's, always with the Blorb reading
+//! LOWER, and every one of those is the pitch this header does not state on its own:
+//! [`InfocomSound::rate`] reports the disk's figure and [`InfocomSound::effective_rate`]
+//! the one it sounds at. See [`Pitch`].
 //!
 //! # The Macintosh lays the same three things out as two files
 //!
@@ -40,8 +47,8 @@
 //! no extension — and, for the four effects whose pitch is not the sample's own,
 //! `M<n>`: the eleven-byte pitch blob with the index appended, so one file does the
 //! work of the Amiga's `.mid` and `.nam` together. An effect with no `M<n>` plays
-//! `S<n>` as itself. See [`Pitch`] for why the Macintosh is the only place the pitch
-//! does anything.
+//! `S<n>` as itself — and the four that have one are exactly the four whose Amiga
+//! `.mid` does not read note 74, which is the note that bends nothing.
 //!
 //! **The header is the same; the payload underneath it is not.** The Macintosh writes
 //! its samples as offset binary, silence at `0x80`, and nothing in the ten bytes
@@ -89,59 +96,96 @@ impl SoundIndex {
 }
 
 
-/// The pitch pair in a `sN.mid` — or, on the Macintosh, in the head of an `M<n>`.
+/// The Note-On in a `sN.mid` — or, on the Macintosh, in the head of an `M<n>`.
 ///
-/// Eleven bytes of MIDI-shaped events, the same shape on every file of both games:
+/// Eleven bytes of MIDI, the same shape on every file of both games:
 ///
 /// ```text
-/// 00 09   90 <note> 40   FF 00 <nn>   90 <base> 00
+/// 00 09   9c <note> 40   FF 00 <nn>   9c <note> 00
 /// ```
 ///
-/// `00 09` is the byte count of what follows; `90 n 40` is a Note-On on channel 0
-/// at velocity 64; `FF 00 nn` is a meta event whose payload varies (`00 01`, `00
-/// 04`, `00 07`, `80 00`) and reads as a delta time; `90 n 00` is a second event on
-/// the same channel at velocity 0.
+/// `00 09` is the byte count of what follows; `9c n 40` is a Note-On on channel `c`
+/// at velocity 64; `FF 00 nn` is a meta event whose payload varies (`00 01`, `00 04`,
+/// `00 07`, `80 00`); `9c n 00` is the matching Note-Off. Every file of both games is
+/// channel 0.
 ///
-/// # What the interpreter does with it
+/// **The second note is the Note-Off, not a reference pitch**, and reading it as one
+/// was the whole of SQ-0912's error — see below. The reference the sample is played
+/// against lives in the SAMPLE's header, and is [`InfocomSound::base_note`].
 ///
-/// READ OUT of the 68000 interpreter Infocom shipped, not inferred from the corpus:
-/// hunk 8 of `The Lurking Horror` (42,224 bytes, off *Lost Treasures* disk 4) writes
-/// Paula's `ioa_Period` at file offset `0x4766` from the routine at `0x48da`, which
-/// holds three IEEE 754 doubles — **1.05946309** (2^(1/12)), **1000.0**, and
-/// **3579.49**, the NTSC Amiga colour-burst clock in kHz. The routine takes the rate
-/// as a double and TWO note bytes, one read from the pitch buffer at the cursor and
-/// one from a per-effect field the interpreter captured earlier. So the model is
-/// equal temperament: the rate is scaled by 2^(difference/12).
+/// # What the interpreter does with it, read out of the 68000 it shipped
 ///
-/// # The Amiga never actually bends a sound, and that is a finding, not an omission
+/// Hunk 8 of `The Lurking Horror` off *Lost Treasures* disk 4 (42,224 bytes) holds one
+/// MIDI-event routine spanning hunk offsets `0x000`–`0x640`, and a pitch routine at
+/// `0x642` whose only caller is the `bsr.w` at `0x4c2`. The pitch routine carries three
+/// doubles as immediates — **1.05946309** (2^(1/12)) at `0x6a6`, **1000.0** at `0x6d8`
+/// and **3579.49** at `0x6ea`, the NTSC Amiga colour-burst clock in kHz — and computes
 ///
-/// On **every** pitch file of both sound games — twenty-two of them across *The
-/// Lurking Horror* and *Sherlock* — the two notes are EQUAL, so the ratio is exactly
-/// 1 and the sample plays at the rate its `.dat` states. That is why *Sherlock*'s
-/// `heart`, which effects 11, 12 and 13 all share against pitch files reading 68, 74
-/// and 79, sounds identical for all three on an Amiga: the notes differ between
-/// FILES, not within one, and it is the within-one difference that bends the pitch.
+/// ```text
+/// ioa_Period = (3579.49 / (rate / 1000)) / 2^((noteA - noteB) / 12)
+/// ```
 ///
-/// The Macintosh is where the pair comes apart. `/MAC/SOUND/M13` reads note 79
-/// against base 68 for that same heartbeat, and its three siblings hold `base` at 68
-/// while `note` varies — a constant beside a variable, which is what makes `base` the
-/// reference and `note` the thing being asked for.
+/// Period is inversely proportional to frequency, so the sample sounds at
+/// `rate · 2^((noteA − noteB)/12)`. The call site says what the two notes are:
 ///
-/// **The SIGN is not verifiable on the Amiga corpus**, because a unison pair reads
-/// the same either way round; it rests on that Macintosh reading alone, and wants a
-/// reference rendition of the Macintosh release to settle. `stories/Sherlock.blb`
-/// cannot settle it — it shifts exactly these four effects, but by `note − 74`, which
-/// is a third model again and self-inconsistent on effect 13 (SQ-0912).
+/// ```text
+/// 0x4a0  movea.l $40.l, a0      ; the loaded pitch buffer
+/// 0x4aa  move.b  (a0), d2       ;   noteA = pitchbuf[cursor + 1]
+/// 0x4ac  movea.l $c(a7), a0
+/// 0x4b0  adda.l  #$78, a0       ; a per-channel byte array
+/// 0x4b8  move.b  (a0), d3       ;   noteB = bases[channel]
+/// ```
+///
+/// and `bases[channel]` was loaded eighty instructions earlier, at `0x41a`, from
+/// `desc[1]` — **byte 1 of the loaded sample**, which is the `.dat` header's flags
+/// word less the two-byte length the loader strips, i.e. the flags' LOW byte. The
+/// same routine writes `desc[0]`, the flags' high byte, straight into `ioa_Cycles`,
+/// and takes `ioa_Data` from `desc + 8` and `ioa_Length` from the word at `desc + 6`.
+/// So the header's flags field, recorded for years as not understood, is two bytes:
+/// **repeat count, then the sample's own base note.**
+///
+/// The note is also transposed before use. At `0x43c` and `0x45c` the routine
+/// subtracts `0x18` from `pitchbuf[cursor + 1]` when the status byte is `0x90` or
+/// `0x91`, and `0x0c` when it is `0x92` — two octaves down for channels 0 and 1, one
+/// for channel 2 — writing it back in place.
+///
+/// # This overturns SQ-0912, and the corpus says so in 27 places
+///
+/// SQ-0912 read the blob's second note as the reference and concluded that every
+/// Amiga pitch file is a unison pair that bends nothing. It is a Note-Off; it equals
+/// the Note-On because that is what a Note-Off does.
+///
+/// With the real model — `(note − transposition) − base_note` — the decoded rate
+/// matches `stories/Lurking.blb` and `stories/Sherlock.blb` **exactly on 27 of the 29
+/// effects the two Blorbs carry**, including all eighteen the model leaves unbent and
+/// all nine it bends. The two it misses are the two documented anomalies: *Lurking
+/// Horror*'s effect 17, whose disk rate of 32910 Hz is already past what Paula can
+/// clock before any bend is applied, and *Sherlock*'s effect 13, where the Blorb
+/// carries a differently-trimmed take (13,989 frames against its siblings' 13,999).
+///
+/// The unison reading agreed with the Blorb on the eighteen unbent effects and
+/// disagreed on all nine bent ones, which is exactly the shape of a model that is
+/// right about nothing except when the answer is zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pitch {
-    /// The Note-On's note: the pitch this effect is asked to sound at.
+    /// The Note-On's status byte, `0x90..=0x9F`. The channel in its low nibble is
+    /// what picks the transposition, so it is data, not a signature.
+    pub status: u8,
+    /// The note the effect is asked to sound, before transposition.
     pub note: u8,
-    /// The second event's note — the reference the sample itself is at.
-    pub base: u8,
 }
 
 /// The pitch blob's fixed length, and the offset the Macintosh index follows it at.
 const PITCH: usize = 11;
+
+/// The fastest Paula can clock a channel, from the interpreter's own 3579.49 kHz and
+/// the minimum period of 124 the Amiga Hardware Reference Manual states for DMA audio.
+///
+/// **This clamp is ours, not Infocom's** — the routine at `0x642` writes whatever it
+/// computed straight into `ioa_Period` with no check, and the hardware is what refuses
+/// to go faster. It bites on exactly one sound in either game, *Lurking Horror*'s
+/// effect 17, whose stated 32910 Hz already needs a period of 109.
+const PAULA_CEILING_HZ: u32 = 3_579_490 / 124;
 
 impl Pitch {
     /// Parse the eleven-byte blob, or `None` when the bytes are not one.
@@ -150,18 +194,31 @@ impl Pitch {
     /// this blob with the index appended.
     pub fn parse(raw: &[u8]) -> Option<Pitch> {
         let ev = raw.get(..PITCH)?;
-        (be16(ev, 0) == 9 && ev[2] == 0x90 && ev[8] == 0x90)
-            .then_some(Pitch { note: ev[3], base: ev[9] })
+        let on = ev[2];
+        (be16(ev, 0) == 9 && on & 0xF0 == 0x90 && ev[8] & 0xF0 == 0x90)
+            .then_some(Pitch { status: on, note: ev[3] })
     }
 
-    /// How far the sample is bent, in semitones. Zero on every Amiga file.
-    pub fn semitones(&self) -> i32 {
-        i32::from(self.note) - i32::from(self.base)
+    /// The octaves the interpreter drops the note by before comparing it, from the
+    /// Note-On's channel: two for channels 0 and 1, one for channel 2, none beyond.
+    pub fn transposition(&self) -> i32 {
+        match self.status {
+            0x90 | 0x91 => 24,
+            0x92 => 12,
+            _ => 0,
+        }
     }
 
-    /// `rate` bent by [`Pitch::semitones`], which is `rate` itself at unison.
-    pub fn scale(&self, rate: u32) -> u32 {
-        match self.semitones() {
+    /// How far the sample is bent, in semitones, against the note it was recorded at.
+    ///
+    /// `base` is the SAMPLE's, not this file's — see [`InfocomSound::base_note`].
+    pub fn semitones(&self, base: u8) -> i32 {
+        i32::from(self.note) - self.transposition() - i32::from(base)
+    }
+
+    /// `rate` bent by [`Pitch::semitones`].
+    pub fn scale(&self, rate: u32, base: u8) -> u32 {
+        match self.semitones(base) {
             0 => rate,
             n => (f64::from(rate) * 2f64.powf(f64::from(n) / 12.0)).round() as u32,
         }
@@ -210,8 +267,9 @@ pub enum Encoding {
 pub struct InfocomSound {
     /// Playback rate in Hz, as the disk states it.
     pub rate: u32,
-    /// The header's flags word, kept because it is not yet understood and a caller
-    /// measuring these disks should be able to see it.
+    /// The header's flags word: repeat count in the high byte, the sample's own base
+    /// note in the low one. See [`InfocomSound::cycles`] and
+    /// [`InfocomSound::base_note`], and [`Pitch`] for where that was read out of.
     pub flags: u16,
     /// Signed 8-bit mono PCM, `frames` bytes — always signed, whatever the disk
     /// wrote, because [`InfocomSound::parse`] converts an [`Encoding::OffsetBinary`]
@@ -316,11 +374,32 @@ impl InfocomSound {
         Some(InfocomSound { rate: u32::from(be16(raw, 4)), flags: be16(raw, 2), samples, pitch: None })
     }
 
-    /// The rate this actually plays at: the disk's own, bent by [`Pitch`] when its
-    /// index named a pitch file that is not a unison pair — so, today, the disk's own
-    /// on every Amiga sound and a bent one on four Macintosh effects.
+    /// The note this sample was recorded at — the flags word's LOW byte.
+    ///
+    /// The reference every pitch file is measured against, and the field that makes a
+    /// bend computable. It reads 50 or 60 across both games. See [`Pitch`] for the
+    /// disassembly that identifies it.
+    pub fn base_note(&self) -> u8 {
+        self.flags as u8
+    }
+
+    /// Paula's `ioa_Cycles` — the flags word's HIGH byte, 0 or 1 on every file here.
+    ///
+    /// Carried because it is what the interpreter writes into the audio request, not
+    /// because anything reads it yet: the Z-machine's own `sound_effect` operand
+    /// already says how many times to repeat, and that is what the host obeys.
+    pub fn cycles(&self) -> u8 {
+        (self.flags >> 8) as u8
+    }
+
+    /// The rate this actually plays at: the disk's own, bent by its [`Pitch`] against
+    /// [`InfocomSound::base_note`], and capped at what Paula can clock.
+    ///
+    /// Nine of the twenty-nine effects across the two games are bent, and the cap
+    /// bites on exactly one — see `PAULA_CEILING_HZ`.
     pub fn effective_rate(&self) -> u32 {
-        self.pitch.map_or(self.rate, |p| p.scale(self.rate))
+        let hz = self.pitch.map_or(self.rate, |p| p.scale(self.rate, self.base_note()));
+        hz.min(PAULA_CEILING_HZ)
     }
 
     /// The same sound as an AIFF `FORM`, for the host's existing decoder.
@@ -571,21 +650,39 @@ mod tests {
     /// The eleven bytes, in the exact shape both games ship them.
     ///
     /// `heart3.mid` is copied out of the *Sherlock* floppy and `M13` out of
-    /// `/MAC/SOUND` on *Lost Treasures* disc 2 — the SAME effect on the two
-    /// platforms, and the pair only comes apart on one of them.
+    /// `/MAC/SOUND` on *Lost Treasures* disc 2 — the SAME effect on the two platforms,
+    /// and the SAME bend, which is the point. SQ-0912 had them differing because it
+    /// read the Note-Off as a reference pitch; the Macintosh's simply was not updated
+    /// when someone copied `heart1.mid` to make `M13`, which is why it reads 68.
     #[test]
-    fn a_pitch_file_is_a_pair_of_notes() {
+    fn a_pitch_file_is_a_note_and_its_note_off() {
+        // Sherlock's `heart` states base note 50 in its own header.
         let amiga = Pitch::parse(b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x4f\x00").expect("parses");
-        assert_eq!(amiga, Pitch { note: 79, base: 79 }, "Sherlock's heart3.mid");
-        assert_eq!(amiga.semitones(), 0, "a unison pair bends nothing");
-        assert_eq!(amiga.scale(18430), 18430);
+        assert_eq!(amiga, Pitch { status: 0x90, note: 79 }, "Sherlock's heart3.mid");
+        assert_eq!(amiga.transposition(), 24, "channel 0 drops two octaves");
+        assert_eq!(amiga.semitones(50), 5, "79 - 24 - 50");
+        assert_eq!(amiga.scale(18430, 50), 24601);
 
         let mac = Pitch::parse(b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x44\x00\x01\x00S12\x00")
             .expect("the index that follows is ignored, not refused");
-        assert_eq!(mac, Pitch { note: 79, base: 68 }, "/MAC/SOUND/M13");
-        assert_eq!(mac.semitones(), 11);
-        // 9215 * 2^(11/12), the Macintosh S12's stated rate bent to note 79.
-        assert_eq!(mac.scale(9215), 17396);
+        assert_eq!(mac, Pitch { status: 0x90, note: 79 }, "/MAC/SOUND/M13 asks for the same note");
+        assert_eq!(mac.semitones(50), amiga.semitones(50), "the stale Note-Off changes nothing");
+        // The Macintosh master is half-rate, so the same bend lands an octave down in
+        // the number and at the same pitch to the ear.
+        assert_eq!(mac.scale(9215, 50), 12301);
+    }
+
+    /// The transposition comes from the Note-On's CHANNEL, which is why the status
+    /// byte is data rather than a signature.
+    #[test]
+    fn the_channel_picks_the_transposition() {
+        let of = |st: u8| Pitch { status: st, note: 74 }.transposition();
+        assert_eq!((of(0x90), of(0x91)), (24, 24), "channels 0 and 1 drop two octaves");
+        assert_eq!(of(0x92), 12, "channel 2 drops one");
+        assert_eq!(of(0x93), 0, "no channel beyond those is transposed");
+        // Every file of both games is channel 0, so 74 is the note that bends nothing
+        // against a base of 50 — which is what eighteen of the twenty-nine effects say.
+        assert_eq!(Pitch { status: 0x90, note: 74 }.semitones(50), 0);
     }
 
     #[test]
@@ -604,25 +701,54 @@ mod tests {
         );
     }
 
-    /// Every pitch file on both release floppies is a unison pair, so applying the
-    /// pitch leaves Amiga playback exactly where SQ-0907 left it. This is the fact
-    /// that keeps a future Macintosh lane from silently retuning the Amiga.
+    /// **One sample, two pitch files, two different sounds** — the case SQ-0912 got
+    /// wrong and SQ-0923 corrects.
+    ///
+    /// *Sherlock*'s `heart` is effects 11, 12 and 13 against pitch files reading 68,
+    /// 74 and 79. The old reading made all three identical because it compared each
+    /// file's Note-On to its own Note-Off; the reference is the SAMPLE's base note,
+    /// which is the same for all three, so the three notes give three rates.
     #[test]
-    fn an_amiga_volume_is_unbent_because_its_pitch_files_are_unisons() {
-        let heart = dat(18430, 0, &[1, 2, 3, 4]);
+    fn one_sample_under_three_pitch_files_plays_three_ways() {
+        // flags 0x0032: repeat count 0, base note 50 — Sherlock's `heart` exactly.
+        let heart = dat(18430, 0x0032, &[1, 2, 3, 4]);
         let files: Vec<(&str, &[u8])> = vec![
             ("Sound/s11.nam", b"\x01\x00heart\x00\x00heart1.mid\x00"),
             ("Sound/heart1.mid", b"\x00\x09\x90\x44\x40\xff\x00\x04\x90\x44\x00"),
+            ("Sound/s12.nam", b"\x01\x00heart\x00\x00growl.mid\x00"),
+            ("Sound/growl.mid", b"\x00\x09\x90\x4a\x40\xff\x00\x04\x90\x4a\x00"),
             ("Sound/s13.nam", b"\x01\x00heart\x00\x00heart3.mid\x00"),
             ("Sound/heart3.mid", b"\x00\x09\x90\x4f\x40\xff\x00\x04\x90\x4f\x00"),
             ("Sound/heart", &heart),
         ];
         let got = from_volume(files);
-        assert_eq!(got[&11].1.pitch, Some(Pitch { note: 68, base: 68 }), "the pitch is read");
-        assert_eq!(got[&13].1.pitch, Some(Pitch { note: 79, base: 79 }));
-        assert_eq!(got[&11].1.effective_rate(), 18430, "and it changes nothing");
-        assert_eq!(got[&13].1.effective_rate(), 18430);
-        assert_eq!(got[&11].1.effective_rate(), got[&13].1.effective_rate(), "the Amiga plays both alike");
+        assert_eq!(got[&11].1.base_note(), 50, "the reference is in the sample's header");
+        assert_eq!(got[&11].1.cycles(), 0, "and the other flags byte is the repeat count");
+        assert_eq!(got[&11].1.pitch, Some(Pitch { status: 0x90, note: 68 }));
+        assert_eq!(got[&12].1.pitch, Some(Pitch { status: 0x90, note: 74 }));
+        assert_eq!(got[&13].1.pitch, Some(Pitch { status: 0x90, note: 79 }));
+
+        assert_eq!(got[&11].1.effective_rate(), 13032, "68 - 24 - 50 = -6 semitones");
+        assert_eq!(got[&12].1.effective_rate(), 18430, "74 is the note that bends nothing");
+        assert_eq!(got[&13].1.effective_rate(), 24601, "79 - 24 - 50 = +5");
+        assert_ne!(got[&11].1.effective_rate(), got[&13].1.effective_rate(), "not one sound, three");
+    }
+
+    /// Paula cannot be clocked past its minimum period, and one sound in either game
+    /// asks it to be — before any bend is applied.
+    #[test]
+    fn the_rate_is_capped_at_what_paula_can_clock() {
+        assert_eq!(PAULA_CEILING_HZ, 28866);
+        // Lurking Horror's effect 17: 32910 Hz stated, base 50, note 90 -> +16.
+        let s17 = dat(32910, 0x0032, &[1, 2, 3, 4]);
+        let files: Vec<(&str, &[u8])> = vec![
+            ("Sound/s17.nam", b"\x01\x00s17.dat\x00\x00s17.mid\x00"),
+            ("Sound/s17.mid", b"\x00\x09\x90\x5a\x40\xff\x00\x04\x90\x5a\x00"),
+            ("Sound/s17.dat", &s17),
+        ];
+        let got = from_volume(files);
+        assert_eq!(got[&17].1.rate, 32910, "the disk's own figure survives untouched");
+        assert_eq!(got[&17].1.effective_rate(), PAULA_CEILING_HZ, "and the hardware's is what plays");
     }
 
     /// The Macintosh layout, laid out as `/MAC/SOUND` is: bare `S<n>` samples, and an
@@ -654,10 +780,11 @@ mod tests {
         assert_eq!(got[&3].1.samples, vec![0x89, 0x89], "a Macintosh payload arrives signed");
         assert_eq!(got[&12].1.samples, vec![0x81, 0x82, 0x83, 0x84]);
 
-        assert_eq!(got[&3].1.effective_rate(), 15360, "unclaimed, so unbent");
-        assert_eq!(got[&12].1.effective_rate(), 9215, "no M12, so unbent");
-        assert_eq!(got[&11].1.effective_rate(), 9215, "M11 is a unison pair");
-        assert_eq!(got[&13].1.effective_rate(), 17396, "M13 asks for note 79 against base 68");
+        // Both samples state base note 50, as every Sherlock sample does.
+        assert_eq!(got[&3].1.effective_rate(), 15360, "no index claims it, so it plays as itself");
+        assert_eq!(got[&12].1.effective_rate(), 9215, "no M12 either");
+        assert_eq!(got[&11].1.effective_rate(), 6516, "M11 asks for note 68: 68 - 24 - 50 = -6");
+        assert_eq!(got[&13].1.effective_rate(), 12301, "M13 asks for note 79: +5");
         assert_eq!(got[&13].1.rate, 9215, "the disk's own figure is still there behind it");
     }
 

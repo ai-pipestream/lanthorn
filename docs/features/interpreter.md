@@ -1295,15 +1295,19 @@ Amiga floppy or anywhere else.
   matters, because *Sherlock*'s samples are called `armor`, `growl` and `violin.bin`,
   and three separate effects share one `heart` recording. Both the Amiga floppies and
   the Macintosh `/MAC/SOUND` layout of the *Lost Treasures* CD are understood, and
-  `/play-sound <n>` fires them the same way it fires a Blorb resource. On the Mac
-  release the disk also says what pitch to play a shared sample at, so *Sherlock*'s
-  heartbeat really does beat faster when the story asks it to — on the Amiga pressing
-  it does not, and babelmap follows each disk rather than averaging them. The two
-  machines also disagree about where silence sits in a sample byte, and the header
-  does not say which — so the layout decides it, checked against the one effect both
-  discs press from the same master. The Mac goes further and fades each sample in and
-  out from its speaker's rest position, which babelmap unwinds rather than reproduces:
-  played back literally on a modern output that ramp is a click at each end.
+  `/play-sound <n>` fires them the same way it fires a Blorb resource.
+  **And the pitch comes with them.** Each effect names a tiny MIDI file saying which
+  note to sound, and each sample states in its own header the note it was recorded at;
+  the gap between the two is the bend, in equal temperament. That is why *Sherlock*'s
+  heartbeat beats at three different speeds from one recording — the model was read out
+  of the 68000 interpreter Infocom shipped, and it reproduces two independent
+  third-party renderings of these sounds on 27 of the 29 effects they carry.
+  The two machines also disagree about where silence sits in a sample byte, and the
+  header does not say which — so the layout decides it, checked against the one effect
+  both discs press from the same master. The Mac goes further and fades each sample in
+  and out from its speaker's rest position, which babelmap unwinds rather than
+  reproduces: played back literally on a modern output that ramp is a click at each
+  end.
 - **Glulx** — Glk sound channels (`glk_schannel_*`) play a Blorb's AIFF/Ogg/MOD
   `Snd ` resources with per-channel volume (including gradual volume ramps) and
   sound-finished notify events, so music and effects behave the way the author
