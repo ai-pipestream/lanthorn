@@ -10,7 +10,8 @@
 //!
 //! # The `.dat` container
 //!
-//! A ten-byte big-endian header, then signed 8-bit mono PCM:
+//! A ten-byte big-endian header, then 8-bit mono PCM — signed here, offset binary on
+//! the Macintosh, which the header does not say and [`Encoding`] explains:
 //!
 //! | offset | field |
 //! |---|---|
@@ -35,12 +36,18 @@
 //!
 //! # The Macintosh lays the same three things out as two files
 //!
-//! `/MAC/SOUND` on *Lost Treasures* disc 2 carries `S<n>` — the identical `.dat`
-//! container, no extension — and, for the four effects whose pitch is not the
-//! sample's own, `M<n>`: the eleven-byte pitch blob with the index appended, so one
-//! file does the work of the Amiga's `.mid` and `.nam` together. An effect with no
-//! `M<n>` plays `S<n>` as itself. See [`Pitch`] for why the Macintosh is the only
-//! place the pitch does anything.
+//! `/MAC/SOUND` on *Lost Treasures* disc 2 carries `S<n>` — the same `.dat` header,
+//! no extension — and, for the four effects whose pitch is not the sample's own,
+//! `M<n>`: the eleven-byte pitch blob with the index appended, so one file does the
+//! work of the Amiga's `.mid` and `.nam` together. An effect with no `M<n>` plays
+//! `S<n>` as itself. See [`Pitch`] for why the Macintosh is the only place the pitch
+//! does anything.
+//!
+//! **The header is the same; the payload underneath it is not.** The Macintosh writes
+//! its samples as offset binary, silence at `0x80`, and nothing in the ten bytes
+//! records that — see [`Encoding`], which is also where the evidence lives. Four of
+//! *Sherlock*'s fifteen effects are a half-rate decimation on this disc as well, so a
+//! Macintosh sample is not simply its Amiga twin in another sign convention.
 //!
 //! # Why AIFF comes back out
 //!
@@ -159,6 +166,41 @@ impl Pitch {
     }
 }
 
+/// How a container's payload encodes silence.
+///
+/// The two machines disagree, and **nothing in the header says which** — the only
+/// field that could have carried it overlaps: all thirteen `/MAC/SOUND` samples read
+/// `0x0032` or `0x0132` in the flags word, and both of those appear on the Amiga
+/// floppies too. The layout is the discriminator instead, and [`from_volume`] already
+/// knows it: three files with extensions is AmigaDOS, two bare `S<n>`/`M<n>` is the
+/// Macintosh.
+///
+/// # How this was settled, and why it is not a judgement call
+///
+/// *Sherlock*'s effect 8 is **byte-identical across the two media once the Macintosh
+/// payload is XORed with `0x80`** — zero differing bytes in 25,820 — and the chain
+/// carries on to a third rendition: those Amiga bytes are in turn byte-identical to
+/// `stories/Sherlock.blb`'s `SSND` payload on fourteen of fifteen effects, and an
+/// 8-bit AIFF is signed by definition. So Amiga signed, Macintosh offset-binary, with
+/// a reference rendition anchoring the sign rather than a guess about it.
+///
+/// The other same-length effects (3, 4, 5, 6, 9, 15, 16) agree after the same XOR to
+/// within 0.3–0.6% of their bytes, and effects 7, 10, 11–13 and 14 are the Macintosh
+/// shipping a half-rate decimation — a different master, not a different encoding.
+/// Across all fifteen the statistics settle it on their own: read as offset binary the
+/// Macintosh payload's mean lands within 2 of zero and its RMS within 2% of the
+/// Amiga's, and read as signed its RMS is two to five times too large and its
+/// sample-to-sample roughness three to eight times too high. That is what reached the
+/// user as "very distorted and crunchy", and why a quiet tail played as full-scale
+/// noise made the sounds seem to run long (SQ-0921).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    /// Silence at `0x00`, as AmigaDOS writes it and as an 8-bit AIFF defines it.
+    Signed,
+    /// Silence at `0x80`, as `/MAC/SOUND` writes it.
+    OffsetBinary,
+}
+
 /// One decoded Infocom sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfocomSound {
@@ -167,7 +209,9 @@ pub struct InfocomSound {
     /// The header's flags word, kept because it is not yet understood and a caller
     /// measuring these disks should be able to see it.
     pub flags: u16,
-    /// Signed 8-bit mono PCM, `frames` bytes.
+    /// Signed 8-bit mono PCM, `frames` bytes — always signed, whatever the disk
+    /// wrote, because [`InfocomSound::parse`] converts an [`Encoding::OffsetBinary`]
+    /// payload on the way in.
     pub samples: Vec<u8>,
     /// The pitch its index pointed at, when there was one. `None` from
     /// [`InfocomSound::parse`], which reads the container alone; [`from_volume`] is
@@ -183,12 +227,17 @@ fn be16(b: &[u8], at: usize) -> u16 {
 }
 
 impl InfocomSound {
-    /// Parse a `Sound/sN.dat`, or `None` when the bytes are not one.
+    /// Parse a `Sound/sN.dat` or a `/MAC/SOUND/S<n>`, or `None` when the bytes are
+    /// not one.
     ///
     /// The signature is the length field agreeing with the file's own size, which
     /// no other file on these disks satisfies by accident, plus a frame count that
     /// fits in what is left.
-    pub fn parse(raw: &[u8]) -> Option<InfocomSound> {
+    ///
+    /// `encoding` is the caller's, not the file's: the header does not record it and
+    /// the two machines disagree. See [`Encoding`], and note that the samples come
+    /// back signed either way.
+    pub fn parse(raw: &[u8], encoding: Encoding) -> Option<InfocomSound> {
         if raw.len() < HEADER || raw.len() > u16::MAX as usize + 2 {
             return None;
         }
@@ -199,12 +248,12 @@ impl InfocomSound {
         if frames == 0 || HEADER + frames > raw.len() {
             return None;
         }
-        Some(InfocomSound {
-            rate: u32::from(be16(raw, 4)),
-            flags: be16(raw, 2),
-            samples: raw[HEADER..HEADER + frames].to_vec(),
-            pitch: None,
-        })
+        let mut samples = raw[HEADER..HEADER + frames].to_vec();
+        if encoding == Encoding::OffsetBinary {
+            // Offset binary and two's complement differ by exactly the sign bit.
+            samples.iter_mut().for_each(|b| *b ^= 0x80);
+        }
+        Some(InfocomSound { rate: u32::from(be16(raw, 4)), flags: be16(raw, 2), samples, pitch: None })
     }
 
     /// The rate this actually plays at: the disk's own, bent by [`Pitch`] when its
@@ -301,18 +350,18 @@ where
     // Pass 1: the indices, which are what carry a sample name and a pitch.
     for (path, (_, raw)) in &by_path {
         let dir = dir_of(path);
-        let (effect, idx, pitch) = match sound_entry(path) {
+        let (effect, idx, pitch, encoding) = match sound_entry(path) {
             Some(Entry::AmigaIndex(n)) => {
                 let Some(idx) = SoundIndex::parse(raw) else { continue };
                 let pitch = by_path
                     .get(&format!("{dir}{}", idx.midi.to_ascii_lowercase()))
                     .and_then(|(_, m)| Pitch::parse(m));
-                (n, idx, pitch)
+                (n, idx, pitch, Encoding::Signed)
             }
             Some(Entry::MacIndex(n)) => {
                 let Some(pitch) = Pitch::parse(raw) else { continue };
                 let Some(idx) = raw.get(PITCH..).and_then(SoundIndex::parse) else { continue };
-                (n, idx, Some(pitch))
+                (n, idx, Some(pitch), Encoding::OffsetBinary)
             }
             _ => continue,
         };
@@ -320,7 +369,7 @@ where
         else {
             continue;
         };
-        let Some(snd) = InfocomSound::parse(sample) else { continue };
+        let Some(snd) = InfocomSound::parse(sample, encoding) else { continue };
         out.insert(effect, (idx.sample.clone(), InfocomSound { pitch, ..snd }));
     }
 
@@ -330,7 +379,7 @@ where
         if out.contains_key(&n) {
             continue;
         }
-        let Some(snd) = InfocomSound::parse(raw) else { continue };
+        let Some(snd) = InfocomSound::parse(raw, Encoding::OffsetBinary) else { continue };
         let name = orig.rsplit('/').next().unwrap_or(orig).to_string();
         out.insert(n, (name, snd));
     }
@@ -540,6 +589,10 @@ mod tests {
         assert_eq!(got[&12].0, "S12");
         assert_eq!(got[&13].0, "S12");
         assert_eq!(got[&11].1.samples, got[&13].1.samples, "one sample, three effects");
+        // 0x09 as offset binary is 0x89 as two's complement; nothing else about the
+        // container changes between the machines, so this is the whole difference.
+        assert_eq!(got[&3].1.samples, vec![0x89, 0x89], "a Macintosh payload arrives signed");
+        assert_eq!(got[&12].1.samples, vec![0x81, 0x82, 0x83, 0x84]);
 
         assert_eq!(got[&3].1.effective_rate(), 15360, "unclaimed, so unbent");
         assert_eq!(got[&12].1.effective_rate(), 9215, "no M12, so unbent");
@@ -548,9 +601,41 @@ mod tests {
         assert_eq!(got[&13].1.rate, 9215, "the disk's own figure is still there behind it");
     }
 
+    /// The two machines disagree about where silence is, the header does not record
+    /// it, and reading one as the other is what made `/MAC/SOUND` "distorted and
+    /// crunchy" (SQ-0921).
+    ///
+    /// Offset binary and two's complement differ by exactly the sign bit, so the same
+    /// bytes decode as two waveforms an octave apart in level: `0x80` is silence one
+    /// way and full negative the other.
+    #[test]
+    fn a_macintosh_payload_is_offset_binary_and_an_amiga_one_is_not() {
+        let raw = dat(15360, 0x0132, &[0x00, 0x80, 0xFF, 0x7F]);
+        let signed = InfocomSound::parse(&raw, Encoding::Signed).expect("parses");
+        let offset = InfocomSound::parse(&raw, Encoding::OffsetBinary).expect("parses");
+        assert_eq!(signed.samples, vec![0x00, 0x80, 0xFF, 0x7F], "AmigaDOS wrote what it meant");
+        assert_eq!(offset.samples, vec![0x80, 0x00, 0x7F, 0xFF], "silence moves from 0x80 to 0x00");
+        assert_eq!(signed.rate, offset.rate, "the header is read the same either way");
+        assert_eq!(signed.flags, offset.flags);
+    }
+
+    /// The Amiga path must not have moved, because its samples are the ones already
+    /// pinned byte-identical to a Blorb's `SSND` payload.
+    #[test]
+    fn an_amiga_volume_still_hands_its_samples_back_untouched() {
+        let heart = dat(18430, 0x013C, &[0x00, 0x80, 0xFF, 0x7F]);
+        let files: Vec<(&str, &[u8])> = vec![
+            ("Sound/s11.nam", b"\x00\x02heart\x00s11.mid\x00"),
+            ("Sound/s11.mid", b"\x00\x09\x90\x44\x40\xff\x00\x04\x90\x44\x00"),
+            ("Sound/heart", &heart),
+        ];
+        let got = from_volume(files);
+        assert_eq!(got[&11].1.samples, vec![0x00, 0x80, 0xFF, 0x7F]);
+    }
+
     #[test]
     fn the_header_is_read_and_the_samples_come_out_whole() {
-        let s = InfocomSound::parse(&dat(15360, 0x003C, &[0x0F, 0x06, 0xFA, 0x0D])).expect("parses");
+        let s = InfocomSound::parse(&dat(15360, 0x003C, &[0x0F, 0x06, 0xFA, 0x0D]), Encoding::Signed).expect("parses");
         assert_eq!(s.rate, 15360);
         assert_eq!(s.flags, 0x003C);
         assert_eq!(s.samples, vec![0x0F, 0x06, 0xFA, 0x0D], "the payload is not touched");
@@ -560,14 +645,14 @@ mod tests {
     /// one of these — which is what keeps the sniff off every other file on a disk.
     #[test]
     fn bytes_that_are_not_one_are_refused() {
-        assert_eq!(InfocomSound::parse(b""), None, "empty");
-        assert_eq!(InfocomSound::parse(b"FORM\0\0\0\x08AIFF"), None, "an AIFF is not one");
+        assert_eq!(InfocomSound::parse(b"", Encoding::Signed), None, "empty");
+        assert_eq!(InfocomSound::parse(b"FORM\0\0\0\x08AIFF", Encoding::Signed), None, "an AIFF is not one");
         let mut wrong = dat(15360, 0, &[1, 2, 3, 4]);
         wrong[1] ^= 0xFF;
-        assert_eq!(InfocomSound::parse(&wrong), None, "a length that disagrees with the file");
+        assert_eq!(InfocomSound::parse(&wrong, Encoding::Signed), None, "a length that disagrees with the file");
         let mut over = dat(15360, 0, &[1, 2, 3, 4]);
         over[8..10].copy_from_slice(&9999u16.to_be_bytes());
-        assert_eq!(InfocomSound::parse(&over), None, "a frame count past the end");
+        assert_eq!(InfocomSound::parse(&over, Encoding::Signed), None, "a frame count past the end");
     }
 
     /// AIFF's 80-bit extended float, against the value a real Blorb carries.
@@ -598,7 +683,7 @@ mod tests {
     /// are the ones that went in.
     #[test]
     fn the_aiff_wrapper_declares_mono_eight_bit_at_the_disks_rate() {
-        let s = InfocomSound::parse(&dat(15360, 0, &[0x0F, 0x06, 0xFA, 0x0D])).expect("parses");
+        let s = InfocomSound::parse(&dat(15360, 0, &[0x0F, 0x06, 0xFA, 0x0D]), Encoding::Signed).expect("parses");
         let a = s.to_aiff();
         assert_eq!(&a[0..4], b"FORM");
         assert_eq!(&a[8..12], b"AIFF");
@@ -616,7 +701,7 @@ mod tests {
     /// word-aligned, so the pad byte is outside `SSND`'s declared length.
     #[test]
     fn an_odd_sample_count_is_padded_without_being_counted() {
-        let s = InfocomSound::parse(&dat(11100, 0, &[1, 2, 3])).expect("parses");
+        let s = InfocomSound::parse(&dat(11100, 0, &[1, 2, 3]), Encoding::Signed).expect("parses");
         let a = s.to_aiff();
         assert_eq!(a.len() % 2, 0, "the form is word-aligned");
         let ssnd_len = u32::from_be_bytes([a[42], a[43], a[44], a[45]]);

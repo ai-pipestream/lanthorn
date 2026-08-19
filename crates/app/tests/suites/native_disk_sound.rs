@@ -285,6 +285,80 @@ fn every_amiga_pitch_file_is_a_unison_pair() {
     }
 }
 
+/// The payload under a `/MAC/SOUND` header is **offset binary**, and the Amiga's is
+/// signed — which the header does not record either way (SQ-0921).
+///
+/// Read one as the other and every sample is reflected about silence: a quiet tail
+/// becomes full-scale noise, the RMS lands two to five times too high, and the result
+/// reaches the player as "very distorted and crunchy", running long because the part
+/// that should have faded out never does.
+///
+/// **The sign is settled by a cross-medium identity, not by inspection**, and the
+/// chain is asserted here end to end. *Sherlock*'s effect 8 is the same master on both
+/// discs, and once the Macintosh payload is converted it is byte-identical to the
+/// Amiga's over all 25,820 frames. Those Amiga bytes are in turn byte-identical to
+/// `stories/Sherlock.blb`'s `SSND` payload — and an 8-bit AIFF is signed by
+/// definition. So the chain runs Macintosh → Amiga → a third party's rendition, with
+/// no link resting on a judgement about how it sounds.
+///
+/// The other effects cannot be asserted byte for byte and are not: 7, 10, 11–13 and 14
+/// are a half-rate decimation on this disc (a different master), and 3, 4, 5, 6, 9,
+/// 15, 16 agree only to within 0.6% of their bytes. What holds across all fifteen is
+/// the statistic the encoding governs — with the conversion, the mean sample sits
+/// within a couple of counts of silence, exactly as the Amiga's does.
+#[test]
+fn the_macintosh_payload_is_offset_binary() {
+    let iso = treasures_dir().join("LostTreasures2.iso");
+    let adf = stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf");
+    if !iso.is_file() || !adf.is_file() {
+        eprintln!("SKIP: gitignored Lost Treasures disc 2 or Sherlock floppy absent");
+        return;
+    }
+    let mac = app::native_sound::from_medium(&iso);
+    let amiga = app::native_sound::from_medium(&adf);
+    assert_eq!(mac.len(), 15, "Sherlock's fifteen effects, off /MAC/SOUND");
+
+    /// The sample bytes, out of the AIFF the sound is carried as.
+    fn pcm(s: &app::native_sound::DiskSound) -> &[u8] {
+        let at = s.aiff.len() - s.frames - usize::from(s.frames % 2 == 1);
+        &s.aiff[at..at + s.frames]
+    }
+
+    // The identity that fixes the sign. Effect 8 is the one master both discs share
+    // at full rate; if the conversion were dropped this is 25,820 differing bytes.
+    assert_eq!(mac[&8].frames, amiga[&8].frames, "effect 8 is the same master on both discs");
+    // Counted rather than compared whole: 25,820 bytes in an assertion message is
+    // not a diagnosis, and the count IS the finding — it is zero or it is all of them.
+    let differing = pcm(&mac[&8]).iter().zip(pcm(&amiga[&8])).filter(|(m, a)| m != a).count();
+    assert_eq!(differing, 0, "effect 8 differs in {differing} of {} frames", mac[&8].frames);
+
+    // The link that makes the Amiga side of that identity the SIGNED one: an 8-bit
+    // AIFF is signed by definition, and a third party's AIFF holds the same bytes.
+    // Skipped rather than asserted when the Blorb is absent — it is a separate
+    // gitignored fixture from the two discs.
+    if let Some(blb) = blorb_sounds(&stories_dir().join("Sherlock.blb")) {
+        let r = &blb[&8];
+        assert_eq!(r.frames as usize, amiga[&8].frames - 1, "the Blorb trims a frame, as it does throughout");
+        let differing = r.samples.iter().zip(pcm(&amiga[&8])).filter(|(b, a)| b != a).count();
+        assert_eq!(differing, 0, "the Amiga payload is the Blorb's signed AIFF payload");
+    } else {
+        eprintln!("NOTE: gitignored stories/Sherlock.blb absent, so the third link is unchecked");
+    }
+
+    // And the statistic that holds where the masters differ: silence is at zero.
+    for e in 3..=17u16 {
+        let mean = |s: &app::native_sound::DiskSound| {
+            pcm(s).iter().map(|&b| f64::from(b as i8)).sum::<f64>() / s.frames as f64
+        };
+        assert!(
+            mean(&mac[&e]).abs() < 3.0,
+            "effect {e}: /MAC/SOUND mean {:.2} is not centred on silence — read as signed it is {:.2}",
+            mean(&mac[&e]),
+            pcm(&mac[&e]).iter().map(|&b| f64::from((b ^ 0x80) as i8)).sum::<f64>() / mac[&e].frames as f64,
+        );
+    }
+}
+
 /// **The Macintosh is where the pitch pair comes apart** — and the layout is two
 /// files, not three (SQ-0912).
 ///

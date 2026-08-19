@@ -1298,7 +1298,10 @@ Amiga floppy or anywhere else.
   `/play-sound <n>` fires them the same way it fires a Blorb resource. On the Mac
   release the disk also says what pitch to play a shared sample at, so *Sherlock*'s
   heartbeat really does beat faster when the story asks it to — on the Amiga pressing
-  it does not, and babelmap follows each disk rather than averaging them.
+  it does not, and babelmap follows each disk rather than averaging them. The two
+  machines also disagree about where silence sits in a sample byte, and the header
+  does not say which — so the layout decides it, checked against the one effect both
+  discs press from the same master.
 - **Glulx** — Glk sound channels (`glk_schannel_*`) play a Blorb's AIFF/Ogg/MOD
   `Snd ` resources with per-channel volume (including gradual volume ramps) and
   sound-finished notify events, so music and effects behave the way the author
