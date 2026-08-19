@@ -847,60 +847,6 @@ fn render_node(
                                 state.v6_story_page.set(Some((p[0], p[1], p[2])));
                             }
                         }
-                        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
-                        // SQ-0896: …and the STORY window's own plate, which the chrome
-                        // canvas excludes by construction — `classify_windows` sets a
-                        // `win == 0` Graphics aside as `story_gfx` so the ring does not
-                        // carry it. That was right while the ring could only draw outside
-                        // the story window; now the viewport is cut from what the art
-                        // leaves, the ring covers the plate's cells and needs its pixels
-                        // to crop. Blitted with the chrome ART layer, before the painted
-                        // ground and before any window's page, which is the painter's
-                        // order the game itself used (SQ-0706): the plate is something the
-                        // game DREW, and a page is a colour it was told to present on.
-                        v6::blit_story_gfx(&mut canvas, layout.story_gfx);
-                        // SQ-0704: a chrome window that named its own page paints it
-                        // into its unpainted pixels here (ZMSD §8.8.3.2), so the ring
-                        // bands ship self-contained instead of leaving the icons'
-                        // clear ground for the terminal to colour in (Zork Zero's
-                        // room icons came out on an opaque black box). Same live
-                        // `honor_game_colours` gate as the pane flood above.
-                        // The painted ground goes under the ring's art and glyphs
-                        // and before the pages claim the rest (SQ-0706).
-                        v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
-                        // SQ-0883: the INK layer, frozen — art, glyph ink and painted
-                        // ground, before any window's PAGE floods the rest. The border
-                        // probe below reads THIS: a page is a colour a window was told
-                        // to present on, not something the game drew, and a probe that
-                        // cannot tell the two apart measures a flank's whole width as
-                        // its border rule. `build_chrome_canvas` freezes its own art
-                        // layer one step earlier for the same reason (SQ-0727/0500):
-                        // opaque is not painted.
-                        let ink = canvas.clone();
-                        if state.config.honor_game_colours {
-                            v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
-                            // …and the story window's own page under the pixels the
-                            // ring bands ship (SQ-0704, hybrid half). Raster flattens
-                            // its whole canvas opaque before shipping; hybrid ships
-                            // only these bands, and they overlap the story box — the
-                            // sliver under a top banner, and the flanks. A pixel left
-                            // transparent there is the TERMINAL's to resolve, which is
-                            // why the icons kept coming out on the terminal background
-                            // after the chrome half of this fix landed.
-                            v6::fill_story_page_clear(&mut canvas, layout.story, &state.colors);
-                        } else {
-                            // SQ-0716: colours declined, but a window the game has
-                            // PAINTED INTO still gets its page — that page is the
-                            // ground its own drawing sits on, not a palette
-                            // preference. See `fill_painted_window_pages`.
-                            v6::fill_painted_window_pages(
-                                &mut canvas,
-                                &layout.chrome,
-                                layout.story,
-                                &state.colors,
-                                state.v6_paint.borrow().as_deref(),
-                            );
-                        }
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
                         let pane_dev = (
@@ -1527,6 +1473,76 @@ fn render_node(
                             };
                             (inv(r.x), inv(r.right()))
                         };
+                        // ── the chrome CANVAS, built here rather than 650 lines up ──
+                        //
+                        // SQ-0903. Every classification above — the viewport, the
+                        // strips, the ring bands, which rows the ring will draw as
+                        // GLYPHS — is computed from `layout` and the ART canvases and
+                        // never reads this one. That was not obvious while the canvas
+                        // was built first: it looked like an ordering constraint, and
+                        // the rasterise-then-carve sequence below looked like the price
+                        // of one. It is not. Only seven statements in the 700 lines
+                        // between the old site and the first read touched `canvas`, and
+                        // all seven are these.
+                        //
+                        // Building it here means `text_run_tops` — the rows the ring has
+                        // just decided to draw with glyphs — is known BEFORE a pixel is
+                        // rasterised, so those rows are never painted instead of being
+                        // painted and then carved back out.
+                        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                        // SQ-0896: …and the STORY window's own plate, which the chrome
+                        // canvas excludes by construction — `classify_windows` sets a
+                        // `win == 0` Graphics aside as `story_gfx` so the ring does not
+                        // carry it. That was right while the ring could only draw outside
+                        // the story window; now the viewport is cut from what the art
+                        // leaves, the ring covers the plate's cells and needs its pixels
+                        // to crop. Blitted with the chrome ART layer, before the painted
+                        // ground and before any window's page, which is the painter's
+                        // order the game itself used (SQ-0706): the plate is something the
+                        // game DREW, and a page is a colour it was told to present on.
+                        v6::blit_story_gfx(&mut canvas, layout.story_gfx);
+                        // SQ-0704: a chrome window that named its own page paints it
+                        // into its unpainted pixels here (ZMSD §8.8.3.2), so the ring
+                        // bands ship self-contained instead of leaving the icons'
+                        // clear ground for the terminal to colour in (Zork Zero's
+                        // room icons came out on an opaque black box). Same live
+                        // `honor_game_colours` gate as the pane flood above.
+                        // The painted ground goes under the ring's art and glyphs
+                        // and before the pages claim the rest (SQ-0706).
+                        v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
+                        // SQ-0883: the INK layer, frozen — art, glyph ink and painted
+                        // ground, before any window's PAGE floods the rest. The border
+                        // probe below reads THIS: a page is a colour a window was told
+                        // to present on, not something the game drew, and a probe that
+                        // cannot tell the two apart measures a flank's whole width as
+                        // its border rule. `build_chrome_canvas` freezes its own art
+                        // layer one step earlier for the same reason (SQ-0727/0500):
+                        // opaque is not painted.
+                        let ink = canvas.clone();
+                        if state.config.honor_game_colours {
+                            v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
+                            // …and the story window's own page under the pixels the
+                            // ring bands ship (SQ-0704, hybrid half). Raster flattens
+                            // its whole canvas opaque before shipping; hybrid ships
+                            // only these bands, and they overlap the story box — the
+                            // sliver under a top banner, and the flanks. A pixel left
+                            // transparent there is the TERMINAL's to resolve, which is
+                            // why the icons kept coming out on the terminal background
+                            // after the chrome half of this fix landed.
+                            v6::fill_story_page_clear(&mut canvas, layout.story, &state.colors);
+                        } else {
+                            // SQ-0716: colours declined, but a window the game has
+                            // PAINTED INTO still gets its page — that page is the
+                            // ground its own drawing sits on, not a palette
+                            // preference. See `fill_painted_window_pages`.
+                            v6::fill_painted_window_pages(
+                                &mut canvas,
+                                &layout.chrome,
+                                layout.story,
+                                &state.colors,
+                                state.v6_paint.borrow().as_deref(),
+                            );
+                        }
                         let text_run_tops: Vec<(u16, u32, u32)> = strips
                             .iter()
                             .chain(menu_strips.iter())
