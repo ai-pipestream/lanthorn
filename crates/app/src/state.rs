@@ -23,7 +23,7 @@ impl std::fmt::Debug for HintSource {
 /// Transient state for the Hints panel modal.
 ///
 /// Held in `AppState.hints: Option<HintSession>` — `Some` while the panel is
-/// open, `None` when closed.  The session is NOT persisted into the `.babelmap`
+/// open, `None` when closed.  The session is NOT persisted into the `.lanthorn`
 /// archive; only the per-IFID hint-file association is saved (Task A).
 pub struct HintSession {
     /// The active hint source (currently always `Zcode`).
@@ -1620,7 +1620,7 @@ pub enum PendingOverwrite {
 /// already exists. Confirm writes, replacing it; cancel leaves it untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmOverwriteSave {
-    /// Absolute path to the target `.babelmap` file.
+    /// Absolute path to the target `.lanthorn` file.
     pub path: std::path::PathBuf,
     /// Display name of the EXISTING save at `path` — may differ from the name
     /// the player just typed when two names slugify to the same file.
@@ -1900,7 +1900,7 @@ pub enum ResizeTarget {
 }
 
 /// Where the event loop should go when the current story ends. `Exit` leaves
-/// babelmap entirely (the classic quit); `Library` exits the story but returns
+/// lanthorn entirely (the classic quit); `Library` exits the story but returns
 /// to the story picker (only meaningful when launched from a directory). Set by
 /// the quit / `/quit-to-library` dispatch and read at the loop's break sites, where
 /// the binary maps it to its own `RunOutcome`. (SQ-0435)
@@ -2618,11 +2618,11 @@ pub struct AppState {
     pub unsaved_progress: bool,
 
     /// Where the event loop should resume once this story ends: `Exit` (quit
-    /// babelmap) or `Library` (return to the story picker). Set by the quit /
+    /// lanthorn) or `Library` (return to the story picker). Set by the quit /
     /// `/quit-to-library` dispatch; read at the loop's break sites. (SQ-0435)
     pub exit_target: ExitTarget,
 
-    /// True when babelmap was launched against a directory (a story library),
+    /// True when lanthorn was launched against a directory (a story library),
     /// so a picker exists to return to. Set once at startup; gates
     /// `/quit-to-library`. (SQ-0435)
     pub launched_from_library: bool,
@@ -2633,7 +2633,7 @@ pub struct AppState {
     pub persist_debug_trace: bool,
 
     /// Per-turn rewind/replay history. Filled when `config.record_turn_history`
-    /// is on; persisted into the `.babelmap` archive. Empty otherwise.
+    /// is on; persisted into the `.lanthorn` archive. Empty otherwise.
     pub history: Vec<crate::history::TurnRecord>,
 
 
@@ -2668,7 +2668,7 @@ pub struct AppState {
 
     /// Every non-empty submitted line (game commands and slash commands), oldest
     /// first. Capped at `COMMAND_HISTORY_CAP`; consecutive duplicates are skipped.
-    /// Persisted per-game in the `.babelmap` archive.
+    /// Persisted per-game in the `.lanthorn` archive.
     pub command_history: Vec<String>,
     /// Navigation cursor into `command_history`. `None` means "not navigating"
     /// (the input line holds the live draft); `Some(i)` means the input shows
@@ -4542,7 +4542,7 @@ impl AppState {
     /// Reset the in-memory transcript sidecars (`transcript_styles`,
     /// `transcript_images`) to match a freshly reassigned `transcript`. Call this
     /// after replacing `transcript` wholesale (load / restore / reset / history
-    /// jump). These sidecars carry no persisted data — the `.babelmap` archive
+    /// jump). These sidecars carry no persisted data — the `.lanthorn` archive
     /// stores only lines/kinds/runs (see `archive::TranscriptData`) — so the
     /// correct post-reassignment state is all-`None`, sized to the new transcript.
     /// A plain `resize` cannot do this: it only truncates the tail, leaving stale
@@ -5846,13 +5846,13 @@ mod tests {
         s.overlays.text_entry = None;
 
         // confirm_delete_save
-        s.overlays.confirm_delete_save = Some(std::path::PathBuf::from("/x.babelmap"));
+        s.overlays.confirm_delete_save = Some(std::path::PathBuf::from("/x.lanthorn"));
         assert!(s.any_overlay_open(), "confirm_delete_save active => any_overlay_open true");
         s.overlays.confirm_delete_save = None;
 
         // confirm_overwrite_save
         s.overlays.confirm_overwrite_save = Some(ConfirmOverwriteSave {
-            path: std::path::PathBuf::from("/x.babelmap"),
+            path: std::path::PathBuf::from("/x.lanthorn"),
             existing_name: "x".to_string(),
             pending: PendingOverwrite::SaveAs,
         });
@@ -6299,7 +6299,7 @@ mod tests {
     /// Create a temporary directory with a unique tag.
     /// Contents: subdir/, save.qzl, notes.txt.
     fn make_test_fb_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("babelmap-fb-{}-{}", tag, std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-fb-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(dir.join("subdir")).unwrap();
         std::fs::write(dir.join("save.qzl"), b"fake quetzal").unwrap();

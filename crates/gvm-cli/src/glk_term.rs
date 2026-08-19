@@ -617,7 +617,7 @@ pub struct TerminalBackend {
     /// A command just read via line input, awaiting deferred echo resolution on
     /// the next buffer output (SQ-0282). `None` when no input echo is pending.
     pending_echo: Option<String>,
-    /// Emit terminal-detection diagnostics to stderr (env `BABELMAP_DEBUG_TERM`).
+    /// Emit terminal-detection diagnostics to stderr (env `LANTHORN_DEBUG_TERM`).
     debug: bool,
     /// The story Blorb, when one was loaded, retained to serve `Data` resource
     /// streams (`glk_stream_open_resource`). `None` for a plain `.ulx` — the
@@ -643,7 +643,7 @@ impl TerminalBackend {
         let is_tty = cli_host::HostMode::current().rich();
         let hold_prompt = cli_host::HostMode::current().plain();
         let (cols, rows) = detect_size();
-        let debug = std::env::var_os("BABELMAP_DEBUG_TERM").is_some();
+        let debug = std::env::var_os("LANTHORN_DEBUG_TERM").is_some();
         if debug {
             eprintln!("[term] new: is_tty={is_tty} cols={cols} rows={rows}");
         }

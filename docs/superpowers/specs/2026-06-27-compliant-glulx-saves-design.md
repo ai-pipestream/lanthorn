@@ -9,10 +9,10 @@
 Let Glulx games save and restore through their **own** in-game SAVE/RESTORE (the
 `@save`/`@restore` opcodes writing/reading a Glk file stream), producing files in
 the **standard Glulx Quetzal format** that other interpreters (Glulxe, Git,
-Lectrote) can read — and that babelmap can read back from them (full
+Lectrote) can read — and that lanthorn can read back from them (full
 bidirectional). In doing so, **unify Glulx saves with the Z-machine model**: the
-portable bytes are real Quetzal wrapped in a `.babelmap` archive (with a display
-side-car), exactly as Z-machine already works. The babelmap-specific Glulx
+portable bytes are real Quetzal wrapped in a `.lanthorn` archive (with a display
+side-car), exactly as Z-machine already works. The lanthorn-specific Glulx
 snapshot format (the custom `GReg` chunk) is **retired**.
 
 ## Decisions (from brainstorming)
@@ -23,10 +23,10 @@ snapshot format (the custom `GReg` chunk) is **retired**.
    resume via the `@save` call-stub — no `GReg`). The Glk window/stream model
    (today embedded as the `Glk ` chunk from the prior phase) moves to an archive
    **side-car**, mirroring the Z-machine's `screen.json`.
-3. **In-game SAVE/RESTORE uses the same `.babelmap` path as Z-machine** — same
+3. **In-game SAVE/RESTORE uses the same `.lanthorn` path as Z-machine** — same
    handlers, the Glulx guards lifted. The portable Quetzal lives inside.
 4. **Extensions for raw interchange:** `.qzl` for Z-machine (already used),
-   `.glksave` for Glulx. The `.babelmap` wrapper stays one extension (self-
+   `.glksave` for Glulx. The `.lanthorn` wrapper stays one extension (self-
    describing via `engine.txt`). **Import detects the engine by content** (the
    IFZS/`IFhd` signature), not the extension; the existing foreign-engine guard
    rejects a Z↔Glulx mismatch. Extension only drives the picker filter + default
@@ -41,7 +41,7 @@ snapshot format (the custom `GReg` chunk) is **retired**.
   **not** implement the `@save` (0x0123) / `@restore` (0x0124) **stream** opcodes
   or `@restart` (0x0122). `glk::StreamKind` has `Window` + `Memory` only — no
   `File`. Filerefs are stubbed no-ops (return NULL/false).
-- The app already does Z-machine in-game save/restore through the `.babelmap`
+- The app already does Z-machine in-game save/restore through the `.lanthorn`
   archive (`PendingIo::Save`/`Restore` suspend → host writes/reads the archive
   whose `game.sav` is real Quetzal; `screen.json` is the zvm-only display
   side-car) and raw `.qzl`/`.sav` import/export (default export `<ifid>.qzl`).
@@ -95,12 +95,12 @@ buffer addr/maxlen) so a load-on-launch / quick-save restore reinstates the
 windows and the input wait. Reuse the model serialization built in the prior
 phase, relocated from inside the bytes to this side-car (extend it to include the
 pending input request if it does not already). The raw `.qzl`/`.glksave` export
-is **only** `game.sav` (no side-car) — portable; the side-car is babelmap display
+is **only** `game.sav` (no side-car) — portable; the side-car is lanthorn display
 polish, like `screen.json`.
 
 ### Back-compat
 
-**None.** babelmap is pre-release, so the legacy `GReg`+`Glk ` Glulx snapshots
+**None.** lanthorn is pre-release, so the legacy `GReg`+`Glk ` Glulx snapshots
 written earlier this session are simply dropped — `restore_state` reads only the
 compliant Quetzal format. (Z-machine archives are unaffected; they were always
 real Quetzal.)
@@ -138,7 +138,7 @@ gvm only.
 
 ### Sub-project C — wiring, UX, extensions, conformance
 
-- App: route Glulx in-game SAVE/RESTORE through the **same** `.babelmap` handlers
+- App: route Glulx in-game SAVE/RESTORE through the **same** `.lanthorn` handlers
   as Z-machine (lift the remaining Glulx guards); write/read the `glk.json`
   side-car next to `game.sav` (glulx-only), mirroring `screen.json`.
 - Raw interchange: **ungate** `.qzl`/`.sav` import/export for Glulx; make the
@@ -159,7 +159,7 @@ gvm only.
 - **gvm (A):** fileref create/exist/delete + file-stream open/write/seek/read/
   close drive the backend hooks (a test backend with an in-memory filesystem);
   `glk_stream_open_file` round-trips bytes.
-- **app (C):** a Glulx in-game SAVE writes a `.babelmap` whose `game.sav` is
+- **app (C):** a Glulx in-game SAVE writes a `.lanthorn` whose `game.sav` is
   compliant Quetzal + a `glk.json` side-car (no `screen.json`); RESTORE round-
   trips; raw `.glksave` export is bare Quetzal and re-imports; a foreign-engine
   raw file is refused by content sniff + guard; Z-machine `.qzl` path unchanged.
@@ -168,7 +168,7 @@ gvm only.
 
 - gvm stays zero-dep (file I/O is the **host's** via `GlkBackend`, not gvm's).
 - Z-machine save/restore/restart/import/export stays **byte-for-byte unchanged**.
-- Z-machine `.babelmap` archives still load (always real Quetzal). Legacy Glulx
+- Z-machine `.lanthorn` archives still load (always real Quetzal). Legacy Glulx
   `GReg` snapshots are intentionally dropped (pre-release, no back-compat).
 - The compliant format is verified against the Glulx spec + a real interpreter,
   not just self-round-trip.

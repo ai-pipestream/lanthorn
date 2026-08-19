@@ -142,7 +142,7 @@ const MEDIA: &[Medium] = &[
     Medium { title: "Beyond Zork (Atari ST)", file: "Infocom Compilation 6 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 5, release: 49, serial: "870917" },
     // ── The Apple II (SQ-0836) ───────────────────────────────────────────────
     //
-    // ProDOS media, and the fifth filesystem babelmap mounts. Every row here was
+    // ProDOS media, and the fifth filesystem lanthorn mounts. Every row here was
     // measured through `app::hints::load_mounted_story` on 2026-08-13, like the
     // rest of the table.
     //
@@ -263,7 +263,7 @@ const MEDIA: &[Medium] = &[
     // other order produces.
     //
     // It matters beyond one game. `zvm-cli` declines v6 by design, so until this
-    // row every Apple format babelmap read could be mounted and never *played*
+    // row every Apple format lanthorn read could be mounted and never *played*
     // through the CLI — Arthur, Journey, Shogun and Zork Zero are all v6. This
     // is a Version 3 game on Apple II media, so the whole path is exercised end
     // to end for the first time; the `NARRATED` entry below is that proof.
@@ -457,7 +457,7 @@ const NARRATED: &[(&str, &[&str])] = &[
     //
     // The two lines above are ProDOS volumes, and every ProDOS disk in the
     // corpus that is *not* a compilation is a Version 6 game, which `zvm-cli`
-    // declines by design. So "babelmap reads Apple II media" had, until this
+    // declines by design. So "lanthorn reads Apple II media" had, until this
     // row, never once meant "and plays a game off one through the CLI". This is
     // a Version 3 story on Apple II media: it boots, prints its banner, and
     // names release 29 / serial 840118 — the story's own word for the build that
@@ -777,7 +777,7 @@ fn a_floppy_and_the_story_file_beside_it_are_pinned_against_each_other() {
 #[test]
 fn every_release_medium_is_offered_by_the_story_picker() {
     let dir = stories_dir();
-    let data_base = std::env::temp_dir().join(format!("babelmap-sq0849-{}", std::process::id()));
+    let data_base = std::env::temp_dir().join(format!("lanthorn-sq0849-{}", std::process::id()));
     let rows = app::picker::scan_stories(&dir, &data_base);
     let listed: Vec<PathBuf> = rows.iter().map(|e| e.path.clone()).collect();
     let _ = std::fs::remove_dir_all(&data_base);
@@ -1155,7 +1155,7 @@ fn floppy_alone(tag: &str) -> Option<FloppyAlone> {
         eprintln!("SKIP: gitignored medium missing at {}", src.display());
         return None;
     }
-    let dir = std::env::temp_dir().join(format!("babelmap-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a directory of its own");
     let image = dir.join("floppy5.ima");

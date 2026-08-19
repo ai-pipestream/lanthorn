@@ -222,7 +222,7 @@ mod tests {
 
     fn dummy_save(name: &str, turns: u32, is_default: bool) -> SaveInfo {
         SaveInfo {
-            path: PathBuf::from(format!("/tmp/{}.babelmap", name)),
+            path: PathBuf::from(format!("/tmp/{}.lanthorn", name)),
             name: name.to_string(),
             turns,
             saved_at: "2026-06-18T10:00:00Z".to_string(),
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn draw_saves_marks_portable_saves_and_only_those() {
         // SQ-0531: portability is driven off the trigger, not the extension —
-        // an @save `.babelmap` is portable, a host Save State is not. The ↗ glyph
+        // an @save `.lanthorn` is portable, a host Save State is not. The ↗ glyph
         // and the themeable tint land on the portable row's Type cell only.
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();

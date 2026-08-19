@@ -1,4 +1,4 @@
-//! A real terminal emulator's verdict on babelmap's bytes (SQ-0764).
+//! A real terminal emulator's verdict on lanthorn's bytes (SQ-0764).
 //!
 //! `pty_emitted_stream.rs` asserts on what OUR decoder read out of the stream.
 //! That decoder and the renderer it audits were written by the same hands, so a
@@ -11,10 +11,10 @@
 //!
 //!   * `protocol` — PORTABLE, always runs, no fixture, no pty. Hand-authored
 //!     kitty streams, a few hundred bytes each, pinning the continuation rule
-//!     that makes babelmap's placement painting fragile. This is the part that
+//!     that makes lanthorn's placement painting fragile. This is the part that
 //!     is a real test rather than a snapshot: it asserts both directions, so it
 //!     fails if the rule is broken AND if it is over-applied.
-//!   * `emitter` — PORTABLE, always runs. babelmap's real emitter driven through
+//!   * `emitter` — PORTABLE, always runs. lanthorn's real emitter driven through
 //!     a real `Terminal` over a byte sink, so the bytes judged are the ones a
 //!     player's terminal receives, frame boundaries and buffer diff included.
 //!     This is where SQ-0772 lives: the defect was a placement the damage model
@@ -80,7 +80,7 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 /// A `a=T,U=1` transmit-and-display of a solid RGBA image, declaring a
-/// `ART_COLS x ART_ROWS` cell grid — the shape babelmap sends. `z=3` is
+/// `ART_COLS x ART_ROWS` cell grid — the shape lanthorn sends. `z=3` is
 /// deliberately non-default so the authored z can be told apart from the -1
 /// upstream reports for every virtual placement.
 fn transmit(id: u32) -> String {
@@ -92,7 +92,7 @@ fn transmit(id: u32) -> String {
     )
 }
 
-/// One row of placeholders in babelmap's own shape: the LEAD cell carries the
+/// One row of placeholders in lanthorn's own shape: the LEAD cell carries the
 /// full diacritic triple (image row, image column, id high byte) and every cell
 /// after it is a bare `U+10EEEE` relying on the continuation rule.
 fn placeholder_row(row: u16, high: char) -> String {
@@ -240,7 +240,7 @@ mod protocol {
     }
 
     /// The failure mode is WORSE when the id's high byte is zero, which is
-    /// babelmap's own id range (`0x00B0_xxxx`, `render/graphics.rs`): the
+    /// lanthorn's own id range (`0x00B0_xxxx`, `render/graphics.rs`): the
     /// truncated id still names a real image, so the lookup succeeds and the
     /// orphaned run resolves — but with no row diacritic it claims image row 0,
     /// so every row of the art redraws the art's FIRST row, and it starts one
@@ -297,7 +297,7 @@ mod protocol {
 /// no story (SQ-0772).
 ///
 /// The `protocol` module above hand-authors the streams it judges, which pins the
-/// RULE but not babelmap's obedience to it. `real_capture` below judges babelmap's
+/// RULE but not lanthorn's obedience to it. `real_capture` below judges lanthorn's
 /// own bytes, but needs a pty, a commercial story file and a couple of seconds.
 /// This module sits between them: it drives `GraphicsRender` through a real
 /// `Terminal` over a byte sink, so the bytes are the ones a player's terminal would
@@ -420,7 +420,7 @@ mod emitter {
     /// The survivors must still name their own image rows.
     ///
     /// Before the fix the whole row leaned on that lead cell, so its loss left the
-    /// rest of the row anchorless: babelmap's ids have a zero high byte, so the run
+    /// rest of the row anchorless: lanthorn's ids have a zero high byte, so the run
     /// still resolved — to the image's FIRST row, on every screen row.
     #[test]
     fn overpainting_the_lead_column_leaves_the_survivors_naming_their_own_rows() {
@@ -574,7 +574,7 @@ mod raster {
         )
     }
 
-    /// The gradient art, placed the way babelmap places art: one placeholder run
+    /// The gradient art, placed the way lanthorn places art: one placeholder run
     /// per row, lead cell carrying the diacritic triple.
     fn gradient_frame() -> String {
         let mut s = gradient_transmit(ID_HIGH);
@@ -785,7 +785,7 @@ mod real_capture {
         let user_dir = out_dir().join("oracle-user-dir");
         let _ = std::fs::remove_dir_all(&user_dir);
 
-        let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_babelmap"), &story, &user_dir);
+        let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_lanthorn"), &story, &user_dir);
         spec.cols = COLS;
         spec.rows = ROWS;
         spec.keys = vec![
@@ -796,7 +796,7 @@ mod real_capture {
             driver::Key::Wait(Duration::from_millis(900)),
         ];
 
-        let cap = driver::run(spec).expect("the pty harness should boot babelmap");
+        let cap = driver::run(spec).expect("the pty harness should boot lanthorn");
         let term = pty_stream::decode_capture(&cap);
         let res = oracle::resolve(
             &cap.bytes,

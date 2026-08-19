@@ -1,10 +1,10 @@
 //! Graphviz DOT map export: emit the raw room graph as DOT so a Graphviz engine
 //! (neato/fdp/dot) lays it out.
 //!
-//! Unlike the SVG export, this does NOT use babelmap's own positions or routed
+//! Unlike the SVG export, this does NOT use lanthorn's own positions or routed
 //! connectors. It hands Graphviz the topology — rooms as nodes, directed
 //! connections as edges labelled with their compass/stub direction — and lets
-//! Graphviz solve the layout. This sidesteps babelmap's in-app layout/routing
+//! Graphviz solve the layout. This sidesteps lanthorn's in-app layout/routing
 //! entirely, which is the point: Graphviz's engines handle dense graphs well.
 //!
 //! The emitted graph is a `digraph` because connections are directed and not
@@ -58,10 +58,10 @@ fn dot_escape(s: &str) -> String {
 pub fn render_dot(graph: &MapGraph) -> String {
     let mut out = String::new();
 
-    out.push_str("// babelmap map export (Graphviz DOT)\n");
+    out.push_str("// lanthorn map export (Graphviz DOT)\n");
     out.push_str("// Render with:  dot -Tsvg map.dot -o map.svg\n");
     out.push_str("//   (the layout=neato attribute below picks the engine; fdp/sfdp also work)\n");
-    out.push_str("digraph babelmap {\n");
+    out.push_str("digraph lanthorn {\n");
     out.push_str("  layout=\"neato\";\n");
     out.push_str("  overlap=false;\n");
     out.push_str("  splines=true;\n");
@@ -126,7 +126,7 @@ mod tests {
         m.observe(1, "West of House", Some(Direction::S)); // back south — non-reciprocal pair
         let dot = render_dot(&m.graph);
 
-        assert!(dot.contains("digraph babelmap {"));
+        assert!(dot.contains("digraph lanthorn {"));
         assert!(dot.contains("}\n"));
         // Nodes keyed by object number.
         assert!(dot.contains("r1 ["));
@@ -193,7 +193,7 @@ mod tests {
         use mapper::graph::MapGraph;
         let g = MapGraph::new();
         let dot = render_dot(&g);
-        assert!(dot.contains("digraph babelmap {"));
+        assert!(dot.contains("digraph lanthorn {"));
         assert!(dot.trim_end().ends_with('}'));
         // No room/edge lines.
         assert!(!dot.contains("->"));

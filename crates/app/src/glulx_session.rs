@@ -123,9 +123,9 @@ pub struct GlulxSession {
 /// converge on a given screen geometry) and the turn is aborted as a recoverable
 /// fault so the app survives instead of hard-hanging. Generous, because this is a
 /// last-resort backstop — the tree-driven size snapping in `gvm` already prevents
-/// the known cause. Set via env `BABELMAP_TURN_BUDGET_MS` for testing.
+/// the known cause. Set via env `LANTHORN_TURN_BUDGET_MS` for testing.
 fn turn_budget() -> Duration {
-    std::env::var("BABELMAP_TURN_BUDGET_MS")
+    std::env::var("LANTHORN_TURN_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .map(Duration::from_millis)
@@ -181,7 +181,7 @@ fn drive(machine: &mut Machine) -> DriveStop {
             StepResult::RestoreRequest => return DriveStop::Restore,
             StepResult::NeedFilename { usage, fmode } => {
                 // SavedGame usage: @save/@restore are host-intercepted (they become
-                // Save/Restore requests served by babelmap's own Save State dialogs),
+                // Save/Restore requests served by lanthorn's own Save State dialogs),
                 // so a save-file prompt here is redundant AND would split the turn
                 // before @save. Auto-name it and keep driving to the opcode; the
                 // synthesized VFS file is unused (the snapshot is host-side). Only the
@@ -931,7 +931,7 @@ impl GlulxSession {
     /// The bare, standard Glulx-Quetzal bytes for the game's own in-game
     /// `@save` (VM state only — no `GReg`/`Glk ` chunks; resumed via a call
     /// stub). Distinct from [`Engine::save_state`], which is the full host
-    /// snapshot behind Save State (`.babelmap`).
+    /// snapshot behind Save State (`.lanthorn`).
     pub fn save_quetzal(&self) -> Vec<u8> {
         self.machine.save_quetzal()
     }
@@ -1756,7 +1756,7 @@ mod tests {
     }
 
     /// SQ-0531: Glulx under the unified writer. `@save` now writes the same
-    /// `.babelmap` archive a host Save State writes, but the bytes it seals
+    /// `.lanthorn` archive a host Save State writes, but the bytes it seals
     /// inside must still be the BARE standard Glulx-Quetzal (`save_quetzal`) —
     /// not the host snapshot, whose `GReg`/`Glk ` chunks would replace the live
     /// display model on restore. The whole archive round-trips back through the
@@ -1797,7 +1797,7 @@ mod tests {
             &ingame, None, &[], None, None, sess.aux_data(), 3, None, None, &[], &[], &[], &[], &[],
         )
         .expect("save_named writes the Glulx archive");
-        let path = dir.join("slot.babelmap");
+        let path = dir.join("slot.lanthorn");
 
         // `game.glksave` — the Glulx interchange extension — holds those bytes verbatim.
         assert_eq!(
@@ -2409,9 +2409,9 @@ mod tests {
     }
 
     #[test]
-    fn glulx_state_round_trips_through_babelmap_archive() {
+    fn glulx_state_round_trips_through_lanthorn_archive() {
         use std::collections::BTreeMap;
-        // A Glulx engine save survives a .babelmap archive round-trip: write its
+        // A Glulx engine save survives a .lanthorn archive round-trip: write its
         // EngineSave (no screen.json), reload, and restore into a FRESH session
         // through Engine::restore_state — state is preserved, no panic.
         let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
@@ -2420,7 +2420,7 @@ mod tests {
         assert_eq!(es.engine, GLULX_ENGINE);
 
         let mut path = std::env::temp_dir();
-        path.push(format!("babelmap-glulx-arch-{}.babelmap", std::process::id()));
+        path.push(format!("lanthorn-glulx-arch-{}.lanthorn", std::process::id()));
         let mapper = mapper::mapper::Mapper::default();
         crate::archive::save_archive(&path, &mapper, &es, None, &BTreeMap::new(),
             &[], &[], &[], &[], &[], &[]).expect("save archive");

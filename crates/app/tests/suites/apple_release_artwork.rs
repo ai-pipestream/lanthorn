@@ -199,7 +199,7 @@ fn the_screen_is_the_archives_picture_space_at_the_machines_scale() {
 /// picture space with a quarter of the rooms missing — exactly as the story is
 /// refused for the same absence.
 ///
-/// This used to be indistinguishable from "babelmap cannot read this release".
+/// This used to be indistinguishable from "lanthorn cannot read this release".
 /// It is not any more: the two complete pressings of the SAME release 77 are in
 /// [`PRESSES`] above and both draw, so the `.2mg` is a short dump and the
 /// refusal is the reader being right.

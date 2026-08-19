@@ -761,7 +761,7 @@ pub fn resolve(
 ///
 /// Sets single-line map and story borders as the default look.
 /// An absent `[map]` means all glyph presets resolve to their factory defaults via finalize_symbols.
-pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
+pub const DEFAULT_STYLE_TOML: &str = r#"# lanthorn built-in default style
 # map_border / story_border = single; other selectors use terminal defaults.
 # No [map] section: all glyph presets resolve to their factory defaults via finalize_symbols.
 
@@ -1167,8 +1167,8 @@ room = { fg = "white" }
 
     #[test]
     fn personal_style_path_is_user_dir_style_toml() {
-        let p = personal_style_path(std::path::Path::new("/home/u/.babelmap"));
-        assert_eq!(p, std::path::Path::new("/home/u/.babelmap/style.toml"));
+        let p = personal_style_path(std::path::Path::new("/home/u/.lanthorn"));
+        assert_eq!(p, std::path::Path::new("/home/u/.lanthorn/style.toml"));
     }
 
     // ── TOML → SymbolSet (SQ-0557 / SQ-0558) ─────────────────────────────────

@@ -1,4 +1,4 @@
-# babelmap style.toml — auto-seeded. The section headers below are active,
+# lanthorn style.toml — auto-seeded. The section headers below are active,
 # but every value line is commented out, so the file stays a no-op until you
 # uncomment lines: each commented value already equals the built-in default,
 # reconstructed straight from the style registry. Edit, uncomment, save, then
@@ -9,7 +9,7 @@
 # palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index ("17"),
 # or background / foreground (the scheme's bg/fg).
 
-version = 1   # style schema version — do not remove; lets babelmap flag an out-of-date file
+version = 1   # style schema version — do not remove; lets lanthorn flag an out-of-date file
 
 # scheme = "tomorrow-night"   # optional base: built-in name or a Ghostty theme path; omit for terminal colours
 
@@ -241,7 +241,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 
 # ── Status bar. Omit [statusbar] for the built-in default. ───────────────────
 # Placeholders: {location} {score} {moves} {time} {turns} {title} {filter}
-# NB: this is babelmap's OWN bar, and `border` frames that. The frame round a
+# NB: this is lanthorn's OWN bar, and `border` frames that. The frame round a
 # GAME's status/upper window is the upper_window_border line up in [elements].
 # [statusbar]
 # border = "none"

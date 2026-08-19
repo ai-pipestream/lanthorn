@@ -12,7 +12,7 @@ path = "src/lib.rs"
 doctest = false
 
 [[bin]]
-name = "babelmap"
+name = "lanthorn"
 path = "src/main.rs"
 
 [dependencies]
@@ -48,7 +48,7 @@ ureq = "3.3"
 hyperrat = "0.1.3"
 font8x8 = "0.3"
 
-# SQ-0764: a SECOND opinion on the bytes babelmap emits. The pty harness
+# SQ-0764: a SECOND opinion on the bytes lanthorn emits. The pty harness
 # (SQ-0762) decodes the stream with our own hand-rolled decoder, which is
 # exactly as likely to be wrong as the code it is auditing. `qwertty-term-vt` is
 # Ghostty's terminal core ported to Rust — a real emulator's resolution of the

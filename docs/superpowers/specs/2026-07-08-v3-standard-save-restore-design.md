@@ -21,10 +21,10 @@ Glulx implementation that supports the standard save format.
 
 Two problems block standard in-game save/restore today. They share one root cause.
 
-**1. Non-standard saved-PC convention (the root cause).** babelmap stores
+**1. Non-standard saved-PC convention (the root cause).** lanthorn stores
 `state.pc` *past the whole save instruction* and, on restore, reads the store
 byte at `pc - 1` (`crates/zvm/src/quetzal.rs:13-18`,
-`crates/zvm/src/cpu/exec.rs:1994-2003`). This is internally consistent — babelmap
+`crates/zvm/src/cpu/exec.rs:1994-2003`). This is internally consistent — lanthorn
 can restore its own `@save`s — but it is **not** what Quetzal §5.8 specifies:
 
 - §5.8.1 (v3, branch form): "The saved PC points to the one or two bytes which
@@ -33,7 +33,7 @@ can restore its own `@save`s — but it is **not** what Quetzal §5.8 specifies:
   where to store the result."
 
 i.e. the standard PC points **at** the result descriptor and restore reads it
-*forward*. Because babelmap's PC is offset by the descriptor length, its in-game
+*forward*. Because lanthorn's PC is offset by the descriptor length, its in-game
 `@save` files do not interoperate with standard interpreters, and vice-versa.
 
 **2. v3 in-game save/restore is auto-failed at the app layer.**
@@ -49,7 +49,7 @@ ambiguity and makes v3 fall out for free.
 
 ## Non-goal / explicitly unchanged: "Save State" (save-anywhere)
 
-babelmap's emulator-style host snapshot — Ctrl+S/Ctrl+R, the `.babelmap`
+lanthorn's emulator-style host snapshot — Ctrl+S/Ctrl+R, the `.lanthorn`
 archive, auto-save/auto-resume, `/save`+`/load`, history/undo, and Glulx saves —
 routes through the engine-neutral `Engine::save_state()` / `restore_state()`
 (`crates/app/src/session.rs:809-823`) → `save_quetzal` / `restore_file`. This
@@ -70,10 +70,10 @@ Per the standard, the Quetzal file carries **no** screen/window state (window
 splits, cursor, styles, colors) — only dynamic memory, the call stack, and the
 PC. On a bare-`.qzl` restore the game re-establishes its own screen (ZMSD §8).
 
-babelmap preserves window configuration in a **separate** archive entry,
+lanthorn preserves window configuration in a **separate** archive entry,
 `screen.json` (`crates/app/src/archive.rs:294-300`), written by
 `save_archive_meta` / `save_named` for **both** the Save State path *and* the
-in-game `@save` path (in-game `@save` writes a `.babelmap` archive via
+in-game `@save` path (in-game `@save` writes a `.lanthorn` archive via
 `save_named`, passing `machine.screen`, `crates/app/src/persist_files.rs:98,120`).
 Bare Quetzal export (`save_game`, `persist_files.rs:203`) is the interop path and
 carries no `screen.json`, by design.
@@ -179,7 +179,7 @@ plumbing (`session.rs:353-405`, `498-524`), and the corresponding `info` message
 
 **Interop oracle (serves SQ-0158):**
 - Unit check that the IFhd PC matches the standard offset. A full cross-interpreter
-  check (restore a babelmap v3/v4/v5 `@save` in Frotz/Bocfel and vice-versa) is
+  check (restore a lanthorn v3/v4/v5 `@save` in Frotz/Bocfel and vice-versa) is
   noted as an SQ-0158 follow-up, not required to land SQ-0163.
 
 **Suite:** `cargo test -p zvm` and `cargo test -p app` stay green.

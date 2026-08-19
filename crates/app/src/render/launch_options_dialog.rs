@@ -297,7 +297,7 @@ mod tests {
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir()
-            .join(format!("babelmap-lodlg-{}-{}", tag, std::process::id()));
+            .join(format!("lanthorn-lodlg-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

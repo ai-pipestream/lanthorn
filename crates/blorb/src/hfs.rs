@@ -4,7 +4,7 @@
 //!
 //! This is the Macintosh sibling of [`crate::adf`], and it exists for the same
 //! reason: Infocom shipped these games on floppies, and a floppy is a container
-//! babelmap can open rather than something a person has to unpack first.
+//! lanthorn can open rather than something a person has to unpack first.
 //! Verified against `Zork Zero Disk.image` — Zork Zero, **version 6, release
 //! 296, serial 881019**, a build 97 releases earlier than the r393/890714 that
 //! every PC medium in the corpus carries.
@@ -416,7 +416,7 @@ impl Hfs {
     /// readable — a correct choice while the only things wanted were the story and
     /// the artwork, which Infocom keeps in data forks. The v6 releases keep their
     /// **bitmap fonts** in the resource fork, and `FONT` 1033 is fixed-pitch, so it
-    /// is the one font in the whole corpus that fits babelmap's cell model (the
+    /// is the one font in the whole corpus that fits lanthorn's cell model (the
     /// Amiga's is proportional — see `blorb::amiga_font`).
     ///
     /// The bytes come back raw. [`crate::resource_fork`] turns them into resources.

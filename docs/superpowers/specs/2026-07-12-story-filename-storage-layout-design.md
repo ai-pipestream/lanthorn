@@ -13,19 +13,19 @@ Storage naming and location are inconsistent across the three hosts (verified ag
 |------|-----------|----------------|-------|
 | zvm-cli | IFID (`compute_ifid`) | **story dir** | `<ifid>.aux` (magic `ZAUX`) |
 | gvm-cli | story filename | **story dir** | `<story>.glkvfs` |
-| app | IFID | **`~/.babelmap/saves`** | `<ifid>.babelmap`, `<ifid>.aux` (magic `ZAX1`), `<ifid>.gvfs`, `<ifid>-<slug>.babelmap`, `<ifid>-<slug>.qzl` |
+| app | IFID | **`~/.lanthorn/saves`** | `<ifid>.lanthorn`, `<ifid>.aux` (magic `ZAX1`), `<ifid>.gvfs`, `<ifid>-<slug>.lanthorn`, `<ifid>-<slug>.qzl` |
 
 Three problems:
 1. **Different keys** — IFID vs filename; the app's Glulx IFID is the Z-machine `ZCODE` formula *misapplied* to Glulx header bytes (`compute_ifid` at `main.rs:1840` / `picker.rs:465` has no engine branch).
-2. **Different default locations** — CLIs write next to the story; the app centralizes in `~/.babelmap/saves`.
+2. **Different default locations** — CLIs write next to the story; the app centralizes in `~/.lanthorn/saves`.
 3. **No configurability** — nothing lets a user redirect where saves/sidecars live.
 
 ## Goals
 
 1. **Storage key = the story's filename**, across all three hosts. Drop IFID from *storage* keying entirely.
-2. **Flat per-game directory** `<base>/<story-filename>/`, files told apart by extension (`.aux`, `.glkvfs`, `.qzl`, `.babelmap`).
+2. **Flat per-game directory** `<base>/<story-filename>/`, files told apart by extension (`.aux`, `.glkvfs`, `.qzl`, `.lanthorn`).
 3. **`--data-dir <path>`** on all three hosts overrides the base.
-4. **Default base:** app = `~/.babelmap/saves` (unchanged home; **user's explicit choice** to keep the app central); CLIs = the story's own directory. Consistency is *structural* (same layout + key + override), defaults intentionally differ.
+4. **Default base:** app = `~/.lanthorn/saves` (unchanged home; **user's explicit choice** to keep the app central); CLIs = the story's own directory. Consistency is *structural* (same layout + key + override), defaults intentionally differ.
 5. **IFID computation stays** for its real jobs — known-title lookup (`session::known_title`) and hint association (`hints::HintIndex`). Untouched.
 6. **No migration** (alpha). Existing `<ifid>.*` files orphan; note in the changelog/docs.
 
@@ -59,18 +59,18 @@ The user owns collisions: two identically-named stories sharing one `--data-dir`
 <base>/<story-filename>/
     default.aux        # Z-machine aux sidecar    (singleton; was <ifid>.aux)
     default.glkvfs     # Glulx VFS sidecar         (singleton; was app <ifid>.gvfs / gvm-cli <story>.glkvfs)
-    default.babelmap   # default Save State slot   (auto per-turn + Ctrl+S default; was <ifid>.babelmap)
-    <slug>.babelmap    # named Save States         (was <ifid>-<slug>.babelmap)
+    default.lanthorn   # default Save State slot   (auto per-turn + Ctrl+S default; was <ifid>.lanthorn)
+    <slug>.lanthorn    # named Save States         (was <ifid>-<slug>.lanthorn)
     <slug>.qzl         # in-game @save files        (app named slugs + CLI interactive bare names; was <ifid>-<slug>.qzl)
 ```
 
-- The three auto/singleton files share the fixed stem **`default`**. `default` is a **reserved slug** — the app rejects/suffixes a user-named save called `default` so it can't clobber the auto slot or a sidecar. (Extensions already separate `.aux`/`.glkvfs`/`.babelmap`, so `default.aux`, `default.glkvfs`, and `default.babelmap` coexist; only a user *Save State* named `default` would collide with the auto `default.babelmap`.)
+- The three auto/singleton files share the fixed stem **`default`**. `default` is a **reserved slug** — the app rejects/suffixes a user-named save called `default` so it can't clobber the auto slot or a sidecar. (Extensions already separate `.aux`/`.glkvfs`/`.lanthorn`, so `default.aux`, `default.glkvfs`, and `default.lanthorn` coexist; only a user *Save State* named `default` would collide with the auto `default.lanthorn`.)
 - `.glkvfs` is now the single canonical Glulx-VFS extension everywhere — the app's `.gvfs` is renamed to `.glkvfs` (same bytes; `vfs_bytes()`/`load_vfs` format unchanged).
-- Per-base default: `<base>` = `~/.babelmap/saves` (app) or the story dir (CLIs), overridable by `--data-dir`.
+- Per-base default: `<base>` = `~/.lanthorn/saves` (app) or the story dir (CLIs), overridable by `--data-dir`.
 
 ### `--data-dir` plumbing
 
-- **app** (clap): add `--data-dir <PATH>` to `struct Cli` (`config.rs`), beside the existing `--user-dir`. When set, the save base becomes `<data-dir>`; else `~/.babelmap/saves`. (`--user-dir` still governs maps/hints/config home; `--data-dir` governs only the per-game save/sidecar base.)
+- **app** (clap): add `--data-dir <PATH>` to `struct Cli` (`config.rs`), beside the existing `--user-dir`. When set, the save base becomes `<data-dir>`; else `~/.lanthorn/saves`. (`--user-dir` still governs maps/hints/config home; `--data-dir` governs only the per-game save/sidecar base.)
 - **zvm-cli / gvm-cli** (hand-rolled): add a `--data-dir <path>` arm to each `parse_args`/argv scan. When set, the sidecar base becomes `<data-dir>`; else the story's own directory.
 
 ### Per-host changes
@@ -80,7 +80,7 @@ The user owns collisions: two identically-named stories sharing one `--data-dir`
 - Save base: `saves_dir(user_dir)` → `<user_dir>/saves` stays the *root*; the per-game dir is `<base>/<story_key>/`. Add `game_dir(base, key)` = `base.join(key)`; `create_dir_all` on first write.
 - Rewrite the `<ifid>.*` path builders to `<game_dir>/default.*` and `<ifid>-<slug>.*` to `<game_dir>/<slug>.*`:
   `ifid::archive_path`, `aux_store::aux_path`, `vfs_store::vfs_path` (+ `.gvfs`→`.glkvfs`), `persist_files::{list_saves, save_named, save_game_named, save_game_named_bytes, list_qzl}` and the `main.rs` call sites threading `&ifid` for storage (§C.3 of the map).
-- Picker badge (`compute_row_badges` / `resolve_aux`): switch save-presence detection from `save_names.starts_with(ifid)` to "does `<base>/<story_key>/` exist and contain a `.babelmap`/`.qzl`". Title/hint lookups still key off `entry.meta.ifid`.
+- Picker badge (`compute_row_badges` / `resolve_aux`): switch save-presence detection from `save_names.starts_with(ifid)` to "does `<base>/<story_key>/` exist and contain a `.lanthorn`/`.qzl`". Title/hint lookups still key off `entry.meta.ifid`.
 - `--data-dir` threaded from `Cli` into the picker (`main.rs:1066`) and the game session (`main.rs:1842`) base.
 
 **zvm-cli:**

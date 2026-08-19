@@ -1,11 +1,11 @@
-# babelmap
+# lanthorn
 
-[![Test](https://github.com/sharkusk/babelmap/actions/workflows/test.yml/badge.svg)](https://github.com/sharkusk/babelmap/actions/workflows/test.yml)
+[![Test](https://github.com/sharkusk/lanthorn/actions/workflows/test.yml/badge.svg)](https://github.com/sharkusk/lanthorn/actions/workflows/test.yml)
 [![Made with Side-Quest](https://img.shields.io/badge/Made%20with-Side--Quest-f97316)](https://github.com/sharkusk/side-quest)
 
-**Play interactive fiction in your terminal while babelmap draws the map for you — live, as you explore.**
+**Play interactive fiction in your terminal while lanthorn draws the map for you — live, as you explore.**
 
-babelmap is a terminal interactive-fiction interpreter with a built-in
+lanthorn is a terminal interactive-fiction interpreter with a built-in
 *automapper*. Point it at a story — the Infocom canon and Z-machine classics
 like *Zork*, modern Inform 7 / Glulx games, graphical *Zork Zero*, or a classic
 Scott Adams text adventure — play it in a clean, mouse-driven TUI, and watch a
@@ -15,8 +15,8 @@ routed, and de-overlapped automatically, then continuously tidied into a
 readable layout. Three from-scratch, zero-dependency virtual machines under one
 roof; one engine-agnostic mapper that charts them all.
 
-> **Beta software.** babelmap is cutting its first public beta. The formats that
-> live on your disk between sessions — saves, the `.babelmap` archive, the
+> **Beta software.** lanthorn is cutting its first public beta. The formats that
+> live on your disk between sessions — saves, the `.lanthorn` archive, the
 > sidecars — are now **frozen and version-pinned**, so a future change can't
 > silently corrupt them (see the [save-format policy](docs/release/save-format-policy.md)).
 > The `config.toml` / `style.toml` schemas stay tolerant but may still gain
@@ -27,11 +27,11 @@ roof; one engine-agnostic mapper that charts them all.
 ## See it
 
 <!-- DEMO: drop a terminal-recording GIF/VHS cast of a play-through + live map here -->
-<!-- e.g. ![babelmap in motion](docs/demo.gif) -->
+<!-- e.g. ![lanthorn in motion](docs/demo.gif) -->
 
-![babelmap's cover-gallery view: a grid of story covers beside a metadata info panel](docs/cover-gallery.png)
+![lanthorn's cover-gallery view: a grid of story covers beside a metadata info panel](docs/cover-gallery.png)
 
-![babelmap playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
+![lanthorn playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
 
 <details>
 <summary>More screenshots</summary>
@@ -63,17 +63,17 @@ roof; one engine-agnostic mapper that charts them all.
 ## Quick start
 
 Grab the archive for your platform from the
-[**latest release**](https://github.com/sharkusk/babelmap/releases) — Linux
+[**latest release**](https://github.com/sharkusk/lanthorn/releases) — Linux
 (x86_64), macOS (universal), and Windows (x86_64) builds ship with every
-release, four binaries in each: `babelmap` itself plus the no-map CLI players
+release, four binaries in each: `lanthorn` itself plus the no-map CLI players
 (`zvm-cli` / `gvm-cli` / `scott-cli`). Extract it and run:
 
 ```bash
 # Play a story
-./babelmap path/to/story.z5
+./lanthorn path/to/story.z5
 
 # Point it at a directory to open the story picker instead
-./babelmap ~/if-games/
+./lanthorn ~/if-games/
 ```
 
 Platform notes (Gatekeeper on macOS, SmartScreen on Windows, `libasound2` on
@@ -81,11 +81,11 @@ Linux) are covered in each release's notes.
 
 Don't have a story yet? Launch the picker and press **`/`** to browse IFDB's
 popular list or search by title/author, then **download a playable story file
-straight into your library** — babelmap grabs it in the background and drops you
+straight into your library** — lanthorn grabs it in the background and drops you
 right on it.
 
-Set a `default_story_dir` (babelmap offers to remember the first directory you
-open) and a bare **`babelmap`** opens your library there. You type at the
+Set a `default_story_dir` (lanthorn offers to remember the first directory you
+open) and a bare **`lanthorn`** opens your library there. You type at the
 story's own inline `>` prompt, the way a classic terminal interpreter works;
 press the leader key (default **`Ctrl+P`**) for a pop-up reference of every
 command.
@@ -107,7 +107,7 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   as you explore, split across switchable multi-level **layers**, and
   continuously re-tidied. Engine-agnostic: the same map grows for *Zork*,
   *Counterfeit Monkey*, or *Adventureland*. Click any room — on the map or in
-  the **matrix** view — and babelmap highlights the way there from where you
+  the **matrix** view — and lanthorn highlights the way there from where you
   stand; a docked **room panel** follows you with the current room's exits,
   contents and connections. → [mapping](docs/features/mapping.md)
 - **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
@@ -115,7 +115,7 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   authentic 640×400 with a `hybrid` / `raster` render choice. (The released build
   also offers a third mode, `frameless`; it is removed in the next release.)
   → [v6 graphics](docs/features/v6-graphics.md)
-- **Play straight off the original Amiga floppies** — hand babelmap an `.adf`
+- **Play straight off the original Amiga floppies** — hand lanthorn an `.adf`
   disk image and it mounts the AmigaDOS filesystem, finds the story *and* its
   native Infocom picture archive, and plays it as an Amiga would: interpreter
   number 4, the Amiga palette and default colours, and artwork decoded from the
@@ -146,13 +146,13 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   cover-gallery **grid**, with a live metadata info panel, on-demand IFDB fetch
   cached per game, and `/` **IFDB search + download** into your library.
   → [interface](docs/features/interface.md)
-- **In-game hints** — open a matching *InvisiClues* file and babelmap boots it in
+- **In-game hints** — open a matching *InvisiClues* file and lanthorn boots it in
   a second Z-machine over the story pane; ~50 Infocom titles can fetch one on
   demand with `H`. → [interface](docs/features/interface.md)
 - **Sound & colour** — Z-machine bleeps + Blorb sampled audio and Glulx Glk sound
   channels (AIFF/Ogg/MOD, per-channel volume), plus game-driven `set_colour` /
   Glk style hints honored at 24-bit RGB. → [interpreter](docs/features/interpreter.md) · [remote audio](docs/remote-sound.md)
-- **Saves & rewind** — self-contained `.babelmap` saves (map + VM + screen +
+- **Saves & rewind** — self-contained `.lanthorn` saves (map + VM + screen +
   transcript) written by Ctrl+S *and* by the story's own `SAVE`, so an in-game
   restore brings your scrollback back too; named slots, standard Quetzal
   import/export, auto-save/load, and a per-turn **rewind/replay** history with the
@@ -163,11 +163,11 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   fully configurable keymap in an auto-seeded, live-reloadable `style.toml`.
   → [customization](docs/features/customization.md)
 - **Crash-proof** — a faulting story halts with a call-frame stack trace (saved
-  to `~/.babelmap/crash.log`) while the app stays interactive, instead of taking
+  to `~/.lanthorn/crash.log`) while the app stays interactive, instead of taking
   the interpreter down. → [interpreter](docs/features/interpreter.md)
 
 For the full, exhaustive feature list see **[`docs/features/`](docs/features/)**;
-for the standards babelmap implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
+for the standards lanthorn implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
 Treaty of Babel) see **[`docs/standards.md`](docs/standards.md)**; for the crate
 layout and I/O design see **[`docs/architecture.md`](docs/architecture.md)**.
 
@@ -176,7 +176,7 @@ layout and I/O design see **[`docs/architecture.md`](docs/architecture.md)**.
 ## Terminal support
 
 Cover art, in-game graphics, and v6's illustrated frame render with real pixels
-wherever the terminal supports a graphics protocol — and babelmap auto-detects
+wherever the terminal supports a graphics protocol — and lanthorn auto-detects
 which, so you rarely set anything. Full pixel graphics reach **all three OSes**:
 
 | Graphics protocol | Terminals | Platforms |
@@ -189,7 +189,7 @@ which, so you rarely set anything. Full pixel graphics reach **all three OSes**:
 Anything without a pixel protocol — a remote session, a bare console — degrades
 to the universal half-block renderer automatically, so a story always stays
 playable and the map always draws. Sixel has the heaviest **encode** cost of the
-three (the v6 `raster` mode leans on it hardest); babelmap encodes off the UI
+three (the v6 `raster` mode leans on it hardest); lanthorn encodes off the UI
 thread so playing stays responsive, but on a very large pane Kitty or iTerm2 will
 feel snappier. Force a specific path with
 `--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`, or turn image rendering
@@ -200,7 +200,7 @@ off entirely with `--no-images`.
 ## Missing or Corrupted Characters / Glyphs
 
 If your map is peppered with tofu boxes or question marks, your font is missing
-some of the line art babelmap draws with. Any mono-space Nerd Font carries the
+some of the line art lanthorn draws with. Any mono-space Nerd Font carries the
 lot: https://www.nerdfonts.com
 
 Here is exactly what the map asks of your font, so you can check a favourite
@@ -223,7 +223,7 @@ while everything else draws fine, that block is your culprit.
 
 > **The fix, if your font is missing them.** Turn the stubs off and those
 > connectors route orthogonally with plain box-drawing characters instead. The
-> line is already in your `~/.babelmap/style.toml`, commented out — uncomment it
+> line is already in your `~/.lanthorn/style.toml`, commented out — uncomment it
 > and set it to `false`:
 >
 > ```toml
@@ -234,12 +234,12 @@ while everything else draws fine, that block is your culprit.
 > `reload-style` picks it up without restarting. Picking a font that covers the
 > block works too, and keeps the nicer diagonals.
 
-Style settings live in `~/.babelmap/style.toml` (create it if absent — every
+Style settings live in `~/.lanthorn/style.toml` (create it if absent — every
 setting has a default, so it only needs the lines you change), and `reload-style`
 applies edits without restarting. A per-game file at
-`~/.babelmap/saves/<story-filename>.save/style.toml` layers over the global one.
+`~/.lanthorn/saves/<story-filename>.save/style.toml` layers over the global one.
 Styling belongs in `style.toml`, **not** `config.toml`; `[symbols]` in a config
-file is a legacy location babelmap will tell you to move.
+file is a legacy location lanthorn will tell you to move.
 
 Diagonal *arrowheads* are a different thing entirely — they live in the ancient
 Arrows block, so if those are missing, something else is wrong. Individual glyphs
@@ -254,10 +254,10 @@ The default look needs no patched font at all.
 
 ## Configuration
 
-babelmap reads `~/.babelmap/config.toml` (override with `--user-dir`, or point at
+lanthorn reads `~/.lanthorn/config.toml` (override with `--user-dir`, or point at
 a file with `--config`); every setting has a default, so the file is optional.
 CLI flags beat the config file, which beats built-in defaults. Saves and sidecars
-live under `~/.babelmap/saves/<story-filename>.save/` by default; `--data-dir
+live under `~/.lanthorn/saves/<story-filename>.save/` by default; `--data-dir
 <path>` relocates just those. See
 [customization & configuration](docs/features/customization.md) and the
 [persistence model](docs/persistence.md).
@@ -269,7 +269,7 @@ live under `~/.babelmap/saves/<story-filename>.save/` by default; `--data-dir
 Prefer to build it yourself? All you need is a Rust toolchain. On Linux, the
 default `playback` audio feature also wants ALSA headers: `libasound2-dev`
 (Debian/Ubuntu) or `alsa-lib-devel` (Fedora). Then
-`cargo build --release` produces `target/release/babelmap`.
+`cargo build --release` produces `target/release/lanthorn`.
 
 ```bash
 cargo build --workspace          # build everything
@@ -280,7 +280,7 @@ cargo run -p gvm-cli   -- story.ulx   # DOS-style Glulx CLI player (no map)
 cargo run -p scott-cli -- story.dat   # DOS-style Scott Adams CLI player (no map)
 ```
 
-The workspace is four shipped binaries — the mapping TUI (`babelmap`, in the
+The workspace is four shipped binaries — the mapping TUI (`lanthorn`, in the
 `app` crate) plus three no-map CLI players — over a set of library crates: the
 three VMs (`zvm` / `gvm` / `scott`), the VM-agnostic `mapper`, and supporting
 `blorb` / `audio` crates. CI runs the full suite on Linux, macOS, and Windows,
@@ -304,4 +304,4 @@ without the summary. Bump the workspace `version` in `Cargo.toml` to match.
 
 ## License
 
-babelmap is released under the **BSD 3-Clause License** — see [`LICENSE`](LICENSE).
+lanthorn is released under the **BSD 3-Clause License** — see [`LICENSE`](LICENSE).

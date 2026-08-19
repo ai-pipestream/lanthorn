@@ -368,7 +368,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Manual verification (after both tasks)
 
-Run babelmap on the A129 story, Boxes zoom:
+Run lanthorn on the A129 story, Boxes zoom:
 - Each room with a portal shows the direction icon in its slot (↑ upper-right, ↓ lower-right, ⊙/⊗/? middle-right). Rooms with notes still show `●` (shifted left where an up-portal shares the corner).
 - `Ctrl+P` reveals destination names right-aligned beside the icons; pressing again hides them. Full names remain in the Ctrl+D dump.
 - Compact zoom still shows the old bare letter labels; Overview unchanged.

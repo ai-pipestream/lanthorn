@@ -436,7 +436,7 @@ impl PictSource {
     ///
     /// **A profile that states its own defaults is not a guess, and outranks
     /// one.** [`InterpreterProfile::default_colours`] is `None` for the IBM PC
-    /// precisely because babelmap has no machine there to speak for — which is
+    /// precisely because lanthorn has no machine there to speak for — which is
     /// every launch the rule above was written for. Where it answers, the answer
     /// came off that machine's own interpreter: the Macintosh's white page under
     /// black ink is `mac/xzip.lst`'s `SetColor := (zWHITE*256) + zBLACK`, and a
@@ -610,7 +610,7 @@ impl PictSource {
     /// a Blorb-less story (scopa) is answered by Blorb §11's non-scalable rule.
     ///
     /// The unit screen is the same 640×400 for every rendition — it is
-    /// babelmap's presentation space, not the card's — so the factor is simply
+    /// lanthorn's presentation space, not the card's — so the factor is simply
     /// how many unit pixels one art pixel covers on each axis:
     ///
     /// | rendition                    | picture space | scale |
@@ -881,7 +881,7 @@ impl PictSource {
 }
 
 /// The Infocom Version 6 standard window: the ART resolution every v6 release
-/// was laid out against, which babelmap presents doubled as the 640×400 unit
+/// was laid out against, which lanthorn presents doubled as the 640×400 unit
 /// screen (SQ-0479). It is the same on every machine that shipped one of these
 /// games, and it is what every Infocom Blorb's `Reso` chunk declares — a native
 /// archive has no chunk to declare it with, so this stands in.
@@ -1312,7 +1312,7 @@ pub struct ResourceBlorb {
 ///
 /// `Arthur Quest 4 Excalibur.2mg` is the Apple IIgs press of *Arthur*, release
 /// 63 / serial 890622, and it carries 168 pictures. Its own volume offers
-/// babelmap no artwork it can read yet, so tier 1 ran, and
+/// lanthorn no artwork it can read yet, so tier 1 ran, and
 /// [`blorb::resolve_resource_blorb`]'s directory scan matched `Arthur.blb` on a
 /// six-character stem prefix — a Blorb built for release 74 / serial 890714, the
 /// DOS press, holding **326** pictures. The game asked for its picture numbers
@@ -1342,7 +1342,7 @@ pub struct ResourceBlorb {
 ///   / serial 001227 — and *Frobozz Magic Video Poker*'s own readme instructs the
 ///   player to do that ("Obtain one of the Zork Zero graphics files… rename the
 ///   graphics file to FMVPOKER"). Borrowing another game's plates is the whole
-///   design of that game. babelmap does not overrule a person who has already
+///   design of that game. lanthorn does not overrule a person who has already
 ///   answered the question.
 ///
 ///   A disk image is the opposite case and that is the whole distinction: nobody
@@ -1399,7 +1399,7 @@ pub fn resource_blorb(story_path: &std::path::Path) -> ResourceBlorb {
 /// it at every boot.
 ///
 /// Asking what WON rather than what was declined also keeps this honest as the
-/// readers improve: a medium babelmap learns to read artwork off stops warning
+/// readers improve: a medium lanthorn learns to read artwork off stops warning
 /// by itself, with nothing here to update.
 pub fn unpaired_art_warning(
     story_path: &std::path::Path,
@@ -1442,7 +1442,7 @@ fn build_mismatch(
 /// and the one that costs nothing, because [`crate::assets::volumes`] refuses a
 /// story file before mounting anything.
 ///
-/// Also empty when the release mounts and babelmap can identify nothing on it. An
+/// Also empty when the release mounts and lanthorn can identify nothing on it. An
 /// empty answer is treated as "no evidence" by [`resource_blorb`] and never as
 /// "no match"; see its docs.
 ///
@@ -1639,7 +1639,7 @@ fn native_image(
 /// wide as an MCGA pixel, so the card and the eye fused each pair into a colour
 /// the palette does not contain. Bocfel says the same of Zork Zero's EGA hint
 /// background (`z6/draw_border.cpp:745`): "no single pixel of the artwork is the
-/// colour the eye actually sees". babelmap keeps all 640 columns — geometrically
+/// colour the eye actually sees". lanthorn keeps all 640 columns — geometrically
 /// right, [`PictSource::art_scale`] maps them onto exactly the rectangle a
 /// 320-wide plate covers — so without this the dither arrives at full contrast
 /// and the arch reads as salmon-and-olive speckle.

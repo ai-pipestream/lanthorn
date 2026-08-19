@@ -424,7 +424,7 @@ fn extract_story(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
             Err("Error: Glulx story files are not yet supported.".to_string())
         }
         Ok((blorb::ExecKind::Scott, _)) => {
-            Err("Error: this is a Scott Adams Blorb; run it with babelmap.".to_string())
+            Err("Error: this is a Scott Adams Blorb; run it with lanthorn.".to_string())
         }
         Err(e) => Err(format!("Error: Blorb has no executable: {e:?}")),
     }
@@ -515,12 +515,12 @@ fn build_machine(
     // silently with no output at all and no prompt to interrupt.
     //
     // So refuse here rather than hang. The refusal is the FRONT-END's, not the
-    // library's: `zvm` supports v6 fully and babelmap plays these games — run
+    // library's: `zvm` supports v6 fully and lanthorn plays these games — run
     // them there.
     if mem.version() == 6 {
         return Err(
             "Error: Z-machine v6 graphical games are not supported by zvm-cli.\n\
-             Run it with babelmap, which renders v6 graphics and menus."
+             Run it with lanthorn, which renders v6 graphics and menus."
                 .to_string(),
         );
     }
@@ -1217,7 +1217,7 @@ Arguments:
                         --story, and each of them keeps its own saves. A release
                         pressed across several volumes is opened by naming ANY
                         one of them — the rest are found beside it. Graphical
-                        v6 stories are not supported — play those with babelmap.
+                        v6 stories are not supported — play those with lanthorn.
 
 Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
@@ -1264,7 +1264,7 @@ Options:
                         every line you have read is discarded. Pinned at the bottom
                         the region starts at row 1 again, so the story scrolls into
                         your terminal's own history — with its wheel, its selection
-                        and its search. Nothing is buffered by babelmap either way.
+                        and its search. Nothing is buffered by lanthorn either way.
                         Swap it mid-game with /pin.
       --scrollback      Alias for --pin bottom, named for what it is for.
       --no-timed-input  Ignore timed-input interrupts
@@ -1282,7 +1282,7 @@ Options:
                         interpreter number carries (its default page and ink,
                         the palette those colour numbers resolve through, and
                         the two screen rules) — and exit. This is the table -I
-                        selects a row of, and the one babelmap presents from.
+                        selects a row of, and the one lanthorn presents from.
   -V, --version         Print version and exit
   -h, --help            Print this help and exit
 ";
@@ -1858,11 +1858,11 @@ mod v6_tests {
             Ok(_) => panic!("v6 must be refused, not loaded"),
         };
         assert!(err.contains("not supported by zvm-cli"), "{err}");
-        assert!(err.contains("babelmap"), "the message points at the front-end that can: {err}");
+        assert!(err.contains("lanthorn"), "the message points at the front-end that can: {err}");
     }
 
     /// The refusal is zvm-cli's alone — the library still supports v6, which is
-    /// what babelmap plays. A version check that lived in `Memory::new` would
+    /// what lanthorn plays. A version check that lived in `Memory::new` would
     /// take the TUI's v6 support down with it.
     #[test]
     fn the_library_still_loads_a_v6_story() {
@@ -2287,7 +2287,7 @@ mod wrap_tests {
 ///
 /// Reported against Anchorhead's title splash: `A N C H O R H E A D` came out
 /// visibly off-centre in `zvm-cli` while the very next line looked right, and
-/// babelmap showed both correctly. The splash prints its centring indent one
+/// lanthorn showed both correctly. The splash prints its centring indent one
 /// BOLD space at a time, and the sink styled each write before measuring it —
 /// so `\x1b[1m \x1b[0m` was charged nine columns instead of one, the sink
 /// believed it had passed the right margin after eight spaces, and it inserted
@@ -2298,7 +2298,7 @@ mod wrap_tests {
 /// escape is not part of any word and takes up no column.
 ///
 /// (The *other* line, `[Press 'R' to restore…]`, was never wrong: it is plain
-/// text, and its indent is byte-for-byte what babelmap emits at the same width —
+/// text, and its indent is byte-for-byte what lanthorn emits at the same width —
 /// Anchorhead simply centres it inside a margin of its own. It is asserted here
 /// as the control that says so.)
 #[cfg(test)]
@@ -2462,7 +2462,7 @@ mod centring_tests {
             );
 
             // Control: plain text, and already correct before the fix. Its
-            // indent is byte-identical to babelmap's at the same width, so the
+            // indent is byte-identical to lanthorn's at the same width, so the
             // game — not the host — is what puts it left of dead centre.
             let prompt = indent_of(&shown, PROMPT, &format!("{cols} cols, prompt"));
             assert_eq!(

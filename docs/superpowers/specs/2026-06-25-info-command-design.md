@@ -3,12 +3,12 @@
 **Date:** 2026-06-25
 **Status:** DEFERRED (shelved — design captured for future implementation; not scheduled)
 **Living spec:** the Content section below is a growing list — whenever an
-interesting/diagnostic piece of state turns up while working on babelmap, add it
+interesting/diagnostic piece of state turns up while working on lanthorn, add it
 to the relevant section here so the eventual `/info` surfaces it.
 
 ## Goal
 
-A diagnostic command that dumps a useful, sectioned snapshot of babelmap's state
+A diagnostic command that dumps a useful, sectioned snapshot of lanthorn's state
 into the transcript — for users (and us) to see at a glance which style files are
 active, what background tasks are doing, and the story/VM facts.
 
@@ -17,7 +17,7 @@ active, what background tasks are doing, and the story/VM facts.
 ### Command
 
 - **`/info`** → dump **both** sections · **`/info vm`** → VM/story only ·
-  **`/info app`** → babelmap only · unknown argument → a short usage error.
+  **`/info app`** → lanthorn only · unknown argument → a short usage error.
 - Output is a **snapshot** at invocation time, pushed into the scrolling transcript
   as **Meta** lines, sectioned with headers (mirrors `/help`'s slash→Meta-lines
   pattern). Searchable with `/search`, exportable with `/export`. Re-run to refresh.
@@ -64,7 +64,7 @@ active, what background tasks are doing, and the story/VM facts.
     exercise which features" for test-fixture selection + engine validation
     (complements the 2026-06-30 feature-gap audits).
 
-**`app` — babelmap:**
+**`app` — lanthorn:**
 - **Terminal default colours (OSC 10/11 probe)** — added 2026-07-28 (SQ-0510
   round 3). The parsed `state.term_default_colors.fg`/`.bg` RGBs plus the RAW
   probe reply bytes (escaped), and which layer the v6 raster ink/page pair
@@ -82,7 +82,7 @@ active, what background tasks are doing, and the story/VM facts.
 - **Persistence:** `user_dir` · `save_dir` · auto-save/auto-load state · default
   archive exists? · named-save count for this IFID
 - **Config:** virtual screen size · command prefix · keymap source · `undo_levels`
-- **Build:** babelmap version / build info
+- **Build:** lanthorn version / build info
 
 ### Architecture (sketch)
 

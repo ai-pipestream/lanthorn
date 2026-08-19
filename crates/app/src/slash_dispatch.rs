@@ -316,7 +316,7 @@ pub(crate) fn dispatch_slash_outcome(
         },
         SlashOutcome::Load(name_opt) => {
             // Named-slot load or default archive load. Named slots may be a
-            // .babelmap Save State or a .qzl game save (SQ-0227 Task 3).
+            // .lanthorn Save State or a .qzl game save (SQ-0227 Task 3).
             let archive_to_load = match name_opt {
                 None => Some(arc_file.to_path_buf()),
                 Some(ref name) => {
@@ -788,7 +788,7 @@ mod debug_dispatch_tests {
         let mut mapper = Mapper::default();
         let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
         let mut style_watcher: Option<app::watch::StyleWatcher> = None;
-        let dir = std::path::Path::new("/tmp/babelmap-sq0435-test");
+        let dir = std::path::Path::new("/tmp/lanthorn-sq0435-test");
         dispatch_slash_outcome(
             outcome, state, &mut mapper, &mut engine, &mut style_watcher,
             dir, "IFIDTEST", dir, &[], dir,
@@ -860,7 +860,7 @@ mod debug_dispatch_tests {
     /// overlay INSTEAD of writing — same rule as the dialog path, reached here
     /// through `/save <name>`. The prompt names the EXISTING save, so a
     /// cross-name slugify collision ("Before Troll" / "before, troll!" both
-    /// land on `before-troll.babelmap`) is visible rather than reading as a
+    /// land on `before-troll.lanthorn`) is visible rather than reading as a
     /// harmless same-name re-save.
     #[test]
     fn slash_save_named_prompts_before_overwriting_an_existing_target() {
@@ -872,14 +872,14 @@ mod debug_dispatch_tests {
         let mut seed_state = AppState::default();
         super::write_named_save(&dir, "IFIDTEST", "Before Troll", &mapper, &mut seed_engine, &mut seed_state)
             .expect("seed write succeeds");
-        let path = dir.join("before-troll.babelmap");
+        let path = dir.join("before-troll.lanthorn");
         let original_bytes = std::fs::read(&path).expect("seed archive written");
 
         // `/save "before, troll!"` — a DIFFERENT typed name, same target file.
         let mut state = AppState::default();
         let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
         let mut style_watcher: Option<app::watch::StyleWatcher> = None;
-        let arc_file = dir.join("default.babelmap");
+        let arc_file = dir.join("default.lanthorn");
         let should_break = dispatch_slash_outcome(
             SlashOutcome::Save(Some("before, troll!".to_string())),
             &mut state, &mut mapper, &mut engine, &mut style_watcher,
@@ -916,7 +916,7 @@ mod debug_dispatch_tests {
         let mut seed_state = AppState::default();
         super::write_named_save(&dir, "IFIDTEST", "Before Troll", &mapper, &mut seed_engine, &mut seed_state)
             .expect("seed write succeeds");
-        let path = dir.join("before-troll.babelmap");
+        let path = dir.join("before-troll.lanthorn");
         let original_bytes = std::fs::read(&path).expect("seed archive written");
 
         let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
@@ -939,7 +939,7 @@ mod debug_dispatch_tests {
     #[test]
     fn slash_save_default_archive_never_prompts_even_when_it_already_exists() {
         let dir = temp_dir("default-slot");
-        let arc_file = dir.join("default.babelmap");
+        let arc_file = dir.join("default.lanthorn");
 
         let seed_meta = app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
@@ -949,7 +949,7 @@ mod debug_dispatch_tests {
         app::archive::save_archive_meta(
             &arc_file, &Mapper::default(), &EngineSave::new("mock", 1, vec![1, 2, 3]), None,
             &BTreeMap::new(), seed_meta, &[], &[], &[], &[], &[], &[],
-        ).expect("seed default.babelmap");
+        ).expect("seed default.lanthorn");
         let before = std::fs::read(&arc_file).expect("seed archive written");
 
         let mut state = AppState::default();

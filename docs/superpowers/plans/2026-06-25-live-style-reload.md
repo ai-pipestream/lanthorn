@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Apply `style.toml` changes to a running babelmap without restart — a `/reload` command and an opt-in file-watcher — and make `style.toml` the single styling source by removing the override sections from `config.toml`.
+**Goal:** Apply `style.toml` changes to a running lanthorn without restart — a `/reload` command and an opt-in file-watcher — and make `style.toml` the single styling source by removing the override sections from `config.toml`.
 
 **Architecture:** A `reload_style(&mut AppState)` core re-reads `style.toml` from disk, resolves it, and swaps `state.colors`/`state.symbols`, keeping the current look on a parse error. `/reload` routes through `apply_action`. A `notify`-based watcher (gated by `watch_style`, default off) feeds the run loop, which debounces and calls the same core. `config.toml` no longer carries `[colors]`/`[symbols]`.
 
@@ -164,8 +164,8 @@ Expected: PASS, 0 warnings. (Removing `Config.colors`/`symbols` will surface eve
 - [ ] **Step 8: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/config.rs crates/app/src/style.rs crates/app/src/main.rs crates/app/src/input.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): style.toml is the single source; drop config style overrides
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/config.rs crates/app/src/style.rs crates/app/src/main.rs crates/app/src/input.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): style.toml is the single source; drop config style overrides
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -194,7 +194,7 @@ mod tests {
     use crate::state::AppState;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("babelmap-reload-{}-{}", tag, std::process::id()));
+        let d = std::env::temp_dir().join(format!("lanthorn-reload-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -301,8 +301,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/reload.rs crates/app/src/lib.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): reload_style core (re-resolve style.toml, keep look on error)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/reload.rs crates/app/src/lib.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): reload_style core (re-resolve style.toml, keep look on error)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -327,7 +327,7 @@ In `crates/app/src/input.rs`, inside `mod tests`, add:
 ```rust
 #[test]
 fn reload_action_applies_style_file() {
-    let dir = std::env::temp_dir().join(format!("babelmap-reloadact-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-reloadact-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("style.toml");
     std::fs::write(&path, "[colors]\n\"transcript\" = { fg = \"magenta\" }\n").unwrap();
@@ -402,8 +402,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/keymap.rs crates/app/src/input.rs crates/app/src/slash.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): /reload command (live re-resolve style.toml)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/keymap.rs crates/app/src/input.rs crates/app/src/slash.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): /reload command (live re-resolve style.toml)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -593,8 +593,8 @@ Run `cargo run -p app -- crates/zvm/tests/fixtures/minizork.z3` with `watch_styl
 - [ ] **Step 10: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/Cargo.toml crates/app/src/watch.rs crates/app/src/lib.rs crates/app/src/keymap.rs crates/app/src/input.rs crates/app/src/slash.rs crates/app/src/main.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): opt-in style.toml file-watch + /watch toggle
+git -C /Volumes/Videos/Source/lanthorn add crates/app/Cargo.toml crates/app/src/watch.rs crates/app/src/lib.rs crates/app/src/keymap.rs crates/app/src/input.rs crates/app/src/slash.rs crates/app/src/main.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): opt-in style.toml file-watch + /watch toggle
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -635,8 +635,8 @@ Expected: PASS (comments don't change resolution).
 - [ ] **Step 4: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add style.example.toml README.md
-git -C /Volumes/Videos/Source/babelmap commit -m "docs: document /reload + watch_style live reload
+git -C /Volumes/Videos/Source/lanthorn add style.example.toml README.md
+git -C /Volumes/Videos/Source/lanthorn commit -m "docs: document /reload + watch_style live reload
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

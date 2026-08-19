@@ -91,7 +91,7 @@ pub struct GarglkSummary {
 }
 
 impl GarglkSummary {
-    /// Render the `babelmap: imported garglk config …` startup line.
+    /// Render the `lanthorn: imported garglk config …` startup line.
     pub fn console_line(&self) -> String {
         let section = if self.matched.is_empty() {
             "global keys".to_string()

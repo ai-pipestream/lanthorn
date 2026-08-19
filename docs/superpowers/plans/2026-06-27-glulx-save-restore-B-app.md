@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Route babelmap's `.babelmap` archive save/restore (and restart) through the engine-neutral `Engine::save_state`/`restore_state`, so Glulx games save/restore/auto-load. Z-machine `game.sav` stays byte-identical; standard `.qzl`/`.sav` interchange stays Z-machine-only.
+**Goal:** Route lanthorn's `.lanthorn` archive save/restore (and restart) through the engine-neutral `Engine::save_state`/`restore_state`, so Glulx games save/restore/auto-load. Z-machine `game.sav` stays byte-identical; standard `.qzl`/`.sav` interchange stays Z-machine-only.
 
 **Spec:** `docs/superpowers/specs/2026-06-27-glulx-save-restore-design.md` (Phase B).
 
@@ -15,7 +15,7 @@
 
 ## Global Constraints
 
-- Z-machine save/restore/restart **byte-for-byte unchanged** (zvm `EngineSave.bytes` == today's Quetzal; `screen.json` still written/restored for zvm). Old `.babelmap` archives load unchanged.
+- Z-machine save/restore/restart **byte-for-byte unchanged** (zvm `EngineSave.bytes` == today's Quetzal; `screen.json` still written/restored for zvm). Old `.lanthorn` archives load unchanged.
 - 0 warnings (`cargo build`, `cargo doc -p app --no-deps`) + full `cargo test --workspace` green per task.
 - Commit-only on the phase's worktree branch; one commit per task (TDD). No push. Do not edit `TODO.md`. App crate only.
 - Commit trailers, every commit (no backticks in the body):
@@ -41,11 +41,11 @@
 
 **Files:** `crates/app/src/main.rs`.
 
-- [ ] **Step 1:** For each `.babelmap`-**archive**-based handler — Save & Quit, `SlashOutcome::Save` (named + archive), `SlashOutcome::Load`, the saves-manager archive load, restore-from-archive, replay-resume, `SaveAs`, launch "Resume", and the per-turn / on-exit autosave — **replace** the `engine_supports_save` guard + the `zvm_session(...).machine` use with: `let es = session.save_state();` then the archive write (passing `&es` + `zvm_session_opt(&*session).map(|z| &z.machine.screen)` for the zvm-only screen); and on restore, `session.restore_state(&es)` (mapping `EngineError::EngineMismatch` to a graceful status), plus `if let Some(z) = zvm_session_opt_mut(...) { apply screen.json }`. These now work for **both** engines.
+- [ ] **Step 1:** For each `.lanthorn`-**archive**-based handler — Save & Quit, `SlashOutcome::Save` (named + archive), `SlashOutcome::Load`, the saves-manager archive load, restore-from-archive, replay-resume, `SaveAs`, launch "Resume", and the per-turn / on-exit autosave — **replace** the `engine_supports_save` guard + the `zvm_session(...).machine` use with: `let es = session.save_state();` then the archive write (passing `&es` + `zvm_session_opt(&*session).map(|z| &z.machine.screen)` for the zvm-only screen); and on restore, `session.restore_state(&es)` (mapping `EngineError::EngineMismatch` to a graceful status), plus `if let Some(z) = zvm_session_opt_mut(...) { apply screen.json }`. These now work for **both** engines.
 - [ ] **Step 2: Restart** (`reset_game`): rebuild the engine via the factory — `load_story(path)` → `GameSession::new`/`GlulxSession::new` boxed as `Box<dyn Engine>` — instead of `*zvm_session_mut(session) = new_session`. Remove its guard. (Reuse the construction logic from session creation in `main`.)
 - [ ] **Step 3: Keep** the `engine_supports_save` guard ONLY on the standard `.qzl`/`.sav` **import/export** paths (export-save-name, file-browser import, and any `Action::SaveGame`/`RestoreGame` standard-save arms) — these stay Z-machine-only.
 - [ ] **Step 4: Tests / smoke:** a `GlulxSession`-backed engine round-trips through the archive save+restore path (state preserved, no panic, no "not supported" message on those paths); restart rebuilds a working engine for both a Z-code and a Glulx story; the standard `.qzl` import/export still shows the guard for Glulx; Z-machine save/restore/restart unchanged (existing tests green).
-- [ ] **Step 5:** Run + commit — `feat(app): Glulx games save/restore/restart via the .babelmap archive (Engine-routed)`.
+- [ ] **Step 5:** Run + commit — `feat(app): Glulx games save/restore/restart via the .lanthorn archive (Engine-routed)`.
 
 ---
 

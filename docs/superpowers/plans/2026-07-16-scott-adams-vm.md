@@ -592,7 +592,7 @@ fn tag_scott() {
 ```
 
 - [ ] **Step 2: Run** — Expected: FAIL.
-- [ ] **Step 3: Implement** — in `startup.rs` add the `app::hints::LoadedStory::Scott(bytes) => { match ScottSession::new(bytes) { Ok(s) => Box::new(s), Err(e) => { eprintln!("babelmap: cannot load Scott Adams story: {e:?}"); std::process::exit(1); } } }` arm. In `engine_helpers.rs` extend `engine_tag` to check `ScottSession` → `scott_session::SCOTT_ENGINE`, and add `scott_session_opt`/`_opt_mut` helpers mirroring the Glulx ones. Leave `engine_supports_save` as-is (host-snapshot save works via `save_state` for all engines; confirm the save/restore UI path uses `save_state`, not the Z-only guard — if the guard gates the Save-State command, extend it to accept Scott).
+- [ ] **Step 3: Implement** — in `startup.rs` add the `app::hints::LoadedStory::Scott(bytes) => { match ScottSession::new(bytes) { Ok(s) => Box::new(s), Err(e) => { eprintln!("lanthorn: cannot load Scott Adams story: {e:?}"); std::process::exit(1); } } }` arm. In `engine_helpers.rs` extend `engine_tag` to check `ScottSession` → `scott_session::SCOTT_ENGINE`, and add `scott_session_opt`/`_opt_mut` helpers mirroring the Glulx ones. Leave `engine_supports_save` as-is (host-snapshot save works via `save_state` for all engines; confirm the save/restore UI path uses `save_state`, not the Z-only guard — if the guard gates the Save-State command, extend it to accept Scott).
 - [ ] **Step 4: Run** `cargo test -p app` — Expected: PASS.
 - [ ] **Step 5: Commit** — `feat(app): construct + tag the Scott Adams engine`.
 

@@ -135,7 +135,7 @@ pub struct ArtCandidate {
 }
 
 impl ArtCandidate {
-    /// The machine this rendition asks babelmap to present itself as.
+    /// The machine this rendition asks lanthorn to present itself as.
     pub fn profile(&self) -> crate::interpreter::InterpreterProfile {
         crate::interpreter::InterpreterProfile::for_art_flavour(self.flavour)
     }
@@ -158,7 +158,7 @@ impl ArtCandidate {
     ///   per-axis art scale draws it `(1, 2)` against MCGA's `(2, 2)` and they now
     ///   land exactly where the MCGA ones do.
     /// * **Dithered colour** — EGA's sixteen colours were fixed in the card, so
-    ///   its artists dithered for the ones they lacked, and babelmap kept all 640
+    ///   its artists dithered for the ones they lacked, and lanthorn kept all 640
     ///   columns distinct where the card fused them in the eye. SQ-0797 fuses them
     ///   at the archive boundary: Zork Zero's boot frame went from horizontal
     ///   speckle 49.1 to 8.4 against the MCGA rendition's own 4.3, and the arch
@@ -349,7 +349,7 @@ pub fn discover_art_candidates(story_path: &Path, disk_entry: Option<&str>) -> V
         // Deliberately NOT on the medium arm: `part_path` names a sibling of
         // `path`, which for a volume's file is the disk image, so it would look
         // for `<image dir>/FOO.EG2` — a file on the host, next to the wrong
-        // thing. No disk babelmap mounts ships a multi-part native archive (both
+        // thing. No disk lanthorn mounts ships a multi-part native archive (both
         // that do are DOS releases, whose FAT12 mount is queued as SQ-0833), so
         // the honest move is to leave the walk off rather than aim it wrongly;
         // the part number below still reports what the archive says it is.
@@ -1145,7 +1145,7 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("babelmap-launchopt-{}-{}", tag, std::process::id()));
+        let d = std::env::temp_dir().join(format!("lanthorn-launchopt-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

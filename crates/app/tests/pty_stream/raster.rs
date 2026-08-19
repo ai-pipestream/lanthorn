@@ -5,7 +5,7 @@
 //! rows 8..40 and that the cells under it were painted `#001428`, and still not
 //! answer the only question that matters — does the frame LOOK right. The person
 //! who has to answer it is usually working over ssh with no terminal to run
-//! babelmap in. So this module turns [`super::oracle::Resolved`] into an RGBA
+//! lanthorn in. So this module turns [`super::oracle::Resolved`] into an RGBA
 //! canvas and a PNG: a frame that can be looked at instead of reproduced, and a
 //! before/after pair that makes a render change reviewable with no terminal at
 //! all.
@@ -34,7 +34,7 @@
 //! EMULATOR's default background (palette entry 0), not in whatever the real
 //! terminal would use: a capture only sees the app→terminal direction, so the
 //! colour the pty answered the OSC 11 probe with is not in the bytes being
-//! resolved. Where babelmap paints its own background — most of a v6 frame —
+//! resolved. Where lanthorn paints its own background — most of a v6 frame —
 //! this makes no difference; on a screen it leaves at the terminal default (an
 //! Arthur boot prompt, say) the whole frame carries the palette's dark grey
 //! instead of the player's own background.
@@ -215,7 +215,7 @@ fn texel(img: &RasterImage, x: u32, y: u32) -> Option<[u8; 4]> {
     Some([px[0], px[1], px[2], px[3]])
 }
 
-/// Source-over blend of one texel onto the canvas. babelmap's art is opaque, so
+/// Source-over blend of one texel onto the canvas. lanthorn's art is opaque, so
 /// this is usually a straight overwrite; alpha is honoured anyway because the
 /// protocol allows it and a half-transparent placement should look like one.
 fn blend(canvas: &mut RgbaImage, x: u32, y: u32, src: [u8; 4]) {

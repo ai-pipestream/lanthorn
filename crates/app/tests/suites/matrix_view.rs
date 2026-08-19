@@ -1,6 +1,6 @@
 //! The matrix view rendered against REAL player data (SQ-0666).
 //!
-//! `unit_tests/advent_maze_map.json` is a verbatim copy of the `map.json` from a babelmap
+//! `unit_tests/advent_maze_map.json` is a verbatim copy of the `map.json` from a lanthorn
 //! archive: one player's partial mapping of Colossal Cave, with the "all alike" maze hand-peeled
 //! onto layer 1. Twelve rooms, forty-seven in-layer edges, two of them reciprocal.
 //!

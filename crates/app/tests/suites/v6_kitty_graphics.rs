@@ -221,7 +221,7 @@ fn the_ring_is_still_placed_after_a_restore_and_a_move() {
 
     let mapper = mapper::mapper::Mapper::default();
     let es = app::engine::Engine::save_state(&session);
-    let path = std::env::temp_dir().join(format!("arthur-kitty-{}.babelmap", std::process::id()));
+    let path = std::env::temp_dir().join(format!("arthur-kitty-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper,

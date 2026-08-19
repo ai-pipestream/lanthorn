@@ -1,6 +1,6 @@
 # Inline story `>` prompt (default), dedicated command bar as an option
 
-**Goal:** Make babelmap input happen at the story's own inline `>` prompt in the transcript
+**Goal:** Make lanthorn input happen at the story's own inline `>` prompt in the transcript
 (classic terminal-interpreter style) BY DEFAULT, and make today's dedicated bottom command
 bar an opt-in config flag.
 

@@ -1,6 +1,6 @@
 //! The matrix view against REAL player data (SQ-0666).
 //!
-//! `unit_tests/advent_maze_map.json` is a verbatim copy of the `map.json` inside a babelmap
+//! `unit_tests/advent_maze_map.json` is a verbatim copy of the `map.json` inside a lanthorn
 //! archive: one player's partial mapping of Colossal Cave, mid-game, with the "all alike" maze
 //! hand-peeled onto layer 1. Every number asserted here was measured from that file, not invented
 //! — which is the point. A synthetic fixture would agree with whatever the classifier happens to

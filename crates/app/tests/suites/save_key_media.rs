@@ -4,7 +4,7 @@
 //! floppies, and keying a game's saves on the image's *filename* was safe by
 //! accident. It is not any more: `Infocom Compilation 1 (19xx)(-).st` carries
 //! six games, `floppy2.ima` carries six more, and every one of them resolved to
-//! the same `<image>.save/` — one `default.babelmap` for six stories, each
+//! the same `<image>.save/` — one `default.lanthorn` for six stories, each
 //! overwriting the last.
 //!
 //! The rule now has two halves ([`cli_host::storage`]): a **loose** story file
@@ -89,7 +89,7 @@ fn stories_on(image: &Path) -> Vec<(String, Option<DiskBuild>)> {
 
 /// A disk-mounted story must never fall back to the basename. The fallback
 /// exists for bytes with no Z-machine header — a Glulx or Scott image — and
-/// every format babelmap mounts is an Infocom Z-code press, so on this corpus
+/// every format lanthorn mounts is an Infocom Z-code press, so on this corpus
 /// nothing may reach it. Asserted rather than assumed: a mounted story that fell
 /// back would silently rejoin its disk-mates in one directory, which is the
 /// original defect wearing a different hat.
@@ -131,7 +131,7 @@ fn every_story_on_every_image_keys_on_a_build() {
 
 /// The defect itself. Every story on a compilation must land in its own
 /// directory; before this change all six on an ST disk shared one, and whichever
-/// game was played last owned `default.babelmap`.
+/// game was played last owned `default.lanthorn`.
 #[test]
 fn two_games_on_one_image_never_share_a_directory() {
     let base = Path::new("/data");

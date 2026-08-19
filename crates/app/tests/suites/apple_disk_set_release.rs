@@ -27,7 +27,7 @@ fn stories_dir() -> PathBuf {
 /// *Journey* joined them in SQ-0863, when its 5.25-inch set arrived. It is the
 /// same shape as the other two and it settles something they could not: the
 /// `Journey.2mg` in the corpus declares five segments and carries four, and
-/// until this set there was no way to tell a short IMAGE from a release babelmap
+/// until this set there was no way to tell a short IMAGE from a release lanthorn
 /// could not read. Release 77 comes off all five floppies, so the `.2mg` is a
 /// short pressing and the reader was right to refuse it.
 const SETS: &[(&str, &[&str], u16, &str, usize)] = &[
@@ -229,7 +229,7 @@ fn one_volume_alone_in_a_directory_yields_no_story() {
         assert!(!any_present());
         return;
     };
-    let dir = std::env::temp_dir().join(format!("babelmap-sq0864-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq0864-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let lone = dir.join("shogun_s3.dsk");
     std::fs::write(&lone, &raw).expect("write the lone volume");
@@ -277,7 +277,7 @@ fn a_volume_that_carries_games_is_untouched_by_the_set_path() {
 /// the size test cannot be what saves us.
 #[test]
 fn a_dsk_that_is_not_a_prodos_volume_is_not_listed() {
-    let dir = std::env::temp_dir().join(format!("babelmap-sq0864-junk-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq0864-junk-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     // 143,360 bytes — the right geometry, no volume directory anywhere in it,
     // and byte `$00` is `$E5` (the classic format filler) rather than anything

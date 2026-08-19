@@ -72,7 +72,7 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
     assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), RELEASE, "this disk carries r{RELEASE}");
     assert_eq!(&bytes[0x12..0x18], SERIAL);
 
-    let dir = std::env::temp_dir().join(format!("babelmap-mac-pillar-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-mac-pillar-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let over = match pictures {
         Some(name) => PictureOverride::resolve_with_session(&path, &dir, Some(name)),

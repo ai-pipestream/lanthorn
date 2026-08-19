@@ -10,7 +10,7 @@
 
 ## Global Constraints
 - No `mapper`/`zvm` changes. Build + `cargo test --workspace` green AND warning-clean after every task.
-- The live `HintSession` is transient — NOT written into the `.babelmap` archive. Only the per-IFID hint-file association persists (Task A's store).
+- The live `HintSession` is transient — NOT written into the `.lanthorn` archive. Only the per-IFID hint-file association persists (Task A's store).
 - Spec (source of truth — read it): `docs/superpowers/specs/2026-06-24-hint-system-design.md`.
 - Commit messages: NO backticks in the body; end every body with exactly:
   ```

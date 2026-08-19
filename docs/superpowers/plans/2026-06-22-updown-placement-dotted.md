@@ -294,7 +294,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Manual verification (after both tasks)
 
-Run babelmap on the A129 story, Boxes zoom: room #203 (`203 →Up→ 201` Attic, with #201 placed NW and no compass edge between them) should show a dotted line from #203's north side up to #201, with the `↑` icon still on #203 and `↓` on #201. A new exploration that goes Up should drop the new room to the NW; Down to the SW.
+Run lanthorn on the A129 story, Boxes zoom: room #203 (`203 →Up→ 201` Attic, with #201 placed NW and no compass edge between them) should show a dotted line from #203's north side up to #201, with the `↑` icon still on #203 and `↓` on #201. A new exploration that goes Up should drop the new room to the NW; Down to the SW.
 
 ## Notes / out of scope
 

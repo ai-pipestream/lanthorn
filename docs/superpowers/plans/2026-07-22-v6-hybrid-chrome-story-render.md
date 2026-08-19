@@ -140,7 +140,7 @@ The KEY change vs the checkpoint: story text is rasterized into the **viewport**
 - [ ] **Step 2:** `cargo test` (workspace) green; `cargo clippy -p app` clean.
 - [ ] **Step 3:** Update docs (features/interpreter, standards) to describe v6 `raster` mode + the `v6_render` config; accurate + concise, major-feature level.
 - [ ] **Step 4:** Commit (`Quest: SQ-0186`).
-- [ ] **Step 5: VISUAL CONFIRM (user, `confirm`):** `babelmap stories/zork0-r393-s890714.z6` with `v6_render = raster` in a kitty/sixel terminal → undistorted scaled frame; compass shows the lit direction indicators over its base; status legible in the border; **story text sits inside the frame, below the banner, between the columns** (the top-margin + overlap fixes); blocky bitmap text is expected. Set `side-quest status SQ-0186 confirm`; relay any flavor line verbatim. Do NOT start Phase B until this looks right.
+- [ ] **Step 5: VISUAL CONFIRM (user, `confirm`):** `lanthorn stories/zork0-r393-s890714.z6` with `v6_render = raster` in a kitty/sixel terminal → undistorted scaled frame; compass shows the lit direction indicators over its base; status legible in the border; **story text sits inside the frame, below the banner, between the columns** (the top-margin + overlap fixes); blocky bitmap text is expected. Set `side-quest status SQ-0186 confirm`; relay any flavor line verbatim. Do NOT start Phase B until this looks right.
 
 ---
 
@@ -183,7 +183,7 @@ The KEY change vs the checkpoint: story text is rasterized into the **viewport**
 - [ ] **Step 2:** `cargo test` (workspace) green; clippy clean; Zork0 integration asserts both modes reachable.
 - [ ] **Step 3:** Update docs (both modes; default hybrid).
 - [ ] **Step 4:** Commit (`Confirm: SQ-0186`).
-- [ ] **Step 5: VISUAL CONFIRM (user):** `babelmap stories/zork0-r393-s890714.z6` (default hybrid) → scaled undistorted frame + compass + status in the border, and **crisp terminal story text** inside the frame with working scrollback/selection/`[more]` and inline pictures; `/set v6_render raster` (or config) switches to the pixel look; no-image terminal → cell fallback. Confirm on Arthur/Journey too if available. Set SQ-0186 `done` when both modes look right.
+- [ ] **Step 5: VISUAL CONFIRM (user):** `lanthorn stories/zork0-r393-s890714.z6` (default hybrid) → scaled undistorted frame + compass + status in the border, and **crisp terminal story text** inside the frame with working scrollback/selection/`[more]` and inline pictures; `/set v6_render raster` (or config) switches to the pixel look; no-image terminal → cell fallback. Confirm on Arthur/Journey too if available. Set SQ-0186 `done` when both modes look right.
 
 ---
 

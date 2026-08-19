@@ -4,7 +4,7 @@
 //! what fits on the screen (including boot) … we should behave as the original
 //! game intended (with exceptions for meta output)."* An authentic Infocom
 //! interpreter paged whenever the output since the last player interaction
-//! exceeded the screen — **regardless of what input came next**. babelmap's v1
+//! exceeded the screen — **regardless of what input came next**. lanthorn's v1
 //! pager (SQ-0404) armed only behind a LINE read on a turn that did not clear the
 //! screen, so two whole classes of overflow scrolled away unread:
 //!
@@ -262,11 +262,11 @@ fn the_v6_veto_is_off_for_stories_that_have_no_line_count() {
     assert!(should_arm(InputKind::Char, more_suppressed(&s)));
 }
 
-/// The directive's one carve-out: *"with exceptions for meta output"*. babelmap's
+/// The directive's one carve-out: *"with exceptions for meta output"*. lanthorn's
 /// own dumps (`/help`, trace pointers, notices) are not game turns — they never
 /// reach an arm site — so however long they are, they never raise `[more]`.
 #[test]
-fn babelmap_meta_output_never_arms_the_pager() {
+fn lanthorn_meta_output_never_arms_the_pager() {
     let mut state = story_state();
     state.last_transcript_total_rows = 4;
     let long_help: String = (0..200).map(|i| format!("/help line {i}\n")).collect();

@@ -3242,7 +3242,7 @@ fn v6_default_pair(
 /// the tests can never resolve it differently.
 ///
 /// SQ-0740 adds a layer ABOVE all three: the machine's own screen pair, when the
-/// interpreter babelmap is presenting as has one. Under ZMSD §8.3's Amiga number
+/// interpreter lanthorn is presenting as has one. Under ZMSD §8.3's Amiga number
 /// there is a single pair for the whole screen and it is the machine's, not the
 /// terminal's — describing the player's terminal there is precisely what made an
 /// Amiga and an IBM PC render identically. `v6_page_pair` is `None` for every

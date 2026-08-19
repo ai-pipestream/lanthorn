@@ -12,7 +12,7 @@
 //!
 //! **And one gate the standard does not mention.** Infocom's own Amiga interpreter
 //! (`amiga/yzip3.c`) changes text colours "only in window 0, and ignore[s] requests
-//! in other windows (except for the special case of bg = -1)". babelmap implements
+//! in other windows (except for the special case of bg = -1)". lanthorn implements
 //! that gate, because §8.3's stated purpose is to *simulate the Amiga hardware* and
 //! a reading of it that diverges from that hardware defeats its own reason for
 //! existing. The evidence is Journey: release 30 makes a single `set_colour(9, 2)`
@@ -43,7 +43,7 @@
 //! was never lost. It arrived, and it was invisible, because Journey asks for
 //! standard 9 (white) and the host theme's story ink is white too, while the pen's
 //! page could not reach a window that never declared one. What was missing was the
-//! machine's OWN pair: babelmap advertised the Amiga's `$2C`/`$2D` defaults to the
+//! machine's OWN pair: lanthorn advertised the Amiga's `$2C`/`$2D` defaults to the
 //! story (§8.3.3) and then painted the host terminal's colours. So the cases below
 //! assert on rendered CELLS, not on the model alone.
 //!
@@ -671,7 +671,7 @@ fn row_styles(area: Rect, buf: &Buffer, needle: &str) -> Option<Vec<(String, Str
 /// 1. the page was standard 11 (`$777`, `Rgb(115, 115, 115)`) because
 ///    `AMIGA_DEFAULT_BACKGROUND` came from a development header rather than from
 ///    the machine — *"the page is lighter than the real Amiga's"*;
-/// 2. the notice came out `DarkGray` on that page, because babelmap's built-in
+/// 2. the notice came out `DarkGray` on that page, because lanthorn's built-in
 ///    "a whole line in brackets is a message from the interpreter" rule mutes it —
 ///    *"nearly invisible"*, where the walkthrough screenshots show it white.
 ///

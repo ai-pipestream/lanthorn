@@ -73,7 +73,7 @@ jobs:
             cargo build --release --locked $BINS --target aarch64-apple-darwin
             cargo build --release --locked $BINS --target x86_64-apple-darwin
             mkdir -p target/universal/release
-            for bin in babelmap zvm-cli gvm-cli scott-cli; do
+            for bin in lanthorn zvm-cli gvm-cli scott-cli; do
               lipo -create -output "target/universal/release/$bin" \
                 "target/aarch64-apple-darwin/release/$bin" \
                 "target/x86_64-apple-darwin/release/$bin"
@@ -82,8 +82,8 @@ jobs:
               # Developer-ID signature (still un-notarized), just enough to launch.
               codesign --force --sign - "target/universal/release/$bin"
             done
-            lipo -info target/universal/release/babelmap
-            codesign --verify --verbose target/universal/release/babelmap
+            lipo -info target/universal/release/lanthorn
+            codesign --verify --verbose target/universal/release/lanthorn
           else
             rustup target add ${{ matrix.target }}
             cargo build --release --locked $BINS --target ${{ matrix.target }}
@@ -98,7 +98,7 @@ jobs:
           else
             VERSION="dev-$(git rev-parse --short HEAD)"
           fi
-          NAME="babelmap-${VERSION}-${{ matrix.name }}"
+          NAME="lanthorn-${VERSION}-${{ matrix.name }}"
           mkdir -p "dist/${NAME}"
 
           case "${{ matrix.name }}" in
@@ -107,7 +107,7 @@ jobs:
             *)                RELDIR="target/${{ matrix.target }}/release"; EXT="" ;;
           esac
 
-          for bin in babelmap zvm-cli gvm-cli scott-cli; do
+          for bin in lanthorn zvm-cli gvm-cli scott-cli; do
             cp "${RELDIR}/${bin}${EXT}" "dist/${NAME}/"
           done
           cp README.md LICENSE "dist/${NAME}/"
@@ -181,8 +181,8 @@ jobs:
             sed -i '$d' changelog-section.md
           done
           {
-            printf '## babelmap %s\n\n' "$GITHUB_REF_NAME"
-            printf 'Download the archive for your platform, extract it, and run `babelmap`\n'
+            printf '## lanthorn %s\n\n' "$GITHUB_REF_NAME"
+            printf 'Download the archive for your platform, extract it, and run `lanthorn`\n'
             printf '(or one of the no-map CLI players `zvm-cli` / `gvm-cli` / `scott-cli`).\n\n'
             printf '> **Beta** — on-disk save formats are version-pinned and any change\n'
             printf '> is a deliberate, release-noted bump (see\n'
@@ -207,7 +207,7 @@ jobs:
             printf '  the flag with `xattr -dr com.apple.quarantine <extracted-folder>`\n'
             printf '  (or approve it once in System Settings → Privacy & Security).\n'
             printf '  Downloading and extracting from the **Terminal** avoids quarantine\n'
-            printf '  entirely: `curl -L <url> -o babelmap.tar.gz && tar xzf babelmap.tar.gz`.\n'
+            printf '  entirely: `curl -L <url> -o lanthorn.tar.gz && tar xzf lanthorn.tar.gz`.\n'
             printf -- '- **Windows** is `x86_64`. It is unsigned, so SmartScreen may warn on\n'
             printf '  first launch (More info → Run anyway).\n\n'
             printf 'Verify a download against its `.sha256` sidecar.\n'
@@ -220,7 +220,7 @@ jobs:
         with:
           draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          name: babelmap ${{ github.ref_name }}
+          name: lanthorn ${{ github.ref_name }}
           files: |
             dist/*.tar.gz
             dist/*.zip

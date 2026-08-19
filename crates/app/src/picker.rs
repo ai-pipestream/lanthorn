@@ -45,7 +45,7 @@ pub struct Features {
 pub struct StoryMeta {
     /// The size of the file on disk — the container, when the story lives in one.
     pub size_bytes: u64,
-    /// The size of the story image babelmap actually runs, after mounting the
+    /// The size of the story image lanthorn actually runs, after mounting the
     /// container (SQ-0771). Equal to `size_bytes` for a plain `.z*`/`.ulx`/`.dat`;
     /// smaller for every container, and *unrelated* to it for an Amiga floppy —
     /// a `.adf` is 880 KB whatever it holds, so the container's length says
@@ -200,7 +200,7 @@ const STORY_EXTS: &[&str] = &[
 /// The disk half used to be a second list written out here, and it went stale
 /// exactly as a duplicated census does: it knew `.adf` and `.image` and never
 /// heard about the DOS and ST formats two later quests had already taught
-/// babelmap to mount, so those floppies were absent from the story list while
+/// lanthorn to mount, so those floppies were absent from the story list while
 /// opening one by name worked fine (SQ-0849).
 pub(crate) fn has_story_ext(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
@@ -1219,7 +1219,7 @@ fn entry_from_loaded(
     disk_image: Option<crate::hints::DiskImage>,
     data_base: &Path,
 ) -> Option<StoryEntry> {
-    // Only list stories babelmap can actually launch: Z-code via the
+    // Only list stories lanthorn can actually launch: Z-code via the
     // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
     // Glulx loader, Scott Adams via the Scott database parser.
     let bytes = loaded.bytes().to_vec();
@@ -1569,7 +1569,7 @@ fn sibling_blorb_exists(path: &Path) -> bool {
 
 /// Compute a row's artifact badges. `data_base` is the storage base; the save
 /// badge lights when the story's per-game dir `<data_base>/<story-key>/` exists
-/// and holds a `.babelmap` or `.qzl` (SQ-0284). `hint_index` (IFID-keyed) is
+/// and holds a `.lanthorn` or `.qzl` (SQ-0284). `hint_index` (IFID-keyed) is
 /// loaded once at picker start. No archive reads.
 pub fn compute_row_badges(
     entry: &StoryEntry,
@@ -1599,7 +1599,7 @@ pub fn compute_row_badges(
     }
 }
 
-/// True if `game_dir` exists and contains at least one `.babelmap` or `.qzl`.
+/// True if `game_dir` exists and contains at least one `.lanthorn` or `.qzl`.
 fn game_dir_has_save(game_dir: &Path) -> bool {
     std::fs::read_dir(game_dir)
         .into_iter()
@@ -1608,7 +1608,7 @@ fn game_dir_has_save(game_dir: &Path) -> bool {
         .any(|e| {
             e.file_name()
                 .to_str()
-                .is_some_and(|n| n.ends_with(".babelmap") || n.ends_with(".qzl"))
+                .is_some_and(|n| n.ends_with(".lanthorn") || n.ends_with(".qzl"))
         })
 }
 
@@ -1662,7 +1662,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let mut d = std::env::temp_dir();
-        d.push(format!("babelmap-picker-{}-{}", tag, std::process::id()));
+        d.push(format!("lanthorn-picker-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -2277,7 +2277,7 @@ mod tests {
     #[test]
     fn a_real_disk_image_lights_the_downloadable_hint_badge() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
-        let base = std::env::temp_dir().join(format!("babelmap-adf-hint-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("lanthorn-adf-hint-{}", std::process::id()));
         let index = hints::load_hint_index(&base);
         for name in [
             "Zork I - The Great Underground Empire.adf",
@@ -2312,7 +2312,7 @@ mod tests {
             return; // no story media here — skip
         };
         let data_base =
-            std::env::temp_dir().join(format!("babelmap-adf-size-{}", std::process::id()));
+            std::env::temp_dir().join(format!("lanthorn-adf-size-{}", std::process::id()));
         let mut saw_adf = false;
         for e in entries.flatten() {
             let path = e.path();
@@ -2595,7 +2595,7 @@ mod tests {
         let b_dir = crate::storage::game_dir(&base, &crate::storage::story_key_at(&dir.join("b.z5")));
         std::fs::create_dir_all(&a_dir).unwrap();
         std::fs::create_dir_all(&b_dir).unwrap();
-        std::fs::write(a_dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(a_dir.join("default.lanthorn"), b"x").unwrap();
         std::fs::write(b_dir.join("before.qzl"), b"x").unwrap();
 
         let hi = hints::load_hint_index(&dir); // empty index (no hints/index.toml)
@@ -2686,7 +2686,7 @@ mod tests {
         let base = dir.join("data");
         let game_dir = crate::storage::game_dir(&base, &crate::storage::story_key_at(&entry.path));
         std::fs::create_dir_all(&game_dir).unwrap();
-        std::fs::write(game_dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(game_dir.join("default.lanthorn"), b"x").unwrap();
         std::fs::write(game_dir.join("quick.qzl"), b"x").unwrap();
         std::fs::write(game_dir.join("_startup.qzl"), b"x").unwrap();
         std::fs::write(game_dir.join("default.aux"), b"x").unwrap();
@@ -2696,8 +2696,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(aux.game_dir, game_dir);
-        // default.babelmap has no valid archive, so list_saves skips it here.
-        assert_eq!(aux.saves.len(), 0, "notanarchive default.babelmap is skipped by list_saves");
+        // default.lanthorn has no valid archive, so list_saves skips it here.
+        assert_eq!(aux.saves.len(), 0, "notanarchive default.lanthorn is skipped by list_saves");
         assert_eq!(aux.qzl_saves.len(), 1);
         assert_eq!(aux.qzl_saves[0].name, "quick");
         assert!(!aux.qzl_saves.iter().any(|s| s.name == "_startup"), "auto save excluded from player list");

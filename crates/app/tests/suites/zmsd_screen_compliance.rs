@@ -192,7 +192,7 @@ fn journey_menu_request_is_denied_but_its_painted_menu_survives() {
 
 /// Beyond Zork (v5) is the reason Flags 2 bit 3 must be preserved: ZMSD §8.1.5.1
 /// says only "an interpreter which cannot provide the character graphics font
-/// should clear bit 3", and babelmap renders font 3. Drive the game to its first
+/// should clear bit 3", and lanthorn renders font 3. Drive the game to its first
 /// room and assert the upper window really is drawn with font-3-translated
 /// box-drawing glyphs, in colour — i.e. the preserved bit changed the game's code
 /// path in the intended direction.

@@ -1,6 +1,6 @@
 //! The drawn map rendered against REAL player data (SQ-0688 / SQ-0689).
 //!
-//! `unit_tests/zork1_underground_map.json` is a verbatim copy of the `map.json` from a babelmap
+//! `unit_tests/zork1_underground_map.json` is a verbatim copy of the `map.json` from a lanthorn
 //! archive: one player's partial mapping of Zork I, whose underground layer holds the two shapes
 //! these bugs need — a one-way NE passage arriving on a box corner (North-South Passage → Deep
 //! Canyon), and a staircase collapsed into a compass connector (Chasm's Up return to the

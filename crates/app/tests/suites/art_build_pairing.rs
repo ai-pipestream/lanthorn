@@ -375,7 +375,7 @@ fn a_disk_with_its_own_artwork_is_never_asked_about_a_blorb() {
 /// The warning SURVIVES where it was earned: a disk with no artwork of its own
 /// and a sidecar refused for naming another build (SQ-0882's other half).
 ///
-/// `Journey.2mg` is release 77 / serial 890616 and babelmap reads no archive off
+/// `Journey.2mg` is release 77 / serial 890616 and lanthorn reads no archive off
 /// it, so the boot really does draw nothing and `Journey.blb` (release 83 /
 /// 890706) really is why. That is the case SQ-0866 was written for, and it is
 /// the ONLY one left in the corpus: measured across `stories/`, sixteen media
@@ -566,10 +566,10 @@ fn no_medium_in_the_corpus_loses_artwork_except_the_mismatched_one() {
 
 /// Every volume of the *Shogun* press names the same build, whichever one is
 /// opened — the property that makes the rule's answer independent of which
-/// floppy a person happened to hand babelmap.
+/// floppy a person happened to hand lanthorn.
 ///
 /// Release 311 / serial 890510 is the build SQ-0864 verified against the story's
-/// own header checksum `$E200` when it taught babelmap to reassemble this set.
+/// own header checksum `$E200` when it taught lanthorn to reassemble this set.
 #[test]
 fn every_volume_of_the_shogun_press_names_release_311() {
     let mut ran = 0;

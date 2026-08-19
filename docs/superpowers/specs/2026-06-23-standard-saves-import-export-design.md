@@ -10,7 +10,7 @@ Interchange standard **Quetzal** save files (`.qzl`/`.sav`) with other Z-machine
 
 ## Feasibility — the I/O already exists
 
-`machine.save_quetzal()` / `restore_quetzal()` are standard Quetzal (the same bytes the `.babelmap` bundles), and `persist_files::save_game(path, &machine)` / `restore_game(path, &mut machine)` already write/read those bytes to/from a plain file. So:
+`machine.save_quetzal()` / `restore_quetzal()` are standard Quetzal (the same bytes the `.lanthorn` bundles), and `persist_files::save_game(path, &machine)` / `restore_game(path, &mut machine)` already write/read those bytes to/from a plain file. So:
 - **Export** = `save_game(target.qzl, &session.machine)`.
 - **Import** = `restore_game(source.qzl, &mut session.machine)` then re-observe the current location (`apply_turn("", &seed)` as elsewhere). The map is NOT part of a standard save, so it is **kept** as-is; after import the current-room global updates and the map continues from there.
 

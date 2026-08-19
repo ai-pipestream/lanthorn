@@ -10,7 +10,7 @@
 
 ## Goal
 
-Replace babelmap's from-scratch-every-turn global layout (constrained stress
+Replace lanthorn's from-scratch-every-turn global layout (constrained stress
 majorization + two repair passes) with a **two-regime** automapper that matches how
 runtime IF mapping actually works:
 
@@ -36,7 +36,7 @@ routing → per-edge fixes. The root fragility is structural, not a single bug:
 - **Two repairs that fight each other** over one lexicographic score, with a radius-3
   escape hatch bolted on because ±1 hill-climbing could not cross the valley between
   them.
-- **It re-solves from scratch every turn**, violating babelmap's own design requirement
+- **It re-solves from scratch every turn**, violating lanthorn's own design requirement
   ("the map does not jump every turn"). Stability — the primary objective of dynamic
   graph layout — was never implemented.
 
@@ -56,7 +56,7 @@ routing → per-edge fixes. The root fragility is structural, not a single bug:
   et al.). Orthogonal ordering *is* compass ordering.
 - **Honest caveat:** as of 2013 no experiment conclusively showed mental-map
   preservation aids comprehension. Stability is a near-universal design heuristic, not a
-  proven law — but it is also what every real tool and babelmap's own spec already
+  proven law — but it is also what every real tool and lanthorn's own spec already
   chose.
 
 ## Decisions (from brainstorming)
@@ -302,7 +302,7 @@ One design doc; the implementation plan ships each phase as working software:
 - **Greedy accumulation.** Incremental placement can accumulate awkward geometry over a
   long session; the on-demand re-tidy is the deliberate escape hatch.
 - **Stability is a heuristic**, not an empirically proven benefit (2013 caveat) — but it
-  matches babelmap's spec and every real tool.
+  matches lanthorn's spec and every real tool.
 - **Crossing-reduction in re-tidy is bounded**, not optimal; legal perpendicular
   crossings may remain.
 - **Nerd Font glyph selection** depends on terminal/font rendering; the single-cell-width

@@ -9,16 +9,16 @@
 
 ## Problem
 
-babelmap has two deliberately-distinct save mechanisms:
+lanthorn has two deliberately-distinct save mechanisms:
 
 - **Save State / Restore State** — the host emulator snapshot (Ctrl+S / `/save-state`),
-  a rich `.babelmap` archive (VM + Glk model + map + screen + transcript + history).
+  a rich `.lanthorn` archive (VM + Glk model + map + screen + transcript + history).
 - **`@save` / `@restore`** — the game's *own* in-game save, invoked when the player
   types `SAVE` / `RESTORE`.
 
 On the **Z-machine** these are already correct and consistent: `@save` writes a
 bare standard Quetzal `.qzl` (VM state only, interop-tested against dfrotz); Save
-State writes `.babelmap`.
+State writes `.lanthorn`.
 
 On **Glulx** they are conflated: the game's `@save` is served by the **host
 snapshot** (`machine.save_state()` — the full superset including `GReg` and the
@@ -37,7 +37,7 @@ defects follow:
 
 Make the two engines behave identically:
 
-- **Save State / Restore State →** `.babelmap` host snapshot, both engines. *(Already true — unchanged.)*
+- **Save State / Restore State →** `.lanthorn` host snapshot, both engines. *(Already true — unchanged.)*
 - **`@save` / `@restore` →** a real, **spec-conformant standard** in-game save, both engines. *(New for Glulx.)*
 - **In-game save/restore UI identical** across engines. *(Already true in the app; brought into line in `gvm-cli`.)*
 - **VFS holds only the game's own external files** (transcripts, recordings, data) —
@@ -159,11 +159,11 @@ slot.
   `session.save_quetzal()` bytes instead of `session.save_state().bytes`; keep the
   `<ifid>-<slug>.qzl` naming, unifying with Z-machine's `save_game_named`.
 - Glulx in-game `@restore` (the `.qzl` branch of `Action::SavesLoad` / `resume_restore`)
-  → `complete_restore_quetzal`. The `.babelmap`-picked-at-`@restore` fall-through to a
+  → `complete_restore_quetzal`. The `.lanthorn`-picked-at-`@restore` fall-through to a
   full session resume (SQ-0227) is unchanged.
 - Expose `save_quetzal` / `complete_restore_quetzal` through `Engine` /
   `glulx_session.rs` as needed.
-- Save State (Ctrl+S → `.babelmap`, inner `game.glksave` = `save_state()`) is unchanged.
+- Save State (Ctrl+S → `.lanthorn`, inner `game.glksave` = `save_state()`) is unchanged.
 
 ### 6. Bonus consistency fix (zvm-cli)
 
@@ -203,7 +203,7 @@ Fix: make `SavedGame`-usage streams **null conduits**, decoupled from the VFS.
   name) to keep the diff contained.
 
 Net: the VFS now holds only the game's genuine external files (transcripts, command
-recordings, data files); saves are host `.qzl`; Save States are `.babelmap`.
+recordings, data files); saves are host `.qzl`; Save States are `.lanthorn`.
 
 ## Documentation (required deliverable)
 
@@ -220,7 +220,7 @@ recordings, data files); saves are host `.qzl`; Save States are `.babelmap`.
     VFS (Layer 3) now holds only the game's transcripts, recordings, and data files.
 - **`docs/features/saves.md`** — extend "Standard in-game save/restore" to state Glulx
   now also writes a real, standard in-game save (VM state only, distinct from
-  `.babelmap`), with the SQ-0229 caveat that Glulx *cross-interpreter* interop is not
+  `.lanthorn`), with the SQ-0229 caveat that Glulx *cross-interpreter* interop is not
   yet golden-tested.
 - **`crates/gvm/GLULX_NOTES.md` §14** — document the new `save_quetzal`/`restore_quetzal`
   standard path (call-stub resume; `IFhd/CMem/Stks/MAll`; §1.8.5 live-state exclusions)
@@ -258,7 +258,7 @@ recordings, data files); saves are host `.qzl`; Save States are `.babelmap`.
   open transcript window: `@restore` must NOT wipe the live transcript window/VFS
   (validates the §1.8.5 live-state exclusion end-to-end).
 - **Regression:** existing Z-machine `@save`/`@restore` and both engines' Save State /
-  `.babelmap` paths unchanged; `cargo test` across the workspace.
+  `.lanthorn` paths unchanged; `cargo test` across the workspace.
 
 ## Out of scope
 
@@ -267,7 +267,7 @@ recordings, data files); saves are host `.qzl`; Save States are `.babelmap`.
   here is spec-conformant by construction and internally round-trip-verified; SQ-0229
   proves the cross-interpreter half.)
 - Routing Glulx `@save` through the live Glk output stream + VFS (Design A).
-- Any Save State / `.babelmap` format change.
+- Any Save State / `.lanthorn` format change.
 
 ## Risks
 

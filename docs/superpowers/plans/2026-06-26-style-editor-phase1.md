@@ -147,8 +147,8 @@ Run: `cargo test -p app` → PASS, 0 warnings. (The editor opens with no render 
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/state.rs crates/app/src/input.rs crates/app/src/keymap.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): style editor mode scaffolding (state, open/cancel, entry)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/state.rs crates/app/src/input.rs crates/app/src/keymap.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): style editor mode scaffolding (state, open/cancel, entry)
 
 Adds StyleEditorState (working StyleDoc + cached preview ColorScheme + selector
 list + focus + custom buffer + MRU), the AppState.style_editor field, open_style_

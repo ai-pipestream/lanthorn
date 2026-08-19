@@ -903,7 +903,7 @@ pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
 /// `zvm::header::parse_header`'s `3..=8` on byte 0 — six of 256 values, so
 /// roughly **2.3% of arbitrary containers pass it**, and one of them was an
 /// 838 KB Apple II disk image whose DiskCopy 4.2 name-length byte is `0x06`.
-/// babelmap opened the whole image as a Version 6 story, paired it with a
+/// lanthorn opened the whole image as a Version 6 story, paired it with a
 /// sidecar Blorb belonging to a different file, printed
 /// "story ended without asking for input", and exited **0** — a message that
 /// reads as a game bug and sends the reader looking somewhere else entirely.
@@ -962,7 +962,7 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
     }
 }
 
-/// Why `bytes` are not a story babelmap can run — the diagnostic that replaced
+/// Why `bytes` are not a story lanthorn can run — the diagnostic that replaced
 /// running them anyway (SQ-0889).
 ///
 /// Deliberately factual rather than clever, because the failure this exists for
@@ -980,7 +980,7 @@ fn unrunnable(bytes: &[u8]) -> String {
         head.iter().map(|b| if (0x20..0x7f).contains(b) { char::from(*b) } else { '.' }).collect();
     let what = match blorb::medium::DiskImage::detect(bytes) {
         Some(image) => format!("it is a {} disk image — a container, not a story", image.label()),
-        None => "no format babelmap reads claims it".to_string(),
+        None => "no format lanthorn reads claims it".to_string(),
     };
     format!(
         "not a story file: {} bytes beginning {}  |{text}| — {what}. It is not a Blorb, \

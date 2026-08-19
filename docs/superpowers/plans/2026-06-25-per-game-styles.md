@@ -46,7 +46,7 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("babelmap-pgstyle-{}-{}", tag, std::process::id()));
+        let d = std::env::temp_dir().join(format!("lanthorn-pgstyle-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -135,8 +135,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/styles.rs crates/app/src/lib.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): per-game style path + scaffold (styles module)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/styles.rs crates/app/src/lib.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): per-game style path + scaffold (styles module)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -243,8 +243,8 @@ Expected: PASS, 0 warnings. (Existing `reload_applies_style_file_and_keeps_curre
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/state.rs crates/app/src/reload.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): reload_style merges per-game style over global (AppState.ifid)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/state.rs crates/app/src/reload.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): reload_style merges per-game style over global (AppState.ifid)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -270,7 +270,7 @@ In `crates/app/src/input.rs`, inside `mod tests`, add:
 ```rust
 #[test]
 fn game_style_action_scaffolds_file() {
-    let dir = std::env::temp_dir().join(format!("babelmap-gamestyle-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-gamestyle-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = AppState::default();
@@ -339,8 +339,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/keymap.rs crates/app/src/input.rs crates/app/src/slash.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): /game-style command scaffolds the per-game style file
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/keymap.rs crates/app/src/input.rs crates/app/src/slash.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): /game-style command scaffolds the per-game style file
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -403,7 +403,7 @@ Expected: builds clean, 0 warnings; suite PASS. (No new unit test for the watche
 In `README.md`, in the Customization section (near the style-files bullet), add a sentence:
 
 ```
-  Per-game looks: run `/game-style` to scaffold `~/.babelmap/styles/<ifid>.toml`,
+  Per-game looks: run `/game-style` to scaffold `~/.lanthorn/styles/<ifid>.toml`,
   edit it, and `/reload` — it layers over `style.toml` for that game only
   (including its own statusbar / transcript rules).
 ```
@@ -411,8 +411,8 @@ In `README.md`, in the Customization section (near the style-files bullet), add 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/main.rs crates/app/src/watch.rs README.md
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): set ifid at startup, watch styles dir, document per-game styles
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/main.rs crates/app/src/watch.rs README.md
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): set ifid at startup, watch styles dir, document per-game styles
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

@@ -314,10 +314,10 @@ impl Adf {
     }
 }
 
-/// Does `bytes` look like a story image babelmap could run?
+/// Does `bytes` look like a story image lanthorn could run?
 ///
 /// A Blorb or a Glulx image says so in its first four bytes. A Z-machine story
-/// has no magic at all, so its header is validated instead: a version babelmap
+/// has no magic at all, so its header is validated instead: a version lanthorn
 /// runs, a static-memory base that a header actually fits under, the object and
 /// global tables inside dynamic memory, high memory and the dictionary at or
 /// above the static base, a printable serial (in ASCII or high ASCII), and a

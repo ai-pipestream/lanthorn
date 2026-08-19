@@ -4292,7 +4292,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         16 => working.watch_style = !working.watch_style,
         17 => working.record_turn_history = !working.record_turn_history,
         18 => working.undo_levels = (working.undo_levels as i32 + delta).clamp(0, 256) as usize,
-        // Position 0 == None (babelmap's default); 1..=10 are explicit interpreter numbers.
+        // Position 0 == None (lanthorn's default); 1..=10 are explicit interpreter numbers.
         // ← from 1 returns to "default"; → from "default" goes to 1.
         19 => {
             let pos = (working.interpreter_number.map(|n| n as i32).unwrap_or(0) + delta).clamp(0, 10);
@@ -5708,14 +5708,14 @@ mod tests {
         s.overlays.saves = Some(SavesState {
             entries: vec![
                 SaveInfo {
-                    path: PathBuf::from("/tmp/default.babelmap"),
+                    path: PathBuf::from("/tmp/default.lanthorn"),
                     name: "(default)".to_string(),
                     turns: 0,
                     saved_at: String::new(),
                     location: None, score: None, is_default: true, trigger: crate::archive::SaveTrigger::HostState,
                 },
                 SaveInfo {
-                    path: PathBuf::from("/tmp/named.babelmap"),
+                    path: PathBuf::from("/tmp/named.lanthorn"),
                     name: "before-troll".to_string(),
                     turns: 10,
                     saved_at: "2026-06-18T10:00:00Z".to_string(),
@@ -5810,8 +5810,8 @@ mod tests {
         let mut s = AppState::default();
         s.overlays.saves = Some(SavesState {
             entries: vec![
-                SaveInfo { path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState },
-                SaveInfo { path: PathBuf::from("/tmp/b.babelmap"), name: "b".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState },
+                SaveInfo { path: PathBuf::from("/tmp/a.lanthorn"), name: "a".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState },
+                SaveInfo { path: PathBuf::from("/tmp/b.lanthorn"), name: "b".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState },
             ],
             scroll: Default::default(),
         });
@@ -6191,7 +6191,7 @@ mod tests {
     /// the list matters, so every field but the name is a placeholder.
     fn dummy_save(name: &str) -> crate::persist_files::SaveInfo {
         crate::persist_files::SaveInfo {
-            path: std::path::PathBuf::from(format!("/tmp/{name}.babelmap")),
+            path: std::path::PathBuf::from(format!("/tmp/{name}.lanthorn")),
             name: name.into(),
             turns: 0,
             saved_at: String::new(),
@@ -8701,7 +8701,7 @@ mod tests {
         let mut state = AppState::default();
         state.overlays.saves = Some(SavesState {
             entries: vec![SaveInfo {
-                path: PathBuf::from("/tmp/a.babelmap"),
+                path: PathBuf::from("/tmp/a.lanthorn"),
                 name: "a".into(),
                 turns: 0,
                 saved_at: String::new(),
@@ -8877,7 +8877,7 @@ mod tests {
         {
             let mut s = AppState::default();
             s.overlays.saves = Some(SavesState { entries: vec![SaveInfo {
-                path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
+                path: PathBuf::from("/tmp/a.lanthorn"), name: "a".into(), turns: 0,
                 saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState,
             }], scroll: Default::default() });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
@@ -8946,7 +8946,7 @@ mod tests {
         {
             let mut s = AppState::default();
             s.overlays.saves = Some(SavesState { entries: vec![SaveInfo {
-                path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
+                path: PathBuf::from("/tmp/a.lanthorn"), name: "a".into(), turns: 0,
                 saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState,
             }], scroll: Default::default() });
             let a = key_to_action(&s, key(KeyCode::Char('q')));

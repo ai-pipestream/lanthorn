@@ -7,7 +7,7 @@
 //! downstream was `zvm::header::parse_header`'s `3..=8` on byte 0 — six of 256
 //! byte values, so roughly **2.3% of arbitrary containers pass it**. One did:
 //! `stories/Shogun.po`, an 838 KB Apple II DiskCopy 4.2 image whose name-length
-//! byte is `0x06`. babelmap ran the whole disk image as a Version 6 story,
+//! byte is `0x06`. lanthorn ran the whole disk image as a Version 6 story,
 //! paired it with a sidecar Blorb belonging to a different file, printed
 //! "story ended without asking for input", and exited **0**.
 //!

@@ -32,7 +32,7 @@ All three are **slash commands** (curated table entries, status-line feedback). 
 
 ### `/export [file]`
 - Writes the **currently visible** lines (honoring the active filter) as **plain text** (no `[STORY]`/`[META]` tags) to a file.
-- Default path: `~/.babelmap/exports/transcript-<UTC-timestamp>.txt` (the exports dir is created if missing; timestamp from `std::time`, format `YYYYMMDD-HHMMSS`). The status line shows the written path.
+- Default path: `~/.lanthorn/exports/transcript-<UTC-timestamp>.txt` (the exports dir is created if missing; timestamp from `std::time`, format `YYYYMMDD-HHMMSS`). The status line shows the written path.
 - `/export <file>` overrides the destination: an absolute/relative path is used as-is; a bare name (no `/`) is written into the default exports dir. Parent dirs are created. On write error, a status-line error is shown.
 
 ## Architecture

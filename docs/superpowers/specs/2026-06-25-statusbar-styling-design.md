@@ -81,7 +81,7 @@ Each `[[statusbar.segment]]` is `{ text, align, fg?, bg?, bold?, italic? }`:
 | `{score}`    | `ScoreTurns.score` (empty on clock games)                    |
 | `{moves}`    | `ScoreTurns.turns` (the game's move count; empty on clock games) |
 | `{time}`     | `Time` formatted `HH:MM` (empty on score games)              |
-| `{turns}`    | `AppState.turns` (babelmap's session command counter)        |
+| `{turns}`    | `AppState.turns` (lanthorn's session command counter)        |
 | `{title}`    | `AppState.title` (resolved adventure title)                  |
 | `{filter}`   | `[filter: story]` / `[filter: meta]`, or empty when `Both`   |
 

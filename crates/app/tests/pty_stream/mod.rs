@@ -1,7 +1,7 @@
-//! The emitted-stream harness (SQ-0762): drive the real babelmap binary under a
+//! The emitted-stream harness (SQ-0762): drive the real lanthorn binary under a
 //! pty and read back the escape bytes it actually wrote to the terminal.
 //!
-//! Every other harness in this repo asserts on babelmap's INTERNAL model — the
+//! Every other harness in this repo asserts on lanthorn's INTERNAL model — the
 //! cell buffer, the layout records, the placement list. None of them can see the
 //! stream, so a defect that is correct in the model and wrong on screen is
 //! invisible to all of them. This one closes that gap, and its whole value is in
@@ -54,7 +54,7 @@ pub fn decode_capture(cap: &driver::Capture) -> Term {
 pub fn report(cap: &driver::Capture, term: &Term) -> String {
     let mut s = String::new();
     let neg = cap.negotiated();
-    let _ = writeln!(s, "=== babelmap emitted-stream capture (SQ-0762) ===");
+    let _ = writeln!(s, "=== lanthorn emitted-stream capture (SQ-0762) ===");
     let _ = writeln!(s, "binary   : {}", cap.spec.bin.display());
     let _ = writeln!(s, "story    : {}", cap.spec.story.display());
     let _ = writeln!(
@@ -78,7 +78,7 @@ pub fn report(cap: &driver::Capture, term: &Term) -> String {
         let _ = writeln!(s, "  +{:>6.2}s  {:<28} answered {}", a.at.as_secs_f32(), a.query, printable(&a.sent));
     }
     if cap.answered.is_empty() {
-        let _ = writeln!(s, "  (babelmap asked nothing — it never probed the terminal)");
+        let _ = writeln!(s, "  (lanthorn asked nothing — it never probed the terminal)");
     }
     let _ = writeln!(s, "  VERDICT: {}", neg.explain());
 
@@ -153,7 +153,7 @@ pub fn screen_report(term: &Term) -> String {
     }
     for p in &placements {
         // The placeholder's foreground carries only the LOW 24 BITS of the image
-        // id (the protocol's own encoding — babelmap drops the top byte into the
+        // id (the protocol's own encoding — lanthorn drops the top byte into the
         // 24-bit colour), so an upload is matched back to its placement by those
         // bits, not by equality.
         let upload = term.apc.iter().find(|a| {

@@ -7,13 +7,13 @@ SAVE/RESTORE commands currently auto-fail with "this game's in-game save/restore
 isn't wired; use Ctrl+S/Ctrl+R". Wiring them makes the **standard path** work:
 on restore the VM resumes inside the game's own save-routine, so the **game
 redraws its own screen** (status line) — the behavior a normal interpreter has,
-and the thing babelmap's snapshot Ctrl+S/Ctrl+R can't do. (Step **A** — persisting
+and the thing lanthorn's snapshot Ctrl+S/Ctrl+R can't do. (Step **A** — persisting
 screen state for the auto-load snapshot path — is deferred.)
 
 ## Goal
 
 When the player types SAVE or RESTORE *to the game* (v4+), perform real file I/O
-through babelmap's saves UI and complete the VM's `@save`/`@restore` correctly, so
+through lanthorn's saves UI and complete the VM's `@save`/`@restore` correctly, so
 the game continues — and, on restore, **redraws itself**.
 
 ## Background (verified)
@@ -26,7 +26,7 @@ the game continues — and, on restore, **redraws itself**.
   the "isn't wired" info line.
 - **Store-2 semantics (the crux):** on a successful restore it is the original
   **`@save`** that "returns 2" in the restored state (the game checks `result == 2`
-  → redraw), *not* `@restore`. babelmap's saved PC is **post-instruction** (the
+  → redraw), *not* `@restore`. lanthorn's saved PC is **post-instruction** (the
   standard convention); for a v4+ `@save` (a store instruction) the store-variable
   byte is the **last byte of the instruction**, i.e. at **`saved_pc - 1`**. So
   restore stores `2` into `mem[saved_pc - 1]` — no PC-convention change needed.
@@ -38,23 +38,23 @@ the game continues — and, on restore, **redraws itself**.
 
 ## Decisions (settled with the user)
 
-- **Save format:** in-game SAVE always writes babelmap's `.babelmap` archive
+- **Save format:** in-game SAVE always writes lanthorn's `.lanthorn` archive
   (map + transcript + Quetzal), even when the map is empty. **The game's own SAVE
-  command therefore also saves the map** — because babelmap intercepts `@save` at
+  command therefore also saves the map** — because lanthorn intercepts `@save` at
   the interpreter level, it writes a full archive rather than a bare Quetzal, with
-  no awareness needed from the game. RESTORE of a `.babelmap` loads that map back
+  no awareness needed from the game. RESTORE of a `.lanthorn` loads that map back
   into the mapper alongside restoring the VM, so the map round-trips through the
   game's own SAVE/RESTORE.
-- **Restore sources:** the restore picker lists **both** `.babelmap` and plain
+- **Restore sources:** the restore picker lists **both** `.lanthorn` and plain
   **`.qzl`** (standard Quetzal) files; either can be restored.
-- **UI:** reuse babelmap's existing **saves-manager dialog** (save mode / restore
+- **UI:** reuse lanthorn's existing **saves-manager dialog** (save mode / restore
   mode), driven this time by the game's opcode rather than Ctrl+S/Ctrl+R.
 - **Scope:** **v4+** only (store form). **v3** (branch form) in-game restore is
   deferred — recovering the branch from a post-instruction PC is ambiguous; v3
   games keep using host-mediated Ctrl+R for now. Documented as a follow-up.
-- **Interop:** because babelmap's saved PC follows the standard convention, plain
+- **Interop:** because lanthorn's saved PC follows the standard convention, plain
   `.qzl` saves (incl. from other interpreters) restore correctly. (This does *not*
-  necessarily make babelmap's `.babelmap`-embedded Quetzal loadable by other
+  necessarily make lanthorn's `.lanthorn`-embedded Quetzal loadable by other
   interpreters — that's a separate CMem/Stks-format question, out of scope.)
 
 ## Architecture / data flow
@@ -104,12 +104,12 @@ caller (quit flag, pending input kind, transcript, location, diagnostics).
 `AppState` gains `ingame_io: Option<PendingIo>`. After `submit` (or `resume_*`), if
 `result.pending_io` is `Some`, the run loop:
 - **Save:** open the saves-manager dialog in **save mode** tagged in-game. On the
-  user's confirm, write a `.babelmap` (reuse the Ctrl+S archive-write path:
+  user's confirm, write a `.lanthorn` (reuse the Ctrl+S archive-write path:
   `save_archive_meta` with the current mapper/machine/transcript), then call
   `session.resume_save(true)`; on cancel, `resume_save(false)`. Clear `ingame_io`.
 - **Restore:** open the saves dialog in **restore mode** tagged in-game, its file
-  list including `*.babelmap` **and** `*.qzl` from the save dir. On confirm, obtain
-  the Quetzal bytes — for `.babelmap`, read its `game.sav` entry (and load its map
+  list including `*.lanthorn` **and** `*.qzl` from the save dir. On confirm, obtain
+  the Quetzal bytes — for `.lanthorn`, read its `game.sav` entry (and load its map
   into the mapper, as Ctrl+R does); for `.qzl`, the file bytes directly — then call
   `session.resume_restore(Some(bytes))`; on cancel, `resume_restore(None)`. Clear
   `ingame_io`.
@@ -123,7 +123,7 @@ path. The "isn't wired" info line is removed.
 ### 4. Quetzal extraction helper (app/archive.rs)
 
 Add `read_quetzal_from_file(path) -> io::Result<Vec<u8>>`: if the file is a
-`.babelmap` zip, return its `game.sav` entry; otherwise return the raw bytes (a
+`.lanthorn` zip, return its `game.sav` entry; otherwise return the raw bytes (a
 plain `.qzl`). Used by the in-game restore path.
 
 ## Error handling
@@ -146,20 +146,20 @@ plain `.qzl`). Used by the in-game restore path.
   `resume_save(true)` continues and the game proceeds; `@restore` → `Some(Restore)`;
   `resume_restore(Some(blob))` resumes and the game continues.
 - **Bureaucracy (v4) end-to-end (fixture-gated):** from a running game, an in-game
-  SAVE writes a `.babelmap`; a later in-game RESTORE of it resumes and the
+  SAVE writes a `.lanthorn`; a later in-game RESTORE of it resumes and the
   **upper-window status line is non-empty** after the resumed turn (the redraw the
   whole exercise is about).
-- **`.qzl` import:** `read_quetzal_from_file` returns the game.sav for a `.babelmap`
+- **`.qzl` import:** `read_quetzal_from_file` returns the game.sav for a `.lanthorn`
   and raw bytes for a `.qzl`; a `.qzl` restores via `complete_restore_success`.
 - Headless smoke test still passes; existing save/restore tests unaffected.
 
 ## Out of scope / deferred
 
-- **Step A:** persisting screen state for babelmap's snapshot path (Ctrl+R /
+- **Step A:** persisting screen state for lanthorn's snapshot path (Ctrl+R /
   auto-load) — the fresh-launch case where the window was never split. Separate
   spec.
 - **v3 in-game save/restore** (branch form) — follow-up.
 - `EXT:0x00/0x01` save/restore **to a memory table** (operand form) — already out of
   scope (a different TODO).
-- Making babelmap's Quetzal byte-compatible with other interpreters' *readers*
+- Making lanthorn's Quetzal byte-compatible with other interpreters' *readers*
   (the dfrotz "Error reading save file" — a CMem/Stks question), separate.

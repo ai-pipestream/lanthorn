@@ -77,7 +77,7 @@ fn walking_locks_the_location_global() {
 fn maze_rooms_sharing_a_name_get_distinct_ids() {
     let Some(image) = advent_image() else { return };
     let save = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".babelmap/saves/advent.blb.save/stuck-in-maze-no-debug.babelmap");
+        .join(".lanthorn/saves/advent.blb.save/stuck-in-maze-no-debug.lanthorn");
     let Ok(ac) = app::archive::load_archive(&save) else {
         eprintln!("SKIP: maze fixture save missing at {}", save.display());
         return;

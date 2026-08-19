@@ -177,7 +177,7 @@ pub const ATARI_ST_INTERPRETER_NUMBER: u8 = 5;
 /// So the number is a property of **the machine the interpreter is running on**
 /// and not of the disk, and §11.1.3 says as much: *"An interpreter should choose
 /// the interpreter number most suitable for the machine it will run on."* The
-/// row below is where babelmap answers that question; see it for why the answer
+/// row below is where lanthorn answers that question; see it for why the answer
 /// is the top of the family.
 pub const APPLE_IIGS_INTERPRETER_NUMBER: u8 = 10;
 
@@ -442,7 +442,7 @@ struct Format {
     pages_across_images: bool,
 }
 
-/// **Every disk format babelmap reads.** Adding one is a row here plus the
+/// **Every disk format lanthorn reads.** Adding one is a row here plus the
 /// `impl Volume` it names, and nothing else anywhere: `detect`, `mount`,
 /// `label`, `interpreter_number`, **the extensions a directory scan
 /// pre-filters on**, the TUI's story loading and picture resolution, and
@@ -627,7 +627,7 @@ const FORMATS: &[Format] = &[
         // interpreter should choose the interpreter number most suitable for the
         // machine it will run on."* The number is a property of the machine in
         // front of the player — which is precisely why Infocom detected it rather
-        // than pressing it — so the question is which Apple II babelmap is. Of
+        // than pressing it — so the question is which Apple II lanthorn is. Of
         // the three the YZIP will run on at all (`cmp #6 / bne BADMACH` refuses
         // anything below an enhanced IIe), the IIgs is the top, and it is the one
         // a modern terminal with colour and a large screen actually resembles.
@@ -2891,7 +2891,7 @@ mod tests {
         assert_eq!(
             disk.interpreter_number(),
             Some(APPLE_IIGS_INTERPRETER_NUMBER),
-            "ProDOS names the Apple II family; 10 names the member babelmap presents as",
+            "ProDOS names the Apple II family; 10 names the member lanthorn presents as",
         );
         let names: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["ZORK.III", "ZORK.II", "ZORK.I", "HITCHHIKER", "BEYOND.ZORK"]);

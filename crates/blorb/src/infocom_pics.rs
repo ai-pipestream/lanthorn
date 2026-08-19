@@ -58,7 +58,7 @@
 //! There is no magic number, and the header carries no release number and no
 //! serial — nothing that could tie an archive to a story. So a caller must
 //! decide by other means that a given file belongs to the story it is about to
-//! draw, and babelmap deliberately does NOT decide it from the filename: every
+//! draw, and lanthorn deliberately does NOT decide it from the filename: every
 //! Infocom Amiga release names its archive `Pic.data`, and the PC names are a
 //! DOS 8.3 convention that a renamed story file no longer matches. The pairing
 //! comes from the medium (both files off one disk image) or from the user
@@ -1174,7 +1174,7 @@ impl InfocomPics {
     /// Both reference interpreters know which card they are on before they open
     /// anything — bocfel maps `.EG1` to `kGraphicsTypeEGA` and `.CG1` to
     /// `kGraphicsTypeCGA` in `find_graphics_files.cpp`, and Frotz's `bcpic.c`
-    /// builds the extension from the display mode. babelmap has no display mode
+    /// builds the extension from the display mode. lanthorn has no display mode
     /// and does not read renditions out of filenames (see the module header), so
     /// this reads the directory instead. Two questions, in order:
     ///

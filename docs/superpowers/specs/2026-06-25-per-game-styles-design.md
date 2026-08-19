@@ -16,8 +16,8 @@ hand-authored files keyed by IFID, merged over the global style.
   reads the global `style.toml` (the pointer in `config.style`), `parse_style_toml
   → resolve`, and swaps `state.colors` / `state.symbols`. It runs at startup, on
   `/reload`, and on a file-watch event.
-- Other per-game state is keyed by IFID: saves are `<saves_dir>/<ifid>.babelmap` /
-  `<ifid>-<slug>.babelmap`; hint-file associations and the `.babelmap` map archive
+- Other per-game state is keyed by IFID: saves are `<saves_dir>/<ifid>.lanthorn` /
+  `<ifid>-<slug>.lanthorn`; hint-file associations and the `.lanthorn` map archive
   are likewise per-IFID. The run loop already holds the current `ifid` and the
   resolved adventure `title` (`state.title`).
 - `merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc` already implements
@@ -145,4 +145,4 @@ A change to either triggers the merged `reload_style`.
 - Capturing the current look into a per-game file by diff or snapshot (the command
   only scaffolds; overrides are hand-authored).
 - Per-game keymap / non-style config.
-- Bundling the per-game style inside the `.babelmap` archive (separate file only).
+- Bundling the per-game style inside the `.lanthorn` archive (separate file only).

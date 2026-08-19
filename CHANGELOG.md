@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to babelmap are recorded here.
+All notable changes to lanthorn are recorded here.
 
 **Tag convention.** A release is cut by pushing a `v*` tag (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
@@ -25,7 +25,7 @@ identifies which beta it is without reading its git hash.
   files called `STORY.DAT` apart. One story opens without asking; a disk with
   none says what it mounted; and with stdin piped it never prompts into the void,
   listing the candidates and naming `--story <n|name>` instead.
-- **The map sometimes speaks first.** Twice in a game babelmap notices that a set
+- **The map sometimes speaks first.** Twice in a game lanthorn notices that a set
   of rooms wants a layer of its own and offers to make one. It never acts —
   layers still come only from a move you asked for. The first case is structural:
   climb down a trapdoor, wander four rooms of cellar, and climb back *up*, and
@@ -68,7 +68,7 @@ identifies which beta it is without reading its git hash.
   spelling is simply gone — no alias. The `interpreter_number` config key is
   untouched; only the command line moved. An audit of every argument the four
   binaries share turned up no other pair like it.
-- **`--no-game-colours`, for babelmap too.** `zvm-cli` and `gvm-cli` both had it
+- **`--no-game-colours`, for lanthorn too.** `zvm-cli` and `gvm-cli` both had it
   and the TUI did not, despite owning the `honor_game_colours` setting that backs
   them. It does what the others do — tell the story the interpreter has no
   colours, and let your theme paint everything — for one launch, never written
@@ -102,7 +102,7 @@ identifies which beta it is without reading its git hash.
   that ends by asking for a keypress was already rejected; these pages ask you to
   *type* yes or no, which looked exactly like a turn ending at the command prompt.
   It isn't one: only the parser prints a `>`, and a page that reads its own answer
-  never does. babelmap now asks whether the prompt is actually there rather than
+  never does. lanthorn now asks whether the prompt is actually there rather than
   whether the game wants typing, which throws out the whole family — warnings,
   gates, credits pages and title plates that read a line — while every real room
   in the Glulx library, including Adventure's terse `superbrief` rooms, still
@@ -110,7 +110,7 @@ identifies which beta it is without reading its git hash.
 - **The terminal's answers stop being typed into your story.** Launching a game
   could skip the intro and leave `0;rgb:ffff/ffff/ffff11;rgb:2828/2c2c/3434` on
   the first input line, with a beep and a stack of "restore a saved position?"
-  prompts. babelmap asks the terminal for its default colours and terminates the
+  prompts. lanthorn asks the terminal for its default colours and terminates the
   question with a status report it waits on; a terminal busy swallowing a
   screenful of graphics — exactly what a picker launch leaves behind — answers
   *after* that wait gives up, and by then nobody is reading, so the replies sit
@@ -155,7 +155,7 @@ identifies which beta it is without reading its git hash.
   every region an uploaded image covers is named, its glyphs marked `#` because the
   image draws over them while its cells' colours, untouched by the placement, stay
   in the style row. No escape sequences anywhere: the capture is meant to be copied,
-  pasted and diffed. It appends to `~/.babelmap/dump-cells.log` with the path named
+  pasted and diffed. It appends to `~/.lanthorn/dump-cells.log` with the path named
   in the transcript, and describes the last frame drawn with no modal over it — a
   modal paints straight onto the cells, so a capture taken through the palette would
   report the palette's box sitting where the game's picture was. Bind it and no modal
@@ -172,7 +172,7 @@ identifies which beta it is without reading its git hash.
   game told it was running on an Amiga, then told its artwork was IBM PC-sized and
   its default colours were your terminal's. The answers now travel together as a
   named **interpreter profile**. *IBM PC* is the default and is exactly what
-  babelmap has always done, named rather than changed. *Amiga* is the sibling, and
+  lanthorn has always done, named rather than changed. *Amiga* is the sibling, and
   it selects itself — boot a game out of an `.adf` release floppy and you get
   interpreter number 4, the Amiga's 320×200 standard window, its own default page
   and ink, and the palette Infocom's Amiga interpreter actually loaded. Setting
@@ -181,8 +181,8 @@ identifies which beta it is without reading its git hash.
   faithful 1989 colour scheme that reads poorly in a modern terminal is one toggle
   away from your own theme.
 
-- **Play straight off the original Amiga floppy.** Hand babelmap an `.adf` disk
-  image — `babelmap "Zork Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem
+- **Play straight off the original Amiga floppy.** Hand lanthorn an `.adf` disk
+  image — `lanthorn "Zork Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem
   (OFS and FFS both), finds the game inside, and boots it. No unpacking step, no
   loose files, nothing to rename. Disk images are listed in the story picker
   alongside everything else. Because AmigaOS has no filename extensions and
@@ -214,18 +214,18 @@ identifies which beta it is without reading its git hash.
   keypress collapses the rest of a sequence at once**, landing on exactly the pixels
   waiting it out would have given you, while still doing whatever you pressed it
   for.
-- **Click a room in the matrix and it shows you the way there.** babelmap finds
+- **Click a room in the matrix and it shows you the way there.** lanthorn finds
   the shortest route it already knows how to walk, from the room you are standing
   in to the one you clicked, and marks one cell per step — the row of the room you
   are in, in the column you leave by — so the marks read top to bottom as walking
   instructions. Each cell keeps its own glyph, so you can still see whether the
   step you are about to take comes back or does not. Passages are only ever walked
   in the direction you walked them, so a one-way corridor is never offered
-  backwards: a route babelmap shows you is a route you can actually walk. The
+  backwards: a route lanthorn shows you is a route you can actually walk. The
   search covers the whole map rather than just the layer on screen — steps on
   other layers have no row here, and where the route walks out of this layer the
   `⇱out` cell it leaves by is the one marked — and the view never jumps layers
-  behind your back. With no known route the room still selects and babelmap says
+  behind your back. With no known route the room still selects and lanthorn says
   so. `Esc` clears the route and keeps the room selected; a second `Esc` unpins
   it, a third closes the dock. Styleable as `map.matrix.cell:path`.
 - **The room dock — one panel that describes where you are.** The floating Room
@@ -323,7 +323,7 @@ identifies which beta it is without reading its git hash.
   see was the one band the dump could not name.
 
 - **Key bindings work again — the shipped config was teaching a format the parser
-  rejects.** `~/.babelmap/config.toml`'s own `[keymap.*]` example was written
+  rejects.** `~/.lanthorn/config.toml`'s own `[keymap.*]` example was written
   backwards and in the wrong case (`quit = "ctrl+q"`, `toggle_map = …`), while the
   parser reads the **key** on the left and the registry's **hyphenated** command on
   the right. TOML is happy with either, so the file loaded cleanly and simply did
@@ -332,7 +332,7 @@ identifies which beta it is without reading its git hash.
   inverted and quotes the corrected version, a snake_case command name is told the
   registry's spelling, and a test uncomments the template's own examples and runs
   them through the real resolvers, so the file can no longer document something
-  babelmap does not accept.
+  lanthorn does not accept.
 
 - **Capturing `/dump-windows` no longer disturbs what it reports.** The command
   had to be reached through the command palette, which is a modal: it drops a
@@ -425,17 +425,17 @@ identifies which beta it is without reading its git hash.
   placeholder glyphs, so selecting it took them along: the first real capture came
   back placeholder-dense with fields truncated mid-word, the diagnostic corrupted
   by the protocol it was diagnosing. Every capture is now also appended to
-  `~/.babelmap/dump-windows.log`, timestamped, with the path named in the
+  `~/.lanthorn/dump-windows.log`, timestamped, with the path named in the
   transcript — readable from a second terminal while the game is still running,
   and still there afterwards.
 
 - **Shogun has its artwork back on the Amiga floppy.** Played off its disk image,
   *James Clavell's Shogun* showed no graphics at all — not even a title screen —
   while *Zork Zero*, *Journey* and *Arthur* all drew theirs. Infocom's picture
-  archive comes in two shapes, and babelmap only knew one: the other three games
+  archive comes in two shapes, and lanthorn only knew one: the other three games
   share a single compression table for the whole file, while Shogun gives every
   picture its own and needs two more bytes per directory entry to say where it
-  is. The file says which it is in its own header, and babelmap now reads that
+  is. The file says which it is in its own header, and lanthorn now reads that
   instead of insisting on one layout, so all 48 of Shogun's pictures decode and
   the title screen paints. Held to the same standard as before: of the 39
   pictures Shogun's Blorb also carries, 34 come off the floppy byte-for-byte
@@ -447,7 +447,7 @@ identifies which beta it is without reading its git hash.
 - **A room the game never made an object of still reaches the map.** *The
   Impossible Bottle*, *frankenfingers* and *Facility* each printed a room name in
   the top-left corner of the status bar and mapped absolutely nothing, for the
-  whole game. The room was never the problem: babelmap had read every one of those
+  whole game. The room was never the problem: lanthorn had read every one of those
   names correctly, then thrown them away, because it would not seed an empty map
   with a room it could not also find in the story's object tree. That was a
   sensible-sounding rule with a false premise — it assumed every game eventually
@@ -463,16 +463,16 @@ identifies which beta it is without reading its git hash.
   for the same evidence.
 
 - **The Impossible Stairs maps a place, not a place and a date.** Its status bar
-  reads `Year: 2001  Place: Front Lawn`, and babelmap took the lot as the room's
+  reads `Year: 2001  Place: Front Lawn`, and lanthorn took the lot as the room's
   name — so every time the story turned a year, the same lawn arrived on the map
   as a brand new room the player had never walked to. A status bar can label
-  several things at once, and which label means "room" is not something babelmap
+  several things at once, and which label means "room" is not something lanthorn
   gets to assume: it now offers each labelled field to the story's own object
   tree, and maps the one the game recognises as a place. The name that reaches the
   map is the one on screen, since the object behind it is called `FrontLawn` and
   no player should have to read that.
 - **Journey stops re-sending its frame to the terminal on every frame.** Playing
-  Journey in hybrid mode, babelmap re-encoded and re-uploaded all three pieces of
+  Journey in hybrid mode, lanthorn re-encoded and re-uploaded all three pieces of
   the game's on-screen frame — the picture panel, the right-hand border and the
   bottom rule — every single time the screen was drawn, for pixels the terminal
   already had. The cache that exists to prevent exactly that was being emptied
@@ -487,7 +487,7 @@ identifies which beta it is without reading its git hash.
 
 - **A band drawn twice on one frame keeps two cached images, not one.** Journey's
   right-hand border is both the frame's flank artwork and the column carried down
-  to the menu, and both land on exactly the same cells. babelmap cached images by
+  to the menu, and both land on exactly the same cells. lanthorn cached images by
   where they are drawn, so each overwrote the other's cache entry and both were
   re-sent to the terminal on every single frame, forever. They now occupy separate
   cache slots. The earlier attempt at this — skipping one of the two draws — is
@@ -498,11 +498,11 @@ identifies which beta it is without reading its git hash.
   frame around the game drew its top, its bottom and its menu, and then simply
   stopped partway down: below the game's own artwork the left and right borders
   were missing entirely, leaving the frame open down both sides for the whole
-  stretch between the picture and the command menu. babelmap already knew how to
+  stretch between the picture and the command menu. lanthorn already knew how to
   carry a border column down that reclaimed space — it had been doing it for the
   IBM PC profile all along. The two profiles draw the same frame with different
   ink: IBM PC uses reverse-video blocks that fill their character cell, Amiga uses
-  `│` glyphs whose stroke sits in the middle of theirs. babelmap looked for the
+  `│` glyphs whose stroke sits in the middle of theirs. lanthorn looked for the
   border in exactly one pixel column, found the glyph's blank margin, and gave up.
   It now looks across the whole character cell, so both profiles frame the gap. The
   right-hand border is also one image lighter per frame: it was being drawn twice,
@@ -513,10 +513,10 @@ identifies which beta it is without reading its git hash.
   yellow-green, and the colours changed as you walked from room to room — while
   the same game booted from its Blorb drew them properly. Neither archive was at
   fault: both say those pictures have no colours of their own and must borrow the
-  palette of the last full illustration drawn, and babelmap was only listening to
+  palette of the last full illustration drawn, and lanthorn was only listening to
   one of them. A Blorb announces it in a chunk; the original Amiga archive writes
   a plain zero where a picture's palette would go — which, for *Zork Zero*, marks
-  exactly the same 172 pictures, id for id. babelmap now reads that zero as what
+  exactly the same 172 pictures, id for id. lanthorn now reads that zero as what
   it is, and the native artwork joins the palette machinery the Blorb path has
   always used, so the compass takes the mood of the room it sits beside instead of
   falling back to a stock EGA table. Checked against Infocom's own converter: of
@@ -533,7 +533,7 @@ identifies which beta it is without reading its git hash.
   rather than "an empty screen". With no boundary the view fell back to sticking
   to the bottom of the scrollback — and the bottom of the scrollback was the exact
   screen the game had just erased. It now reads as what it is, so the title stands
-  alone and the erased screen stays where a clear has always left it in babelmap:
+  alone and the erased screen stays where a clear has always left it in lanthorn:
   above the fold, one scroll away. Anchorhead's `* THE FIRST DAY *` quote box, the
   same shape of screen, stops showing the title splash beneath it too.
 - **fmvpoker's bet and quit prompts are back on the screen, and so is what you
@@ -542,7 +542,7 @@ identifies which beta it is without reading its git hash.
   invisible — though pressing Enter still applied the bet, so the game was
   listening the whole time. QUIT did the same, which was the giveaway: nothing
   about the bet screen was at fault, only that the game had started reading through
-  that panel. babelmap decides which window is the story's transcript, and it had
+  that panel. lanthorn decides which window is the story's transcript, and it had
   been letting a *read* settle the question. The game says so itself — the
   Z-machine gives every window a "copy this to the transcript" flag, and fmvpoker
   sets it on the table window and clears it on the panel — so a read no longer
@@ -559,7 +559,7 @@ identifies which beta it is without reading its git hash.
   is `0×0` in the converted Blorb and `2×1` on the original floppy, so with genuine
   Amiga art every drop cap missed the cursor by two pixels and was reclassified as
   a picture the game had placed for itself — painted onto a window nobody was
-  showing instead of floated beside its paragraph. babelmap now also listens for
+  showing instead of floated beside its paragraph. lanthorn now also listens for
   the margin the game reserves immediately after such a draw, which is the story
   saying "the text flows around this one" in as many words.
 - **Journey's Amiga border reaches the edge of the window, and its menu answers
@@ -634,7 +634,7 @@ identifies which beta it is without reading its git hash.
 
 - **HOLD lands under the card you are holding.** Frobozz Magic VideoPoker positions
   everything it says: `HOLD` under each held card, the running totals in the panel
-  below the table. babelmap read its story window as a transcript, so all of it
+  below the table. lanthorn read its story window as a transcript, so all of it
   scrolled past as narration instead — and the game's own player was right that
   there is not supposed to be a scroll window in it at all. What settles it is not
   what a run *means* — a game moving the cursor before a run usually means "resume
@@ -651,12 +651,12 @@ identifies which beta it is without reading its git hash.
 - **The line telling you what you drew stops being written over.** Deal a hand in
   Frobozz Magic VideoPoker and the game announces it in the panel under the table —
   *You draw (a) an Eight, (b) a Three, (c) an Ace…* — which is the only place the
-  cards are named, and babelmap was rasterizing the story scroll's opening banner
+  cards are named, and lanthorn was rasterizing the story scroll's opening banner
   straight across it. The panel was never in the wrong place; the story window is
   the whole screen in this game, and once five cards fill the frame's interior the
   largest clear rectangle left for the transcript drops onto the very box the panel
   occupies. The page already filled *under* labels another window is holding, so
-  now the glyphs do too: a transcript is babelmap's re-reading of everything the
+  now the glyphs do too: a transcript is lanthorn's re-reading of everything the
   story window has ever said, while a label another window is holding is on the
   screen right now, and where the two collide the label wins. The money lines the
   transcript owns still print below it.
@@ -666,7 +666,7 @@ identifies which beta it is without reading its git hash.
   picture file renamed — so the frame's top-centre tab natively reads *Double
   Fanucci*, a title belonging to a different game. fmvpoker hides it the way a v6
   game does: it parks a window exactly over the banner and erases it to the blue it
-  declared for that window. babelmap recorded the erase correctly and then flooded
+  declared for that window. lanthorn recorded the erase correctly and then flooded
   window 0's page straight over the top of it, and window 0 here is the entire
   screen — so the tab came out as a white gash across an otherwise complete blue
   frame, which is what three passes at this had recorded as artwork being clipped at
@@ -679,7 +679,7 @@ identifies which beta it is without reading its git hash.
   list — *Prologue • ACT I • Interlude • …* — and then a prologue headed *Excerpted
   from the New Gothenburg Post:*, and the automap had drawn both as rooms before the
   player had typed a single command. Neither is a place; they only look like one,
-  because Inform bolds a room heading and a title with the same style. babelmap now
+  because Inform bolds a room heading and a title with the same style. lanthorn now
   reads the shape of the page rather than the words on it. A room heading is joined
   to the description printed directly beneath it, and the turn that prints one ends
   by handing you the command prompt; a banner stands alone above a blank line on a
@@ -733,17 +733,17 @@ identifies which beta it is without reading its git hash.
   eleven of Brian Howarth's games — Scott Adams adventures rebuilt as v6 Z-code —
   played from start to finish with a completely empty automap, even though every
   turn repaints "I'm in a dense SPOOKY Forest / Obvious exits: NORTH SOUTH" in
-  plain sight. They defeat every way babelmap knows to find a room, all at once:
+  plain sight. They defeat every way lanthorn knows to find a room, all at once:
   the player is never put into the object tree at all, every room object carries
   the same compiled name (`ScottRoom`), and the line you read lives in a property
-  where no name match will ever find it. babelmap now takes the room from the
+  where no name match will ever find it. lanthorn now takes the room from the
   variable these games keep it in — but only after confirming that the room it
   points at is carrying, in its own properties, the very words on screen that
   turn. The screen and the object tree have to agree before either is believed,
   which is what makes the answer an exact room rather than a name: these games
   reuse a description across whole mazes, and ten rooms that all read "I'm in a
   Tunnel" now map as ten rooms. Nothing changes for any game that already found
-  its rooms — the new check runs only where babelmap previously found none — and
+  its rooms — the new check runs only where lanthorn previously found none — and
   the automapper's own probing can no longer fault the story it is reading.
 - **Text that vanished from `raster` mode in four v6 games.** Three separate field
   reports, one mistaken assumption: the pixel composite kept using "is this pixel
@@ -779,7 +779,7 @@ identifies which beta it is without reading its git hash.
 - **Shogun's "You may choose to:" now sits beside START/RESTORE/QUIT, not under
   the title.** The game prints its nine centred banner lines while window 0 is the
   whole screen, then moves window 0 down to a four-row box level with — and to the
-  left of — its boot menu, and prints the prompt there. babelmap already froze the
+  left of — its boot menu, and prints the prompt there. lanthorn already froze the
   banner where it was painted and already held the right box; it just started the
   resumed transcript flush under the banner and let it flow, so the prompt landed
   nine rows above the menu it belongs beside and scrolled away with everything
@@ -806,7 +806,7 @@ identifies which beta it is without reading its git hash.
   and then simply narrates — it never repositions the text window, because the
   Z-machine standard says splitting the screen *tiles* the two windows: the upper
   one takes the height it asked for, and the story window "is placed just below
-  it". babelmap only shortened the story window and left it pinned to the top
+  it". lanthorn only shortened the story window and left it pinned to the top
   corner, so it sat squarely inside the picture and the prose came out printed
   across the artwork. The split now places the story window where the standard puts
   it, and the picture and the prose each get their own half of the screen. Adventure
@@ -873,7 +873,7 @@ identifies which beta it is without reading its git hash.
   in scopa and the whole table zoomed out — the cards crammed into a corner with
   big black rectangles beside them. The card game was not drawing any of that: to
   find out how wide a string is, it opens a scratch window 1000×1000 so the string
-  cannot wrap, prints into it, and reads the width back. babelmap sized the
+  cannot wrap, prints into it, and reads the width back. lanthorn sized the
   composite to cover every window the game had open, so that one measuring window
   — two and a half times wider than the screen — decided how big the picture was,
   and everything real shrank to fit inside it. Now a window is drawn only where it
@@ -888,7 +888,7 @@ identifies which beta it is without reading its git hash.
   the game then drops window 0 to a small box at the bottom, beside its
   START/RESTORE/QUIT menu, and prints "You may choose to:" there. The Z-machine
   standard says moving a window changes nothing already on screen — so on the
-  original the banner stays up top. babelmap streamed both halves into one
+  original the banner stays up top. lanthorn streamed both halves into one
   transcript, which jammed the prompt under the banner and then scrolled the
   banner out of a four-row box. Prose now freezes where it was printed the moment
   its window moves out from under it: the banner becomes paint at the exact rows
@@ -903,7 +903,7 @@ identifies which beta it is without reading its git hash.
   and clearing the screen is also what puts the text cursor there, so the picture
   looked exactly like one of Zork Zero's illuminated drop-caps: drawn on the
   current text line, meant to have prose flowing beside it. It got floated into
-  the transcript and the screen never received it. babelmap now asks the question
+  the transcript and the screen never received it. lanthorn now asks the question
   a float actually turns on — *is there room left beside it?* — and a picture
   spanning the window from edge to edge answers no. The table, the JOURNEY splash
   and the Mysterious Adventures' title cards all land on the screen now, with the
@@ -915,7 +915,7 @@ identifies which beta it is without reading its git hash.
   picture, unreadable in both directions. Arthur never asks for that: it clears
   the screen, draws the plate, hides the cursor and waits for a key, and its
   narration is a *separate* screen it erases before the next illustration goes up.
-  The whole graveyard-to-Merlin turn prints not one character. babelmap was
+  The whole graveyard-to-Merlin turn prints not one character. lanthorn was
   painting its own scrollback onto the plate. Now a placed picture that leaves no
   column wide enough to wrap prose into owns the screen outright — exactly as a
   window-filling picture already did — so the illustration ships alone, in both
@@ -928,7 +928,7 @@ identifies which beta it is without reading its git hash.
   pixels: for every line it reads its own window's width, works out the centred
   column, and moves the cursor there — then prints the text with no leading
   spaces at all. The centring was never in the text, so streaming the text and
-  dropping the cursor column lost it entirely. babelmap now carries a declared
+  dropping the cursor column lost it entirely. lanthorn now carries a declared
   column into the transcript as an indent; at the v6 cell width of 8 pixels the
   two measurements are the same one, and every line lands exactly where the game
   worked out it should. Journey's title screen, centred the same way, comes
@@ -940,7 +940,7 @@ identifies which beta it is without reading its git hash.
   three plates that open Arthur (the sword in the stone, the churchyard, Merlin)
   never rendered at all. Arthur lays those screens out itself: it clears every
   window, asks window 0 how big it is, centres the 584×392 plate by hand at
-  x=29, y=5, and narrates over it. babelmap treated *every* window-0 picture as
+  x=29, y=5, and narrates over it. lanthorn treated *every* window-0 picture as
   an inline drop-cap — the Zork Zero idiom, where the art is drawn on the text
   cursor and has to scroll with the paragraph beside it — so Arthur's backdrops
   were pushed into the transcript as floats, no window canvas was ever made, and
@@ -962,7 +962,7 @@ identifies which beta it is without reading its git hash.
   decided instead, and its answer was black. The Z-Machine Standard is clear
   that it was ours to decide (§8.8.3.2: every Version 6 window has its OWN
   foreground/background pair) and Zork Zero's banner window says white, like the
-  DOS original. babelmap now paints each chrome window's own page into the
+  DOS original. lanthorn now paints each chrome window's own page into the
   pixels no layer touched, so the ring it ships is self-contained instead of
   leaving holes for the terminal to colour in. Only untouched pixels are filled:
   artwork, status bands, glyphs and the icons' own ink are left byte for byte
@@ -970,14 +970,14 @@ identifies which beta it is without reading its git hash.
   gave no colour keeps exactly today's look. `/set-game-colours off` opts out as
   usual. The same rule gives Scopa its green baize back.
 - **The status bar stops painting a black band on a light terminal.** With no
-  `style.toml` and no colour scheme configured, babelmap's UI surfaces — the
+  `style.toml` and no colour scheme configured, lanthorn's UI surfaces — the
   status bar, the v4+ upper window, story info, dialog backgrounds, the Glk grid
   styles — were drawn white-on-**black**, regardless of what colour the terminal
   actually is. It was never the game's doing: Anchorhead, the story it was
   reported on, sets no colours at all. It was ours. "No scheme configured" left
   the theme's `chrome` role with nothing to derive from, so it fell back to a
   hard-coded black page — a guess that happens to be right on a black terminal
-  and wrong everywhere else, laying a band across the top of the screen. babelmap
+  and wrong everywhere else, laying a band across the top of the screen. lanthorn
   already asks the terminal for its real default colours at startup (the OSC
   10/11 probe that keeps the v6 raster canvas honest); that answer now reaches
   the theme as well, so the unconfigured look follows your terminal instead of
@@ -989,7 +989,7 @@ identifies which beta it is without reading its git hash.
 - **The upper window's frame answers to `style.toml` again.** `upper_window_border`
   could be recoloured but not reshaped: its `style` / `style_top` / … keys were
   read straight past. The one place that applied them was the retired `[colors]`
-  table, and the `style.toml` babelmap seeds has no `[colors]` section — the
+  table, and the `style.toml` lanthorn seeds has no `[colors]` section — the
   selector lives in `[elements]`, where its border keys parsed into the theme and
   stopped there. So `upper_window_border = { style = "none" }` sat in the file
   doing nothing, on Anchorhead and every other v4+ story. The frame's shape now
@@ -1027,7 +1027,7 @@ identifies which beta it is without reading its git hash.
 ### Changed
 
 - **A game's status/upper window is no longer boxed by default.** The single-line
-  frame babelmap drew round it is off out of the box: the status line sits flush
+  frame lanthorn drew round it is off out of the box: the status line sits flush
   against the story, and the two rows and two columns the frame was costing go
   back to the game's own screen. Put it back — in any style, or one edge at a
   time — with `upper_window_border = { style = "single" }` in `[elements]`.
@@ -1048,7 +1048,7 @@ identifies which beta it is without reading its git hash.
   (with the return direction), one-way, self-loop, tried-but-flat, or untried
   frontier. Selecting a room bolds its known entrances; identically-named
   rooms number themselves; the table thins its cells before it scrolls. A
-  layer marked as a maze (`/mark-maze-layer`, or accept the offer babelmap
+  layer marked as a maze (`/mark-maze-layer`, or accept the offer lanthorn
   makes when it notices a tangle) defaults to the matrix. Self-loops — "west
   leads back here" — are now recordable at all, one-way passages grow
   arrowheads on the drawn map, and the room panel gains the full per-direction
@@ -1223,7 +1223,7 @@ keyboard.
   drive. Measured across every v6 story available, each one runs away at its first
   input prompt whatever key it is given: *Zork Zero* and *Arthur* flood the terminal,
   *Shogun* spins silently with nothing to interrupt. `zvm` itself supports v6 fully —
-  play those in babelmap.
+  play those in lanthorn.
 - **OS and C-library noise stays off the screen.** ALSA and friends write straight to
   file descriptor 2, which no Rust-side hook can intercept, so their messages landed
   mid-frame and corrupted the display. While the alternate screen is up, fd 2 goes to
@@ -1270,7 +1270,7 @@ keyboard.
 
 ### Save format
 
-- **`.babelmap` archive `format_version` 5 → 6.** A v6 archive now carries
+- **`.lanthorn` archive `format_version` 5 → 6.** A v6 archive now carries
   `display.json` — each graphics window's display list plus the Blorb §11.3 palette —
   and omits the canvas PNG for any window whose replay reproduced the live canvas at
   save time. Archives written before the bump still load and take the PNG path, which
@@ -1282,7 +1282,7 @@ keyboard.
 ### Known issues
 
 - **`zvm-cli` cannot play graphical v6 stories at all** — it now says so at load
-  rather than hanging. Play them in babelmap, which renders v6 graphics and menus.
+  rather than hanging. Play them in lanthorn, which renders v6 graphics and menus.
 - **Room selection lost its keyboard shortcuts.** `select-room next|prev` was bound to
   `n`/`p` only while the map held focus, and with that focus mode removed the command
   is reachable by clicking a room, `/select-room`, or the command palette.
@@ -1342,7 +1342,7 @@ the game itself does, and `config.toml` learned to explain itself.
   *Journey* and *Shogun* all lay out visibly better for it, and `scroll_window(0)` is
   a silent no-op instead of a player-facing warning.
 - **`config.toml` explains itself.** On first run it is seeded like `style.toml`
-  already was: every setting babelmap reads, grouped and commented, with the value
+  already was: every setting lanthorn reads, grouped and commented, with the value
   shown being the default — so uncommenting a line changes nothing and the whole
   surface is browsable from the file. Only settings you actually change are written
   live; section headers stay uncommented; your comments survive later saves.
@@ -1358,7 +1358,7 @@ the game itself does, and `config.toml` learned to explain itself.
   global rather than by the room's printed name, so two rooms sharing a name stay
   distinct and a renamed room stays itself.
 - **One save format, whoever asked for it (SQ-0531).** A story's own `SAVE` now
-  writes the same self-contained `.babelmap` archive Ctrl+S writes — map, screen,
+  writes the same self-contained `.lanthorn` archive Ctrl+S writes — map, screen,
   transcript and inline art included — instead of a bare VM-state-only file. So an
   in-game `restore` finally brings your scrollback back with it, even into a
   freshly launched session. The saves manager's **Type** column is now driven by
@@ -1375,7 +1375,7 @@ the game itself does, and `config.toml` learned to explain itself.
 
 - **A Glulx game's own `SAVE` now loads from the saves manager (SQ-0556).**
   `SAVE` behaves the same on every engine again: on Z-machine, Glulx and Scott
-  Adams alike it writes a `.babelmap`, the archive appears in the manager, and it
+  Adams alike it writes a `.lanthorn`, the archive appears in the manager, and it
   restores through both the game's own `RESTORE` and the host's. Picking a Glulx
   one from the manager used to answer `Glulx has no game-save (.qzl) format`
   outright. The restore keeps the windows you're looking at exactly as they are —
@@ -1412,7 +1412,7 @@ the game itself does, and `config.toml` learned to explain itself.
 
 ### Save format
 
-- **`.babelmap` archive `format_version` 4 → 5.** `meta.json` gained
+- **`.lanthorn` archive `format_version` 4 → 5.** `meta.json` gained
   `trigger: "ingame" | "hoststate"`; restore dispatches on it instead of on the
   file extension. Archives written before the bump still load and read as
   `"hoststate"` — which is exactly what they were — but a version-5 archive is
@@ -1435,7 +1435,7 @@ the game itself does, and `config.toml` learned to explain itself.
   screen (ZMSD §8), so erasing a region clears whatever *any* window plotted there.
   *Arthur*'s map screen erases the columns its side borders occupy, and since the game
   never redraws them they stay gone for the session. This is what a real interpreter
-  shows, and babelmap follows it deliberately rather than second-guessing the game.
+  shows, and lanthorn follows it deliberately rather than second-guessing the game.
 - The three v6 caveats from beta.1 still apply: **Inform-compiled v6 status lines
   don't paint in `raster` mode**, **rasterized v6 text isn't selectable**, and **sixel
   encode latency on very large panes**. See their entries below for scope and
@@ -1445,7 +1445,7 @@ the game itself does, and `config.toml` learned to explain itself.
 
 ## v0.1.0-beta.1 — first public beta
 
-The first public build of babelmap: a terminal interactive-fiction interpreter
+The first public build of lanthorn: a terminal interactive-fiction interpreter
 that draws you a live map as you play. This entry is an inventory of what the
 beta ships, not a diff — there's no prior release to diff against.
 
@@ -1547,7 +1547,7 @@ is not a promise that every game in a format works.
 
 ### Formats & persistence
 
-- **`.babelmap` Save States** — one self-contained file freezing the whole
+- **`.lanthorn` Save States** — one self-contained file freezing the whole
   session (VM state + map + on-screen windows + transcript), with named slots,
   auto-save/auto-load, and an optional per-turn **rewind/replay** history.
 - **Standard interchange, in and out** — game-written `@save` produces a portable
@@ -1561,7 +1561,7 @@ is not a promise that every game in a format works.
 - **Frozen formats.** For the beta, every persisted byte format is enumerated,
   version-stamped, and pinned by a round-trip freeze test, under three guarantee
   tiers — **Public spec** (Quetzal / Glulx-Quetzal, kept spec-clean and
-  interoperable), **Frozen (0.x)** (private binary formats and the `.babelmap`
+  interoperable), **Frozen (0.x)** (private binary formats and the `.lanthorn`
   archive: they may only change via a deliberate bump-and-note ritual, and reject
   a newer version marker cleanly), and **Tolerant** (TOML/JSON config &
   metadata: missing fields default, unknown fields ignored). Full inventory and
@@ -1570,7 +1570,7 @@ is not a promise that every game in a format works.
 ### Platforms
 
 Runs on **Linux, macOS, and Windows**. Release archives ship four binaries
-(`babelmap` + `zvm-cli` / `gvm-cli` / `scott-cli`) per platform: Linux x86_64
+(`lanthorn` + `zvm-cli` / `gvm-cli` / `scott-cli`) per platform: Linux x86_64
 (glibc, needs `libasound2` at runtime), a macOS universal binary (Apple Silicon +
 Intel, ad-hoc signed, not notarized), and Windows x86_64 (unsigned).
 

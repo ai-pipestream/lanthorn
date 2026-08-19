@@ -16,7 +16,7 @@
 //! one row per (non-adaptive picture, adaptive picture) pair. Zork Zero's is
 //! 224x172 = 38528 rows; Arthur's is 134x3 = 402.
 //!
-//! Nothing in babelmap's *runtime* uses this — [`crate::Blorb`] deliberately
+//! Nothing in lanthorn's *runtime* uses this — [`crate::Blorb`] deliberately
 //! ignores `BPal` and the app computes §11.3 live, so a container that lacks the
 //! table (every non-Infocom blorb) behaves identically. It is decoded here
 //! because it is an independent oracle for that live computation: the app's

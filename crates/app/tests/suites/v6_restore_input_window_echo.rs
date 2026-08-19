@@ -165,7 +165,7 @@ fn a_restore_mid_bet_still_echoes_typed_digits(honor: bool, resize: bool) {
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(&session);
     let path = std::env::temp_dir().join(format!(
-        "fmvpoker-input-window-{honor}-{resize}-{}.babelmap",
+        "fmvpoker-input-window-{honor}-{resize}-{}.lanthorn",
         std::process::id()
     ));
     app::archive::save_archive_meta_pics(

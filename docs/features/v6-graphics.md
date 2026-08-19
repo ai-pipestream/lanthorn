@@ -5,7 +5,7 @@
 Z-machine **v6** is Infocom's graphical story format — the one behind *Zork
 Zero*, *Shogun*, *Journey*, and *Arthur*. It splits the screen into pixel-
 addressed windows, draws pictures at exact coordinates, and expects the
-interpreter to composite it all into one illustrated page. babelmap's `zvm`
+interpreter to composite it all into one illustrated page. lanthorn's `zvm`
 implements the v6 windowing and picture opcodes needed to run that model, and
 the app renders the result. The depth below is verified against *Zork Zero*,
 whose full frame — banner, side columns, the per-room exit compass, and
@@ -20,7 +20,7 @@ siblings) queries `picture_data` on a handful of pictures that are never
 actually drawn — they exist purely to answer "how big is this thing," and the
 game uses the answer to position its banner, columns, and compass. Those
 pictures are Blorb `Rect` chunks: an 8-byte, dimension-only placeholder (width
-then height, big-endian) with no pixel data at all. babelmap recognizes a
+then height, big-endian) with no pixel data at all. lanthorn recognizes a
 `Rect` chunk and answers `picture_data` straight from it, which is exactly the
 mechanism these games rely on — it isn't a general Blorb image feature, it's a
 placement protocol these specific titles speak.
@@ -28,13 +28,13 @@ placement protocol these specific titles speak.
 ## Where the pictures come from
 
 Most of the time: a Blorb. Either the story file *is* one, or a `.blb`/`.blorb`
-sibling beside it carries the `Pict` resources, and babelmap resolves that on its
+sibling beside it carries the `Pict` resources, and lanthorn resolves that on its
 own.
 
 There is a second source, for anyone playing from original media. Infocom's Amiga
 releases stored their artwork in a single `Pic.data` archive on the game disk — a
 big-endian Huffman + run-length + per-scanline-XOR codec of Infocom's own design,
-nothing to do with PNG — and babelmap decodes it directly. Launch a game from its
+nothing to do with PNG — and lanthorn decodes it directly. Launch a game from its
 [`.adf` disk image](interpreter.md#what-counts-as-a-story-file) and the archive
 that shipped on that same floppy becomes the game's art. Nothing to configure:
 the story and the pictures came off one disk, so the pairing is guaranteed by the
@@ -43,12 +43,12 @@ medium rather than guessed from a filename.
 The Macintosh releases wrote the *same* container, so a Mac disk image works the
 same way — with one wrinkle worth knowing about. Apple sold two screens, and
 Infocom shipped an archive for each: a colour `CPic.data` and a monochrome
-`Pic.data`. **babelmap reads both.** It draws the colour one, because that is
+`Pic.data`. **lanthorn reads both.** It draws the colour one, because that is
 what every other medium here supplies and nothing on the disk argues otherwise;
 the black-and-white artwork is a thing you ask for:
 
 ```sh
-babelmap "Zork Zero Disk.image" --pictures Pic.data
+lanthorn "Zork Zero Disk.image" --pictures Pic.data
 ```
 
 That name is looked up *on the volume*. A story mounted out of a disk image has
@@ -66,9 +66,9 @@ volume spells it: an Atari ST compilation's files are `HITCHHIK/STORY.DAT` and
 Amiga and Macintosh volumes are flat and behave exactly as they always did.
 
 The PC and Atari ST floppies join the same road, with one caveat that is the
-disk's fault rather than babelmap's. A DOS release stores its art as `.MG1`
+disk's fault rather than lanthorn's. A DOS release stores its art as `.MG1`
 (MCGA), `.EG1`/`.EG2` (EGA) or `.CG1` (CGA) — three video cards, one machine —
-and babelmap will draw whichever of them is on the image you opened. But a PC
+and lanthorn will draw whichever of them is on the image you opened. But a PC
 release is often **several** images, and the artwork does not always travel with
 the story: *Zork Zero*'s story and its EGA art are on *Lost Treasures* floppy 5,
 while its CGA art is alone on floppy 4. One mount is one disk, so open the one
@@ -88,7 +88,7 @@ sprites are redrawn rather than scaled — the same 483 picture numbers, the sam
 386 of them carrying pixels, at sizes that mostly do not divide. Infocom's own
 Mac interpreter says so in the flag's own definition: *"this pic is mono, and
 scaled for a 480x300 screen (std Mac)"*. It also displayed that art 1:1 where it
-scaled the colour art by 1.5 or 2, and babelmap does the same — 480×300 is the
+scaled the colour art by 1.5 or 2, and lanthorn does the same — 480×300 is the
 one picture space in this whole format that does not double onto the 640×400
 screen.
 
@@ -97,7 +97,7 @@ screen.
 Which raises the obvious question, and the answer turns out to be the whole
 Macintosh screen model: if the mono plates are 480×300 and the colour ones are
 640×400 once doubled, **what is the screen?** Both, depending on which archive
-is in hand — and that is not a compromise babelmap invented, it is one decision
+is in hand — and that is not a compromise lanthorn invented, it is one decision
 in Infocom's own interpreter. It sized its window and chose its picture file on
 the same test: a Mac big enough for colour got a 640×400 window and `CPic.Data`,
 and everything else got a 480×300 window and `Pic.Data`. The source says it in
@@ -124,9 +124,9 @@ game itself is being told 480×300. The interpreter computes what it reports
 straight off its own window rect, in pixels, with the divide-by-font-size
 commented out.
 
-One rounding the Mac did not have to do: 300 is not a whole number of babelmap's
+One rounding the Mac did not have to do: 300 is not a whole number of lanthorn's
 16-pixel Version 6 cells. A real Mac fitted 20 rows of its own 15-pixel Geneva
-into exactly 300; babelmap rounds to the nearest cell, 19 rows and 304 pixels, so
+into exactly 300; lanthorn rounds to the nearest cell, 19 rows and 304 pixels, so
 the screen *contains* the 480×300 plate with four pixels to spare. Rounding the
 other way would have handed the game a 288-pixel screen and clipped the bottom
 twelve pixels off its own artwork, which is the sort of thing that turns into a
@@ -153,12 +153,12 @@ own quiet confirmation that those Blorbs were converted from the Amiga release.
 archive is built the second way the format allows — every picture carrying its
 own compression table rather than sharing one for the whole file, which costs two
 extra bytes in each directory entry. The header says which shape a file is, and
-babelmap reads both. Of the 39 pictures *Shogun*'s Blorb also holds, 34 come off
+lanthorn reads both. Of the 39 pictures *Shogun*'s Blorb also holds, 34 come off
 the floppy byte-for-byte identical; two of the rest differ only in how the Blorb
 rounded the Amiga's 4-bit colours, and the others are places the Blorb kept a
 band, or a retouched version, of art the floppy still has whole.
 
-The PC releases shipped the *same* pictures in a different wrapper, and babelmap
+The PC releases shipped the *same* pictures in a different wrapper, and lanthorn
 reads that too. `.MG1` (MCGA), `.EG1`/`.EG2` (EGA) and `.CG1` (CGA) are the same
 sixteen-byte header and the same directory written the other way round —
 little-endian, x86-style — but the pixels inside are GIF's LZW rather than
@@ -177,7 +177,7 @@ one.
 
 EGA art is 640 pixels wide and did not fit on a 360K floppy, so *Arthur* and
 *Journey* shipped their EGA renditions on two disks — `.EG1` and `.EG2` — and the
-header's first byte says which one you are holding. **Name the first and babelmap
+header's first byte says which one you are holding. **Name the first and lanthorn
 loads both.** You do not have to know the set is split, and you cannot pick half
 of it by accident: the launch dialog and the info panel show a two-disk set as a
 single row, counting the whole thing.
@@ -195,12 +195,12 @@ which looks very much like an EGA-only way of blanking the illustration window.)
 
 Following the part number to the next file is *not* the guess-the-pairing-from-a-
 filename rule the tier list below rejects, and the difference is worth being
-precise about: you have already told babelmap which archive this story uses, and
+precise about: you have already told lanthorn which archive this story uses, and
 this only follows that archive's own in-band part number to the rest of itself.
 The header is then checked — a file under the next part's name that says it is
 some other part, or was written by another codec, or adds no picture the set
 lacks, is **refused and reported**, never merged on the strength of its name.
-babelmap keeps looking until a part is missing, so a title that shipped on three
+lanthorn keeps looking until a part is missing, so a title that shipped on three
 disks would work too.
 
 *Zork Zero* is unaffected: its 360K release gave EGA a whole disk, so `zork0.eg1`
@@ -212,7 +212,7 @@ The Apple II press is the fourth machine, and the one that hides its artwork
 best. There is no archive *file* on any of these disks: the pictures live inside
 the same opaque `.D1`…`.D5` segments as the story, and the segment index says
 where — one block number per segment, zero for a segment carrying no art. Open
-any of these and babelmap merges what it finds into one archive:
+any of these and lanthorn merges what it finds into one archive:
 
 | release | opens from | pictures |
 |---|---|---|
@@ -234,7 +234,7 @@ by Infocom's own Apple interpreter in the dots it is counted in: `MAXWIDTH EQU
 140 ; 560 / 4 = max "pixels"` and `MAXHEIGHT EQU 192 ; 192 screen lines`. One
 Apple picture pixel is four dots of the 560-dot double-hi-res display and one
 scan line tall, and on the 4:3 monitor the machine drove a scan line measures
-about 2.19 dots — so babelmap presents that art at (4, 2) and the story is told
+about 2.19 dots — so lanthorn presents that art at (4, 2) and the story is told
 its screen is **560×384**. Not 640×400: that was what *Arthur* got while its
 artwork was unreadable and nothing declared a picture space, and an archive
 outranks a machine default for the same reason a Macintosh mono `Pic.data` lays
@@ -248,14 +248,14 @@ the Amiga's r54 and the DOS r74, and it is entitled to its own screen.
 | Macintosh mono | 480×300 | 1:1 | 480×300 |
 | Apple II | 140×192 | 4× / 2× | 560×384 |
 
-560×384 is exactly 70×24 of babelmap's 8×16 Version 6 cells, so nothing rounds.
+560×384 is exactly 70×24 of lanthorn's 8×16 Version 6 cells, so nothing rounds.
 (The Apple's *own* character grid was 46×21 on a 3×9 cell, which is a screen
-model rather than a resolution and is a separate thing babelmap does not yet
+model rather than a resolution and is a separate thing lanthorn does not yet
 express — see [`interpreter.md`](interpreter.md).)
 
 ### Choosing which artwork a game draws
 
-Three sources, in decreasing order of how sure babelmap can be that the art and
+Three sources, in decreasing order of how sure lanthorn can be that the art and
 the story belong together:
 
 1. **A Blorb.** The container validates its own contents. Nothing to configure.
@@ -263,7 +263,7 @@ the story belong together:
    came out of one box, so the medium guarantees the pairing. Nothing to
    configure. A multi-disk press can split them: the 360K DOS *Zork Zero* puts
    CGA on disk 1, the story **alone** on disk 2 and EGA on disk 3, so booting the
-   story disk used to draw no artwork at all and offer none to pick. babelmap now
+   story disk used to draw no artwork at all and offer none to pick. lanthorn now
    reads every volume of the release, and prefers the rendition that kept its
    colour when the story's own disk carries none — EGA over CGA, on a terminal
    with rather more than two.
@@ -294,7 +294,7 @@ the story belong together:
 #### A Blorb that belongs to another release is not used
 
 Tier 1's confidence has a limit, and the Apple IIgs *Arthur* found it. That disk
-is release 63 / serial 890622 and carries 168 pictures; babelmap cannot yet read
+is release 63 / serial 890622 and carries 168 pictures; lanthorn cannot yet read
 its artwork off the platter, so it fell through to the resource Blorb beside the
 story — and `Arthur.blb` is the **DOS** press, release 74 / serial 890714, with
 **326**. The two games number their pictures differently, so *Arthur* asked for
@@ -304,11 +304,11 @@ a six-character filename match.
 Blorb has a chunk for exactly this: the optional `IFhd` **game identifier**, which
 records the release, serial and checksum the resources were made for, and which
 the spec says an interpreter *"can check… If they don't [match], the interpreter
-should display an error."* babelmap now checks it, and where the check fails it
+should display an error."* lanthorn now checks it, and where the check fails it
 draws nothing and says why:
 
 ```
-babelmap: warning: Arthur.blb is the artwork for release 74, serial 890714, but
+lanthorn: warning: Arthur.blb is the artwork for release 74, serial 890714, but
 this disk is release 63, serial 890622 — a different build's pictures are not
 being drawn
 ```
@@ -330,9 +330,9 @@ things are therefore *not* contradictions —
   *is* the pairing. *Frobozz Magic Video Poker* is the case that proves it: its
   Blorb is a byte-for-byte copy of *Zork Zero*'s, so it claims to be release 393
   while the game is release 60 — and its own readme tells you to do that, because
-  borrowing *Zork Zero*'s plates is the entire design of the game. babelmap does
+  borrowing *Zork Zero*'s plates is the entire design of the game. lanthorn does
   not overrule someone who has already answered the question.
-- **A disk whose story babelmap cannot identify.** Nothing to compare, so nothing
+- **A disk whose story lanthorn cannot identify.** Nothing to compare, so nothing
   is proven. The check simply gets sharper as the disk readers learn more, and it
   has: see below.
 
@@ -350,7 +350,7 @@ The check now asks the release as a whole. The segment index names which block
 holds story page 0, and that page is where the release, serial and checksum live
 (Quetzal §5.4) — so *which build is this?* is a question **one 512-byte block**
 answers, without reassembling the 344 KB story around it. On the presses where
-babelmap can do both, the page and the full checksum-verified reassembly name the
+lanthorn can do both, the page and the full checksum-verified reassembly name the
 identical build, which is what licenses trusting the page on its own.
 
 Two releases changed, and nothing else in a corpus of 269 files did:
@@ -364,14 +364,14 @@ Two releases changed, and nothing else in a corpus of 269 files did:
 its index declares five segments and the disk carries four, so 92 of the story's
 552 pages are missing and the game cannot be reassembled or played off that image
 at all. It can still say what it is — page 0 survives on `JOURNEY.D1` — and a
-release that cannot be played is still a release whose plates babelmap will not
+release that cannot be played is still a release whose plates lanthorn will not
 guess at. The four-volume Apple II *Zork Zero* press became identifiable in the
 same breath (release 383 / serial 890602) and nothing about it moved, because no
 Blorb in the corpus stem-matches it.
 
 Refusing the wrong plates left these releases drawing nothing at all, and that
 was always meant to be temporary: their own plates *are* on their platters,
-inside the same packed segments. babelmap reads them now — see [Apple II
+inside the same packed segments. lanthorn reads them now — see [Apple II
 artwork](#apple-ii-artwork) below — so *Shogun*'s press draws its own 55, the
 `.2mg` *Arthur* its own 168, and the refusal costs a player nothing. The one
 release still dark is `Journey.2mg`, and for the same reason it cannot be played:
@@ -416,7 +416,7 @@ same place:
 | browsing the library | **Shift-Enter** (or `o`, or a double right-click) on the story |
 | setting it once and forgetting it | `pictures = "…"` in the game's `config.toml` |
 
-`--pictures` is the try-it-once path — `babelmap zork0.z6 --pictures zork0.mg1` —
+`--pictures` is the try-it-once path — `lanthorn zork0.z6 --pictures zork0.mg1` —
 and it composes with your shell, so you can flip between renditions in successive
 launches without touching any config. It **outranks** the config key: the more
 specific and more recent instruction wins. It also *requires* a story on the
@@ -491,7 +491,7 @@ video-poker cabinet, ships a readme telling you to rename one of *Zork Zero*'s
 graphics files to `FMVPOKER.EG1` and drop it alongside. No rule could ever have
 guessed that; one line of config says it outright.
 
-What babelmap deliberately will **not** do is find an archive by name. It sounds
+What lanthorn deliberately will **not** do is find an archive by name. It sounds
 harmless and it is not. These files carry no release number and no serial —
 nothing that ties one to a story — and every Infocom Amiga release names its
 archive the identical `Pic.data`, so a name-based rule needs you to rename things
@@ -503,7 +503,7 @@ knows which game they own. Which is exactly why the name matching described
 above is allowed to exist: it decides which rows you are *shown*, never which
 file gets opened. Nothing downstream of that list acts on it.)
 
-And when the key names a file babelmap can't use — missing, truncated, or not a
+And when the key names a file lanthorn can't use — missing, truncated, or not a
 picture archive at all — it says so, out loud, naming the file and the reason,
 before falling back to the Blorb. The one outcome worth ruling out is a player
 who believes they're looking at original artwork and isn't.
@@ -511,7 +511,7 @@ who believes they're looking at original artwork and isn't.
 Naming an archive also picks the machine. Ask for a game's EGA rendition and you
 are asking for the IBM PC that drew it; ask for its `Pic.data` and you are asking
 for the Amiga, colours and all — see
-[the interpreter profile](interpreter.md#the-interpreter-profile). babelmap works
+[the interpreter profile](interpreter.md#the-interpreter-profile). lanthorn works
 out which from the file's *contents*, never its extension, because the two codecs
 are structurally different and a filename can lie. An explicit
 `interpreter_number` still overrules it.
@@ -557,7 +557,7 @@ screen.
 An MCGA or Amiga picture arrives with its own sixteen colours attached. An EGA or
 CGA one does not, and there is nowhere in its directory record to put them —
 those cards had their palettes soldered in, so Infocom stored the pixels and let
-the hardware supply the rest. babelmap now supplies it too, reading the rendition
+the hardware supply the rest. lanthorn now supplies it too, reading the rendition
 straight out of the directory: nobody carrying a palette means the colours came
 from somewhere else, and every picture flagged two-colour means black and white.
 (Never the file extension. A `.CG1` that somebody renamed is still a `.CG1`.)
@@ -579,7 +579,7 @@ not red: it is brown and bright red in alternating **columns**, one pixel wide,
 and on a 640×200 screen those pixels are half as wide as an MCGA one, so the card
 fused each pair into a colour the palette does not contain. Bocfel puts it
 perfectly: no single pixel of the artwork is the colour the eye actually sees.
-babelmap keeps all 640 columns — that is what makes an EGA plate cover exactly
+lanthorn keeps all 640 columns — that is what makes an EGA plate cover exactly
 the rectangle a 320-wide one does — so it has to do the fusing itself, with a
 three-tap tent across columns as the art comes out of the archive. Do it there
 and bronze is a property of the artwork; leave it to the scale onto your terminal
@@ -620,7 +620,7 @@ Widening the kernel does finish the job: `[1, 2, 2, 2, 1] / 8` has zeros at both
 of the frequencies a 320-wide plate cannot carry, and it takes the flank to 6.98
 against MCGA's 6.05 while pulling the whole frame's distance to the MCGA
 rendition from 27.79 down to 26.04. Every number improves. It is still not what
-babelmap does, because the same frame carries the **compass rose**, whose N, W, E
+lanthorn does, because the same frame carries the **compass rose**, whose N, W, E
 and S are 640-wide line art the card resolved perfectly well — and at that width
 they stop being letters and become smudges. One plate, two kinds of detail at the
 same frequency, and no single linear filter tells them apart. The tent keeps the
@@ -640,7 +640,7 @@ deliberate, and whatever sits behind it becomes a colour the artwork never had t
 store. Both are lost the moment something paints a page underneath, and *Zork
 Zero* asks for one — it sets black-on-white at boot and does so for every video
 card alike, because the story file cannot see which archive you loaded. So
-babelmap tells a game drawing two-colour artwork that the interpreter has no
+lanthorn tells a game drawing two-colour artwork that the interpreter has no
 colours to offer, which is true, and the game stops asking. Your theme owns the
 page, the stencil reveals it, and the artwork comes out in your colours. It
 applies to that story only — it never touches your saved settings, so opening a
@@ -660,7 +660,7 @@ to the IBM PC profile and the stencil rule fires on it unchanged.
 Neither is *adaptive*, which matters more than it sounds. A picture that carries
 no palette normally means "draw me with whatever palette is current" (below), and
 an EGA picture carries none for an entirely different reason — it has no say in
-its colours at all. babelmap keeps those out of the Current-Palette machinery
+its colours at all. lanthorn keeps those out of the Current-Palette machinery
 altogether, so nothing can tint a rendition whose colours were decided by a chip.
 
 ## Splitting the screen TILES it
@@ -689,7 +689,7 @@ game re-places the window itself when the splash goes.
 Some games never lay out at all. Inform 6's v6 library leaves *every* window at
 height zero and flows its prose through the transcript, so the screen model would
 otherwise come out completely empty and the composite would ship a blank page. For
-that — and only that — babelmap synthesises a full-screen story window out of the
+that — and only that — lanthorn synthesises a full-screen story window out of the
 header's own character dimensions, so the streamed text still has somewhere to
 live. The question it asks is "did *nothing at all* survive?", which sounds
 obvious and was not: it used to ask whether the surviving windows had a zero
@@ -728,7 +728,7 @@ text read at its period-screenshot size *relative to the picture*, instead of
 the oversized 40-columns-over-320px look you get if you take the art dimensions
 at face value.
 
-babelmap now does exactly that (matching Frotz's DOS/Amiga profile). The engine
+lanthorn now does exactly that (matching Frotz's DOS/Amiga profile). The engine
 reports a 640×400 screen (2× the Blorb `Reso` standard window, or a plain
 640×400 when a story ships no `Reso`), an 8-wide-by-16-tall font cell, and
 answers `picture_data` with the **doubled** dimensions — so the game lays its
@@ -756,7 +756,7 @@ window 1000×1000 so a string it is about to print cannot wrap, reads the width
 back, and moves on. Taken literally that one window is bigger than the screen,
 and since the composite spans every window the game has open, the whole picture
 would shrink to fit it — the table crammed into a corner with black bands where
-the oversized window's page fell off the world. babelmap draws the part of a
+the oversized window's page fell off the world. lanthorn draws the part of a
 window that exists: each box is clipped to the screen the header declares
 (§8.4.3's width and height words) before anything is composited. The clip is
 purely what gets *drawn* — the interpreter still reports the size the game wrote
@@ -829,7 +829,7 @@ replication, and the corpus tests pin it that way.
 
 The rule outgrew v6. It arrived here because Journey's canyon needed it, but nothing
 about "filter by the direction the axis moves" is Z-machine-shaped, and every other
-place babelmap scaled a picture had quietly picked its own answer: Glulx's
+place lanthorn scaled a picture had quietly picked its own answer: Glulx's
 `glk_image_draw_scaled` smoothed art it was *enlarging*, and cover art, gallery
 tiles, the resource preview and the non-Kitty graphics-window blit all deferred to
 the image crate's default filter, which is nearest — a decimation, at exactly the
@@ -841,7 +841,7 @@ answer and not six.
 ### The seam that came with it
 
 An area filter averages neighbours, and it will happily average a pixel that is not
-there. babelmap's canvases are RGBA, and a *transparent* pixel carries the colour
+there. lanthorn's canvases are RGBA, and a *transparent* pixel carries the colour
 `(0,0,0)` behind its zero alpha — a colour no game ever drew. Filter the four
 channels independently and every place opaque art meets clear canvas comes out with
 its colour dragged toward black and its alpha dropped to match; composited, that
@@ -936,7 +936,7 @@ session-only switch that never touches your saved config:
   compass) renders as a single scaled pixel image forming a **ring** around an
   inset viewport, and the story text inside that viewport is real terminal
   text: crisp, selectable, scrollable, and styled exactly like any other
-  babelmap transcript — including its own inline images (see below). The ring
+  lanthorn transcript — including its own inline images (see below). The ring
   is tiled into up to four non-overlapping bands (top/bottom/left/right)
   around the viewport; a band flush against the pane edge is simply omitted.
   Each top/bottom band is then decomposed further: a horizontal strip that is
@@ -991,7 +991,7 @@ session-only switch that never touches your saved config:
   prints its whole title inside, only 17% of its pixels painted, which the fill test
   missed at every point that mattered. The Mysterious Adventures are neither kind —
   their boot stacks two 512×192 title cards down the left of the screen, leaving the
-  right-hand quarter bare — and for a while babelmap drew neither card, because two
+  right-hand quarter bare — and for a while lanthorn drew neither card, because two
   tests for two particular shapes had quietly stood in for the one fact that
   mattered. Both shapes are special cases of it, and the general rule moves no other
   title: crisp terminal cells are worth having, but not at the price of the picture.
@@ -1012,7 +1012,7 @@ session-only switch that never touches your saved config:
 
   That capability retired the fourth way a frame could have no ring. fmvpoker used
   to lose its whole frame for as long as the player took to type a bet: choosing
-  *Change Current Bet* hands the read to its bottom panel, and while babelmap
+  *Change Current Bet* hands the read to its bottom panel, and while lanthorn
   treated that panel as the story window, the window still holding the poker table
   stopped being one and the table was drawn by nobody. Two separate fixes have since
   removed that — a display panel the game declares is not its transcript never
@@ -1072,7 +1072,7 @@ session-only switch that never touches your saved config:
   window's text away with the story (the game warns about exactly that). Which
   window carries the narrative is the game's own declaration: ZMSD §8.8.3.1's
   attribute 2, "text copied to output stream 2", is set on the transcript's window
-  and cleared on a display window. babelmap follows that — with the window the game
+  and cleared on a display window. lanthorn follows that — with the window the game
   reads input through as the fallback for a game that declares nothing — and gives
   every other prose window its own buffer, drawn in its own rect. A **read does not
   overrule the declaration**: fmvpoker prints "Enter the new bet:" into its bottom
@@ -1094,7 +1094,7 @@ session-only switch that never touches your saved config:
 - **Erased windows are opaque.** On a real interpreter every v6 window is a
   clipping region over one shared screen bitmap, so erasing a window paints its
   rect with that window's background — which is what makes a hint menu hide the
-  story behind it. babelmap composites layers instead, so it tracks the erase:
+  story behind it. lanthorn composites layers instead, so it tracks the erase:
   a window stays an opaque field until the story prints another character, at
   which point the prose is the newer paint and the fill stops covering. That one
   rule keeps both cases right — advent.z6's `help` (erase the screen, split a
@@ -1273,7 +1273,7 @@ session-only switch that never touches your saved config:
   three recipes are per title, because the artwork is: the mechanism is a port of
   Bocfel's `draw_border.cpp`, which Spatterlight ships, and which hard-codes per
   game *and* per platform for the same reason. It can afford to, because it draws
-  one rendition per run; babelmap lets you switch archives mid-library, and Zork
+  one rendition per run; lanthorn lets you switch archives mid-library, and Zork
   Zero's renditions **disagree about where its pillars start** — the banner above
   them is 34 raw rows on MCGA, 37 on EGA and 39 on CGA, while the pillars are 166
   rows in all three. A repeat unit pinned to one of those layouts lands inside the
@@ -1309,7 +1309,7 @@ session-only switch that never touches your saved config:
   between them.
   **A shaft has to be most of the flank, or it isn't one.** Zork Zero has three
   scene borders — the castle, the underground and the jungle — and Spatterlight
-  picks between them by reading the game's own border global, which babelmap has no
+  picks between them by reading the game's own border global, which lanthorn has no
   path to: picture numbers do not survive the engine boundary, and the renderer is
   handed a flattened canvas. Measuring the repeat unit rather than pinning it was
   right for the castle and wrong for the other two, and wrong in an unusually
@@ -1509,7 +1509,7 @@ session-only switch that never touches your saved config:
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively. Its default ink/page follow the theme; where the
-  theme leaves them at "terminal default", babelmap probes the terminal's own
+  theme leaves them at "terminal default", lanthorn probes the terminal's own
   foreground/background at startup (OSC 10/11) and paints in those, so raster
   text stays readable on a light-background terminal instead of forcing a
   fixed light-grey-on-black.
@@ -1572,7 +1572,7 @@ a beside-the-story picture column letterboxes in the `graphics` selector's style
 ## Illuminated drop-caps and room icons, inline
 
 Window 0's own pictures — Zork Zero's illuminated drop-caps and small room
-icons — aren't separate chrome; they're story content. babelmap floats them
+icons — aren't separate chrome; they're story content. lanthorn floats them
 at the left margin of the story text and wraps the surrounding lines beside
 them, so they scroll naturally with the transcript instead of sitting in a
 fixed frame.
@@ -1632,12 +1632,12 @@ always did.
 **So is the picture's own ground.** These are cut-out PNGs — an ornate letter and
 a little room icon, mostly holes — and the image protocol keeps that transparency
 and hands it to the *terminal* to resolve, which never consults the cells
-underneath. So babelmap resolves it first, against the page the picture is
+underneath. So lanthorn resolves it first, against the page the picture is
 standing on, and the question is only which page that is. A window that named a
 background with `set_colour` has answered it; failing that, the **machine** has,
 if it is one of the two whose §8.3.3 defaults are its screen rather than advice
 about a terminal. Zork Zero off its Macintosh release disk never calls
-`set_colour` even once, so until babelmap asked the machine, every drop-cap and
+`set_colour` even once, so until lanthorn asked the machine, every drop-cap and
 every room icon on that disk was cut out against the theme's own dark chrome
 while the page around it was the Mac's white — a black tile under each picture on
 a white sheet. The Amiga's grey page answers for Arthur, Shogun and Journey the
@@ -1664,7 +1664,7 @@ ever going to place them. What settles them instead is asking what the cursor
 test is actually worth on that frame: landing on the text cursor means the
 picture belongs to the line being written, and at boot **nothing has been written
 at all**. The cursor is simply where the screen-clear left it, so a picture that
-matches it matches nothing. babelmap now counts the characters window 0 has
+matches it matches nothing. lanthorn now counts the characters window 0 has
 streamed, and treats hitting the cursor as evidence only when there were some.
 Every genuine float in the catalogue is drawn into a window that has already
 printed something; every coincidence is not.
@@ -1678,7 +1678,7 @@ and draws the plate there. The Merlin screen redraws the graveyard at that same
 origin and composites Merlin *inside* it, so the wizard appears on the graveyard
 in a single frame rather than beneath it in a second one.
 
-babelmap honours that arithmetic. A window-0 picture the game placed rather than
+lanthorn honours that arithmetic. A window-0 picture the game placed rather than
 inlined gets a real window canvas, at the pixel origin the game named, and later
 draws composite into the same canvas exactly as they would on an Amiga. The
 centring margin the game deliberately left around the plate stays the story
@@ -1693,7 +1693,7 @@ the cursor and waits for a key — the whole graveyard→Merlin turn is thirty-o
 instructions and prints not one character. Its narration is a *separate*,
 picture-less screen, erased before the next plate goes up. So when a placed plate
 leaves no column wide enough to wrap prose into, the picture owns the screen and
-babelmap draws no story text on that frame — the same rule a window-filling
+lanthorn draws no story text on that frame — the same rule a window-filling
 picture like Zork Zero's rebus already followed. A plate that *does* leave a real
 column — a margin illustration, a corner logo — still gets prose beside it.
 
@@ -1710,7 +1710,7 @@ centring margin, so they still own their screens.
 
 The story window has to be seated inside whatever the game drew around it: Zork
 Zero rings it with a carved frame, Arthur hangs a graphics panel above it, Journey
-puts an illustration down its left side. babelmap finds the room by shrinking the
+puts an illustration down its left side. lanthorn finds the room by shrinking the
 window's rectangle, edge by edge, until no edge touches anything opaque — and for
 a long time "opaque" meant *any* pixel already on the canvas, which includes the
 rasterized glyphs of the game's own menus.
@@ -1737,14 +1737,14 @@ clear rectangle left for the transcript drops onto the very box the game gave it
 bottom panel — and the panel is where the hand is announced, *You draw (a) an
 Eight, (b) a Three, (c) an Ace…*, the only place the cards are named. The boot
 banner was written across it. The rule that settles it is a difference in kind: a
-transcript is babelmap's re-reading of everything the story window has ever said,
+transcript is lanthorn's re-reading of everything the story window has ever said,
 while a label another window is holding is on the screen *right now*. Where they
 land on the same cell, the live label wins, and everything the transcript owns
 outside those cells still prints.
 
 The same distinction settles how a reverse-video run is drawn. Highlighting a run
 means painting a solid block and cutting the glyph out of it — except over frame
-art, where a block would erase the picture, so babelmap draws dark ink directly on
+art, where a block would erase the picture, so lanthorn draws dark ink directly on
 the art instead (that is how Zork Zero's ribbon labels sit on their banner). The
 "is there art here?" test also used to read the live canvas, where an earlier run's
 own highlight block looks exactly like artwork. advent's help screen is drawn as
@@ -1765,7 +1765,7 @@ machines these games were written for you watched the graveyard fill the screen 
 *then* watched Merlin arrive on top of it, because each `draw_picture` blitted as
 its opcode ran.
 
-babelmap plays that back. The turn still runs straight through — the interpreter
+lanthorn plays that back. The turn still runs straight through — the interpreter
 never blocks, never yields mid-picture, and the composite it ends on is exactly the
 one it built before — but the renderer walks the screens the turn passed through on
 the way there, one per frame. The wait between them is proportional to the area
@@ -1789,14 +1789,14 @@ machines that painted at a visible speed.
 
 ## Prose the game positions itself
 
-A v6 window that wraps and scrolls streams its text, and babelmap renders that
+A v6 window that wraps and scrolls streams its text, and lanthorn renders that
 stream as real terminal text — selectable, scrollable, reflowing to your pane.
 But a game can still position that prose horizontally, and some do. Shogun's
 title screen is the case: for every header line it reads its own window's width,
 computes the centred column, moves the cursor there, and prints the line with no
 leading spaces whatsoever. The centring lives entirely in the cursor move.
 
-babelmap carries that declaration into the text stream as an indent. The v6 cell
+lanthorn carries that declaration into the text stream as an indent. The v6 cell
 is 8 pixels wide, so the pixel column and the character column are the same
 measurement — column 297 is character 37, which is exactly where a six-letter
 title centres on an eighty-column screen. Every line of Shogun's header lands on
@@ -1834,9 +1834,9 @@ row beneath it played the hand.
 **A keypress turn's output does not automatically open a line, either.** The
 transcript puts each turn's output on a fresh line, and for a typed command that is
 right: an interpreter echoes a `read` together with its terminating newline
-(§7.1.1.1), so babelmap appends what you typed to the game's `>` and lets the reply
+(§7.1.1.1), so lanthorn appends what you typed to the game's `>` and lets the reply
 start below. `read_char` echoes nothing at all (§10.7), so for a keypress turn that
-line break is babelmap's own invention — and whether it belongs cannot be read off
+line break is lanthorn's own invention — and whether it belongs cannot be read off
 the text, because a game redrawing a menu moves its cursor and prints no newline
 either way. The game's cursor is asked instead: output whose first character lands
 exactly where the last output left the cursor continues that line, and everything
@@ -1850,7 +1850,7 @@ fmvpoker's menu repaints — keep their line breaks, because their cursor says s
 ## A window the game drew a frame around is a canvas, not a page
 
 The story window is a transcript in every Infocom v6 title: text streams into it,
-babelmap keeps the scrollback, and you can page back through it. Frobozz Magic
+lanthorn keeps the scrollback, and you can page back through it. Frobozz Magic
 VideoPoker is not built that way. It draws a poker table across the whole screen,
 grows its story window to the whole screen behind it, and then *positions*
 everything it has to say — `HOLD` under each card you are holding, the running
@@ -1867,7 +1867,7 @@ prompt. All of them mean *resume the story here*, with the identical signal
 fmvpoker uses to mean *paint this under that card*. Under that rule Arthur's
 `CHURCH` came out as a painted `C` and a streamed `HURCH`.
 
-So babelmap asks what kind of **surface** the window is, not what a run means.
+So lanthorn asks what kind of **surface** the window is, not what a run means.
 Arthur's story window is a transcript that happens to have plates drawn on it;
 fmvpoker's is a picture frame that happens to have text positioned in it. The
 discriminator is that the window's own art **encloses** it — painted pixels within
@@ -1877,7 +1877,7 @@ a game positions text inside. A window like that renders as what is sitting on i
 at the coordinates the game named, and carries no transcript at all — which is
 exactly how a real interpreter shows it, and it is the same idea as a window
 keeping the ground it painted, applied to the text on that ground. Measured across
-every v6 title babelmap is tested against, one game answers to it.
+every v6 title lanthorn is tested against, one game answers to it.
 
 ## Prose freezes where it was printed when its window moves
 
@@ -1886,7 +1886,7 @@ change the current display". Text already printed is pixels, and pixels do not
 follow a box around. Shogun's opening depends on it — the whole nine-line title
 header is printed while window 0 *is* the screen, and then window 0 drops to a
 tiny box at the bottom beside the menu and prints "You may choose to:" there. On
-an Amiga the header simply stays up top; babelmap streamed both halves into one
+an Amiga the header simply stays up top; lanthorn streamed both halves into one
 transcript, so the prompt came out jammed under the banner and the banner
 promptly scrolled out of a four-row box.
 
@@ -1941,7 +1941,7 @@ art the cell path has deliberately dropped. Nothing above the story window at al
 means nothing to sit below, and the transcript keeps the top of your pane.
 
 **A cleared screen starts at the top of its box, in every mode.** When a game
-clears the screen, babelmap pins what it prints next to the *top* of the story
+clears the screen, lanthorn pins what it prints next to the *top* of the story
 window and leaves the rest blank, rather than sticking to the bottom and dragging
 pre-clear history back into view — your scrollback is all still there, one scroll
 up. The cell paths have always done this; `raster` now does too, which is what
@@ -1966,7 +1966,7 @@ was.
 
 ## …and so do pictures
 
-Same rule, one layer over. babelmap keeps each v6 window's art on a canvas of its
+Same rule, one layer over. lanthorn keeps each v6 window's art on a canvas of its
 own and paints that canvas wherever the window currently is, which tells the truth
 right up until the game moves the window. scopa never stops moving it. Every
 picture it draws goes through a scratch window it borrows for exactly one
@@ -2081,7 +2081,7 @@ Shogun's opening is the classic: the game draws its harbour illustration at the
 back past the art (that's the Z-Machine Standard's margin-picture idiom — a
 picture parked at a window edge with the margins pulled in around it). The story
 text fills the narrower **left** column beside the picture, then reclaims the
-full width the moment it scrolls below the art. babelmap honours the game's own
+full width the moment it scrolls below the art. lanthorn honours the game's own
 margins: the engine records them (and snaps the cursor home on either edge, per
 §15), and both `raster` and `hybrid` float the picture to its placed side —
 right for Shogun, left for a drop-cap — wrapping the prose in the column the game
@@ -2094,7 +2094,7 @@ Some v6 titles paint a big picture straight into a graphics window: Shogun's
 320×200 title screen, Zork Zero's cutscene illustrations. `hybrid` and `raster`
 draw those windows directly. The removed `frameless` mode dropped the graphics
 windows that frame the story, so it would have lost the splash entirely — and to
-save it, babelmap used to recognise a *content-sized* draw and re-emit it as a
+save it, lanthorn used to recognise a *content-sized* draw and re-emit it as a
 one-off inline image band in the transcript, anchored where the game drew it,
 which every other mode then had to skip so the art was not drawn twice.
 
@@ -2107,7 +2107,7 @@ and a per-window redraw dedupe — is gone with it.
 The size classifier stayed, because it answers a second question too: whether a
 window-0 picture floats inline in the prose or reserves a margin beside it.
 
-The catch is telling a splash from decoration. babelmap classifies a
+The catch is telling a splash from decoration. lanthorn classifies a
 graphics-window picture by its size against the reported screen: a picture is
 **content** when it covers ≥ 40% of the screen area, or is ≥ 60% of the screen
 width *and* ≥ 30% of its height; a narrow strip (≤ 15% of screen width, like
@@ -2158,7 +2158,7 @@ each Version 6 window its own pair — not one page shared by the screen. It
 matters most where the art is mostly holes: Zork Zero's compass and room icons
 are line art on a clear ground (95% transparent) and hang below the banner
 artwork, so the pixels behind them are pixels nobody painted. Left transparent,
-the graphics protocol picks the colour, and it picks black. babelmap paints each
+the graphics protocol picks the colour, and it picks black. lanthorn paints each
 chrome window's own page into its untouched pixels instead, so the ring it
 uploads is self-contained. Only `alpha == 0` pixels are filled — artwork, status
 bands, glyphs and the icons' own ink are untouched, the story box stays clear for
@@ -2220,7 +2220,7 @@ colours, then stamps adaptive overlays on top expecting them to inherit that
 mood. Decode each one with its own placeholder instead and the compass comes
 out in garish primary EGA, clashing with everything around it.
 
-babelmap now tracks that Current Palette as it draws, and when an adaptive
+lanthorn now tracks that Current Palette as it draws, and when an adaptive
 picture comes up it splices the current colours into the picture before
 decoding — keeping the overlay's own transparency intact, so the arrow still
 cuts a clean hole in the rose. Because the *same* overlay can legally be drawn
@@ -2246,20 +2246,20 @@ floppy is the source that is right.
 ## Arrow keys: movement or map panning, your call
 
 Several v6 titles bind the arrow keys straight to movement — press ↑ and your
-character walks north. That's authentic, but it collides with babelmap's own
+character walks north. That's authentic, but it collides with lanthorn's own
 use of arrows for scrollback recall and map panning, which some players would
 rather keep. Set `v6_arrow_keys = false` in the config (or flip it right in
 the settings screen) and arrows are withheld from v6 stories — but only at the
 `>` prompt, where the movement-vs-panning clash actually happens. There, instead
 of being delivered as a ZSCII cursor code, the keypress falls through to whatever
-babelmap would do with it if no game input were pending — command-history recall
+lanthorn would do with it if no game input were pending — command-history recall
 or map panning, depending on focus.
 
 Menus are the deliberate exception. Whenever a v6 story is waiting on a single
 keypress rather than a line — Shogun's startup menu, hint menus, a "press any
 key" pause — arrows always reach the game, setting or no setting, because those
 screens are unnavigable without them. So the rule is simply: arrows drive
-babelmap at the prompt, and drive the game everywhere else.
+lanthorn at the prompt, and drive the game everywhere else.
 
 Enter and every other key are untouched, and v1–v5/Glulx stories keep getting
 arrows regardless of this setting; it only ever withholds them from a v6 prompt.
@@ -2275,7 +2275,7 @@ a spoke and you walk.
 
 The automapper comes along for the ride. A click types nothing, so there is no
 command to parse a direction from — but the game echoes the command it
-synthesized (`north`, alone on the first output line), and babelmap adopts that
+synthesized (`north`, alone on the first output line), and lanthorn adopts that
 echo as the turn's movement command. A compass-clicked move draws the same
 directional edge on the map, and records the direction as tried, as if you had
 typed it.
@@ -2285,7 +2285,7 @@ typed it.
 An image sent to a kitty terminal stays there until something says otherwise.
 Placing a new one over it does not free it; closing the window it belonged to does
 not free it; clearing the screen does not free it. Only an explicit delete does,
-and babelmap now sends one for every picture it walks away from — a chrome band
+and lanthorn now sends one for every picture it walks away from — a chrome band
 whose art changed, a band the ring no longer draws, and the full-pane raster
 composite, which is the largest single thing the app ever uploads (2.8 MB of
 Journey's opening screen, at a 117×64 terminal).
@@ -2362,7 +2362,7 @@ difference between a boot animation that feels snappy and one that does not.
 ## `/dump-windows` reports the last frame the *game* drew
 
 When a v6 layout looks wrong, `/dump-windows` is how you say what you saw: one
-block per window, merging the game's own window table, the model babelmap built
+block per window, merging the game's own window table, the model lanthorn built
 from it, and where the renderer actually put each one on the terminal — the three
 things that have to agree.
 
@@ -2371,7 +2371,7 @@ or a hotkey dialog and you are opening a modal overlay, which routes the v6 pane
 off its pixel path — so the frame *most recently drawn* when the dump runs is the
 palette's, in which every one of the game's windows is honestly reported as
 `NOT DRAWN this frame`. That is the one thing nobody opened the dump to learn. So
-babelmap keeps the mapping from each frame the **game** drew, and the dump
+lanthorn keeps the mapping from each frame the **game** drew, and the dump
 describes that one: its render path, its pane, its story viewport, its per-window
 cells and chrome strips, and the ring's own plan and clip for that frame. A
 `frame described:` line says which frame it is and how many modal frames have
@@ -2413,7 +2413,7 @@ carrying no crop because there is nothing to crop, while a plain `flank-divider`
 with a native crop beside it is still a bitmap. "The frame's sides are a picture of
 a character" is a sentence this dump can now say in one line.
 
-The dump also lands in **`~/.babelmap/dump-windows.log`**, appended, with a
+The dump also lands in **`~/.lanthorn/dump-windows.log`**, appended, with a
 timestamp per capture, and the transcript line names the path. Selecting the
 on-screen copy off a v6 pane drags the graphics protocol's own placeholder glyphs
 along with it — the diagnostic corrupted by the thing it is diagnosing — and the
@@ -2459,7 +2459,7 @@ Above the grid, three summaries do the counting for you:
   styles (one per pixel pair); past the first 48 the tail is bucketed under `*`
   with its own count and extent, so the legend never buries the dozen that matter.
 
-The whole capture goes to **`~/.babelmap/dump-cells.log`**, appended and
+The whole capture goes to **`~/.lanthorn/dump-cells.log`**, appended and
 timestamped, and the transcript line names the path — only the path, because the
 grid is two lines per row and echoing it would scroll the very frame your next
 capture is meant to describe. Like the window dump, it lands in a file because a

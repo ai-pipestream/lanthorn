@@ -1,5 +1,5 @@
 //! SQ-0656: what the host may and may not do to a Glulx session while the GAME's
-//! own `@save`/`@restore` is suspended on one of babelmap's dialogs.
+//! own `@save`/`@restore` is suspended on one of lanthorn's dialogs.
 //!
 //! Three things converge on that window: the player can answer the game's RESTORE
 //! dialog with a host **Save State** instead (a full machine swap under a

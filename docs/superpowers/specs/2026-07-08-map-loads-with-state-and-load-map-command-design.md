@@ -1,11 +1,11 @@
-# Map Loads With Babelmap State + `/load_map` Command — Design
+# Map Loads With Lanthorn State + `/load_map` Command — Design
 
 **Date:** 2026-07-08
 **Status:** Approved for planning
 
 ## Goal
 
-A map must never auto-load on its own. It loads **only** as part of a `.babelmap`
+A map must never auto-load on its own. It loads **only** as part of a `.lanthorn`
 archive's state (whether that state is auto-resumed at startup or loaded
 explicitly). Standalone map files enter **only** on demand via a new
 `/load_map <path>` command.
@@ -15,7 +15,7 @@ explicitly). Standalone map files enter **only** on demand via a new
 Startup (`crates/app/src/main.rs:1736-1786`) loads the map from three places, all
 too eager:
 
-1. From the per-story `.babelmap` archive — `ac.mapper` is adopted
+1. From the per-story `.lanthorn` archive — `ac.mapper` is adopted
    **unconditionally** (`main.rs:1771`) whenever the archive exists, *independent*
    of `cfg.auto_load` (which today gates only the game-state VM restore). So even
    when you start a fresh game (`auto_load = false`), the accumulated map still
@@ -88,7 +88,7 @@ The only way a standalone map enters. Registered in the `slash::COMMANDS` regist
 
 ## Testing
 
-- **Startup coupling:** with a `.babelmap` archive present, `auto_load = true` yields
+- **Startup coupling:** with a `.lanthorn` archive present, `auto_load = true` yields
   the archive's map; `auto_load = false` yields an empty map. (Unit-test the load
   decision, or a focused integration around the startup mapper selection.)
 - **No standalone auto-load:** a bare `<ifid>.map.json` on disk is ignored at

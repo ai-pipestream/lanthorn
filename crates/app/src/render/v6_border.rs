@@ -2,7 +2,7 @@
 //!
 //! Three of the graphical v6 titles frame their story window with side artwork
 //! that was authored for a 320x200 screen and does not reach the bottom of a
-//! modern pane. babelmap used to make up the difference by *stretching* the
+//! modern pane. lanthorn used to make up the difference by *stretching* the
 //! flank band vertically (SQ-0511), which elongates the art by whatever the
 //! letterbox slack happens to be — measured at 2.2x on Zork Zero and 3.0x on
 //! Shogun at a 117x64 terminal, against a horizontal factor of 1.0x. Shogun and
@@ -26,11 +26,11 @@
 //! could not do it either, hard-coding per game *and* per platform. What is
 //! derived here is WHICH of the three known layouts a flank is showing
 //! ([`recognize`]), from the art's own native extent — and, for Zork Zero, WHERE
-//! its pillars are ([`pillar_shaft`]), because babelmap lets the player choose
+//! its pillars are ([`pillar_shaft`]), because lanthorn lets the player choose
 //! the rendition and Bocfel does not. Everything else is per title, named, and
 //! sourced.
 //!
-//! Every row coordinate in this file is in babelmap's v6 **unit space**, which
+//! Every row coordinate in this file is in lanthorn's v6 **unit space**, which
 //! is the art's own pixels doubled *vertically* (`session::V6_ART_SCALE` = 2;
 //! the horizontal factor is 1 for a 640-wide EGA or CGA archive, whose pixels
 //! are half as wide — SQ-0790). Bocfel's constants are in raw art rows, so each
@@ -235,7 +235,7 @@ fn repeats_an_ornament(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), hi
 /// A v6 screen is the archive's picture space rounded UP to a whole cell, so a
 /// full-height plate can stop short of the screen by that rounding. Every
 /// rendition but one divides exactly and nobody noticed: the standard
-/// Macintosh's monochrome archive is 480x300 laid on babelmap's 8x16 cell, which
+/// Macintosh's monochrome archive is 480x300 laid on lanthorn's 8x16 cell, which
 /// rounds to a **304**-row screen (SQ-0838 — see `InterpreterProfile::v6_font_cell`
 /// for the four pixels of slack it names by hand). Zork Zero's monochrome
 /// pillars are painted to row 300 of that 304, so an exact test read them as
@@ -446,7 +446,7 @@ pub fn extend_pillars(
 /// Bocfel additionally shortens the foot on Amiga (`foot_height -= top_margin;
 /// total_height -= top_margin`). That does NOT transfer: `arthur_pic_top_margin`
 /// is a Glk window-layout quantity Bocfel introduces because it re-places
-/// Arthur's frame itself, quantised to its own cell height. babelmap never
+/// Arthur's frame itself, quantised to its own cell height. lanthorn never
 /// re-places the art — the game draws it and we read the canvas back — so there
 /// is no top margin to subtract. Measured on `Arthur - The Quest for
 /// Excalibur.adf` (release 54, serial 890606): the poles run native rows
@@ -485,7 +485,7 @@ fn arthur(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
 /// status bar — *"the raw border graphics have a decorative top bar that doesn't
 /// fit the header text, so the original interpreters cover it with a solid color
 /// rectangle"* — is step 4 of `draw_border_common`, drawn AFTER the extension,
-/// so the copies it stamps are of the unmasked picture. babelmap's chrome canvas
+/// so the copies it stamps are of the unmasked picture. lanthorn's chrome canvas
 /// is the same art with that band already gone: Shogun's status line is two
 /// 16px rows the renderer draws as crisp terminal cells (SQ-0500), so the top
 /// **32 native rows** of the flank are transparent there while the
@@ -760,7 +760,7 @@ pub fn extend_banded_pillars(dst: &mut RgbaImage, top_cut: u32, art_bottom: u32,
 /// every one of those four numbers **measured off the art** instead.
 ///
 /// Bocfel can hard-code them because it only ever draws one rendition per run,
-/// chosen by display mode; babelmap lets the player switch archives, and Zork
+/// chosen by display mode; lanthorn lets the player switch archives, and Zork
 /// Zero's renditions do not agree on where the pillars begin. The banner above
 /// them is 34 raw rows on MCGA, **37 on EGA and 39 on CGA**, while the pillars
 /// are 166 rows in all three — so a cut pinned to 86 in unit space lands 6 rows

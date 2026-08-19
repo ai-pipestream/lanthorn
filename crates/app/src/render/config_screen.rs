@@ -13,7 +13,7 @@ use crate::state::AppState;
 /// (`config_toggle_or_edit` / `config_cycle` in `input.rs`) and in
 /// `config_row_value` below — APPEND new rows, never reorder.
 pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
-    ("user_dir",             ConfigRowKind::Path, "Where babelmap keeps saves, maps, and settings (default ~/.babelmap)."),
+    ("user_dir",             ConfigRowKind::Path, "Where lanthorn keeps saves, maps, and settings (default ~/.lanthorn)."),
     ("auto_load",            ConfigRowKind::Bool, "Resume your last session automatically on launch."),
     ("auto_save",            ConfigRowKind::Bool, "Save the archive after every turn, not just on quit or Ctrl+S."),
     ("prompt_save_on_quit",  ConfigRowKind::Bool, "Ask to save when you quit (only matters when auto_save is off)."),
@@ -37,7 +37,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
     ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
     ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal story in a scaled pixel frame) or raster (whole pane as one pixel image)."),
-    ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive babelmap's scrollback and map panning instead."),
+    ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive lanthorn's scrollback and map panning instead."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]

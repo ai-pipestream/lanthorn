@@ -6,7 +6,7 @@
 
 ## Goal
 
-An in-app modal to view and edit the **scalar/enum/preset** config options, with an explicit **Save** (writes `~/.babelmap/config.toml`, format-preserving, and applies to the running session) and **Cancel** (discard). CLI-overridden values are shown read-only/marked (command-line already wins this session via `Config::resolve`). Complex list/map options (keymap bindings, symbol per-glyph overrides, color elements, hotkey groups) are edited via their dedicated tools (hotkey dialog, gallery, config file) and are out of scope here.
+An in-app modal to view and edit the **scalar/enum/preset** config options, with an explicit **Save** (writes `~/.lanthorn/config.toml`, format-preserving, and applies to the running session) and **Cancel** (discard). CLI-overridden values are shown read-only/marked (command-line already wins this session via `Config::resolve`). Complex list/map options (keymap bindings, symbol per-glyph overrides, color elements, hotkey groups) are edited via their dedicated tools (hotkey dialog, gallery, config file) and are out of scope here.
 
 ## Settings shown (v1)
 

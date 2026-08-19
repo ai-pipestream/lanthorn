@@ -281,7 +281,7 @@ fn advent_style_command_moves_the_story_window() {
 /// SQ-0584: `help` opens a hint-style menu — window 1 split to 160px, ERASED, then
 /// painted with the subject list. On a real interpreter every v6 window is a clipping
 /// region over ONE screen bitmap, so that erase is opaque paint and the menu hides the
-/// story behind it. babelmap composites layers instead, and an erased window used to
+/// story behind it. lanthorn composites layers instead, and an erased window used to
 /// be simply transparent: the menu's text floated over the room description with
 /// nothing behind it. The panel must read solid, and the story must come back
 /// untouched when the menu closes (advent erases and reprints on the way out).

@@ -55,7 +55,7 @@ pub(crate) struct BootResult {
 }
 
 /// The one-time launch context resolved before the picker→play loop: parsed
-/// args, config, the saves/sidecar base dir, and whether babelmap was launched
+/// args, config, the saves/sidecar base dir, and whether lanthorn was launched
 /// against a directory (a story library) or a single file. `resolve_launch`
 /// builds this ONCE; `boot_story` consumes it (by reference) per story so a
 /// library launch can replay the build for each chosen story. (SQ-0435)
@@ -90,7 +90,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     app::theme::template::auto_seed(&cfg.user_dir);
 
     // …and the same treatment for config.toml (SQ-0573): a fully commented template
-    // listing EVERY setting at its default, so what babelmap can be told to do is
+    // listing EVERY setting at its default, so what lanthorn can be told to do is
     // discoverable from the file rather than only from the source. Same contract as
     // the style seed — never overwrites, best-effort. Seeded at the RESOLVED config
     // path (`--config`/`--user-dir`/default), not `user_dir`, so the file we seed is
@@ -104,7 +104,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         Some(p) => p,
         None => {
             eprintln!(
-                "babelmap: no story given. Pass a story file or directory, or set \
+                "lanthorn: no story given. Pass a story file or directory, or set \
                  `default_story_dir` in {}.",
                 config_path(&cli).display(),
             );
@@ -121,15 +121,15 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
             story_path.display()
         ))
     {
-        // Store an absolute path so a later bare `babelmap` resolves the same
+        // Store an absolute path so a later bare `lanthorn` resolves the same
         // directory regardless of the working dir it's launched from. The dir
         // exists (is_dir passed), so canonicalize should succeed; fall back to
         // the supplied path if it somehow doesn't.
         let to_store = std::fs::canonicalize(&story_path).unwrap_or_else(|_| story_path.clone());
         cfg.default_story_dir = Some(to_store.clone());
         match app::config::write_config_file(&cfg) {
-            Ok(()) => eprintln!("babelmap: saved default story directory ({}).", to_store.display()),
-            Err(e) => eprintln!("babelmap: could not save config: {e}"),
+            Ok(()) => eprintln!("lanthorn: saved default story directory ({}).", to_store.display()),
+            Err(e) => eprintln!("lanthorn: could not save config: {e}"),
         }
     }
 
@@ -220,7 +220,7 @@ pub(crate) fn boot_story(
     let (loaded, disk_image) = match hints::load_mounted_story_from(&story_path, disk_entry) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("babelmap: cannot read '{}': {}", story_path.display(), e);
+            eprintln!("lanthorn: cannot read '{}': {}", story_path.display(), e);
             std::process::exit(1);
         }
     };
@@ -269,7 +269,7 @@ pub(crate) fn boot_story(
     // SQ-0866: and neither must a resource Blorb REFUSED for naming a different
     // build. Drawing nothing is the honest outcome, but it is only honest if the
     // player is told why their disk has no pictures — otherwise a silent screen
-    // reads as a defect in babelmap rather than as a Blorb that belongs to
+    // reads as a defect in lanthorn rather than as a Blorb that belongs to
     // another release. Asked only for a story that came off a disk image, which
     // is the only case the refusal can fire in, and only when no named archive
     // has already won; every ordinary boot pays nothing for it.
@@ -283,7 +283,7 @@ pub(crate) fn boot_story(
             .flatten()
     });
     if let Some(msg) = &picture_warning {
-        eprintln!("babelmap: warning: {msg}");
+        eprintln!("lanthorn: warning: {msg}");
     }
     // Read off before the archive itself moves into the `PictSource` below: a
     // native archive has no `Reso` chunk, so the standard window its coordinates
@@ -667,7 +667,7 @@ pub(crate) fn boot_story(
                         ZError::Truncated => "story file is truncated".to_string(),
                         _ => format!("{e:?}"),
                     };
-                    eprintln!("babelmap: {msg}");
+                    eprintln!("lanthorn: {msg}");
                     std::process::exit(1);
                 }
             };
@@ -730,7 +730,7 @@ pub(crate) fn boot_story(
             ) {
                 Ok(s) => Box::new(s),
                 Err(e) => {
-                    eprintln!("babelmap: cannot load Glulx story: {e:?}");
+                    eprintln!("lanthorn: cannot load Glulx story: {e:?}");
                     std::process::exit(1);
                 }
             }
@@ -745,7 +745,7 @@ pub(crate) fn boot_story(
         ) {
             Ok(s) => Box::new(s),
             Err(e) => {
-                eprintln!("babelmap: cannot load Scott Adams story: {e}");
+                eprintln!("lanthorn: cannot load Scott Adams story: {e}");
                 std::process::exit(1);
             }
         },
@@ -772,7 +772,7 @@ pub(crate) fn boot_story(
     // SQ-0319: announce the imported garglk config (after the spinner erased its
     // line, so the message isn't clobbered). Printed only when a sidecar applied.
     if let Some(line) = &garglk_line {
-        eprintln!("babelmap: {line}");
+        eprintln!("lanthorn: {line}");
     }
 
     // SQ-0811: name the seed the story just booted on. A run that turns out
@@ -781,7 +781,7 @@ pub(crate) fn boot_story(
     // the terminal — so it stays in the scrollback afterwards, like the warnings
     // above it. Said on every launch, because the interesting run is never the
     // one you thought to ask about beforehand.
-    eprintln!("babelmap: {}", random_seed_line(random_seed, cfg.random_seed.is_some()));
+    eprintln!("lanthorn: {}", random_seed_line(random_seed, cfg.random_seed.is_some()));
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
@@ -830,7 +830,7 @@ pub(crate) fn boot_story(
                             startup_turns = Some(ac.meta.turns);
                         }
                         Err(e) => {
-                            eprintln!("babelmap: warning: could not restore game from archive: {}; starting fresh", restore_error_msg(e));
+                            eprintln!("lanthorn: warning: could not restore game from archive: {}; starting fresh", restore_error_msg(e));
                         }
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
@@ -846,7 +846,7 @@ pub(crate) fn boot_story(
                 if cfg.auto_load { ac.mapper } else { Mapper::default() }
             }
             Err(e) => {
-                eprintln!("babelmap: warning: could not load archive {}: {}", arc_file.display(), e);
+                eprintln!("lanthorn: warning: could not load archive {}: {}", arc_file.display(), e);
                 Mapper::default()
             }
         }
@@ -953,7 +953,7 @@ pub(crate) fn boot_story(
         let mut effects: Vec<u16> = state.disk_sounds.keys().copied().collect();
         effects.sort_unstable();
         eprintln!(
-            "babelmap: {} sound effect{} on the medium ({})",
+            "lanthorn: {} sound effect{} on the medium ({})",
             effects.len(),
             if effects.len() == 1 { "" } else { "s" },
             effects.iter().map(u16::to_string).collect::<Vec<_>>().join(", "),
@@ -965,7 +965,7 @@ pub(crate) fn boot_story(
             let (sounds, images) = (count(b"Snd "), count(b"Pict"));
             let own = path == story_path;
             eprintln!(
-                "babelmap: loaded resources from {}{} ({} sound{}, {} image{})",
+                "lanthorn: loaded resources from {}{} ({} sound{}, {} image{})",
                 path.display(),
                 if own { " (self)" } else { " (sidecar)" },
                 sounds, if sounds == 1 { "" } else { "s" },
@@ -1187,7 +1187,7 @@ pub(crate) fn boot_story(
         for line in &state.transcript {
             println!("{}", line);
         }
-        eprintln!("babelmap: story ended without asking for input.");
+        eprintln!("lanthorn: story ended without asking for input.");
         std::process::exit(0);
     }
 
@@ -1219,11 +1219,11 @@ pub(crate) fn boot_story(
     // CLI/picker phases so ordinary terminal output is unaffected. A failure here is
     // not worth refusing to start over: the game runs, the chatter just stays visible.
     if let Err(e) = app::stderr_redirect::install(&state.config.user_dir.join("stderr.log")) {
-        eprintln!("babelmap: could not redirect OS error output ({e}); it may corrupt the display");
+        eprintln!("lanthorn: could not redirect OS error output ({e}); it may corrupt the display");
     }
 
     if let Err(e) = enable_raw_mode() {
-        eprintln!("babelmap: cannot enable raw mode (not a TTY?): {}", e);
+        eprintln!("lanthorn: cannot enable raw mode (not a TTY?): {}", e);
         std::process::exit(1);
     }
 
@@ -1231,7 +1231,7 @@ pub(crate) fn boot_story(
 
     if let Err(e) = execute!(stdout(), EnterAlternateScreen) {
         restore_terminal();
-        eprintln!("babelmap: cannot enter alternate screen: {}", e);
+        eprintln!("lanthorn: cannot enter alternate screen: {}", e);
         std::process::exit(1);
     }
     // Bracketed paste (SQ-0653). Without it the terminal replays a paste as raw
@@ -1257,7 +1257,7 @@ pub(crate) fn boot_story(
         Ok(t) => t,
         Err(e) => {
             restore_terminal();
-            eprintln!("babelmap: cannot create terminal: {}", e);
+            eprintln!("lanthorn: cannot create terminal: {}", e);
             std::process::exit(1);
         }
     };

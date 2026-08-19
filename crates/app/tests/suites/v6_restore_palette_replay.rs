@@ -92,7 +92,7 @@ fn a_restored_canvas_survives_the_next_palette_change() {
     // Through the real archive, as Save State and auto-resume do.
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(&session);
-    let path = std::env::temp_dir().join(format!("arthur-replay-{}.babelmap", std::process::id()));
+    let path = std::env::temp_dir().join(format!("arthur-replay-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper,

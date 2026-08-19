@@ -12,7 +12,7 @@
 //! - church     — Pict 10 (`ddaa88`, `775500`), brown
 //! - hiding behind the gravestone — Pict 7 (`7080f0`), a different blue
 //!
-//! babelmap re-decoded an adaptive picture with the Current Palette only when the
+//! lanthorn re-decoded an adaptive picture with the Current Palette only when the
 //! game DREW it, so Arthur's frame kept the churchyard palette for the whole game:
 //! it stayed blue in the brown church and never shifted when the gravestone scene
 //! swapped the blues.

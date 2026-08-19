@@ -1,6 +1,6 @@
 //! The room dock rendered end to end, against real player data (SQ-0692).
 //!
-//! `unit_tests/advent_maze_map.json` is a verbatim copy of the `map.json` from a babelmap
+//! `unit_tests/advent_maze_map.json` is a verbatim copy of the `map.json` from a lanthorn
 //! archive: one player's partial mapping of Colossal Cave. Driving the dock from a real graph is
 //! what makes "does the header name the room the way the matrix does" a meaningful question.
 //!

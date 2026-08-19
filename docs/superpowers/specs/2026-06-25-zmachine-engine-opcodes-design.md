@@ -62,7 +62,7 @@ save/restore to a memory table, `sound_effect` (Blorb audio), v6 graphics.
   actual font change.
 
 - **set_colour (2OP:0x1B)** / **set_true_colour (EXT:0x05)** — explicit no-op arms
-  (accept and ignore operands). babelmap renders with its own styling and
+  (accept and ignore operands). lanthorn renders with its own styling and
   advertises no game-driven colour; an explicit arm documents the intentional
   no-op (currently a silent fall-through).
 

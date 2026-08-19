@@ -4291,7 +4291,7 @@ mod tests {
 
     #[test]
     fn v4_status_bar_does_not_render_synthesized_content() {
-        // The synthesized babelmap status bar (room + turn counter) is removed for
+        // The synthesized lanthorn status bar (room + turn counter) is removed for
         // v4+/HostManaged during normal play. The bar must be fully hidden when
         // there is no transient notification message.
         let machine = minimal_machine_v4();
@@ -5245,9 +5245,12 @@ mod tests {
 
     #[test]
     fn render_transcript_status_line_nonblank_with_fixture() {
-        let fixture = std::path::Path::new(
-            "/Volumes/Videos/Source/babelmap/crates/zvm/tests/fixtures/czech.z5",
-        );
+        // Relative to the crate, not to one checkout. This was an absolute path
+        // into a developer's home directory, so it skipped vacuously for everyone
+        // else and would have gone on doing so silently; the lanthorn rename broke
+        // it outright, which is the only reason anyone noticed.
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
         if !fixture.exists() {
             eprintln!("SKIP: czech.z5 fixture not found");
             return;

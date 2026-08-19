@@ -59,7 +59,7 @@ Rejected alternatives: threading a `&SymbolSet` parameter through every render f
 ### 2. Config integration (extends Track B's `Config`, already merged)
 
 - Add `symbols: SymbolConfig` to `Config` with `#[serde(default)]`, where `SymbolConfig` holds the four preset names (each defaulting to today's preset) and an `overrides: BTreeMap<String, String>`.
-- `Config` already loads `~/.babelmap/config.toml`; this is purely additive.
+- `Config` already loads `~/.lanthorn/config.toml`; this is purely additive.
 
 ### 3. Renderer integration (`crates/app/src/render/map.rs`)
 

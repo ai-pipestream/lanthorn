@@ -6,7 +6,7 @@
 
 ## Goal
 
-Let the user edit babelmap's TUI theme **interactively, in-app, with live preview**, instead of hand-editing `style.toml` and pressing reload. Phase 1 covers the **foreground/background colors and the five text attributes** (bold, italic, underline, dim, reverse) of every styleable element, via a **click-to-edit** surface: click an element on a preview board, then set its properties from swatches/toggles, and see the change immediately.
+Let the user edit lanthorn's TUI theme **interactively, in-app, with live preview**, instead of hand-editing `style.toml` and pressing reload. Phase 1 covers the **foreground/background colors and the five text attributes** (bold, italic, underline, dim, reverse) of every styleable element, via a **click-to-edit** surface: click an element on a preview board, then set its properties from swatches/toggles, and see the change immediately.
 
 ## Background (existing pieces this builds on)
 

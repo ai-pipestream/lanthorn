@@ -63,7 +63,7 @@ pub fn stories() -> PathBuf {
 /// for. Nothing is ever written to it — the session name outranks the key — but
 /// the door takes a directory and this is an honest one.
 pub fn scratch() -> PathBuf {
-    std::env::temp_dir().join(format!("babelmap-archive-sweep-{}", std::process::id()))
+    std::env::temp_dir().join(format!("lanthorn-archive-sweep-{}", std::process::id()))
 }
 
 // ── The corpus ───────────────────────────────────────────────────────────────

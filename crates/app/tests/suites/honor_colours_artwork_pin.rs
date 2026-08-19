@@ -81,7 +81,7 @@ fn boot_colour_decision(story: &str, pictures: Option<&str>) -> Option<Boot> {
         fixture(p)?;
     }
     let dir = std::env::temp_dir()
-        .join(format!("babelmap-sq860-boot-{}-{}", std::process::id(), story.len()));
+        .join(format!("lanthorn-sq860-boot-{}-{}", std::process::id(), story.len()));
     let _ = std::fs::create_dir_all(&dir);
     let over = PictureOverride::resolve_with_session(&path, &dir, pictures);
     // `startup.rs`'s order: the named archive's flavour, then the medium.
@@ -107,7 +107,7 @@ fn state_at_the_boot_reload(
     global_honour: bool,
     declines: bool,
 ) -> (AppState, PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("babelmap-sq860-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq860-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let style = dir.join("style.toml");

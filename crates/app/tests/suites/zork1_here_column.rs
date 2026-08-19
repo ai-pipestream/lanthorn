@@ -220,7 +220,7 @@ fn minizork_gets_the_same_treatment_from_entirely_different_numbers() {
 
 /// The fail-toward-less contract on a real story. Planetfall's table gives no
 /// unambiguous openness bit, so nesting is off there — the column falls back to
-/// direct children plus shared scenery, which is what babelmap listed before
+/// direct children plus shared scenery, which is what lanthorn listed before
 /// this work. A story we cannot read is a story we do not guess about.
 #[test]
 fn planetfall_declines_to_guess_at_openness_and_nests_nothing() {

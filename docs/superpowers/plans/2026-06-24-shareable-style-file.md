@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - No `mapper`/`zvm` changes. Style is an `app`-crate concern.
-- No backward compatibility (app is undeployed): no legacy `elements` packed-string format, no migration — old-format `~/.babelmap` files can be deleted. An empty style (no `style` pointer, no config override) must still resolve to today's terminal-default look.
+- No backward compatibility (app is undeployed): no legacy `elements` packed-string format, no migration — old-format `~/.lanthorn` files can be deleted. An empty style (no `style` pointer, no config override) must still resolve to today's terminal-default look.
 - Fixed selector set only — no general CSS cascade/selector matching. Unknown selector ⇒ warning, ignored, never crash. Missing/garbage style path ⇒ warning, fall back to built-in `default`, never crash.
 - Writers are format-preserving (`toml_edit`) and MUST preserve unknown sections/keys (so future `[header]`/`[input]`/border keys survive a save).
 - Commit messages: NO backticks in the body; end every commit body with exactly:
@@ -473,8 +473,8 @@ fn write_config_does_not_emit_style_sections() {
 // in style.rs
 #[test]
 fn personal_style_path_is_user_dir_style_toml() {
-    let p = personal_style_path(std::path::Path::new("/home/u/.babelmap"));
-    assert_eq!(p, std::path::Path::new("/home/u/.babelmap/style.toml"));
+    let p = personal_style_path(std::path::Path::new("/home/u/.lanthorn"));
+    assert_eq!(p, std::path::Path::new("/home/u/.lanthorn/style.toml"));
 }
 ```
 
@@ -482,7 +482,7 @@ fn personal_style_path_is_user_dir_style_toml() {
 - [ ] **Step 3: Implement `personal_style_path`** and wire startup resolution in `main.rs` (as in Interfaces). Build + run existing tests.
 - [ ] **Step 4: Implement gallery/config save path** — on gallery close and config save, instead of `config::write_symbols`/writing `[colors]` to config.toml: build the resolved `ColorScheme`+`SymbolSet` from the edited selections, call `style::write_style_full(personal_style_path(&user_dir), &cs, &set)`, set `state.config.style = Some(personal_style_path.to_string())` and persist that pointer via `config::write_config`. Re-resolve `state.colors`/`state.symbols`.
 - [ ] **Step 5: Implement `GalleryExportStyle`** — add the action; in `render/gallery.rs` add a footer button + key hint ("Output all settings"); in `input.rs` route the key to `Action::GalleryExportStyle`; handler does the same `write_style_full` + repoint as Step 4 but on demand. Add/extend a gallery render test asserting the footer shows the new hint.
-- [ ] **Step 6: Run full `cargo test --workspace`; confirm green + warning-clean. Manually sanity-check (note in report): launch with no `style` → today's look; gallery edit writes `~/.babelmap/style.toml` and sets `style`.**
+- [ ] **Step 6: Run full `cargo test --workspace`; confirm green + warning-clean. Manually sanity-check (note in report): launch with no `style` → today's look; gallery edit writes `~/.lanthorn/style.toml` and sets `style`.**
 - [ ] **Step 7: Commit** — "feat(style): wire style file at startup, gallery export + repoint".
 
 ---

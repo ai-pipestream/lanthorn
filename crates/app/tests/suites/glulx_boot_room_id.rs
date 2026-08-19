@@ -47,7 +47,7 @@ fn boot_in(dir: &std::path::Path, image: Vec<u8>) -> GlulxSession {
 #[test]
 fn the_boot_room_keeps_its_id_through_the_first_turn() {
     let Some(image) = advent_image() else { return };
-    let dir = std::env::temp_dir().join(format!("babelmap-boot-room-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-boot-room-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch game dir");
 

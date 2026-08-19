@@ -1,11 +1,11 @@
-# babelmap — Design
+# lanthorn — Design
 
 **Date:** 2026-06-18
 **Status:** Approved design, pre-implementation
 
 ## 1. Overview & Scope
 
-babelmap is a TUI interactive-fiction interpreter built around **automapping**. The
+lanthorn is a TUI interactive-fiction interpreter built around **automapping**. The
 first version targets the **Z-machine** — all text-mode versions: **3, 4, 5, 7, and 8**, covering
 classic Infocom games and Inform 6 output. The **graphical** version **6** is deliberately excluded
 (see below). We write our **own Z-machine VM** in **Rust** so the
@@ -161,7 +161,7 @@ deliberate future enhancement, not in v1.
 ## 5. Persistence & Light Correction
 
 ### Two independent stores
-babelmap keeps two kinds of saved state, owned by `app`, that are **never bundled together**:
+lanthorn keeps two kinds of saved state, owned by `app`, that are **never bundled together**:
 
 1. **Quetzal game saves** — point-in-time VM snapshots, triggered by the game's `save`/`restore`.
    Stored as standard Quetzal `.qzl` files so they stay **portable** across interpreters. There may

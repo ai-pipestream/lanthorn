@@ -1,6 +1,6 @@
 //! In-game `restart` re-boots the story in place instead of quitting the app
 //! (SQ-0493). Before the fix, the `@restart` opcode surfaced as `RunStop::Quit`,
-//! so typing `restart` (and confirming) dropped the player out of babelmap to the
+//! so typing `restart` (and confirming) dropped the player out of lanthorn to the
 //! terminal. Now the VM re-boots (v6 re-enters `main`; v1–5 jump to the initial
 //! PC) and play continues from the game's opening.
 //!

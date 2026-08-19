@@ -3,7 +3,7 @@
 //! Network only — every request is driven by an explicit user action (a typed
 //! search, a chosen download). One request in flight at a time (the picker's
 //! [`SearchWorker`] is a single serial thread); nothing here prefetches,
-//! crawls, or bulk-enumerates. All requests carry babelmap's descriptive
+//! crawls, or bulk-enumerates. All requests carry lanthorn's descriptive
 //! User-Agent, which is also required to get past IFDB's Cloudflare bot filter
 //! (see the terms notes below).
 //!
@@ -368,10 +368,10 @@ impl SearchSource for IfdbSearchClient {
     }
 }
 
-/// babelmap's descriptive User-Agent — identifies the client and its repo, and
+/// lanthorn's descriptive User-Agent — identifies the client and its repo, and
 /// (per IFDB's docs) is required to clear Cloudflare's bot filter.
 fn user_agent() -> String {
-    format!("babelmap/{} (+https://github.com/sharkusk/babelmap)", env!("CARGO_PKG_VERSION"))
+    format!("lanthorn/{} (+https://github.com/sharkusk/lanthorn)", env!("CARGO_PKG_VERSION"))
 }
 
 fn search_url(query: &str) -> String {
@@ -1115,10 +1115,10 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_identifies_babelmap() {
+    fn user_agent_identifies_lanthorn() {
         let ua = user_agent();
-        assert!(ua.starts_with("babelmap/"));
-        assert!(ua.contains("github.com/sharkusk/babelmap"));
+        assert!(ua.starts_with("lanthorn/"));
+        assert!(ua.contains("github.com/sharkusk/lanthorn"));
     }
 
     // ── worker roundtrip (no network) ──────────────────────────────────────

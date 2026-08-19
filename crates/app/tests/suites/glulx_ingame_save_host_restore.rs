@@ -52,7 +52,7 @@ fn a_real_glulx_ingame_save_archive_restores_through_the_host_path() {
     assert_eq!(r.pending_io, Some(PendingIo::Save), "the game's SAVE verb bubbles a host Save request");
 
     // Seal the archive exactly as the app's `handle_save_as` does for an in-game
-    // trigger — the same writer, the same trigger, a real `.babelmap` on disk.
+    // trigger — the same writer, the same trigger, a real `.lanthorn` on disk.
     let ingame = app::persist_files::game_save_bytes(&sess, SaveTrigger::Ingame);
     let dir = std::env::temp_dir().join(format!("bm-sq0556-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -62,8 +62,8 @@ fn a_real_glulx_ingame_save_archive_restores_through_the_host_path() {
         &ingame, None, &[], None, None, sess.aux_data(), 3, Some(saved_room), None, &[], &[], &[], &[], &[],
     )
     .expect("the @save archive is written");
-    let path = dir.join("slot.babelmap");
-    assert!(path.exists(), "an in-game @save produces a .babelmap the saves manager can list");
+    let path = dir.join("slot.lanthorn");
+    assert!(path.exists(), "an in-game @save produces a .lanthorn the saves manager can list");
     assert_eq!(
         app::archive::read_archive_meta(&path).expect("meta").trigger,
         SaveTrigger::Ingame,

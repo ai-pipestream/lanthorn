@@ -184,7 +184,7 @@ mod tests {
     use crate::state::AppState;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("babelmap-reload-{}-{}", tag, std::process::id()));
+        let d = std::env::temp_dir().join(format!("lanthorn-reload-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

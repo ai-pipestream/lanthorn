@@ -181,7 +181,7 @@ fn looks_like_zmachine(bytes: &[u8]) -> bool {
 }
 
 fn user_agent() -> String {
-    format!("babelmap/{} (+https://github.com/sharkusk/babelmap)", env!("CARGO_PKG_VERSION"))
+    format!("lanthorn/{} (+https://github.com/sharkusk/lanthorn)", env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # Standards & specifications
 
-babelmap is a from-scratch implementation of the interactive-fiction virtual machines and
+lanthorn is a from-scratch implementation of the interactive-fiction virtual machines and
 file formats. This page collects the authoritative specifications it implements against, so
 you can check our behaviour against the source of truth. Section references (e.g. "Glk spec
 §4.4") that appear throughout the code point into these documents.
@@ -29,37 +29,37 @@ you can check our behaviour against the source of truth. Section references (e.g
 
 - **Glk API Specification (0.7.6)** — the windowing/stream/event abstraction the **Glulx**
   engine drives its display through (text-buffer and text-grid windows, graphics windows,
-  line/char and timer/mouse/hyperlink input events, file streams). babelmap projects the Glk
+  line/char and timer/mouse/hyperlink input events, file streams). lanthorn projects the Glk
   window tree onto its terminal UI. Only `gvm` uses Glk; the Z-machine and Scott Adams engines
-  render through their own native display models and converge with Glulx only at babelmap's
+  render through their own native display models and converge with Glulx only at lanthorn's
   neutral `ScreenModel` (see [architecture](architecture.md)). Referenced in-code at e.g. §3.3
   (window sizing), §4.2/§4.4 (event model), §11.2 (file streams).
   <https://eblong.com/zarf/glk/Glk-Spec-076.html> · [home](https://eblong.com/zarf/glk/)
 
 - **Gargoyle `garglk_*` extensions** — the de-facto colour and reverse-video Glk extensions
-  (`garglk_set_zcolors`, `garglk_set_reversevideo`, `gestalt_GarglkText`) that babelmap
+  (`garglk_set_zcolors`, `garglk_set_reversevideo`, `gestalt_GarglkText`) that lanthorn
   recognises so games written for Gargoyle render their per-span colours.
   <https://github.com/garglk/garglk>
 
 ## File formats
 
-- **Quetzal** — the cross-interpreter saved-game standard. babelmap reads and writes Quetzal
+- **Quetzal** — the cross-interpreter saved-game standard. lanthorn reads and writes Quetzal
   so an in-game `save` can be restored on another interpreter (and vice versa); the Glulx
   save path writes a Glulx-flavoured Quetzal.
   <https://inform-fiction.org/zmachine/standards/quetzal/index.html>
 
 - **Blorb** — the resource-packaging format that bundles a game's executable together with its
-  cover art, images, and sounds. babelmap reads Blorb (`.zblorb`/`.gblorb`/`.blorb`) to
+  cover art, images, and sounds. lanthorn reads Blorb (`.zblorb`/`.gblorb`/`.blorb`) to
   extract the story file and its graphics/audio resources.
   <https://eblong.com/zarf/blorb/Blorb-Spec.html> · [home](https://eblong.com/zarf/blorb/)
 
-- **Treaty of Babel (revision 12)** — the community agreement on story identification. babelmap
+- **Treaty of Babel (revision 12)** — the community agreement on story identification. lanthorn
   computes each story's **IFID** per the Treaty to key its per-game saves, maps, and
   bibliographic lookups.
   <https://babel.ifarchive.org/babel.html> · [specs repo](https://github.com/iftechfoundation/ifarchive-if-specs)
 
 - **EA IFF 85 (Interchange File Format)** — the chunked container format that Blorb and
-  Quetzal are both built on (`FORM`/chunk structure). babelmap's Blorb and Quetzal parsers
+  Quetzal are both built on (`FORM`/chunk structure). lanthorn's Blorb and Quetzal parsers
   implement this chunk layout.
   <https://en.wikipedia.org/wiki/Interchange_File_Format>
 
@@ -68,11 +68,11 @@ you can check our behaviour against the source of truth. Section references (e.g
 Almost everything above is implemented to the letter. One place is not, and it is deliberate:
 
 - **ZMSD §15 — Version 6 `scroll_window` on window 0.** Windows 1–7 scroll their pixels
-  exactly as specified. Window 0 — the main scrolling window — is owned by babelmap's
+  exactly as specified. Window 0 — the main scrolling window — is owned by lanthorn's
   transcript renderer rather than a fixed pixel canvas, so a scroll of *it* is ignored. This
   is what makes illustrated room descriptions work: Zork Zero's inline-picture idiom reads
   window 0's cursor, scrolls up to free vertical room for a room icon, homes the cursor into
-  the freed band, draws there, and sets margins so the prose flows beside the art. babelmap
+  the freed band, draws there, and sets margins so the prose flows beside the art. lanthorn
   lays that picture out as an inline transcript band, where the transcript has already
   scrolled by exactly the text it printed — obeying the pixel scroll on top would double it.
   The picture, its position in the flow, and the text wrap around it all land as the game

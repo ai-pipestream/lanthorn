@@ -103,7 +103,7 @@ impl Vm {
     /// A seed belongs in the CONSTRUCTOR, not in a `seed_rng` call after it: the
     /// opening occurrence pass runs below, inside this function, and occurrences
     /// roll percentage chances — so a game seeded afterwards has already had its
-    /// first random events decided by the default seed. babelmap passes the
+    /// first random events decided by the default seed. lanthorn passes the
     /// `random_seed` config key here, or an entropy draw when that key is unset.
     pub fn new_seeded(db: Database, trace_fired: bool, seed: u32) -> Vm {
         let item_loc = db.items.iter().map(|i| i.start_loc).collect();

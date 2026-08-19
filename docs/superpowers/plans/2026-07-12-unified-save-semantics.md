@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Glulx in-game `@save`/`@restore` produce a **spec-conformant standard Glulx-Quetzal** save (like the Z-machine's `.qzl`), fix the "Save failed." bug in Counterfeit Monkey, and decouple saves from the Glk VFS — while leaving the `.babelmap` Save State path untouched.
+**Goal:** Make Glulx in-game `@save`/`@restore` produce a **spec-conformant standard Glulx-Quetzal** save (like the Z-machine's `.qzl`), fix the "Save failed." bug in Counterfeit Monkey, and decouple saves from the Glk VFS — while leaving the `.lanthorn` Save State path untouched.
 
 **Architecture:** Add a bare, call-stub-based Glulx save (`save_quetzal`/`restore_quetzal`) beside the existing full snapshot (`save_state`/`restore_state`). `@save` pushes a Glulx call stub for its `S1` operand so PC/FP/SP self-describe (spec §1.8.2); `restore_quetzal` restores VM memory/stack/heap and pops the stub to resume, leaving all live Glk/iosys/stringtbl/protect state intact (spec §1.8.5). A tiny write-count shim satisfies the game's stream check under host-intercepted delivery. SavedGame Glk streams become null conduits, removing saves from the VFS.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - `gvm` and `zvm` crates stay **zero external deps**. CLI/app crates may use their existing deps only.
-- **Do NOT change `save_state()` / `restore_state()` bytes or behavior** — that is the `.babelmap` Save State path. A regression test guards this.
+- **Do NOT change `save_state()` / `restore_state()` bytes or behavior** — that is the `.lanthorn` Save State path. A regression test guards this.
 - Spec conformance targets (Glulx Spec, Plotkin): §1.3.2 call stub `(DestType, DestAddr, PC, FramePtr)`; §1.8 chunk set `IFhd + (CMem|UMem) + Stks + MAll`; §1.8.2 `@save` pushes a stub, restore pops it and stores the result (`0` success / `1` fail now, `-1` on a restored resume); §1.8.5 iosys mode/rock, string-decoding table, protect range, Glk state are **NOT saved** and must be left live on `restore_quetzal`.
 - Commit trailers on every commit:
   ```
@@ -149,13 +149,13 @@
 
 **Files:**
 - Modify: `crates/app/src/persist_files.rs` (`save_game_named_bytes` ~236), `crates/app/src/glulx_session.rs` (expose `save_quetzal`/`complete_restore_quetzal`), `crates/app/src/session.rs` (Engine plumbing if needed), `crates/app/src/main.rs` (the Glulx `.qzl` restore branch of `Action::SavesLoad` / `resume_restore`).
-- Test: `crates/app/src/glulx_session.rs` tests (mirror `glulx_state_round_trips_through_babelmap_archive`).
+- Test: `crates/app/src/glulx_session.rs` tests (mirror `glulx_state_round_trips_through_lanthorn_archive`).
 
 **Interfaces:**
 - Consumes: `Machine::save_quetzal`, `Machine::complete_restore_quetzal` (Tasks 1–2).
 - Produces: an engine-level accessor for the Glulx bare save bytes + restore.
 
-**Design notes:** Only the Glulx path changes: swap `session.save_state().bytes` → the new `save_quetzal()` bytes in `save_game_named_bytes`; route the Glulx in-game `.qzl` restore through `complete_restore_quetzal` instead of `complete_restore_success`. Z-machine paths and the `.babelmap` Save State path are untouched. The `<ifid>-<slug>.qzl` naming stays (SQ-0284 changes naming later).
+**Design notes:** Only the Glulx path changes: swap `session.save_state().bytes` → the new `save_quetzal()` bytes in `save_game_named_bytes`; route the Glulx in-game `.qzl` restore through `complete_restore_quetzal` instead of `complete_restore_success`. Z-machine paths and the `.lanthorn` Save State path are untouched. The `<ifid>-<slug>.qzl` naming stays (SQ-0284 changes naming later).
 
 **CARRY-FORWARD FIX (from Task 1 review, Important):** With the new stack-based `@save` stub, a host `save_state()` taken *during* an `@save` suspension captures the un-popped stub, and `restore_state` never pops it → corrupted stack on resume. Interactive Ctrl+S is already overlay-guarded, but **exit auto-save** (`crates/app/src/main.rs` ~4047–4060, `session.save_state()` called unconditionally when `config.auto_save`) is NOT. Guard every host-snapshot trigger against a pending in-game save: use the new `Engine`/`Machine::is_saveload_pending()` (Task 2) and, when it's true, **skip the exit auto-save** (the in-game save the user was making is the relevant persistence anyway) — do not capture a snapshot mid-suspension. Add a regression test.
 
@@ -163,7 +163,7 @@
 - [ ] **Step 2: Run — fail. Step 3: implement** the accessor(s) + `save_game_named_bytes` byte-source swap + the restore-branch method swap.
 - [ ] **Step 4: Run — pass.**
 - [ ] **Step 4b: Carry-forward guard (failing test first).** Add a test that exit auto-save is skipped when a save/restore is pending (`is_saveload_pending()` true) — e.g. simulate a session at an `@save` suspension and assert the exit-save path does not call `save_state()`. Then implement the guard at the exit auto-save site (`main.rs` ~4047) and any other unconditional host `save_state()` trigger. Run — pass.
-- [ ] **Step 5: `cargo test -p app` (full) + `cargo build -p app`.** Confirm no Save State / `.babelmap` regressions.
+- [ ] **Step 5: `cargo test -p app` (full) + `cargo build -p app`.** Confirm no Save State / `.lanthorn` regressions.
 - [ ] **Step 6: Commit** — `feat(app): Glulx in-game @save writes a standard .qzl, restore preserves live state (SQ-0283)`. Stage the edited app files by path. (Guard fix may be a second commit `fix(app): skip host snapshot while an in-game @save is pending (SQ-0283)`.)
 
 ---
@@ -189,7 +189,7 @@
 **Design notes:** Reflect the spec's Documentation section. No README change.
 
 - [ ] **Step 1:** `docs/persistence.md` — Terminology (~L18): Glulx `@save` produces a bare **standard Glulx-Quetzal** save, not the host snapshot. Layer 1 (~L31–33): Glulx writes a standard in-game save (VM only, call-stub resume, no VFS embed); interop verified internally, cross-interpreter goldens tracked under SQ-0229. Table (~L92–96): Glulx `@save`/`@restore` rows → bare `.qzl`. `create_by_prompt` section (~L102–112): SavedGame no longer resolves into a VFS slot (host conduit); VFS now holds only transcripts/recordings/data.
-- [ ] **Step 2:** `docs/features/saves.md` — extend "Standard in-game save/restore" to note Glulx now writes a real standard in-game save (VM state only, distinct from `.babelmap`), with the SQ-0229 caveat (cross-interpreter interop not yet golden-tested).
+- [ ] **Step 2:** `docs/features/saves.md` — extend "Standard in-game save/restore" to note Glulx now writes a real standard in-game save (VM state only, distinct from `.lanthorn`), with the SQ-0229 caveat (cross-interpreter interop not yet golden-tested).
 - [ ] **Step 3:** `crates/gvm/GLULX_NOTES.md` §14 — document the new `save_quetzal`/`restore_quetzal` standard path (call-stub resume; `IFhd/CMem/Stks/MAll`; §1.8.5 live-state exclusions) beside the existing `GReg`-based `save_state`, and why the two differ.
 - [ ] **Step 4: Commit** — `docs(persistence): Glulx in-game saves are standard Glulx-Quetzal (SQ-0283)`. Stage the three doc files.
 
@@ -202,14 +202,14 @@ cargo build --workspace --tests
 cargo test -p gvm          # save_quetzal/restore_quetzal round-trips, conduit, shim, live-state preservation
 cargo test -p gvm-cli
 cargo test -p zvm-cli
-cargo test -p app          # no Save State / .babelmap regressions
+cargo test -p app          # no Save State / .lanthorn regressions
 ```
 
 **Manual smoke (user — not headlessly runnable):**
 - Counterfeit Monkey in `gvm-cli`: type `save` → **"Ok."** (not "Save failed."), then `restore` restores.
 - Counterfeit Monkey in the app: same, through the SaveAs prompt + saves manager.
 - A Glulx game with `SCRIPT ON` (open transcript window): in-game `@restore` must NOT wipe the live transcript window/VFS (validates §1.8.5 end-to-end).
-- Z-machine `@save`/`@restore` and both engines' Ctrl+S Save State (`.babelmap`) unchanged.
+- Z-machine `@save`/`@restore` and both engines' Ctrl+S Save State (`.lanthorn`) unchanged.
 
 ## Notes / Out of scope
 

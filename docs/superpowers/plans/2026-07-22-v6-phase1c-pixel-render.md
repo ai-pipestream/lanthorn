@@ -181,7 +181,7 @@ fn v6_positioned_windows_carry_game_pixel_rects() {
     // Boot Zork Zero far enough to open its windows (reuse this file's harness).
     let model = /* existing helper that returns the v6 ScreenModel */;
     let items = match &model.root {
-        babelmap::engine::WinNode::Layered(items) => items,
+        lanthorn::engine::WinNode::Layered(items) => items,
         other => panic!("expected Layered, got {other:?}"),
     };
     assert!(!items.is_empty(), "v6 model has positioned windows");
@@ -772,13 +772,13 @@ Add to `crates/app/tests/zork0_v6_windows.rs` a test that boots Zork Zero, build
 fn zork0_v6_pixel_canvas_is_nonempty() {
     let model = /* existing helper → v6 ScreenModel after boot */;
     let items = match &model.root {
-        babelmap::engine::WinNode::Layered(v) => v,
+        lanthorn::engine::WinNode::Layered(v) => v,
         _ => panic!("expected Layered"),
     };
     let bg = image::Rgba([0, 0, 0, 255]);
-    let main = babelmap::render::v6_canvas::MainText::default();
-    let colors = babelmap::colors::ColorScheme::default();
-    let canvas = babelmap::render::v6_canvas::build_v6_canvas(
+    let main = lanthorn::render::v6_canvas::MainText::default();
+    let colors = lanthorn::colors::ColorScheme::default();
+    let canvas = lanthorn::render::v6_canvas::build_v6_canvas(
         items, (80, 24), (8, 8), bg, image::Rgba([255; 4]), &main, &colors,
     );
     assert_eq!(canvas.dimensions(), (640, 192));

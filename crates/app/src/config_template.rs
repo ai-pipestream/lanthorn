@@ -2,7 +2,7 @@
 //!
 //! Mirrors what `style.toml` already does (see [`crate::theme::template`]): emit
 //! EVERY setting, each with a short comment, and leave the line commented out when
-//! it holds the default — so the file is a browsable catalogue of what babelmap can
+//! it holds the default — so the file is a browsable catalogue of what lanthorn can
 //! be told to do, and uncommenting a line is a no-op until you change its value.
 //!
 //! Before this, [`crate::config::write_config`] only wrote keys it had a value for,
@@ -77,14 +77,14 @@ struct Group {
 const STARTUP: &[Row] = &[
     ex(
         "user_dir",
-        "\"~/.babelmap\"",
-        &["Root directory for babelmap data (maps/, saves/, style.toml).", "Default: ~/.babelmap."],
+        "\"~/.lanthorn\"",
+        &["Root directory for lanthorn data (maps/, saves/, style.toml).", "Default: ~/.lanthorn."],
     ),
     ex(
         "default_story_dir",
         "\"~/games/if\"",
         &[
-            "Directory (or single story file) opened when babelmap is launched with",
+            "Directory (or single story file) opened when lanthorn is launched with",
             "no path argument. Unset by default, so a path is required.",
         ],
     ),
@@ -194,7 +194,7 @@ const INTERPRETER: &[Row] = &[
         "true",
         &[
             "Honour game-set colours. Set false to use only the configured theme.",
-            "Override for a single run with `babelmap --no-game-colours`.",
+            "Override for a single run with `lanthorn --no-game-colours`.",
         ],
     ),
     d(
@@ -218,7 +218,7 @@ const INTERPRETER: &[Row] = &[
             "   6  IBM PC",
             "",
             "Unset auto-selects: 6 (IBM PC) for v6, else 1 (DECSystem-20). Override for",
-            "a single run with `babelmap --interpreter N`.",
+            "a single run with `lanthorn --interpreter N`.",
         ],
     ),
     ex(
@@ -229,7 +229,7 @@ const INTERPRETER: &[Row] = &[
             "story replays exactly: the same shuffles, the same dice, the same dungeon.",
             "Unset (default) draws a fresh seed from the system at every launch, which",
             "is what makes a randomised game like Kerkerkruip a different game twice.",
-            "babelmap prints the seed it used on the console as it starts — copy that",
+            "lanthorn prints the seed it used on the console as it starts — copy that",
             "number in here to play that run again. A game that asks the interpreter",
             "for entropy itself (Glulx setrandom 0) still gets it, seed or no seed.",
         ],
@@ -251,7 +251,7 @@ const INTERPRETER: &[Row] = &[
             "             for a big screen (Counterfeit Monkey's map sidebar).",
             "  2, 3…    — divide your cell size by this instead",
             "Only affects Glulx: v6 Z-machine and Scott Adams lay out on their own",
-            "fixed canvas, which babelmap scales into the pane already.",
+            "fixed canvas, which lanthorn scales into the pane already.",
         ],
     ),
     d(
@@ -271,7 +271,7 @@ const INTERPRETER: &[Row] = &[
             "EGA's sixteen colours were fixed in the silicon, so its artists dithered",
             "for the ones they lacked — Zork Zero's bronze arch is brown and bright red",
             "alternating column by column — and on a 640x200 screen those half-width",
-            "columns blended in the eye into a colour the palette never held. babelmap",
+            "columns blended in the eye into a colour the palette never held. lanthorn",
             "keeps all 640 columns, so it does the blending itself.",
             "Set false to see the archive's own pixels, dither and all. CGA line art is",
             "never fused either way, and 320-wide MCGA and Amiga art has no dither at",
@@ -430,7 +430,7 @@ const TRAILER: &str = r#"
 # [keymap.anim]
 # "ctrl+t" = "animate-tidy"
 #
-# The story browser (the screen you get when babelmap is pointed at a directory)
+# The story browser (the screen you get when lanthorn is pointed at a directory)
 # has its own context. Only its own commands work there — it runs before a story
 # is loaded, so nothing that acts on a running game has anything to act on.
 #
@@ -458,9 +458,9 @@ const TRAILER: &str = r#"
 /// [`Config::default()`] — writing it changes nothing until the user edits it.
 pub fn commented_template() -> String {
     let mut out = String::new();
-    out.push_str("# babelmap config.toml\n");
+    out.push_str("# lanthorn config.toml\n");
     out.push_str("#\n");
-    out.push_str("# Every setting babelmap reads is listed here. Lines are commented out, and the\n");
+    out.push_str("# Every setting lanthorn reads is listed here. Lines are commented out, and the\n");
     out.push_str("# value shown is the DEFAULT unless the comment says otherwise — so uncommenting\n");
     out.push_str("# a line as-is changes nothing. Edit the value to change behaviour.\n");
     out.push_str("#\n");
@@ -476,8 +476,8 @@ pub fn commented_template() -> String {
     out.push_str("# overridden. An absent key there means \"inherit whatever this file says\", so\n");
     out.push_str("# do NOT paste this template into a game directory — every line you uncommented\n");
     out.push_str("# would become a per-game override pinning that value for that story.\n");
-    out.push_str("#\n# `version` below is the schema stamp — babelmap manages it; leave it alone.\n");
-    out.push_str("# It is also the anchor that keeps settings babelmap writes for you (from the\n");
+    out.push_str("#\n# `version` below is the schema stamp — lanthorn manages it; leave it alone.\n");
+    out.push_str("# It is also the anchor that keeps settings lanthorn writes for you (from the\n");
     out.push_str("# settings screen, say) together at the top rather than scattered.\n");
     out.push_str(&format!("version = {CONFIG_SCHEMA_VERSION}\n"));
 
@@ -522,7 +522,7 @@ pub fn auto_seed(config_file: &std::path::Path) {
     if config_file.exists() {
         return;
     }
-    // Atomic (SQ-0644), like every other file babelmap owns: a torn seed would leave
+    // Atomic (SQ-0644), like every other file lanthorn owns: a torn seed would leave
     // a config.toml that exists (so it is never re-seeded) and may not parse (so every
     // later settings save is refused by SQ-0580's guard) — a dead file the user has to
     // find and delete by hand.
@@ -619,7 +619,7 @@ mod tests {
     }
 
     /// Uncommenting a `Line::Default` row must reproduce the default it claims to
-    /// document — otherwise the file lies about what babelmap does. Checked one key
+    /// document — otherwise the file lies about what lanthorn does. Checked one key
     /// at a time so a failure names the offender.
     #[test]
     fn template_default_lines_are_really_the_defaults() {
@@ -668,7 +668,7 @@ mod tests {
 
         let documented: Vec<&str> = all_rows().iter().map(|(k, _, _)| *k).collect();
         let trailer = TRAILER;
-        // `version` is managed by babelmap (stamped by write_config, never hand-set),
+        // `version` is managed by lanthorn (stamped by write_config, never hand-set),
         // and the two open-ended tables are documented as commented example blocks in
         // the trailer rather than as enumerable keys.
         let exempt = ["version"];

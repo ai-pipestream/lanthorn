@@ -1,11 +1,11 @@
 //! SQ-0719 (second half) / SQ-0736: the interpreter profile — which machine
-//! babelmap presents itself to the story as — and the 1× artwork that selecting
+//! lanthorn presents itself to the story as — and the 1× artwork that selecting
 //! it dissolves.
 //!
 //! The reported symptom: *Zork Zero* booted straight off its Amiga release
 //! floppy drew its art at half size. The cause was two individually-correct
 //! rules meeting. Blorb §11 says a resource file with no `Reso` chunk declares
-//! no scalable images, so babelmap shows them at actual size (SQ-0715, which is
+//! no scalable images, so lanthorn shows them at actual size (SQ-0715, which is
 //! why scopa and mysterious01 correctly stay at 1:1). A native Amiga `Pic.data`
 //! archive has no `Reso` chunk because **the format has no such concept** — so
 //! absence of evidence was being read as evidence of absence, and 320×200 art
@@ -143,7 +143,7 @@ fn fake_pic_data() -> Vec<u8> {
 
 fn write_image(name: &str, image: &[u8]) -> std::path::PathBuf {
     let path =
-        std::env::temp_dir().join(format!("babelmap-profile-{}-{name}", std::process::id()));
+        std::env::temp_dir().join(format!("lanthorn-profile-{}-{name}", std::process::id()));
     std::fs::write(&path, image).expect("write the disk image");
     path
 }

@@ -15,11 +15,11 @@
 
 ## Goal
 
-Prove that babelmap's save files interoperate with other standard interpreters, in
+Prove that lanthorn's save files interoperate with other standard interpreters, in
 **both** directions and for **both** engines:
 
-- **READ** — babelmap correctly restores saves produced by a reference interpreter.
-- **WRITE** — a reference interpreter correctly restores saves produced by babelmap.
+- **READ** — lanthorn correctly restores saves produced by a reference interpreter.
+- **WRITE** — a reference interpreter correctly restores saves produced by lanthorn.
 
 The primary durable artifact is automated tests. The one CI-enforced guarantee per
 engine is the READ direction (via checked-in golden saves, no external binary at
@@ -28,7 +28,7 @@ reference interpreter, plus a documented local runner.
 
 ## Background
 
-babelmap emits two standard formats, both `FORM IFZS` (Quetzal):
+lanthorn emits two standard formats, both `FORM IFZS` (Quetzal):
 - Z-machine: bare Quetzal `.qzl` via `zvm::quetzal::save_quetzal` (host `save_game`,
   `persist_files.rs:203`); restore via `restore_file`/`restore_quetzal`.
 - Glulx: "Glulx-Quetzal" via `gvm` `save_state` (`gvm/src/exec.rs:1373`; `CMem` +
@@ -52,7 +52,7 @@ Story fixtures:
 
 ### The cross-load equivalence oracle
 
-Comparing babelmap's transcript to a reference interpreter's transcript byte-for-byte
+Comparing lanthorn's transcript to a reference interpreter's transcript byte-for-byte
 is fragile (different formatting, prompts, status lines). Instead, **every assertion
 compares two outputs from the *same* interpreter**, varying only the state source:
 
@@ -60,19 +60,19 @@ compares two outputs from the *same* interpreter**, varying only the state sourc
 > must produce the **same** output as **restoring a save taken at P**, then the same
 > probe.
 
-- **READ** (*I* = babelmap): `babelmap.play(prefix).probe()` ==
-  `babelmap.restore(reference_golden_save).probe()`. If equal, babelmap reconstructs
+- **READ** (*I* = lanthorn): `lanthorn.play(prefix).probe()` ==
+  `lanthorn.restore(reference_golden_save).probe()`. If equal, lanthorn reconstructs
   the reference save's state correctly. Needs only the checked-in golden save +
   story — **CI-enforced, no binary**.
 - **WRITE** (*I* = reference terp): `terp.play(prefix).probe()` ==
-  `terp.restore(babelmap_save).probe()`. If equal, the reference terp reconstructs
-  babelmap's save correctly. Needs the reference binary — **`#[ignore]`-gated**.
+  `terp.restore(lanthorn_save).probe()`. If equal, the reference terp reconstructs
+  lanthorn's save correctly. Needs the reference binary — **`#[ignore]`-gated**.
 
 **Requirements on prefix/probe (per story):** the prefix must mutate observable state
 of more than one kind (position/PC *and* object/flag state), and the probe must reveal
 that mutated state (e.g. a `look` + `inventory` pair after moving rooms and taking an
 item), so the test fails if restore drops any state class — not just the PC. `dfrotz`
-and babelmap (and `glulxe` and babelmap) must reach the *same* state from the same
+and lanthorn (and `glulxe` and lanthorn) must reach the *same* state from the same
 prefix; both stories' relevant openings are deterministic (no RNG at the chosen P).
 
 ### Fixtures (checked in)
@@ -93,9 +93,9 @@ prefix commands used to reach P — so the golden can be regenerated determinist
 - `crates/zvm/tests/save_interop.rs`
   - `zmachine_reads_reference_save` (CI): fresh `Machine` from `minizork.z3`; assert
     `play(prefix).probe()` == `restore(golden .qzl).probe()`.
-  - `zmachine_save_read_by_dfrotz` (`#[ignore]`, gated on `dfrotz` present): babelmap
+  - `zmachine_save_read_by_dfrotz` (`#[ignore]`, gated on `dfrotz` present): lanthorn
     writes a save at P to a temp file; assert
-    `dfrotz.play(prefix).probe()` == `dfrotz.restore(babelmap_save).probe()`, driving
+    `dfrotz.play(prefix).probe()` == `dfrotz.restore(lanthorn_save).probe()`, driving
     `dfrotz` via `-L <save>` and stdin, comparing its dumb-mode output.
 - `crates/gvm/tests/save_interop.rs`
   - `glulx_reads_reference_save` (CI): fresh `gvm` machine from `glulxercise.ulx`;
@@ -155,8 +155,8 @@ Two risks are resolved during the one-time setup, before the plan commits to the
 - Testing against additional interpreters (Bocfel, Lectrote, Parchment/Quixe web) —
   `dfrotz`/`glulxe` are sufficient reference oracles; more can be added later.
 - Aux-data (`Glk `/`aux`) and screen-state interop beyond what a normal restore covers.
-- Making babelmap's emulator-style "Save State" archive portable (it is intentionally a
-  babelmap container; only the standard `@save` path is interop-tested here).
+- Making lanthorn's emulator-style "Save State" archive portable (it is intentionally a
+  lanthorn container; only the standard `@save` path is interop-tested here).
 - Automatically installing reference binaries in CI (the live tests are local/opt-in).
 
 ## Open risks (tracked, resolved in the plan's setup task)

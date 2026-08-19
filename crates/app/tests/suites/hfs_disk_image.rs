@@ -193,14 +193,14 @@ fn fake_pic_data() -> Vec<u8> {
 }
 
 fn write_image(name: &str, image: &[u8]) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("babelmap-hfs-{}-{name}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("lanthorn-hfs-{}-{name}", std::process::id()));
     std::fs::write(&path, image).expect("write the disk image");
     path
 }
 
 // ── Synthetic disk: the whole loading path, no fixture ────────────────────────
 
-/// The headline: pointing babelmap at a Macintosh disk image loads the game and
+/// The headline: pointing lanthorn at a Macintosh disk image loads the game and
 /// its art with no extraction step and nothing to configure.
 ///
 /// FALSIFY by dropping the `Hfs` arm from `hints::read_story_file`: the image is
@@ -455,7 +455,7 @@ fn the_macintosh_disk_carries_two_picture_archives_and_the_colour_one_is_the_art
 #[test]
 fn naming_the_monochrome_archive_by_hand_draws_the_monochrome_artwork() {
     let Some(path) = mac_disk() else { return };
-    let dir = std::env::temp_dir().join("babelmap-mac-mono-override");
+    let dir = std::env::temp_dir().join("lanthorn-mac-mono-override");
     let _ = std::fs::create_dir_all(&dir);
 
     let over = app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some("Pic.data"));

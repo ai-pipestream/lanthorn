@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** A map loads only as part of the `.babelmap` archive's state — never standalone, never decoupled from that state. Standalone map files enter only via a new `/load-map <path>` command.
+**Goal:** A map loads only as part of the `.lanthorn` archive's state — never standalone, never decoupled from that state. Standalone map files enter only via a new `/load-map <path>` command.
 
 **Architecture:** Gate the startup archive-map adoption on `cfg.auto_load` (same gate as the game-state restore); make the launch-resume dialog adopt the archive map on accept; delete all standalone-map auto-load (and the `use_default_map` option); add a `/load-map` slash command mirroring the existing arg-bearing commands.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- A map NEVER auto-loads from a standalone file. Only the `.babelmap` archive (gated by `auto_load`) or explicit `/load-map` bring a map in.
+- A map NEVER auto-loads from a standalone file. Only the `.lanthorn` archive (gated by `auto_load`) or explicit `/load-map` bring a map in.
 - Explicit save/restore/`/load` paths (Ctrl+R `main.rs:3314`, saves-list `3542`/`3576`, `/load` `3967`) already adopt the embedded map and must stay unchanged.
 - Command naming follows the registry's verb-noun kebab convention (`export-transcript`, `zoom-map`), so the command is `load-map`.
 - Run `cargo test -p app` per task; it must stay green (~1055+ lib tests).
@@ -49,7 +49,7 @@ Replace the whole `let mut mapper = if arc_file.exists() { … } else { … };` 
                             startup_history = ac.history;
                         }
                         Err(e) => {
-                            eprintln!("babelmap: warning: could not restore game from archive: {}; starting fresh", restore_error_msg(e));
+                            eprintln!("lanthorn: warning: could not restore game from archive: {}; starting fresh", restore_error_msg(e));
                         }
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
@@ -65,7 +65,7 @@ Replace the whole `let mut mapper = if arc_file.exists() { … } else { … };` 
                 if cfg.auto_load { ac.mapper } else { Mapper::default() }
             }
             Err(e) => {
-                eprintln!("babelmap: warning: could not load archive {}: {}", arc_file.display(), e);
+                eprintln!("lanthorn: warning: could not load archive {}: {}", arc_file.display(), e);
                 Mapper::default()
             }
         }
@@ -97,7 +97,7 @@ In the exit block (`main.rs:3813-3823`), delete the `Err(e)` fallback's `save_ma
 
 ```rust
             Err(e) => {
-                eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
+                eprintln!("lanthorn: warning: could not save to {}: {}", arc_file.display(), e);
             }
 ```
 
@@ -112,13 +112,13 @@ Compile (`cargo build -p app`) and remove everything the compiler flags as unuse
 - [ ] **Step 5: Verify**
 
 Run: `cargo test -p app` and `cargo build -p app`
-Expected: PASS, no unused-item warnings. Manually confirm the two behaviors (no automated startup harness exists): with a `.babelmap` present, `auto_load=true` resumes with its map; `auto_load=false` starts blank; accepting the launch-resume dialog brings the map.
+Expected: PASS, no unused-item warnings. Manually confirm the two behaviors (no automated startup harness exists): with a `.lanthorn` present, `auto_load=true` resumes with its map; `auto_load=false` starts blank; accepting the launch-resume dialog brings the map.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add crates/app/src/main.rs crates/app/src/ifid.rs crates/app/src/persist_files.rs
-git commit -m "feat(app): map loads only with .babelmap state; drop standalone map auto-load (SQ-0226)
+git commit -m "feat(app): map loads only with .lanthorn state; drop standalone map auto-load (SQ-0226)
 
 Quest: SQ-0226"
 ```

@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn write_tags_and_aligns_truncate_resets() {
-        let dir = std::env::temp_dir().join(format!("babelmap-trace-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-trace-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("trace.log");
         let _ = std::fs::remove_file(&log);

@@ -24,11 +24,11 @@ style = "<built-in name or file path>"
 1. **Base** = the style file named by `style`:
    - a **built-in name** (embedded; v1 ships exactly one: `default` = today's terminal look), OR
    - a **file path** (`~` expanded, relative paths resolved against `user_dir`).
-   - If `style` is **absent**: base = the user's personal `~/.babelmap/style.toml` if it exists, else the built-in `default`.
+   - If `style` is **absent**: base = the user's personal `~/.lanthorn/style.toml` if it exists, else the built-in `default`.
 2. **Override** = `config.toml`'s own `[colors]`/`[symbols]` sections (written in the SAME new format as the style file), layered on top **per key** — they overwrite only the settings they explicitly name.
 3. The merged result resolves into `ColorScheme` + `SymbolSet` and is stored in `AppState.colors` / `AppState.symbols`.
 
-**No backward compatibility** (the app is undeployed): there is no legacy `[colors].elements` packed-string format and no migration — old-format `~/.babelmap` files can simply be deleted. Both the style file and `config.toml`'s override sections use the new format only.
+**No backward compatibility** (the app is undeployed): there is no legacy `[colors].elements` packed-string format and no migration — old-format `~/.lanthorn` files can simply be deleted. Both the style file and `config.toml`'s override sections use the new format only.
 
 **No general cascade/selector engine** (ratatui is immediate-mode; there is nothing like Textual TCSS to defer to). We implement a small, fixed selector set ourselves.
 
@@ -104,9 +104,9 @@ Both `config.toml`'s `[colors]`/`[symbols]` and the style file deserialize into 
 
 Today the gallery writes `[symbols]` to `config.toml` and the config screen writes presets/`[colors].scheme` to `config.toml`. New behavior:
 
-- Edits write to the user's **personal style file** `~/.babelmap/style.toml` (created on first edit), format-preserving via `toml_edit`, **preserving unknown sections** (future `[header]` etc.).
-- **Fork-on-edit:** the edit session starts from the currently-resolved style (whatever `style` points at, plus overrides), and on save writes the result to `~/.babelmap/style.toml` AND sets `config.toml`'s `style` to point at the personal file (or clears it, since absent ⇒ personal file). So: load a friend's style, tweak it, and it becomes *your* style — what you see is what you save.
-- **Gallery "Output all settings to style file" button:** an explicit, discoverable gallery action (footer button + key) that writes the **complete current style fully expanded** — every color selector and every symbol preset/override, not just deltas — to the personal `~/.babelmap/style.toml`, producing a **self-contained, shareable** file (no reliance on a base `scheme` or inherited defaults). It also repoints `config.toml`'s `style` to the personal file. This is the deliberate "export my whole look" affordance; fork-on-edit is the implicit version that fires on any normal save.
+- Edits write to the user's **personal style file** `~/.lanthorn/style.toml` (created on first edit), format-preserving via `toml_edit`, **preserving unknown sections** (future `[header]` etc.).
+- **Fork-on-edit:** the edit session starts from the currently-resolved style (whatever `style` points at, plus overrides), and on save writes the result to `~/.lanthorn/style.toml` AND sets `config.toml`'s `style` to point at the personal file (or clears it, since absent ⇒ personal file). So: load a friend's style, tweak it, and it becomes *your* style — what you see is what you save.
+- **Gallery "Output all settings to style file" button:** an explicit, discoverable gallery action (footer button + key) that writes the **complete current style fully expanded** — every color selector and every symbol preset/override, not just deltas — to the personal `~/.lanthorn/style.toml`, producing a **self-contained, shareable** file (no reliance on a base `scheme` or inherited defaults). It also repoints `config.toml`'s `style` to the personal file. This is the deliberate "export my whole look" affordance; fork-on-edit is the implicit version that fires on any normal save.
 - `write_config` no longer writes `[colors]`/`[symbols]` (those move to the style file); it keeps writing the functional keys. A new `style::write_style(path, &resolved_style)` handles the style file. Any `[colors]`/`[symbols]` a user hand-writes in `config.toml` remain the override layer (read, not written by the tools).
 
 ## Components
@@ -134,7 +134,7 @@ Today the gallery writes `[symbols]` to `config.toml` and the config screen writ
 - **Selector → field mapping:** each selector + `:variant` lands on the correct `ColorScheme` field with the right patched Style; unknown selector ⇒ warning, ignored, no crash.
 - **Color value parsing:** named, `#rrggbb`, index `0-255` each parse; bad value ⇒ warning, ignored.
 - **Write round-trip:** `write_style` writes selectors+symbols, is format-preserving, and PRESERVES an unrelated `[header]` section + comments (proves future beautify keys survive). Re-reading yields the same resolved style.
-- **Fork-on-edit:** saving from the gallery/config writes `~/.babelmap/style.toml` and sets `config.toml` `style` to it; a subsequent load reflects the edit.
+- **Fork-on-edit:** saving from the gallery/config writes `~/.lanthorn/style.toml` and sets `config.toml` `style` to it; a subsequent load reflects the edit.
 - **Gallery export-all:** the "Output all settings" action writes a fully-expanded style file — every selector + every symbol key present, no inherited gaps — and re-loading it WITHOUT any base scheme/overrides reproduces the same `ColorScheme`/`SymbolSet` (self-contained); the `style` pointer is repointed to it.
 
 ## Out of scope / non-goals
@@ -142,7 +142,7 @@ Today the gallery writes `[symbols]` to `config.toml` and the config screen writ
 - A general CSS cascade / arbitrary selector matching (fixed selector set only).
 - Layout-from-style (docking/grid) — ratatui doesn't support it; layout stays in code.
 - Borders/header/input *rendering* and their style fields (those are #42/#44/#45/#46).
-- Backward compatibility / migration of old-format files (app is undeployed; delete old `~/.babelmap` style files instead).
+- Backward compatibility / migration of old-format files (app is undeployed; delete old `~/.lanthorn` style files instead).
 - `mapper`/`zvm` changes.
 
 ## Risks & limitations (accepted)

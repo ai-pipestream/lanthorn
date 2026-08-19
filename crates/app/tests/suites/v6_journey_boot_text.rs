@@ -70,7 +70,7 @@ fn stories_dir() -> PathBuf {
 /// The IBM PC release, as an ordinary story file.
 const PC_RELEASE: &str = "journey-r83-s890706.z6";
 
-/// The Amiga release, still on its release floppy — which is how babelmap is given
+/// The Amiga release, still on its release floppy — which is how lanthorn is given
 /// it, and why it is a DIFFERENT BUILD (r30/890322 against the PC's r83/890706)
 /// rather than the same one under another profile. See
 /// [`journey_never_shows_an_erased_title_block_on_either_release`].
@@ -200,7 +200,7 @@ const ANY_KEY: &str = "[Press any key to begin]";
 /// > the ibm-pc build the screen is reset (scroll back still exists) between each
 /// > keypress. amiga build is not resetting."*
 ///
-/// The two builds are two BUILDS, which is the thing the first fix missed. babelmap
+/// The two builds are two BUILDS, which is the thing the first fix missed. lanthorn
 /// takes the Amiga release off its release floppy (`InterpreterProfile::resolve`
 /// reads the medium, and `Adf::story` reads `Story.data` out of it), and that is
 /// r30/890322 — not r83/890706 under another palette. The two lay their windows out

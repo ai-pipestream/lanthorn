@@ -6,16 +6,16 @@
 
 ## Goal
 
-Let the player keep several named saves per story, each a self-contained `.babelmap` archive, managed through one saves-manager modal (list / load / save-as / delete). The existing `Ctrl+S` quick-save to the default slot is unchanged.
+Let the player keep several named saves per story, each a self-contained `.lanthorn` archive, managed through one saves-manager modal (list / load / save-as / delete). The existing `Ctrl+S` quick-save to the default slot is unchanged.
 
 ## Model (decided)
 
-- **Named slots.** Each named save is `<dir>/<ifid>-<name>.babelmap`. The quick-save default is `<dir>/<ifid>.babelmap` (from the archive wiring). Each save bundles the map + Quetzal game state (the archive container).
+- **Named slots.** Each named save is `<dir>/<ifid>-<name>.lanthorn`. The quick-save default is `<dir>/<ifid>.lanthorn` (from the archive wiring). Each save bundles the map + Quetzal game state (the archive container).
 - **Unified saves-manager modal** for named saves: list, Load, Save As, Delete. `Ctrl+S` keeps quick-saving to the default slot silently.
 
 ## Dependencies
 
-- **Archive wiring (L7):** `.babelmap` as the save/load container and the default-slot semantics. THIS SPEC ASSUMES that brief is implemented first.
+- **Archive wiring (L7):** `.lanthorn` as the save/load container and the default-slot semantics. THIS SPEC ASSUMES that brief is implemented first.
 - **L8 keymap (done):** the modal is opened by a `Command::OpenSaves`; add the command + default binding to the keymap.
 - `archive.rs` (`save_archive`/`load_archive`/`Meta`), already on `main`.
 
@@ -24,8 +24,8 @@ Let the player keep several named saves per story, each a self-contained `.babel
 1. **`archive.rs` — extend `Meta`** from `{ format_version, ifid }` to `{ format_version, ifid, name: Option<String>, turns: u32, saved_at: String }`. New fields `#[serde(default)]` so archives written before this change still load. `saved_at` is an RFC3339 string from `std::time::SystemTime` (the app binary may use system time; only Workflow scripts cannot). `save_archive` gains the metadata (either extra params or a `Meta` argument — keep the existing 3-arg form working via a thin wrapper if simpler).
 2. **`persist_files.rs` — slot helpers:**
    - `pub struct SaveInfo { pub path: PathBuf, pub name: String, pub turns: u32, pub saved_at: String, pub is_default: bool }`
-   - `pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo>` — glob `<ifid>.babelmap` and `<ifid>-*.babelmap`, read each archive's `Meta`, sort (default first, then by `saved_at` desc). Files that fail to parse are skipped.
-   - `pub fn save_named(dir: &Path, ifid: &str, name: &str, mapper: &Mapper, machine: &Machine, turns: u32) -> io::Result<()>` — sanitize `name` to a filesystem-safe slug, write `<ifid>-<slug>.babelmap` with `Meta`.
+   - `pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo>` — glob `<ifid>.lanthorn` and `<ifid>-*.lanthorn`, read each archive's `Meta`, sort (default first, then by `saved_at` desc). Files that fail to parse are skipped.
+   - `pub fn save_named(dir: &Path, ifid: &str, name: &str, mapper: &Mapper, machine: &Machine, turns: u32) -> io::Result<()>` — sanitize `name` to a filesystem-safe slug, write `<ifid>-<slug>.lanthorn` with `Meta`.
    - `pub fn delete_save(path: &Path) -> io::Result<()>`.
 3. **`render/saves.rs` (new)** — `pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer)`: a centered modal listing `SaveInfo` rows (`name`, `turn N`, short time; default row labelled "(default)"), current row marked, with a key hint footer.
 4. **`AppState` additions:**
@@ -48,7 +48,7 @@ Let the player keep several named saves per story, each a self-contained `.babel
 
 ## Testing
 
-- `list_saves`: with two named `.babelmap` files + the default, returns 3 `SaveInfo` with correct names/turns; a non-archive file in the dir is ignored; ordering (default first).
+- `list_saves`: with two named `.lanthorn` files + the default, returns 3 `SaveInfo` with correct names/turns; a non-archive file in the dir is ignored; ordering (default first).
 - `save_named` round-trip: save with name "before-troll", turns 42; `list_saves` shows it; `load_archive` restores the map + game bytes; name slug is filesystem-safe.
 - `delete_save`: removes the file; subsequent `list_saves` omits it.
 - `Meta` back-compat: an archive written with only `{format_version, ifid}` loads with `name=None, turns=0, saved_at=""`.

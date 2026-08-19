@@ -1,6 +1,6 @@
 // SQ-0158 — READ-direction save-format interop.
 //
-// Proves babelmap's zvm can restore a bare Quetzal `.qzl` save produced by a
+// Proves lanthorn's zvm can restore a bare Quetzal `.qzl` save produced by a
 // *different* interpreter (`dfrotz`) and land in the same state a native
 // play-through would reach. The golden fixture's PC points at the `save`
 // instruction's result descriptor (Quetzal §5.8), so this exercises the
@@ -131,17 +131,17 @@ fn zmachine_reads_reference_save() {
 
 // SQ-0158 — WRITE-direction save-format interop.
 //
-// Proves a save that *babelmap writes* (via the game's `@save`) is read
+// Proves a save that *lanthorn writes* (via the game's `@save`) is read
 // correctly by the reference interpreter `dfrotz`. Compares two dfrotz runs
-// through the identical dfrotz code path: A loads babelmap's save, B loads
-// dfrotz's own committed golden save. Both encode point P; if babelmap wrote
+// through the identical dfrotz code path: A loads lanthorn's save, B loads
+// dfrotz's own committed golden save. Both encode point P; if lanthorn wrote
 // a correct, dfrotz-readable save, A and B produce byte-identical output.
 
 /// Drive minizork through PREFIX and the game's own `save` verb, capturing
 /// the descriptor-PC Quetzal bytes `save_quetzal` emits when `pending_save`
 /// is set (the same convention an in-game `@save` produces). Writes the
 /// bytes to a unique temp file and returns its path.
-fn babelmap_save_at_p() -> std::path::PathBuf {
+fn lanthorn_save_at_p() -> std::path::PathBuf {
     let story = zvm::fixtures::load("minizork.z3").expect("required CI fixture minizork.z3 missing");
     let mut machine = boot_to_first_read(story);
     run_turns(&mut machine, &PREFIX);
@@ -155,16 +155,16 @@ fn babelmap_save_at_p() -> std::path::PathBuf {
                 StepResult::RestoreRequest => machine.complete_restore_failure(),
                 StepResult::Continue => {}
                 StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart | StepResult::Fault => {
-                    panic!("babelmap_save_at_p: expected a SaveRequest from the `save` verb but the machine reached a different terminal state first");
+                    panic!("lanthorn_save_at_p: expected a SaveRequest from the `save` verb but the machine reached a different terminal state first");
                 }
             }
         }
-        panic!("babelmap_save_at_p: never reached SaveRequest within step cap");
+        panic!("lanthorn_save_at_p: never reached SaveRequest within step cap");
     };
     machine.complete_save(true);
 
-    let path = std::env::temp_dir().join(format!("babelmap-158b-{}.qzl", std::process::id()));
-    std::fs::write(&path, &bytes).expect("write babelmap's save to a temp file");
+    let path = std::env::temp_dir().join(format!("lanthorn-158b-{}.qzl", std::process::id()));
+    std::fs::write(&path, &bytes).expect("write lanthorn's save to a temp file");
     path
 }
 
@@ -199,8 +199,8 @@ fn dfrotz_probe(save_path: &std::path::Path) -> String {
 #[test]
 #[ignore = "needs dfrotz on PATH; run with: cargo test -p zvm --test save_interop -- --ignored"]
 fn zmachine_save_read_by_dfrotz() {
-    // A: dfrotz loads babelmap's save.
-    let bab = babelmap_save_at_p();
+    // A: dfrotz loads lanthorn's save.
+    let bab = lanthorn_save_at_p();
     let a = dfrotz_probe(&bab);
     // B: dfrotz loads its own golden save.
     let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/interop/minizork-at-P.qzl");
@@ -209,11 +209,11 @@ fn zmachine_save_read_by_dfrotz() {
 
     assert!(
         a.contains("North of House") && a.contains("leaflet"),
-        "dfrotz reading babelmap's save must reveal point-P state (non-vacuous guard):\n{a}"
+        "dfrotz reading lanthorn's save must reveal point-P state (non-vacuous guard):\n{a}"
     );
     assert_eq!(
         a.trim(),
         b.trim(),
-        "dfrotz reading babelmap's save must match dfrotz reading its own golden save"
+        "dfrotz reading lanthorn's save must match dfrotz reading its own golden save"
     );
 }

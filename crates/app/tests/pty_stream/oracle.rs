@@ -18,7 +18,7 @@
 //! it find its own row and column. Ours reports placeholder cells; this one
 //! reports pixels that would land.
 //!
-//! THE DIFFERENCE THAT PAID FOR THE CRATE. babelmap paints a virtual placement
+//! THE DIFFERENCE THAT PAID FOR THE CRATE. lanthorn paints a virtual placement
 //! one run per row, and only the run's LEAD cell carries the diacritic triple
 //! (image row index, image column index, the image id's high byte). Every cell
 //! after it is a bare `U+10EEEE` leaning on the protocol's continuation rule: a
@@ -28,7 +28,7 @@
 //! colour, so they still name an image id, but only its LOW 24 BITS: the high
 //! byte lived in the third diacritic and died with the lead cell. If the real id
 //! has a non-zero high byte the lookup misses and a real terminal draws NOTHING
-//! there. If the high byte happens to be zero — which is babelmap's own id range,
+//! there. If the high byte happens to be zero — which is lanthorn's own id range,
 //! `0x00B0_xxxx` — the lookup succeeds but the orphaned run now claims image row
 //! 0 and column 0, so every row of the art redraws the art's first row. Our
 //! decoder sees placeholder cells and reports an image in both cases. This one
@@ -188,7 +188,7 @@ pub struct Draw {
     pub src_h: u32,
 }
 
-/// One image the terminal holds, decoded to tightly-packed RGBA. babelmap
+/// One image the terminal holds, decoded to tightly-packed RGBA. lanthorn
 /// transmits `f=32` (raw RGBA) so this is usually a straight copy, but the
 /// decode goes through the crate's own converter, which handles the gray/RGB
 /// formats too — the rasteriser must not care which format arrived.
@@ -203,7 +203,7 @@ pub struct RasterImage {
 /// live 256-entry palette (OSC 4 changes it) and the defaults an unstyled cell
 /// falls back to (OSC 10/11 change those).
 ///
-/// When the app never set a dynamic default — babelmap does not — the fallback
+/// When the app never set a dynamic default — lanthorn does not — the fallback
 /// is the palette's own black and light grey rather than an invented pair, so
 /// every colour in a rendered picture traces back to something the stream said.
 #[derive(Clone)]
@@ -311,7 +311,7 @@ struct Grid {
 /// pixels, and a placement whose destination rounds to zero pixels is one a
 /// renderer skips.
 ///
-/// The ACTIVE screen is read, so babelmap's `?1049` alternate screen needs no
+/// The ACTIVE screen is read, so lanthorn's `?1049` alternate screen needs no
 /// special handling — but a capture that outlived the app's exit from the
 /// alternate screen resolves against the primary screen, which is empty. That is
 /// the truth about those bytes, not a fault in this function.

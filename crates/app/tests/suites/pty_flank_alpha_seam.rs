@@ -1,4 +1,4 @@
-//! SQ-0827 — no band babelmap uploads may carry a colour the game never drew.
+//! SQ-0827 — no band lanthorn uploads may carry a colour the game never drew.
 //!
 //! Reported by eye on the Amiga Zork Zero floppy (**release 366 / serial 890323**),
 //! measured off a 583x850 screenshot: a **one pixel** wide line down both edges of
@@ -17,7 +17,7 @@
 //!
 //! The invariant is stated the way the report was — a one-pixel column, at the seam,
 //! darker than the page either side of it — and measured on the screen a real terminal
-//! emulator resolves from babelmap's own bytes, because a defect one pixel wide inside
+//! emulator resolves from lanthorn's own bytes, because a defect one pixel wide inside
 //! an image is invisible to every cell-buffer harness in the tree. An earlier draft
 //! judged the emitted image instead, asking that a partly transparent pixel lie between
 //! the opaque pixels touching it; that is not an invariant a shrink obeys, because
@@ -128,13 +128,13 @@ fn no_one_pixel_line_at_the_flank_seam(honor: bool) {
     }
     let user_dir = out_dir().join(format!("flank-seam-honor-{honor}"));
     let _ = std::fs::remove_dir_all(&user_dir);
-    std::fs::create_dir_all(&user_dir).expect("a throwaway babelmap home");
+    std::fs::create_dir_all(&user_dir).expect("a throwaway lanthorn home");
     // The driver writes the per-game sidecar itself; the colour policy is a global
-    // key, and babelmap reads the file rather than reseeding it when it exists.
+    // key, and lanthorn reads the file rather than reseeding it when it exists.
     std::fs::write(user_dir.join("config.toml"), format!("honor_game_colours = {honor}\n"))
         .expect("seeding the colour policy");
 
-    let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_babelmap"), &story, &user_dir);
+    let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_lanthorn"), &story, &user_dir);
     spec.cols = COLS;
     spec.rows = ROWS;
     spec.cell_w = CELL.0;
@@ -149,7 +149,7 @@ fn no_one_pixel_line_at_the_flank_seam(honor: bool) {
         driver::Key::Wait(Duration::from_millis(1500)),
     ];
 
-    let cap = driver::run(spec).expect("the pty harness should boot babelmap");
+    let cap = driver::run(spec).expect("the pty harness should boot lanthorn");
     let neg = cap.negotiated();
     assert!(
         neg.is_kitty(),

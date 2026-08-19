@@ -4,7 +4,7 @@
 //! the top (window 3, 180px), the status bar in the middle (window 1, y=181) and the
 //! prose the player types into below (window 7, y=201). Windows 3 and 7 are both
 //! wrap+scroll, so both stream through the Z-machine's stream-1 text path, and
-//! babelmap used to splice them into ONE transcript — the top window's text then
+//! lanthorn used to splice them into ONE transcript — the top window's text then
 //! scrolled away with the story. The game says so itself, on that very screen: "If
 //! things scroll off of the screen that shouldn't (like the windows on the top of
 //! the screen), then your interpreter probably doesn't support V6 correctly."
@@ -242,7 +242,7 @@ fn a_restore_brings_the_second_window_back() {
     // Round-trip the screen through the archive DTOs, as Save State does.
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(&session);
-    let path = std::env::temp_dir().join(format!("advent-secondary-{}.babelmap", std::process::id()));
+    let path = std::env::temp_dir().join(format!("advent-secondary-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper,

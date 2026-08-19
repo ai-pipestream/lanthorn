@@ -140,8 +140,8 @@ Expected: PASS, 0 warnings. (Existing `ColorScheme` equality/round-trip tests st
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/colors.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): StatusBarLayout data model on ColorScheme
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/colors.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): StatusBarLayout data model on ColorScheme
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -323,8 +323,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 9: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): parse [statusbar] block into RawStatusBar + merge
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): parse [statusbar] block into RawStatusBar + merge
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -438,8 +438,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): resolve [statusbar] into StatusBarLayout + map frame
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): resolve [statusbar] into StatusBarLayout + map frame
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -799,8 +799,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 10: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/render/transcript.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): render configurable status-bar segments (clusters + placeholders)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/render/transcript.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): render configurable status-bar segments (clusters + placeholders)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -826,7 +826,7 @@ In `crates/app/src/style.rs`, inside `mod tests`, add:
 fn write_style_full_round_trips_statusbar_and_transcript_rules() {
     use crate::colors::{Align, StatusSegment, StatusBarLayout};
     use ratatui::style::Color;
-    let dir = std::env::temp_dir().join(format!("babelmap-sb-rt-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-sb-rt-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sb.toml");
 
@@ -971,8 +971,8 @@ Expected: PASS, 0 warnings. (`write_style_full_is_self_contained` and the transc
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/style.rs crates/app/src/colors.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): export statusbar + transcript rules in write_style_full
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/style.rs crates/app/src/colors.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): export statusbar + transcript rules in write_style_full
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -995,8 +995,8 @@ Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
 Create `style.example.toml` at the repo root:
 
 ```toml
-# babelmap style reference — copy to ~/.babelmap/style.toml and edit.
-# Point config.toml at it with:  style = "~/.babelmap/style.toml"
+# lanthorn style reference — copy to ~/.lanthorn/style.toml and edit.
+# Point config.toml at it with:  style = "~/.lanthorn/style.toml"
 #
 # Color values accept: a named color (cyan, dark-gray, light-blue, …),
 # palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index ("17"),
@@ -1156,8 +1156,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add style.example.toml README.md crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "docs: commented style.example.toml reference + README pointer
+git -C /Volumes/Videos/Source/lanthorn add style.example.toml README.md crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "docs: commented style.example.toml reference + README pointer
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

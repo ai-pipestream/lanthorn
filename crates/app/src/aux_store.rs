@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn global_file_round_trips() {
-        let dir = std::env::temp_dir().join(format!("babelmap-aux-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-aux-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(read_global_aux(&dir).is_empty(), "absent file → empty");
         write_global_aux(&dir, &sample()).unwrap();
@@ -230,7 +230,7 @@ mod tests {
     /// rather than half-happening (an in-place `fs::write` would have succeeded).
     #[test]
     fn an_interrupted_aux_write_keeps_the_previous_table() {
-        let dir = std::env::temp_dir().join(format!("babelmap-aux-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-aux-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_global_aux(&dir, &sample()).unwrap();

@@ -5,7 +5,7 @@
 //! scrolling window is no exception, and Shogun's opening turns on it — the game
 //! prints its whole title header while window 0 is the full 640x400 screen, then
 //! moves window 0 down to a 548x64 box beside its menu and prints "You may choose
-//! to:" there. A real interpreter leaves the header painted up top. babelmap
+//! to:" there. A real interpreter leaves the header painted up top. lanthorn
 //! streamed both halves into one transcript, so they came out adjacent and the
 //! header scrolled out of a four-row box.
 //!

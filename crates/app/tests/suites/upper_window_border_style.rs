@@ -1,6 +1,6 @@
 //! SQ-0700: the upper-window frame must be switchable off from a REAL style.toml.
 //!
-//! The frame babelmap draws around a v4+ game's status/upper window is ours, not
+//! The frame lanthorn draws around a v4+ game's status/upper window is ours, not
 //! the game's — so the theme owns it, and `upper_window_border = { style = "none" }`
 //! is how a player turns it off. The reported symptom was that it did nothing for
 //! `anchor.z8` (a v8 story): the frame stayed, and kept its row/column reservation.
@@ -28,7 +28,7 @@ fn stories_dir() -> PathBuf {
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("babelmap-uwb-{}-{}", tag, std::process::id()));
+    let d = std::env::temp_dir().join(format!("lanthorn-uwb-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

@@ -1078,7 +1078,7 @@ mod tests {
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!(
-                "babelmap-blorb-test-{}-{}-{n}",
+                "lanthorn-blorb-test-{}-{}-{n}",
                 std::process::id(),
                 tag
             ));

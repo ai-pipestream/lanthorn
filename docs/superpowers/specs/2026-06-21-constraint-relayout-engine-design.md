@@ -28,7 +28,7 @@ axes** — the house core (`79/80/81/180/76`, plus interior `203/193`) stays dis
 
 The deleted engine was never the real problem; the *architecture around it* was — it ran
 **every turn** with fragile proxy-based repairs (octant / grid-BFS) that approximated the
-renderer. babelmap now has a clean two-regime model: stable per-turn **incremental
+renderer. lanthorn now has a clean two-regime model: stable per-turn **incremental
 placement** + on-demand **re-tidy** + a **router-measured cleanup** in `app` that nudges
 rooms against the REAL rendered plan. Running the constraint solver **only on re-tidy** and
 feeding its output to that cleanup sidesteps every source of the original fragility.

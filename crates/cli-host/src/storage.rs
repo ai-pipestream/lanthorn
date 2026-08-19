@@ -24,7 +24,7 @@
 //! A story **mounted out of a disk image** is keyed by its own release and
 //! serial instead — [`disk_story_key`]. The basename cannot answer for it: one
 //! `Infocom Compilation 1 (19xx)(-).st` carries six games, and they would all
-//! have shared one `default.babelmap` and overwritten each other. Keying on the
+//! have shared one `default.lanthorn` and overwritten each other. Keying on the
 //! build gives three properties the filename never had — renaming the image
 //! keeps the saves, a game that moves between disks in a set keeps them, and
 //! two games on one disk cannot collide — and it is the same identity this
@@ -100,7 +100,7 @@ const SLUG_MAX: usize = 24;
 /// The readable half of a disk-mounted story's key.
 ///
 /// The **identity** is the release and serial that follow it; this part exists so
-/// a person reading `~/.babelmap` can tell `hitchhikers-guide-r59-s851108` from
+/// a person reading `~/.lanthorn` can tell `hitchhikers-guide-r59-s851108` from
 /// `zork-i-r88-s840726` without opening either. It is derived mechanically from
 /// the canonical title `cli_host::titles` already holds — a curated slug column
 /// would be a second table to keep in step with the first — by dropping any

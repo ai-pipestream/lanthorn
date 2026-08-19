@@ -180,7 +180,7 @@ fn the_macintosh_floppy_carries_a_font_in_its_resource_fork() {
 }
 
 /// The Macintosh font is **fixed-pitch across printable ASCII, at 7** — and that is
-/// still one pixel narrower than babelmap's cell (SQ-0916).
+/// still one pixel narrower than lanthorn's cell (SQ-0916).
 ///
 /// This case exists because the first reading of this font was wrong twice. It was
 /// called proportional (true only if you count the accented high range, which no
@@ -223,7 +223,7 @@ fn the_macintosh_font_is_fixed_pitch_but_narrower_than_our_cell() {
     );
     assert!(
         widths.iter().all(|&w| w < 8),
-        "and it is NARROWER than babelmap's 8px cell, so drawing with it at that cell \
+        "and it is NARROWER than lanthorn's 8px cell, so drawing with it at that cell \
          costs a pixel of tracking on every character: {widths:?}",
     );
 

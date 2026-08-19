@@ -2,7 +2,7 @@
 
 [← back to README](../../README.md)
 
-Point babelmap at a story and it works out the format from the file itself and
+Point lanthorn at a story and it works out the format from the file itself and
 boots the right engine — you never choose. Under the hood are three from-scratch,
 zero-dependency virtual machines written clean-room in Rust: a Z-machine
 (`zvm`), a Glulx engine (`gvm`), and a Scott Adams / ScottFree engine (`scott`).
@@ -23,13 +23,13 @@ playing.
 - **Scott Adams** (ScottFree `.dat`) — the classic 8-bit text adventures
   (*Adventureland*, *Pirate Adventure*, …), played through the same TUI and live
   automap as everything else. Room illustrations render when the game ships as a
-  Blorb with PNG artwork (drawn by the graphics pipeline); babelmap plays the
+  Blorb with PNG artwork (drawn by the graphics pipeline); lanthorn plays the
   `.dat` text engine and shows the bundled images — it does **not** decode the
   original SAGA line-draw graphics format.
 
 ## What counts as a story file
 
-Point babelmap at whatever the game arrived in and it digs the story out itself.
+Point lanthorn at whatever the game arrived in and it digs the story out itself.
 
 - **Bare images** — `.z3`–`.z8`, `.ulx`, and Scott Adams `.dat` are read straight.
 - **Blorb containers** — `.zblorb`/`.gblorb`/`.blorb`/`.blb` yield their executable
@@ -41,7 +41,7 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   Mac release floppy, likewise played as it shipped.
 - **Hybrid CD-ROMs** — `.bin`, the raw disc dump, no `.cue` wanted. *Classic Text
   Adventure Masterpieces of Infocom* pressed one disc for two machines, and its
-  Macintosh half is an Apple partition three layers down: hand babelmap the
+  Macintosh half is an Apple partition three layers down: hand lanthorn the
   354 MB dump and it measures the sector framing, walks the partition map and
   mounts the volume, offering all 83 games on it.
 - **DOS floppy images** — `.ima`, `.img`, or any name at all: the PC release disk,
@@ -52,13 +52,13 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   Apple IIgs disks and the seven-volume *Lost Treasures of Infocom* collection.
   And `.dsk`, the 5.25" press, which is the same filesystem with its sectors in
   the order the drive numbers them rather than the order ProDOS does: hand
-  babelmap any one of *Shogun*'s five floppies, *Journey*'s five or *Zork Zero*'s
+  lanthorn any one of *Shogun*'s five floppies, *Journey*'s five or *Zork Zero*'s
   four and the whole game opens, because a release is not a platter. And `.po`,
   the same 800 KB volume with no wrapper at all.
 - **Apple II raw self-booting disks** — also `.dsk`, also 143,360 bytes, and not
   a filesystem at all. Infocom's earlier retail floppies boot their own loader
   and read the story off known tracks with their own RWTS: no ProDOS volume
-  directory in any sector order, no DOS 3.3 VTOC, nothing to enumerate. babelmap
+  directory in any sector order, no DOS 3.3 VTOC, nothing to enumerate. lanthorn
   finds the game by putting the sectors into DOS 3.3 *logical* order and then
   looking for a run of them that verifies against the story's own header
   checksum — which is an oracle a wrong guess cannot pass. `stories/`'s
@@ -69,19 +69,19 @@ Point babelmap at whatever the game arrived in and it digs the story out itself.
   three disks in `stories/` and used by none: *Trinity* writes its story straight
   over its own directory sector, and *Hitchhiker's* keeps a decorative directory
   whose only file is a BASIC loader. So the story is raw sectors again — and laid
-  out differently by different presses, so babelmap tries each layout and keeps
+  out differently by different presses, so lanthorn tries each layout and keeps
   the one that verifies against the story's own checksum.
 
 Those last seven are worth their own paragraphs. Infocom's Amiga releases came on 880 KB
 floppies, and the disk images those turned into are still how the graphical
-titles circulate in their native form. Hand babelmap one — `babelmap "Zork
+titles circulate in their native form. Hand lanthorn one — `lanthorn "Zork
 Zero_Disk1.adf"` — and it mounts the AmigaDOS filesystem (both OFS and FFS),
 walks it, and plays what it finds. No unpacking step, no loose files, nothing to
 rename.
 
 AmigaOS has no filename extensions to go by, and while Infocom's convention was
 `Story.data` beside `Pic.data`, the convention is not a promise — one Zork Zero
-disk lists a file in its own manifest that was never written to it. So babelmap
+disk lists a file in its own manifest that was never written to it. So lanthorn
 identifies the story by **content**: a Z-machine header whose version, memory
 map, serial, and declared length all agree with the bytes actually present. The
 two saved games sitting on the Zork Zero disk look superficially like v3 stories
@@ -91,7 +91,7 @@ floppy that ships as Disk 0 — says so instead of booting a system library.
 
 The artwork comes along for free: a native Infocom picture archive on the *same*
 image is that story's art, because a shared floppy is as strong a guarantee of
-pairing as a Blorb is. Loose archives are a different matter — babelmap will use
+pairing as a Blorb is. Loose archives are a different matter — lanthorn will use
 one, but only if you name it, and it never guesses from a filename. See
 [Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws).
 
@@ -99,7 +99,7 @@ The Macintosh floppy is the same story one filesystem over, and a good deal more
 work: a DiskCopy 4.2 image is an 84-byte header wrapped around an HFS volume,
 with 12 bytes of sector tag per block trailing behind that are *not* part of the
 filesystem. Inside is a B\*-tree catalog — the most structure any medium here
-asks for — and babelmap walks it, extents overflow file and all. macOS is no help
+asks for — and lanthorn walks it, extents overflow file and all. macOS is no help
 whatsoever: `hdiutil attach` has refused HFS-standard images since 10.14, so
 every layer of that chain is hand-rolled, with the same zero dependencies the
 rest of the container reading takes.
@@ -107,7 +107,7 @@ rest of the container reading takes.
 The same reader opens a **CD**, because a CD is that volume in two more
 containers rather than a new filesystem. A raw disc dump keeps each sector's
 whole 2352-byte frame, so the 2048 bytes of user data have to be gathered out of
-it — and babelmap *measures* that frame rather than assuming it, by finding the
+it — and lanthorn *measures* that frame rather than assuming it, by finding the
 sync pattern at the front and the next one after it, which reads a 2448-byte
 subchannel dump with nothing taught about the number and reads a cooked `.iso`
 by noticing there is no sync at all. Inside is an Apple Partition Map, and on a
@@ -121,7 +121,7 @@ feature: **a volume need not fill its container.** The *Masterpieces* partition
 is sized for the whole disc and claims 634.8 MB of allocation blocks on a disc
 whose entire payload is 308 MB, because it shares the platter with the ISO9660
 half and its free tail was simply never written. Every block any file actually
-uses is there. babelmap used to compare that nominal size against the image and
+uses is there. lanthorn used to compare that nominal size against the image and
 decline the volume outright, which meant the disc — and the partition, even when
 you extracted it by hand — read as "Z-machine version 0 is not supported". The
 bound is now on what a reader *follows*: the catalogue, the extents overflow
@@ -133,7 +133,7 @@ front half of one.
 And the same content-first rule decides what to run, because the `.image`
 extension means nothing in particular and the Mac disk carries a story, an
 application, the Finder's desktop database and **two** picture archives — one for
-the colour screen and one for the black-and-white one. babelmap draws the colour
+the colour screen and one for the black-and-white one. lanthorn draws the colour
 archive; the monochrome one packs its directory differently and is not yet
 decoded.
 
@@ -155,7 +155,7 @@ signature on one machine and a checksum word on the other.
 These disks push the content-first rule harder than any other medium, because
 their filenames give up entirely. Every story on an Atari ST compilation is
 called `STORY.DAT` — four of them, on four different games — so the *directory*
-is what names the game, and babelmap lists them as `HITCHHIK/STORY.DAT` and
+is what names the game, and lanthorn lists them as `HITCHHIK/STORY.DAT` and
 `BUREAUCR.ACY/STORY.DAT`. Subdirectories are not optional here: a root-only walk
 would find nothing at all on that disk, and would miss the `DEMO` folder on the
 standalone DOS *Hitchhiker's*. Beside the games sit somebody's 1996 saved
@@ -168,7 +168,7 @@ Infocom's DOS name for a bare Z-machine story — byte-identical to the loose
 The one thing a PC disk cannot do is be a whole release by itself. *Zork Zero*'s
 story lives on *Lost Treasures* floppy 5 with its EGA artwork, while its CGA
 artwork is one disk over on floppy 4; the standalone 360 KB release spreads
-installer, story and EGA art across three floppies. babelmap mounts **one image**
+installer, story and EGA art across three floppies. lanthorn mounts **one image**
 and offers what that image holds, so pick the disk with the game on it. Joining
 several disks into one release is a set model that does not exist yet.
 
@@ -176,17 +176,17 @@ The Apple II arrives wrapped. A `.2mg` is a 64-byte little-endian header bolted
 onto an 800 KB ProDOS volume, and every image in the reference collection carries
 a small trap in that header: the field that says how long the data is reads
 **zero**. That is a known quirk of the tool that wrote them — CiderPress signs
-its images `WOOF` — so babelmap takes the declared length when there is one, the
+its images `WOOF` — so lanthorn takes the declared length when there is one, the
 block count when there is not, and the tail of the file only as a last resort,
 and insists in every case that what it lands on is a whole number of 512-byte
 blocks that are actually present. A bare ProDOS volume with no wrapper reads the
 same way.
 
 Underneath, ProDOS is the tidiest filesystem here and the one that nests deepest.
-Files come in four shapes and babelmap reads all of them: a *seedling* is a
+Files come in four shapes and lanthorn reads all of them: a *seedling* is a
 single block, a *sapling* points at an index block of 256 pointers, a *tree*
 points at a master index of index blocks, and a GS/OS *extended* file keeps a
-mini-entry per fork in an extended key block — of which babelmap reads the data
+mini-entry per fork in an extended key block — of which lanthorn reads the data
 fork, exactly as it does on the Macintosh. Holes are real: a zero pointer means a
 block ProDOS never allocated, and it reads back as 512 zero bytes rather than as
 an error. Directories nest two deep on the GS/OS disks, so files are named by
@@ -196,7 +196,7 @@ since it carries three different files called `FINDER.DATA`.
 Two of these disks are worth knowing about before you open them. *Arthur* and
 *Journey* on the Apple II are the ProDOS **8** press, and they do not contain a
 story file at all: the game is split across `ARTHUR.D1`–`D5` and
-`JOURNEY.D1`–`D4`, none of which begins with a Z-machine header. babelmap reads
+`JOURNEY.D1`–`D4`, none of which begins with a Z-machine header. lanthorn reads
 them anyway — see [The packed Apple volume](#the-packed-apple-volume) below,
 where the 5.25" presses of *Shogun* and *Zork Zero* do the same thing across
 five and four separate floppies. And
@@ -212,7 +212,7 @@ a six-character serial — `871214`, or `------` on some builds — which is a f
 sanity check right up until you meet a disk written on a machine that sets the
 high bit on every character it stores. `LEATHRGODDESSES` on volume `INFOCOM6` is
 a perfectly good Version 3 story whose serial reads `C2 EC EF F7 EE A1`; take bit
-7 off and it spells **`Blown!`**, somebody's joke, not damage. babelmap now masks
+7 off and it spells **`Blown!`**, somebody's joke, not damage. lanthorn now masks
 that bit before it judges a serial, so *Leather Goddesses of Phobos* is on the
 list where it always belonged — and the check keeps doing the job it was there
 for, because what it is really guarding against is the saved games sitting beside
@@ -239,7 +239,7 @@ from being mistaken for one.
 
 Reassembly is not something to be confident about by eye, though: the pages are
 opaque, and a wrong map produces a file that looks every bit as much like Z-code
-as a right one. So babelmap does not trust its own work. It assembles, then
+as a right one. So lanthorn does not trust its own work. It assembles, then
 checks the story's own header checksum — the sum of every byte from `$40` to the
 declared length, which Infocom put there for exactly this kind of doubt — and
 hands back nothing that fails. *Arthur* release 63, serial 890622, 271,304 bytes,
@@ -249,7 +249,7 @@ checksum `$45EB`: that is a game, and you can play it.
 that image carries four, so ninety-two of its five hundred and fifty-two pages
 are not on the image at all. Nothing is wrong with the reader and nothing is
 wrong with the disk's ProDOS filesystem; the pressing is simply incomplete. The
-honest answer to four fifths of a game is no game, so babelmap mounts the volume,
+honest answer to four fifths of a game is no game, so lanthorn mounts the volume,
 lists its files and declines to offer a story — the same answer it gave before,
 now for a reason it can state.
 
@@ -303,7 +303,7 @@ one of those files by itself and the honest answer is the *Journey* answer — a
 mounted ProDOS volume called `SHOGUN.1`, four files on it, and no game.
 
 So opening a disk had to stop meaning opening a file. Name any volume of the set
-and babelmap finds the rest the way the browser already grouped them — by their
+and lanthorn finds the rest the way the browser already grouped them — by their
 filenames, in one directory, without opening anything — and asks the container
 the question spanning them. The same header checksum settles it, so a pile of
 floppies that are not one release is refused rather than spliced: *Shogun*
@@ -323,13 +323,13 @@ directory of 140×192 and 62×72 pictures at the Apple II's own hi-res dimension
 The Apple wrote a directory record eight bytes wide where the Amiga, Macintosh and
 PC wrote twelve, fourteen or sixteen, and it packs pixels the way Apple hi-res
 packs them, which is like nothing else in the crate; the same segment index that
-says where the story pages are says where each archive begins. babelmap reads all
+says where the story pages are says where each archive begins. lanthorn reads all
 of it now, and every Apple II release here draws its own plates — *Arthur*'s 168,
 *Journey*'s 135, *Shogun*'s 55, *Zork Zero*'s 496. That art comes with a screen of
 its own, 560×384 rather than the 640×400 a Version 6 story gets when nothing
 declares a picture space: see [v6 graphics](v6-graphics.md#apple-ii-artwork).
 
-Disk images are first-class in the library too: point babelmap at a directory of
+Disk images are first-class in the library too: point lanthorn at a directory of
 them and the picker's TYPE column names the container alongside the format —
 `Z6 (ADF)` off an Amiga disk, `Z6 (HFS)` off a Macintosh one, `Z6 (DOS)` off a PC
 floppy, `Z3 (ST)` off an Atari one and `Z5 (ProDOS)` off an Apple II disk — from the same content-based
@@ -344,13 +344,13 @@ a while they did: the "is this a disk, and what is on it" question was written
 out three separate times — once for artwork, once for story loading, once in
 `zvm-cli` — and the third copy had never learned about Macintosh disks at all. So
 the command-line player mounted an Amiga floppy happily and refused a Mac one a
-month after babelmap had learned to read it. Nobody wrote that rule; it was what
+month after lanthorn had learned to read it. Nobody wrote that rule; it was what
 you get when three places each answer the same question separately.
 
 There is one road now. A single table inside `blorb` lists the formats, and
 everything that touches a disk — the picker, story loading, artwork, the CLI's
 menu, the interpreter number the medium implies — asks that table rather than
-naming a filesystem. **Whatever babelmap can recognise as a disk, it can open**,
+naming a filesystem. **Whatever lanthorn can recognise as a disk, it can open**,
 because recognising and opening are the same lookup. A format added to the table
 arrives everywhere at once, and DOS and the Atari ST proved it: they landed as
 two rows and one reader, and the picker, the CLI menu and the launch dialog all
@@ -380,7 +380,7 @@ disk is the same 143,360 bytes in the same sector order, and there is no
 filesystem under it in any order — no ProDOS volume directory, no DOS 3.3 VTOC,
 just Infocom's own loader and 426 sectors of Z-code it reads with its own RWTS.
 Nothing comes out the other side of a de-interleave here the way a ProDOS volume
-does, so this one is a format of its own, and it is the only one babelmap reads
+does, so this one is a format of its own, and it is the only one lanthorn reads
 whose bytes are not a volume at all. What finds the game is the **story's own
 header checksum**: put the sectors into DOS 3.3 logical order, walk every sector
 boundary, and take the run that verifies. Under the two wrong orders the same
@@ -393,7 +393,7 @@ Two rows now claim `.dsk`, and they stay apart by construction rather than by
 table order: a raw disk is one only when the image is *not* a ProDOS volume. And
 the format matters past one game. `zvm-cli` declines Version 6 by design, and
 every Apple release above — Arthur, Journey, Shogun, Zork Zero — is v6, so until
-this disk arrived, "babelmap reads Apple II media" had never once meant "and
+this disk arrived, "lanthorn reads Apple II media" had never once meant "and
 plays a single-game Apple disk from the command line". *Planetfall* is v3. It
 boots, prints its banner and names release 29.
 
@@ -436,7 +436,7 @@ The new part is that the two presses do not agree on where to put it. The 1984
 *Hitchhiker's* spends **sixteen** of each track's twenty-one sectors and leaves
 the other five formatted-blank, skipping the loader and directory tracks whole;
 the 1986 *Trinity* spends every sector it can reach and skips only the BAM.
-babelmap does not guess between them: it tries each, and keeps the one whose
+lanthorn does not guess between them: it tries each, and keeps the one whose
 reassembly verifies against the story's own header checksum. Where a press stops
 on a disk needs no table either, because a 1541 `FORMAT` leaves every block as
 `$4B` and then 255 × `$01` — so the reader simply stops where the disk stops
@@ -574,7 +574,7 @@ content-based identification decides what on the disk is a story.
 **Exactly the way** is meant literally: the CLI opens every format the TUI does,
 Macintosh disks included, because both go through the same table. Point it at a
 graphical v6 disk of either kind and you get the v6 refusal — the one every
-graphical Amiga floppy already gets, telling you to run it in babelmap — rather
+graphical Amiga floppy already gets, telling you to run it in lanthorn — rather
 than a complaint about the disk. That distinction matters: it says the mount
 worked and only the renderer is missing.
 
@@ -642,11 +642,11 @@ every image, and — because the save key is the story's own release and serial 
 **And the browser goes one further: it reads the whole set** (SQ-0844). These
 collections were pressed as sets — seven Apple II volumes, nine Atari ST
 floppies, `floppy1.ima` through `floppy5.ima` — and a set is one shelf of games
-rather than a pile of disks. babelmap works out which files belong together from
+rather than a pile of disks. lanthorn works out which files belong together from
 their names alone: one directory, one disk-image extension, identical but for a
 run of digits counting 1, 2, 3…. Name any single volume and the browser opens on
 the entire release, which is what finally makes *Lost Treasures* volume 1 useful
-— it is the GS/OS launcher with no game on it, so `babelmap "…(Disk 1 of 7).2mg"`
+— it is the GS/OS launcher with no game on it, so `lanthorn "…(Disk 1 of 7).2mg"`
 used to be an error message and now lists all thirty games.
 
 That also settles the overlap these sets carry. `Infocom Compilation 5` and
@@ -666,7 +666,7 @@ only at `360`/`720` — a capacity, not a disk number, and therefore two sets.
 **And each of those six games gets its own saves** (SQ-0850). A per-game save
 directory used to be named after the story file, which was fine while one image
 meant one game and quietly catastrophic once it did not: all six stories on an ST
-compilation shared one `<image>.save/`, one `default.babelmap`, and whichever you
+compilation shared one `<image>.save/`, one `default.lanthorn`, and whichever you
 played last owned it. A story taken off a disk image is now keyed by its own
 **release and serial** — `hitchhikers-guide-r56-s841221` — so two games on one
 disk cannot collide, renaming the image keeps your saves, and the Amiga, DOS and
@@ -674,7 +674,7 @@ Atari ST presses of *Zork I* r88/840726 all reach the same directory because the
 are the same build. A loose story file still keys on its filename, exactly as
 before, so nothing you already have moves. `zvm-cli` and the TUI read one helper
 for this, which is why `--story 3` off a compilation and the same game opened in
-babelmap find each other's saves.
+lanthorn find each other's saves.
 
 And the floppy now tells the CLI which *machine* it is, not merely which story.
 A disk format is evidence, and evidence that only reaches one front-end is half
@@ -692,7 +692,7 @@ Amiga floppy or anywhere else.
 - **Standard Quetzal save/restore** — the game's own SAVE/RESTORE writes and reads
   the interchange Quetzal format, so a save you make here opens in Frotz and vice
   versa.
-- **Story-dictionary introspection** — babelmap reads the game's built-in word list
+- **Story-dictionary introspection** — lanthorn reads the game's built-in word list
   and turns it into live verb/noun autocomplete, so you type `exam` and the game's
   actual vocabulary completes it.
 - **v4+ upper-window screen model** — cursor-addressed status lines and full-screen
@@ -700,7 +700,7 @@ Amiga floppy or anywhere else.
   grid pinned atop the transcript, and `read_char` keystrokes are forwarded so you
   fill those forms in place. The game is told the story pane's **real** size — the
   standard asks the interpreter to keep the current height and width in the header
-  and lets it change them whenever it likes, so babelmap measures the pane and
+  and lets it change them whenever it likes, so lanthorn measures the pane and
   re-measures it on every terminal resize. A game's full-width form therefore lines
   up column-for-column with the prose beside it instead of floating in a fixed
   80-column box. Pin a fixed screen with `virtual_screen_cols`/`virtual_screen_rows`
@@ -729,7 +729,7 @@ Amiga floppy or anywhere else.
   before, because a game's initialisation routine is precisely where the
   shuffling is done, and a seed installed after the first prompt changes nothing
   the player will ever see. Set `random_seed` in `config.toml` to pin it instead
-  and the run becomes reproducible end to end; babelmap names the seed it used on
+  and the run becomes reproducible end to end; lanthorn names the seed it used on
   the console at startup, so an interesting run can be asked for again. The VM
   crates stay dependency-free through all of it — the entropy comes from std's
   own OS-seeded hasher, not a crate.
@@ -787,7 +787,7 @@ Amiga floppy or anywhere else.
   here**. The DOS floppy can abstain because Frotz's rule *is* the IBM PC's rule,
   so a DOS disk describes itself correctly by saying nothing. On a ProDOS volume
   that same silence lands on 1 — the DECSystem-20 — or, for version 6, on 6, the
-  IBM PC, which is also the one value that switches babelmap into CP437 character
+  IBM PC, which is also the one value that switches lanthorn into CP437 character
   graphics. Saying nothing does not leave the Apple II unnamed; it names it
   something else, on another continent. And §11.1.3 asks for exactly the
   judgement being ducked: *"an interpreter should choose the interpreter number
@@ -809,7 +809,7 @@ Amiga floppy or anywhere else.
   This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
-  key, or `--interpreter N` — one spelling across `babelmap` and `zvm-cli` alike,
+  key, or `--interpreter N` — one spelling across `lanthorn` and `zvm-cli` alike,
   where it is also `-I N` —
   e.g. `6` selects the IBM PC path, which draws Beyond Zork's map box and cursor
   arrows as CP437 character graphics instead of Font 3. The `--interpreter`
@@ -832,13 +832,13 @@ Amiga floppy or anywhere else.
   the rest as an IBM PC produces a machine that never existed. So the answers
   travel together as a named **profile**.
 
-  **IBM PC** is the default and is simply what babelmap has always done: the
+  **IBM PC** is the default and is simply what lanthorn has always done: the
   Frotz interpreter-number rule above, the resource file's own declared art
   resolution, your terminal's colours reported as the interpreter defaults, and
   ZMSD §8.3.1's colour table.
 
   **Amiga** is the sibling, and it selects itself: a story booted straight out of
-  an `.adf` release floppy came off an Amiga, so babelmap presents one — 
+  an `.adf` release floppy came off an Amiga, so lanthorn presents one — 
   interpreter number 4, the Amiga's 320×200 standard window (which is what makes
   the artwork in a native `Pic.data` archive scale onto the 640×400 screen, since
   that format has no `Reso` chunk to declare it), a dark grey page and white ink
@@ -922,7 +922,7 @@ Amiga floppy or anywhere else.
   grey rather than black, and the Macintosh and the ST both boot white.
 
   It states **no standard window**, and this is the interesting decline, because
-  unlike the ST the machine *has* a version-6 screen and babelmap can quote it:
+  unlike the ST the machine *has* a version-6 screen and lanthorn can quote it:
   140×192 on a 3×9 character cell, 46 columns by 21 lines, the 560-dot double
   hi-res display counted in four-dot colour pixels. That is a different screen
   *model*, not a different resolution — this knob holds a picture space that gets
@@ -990,7 +990,7 @@ Amiga floppy or anywhere else.
   — the interpreter number, the default page and ink in `$2C`/`$2D`, the palette
   colour numbers resolve through, and the §8.3 screen rules a machine gets by
   name — lives in one table inside `zvm`, keyed by the §11.1.3 number. Both
-  `babelmap` and `zvm-cli` read it, so opening the same disk in either presents
+  `lanthorn` and `zvm-cli` read it, so opening the same disk in either presents
   the same machine.
 
   That is new, and it fixed a real half-wiring: `zvm-cli` used to set the
@@ -1000,7 +1000,7 @@ Amiga floppy or anywhere else.
   disagreed. (The Apple presses were the one place it never showed, because the
   Apple's black-page-white-ink pair happens to *be* that generic default.)
 
-  What stays in `babelmap` stays for a reason: reading a disk to work out which
+  What stays in `lanthorn` stays for a reason: reading a disk to work out which
   machine pressed it is file I/O, which the VM core deliberately has none of; the
   artwork-flavour preference needs the resource reader; and a standard window is
   a Version 6 picture space stated by an *archive* rather than by a machine.
@@ -1013,11 +1013,11 @@ Amiga floppy or anywhere else.
   throughout — and that is equally right, because the MCGA's DAC holds 256
   entries and Infocom used them, which is how *Arthur*'s map screen manages
   three palettes at once. One story, one border, two machines, two behaviours.
-  babelmap follows whichever machine you are presenting as; `one screen palette`
+  lanthorn follows whichever machine you are presenting as; `one screen palette`
   in the table above is the column that says which.
 
   **One byte in that neighbourhood is still unsourced**, and it is one a story
-  can print. Header `$1F` is the interpreter *version*, and babelmap writes `A`
+  can print. Header `$1F` is the interpreter *version*, and lanthorn writes `A`
   for every machine — a value that arrived in the same early commit as the
   interpreter number's since-replaced "6, a common neutral value" and was never
   revisited. *Shogun* renders it as a decimal, so its Amiga credits read
@@ -1025,7 +1025,7 @@ Amiga floppy or anywhere else.
   settled you can set it yourself:
 
   ```sh
-  babelmap "stories/James Clavell's Shogun.adf" --interpreter-version 8
+  lanthorn "stories/James Clavell's Shogun.adf" --interpreter-version 8
   ```
 
   A number or a single character (`A` is taken as its ASCII code), because games
@@ -1054,7 +1054,7 @@ Amiga floppy or anywhere else.
 
   In a terminal, note that a machine's page is what the story is *told*, not
   something painted over your theme. Where a game names no colour, `zvm-cli` and
-  `babelmap` both still show your terminal's own — a machine's colours reach the
+  `lanthorn` both still show your terminal's own — a machine's colours reach the
   screen only where the game actually asks for them.
 
   The Apple is also the profile whose *number* had to be argued rather than read
@@ -1066,7 +1066,7 @@ Amiga floppy or anywhere else.
   The artwork can select the machine too, and it sits between the two. If you
   name a picture archive for a game — the `pictures` key described under
   [Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws) —
-  then you have said which machine's rendition you want to look at, and babelmap
+  then you have said which machine's rendition you want to look at, and lanthorn
   presents that machine: a `Pic.data` is an Amiga, an `.MG1`/`.EG1`/`.CG1` is an
   IBM PC. It reads that from the file's *contents*, never its extension, since
   the two containers are structurally different and a renamed file would
@@ -1081,7 +1081,7 @@ Amiga floppy or anywhere else.
   The character cell is 8×16 on every profile — EGA's own 640×200 mode on an 8×8
   cell is the same 80×25 grid — so no *rendition* alters the screen a game is
   handed. (The one machine that would have moved it is the Macintosh, whose
-  interpreter typeset Version 6 in 12-point Geneva on a 7×15 cell. babelmap keeps
+  interpreter typeset Version 6 in 12-point Geneva on a 7×15 cell. lanthorn keeps
   its 8×16, so a standard-Mac screen comes out 60×19 characters where a real Mac
   fitted 68×20 — slightly larger type, and four pixels of slack at the bottom.
   Making the cell a per-machine runtime value reaches into every corner of the
@@ -1102,7 +1102,7 @@ Amiga floppy or anywhere else.
   the inference above. It belongs in a *launch* dialog rather than the settings
   screen because header byte `$1E` is read by the story itself at boot — a game
   that has already started has already made decisions from it, so offering to
-  change it mid-session would be offering something babelmap cannot deliver.
+  change it mid-session would be offering something lanthorn cannot deliver.
 
   Authenticity can cost readability — *Zork Zero* under an Amiga picks a colour
   scheme that was easy on a 1989 monitor and is merely adequate in a modern
@@ -1122,7 +1122,7 @@ Amiga floppy or anywhere else.
   reloading the register, so every glyph already on the display changed with it —
   there was no way to give one window, or one word, a colour of its own.
 
-  babelmap does exactly that. Under interpreter 4 a `set_colour` **from window 0**
+  lanthorn does exactly that. Under interpreter 4 a `set_colour` **from window 0**
   loads the machine's two pens, every window adopts them, and every glyph already
   drawn — status grids, the pixel-positioned labels on *Zork Zero*'s banner
   ribbons, the prose a window has scrolled, even prose left frozen behind a window
@@ -1131,23 +1131,23 @@ Amiga floppy or anywhere else.
   goes with it.
 
   **And a `set_colour` from any other window is ignored** — which is the one place
-  babelmap deliberately departs from the letter of §8.3, so it is worth saying why.
+  lanthorn deliberately departs from the letter of §8.3, so it is worth saying why.
   The standard does not mention such a gate; Infocom's own released Amiga
   interpreter does, in as many words: it changes text colours *"only in window 0,
   and ignore[s] requests in other windows (except for the special case of
   bg = -1)"*. §8.3's stated purpose is to **simulate the Amiga hardware**, so a
-  reading of it that makes babelmap diverge from that hardware defeats the rule's
+  reading of it that makes lanthorn diverge from that hardware defeats the rule's
   own reason for existing — and Infocom's interpreter is the better authority on
   how Infocom's games looked on Infocom's machine. *Journey* settles it: its Amiga
   release (30 / 890322) makes exactly one `set_colour`, asking for white on black,
   and makes it on window 3. Applied globally that paints the game black; real
   Amiga captures show *Journey* on grey with white text instead — the Amiga's
   *default* pair, `DEF_BACK` over `DEF_FORE 9`. The real machine dropped the call,
-  and so does babelmap. (If you are ever tempted to "correct" this back to the bare
+  and so does lanthorn. (If you are ever tempted to "correct" this back to the bare
   text of the standard: that is the change, and this is the paragraph explaining
   why it was not made.)
 
-  **And the floppy outranks the leaked source.** babelmap took the Amiga's numbers
+  **And the floppy outranks the leaked source.** lanthorn took the Amiga's numbers
   from `amiga/yzip1.c` and `amiga/yzip.h` in Infocom's leaked interpreter sources,
   which are a *development* snapshot. In two places they disagree with what
   Infocom actually pressed onto the disks, and the second of the two is the whole
@@ -1173,7 +1173,7 @@ Amiga floppy or anywhere else.
   `yzip.h` is told by a failing test that the machine disagrees. (SQ-0822.)
 
   **On this machine, a bracketed line is not a message from the interpreter.**
-  babelmap normally mutes a whole line in `[brackets]` in the transcript, on the
+  lanthorn normally mutes a whole line in `[brackets]` in the transcript, on the
   reasonable guess that it came from the interpreter rather than the story. Under
   §8.3's Amiga that guess is wrong twice: *Arthur*'s
   `[You have earned ten chivalry points.]` is the game's own prose in the game's
@@ -1186,10 +1186,10 @@ Amiga floppy or anywhere else.
 
   **The machine's default pair is painted, not merely advertised.** §8.3.3 has an
   interpreter write its own default background and foreground into header bytes
-  `$2C`/`$2D` so the story can read them, and babelmap has always written the
+  `$2C`/`$2D` so the story can read them, and lanthorn has always written the
   Amiga's. Under interpreter 4 those two bytes are also the *screen*: on real
   hardware they are the registers, so every pixel no picture and no `set_colour`
-  claimed is the background pen. So they are what babelmap paints with too — the
+  claimed is the background pen. So they are what lanthorn paints with too — the
   page under the frame, the ink of any text that named no colour of its own. That
   is what makes an Amiga *look* like an Amiga rather than merely report as one:
   *Journey* on its release floppy is white text on the machine's dark grey, frame
@@ -1203,13 +1203,13 @@ Amiga floppy or anywhere else.
   the game's own white plate, on a two-colour machine that has no grey in it
   anywhere, which reads as text that failed to render. A Mac window was white
   with black type, Infocom's own interpreter says so in one line, and that is
-  now the page babelmap paints. There is no claim about shared pens here — that
+  now the page lanthorn paints. There is no claim about shared pens here — that
   part is the Amiga's alone; a Mac `set_colour` still colours one window, exactly
   as §8.3 describes. This is only the ground beneath a window that asked for
   nothing, and `honor_game_colours = false` still hands it back to your theme.
 
   **What you are typing stands on that page too.** The line you are composing is
-  drawn by babelmap rather than by the story, and it used to resolve its ink from
+  drawn by lanthorn rather than by the story, and it used to resolve its ink from
   your theme alone — which on a machine page is a coin toss. On the Amiga it won
   the toss, because the theme's body ink is white and so is `DEF_FORE`; on the
   Macintosh it lost it completely, and typing into a white Mac page was typing in
@@ -1231,15 +1231,15 @@ Amiga floppy or anywhere else.
   never gave a background keeps painting nothing behind its glyphs, or a single
   black `set_colour` would paint *Journey*'s own illustration out of its frame.
   Everything else — every non-Amiga profile, and any profile at all with
-  `honor_game_colours` off, where babelmap has told the story it has no colours to
+  `honor_game_colours` off, where lanthorn has told the story it has no colours to
   offer — keeps one pair per window and the host theme's own page, exactly as §8.3
   describes for every other machine.
-- **v6 graphical stories** — babelmap boots and plays graphical v6 titles,
+- **v6 graphical stories** — lanthorn boots and plays graphical v6 titles,
   verified against *Zork Zero*'s full frame. On an image-capable terminal
   (Kitty / iTerm2 / Sixel) the game's chrome — the decorative frame, status
   line, and per-room compass — renders as one scaled, **pixel-aspect-accurate**
   image (uniform scaling, letterboxed, never stretched); the game itself lays
-  this out by querying invisible "placement" pictures, which babelmap answers
+  this out by querying invisible "placement" pictures, which lanthorn answers
   from the Blorb's own dimension data. The `v6_render` setting (see
   Customization) picks how the story text is drawn: the default `hybrid` mode
   keeps it as real, crisp terminal text inside the chrome; `raster` bakes it
@@ -1253,7 +1253,7 @@ Amiga floppy or anywhere else.
 
 - **External files** — Glulx games persist their own data through Glk file streams;
   a game's fixed-name saves and caches are read and written for it silently. (See
-  [saves](saves.md) for how this dovetails with babelmap's Save States.)
+  [saves](saves.md) for how this dovetails with lanthorn's Save States.)
 - **Accelerated-function interception** — big Glulx games reach the first prompt
   dramatically faster. Well-known Inform veneer functions the game registers via
   `accelfunc` are recognized and run natively instead of grinding through full VM
@@ -1265,7 +1265,7 @@ Amiga floppy or anywhere else.
   compute with floats — Counterfeit Monkey's in-game graphics scaling, say — run
   instead of faulting, and the `gestalt` opcode answers `Float` and `Double`
   truthfully so a game can probe first.
-- **Line-input terminators** — babelmap honors `glk_set_terminators_line_event`, so
+- **Line-input terminators** — lanthorn honors `glk_set_terminators_line_event`, so
   a game can register special keys (Escape and the function keys `Func1`–`Func12`)
   that end a line of input; the terminating keycode comes back in the line event's
   second value (`val2`; `0` for a normal Enter).
@@ -1290,7 +1290,7 @@ Amiga floppy or anywhere else.
 - **Straight off the original floppy** — the two Infocom games that ever used sound,
   *The Lurking Horror* and *Sherlock*, shipped their effects as raw Infocom sample
   files on the release disk, years before Blorb existed. Mount one of those disks and
-  babelmap plays them: no `.blb` beside the story, no conversion step, nothing to
+  lanthorn plays them: no `.blb` beside the story, no conversion step, nothing to
   fetch. **The disk wins over a `.blb` filed beside it** — the same way artwork
   already resolves, and for the same reason: the disk is the rendition Infocom
   pressed, and a Blorb is somebody's later re-rendering of it, sometimes at
@@ -1310,7 +1310,7 @@ Amiga floppy or anywhere else.
   The two machines also disagree about where silence sits in a sample byte, and the
   header does not say which — so the layout decides it, checked against the one effect
   both discs press from the same master. The Mac goes further and fades each sample in
-  and out from its speaker's rest position, which babelmap unwinds rather than
+  and out from its speaker's rest position, which lanthorn unwinds rather than
   reproduces: played back literally on a modern output that ramp is a click at each
   end.
 - **Glulx** — Glk sound channels (`glk_schannel_*`) play a Blorb's AIFF/Ogg/MOD
@@ -1318,7 +1318,7 @@ Amiga floppy or anywhere else.
   sound-finished notify events, so music and effects behave the way the author
   wired them.
 
-Sound always plays on the local device babelmap runs on; to route audio from a
+Sound always plays on the local device lanthorn runs on; to route audio from a
 remote/SSH session back to your own machine, see
 [`docs/remote-sound.md`](../remote-sound.md). Unimplemented-opcode warnings
 surface in the transcript as meta lines (hidden by `/filter story`) rather than
@@ -1326,7 +1326,7 @@ spilling onto stderr.
 
 ## Game-driven colour
 
-When a game asks for colour, babelmap gives it colour — on your terms. The
+When a game asks for colour, lanthorn gives it colour — on your terms. The
 Z-machine's v5+ `set_colour` and `set_true_colour` are honored: the standard
 palette (black/red/green/…) maps onto *your* colour scheme, so a game's "red" is
 your red rather than a hard-coded shade, while greys and true-colour render as
@@ -1524,7 +1524,7 @@ answer **`/status`** at any line prompt with the current status — the Z-machin
 status line or upper window, the Glk grid windows, or a Scott room block — and
 the game never sees the command. The leading slash is what makes intercepting it
 safe: no interactive-fiction parser gives `/` a meaning, so no game verb is
-shadowed, and babelmap's own TUI already spells host commands that way. (A `char`
+shadowed, and lanthorn's own TUI already spells host commands that way. (A `char`
 prompt — "press any key" — takes the keypress as itself; `/status` is a line
 command. `/menu` is the exception, because a menu *is* a char prompt and a
 command that could not be typed at one would be useless.)
@@ -1566,7 +1566,7 @@ the screen and every line is discarded as it passes.
 `--pin bottom` (or its alias **`--scrollback`**, which is what you actually want it
 for) moves the same fixed rows to the bottom of the screen. The region then starts
 at row 1 again and the story scrolls into your terminal's own history — with its
-scroll wheel, its text selection and its search, none of which babelmap could give
+scroll wheel, its text selection and its search, none of which lanthorn could give
 you as convincingly. Nothing is buffered on our side either way; the history was
 always the terminal's, and the only question was whether we were standing in the
 way of it. Swap it mid-game with **`/pin`** (`/pin top`, `/pin bottom`, or bare
@@ -1611,5 +1611,5 @@ opcode — it doesn't take the interpreter down with it. The game halts with a
 call-frame stack trace (the faulting PC and opcode, plus each frame's return
 address and locals). In the app the trace appears inline in the transcript and the
 app **stays interactive**: the map, scrollback, and a deliberate quit all keep
-working, and a durable copy lands in `~/.babelmap/crash.log`. `zvm-cli`/`gvm-cli`
+working, and a durable copy lands in `~/.lanthorn/crash.log`. `zvm-cli`/`gvm-cli`
 print the trace to stderr and exit 70.

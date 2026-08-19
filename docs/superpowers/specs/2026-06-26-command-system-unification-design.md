@@ -41,7 +41,7 @@ Each row is `name` `usage` — `description` (category). Commands marked **(args
 - `save-game [name]` — save the game, optionally to a named slot. (args)
 - `load-game [name]` — load a save, optionally a named slot. (args)
 - `reset-game [map]` — restart the game; `reset-game map` also clears the map. (args)
-- `quit` — exit babelmap.
+- `quit` — exit lanthorn.
 - `open-hints` — open the hints panel.
 - `open-history` — open the rewind/replay history.
 - `open-verb-menu` — open the verb/item palette.

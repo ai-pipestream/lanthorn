@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A multi-section debug trace (`screen` / `map` / `hostio`) toggleable via a `--trace <list>` CLI flag and a `/trace <list>` command, written to one tagged `~/.babelmap/trace.log`.
+**Goal:** A multi-section debug trace (`screen` / `map` / `hostio`) toggleable via a `--trace <list>` CLI flag and a `/trace <list>` command, written to one tagged `~/.lanthorn/trace.log`.
 
 **Architecture:** Buffer-drain. The zero-dep VM crates (`zvm`, `gvm`) accumulate display-instruction lines into a `screen_trace: Vec<String>` gated by a `trace_screen: bool`, drained each turn by the app through a new `Engine::take_screen_trace()`. The `map` section reuses the *already-existing* `render_traced` stage labels + the app's `render_steps` worker buffer. The app owns section state (`Config.trace: TraceSections`), a `trace` module of best-effort file functions, and the `hostio` emit sites. Full design: `docs/superpowers/specs/2026-07-18-sectioned-trace-design.md`.
 
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn write_tags_and_aligns_truncate_resets() {
-        let dir = std::env::temp_dir().join(format!("babelmap-trace-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-trace-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("trace.log");
         let _ = std::fs::remove_file(&log);
@@ -957,7 +957,7 @@ Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
 
 - [ ] `cargo test -p zvm -p gvm -p app` — all green.
 - [ ] `cargo clippy -p zvm -p gvm -p app -p gvm-cli` — clean.
-- [ ] Manual smoke (user): `babelmap <zstory>.z5 --trace screen,map`, play a turn, confirm `~/.babelmap/trace.log` shows tagged `[screen] @…` (Z-machine) and `[map] …` lines; then `babelmap cm.gblorb --trace screen` shows `[screen] glk_…` lines; `/trace hostio` then a save shows `[hostio] save_state(...)`; `/trace none` stops output; `/trace` shows current state.
+- [ ] Manual smoke (user): `lanthorn <zstory>.z5 --trace screen,map`, play a turn, confirm `~/.lanthorn/trace.log` shows tagged `[screen] @…` (Z-machine) and `[map] …` lines; then `lanthorn cm.gblorb --trace screen` shows `[screen] glk_…` lines; `/trace hostio` then a save shows `[hostio] save_state(...)`; `/trace none` stops output; `/trace` shows current state.
 - [ ] Update `README.md` if the trace flag warrants a mention (per project policy: major features only — a debug flag likely does not; note in side-quest instead).
 
 ## Self-Review notes

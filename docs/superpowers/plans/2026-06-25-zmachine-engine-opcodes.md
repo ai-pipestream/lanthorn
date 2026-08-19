@@ -126,8 +126,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): verify checksums the story (real branch); document piracy
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): verify checksums the story (real branch); document piracy
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -202,7 +202,7 @@ fn set_colour_and_true_colour_are_graceful_noops() {
 `exec_2op` — add before the `_ => Continue` fall-through:
 
 ```rust
-// 2OP:0x1B set_colour — game-driven colour is not applied (babelmap styling
+// 2OP:0x1B set_colour — game-driven colour is not applied (lanthorn styling
 // owns the look); accept and ignore.
 0x1B => StepResult::Continue,
 ```
@@ -212,8 +212,8 @@ fn set_colour_and_true_colour_are_graceful_noops() {
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): graceful set_font (report fixed font) + set_colour/set_true_colour no-ops
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): graceful set_font (report fixed font) + set_colour/set_true_colour no-ops
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -287,8 +287,8 @@ fn check_unicode_reports_printable_and_receivable() {
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): print_unicode / check_unicode (EXT:0x0B/0x0C)
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): print_unicode / check_unicode (EXT:0x0B/0x0C)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -363,8 +363,8 @@ fn encode_text_writes_packed_word() {
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): encode_text (VAR:0x1C)
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): encode_text (VAR:0x1C)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -467,8 +467,8 @@ Update `supply_line` to call `write_parse_buffer` (same behaviour). Then add the
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): tokenise (VAR:0x1B) reusing the read lexing + parse-buffer write
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): tokenise (VAR:0x1B) reusing the read lexing + parse-buffer write
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -546,8 +546,8 @@ escape/newline behaviour is unchanged.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/text/decode.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): custom alphabet table (header 0x34, v5+) in text decode
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/text/decode.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): custom alphabet table (header 0x34, v5+) in text decode
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -621,8 +621,8 @@ its own code. Document this in the report.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): terminating-characters table (header 0x2E, v5+)
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): terminating-characters table (header 0x2E, v5+)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

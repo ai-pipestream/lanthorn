@@ -2,7 +2,7 @@
 //! the frame agrees at its corners.
 //!
 //! Three titles frame their story window with side artwork authored for a
-//! 320x200 screen. Until this suite existed, babelmap made up the difference by
+//! 320x200 screen. Until this suite existed, lanthorn made up the difference by
 //! stretching the flank band vertically (SQ-0511) — measured here at 2.2x the
 //! horizontal factor on Zork Zero and 3.0x on Shogun at a 117x64 terminal — and
 //! Arthur's flank was simply CLIPPED at the row his poles stop, leaving the
@@ -585,7 +585,7 @@ fn a_flank_has_no_gap_between_its_tiled_pieces() {
 /// Bocfel gets its horizontal consistency from a single uniform stretch of the
 /// whole native canvas at the end (`flush_bitmap` stretch-blits the pixmap to
 /// fill the window), which guarantees agreement but gives no control over how
-/// the pieces relate. babelmap places each band itself, so the agreement is a
+/// the pieces relate. lanthorn places each band itself, so the agreement is a
 /// property that can be broken — hence this case. SQ-0698 changed the VERTICAL
 /// axis only; nothing here should ever move.
 ///
@@ -1363,7 +1363,7 @@ fn compose_scene_border(
 /// this suite can afford ever reaches.
 ///
 /// Bocfel dispatches on the game's own border global and gives each scene its own
-/// routine. babelmap cannot read that global — `WinNode::Graphics` carries a
+/// routine. lanthorn cannot read that global — `WinNode::Graphics` carries a
 /// flattened `RgbaImage` and picture numbers do not survive the engine boundary —
 /// so the question this case settles is how much of the dispatch the PIXELS can
 /// replace. It composes each scene's flanks from the archive's own pictures the

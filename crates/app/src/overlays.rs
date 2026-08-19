@@ -818,7 +818,7 @@ mod tests {
             (|o| o.reset_dialog = true, OverlayKind::Reset),
             (|o| o.game_over = true, OverlayKind::GameOver),
             (|o| o.confirm_overwrite_save = Some(app::state::ConfirmOverwriteSave {
-                path: std::path::PathBuf::from("s.babelmap"),
+                path: std::path::PathBuf::from("s.lanthorn"),
                 existing_name: "s".to_string(),
                 pending: app::state::PendingOverwrite::SaveAs,
             }), OverlayKind::ConfirmOverwrite),
@@ -930,7 +930,7 @@ mod tests {
         let mut o = OverlayState::default();
         o.save_name_dialog = Some(app::state::SaveNameDialog::new("chapter one".to_string(), false));
         o.confirm_overwrite_save = Some(app::state::ConfirmOverwriteSave {
-            path: std::path::PathBuf::from("chapter-one.babelmap"),
+            path: std::path::PathBuf::from("chapter-one.lanthorn"),
             existing_name: "Chapter One".to_string(),
             pending: app::state::PendingOverwrite::SaveAs,
         });

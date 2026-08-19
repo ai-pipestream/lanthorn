@@ -7,7 +7,7 @@
 ## Goal
 
 Add a toggleable, animated **info side-panel** to the pre-game story picker (the
-full-screen selection shown when a *directory* is passed to `babelmap` at
+full-screen selection shown when a *directory* is passed to `lanthorn` at
 launch). Pressing `i` or `Tab` slides in a right-hand panel describing the
 highlighted story: header/filesystem metadata, blorb resource structure
 (including a matching sibling `.blb`/`.blorb`), matching saved games, and a

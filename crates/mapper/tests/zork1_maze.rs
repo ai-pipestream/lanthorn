@@ -1,6 +1,6 @@
 //! Matrix labelling against a maze EMBEDDED in ordinary geography (SQ-0683, SQ-0685).
 //!
-//! `unit_tests/zork1_maze_map.json` is a verbatim copy of the `map.json` inside a babelmap archive:
+//! `unit_tests/zork1_maze_map.json` is a verbatim copy of the `map.json` inside a lanthorn archive:
 //! one player's partial mapping of Zork I, mid-game, standing in the maze. Nothing here is
 //! hand-peeled — the maze shares its layer ("Cellar") with the Cellar, the Troll Room, the Gallery,
 //! the Studio and East of Chasm, and the player never flagged it, because flagging a maze is a

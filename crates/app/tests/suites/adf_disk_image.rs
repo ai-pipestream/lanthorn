@@ -117,14 +117,14 @@ fn fake_pic_data() -> Vec<u8> {
 }
 
 fn write_image(name: &str, image: &[u8]) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("babelmap-adf-{}-{name}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("lanthorn-adf-{}-{name}", std::process::id()));
     std::fs::write(&path, image).expect("write the disk image");
     path
 }
 
 // ── Synthetic disk: the whole loading path, no fixture ────────────────────────
 
-/// The headline: pointing babelmap at a disk image loads the game and its art
+/// The headline: pointing lanthorn at a disk image loads the game and its art
 /// with no extraction step and nothing to configure.
 #[test]
 fn a_disk_image_yields_both_the_story_and_its_artwork() {

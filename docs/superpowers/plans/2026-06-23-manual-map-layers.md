@@ -1235,7 +1235,7 @@ Add to `crates/app/src/persist_files.rs` tests:
     fn save_load_round_trips_layers_and_names() {
         use mapper::direction::Direction;
         let mut dir = std::env::temp_dir();
-        dir.push(format!("babelmap-layers-{}", std::process::id()));
+        dir.push(format!("lanthorn-layers-{}", std::process::id()));
         let path = dir.join("ZCODE-1-x-0.map.json");
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);

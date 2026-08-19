@@ -6,7 +6,7 @@
 
 ## Goal
 
-Apply style changes to a running babelmap without a restart: a manual `/reload`
+Apply style changes to a running lanthorn without a restart: a manual `/reload`
 command and an optional file-watcher that re-reads `style.toml` on save. Make
 `style.toml` the single source of styling by removing the style-override sections
 from `config.toml`.

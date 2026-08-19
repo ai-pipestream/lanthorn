@@ -186,7 +186,7 @@ impl Default for SearchConfig {
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
-/// babelmap: a Z-machine interpreter with live automapping.
+/// lanthorn: a Z-machine interpreter with live automapping.
 /// `--interpreter-version`: a decimal byte, or a single character taken as its
 /// ASCII code.
 ///
@@ -213,10 +213,10 @@ fn parse_interpreter_version(s: &str) -> Result<u8, String> {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "babelmap",
+    name = "lanthorn",
     version = buildinfo::LONG,
     about = "Interactive-fiction interpreter (Z-machine, Glulx, Scott Adams) with live automapping",
-    // Show `babelmap <version>` at the top of --help (clap omits it by default).
+    // Show `lanthorn <version>` at the top of --help (clap omits it by default).
     help_template = "{before-help}{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}{after-help}"
 )]
 pub struct Cli {
@@ -224,7 +224,7 @@ pub struct Cli {
     /// omitted, falls back to the `default_story_dir` config setting.
     pub story: Option<PathBuf>,
 
-    /// Override the babelmap home directory (default: ~/.babelmap)
+    /// Override the lanthorn home directory (default: ~/.lanthorn)
     #[arg(long, value_name = "PATH")]
     pub user_dir: Option<PathBuf>,
 
@@ -278,7 +278,7 @@ pub struct Cli {
     ///   5  Atari ST         11  Tandy Color
     ///   6  IBM PC
     ///
-    /// Overrides `interpreter_number` in config.toml. With neither set, babelmap
+    /// Overrides `interpreter_number` in config.toml. With neither set, lanthorn
     /// auto-selects per Frotz's rule: 6 (IBM PC) for v6, else 1 (DECSystem-20).
     //
     // The flag is spelled `--interpreter`, matching `zvm-cli`'s `-I`/`--interpreter`
@@ -293,7 +293,7 @@ pub struct Cli {
     /// Shogun prints it as a decimal, Nord and Bert as a letter.
     ///
     /// This is an EXPERIMENT knob, not a setting — there is no config key and
-    /// nothing is written back. babelmap's default is `A` (65), which has no
+    /// nothing is written back. lanthorn's default is `A` (65), which has no
     /// provenance, and the original Amiga wrote 8: on release 295 of Shogun the
     /// credits read "Amiga Interpreter version 6.65" here against the real
     /// machine's "6.8". Whether any story BRANCHES on the byte rather than
@@ -315,10 +315,10 @@ pub struct Cli {
     /// otherwise: a DOS .MG1/.EG1/.CG1 asks for the IBM PC, an Amiga Pic.data
     /// for the Amiga.
     ///
-    ///   babelmap stories/zork0.z6 --pictures zork0.mg1
+    ///   lanthorn stories/zork0.z6 --pictures zork0.mg1
     ///
     /// Requires a story on the command line: the flag names art FOR a story, so
-    /// it has no referent when babelmap opens a library. Pick a rendition from
+    /// it has no referent when lanthorn opens a library. Pick a rendition from
     /// the browser with Shift-Enter instead.
     ///
     /// NOTE: Arthur's and Journey's EGA art shipped on two disks (.EG1 + .EG2);
@@ -545,7 +545,7 @@ fn default_config_file() -> PathBuf {
 
 fn default_user_dir() -> PathBuf {
     let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base).join(".babelmap")
+    PathBuf::from(base).join(".lanthorn")
 }
 
 fn default_true() -> bool { true }
@@ -583,7 +583,7 @@ pub enum AuxStorage {
     /// Ask the user on first use, then store the choice in config.
     #[default]
     Ask,
-    /// Inside each `.babelmap` save archive.
+    /// Inside each `.lanthorn` save archive.
     Archive,
     /// In one per-game file in the save directory (shared across playthroughs).
     Global,
@@ -670,7 +670,7 @@ impl GlkPixelScale {
     /// screen makes it not fit, and Counterfeit Monkey's map stops being half the
     /// screen). Whichever reference is chosen, one of those two breaks; leaving the
     /// terminal's own cell alone is the only setting that is never actively wrong, so
-    /// it is what an unconfigured babelmap does.
+    /// it is what an unconfigured lanthorn does.
     ///
     /// `Fixed(n)` divides by `n`, for pinning the trade-off manually. Never returns 0
     /// on either axis.
@@ -908,7 +908,7 @@ pub fn entropy_seed() -> u32 {
 
 /// Current `config.toml` schema version. Bump when a config change means an
 /// older hand-written file may behave unexpectedly. `write_config` stamps this
-/// as `version = N`; a future babelmap can compare a file's `version` against
+/// as `version = N`; a future lanthorn can compare a file's `version` against
 /// this to flag an out-of-date config. A file with no `version` reads as 0.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
@@ -939,11 +939,11 @@ pub struct Config {
     /// versioning has no `version` key and reads as 0.
     #[serde(default)]
     pub version: u32,
-    /// Root directory for babelmap data (maps, saves, exports).
+    /// Root directory for lanthorn data (maps, saves, exports).
     /// Sub-directories: maps/ — where per-story map files live.
     #[serde(default = "default_user_dir")]
     pub user_dir: PathBuf,
-    /// Directory (or story file) opened when babelmap is launched with no path
+    /// Directory (or story file) opened when lanthorn is launched with no path
     /// argument. `None` (default) means a path is required on the command line.
     #[serde(default)]
     pub default_story_dir: Option<PathBuf>,
@@ -979,7 +979,7 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub prompt_load_on_launch: bool,
     /// When true, record a per-turn rewind/replay history (Quetzal save + map
-    /// snapshots) into the `.babelmap` archive. Default false (opt-in: it grows
+    /// snapshots) into the `.lanthorn` archive. Default false (opt-in: it grows
     /// the archive and keeps per-turn blobs in memory).
     #[serde(default)]
     pub record_turn_history: bool,
@@ -1006,7 +1006,7 @@ pub struct Config {
     /// for the ones they did not have — Zork Zero's bronze arch is a
     /// column-by-column alternation of brown and bright red, and on a 640x200
     /// screen those columns fused in the eye into a colour the palette does not
-    /// hold. babelmap keeps all 640 columns (that is what makes an EGA plate
+    /// hold. lanthorn keeps all 640 columns (that is what makes an EGA plate
     /// cover exactly the rectangle a 320-wide one does), so it fuses them itself,
     /// in `crate::graphics::blend_half_width_columns`.
     ///
@@ -1066,7 +1066,7 @@ pub struct Config {
     /// header byte $21. Unset (the default) means "follow the story pane": ZMSD
     /// §8.4 requires the interpreter to "write the current height (in lines) and
     /// width (in characters) into bytes $20 and $21", and it "may change the exact
-    /// dimensions whenever it likes", so babelmap reports the pane's real measured
+    /// dimensions whenever it likes", so lanthorn reports the pane's real measured
     /// size and re-reports it on every terminal resize. Set this key only to pin a
     /// fixed virtual screen (e.g. to reproduce a game's original 80-column
     /// layout); a pinned width no longer matches what the transcript wraps at, so
@@ -1122,12 +1122,12 @@ pub struct Config {
     pub interpreter_number: Option<u8>,
     /// The seed every engine's random-number generator starts from (SQ-0811).
     ///
-    /// `None` — the default — means "a different game every launch": babelmap
+    /// `None` — the default — means "a different game every launch": lanthorn
     /// draws a fresh seed from the OS at boot, which is what Frotz, Glulxe and
     /// Git all do and what a randomised game like Kerkerkruip needs to be a
     /// different game twice. Set it to any number to PIN the run instead, so the
     /// same story replays the same shuffles, the same dice and the same dungeon —
-    /// the seed babelmap reports on the console at startup is exactly the value
+    /// the seed lanthorn reports on the console at startup is exactly the value
     /// to put here to play that run again.
     ///
     /// A pinned seed does not gag a game that asks for entropy itself: Glulx's
@@ -1157,7 +1157,7 @@ pub struct Config {
     /// not part of the file's schema.
     #[serde(skip)]
     pub one_run: OneRunOverrides,
-    /// The machine babelmap presents itself to this story as (SQ-0719).
+    /// The machine lanthorn presents itself to this story as (SQ-0719).
     ///
     /// Not a config key — it is INFERRED per story at boot by
     /// [`crate::interpreter::InterpreterProfile::resolve`] (an explicit
@@ -1318,8 +1318,8 @@ impl Default for Config {
 ///
 /// SQ-0574: `--user-dir` used to be ignored here, so it relocated every WRITE
 /// (`write_config` and the template seed both took `cfg.user_dir`) while reads still
-/// came from the default home — `babelmap --user-dir /tmp/x` seeded and saved
-/// `/tmp/x/config.toml` and then loaded `~/.babelmap/config.toml`, silently
+/// came from the default home — `lanthorn --user-dir /tmp/x` seeded and saved
+/// `/tmp/x/config.toml` and then loaded `~/.lanthorn/config.toml`, silently
 /// discarding everything it had just written.
 ///
 /// Deliberately driven by the CLI alone: the `user_dir` KEY inside the file names the
@@ -1594,7 +1594,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
             std::io::ErrorKind::InvalidData,
             format!(
                 "{} could not be loaded ({err}) — refusing to overwrite it. Fix the file, \
-                 or move it aside and babelmap will seed a fresh one.",
+                 or move it aside and lanthorn will seed a fresh one.",
                 cfg.config_file.display(),
             ),
         ));
@@ -1618,7 +1618,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "{} is not valid TOML ({e}) — refusing to overwrite it. Fix the file, \
-                     or move it aside and babelmap will seed a fresh one.",
+                     or move it aside and lanthorn will seed a fresh one.",
                     config_path.display(),
                 ),
             ));
@@ -2067,17 +2067,17 @@ mod tests {
     /// name let one run rewrite what the other was reading — SQ-0812).
     fn write_temp_config(name: &str, contents: &str) -> PathBuf {
         let path =
-            std::env::temp_dir().join(format!("babelmap_test_{}_{}.toml", name, std::process::id()));
+            std::env::temp_dir().join(format!("lanthorn_test_{}_{}.toml", name, std::process::id()));
         let mut f = std::fs::File::create(&path).unwrap();
         write!(f, "{}", contents).unwrap();
         path
     }
 
     #[test]
-    fn default_config_has_babelmap_dir() {
+    fn default_config_has_lanthorn_dir() {
         let cfg = Config::default();
-        // The default user_dir must end with ".babelmap".
-        assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
+        // The default user_dir must end with ".lanthorn".
+        assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
     }
 
     #[test]
@@ -2091,7 +2091,7 @@ mod tests {
     fn unspecified_fields_fall_back_to_defaults() {
         // An empty TOML file should give us the same user_dir as Config::default().
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
+        assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
     }
 
     #[test]
@@ -2104,7 +2104,7 @@ mod tests {
         let cfg: Config = toml::from_str(r#"default_story_dir = "/tmp/stories""#).unwrap();
         assert_eq!(cfg.default_story_dir, Some(PathBuf::from("/tmp/stories")));
         // write_config persists it, and a Some value survives the round trip.
-        let dir = std::env::temp_dir().join(format!("babelmap-dsd-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-dsd-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_config(&dir, &cfg).unwrap();
         let written = std::fs::read_to_string(dir.join("config.toml")).unwrap();
@@ -2165,7 +2165,7 @@ mod tests {
             debug: false,
         };
         let cfg = resolve(&cli);
-        assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
+        assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
     }
 
     #[test]
@@ -2306,7 +2306,7 @@ use_defaults = false
 
         // Fixed is a plain divisor, and 1 restores the terminal's own cell.
         assert_eq!(Fixed(1).apply((14, 28)), (14, 28), "the author's literal pixels");
-        // Native is what an unconfigured babelmap does: hand the game exactly what the
+        // Native is what an unconfigured lanthorn does: hand the game exactly what the
         // terminal reports, so no game's pixel constants are moved under it.
         assert_eq!(Native.apply((14, 28)), (14, 28));
         assert_eq!(Native.apply((7, 14)), (7, 14));
@@ -2383,7 +2383,7 @@ use_defaults = false
     /// now the only non-default there is.
     #[test]
     fn v6_render_raster_round_trips_through_writer() {
-        let dir = std::env::temp_dir().join(format!("babelmap-v6-raster-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-v6-raster-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = Config::default();
         cfg.v6_render = V6RenderMode::Raster;
@@ -2406,7 +2406,7 @@ use_defaults = false
         let off: Config = toml::from_str("fuse_art_dither = false\n").unwrap();
         assert!(!off.fuse_art_dither);
 
-        let dir = std::env::temp_dir().join(format!("babelmap-fuse-dither-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-fuse-dither-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = Config::default();
         cfg.fuse_art_dither = false;
@@ -2419,10 +2419,10 @@ use_defaults = false
 
     #[test]
     fn write_config_round_trips_scalars_and_preserves_keymap() {
-        let dir = std::env::temp_dir().join(format!("babelmap_write_config_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn_write_config_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Write initial config with a [keymap] section and a comment.
-        let initial = "# babelmap config\n[keymap]\nzoom_in = \"z\"\n";
+        let initial = "# lanthorn config\n[keymap]\nzoom_in = \"z\"\n";
         std::fs::write(dir.join("config.toml"), initial).unwrap();
 
         let cfg = Config {
@@ -2504,7 +2504,7 @@ use_defaults = false
         // Keymap is preserved.
         assert_eq!(doc["keymap"]["zoom_in"].as_str(), Some("z"));
         // Comment is in the raw text.
-        assert!(content.contains("# babelmap config"), "comment must be preserved");
+        assert!(content.contains("# lanthorn config"), "comment must be preserved");
 
         // SQ-0573, the other half: a key the file ALREADY has is always rewritten, even
         // when it now holds the default — otherwise flipping a setting back to its
@@ -2528,7 +2528,7 @@ use_defaults = false
     fn write_config_creates_file_and_dir_when_missing() {
         // Settings-save must create config.toml (and its parent) from scratch.
         let dir = std::env::temp_dir()
-            .join(format!("babelmap_write_config_new_{}", std::process::id()))
+            .join(format!("lanthorn_write_config_new_{}", std::process::id()))
             .join("nested");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!dir.exists());
@@ -2548,7 +2548,7 @@ use_defaults = false
         // hint_skip_screen_warning are settings-panel-editable but were absent
         // from write_config, so a saved edit reverted to the default on restart.
         // Round-trip NON-default values through the writer and a fresh parse.
-        let dir = std::env::temp_dir().join(format!("babelmap-cfg-rt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-cfg-rt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2597,7 +2597,7 @@ use_defaults = false
 
     #[test]
     fn command_bar_round_trips_through_toml() {
-        let dir = std::env::temp_dir().join(format!("babelmap_command_bar_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn_command_bar_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut cfg = Config::default();
@@ -2640,7 +2640,7 @@ use_defaults = false
     #[test]
     fn write_config_does_not_emit_style_sections() {
         let dir = std::env::temp_dir().join(format!(
-            "babelmap_write_config_no_style_{}",
+            "lanthorn_write_config_no_style_{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2720,7 +2720,7 @@ use_defaults = false
     #[test]
     fn write_config_round_trips_animation() {
         let dir = std::env::temp_dir().join(format!(
-            "babelmap_write_config_anim_{}",
+            "lanthorn_write_config_anim_{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2910,8 +2910,8 @@ use_defaults = false
     }
 
     /// SQ-0574: `--user-dir` must move the config READ as well as the writes. It used
-    /// to be ignored by `config_path`, so `babelmap --user-dir /tmp/x` seeded and saved
-    /// `/tmp/x/config.toml` while still loading `~/.babelmap/config.toml` — every
+    /// to be ignored by `config_path`, so `lanthorn --user-dir /tmp/x` seeded and saved
+    /// `/tmp/x/config.toml` while still loading `~/.lanthorn/config.toml` — every
     /// setting it wrote was silently discarded on the next launch.
     #[test]
     fn user_dir_moves_the_config_file_and_a_save_round_trips() {
@@ -3294,7 +3294,7 @@ use_defaults = false
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// SQ-0855. Every flag `babelmap` accepts, parsed through the real clap surface —
+    /// SQ-0855. Every flag `lanthorn` accepts, parsed through the real clap surface —
     /// the test that catches a flag renamed in its doc comment and nowhere else, or
     /// renamed in the arg table and left stale in the docs that name it.
     ///
@@ -3303,12 +3303,12 @@ use_defaults = false
     /// two binaries is the whole defect. Pre-release, so there is deliberately no
     /// alias — the old spelling must be REJECTED, or nothing would ever have moved.
     #[test]
-    fn every_flag_babelmap_accepts_parses_and_the_old_spelling_is_gone() {
+    fn every_flag_lanthorn_accepts_parses_and_the_old_spelling_is_gone() {
         use clap::Parser;
         for flag in [
             "--no-accel", "--no-sound", "--no-images", "--no-game-colours", "--debug",
         ] {
-            let cli = Cli::try_parse_from(["babelmap", flag, "g.z5"])
+            let cli = Cli::try_parse_from(["lanthorn", flag, "g.z5"])
                 .unwrap_or_else(|e| panic!("{flag} should parse: {e}"));
             assert_eq!(
                 cli.story.as_deref(),
@@ -3326,7 +3326,7 @@ use_defaults = false
             ("--trace", "screen"),
             ("--pictures", "g.mg1"),
         ] {
-            let cli = Cli::try_parse_from(["babelmap", flag, value, "g.z5"])
+            let cli = Cli::try_parse_from(["lanthorn", flag, value, "g.z5"])
                 .unwrap_or_else(|e| panic!("{flag} {value} should parse: {e}"));
             assert_eq!(
                 cli.story.as_deref(),
@@ -3337,12 +3337,12 @@ use_defaults = false
         // The flag sets the field the config key is named after — the FIELD keeps the
         // key's name because that is what it sets; only the spelling on the command
         // line moved.
-        let cli = Cli::try_parse_from(["babelmap", "--interpreter", "4", "g.z5"]).unwrap();
+        let cli = Cli::try_parse_from(["lanthorn", "--interpreter", "4", "g.z5"]).unwrap();
         assert_eq!(cli.interpreter_number, Some(4), "--interpreter sets interpreter_number");
         assert!(!cli.no_game_colours, "and is nothing to do with colours");
 
         assert!(
-            Cli::try_parse_from(["babelmap", "--interpreter-number", "6", "g.z5"]).is_err(),
+            Cli::try_parse_from(["lanthorn", "--interpreter-number", "6", "g.z5"]).is_err(),
             "the old spelling is gone outright — no deprecated alias before release"
         );
         // And the help text a user reads names the new spelling, not the old one.

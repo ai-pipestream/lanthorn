@@ -481,7 +481,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Manual verification (after all tasks)
 
 Run the binary on the A129 story and inspect the dump, confirming:
-- Each Up/Down/In/Out connection in `~/.babelmap/maps/ZCODE-88-840726-A129.map.txt` shows a glyph + target name badge beside its origin box (e.g. `26` shows `↑`-up to `#25`, `27` shows `↓`-down to `#27`'s target), stacked when a room has several.
+- Each Up/Down/In/Out connection in `~/.lanthorn/maps/ZCODE-88-840726-A129.map.txt` shows a glyph + target name badge beside its origin box (e.g. `26` shows `↑`-up to `#25`, `27` shows `↓`-down to `#27`'s target), stacked when a room has several.
 - The `# === PORTALS` section lists every portal with its full untruncated name.
 - Where a connector crosses a badge cell, the connector line is visible (badge yields).
 ```bash

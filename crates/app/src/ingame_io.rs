@@ -30,7 +30,7 @@ pub(crate) fn delete_save_confirmed(
                 state.push_notice("[Save deleted]");
                 if let Some(s) = &mut state.overlays.saves {
                     // SQ-0854: refresh through the SAME enumeration that filled
-                    // the list — `combined_saves`, which is `.babelmap` Save
+                    // the list — `combined_saves`, which is `.lanthorn` Save
                     // States AND bare `.qzl` game saves. Re-listing with the
                     // narrower `list_saves` dropped every `.qzl` row alongside
                     // the one file actually deleted, so a single delete could
@@ -87,7 +87,7 @@ pub(crate) fn handle_save_as(
     // SQ-0648: a save-as target that already exists silently overwrote whatever
     // was there — including a save with a DIFFERENT typed name that happens to
     // slugify to the same file ("Before Troll" and "before, troll!" both land
-    // on before-troll.babelmap). Confirm before clobbering it: open the
+    // on before-troll.lanthorn). Confirm before clobbering it: open the
     // overwrite dialog and leave THIS dialog open behind it (reopened here with
     // the same typed text, since the caller may already have cleared it) so
     // Cancel needs no recovery. `force` skips this once the player has answered.
@@ -106,7 +106,7 @@ pub(crate) fn handle_save_as(
         }
     }
     // ONE writer for both triggers (SQ-0531): an in-game `@save` and a host
-    // "Save State" named slot both produce the same `.babelmap` archive — map,
+    // "Save State" named slot both produce the same `.lanthorn` archive — map,
     // transcript (art included), screen, aux and all — so an in-game save is no
     // longer a lesser save. What differs is the game bytes riding inside, and
     // `Meta::trigger` is what records which convention they follow.
@@ -155,7 +155,7 @@ pub(crate) fn handle_save_as(
 
 /// Open the saves dialog in "in-game" mode for a game-initiated save/restore.
 /// SAVE: prompt for a save name (reuses the save-name dialog). RESTORE: open the
-/// saves list, including plain *.qzl files alongside *.babelmap saves.
+/// saves list, including plain *.qzl files alongside *.lanthorn saves.
 pub(crate) fn open_ingame_saves(
     io: app::session::PendingIo,
     game_dir: &std::path::Path,
@@ -175,7 +175,7 @@ pub(crate) fn open_ingame_saves(
             ));
         }
         PendingIo::Restore => {
-            // The game asked to RESTORE: list babelmap saves + plain .qzl files.
+            // The game asked to RESTORE: list lanthorn saves + plain .qzl files.
             let entries = combined_saves(game_dir);
             state.overlays.saves = Some(SavesState { entries, scroll: Default::default() });
         }
@@ -305,7 +305,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "babelmap-sq0531-{}-{}-{}",
+            "lanthorn-sq0531-{}-{}-{}",
             tag,
             std::process::id(),
             std::time::SystemTime::now()
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn ingame_save_writes_a_full_archive_whose_game_bytes_stay_interchange_grade() {
         // The heart of SQ-0531: `@save` no longer writes a bare `.qzl`. It writes
-        // the SAME `.babelmap` a host Save State writes — map, transcript, screen
+        // the SAME `.lanthorn` a host Save State writes — map, transcript, screen
         // — while the bytes sealed inside stay byte-identical to
         // `Machine::save_quetzal()`, so unzipping `game.qzl` still hands another
         // interpreter a standard Quetzal save.
@@ -374,7 +374,7 @@ mod tests {
 
         super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
 
-        let path = dir.join("chapter-one.babelmap");
+        let path = dir.join("chapter-one.lanthorn");
         assert!(path.exists(), "@save writes the archive");
         assert!(!dir.join("chapter-one.qzl").exists(), "and no bare .qzl beside it");
 
@@ -417,7 +417,7 @@ mod tests {
 
         super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
 
-        let path = dir.join("chapter-one.babelmap");
+        let path = dir.join("chapter-one.lanthorn");
         let meta = app::archive::read_archive_meta(&path).expect("meta");
         assert_eq!(meta.trigger, SaveTrigger::HostState);
         assert!(!meta.trigger.is_portable(), "a between-turns snapshot is NOT advertised as portable");
@@ -435,18 +435,18 @@ mod tests {
     /// A save-as target that already exists must open the overwrite-confirm
     /// overlay INSTEAD of writing — including a cross-name slugify collision
     /// ("Before Troll" and "before, troll!" both land on
-    /// `before-troll.babelmap`), where the prompt must name the EXISTING
+    /// `before-troll.lanthorn`), where the prompt must name the EXISTING
     /// save, not what was just typed, or the collision would be invisible.
     #[test]
     fn handle_save_as_prompts_before_overwriting_an_existing_target() {
         let dir = temp_dir("overwrite-prompt");
         let mut mapper = mapper_with_room();
 
-        // First save: "Before Troll" -> before-troll.babelmap.
+        // First save: "Before Troll" -> before-troll.lanthorn.
         let mut sess1 = minizork();
         let mut state1 = state_with_session(None);
         super::handle_save_as("Before Troll".into(), &dir, IFID, &mut mapper, &mut sess1, &mut state1, false);
-        let path = dir.join("before-troll.babelmap");
+        let path = dir.join("before-troll.lanthorn");
         assert!(path.exists());
         let original_bytes = std::fs::read(&path).expect("read original archive");
         let meta1 = app::archive::read_archive_meta(&path).expect("meta");
@@ -492,7 +492,7 @@ mod tests {
         let mut sess1 = minizork();
         let mut state1 = state_with_session(None);
         super::handle_save_as("Before Troll".into(), &dir, IFID, &mut mapper, &mut sess1, &mut state1, false);
-        let path = dir.join("before-troll.babelmap");
+        let path = dir.join("before-troll.lanthorn");
         let original_bytes = std::fs::read(&path).expect("read original archive");
 
         let mut sess2 = minizork();
@@ -533,7 +533,7 @@ mod tests {
     // ── Restore: both containers, both directions ────────────────────────────
 
     #[test]
-    fn ingame_restore_of_a_babelmap_round_trips_the_game() {
+    fn ingame_restore_of_a_lanthorn_round_trips_the_game() {
         // Write an @save archive, play on, then answer the game's own @restore
         // with that archive. Oracle: the same probe command after the restore
         // reproduces the pre-restore transcript exactly.
@@ -542,7 +542,7 @@ mod tests {
         let mut state = state_with_session(Some(PendingIo::Save));
         let mut mapper = mapper_with_room();
         super::handle_save_as("slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
-        let path = dir.join("slot.babelmap");
+        let path = dir.join("slot.lanthorn");
 
         let _ = sess.resume_save(true); // @save completes; the game runs on
         let t1 = sess.submit("north").transcript;
@@ -553,7 +553,7 @@ mod tests {
         sess.resume_restore(Some(&bytes));
 
         let t2 = sess.submit("north").transcript;
-        assert_eq!(t2, t1, "in-game @restore of a .babelmap resumes the save point");
+        assert_eq!(t2, t1, "in-game @restore of a .lanthorn resumes the save point");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -592,13 +592,13 @@ mod tests {
         let mut sess = at_ingame_save();
         let mut state = state_with_session(Some(PendingIo::Save));
         super::handle_save_as("game-slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
-        let ingame_path = dir.join("game-slot.babelmap");
+        let ingame_path = dir.join("game-slot.lanthorn");
 
         // (2) A host Save State archive -> full resume.
         let mut host_sess = minizork();
         let mut host_state = state_with_session(None);
         super::handle_save_as("host-slot".into(), &dir, IFID, &mut mapper, &mut host_sess, &mut host_state, false);
-        let host_path = dir.join("host-slot.babelmap");
+        let host_path = dir.join("host-slot.lanthorn");
 
         // (3) A bare foreign .qzl -> descriptor completion, no sidecars.
         let raw = dir.join("foreign.qzl");
@@ -656,13 +656,13 @@ mod tests {
 
     // ── SQ-0854: the open saves list after a delete ──────────────────────────
 
-    /// A game dir holding two `.babelmap` Save States and one bare `.qzl`.
+    /// A game dir holding two `.lanthorn` Save States and one bare `.qzl`.
     ///
     /// The merged list sorts newest-first, and all three files are written in
     /// the same second, so the `.qzl`'s mtime is pushed a day off `now` to make
     /// the row order deterministic: `qzl_first` puts it at the top, otherwise at
     /// the bottom. That is what lets the first-row and last-row cases below each
-    /// pick a `.babelmap` on purpose.
+    /// pick a `.lanthorn` on purpose.
     fn dir_with_two_states_and_a_qzl(tag: &str, qzl_first: bool) -> std::path::PathBuf {
         let dir = temp_dir(tag);
         let mut mapper = mapper_with_room();
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn deleting_one_save_removes_exactly_that_row_from_the_open_list() {
         let dir = dir_with_two_states_and_a_qzl("delete-one-row", false);
-        let victim = dir.join("alpha.babelmap");
+        let victim = dir.join("alpha.lanthorn");
         let mut state = open_saves_over(&dir, &victim);
         assert_eq!(rows(&state).len(), 3, "two Save States and one .qzl are listed");
 
@@ -732,7 +732,7 @@ mod tests {
 
         // Exactly one file left the disk.
         assert!(!victim.exists(), "the selected save is deleted");
-        assert!(dir.join("beta.babelmap").exists(), "the other Save State survives");
+        assert!(dir.join("beta.lanthorn").exists(), "the other Save State survives");
         assert!(dir.join("from-frotz.qzl").exists(), "deleting a Save State never touches a .qzl");
 
         // ...and exactly one row left the list.
@@ -745,7 +745,7 @@ mod tests {
     /// Deleting a `.qzl` is the same contract from the other side: the `.qzl`
     /// row goes and both Save States stay.
     #[test]
-    fn deleting_a_qzl_leaves_the_babelmap_rows_alone() {
+    fn deleting_a_qzl_leaves_the_lanthorn_rows_alone() {
         let dir = dir_with_two_states_and_a_qzl("delete-qzl", false);
         let victim = dir.join("from-frotz.qzl");
         let mut state = open_saves_over(&dir, &victim);
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn a_cancelled_delete_leaves_the_list_untouched() {
         let dir = dir_with_two_states_and_a_qzl("delete-cancel", false);
-        let victim = dir.join("alpha.babelmap");
+        let victim = dir.join("alpha.lanthorn");
         let mut state = open_saves_over(&dir, &victim);
         let before = rows(&state);
 
@@ -820,7 +820,7 @@ mod tests {
         let mut mapper = mapper_with_room();
         let mut writer = state_with_session(None);
         super::handle_save_as("alpha".into(), &dir, IFID, &mut mapper, &mut minizork(), &mut writer, false);
-        let only = dir.join("alpha.babelmap");
+        let only = dir.join("alpha.lanthorn");
         let mut state = open_saves_over(&dir, &only);
 
         super::delete_save_confirmed(&only, true, &dir, &mut state);

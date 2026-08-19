@@ -121,7 +121,7 @@
 - [ ] **Step 2:** `cargo test -p gvm --test kerkerkruip_boots` → PASS (or SKIP if the story is absent — it is gitignored, so CI skips; locally it runs).
 - [ ] **Step 3:** Manually confirm (report the transcript tail): Kerkerkruip now shows a room/gameplay instead of re-drawing the menu with `*** Error on file 'KerkerkruipStorage' ***`.
 - [ ] **Step 4:** README — per the "README = major features only" rule, add a single concise line under the relevant capabilities section noting Glulx file-storage (Glk file streams) support IF the README enumerates Glk capabilities; otherwise skip and note that in the report. Do not document individual selectors.
-- [ ] **Step 5:** Update `/Users/marcuskellerman/.claude/projects/-Volumes-Videos-Source-babelmap/memory/to-verify.md`: add an SQ-0277 entry (Kerkerkruip boots to gameplay; general file-using games no longer `P48`; Save State round-trips the VFS) and note that SQ-0273's garglk smoke is now finally runnable in Kerkerkruip combat.
+- [ ] **Step 5:** Update `/Users/marcuskellerman/.claude/projects/-Volumes-Videos-Source-lanthorn/memory/to-verify.md`: add an SQ-0277 entry (Kerkerkruip boots to gameplay; general file-using games no longer `P48`; Save State round-trips the VFS) and note that SQ-0273's garglk smoke is now finally runnable in Kerkerkruip combat.
 - [ ] **Step 6: Commit** (`test(gvm): Kerkerkruip boots past its storage menu + docs (SQ-0277)`), staging the test file + README (if changed). The memory file is outside the repo — do not stage it.
 
 ---

@@ -1,7 +1,7 @@
 //! The Amiga palette and default pair, read back out of the interpreters on
 //! Infocom's own release floppies — SQ-0822.
 //!
-//! babelmap's Amiga profile came from `amiga/yzip1.c` and `amiga/yzip.h` in the
+//! lanthorn's Amiga profile came from `amiga/yzip1.c` and `amiga/yzip.h` in the
 //! leaked historical interpreter sources. Those are a DEVELOPMENT snapshot, and
 //! they disagree with what Infocom actually shipped in two places — one of which
 //! is the whole screen:

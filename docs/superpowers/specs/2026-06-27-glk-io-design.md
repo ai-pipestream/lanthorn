@@ -4,7 +4,7 @@
 **Status:** Approved (build 3a; 3b designed later)
 **Crate:** `crates/gvm` (Glk model) + `crates/gvm-cli` (terminal backend)
 **Roadmap:** Glulx sub-project 3. 3a = Glk core + interactive CLI (this spec).
-3b = babelmap TUI integration (separate, designed with the user before touching
+3b = lanthorn TUI integration (separate, designed with the user before touching
 app code).
 
 ## Context
@@ -135,7 +135,7 @@ smoke. This is the capstone the earlier phases deferred.
 
 ## Out of scope (3a, permanently or deferred)
 
-- The babelmap **TUI** Glk backend + the `GameSession`-over-both-engines refactor
+- The lanthorn **TUI** Glk backend + the `GameSession`-over-both-engines refactor
   → **3b** (designed with the user before touching app code).
 - Graphics/sound/hyperlink windows and the non-IF Glk surface.
 - Cross-interpreter Quetzal file compatibility for `@save`/`@restore` (revisit

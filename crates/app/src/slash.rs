@@ -56,7 +56,7 @@ pub enum SlashOutcome {
     /// Quit the application.
     Quit,
     /// Exit the current story and return to the story picker (only meaningful
-    /// when babelmap was launched from a directory). Handled in
+    /// when lanthorn was launched from a directory). Handled in
     /// `slash_dispatch`: it mirrors `Quit`'s save-prompt path but resolves the
     /// loop to the library instead of exiting. (SQ-0435)
     QuitToLibrary,
@@ -77,7 +77,7 @@ pub enum SlashOutcome {
     /// colours) to the transcript as Meta lines. Handled in `slash_dispatch`.
     DumpWindows,
     /// Diagnostic: write the last frame's rendered CELLS — glyphs plus per-cell
-    /// colours and attributes — to `~/.babelmap/dump-cells.log` as plain text
+    /// colours and attributes — to `~/.lanthorn/dump-cells.log` as plain text
     /// (SQ-0761). Handled in `slash_dispatch`.
     DumpCells,
     /// Toggle the Z-machine debug inspector tiled pane. Handled in `slash_dispatch`
@@ -204,7 +204,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "reset-game [map] [data]", description: "restart the game — bare opens the options dialog; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh",
         dispatch: |a| SlashOutcome::Reset { map: a.contains(&"map"), data: a.contains(&"data") } },
     CommandSpec { name: "quit", category: Category::Game, context: Context::Global,
-        usage: "quit", description: "exit babelmap",
+        usage: "quit", description: "exit lanthorn",
         dispatch: |_| SlashOutcome::Quit },
     CommandSpec { name: "quit-to-library", category: Category::Game, context: Context::Global,
         usage: "quit-to-library", description: "exit the current story and return to the story library",
@@ -476,10 +476,10 @@ pub static COMMANDS: &[CommandSpec] = &[
 
     // ── Help ──────────────────────────────────────────────────────────────
     CommandSpec { name: "dump-windows", category: Category::Help, context: Context::Global,
-        usage: "dump-windows", description: "dump the last game frame's window layout, here and to ~/.babelmap/dump-windows.log",
+        usage: "dump-windows", description: "dump the last game frame's window layout, here and to ~/.lanthorn/dump-windows.log",
         dispatch: |_| SlashOutcome::DumpWindows },
     CommandSpec { name: "dump-cells", category: Category::Help, context: Context::Global,
-        usage: "dump-cells", description: "write the last frame's cells — glyphs, colours and attributes — to ~/.babelmap/dump-cells.log",
+        usage: "dump-cells", description: "write the last frame's cells — glyphs, colours and attributes — to ~/.lanthorn/dump-cells.log",
         dispatch: |_| SlashOutcome::DumpCells },
     CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
         usage: "debug", description: "toggle the Z-machine debug inspector pane",

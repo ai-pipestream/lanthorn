@@ -89,14 +89,14 @@
 - [ ] **Step 2:** Write `docs/persistence.md` covering, clearly and concretely:
   - **The three layers**, with what each captures, when it triggers, and what survives:
     1. **The game's own save** — Z-machine `@save`/`@restore` → **Quetzal** (`.qzl`); Glulx `@save`/`@restore` → the host **Save State** blob. In-game, player-initiated.
-    2. **Save State / Restore State** (host emulator snapshot) — save-anywhere full-machine snapshot; **includes the entire Glk file VFS** (SQ-0277 v4). Explicit, per-slot; archived in `.babelmap` (`game.qzl`/`game.glksave`).
+    2. **Save State / Restore State** (host emulator snapshot) — save-anywhere full-machine snapshot; **includes the entire Glk file VFS** (SQ-0277 v4). Explicit, per-slot; archived in `.lanthorn` (`game.qzl`/`game.glksave`).
     3. **Automatic per-story persistence** (no explicit save) — Z-machine **aux data** (`<save_dir>/<ifid>.aux`) and, NEW (SQ-0278), the Glulx **Glk file VFS** (`<save_dir>/<ifid>.gvfs` in the app; `<story>.glkvfs` in gvm-cli). Auto-loaded at story-open, auto-flushed per-turn. This is what makes a game's own external-storage files (e.g. Kerkerkruip scores) survive a plain quit.
   - **Per host**: the app (TUI) file locations under the user dir; gvm-cli/zvm-cli sidecars next to the story.
   - **Terminology note**: "Save State/Restore State" = host snapshot (engine-neutral, save-anywhere); "@save/@restore" = the game's in-game standard path (Quetzal on Z-machine).
   - A short table mapping {layer × engine × host → file}.
   - Note the two known SQ-0277 limitations still in effect for the VFS: `create_by_prompt` fixed-name, text-mode newline translation omitted.
 - [ ] **Step 3:** README — add ONE concise line (per "README = major features only") under the capabilities/engines section: Glulx games' external file storage (Glk file streams) now auto-persists across sessions, with a link to `docs/persistence.md`. Do not enumerate selectors/paths in the README.
-- [ ] **Step 4:** Update `/Users/marcuskellerman/.claude/projects/-Volumes-Videos-Source-babelmap/memory/to-verify.md`: add an SQ-0278 entry — manual smoke: run a Glulx game that writes a file (Kerkerkruip once past its menu, or any file-using game), QUIT WITHOUT saving, relaunch, confirm the data persisted (app `<save_dir>/<ifid>.gvfs`; gvm-cli `<story>.glkvfs`); confirm a `__temp_` file does NOT persist; confirm deleting the sidecar resets the game's stored data. Do NOT stage the memory file.
+- [ ] **Step 4:** Update `/Users/marcuskellerman/.claude/projects/-Volumes-Videos-Source-lanthorn/memory/to-verify.md`: add an SQ-0278 entry — manual smoke: run a Glulx game that writes a file (Kerkerkruip once past its menu, or any file-using game), QUIT WITHOUT saving, relaunch, confirm the data persisted (app `<save_dir>/<ifid>.gvfs`; gvm-cli `<story>.glkvfs`); confirm a `__temp_` file does NOT persist; confirm deleting the sidecar resets the game's stored data. Do NOT stage the memory file.
 - [ ] **Step 5: Commit** `docs: document the save/persistence model incl. auto VFS persistence (SQ-0278)` (stage docs/persistence.md, README.md).
 
 ---

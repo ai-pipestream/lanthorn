@@ -64,7 +64,7 @@ pub fn commented_template() -> String {
     let mut out = String::new();
 
     out.push_str(
-        "# babelmap style.toml — auto-seeded. The section headers below are active,\n\
+        "# lanthorn style.toml — auto-seeded. The section headers below are active,\n\
          # but every value line is commented out, so the file stays a no-op until you\n\
          # uncomment lines: each commented value already equals the built-in default,\n\
          # reconstructed straight from the style registry. Edit, uncomment, save, then\n\
@@ -77,7 +77,7 @@ pub fn commented_template() -> String {
          \n",
     );
     out.push_str(&format!(
-        "version = {}   # style schema version — do not remove; lets babelmap flag an out-of-date file\n\n",
+        "version = {}   # style schema version — do not remove; lets lanthorn flag an out-of-date file\n\n",
         super::toml_schema::STYLE_SCHEMA_VERSION
     ));
     out.push_str(
@@ -309,7 +309,7 @@ const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour who
 
 # ── Status bar. Omit [statusbar] for the built-in default. ───────────────────
 # Placeholders: {location} {score} {moves} {time} {turns} {title} {filter}
-# NB: this is babelmap's OWN bar, and `border` frames that. The frame round a
+# NB: this is lanthorn's OWN bar, and `border` frames that. The frame round a
 # GAME's status/upper window is the upper_window_border line up in [elements].
 # [statusbar]
 # border = "none"
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn auto_seed_writes_when_missing_and_never_overwrites() {
         let dir = std::env::temp_dir().join(format!(
-            "babelmap-template-test-{}-{}",
+            "lanthorn-template-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

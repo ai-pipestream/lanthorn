@@ -114,7 +114,7 @@ pub fn render_dump(graph: &MapGraph) -> String {
     let conns = graph.connections();
 
     let mut out = String::new();
-    out.push_str("# babelmap map dump\n");
+    out.push_str("# lanthorn map dump\n");
     let current = graph.current().map(|id| format!("#{id}")).unwrap_or_else(|| "none".into());
     out.push_str(&format!(
         "# rooms: {}, edges: {}, current: {}\n#\n",
@@ -265,7 +265,7 @@ mod tests {
         m.observe(2, "Forest", Some(Direction::N));
         let dump = render_dump(&m.graph);
 
-        assert!(dump.contains("# babelmap map dump"));
+        assert!(dump.contains("# lanthorn map dump"));
         assert!(dump.contains("ROOM 1 \"West of House\""), "room legend: {dump}");
         assert!(dump.contains("ROOM 2 \"Forest\""));
         assert!(dump.contains("EDGE 1 N 2"), "edge list: {dump}");
@@ -292,7 +292,7 @@ mod tests {
     fn empty_map_dump_is_safe() {
         let g = MapGraph::new();
         let dump = render_dump(&g);
-        assert!(dump.contains("# babelmap map dump"));
+        assert!(dump.contains("# lanthorn map dump"));
         assert!(dump.contains("(empty map)"));
     }
 

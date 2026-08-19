@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn round_trips_through_temp_dir() {
-        let dir = std::env::temp_dir().join(format!("babelmap-vfs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-vfs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(read_vfs(&dir).is_empty(), "absent file → empty");
         let blob = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -56,7 +56,7 @@ mod tests {
     /// succeeded and clobbered the blob).
     #[test]
     fn an_interrupted_vfs_write_keeps_the_previous_blob() {
-        let dir = std::env::temp_dir().join(format!("babelmap-vfs-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-vfs-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let blob = vec![0xDE, 0xAD, 0xBE, 0xEF];

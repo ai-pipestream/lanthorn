@@ -76,7 +76,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
             buf,
             content.x,
             content.y + 1,
-            "Where should babelmap keep it?",
+            "Where should lanthorn keep it?",
             body_style,
             content,
         );

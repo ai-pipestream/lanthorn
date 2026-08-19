@@ -26,7 +26,7 @@ operand (table) form while keeping the 0-operand form unchanged.
   operand, and the result (1/0, or bytes-read) is returned synchronously to the
   game. Routing it through the suspend/dialog flow would be wrong and would
   ripple across session/app/CLI/headless.
-- **babelmap already persists per game** in a single `.babelmap` zip archive
+- **lanthorn already persists per game** in a single `.lanthorn` zip archive
   (`game.sav` + map + metadata), auto-saved each turn and at the per-game
   default path `archive_path(save_dir, ifid)`.
 
@@ -45,7 +45,7 @@ touches the filesystem.
             │
             ▼  (post-turn, app side)
    app persists aux_data per `aux_storage`:
-     • archive → fold into the .babelmap zip (aux.dat entry)
+     • archive → fold into the .lanthorn zip (aux.dat entry)
      • global  → write …/<ifid>.aux
    and clears aux_dirty.
 ```
@@ -113,8 +113,8 @@ tolerant: a malformed/truncated blob yields an empty map rather than erroring).
 
 Driven by `aux_storage` once resolved to `Archive` or `Global`:
 
-- **Archive mode** — aux rides inside the `.babelmap` zip:
-  - **Write:** every `.babelmap` write (per-turn auto-save *and* manual Ctrl+S /
+- **Archive mode** — aux rides inside the `.lanthorn` zip:
+  - **Write:** every `.lanthorn` write (per-turn auto-save *and* manual Ctrl+S /
     save-as / in-game save) embeds the current `aux_data` as an `aux.dat` zip
     entry (`encode_aux`); the entry is omitted when the table is empty. Clearing
     `aux_dirty` after a write is a notify-bookkeeping detail — correctness does
@@ -127,7 +127,7 @@ Driven by `aux_storage` once resolved to `Archive` or `Global`:
     `machine.aux_data` (this is what lets a *new* playthrough see prior data).
   - **Write:** when `aux_dirty`, write `encode_aux(aux_data)` to the file; clear
     `aux_dirty`.
-  - **Override:** in this mode the `.babelmap` zip carries **no** `aux.dat`, and
+  - **Override:** in this mode the `.lanthorn` zip carries **no** `aux.dat`, and
     any existing zip aux entry is ignored on load — the global file is the sole
     source of truth.
   - The IFID is already filesystem-safe (`ZCODE-…`) but is sanitized
@@ -143,7 +143,7 @@ Driven by `aux_storage` once resolved to `Archive` or `Global`:
 - Action: a post-turn dialog (common dialog chrome, keyboard + mouse, TAB nav):
 
   > **This story saves persistent side-data** (e.g. remembering past
-  > playthroughs). Where should babelmap keep it?
+  > playthroughs). Where should lanthorn keep it?
   > **[ With each save file ]   [ Globally for all stories ]**
 
   - "With each save file" → `aux_storage = Archive`.

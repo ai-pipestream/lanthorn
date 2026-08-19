@@ -96,7 +96,7 @@ Use `--data-dir <dir>` to sandbox file/fileref writes.
 ## Map fixtures
 
 `advent_maze_map.json` — a player's real, partial mapping of Colossal Cave
-(`advent.blb`), lifted verbatim from the `map.json` inside a babelmap archive.
+(`advent.blb`), lifted verbatim from the `map.json` inside a lanthorn archive.
 30 rooms across two layers; layer 1 is the hand-peeled "all alike" maze (12
 rooms, 47 in-layer edges, 11 of them sharing the name "Maze"). Player-generated
 data, freely redistributable, and the calibration set behind the matrix view and

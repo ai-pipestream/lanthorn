@@ -18,7 +18,7 @@
 - Undo is **in-memory and inline** — it must NOT return `SaveRequest`/`RestoreRequest`; it `do_store`s immediately (like the current `-1` stubs).
 - Store values: `save_undo` → `1` (success) / `-1` i.e. `0xFFFF` (when `undo_cap == 0`, disabled); `restore_undo` → `2` into the **original `save_undo`'s** store target on success, `0` into its own target when the stack is empty.
 - `save_quetzal` / `restore_quetzal` snapshot/replace dynamic memory + frames + eval stack + PC. The snapshot PC is the post-`save_undo` address (the standard `step()` advance), so restoring resumes there.
-- Undo history is session-only (never written into `.babelmap` saves).
+- Undo history is session-only (never written into `.lanthorn` saves).
 - Depth is `config.undo_levels` (default 16; `0` disables). Run `cargo test -p app` and `cargo test -p zvm` after the tasks that touch each crate: 0 failures, 0 warnings.
 
 ---
@@ -181,8 +181,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 8: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): in-memory multi-level undo (save_undo / restore_undo)
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): in-memory multi-level undo (save_undo / restore_undo)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -258,8 +258,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/config.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): undo_levels config (default 16, 0 disables)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/config.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): undo_levels config (default 16, 0 disables)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -329,8 +329,8 @@ In `README.md`, in the Configuration section, add a line:
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/main.rs README.md
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): apply undo_levels to the VM at session creation + docs
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/main.rs README.md
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): apply undo_levels to the VM at session creation + docs
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

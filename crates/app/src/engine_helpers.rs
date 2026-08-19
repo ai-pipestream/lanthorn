@@ -23,7 +23,7 @@ pub(crate) fn zvm_session_mut(engine: &mut dyn Engine) -> &mut GameSession {
     engine
         .as_any_mut()
         .downcast_mut::<GameSession>()
-        .expect("babelmap drives a Z-machine GameSession")
+        .expect("lanthorn drives a Z-machine GameSession")
 }
 
 /// Non-panicking downcast to the Z-machine session: `Some` for a Z-code game,
@@ -160,7 +160,7 @@ pub(crate) fn restore_error_msg(e: app::engine::EngineError) -> String {
     use app::engine::EngineError;
     match e {
         EngineError::EngineMismatch { expected, found } => format!(
-            "this save was written by the \"{found}\" engine, but babelmap is running the \"{expected}\" engine"
+            "this save was written by the \"{found}\" engine, but lanthorn is running the \"{expected}\" engine"
         ),
         EngineError::BadSave(msg) if msg.contains("SaveMismatch") => {
             "save is for a different story".to_string()
@@ -178,7 +178,7 @@ pub(crate) fn restore_error_msg(e: app::engine::EngineError) -> String {
 pub(crate) enum RestoreOutcome {
     /// Descriptor-PC bytes were completed. `None` for a bare `.qzl` carried in
     /// from another interpreter (it has no sidecars); `Some` for an in-game
-    /// `@save` `.babelmap`, which carries the full session alongside them.
+    /// `@save` `.lanthorn`, which carries the full session alongside them.
     DescriptorCompleted(Option<Box<app::archive::ArchiveContents>>),
     Resumed(Box<app::archive::ArchiveContents>),
 }
@@ -186,15 +186,15 @@ pub(crate) enum RestoreOutcome {
 /// Restore `path` into `session`, dispatching on which PC convention its game
 /// bytes follow (SQ-0227, retargeted by SQ-0531).
 ///
-/// A bare `.qzl` and an `@save`-triggered `.babelmap` both hold descriptor-PC
+/// A bare `.qzl` and an `@save`-triggered `.lanthorn` both hold descriptor-PC
 /// bytes, so both complete the pending `@save` descriptor
-/// (`Engine::restore_game_save`); a host-Save-State `.babelmap` resumes the whole
+/// (`Engine::restore_game_save`); a host-Save-State `.lanthorn` resumes the whole
 /// session (`Engine::restore_state`). The convention now comes from the archive's
-/// `Meta::trigger`, not from the file extension — `@save` writes a `.babelmap`
+/// `Meta::trigger`, not from the file extension — `@save` writes a `.lanthorn`
 /// too. This is still the fix for the SQ-0163 regression: every host restore path
 /// used to call `restore_state` unconditionally, landing the VM on the descriptor
 /// instead of past it. Shared by every host load/restore site (saves-manager Load,
-/// `/restore-state`, and a `.babelmap` picked from the in-game restore picker).
+/// `/restore-state`, and a `.lanthorn` picked from the in-game restore picker).
 pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Result<RestoreOutcome, String> {
     if app::persist_files::is_game_save(path) {
         let bytes = app::archive::read_quetzal_from_file(path).map_err(|e| e.to_string())?;
@@ -218,10 +218,10 @@ pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine
 
 /// Floor the declared-width guard for a restore that brought game memory in
 /// WITHOUT any screen state: a bare Quetzal (`.qzl`/`.sav`), from another
-/// interpreter or an older babelmap (SQ-0681).
+/// interpreter or an older lanthorn (SQ-0681).
 ///
 /// [`app::session::restore_screen`] can raise the floor to the restored game's
-/// own frame of reference because a `.babelmap` archives the screen the game was
+/// own frame of reference because a `.lanthorn` archives the screen the game was
 /// laid out on. A bare Quetzal, by design, archives none: ZMSD/Quetzal treat the
 /// header's screen dimensions as the interpreter's, to be re-stamped on restore,
 /// so the width whose columns the restored status routine baked in is genuinely
@@ -229,7 +229,7 @@ pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine
 ///
 /// The conservative choice is [`zvm::screen::DEFAULT_SCREEN_COLS`] (80), not the
 /// current session's floor. 80 is the Z-machine's conventional screen width, the
-/// width zvm falls back to, and the width every babelmap session booted at before
+/// width zvm falls back to, and the width every lanthorn session booted at before
 /// SQ-0680 seeded the real pane — so it is what a foreign or older `.qzl` was
 /// overwhelmingly laid out for. Getting it wrong in this direction costs at most
 /// a bar clipped at the right of a narrower pane (what any interpreter shows for
@@ -238,7 +238,7 @@ pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine
 /// restore. It only ever grows the floor, so a session already wider than 80 is
 /// untouched, and it is a no-op for the versions the floor exempts (v1–3, v6).
 ///
-/// Not applied to an in-game `@save` `.babelmap`, which travels the same
+/// Not applied to an in-game `@save` `.lanthorn`, which travels the same
 /// descriptor-completion path but DOES carry its screen: there
 /// [`apply_archive_state`] hands `restore_screen` the real width, and guessing 80
 /// first would pin a genuinely 60-column save to 80.
@@ -254,7 +254,7 @@ pub(crate) fn note_bare_quetzal_width(session: &mut dyn Engine) {
 ///
 /// The VM-side restore has already happened by the time this runs — either a full
 /// `restore_state` resume or a descriptor completion from an in-game `@save`
-/// archive (SQ-0531). Shared by every `.babelmap` restore site so the two never
+/// archive (SQ-0531). Shared by every `.lanthorn` restore site so the two never
 /// drift; the caller still owns its own notices and overlay bookkeeping.
 pub(crate) fn apply_archive_state(
     ac: app::archive::ArchiveContents,
@@ -302,7 +302,7 @@ pub(crate) fn apply_archive_state(
 /// prints and caches it OUTSIDE the VM snapshot, so a resume left that cache
 /// holding the fresh boot's opening room and the map selected the wrong room
 /// until the next turn reprinted a heading. Call at every site that resumes a
-/// `.babelmap`, beside `restore_screen` — before `reobserve_location`, which is
+/// `.lanthorn`, beside `restore_screen` — before `reobserve_location`, which is
 /// what reads the location back out.
 pub(crate) fn seed_resumed_location(session: &mut dyn Engine, meta: &app::archive::Meta) {
     if let (Some(name), Some(g)) = (meta.location.as_deref(), glulx_session_opt_mut(session)) {
@@ -317,7 +317,7 @@ pub(crate) fn seed_resumed_location(session: &mut dyn Engine, meta: &app::archiv
 /// (which PANIC / return `None` on any other engine) and reads raw Quetzal saves
 /// from other interpreters — Z-machine-only until cross-interpreter Glulx Quetzal exists.
 /// They check this first and bail gracefully when it returns `false` (a Glulx
-/// game). The `.babelmap` archive save/restore/restart paths no longer need it:
+/// game). The `.lanthorn` archive save/restore/restart paths no longer need it:
 /// they route through the engine-neutral `Engine::save_state`/`restore_state`
 /// and work for both engines.
 pub(crate) fn engine_supports_save(engine: &dyn Engine) -> bool {
@@ -329,7 +329,7 @@ mod tests {
     // ── SQ-0227 Task 3: restore dispatch on file extension ──────────────────────
     //
     // `restore_from_file` is the dispatch shared by every host restore site
-    // (saves-manager Load, `/restore-state`, and a `.babelmap` picked from the
+    // (saves-manager Load, `/restore-state`, and a `.lanthorn` picked from the
     // in-game restore picker). Regression proof for SQ-0163: every host
     // restore path used to call `restore_state` (resume) unconditionally, so
     // a host restore of an in-game `@save` (`.qzl`) landed the VM on the
@@ -343,7 +343,7 @@ mod tests {
     /// narrow session's own boot width to make every baked field column illegal.
     ///
     /// The contrast in the second half is the reason the guess is scoped to this
-    /// one branch: a `.babelmap` restore must NOT take the guess, because an
+    /// one branch: a `.lanthorn` restore must NOT take the guess, because an
     /// archive knows the real width (`restore_screen`) and pinning a genuinely
     /// 60-column session to 80 would undo SQ-0680's pre-boot seed.
     #[test]
@@ -378,21 +378,21 @@ mod tests {
         );
         let _ = std::fs::remove_file(&qzl_path);
 
-        // Contrast: a Save State .babelmap. Its width comes from the archived
+        // Contrast: a Save State .lanthorn. Its width comes from the archived
         // screen (here: none archived), never from the bare-Quetzal guess.
         let save = Engine::save_state(&narrow());
-        let babelmap_path = std::env::temp_dir().join(format!("bm-sq0681-{}.babelmap", std::process::id()));
-        app::archive::save_archive(&babelmap_path, &mapper::mapper::Mapper::default(), &save, None,
-            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write .babelmap");
+        let lanthorn_path = std::env::temp_dir().join(format!("bm-sq0681-{}.lanthorn", std::process::id()));
+        app::archive::save_archive(&lanthorn_path, &mapper::mapper::Mapper::default(), &save, None,
+            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write .lanthorn");
 
         let mut sess2 = narrow();
-        let outcome2 = super::restore_from_file(&babelmap_path, &mut sess2).expect("restore .babelmap");
+        let outcome2 = super::restore_from_file(&lanthorn_path, &mut sess2).expect("restore .lanthorn");
         assert!(matches!(outcome2, super::RestoreOutcome::Resumed(_)));
         assert_eq!(
             sess2.boot_screen_cols, 60,
             "an archive restore never takes the bare-Quetzal guess — SQ-0680's narrow seed stands"
         );
-        let _ = std::fs::remove_file(&babelmap_path);
+        let _ = std::fs::remove_file(&lanthorn_path);
     }
 
     /// SQ-0787. Every restore site funnels through [`super::apply_v6_pictures`], and
@@ -431,7 +431,7 @@ mod tests {
         assert!(Engine::paint_surface(&sess).is_some(), "premise: a ground is on screen");
 
         let path =
-            std::env::temp_dir().join(format!("bm-sq0787-{}.babelmap", std::process::id()));
+            std::env::temp_dir().join(format!("bm-sq0787-{}.lanthorn", std::process::id()));
         let save = Engine::save_state(&sess);
         app::archive::save_archive(&path, &mapper::mapper::Mapper::default(), &save, None,
             &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write");
@@ -486,7 +486,7 @@ mod tests {
         );
 
         let path =
-            std::env::temp_dir().join(format!("bm-sq0814-{}.babelmap", std::process::id()));
+            std::env::temp_dir().join(format!("bm-sq0814-{}.lanthorn", std::process::id()));
         let save = Engine::save_state(&sess);
         app::archive::save_archive(&path, &mapper::mapper::Mapper::default(), &save, None,
             &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write");
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_from_file_completes_qzl_descriptor_and_resumes_babelmap_sq0163() {
+    fn restore_from_file_completes_qzl_descriptor_and_resumes_lanthorn_sq0163() {
         use app::engine::Engine;
         use app::session::{GameSession, InputKind, PendingIo};
 
@@ -536,7 +536,7 @@ mod tests {
             "restore runs forward past the @save descriptor, not parked on it (SQ-0233)");
         let _ = std::fs::remove_file(&qzl_path);
 
-        // Contrast: a Save State (.babelmap) is resume-PC convention --
+        // Contrast: a Save State (.lanthorn) is resume-PC convention --
         // captured at an input prompt, no pending @save. The dispatch must
         // instead do a full session resume, landing exactly at the saved PC.
         let sess2 = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
@@ -544,16 +544,16 @@ mod tests {
         let pc_before_restore = sess2.machine.state.pc;
         let save = sess2.save_state();
 
-        let babelmap_path = std::env::temp_dir().join(format!("bm-t3-{}.babelmap", std::process::id()));
-        app::archive::save_archive(&babelmap_path, &mapper::mapper::Mapper::default(), &save, None,
-            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write .babelmap");
+        let lanthorn_path = std::env::temp_dir().join(format!("bm-t3-{}.lanthorn", std::process::id()));
+        app::archive::save_archive(&lanthorn_path, &mapper::mapper::Mapper::default(), &save, None,
+            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write .lanthorn");
 
         let mut fresh2 = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
-        let outcome2 = super::restore_from_file(&babelmap_path, &mut fresh2).expect("restore .babelmap Save State");
+        let outcome2 = super::restore_from_file(&lanthorn_path, &mut fresh2).expect("restore .lanthorn Save State");
         assert!(matches!(outcome2, super::RestoreOutcome::Resumed(_)));
         assert_eq!(fresh2.machine.state.pc, pc_before_restore, "resume convention: lands exactly at the saved PC, not the @save descriptor");
         assert_eq!(fresh2.machine.global(0), 0, "resume: @save never ran, G0 untouched (contrast with descriptor completion's 2 above)");
-        let _ = std::fs::remove_file(&babelmap_path);
+        let _ = std::fs::remove_file(&lanthorn_path);
     }
 
     // ── Graceful no-panic guards for non-Z-machine (Glulx) engines ──────────────

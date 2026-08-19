@@ -1,4 +1,4 @@
-//! Cross-platform host-side audio backend for babelmap. Plays synthesised tones
+//! Cross-platform host-side audio backend for lanthorn. Plays synthesised tones
 //! (Z-machine bleeps) and decoded samples (Blorb `Snd ` resources) via `rodio`.
 //! With the `playback` feature off, the backend is a compile-time no-op.
 

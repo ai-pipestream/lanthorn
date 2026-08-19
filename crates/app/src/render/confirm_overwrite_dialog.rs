@@ -4,7 +4,7 @@
 //! the confirm-delete pattern almost verbatim: Overwrite replaces the existing
 //! file, Cancel leaves it untouched. It exists because two different typed
 //! save names can slugify to the same filename ("Before Troll" and "before,
-//! troll!" both land on `before-troll.babelmap`) — writing straight over the
+//! troll!" both land on `before-troll.lanthorn`) — writing straight over the
 //! target silently destroyed whichever save was there first. The body names
 //! the EXISTING save, not the name just typed, so a cross-name collision is
 //! visible instead of looking like a same-name re-save.
@@ -137,7 +137,7 @@ mod tests {
 
     fn pending(existing_name: &str) -> ConfirmOverwriteSave {
         ConfirmOverwriteSave {
-            path: std::path::PathBuf::from("/saves/before-troll.babelmap"),
+            path: std::path::PathBuf::from("/saves/before-troll.lanthorn"),
             existing_name: existing_name.to_string(),
             pending: PendingOverwrite::SaveAs,
         }

@@ -8,7 +8,7 @@
 
 ## Goal
 
-Make babelmap **play Glulx (`.ulx`/`.gblorb`) games** in the TUI: a
+Make lanthorn **play Glulx (`.ulx`/`.gblorb`) games** in the TUI: a
 `GlulxSession` implementing `Engine`, an app-side `GlkBackend` that maps Glk's
 window tree onto the neutral `ScreenModel`, a **generic multi-window renderer**
 for the story pane (with the **map alongside**), Glk input via the existing
@@ -76,7 +76,7 @@ the map keeps its pane):
 - The **Z-machine path is unchanged**: its 2-node tree renders through this same
   code (already validated in 3b-i), so there is one renderer for both engines.
 - Re-derived each frame from `engine.screen()`, so dynamic open/close/resize just
-  works. babelmap tells the engine the story-pane size each frame (the map is
+  works. lanthorn tells the engine the story-pane size each frame (the map is
   bolted on the side, untouched).
 
 ### 5. Input
@@ -90,7 +90,7 @@ target game doesn't need them).
 
 ### 6. Save / load
 
-`.babelmap` archives already carry the engine tag (3b-i). A Glulx game's save is
+`.lanthorn` archives already carry the engine tag (3b-i). A Glulx game's save is
 the `gvm` snapshot under the `"glulx"` tag; the restore guard refuses a
 mismatched engine. (The Z-machine `ScreenState` archive entry is Z-specific and
 stays so; Glulx archives don't write it.)

@@ -1,7 +1,7 @@
 //! Clicking a room in the matrix highlights the way there (SQ-0693), against REAL player data.
 //!
 //! `unit_tests/advent_maze_map.json` and `unit_tests/zork1_underground_map.json` are verbatim
-//! `map.json` files out of babelmap archives — one player's partial Colossal Cave with the "all
+//! `map.json` files out of lanthorn archives — one player's partial Colossal Cave with the "all
 //! alike" maze hand-peeled onto its own layer, and one player's Zork I with a maze layer and a
 //! Cellar layer. Nothing here needs a story file.
 //!

@@ -56,7 +56,7 @@ fn any_media_present() -> bool {
 /// A scratch storage base, unique per test process so parallel tests cannot
 /// read each other's sidecars.
 fn data_base(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("babelmap-sq0859-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq0859-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }

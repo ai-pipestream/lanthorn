@@ -144,7 +144,7 @@ fn fit_proportionally(w: u32, h: u32, nw: u32, nh: u32) -> (u32, u32) {
 ///
 /// The leftover strip below/right of the fitted picture is transparent padding, laid
 /// down top-left — byte for byte what the crate does with a picker that was never
-/// given a `background_color`, which is every picker babelmap builds.
+/// given a `background_color`, which is every picker lanthorn builds.
 pub fn fit_for_protocol(
     picker: &Picker,
     img: &image::DynamicImage,
@@ -494,7 +494,7 @@ struct V6Ready {
     /// The kitty image id this composite was last PLACED as, read back off the
     /// placement (SQ-0753). `None` under a non-kitty protocol, and until the first
     /// [`GraphicsRender::redraw_v6`]. Without it the full-frame composite — the
-    /// single largest upload babelmap makes, 2.8 MB on Journey — can only be
+    /// single largest upload lanthorn makes, 2.8 MB on Journey — can only be
     /// forgotten, never freed.
     placed_id: Option<u32>,
 }
@@ -2076,7 +2076,7 @@ const PLACEHOLDER_WIDTH: ratatui::buffer::CellDiffOption =
 /// followed by bare continuations. That is legal until a later frame overpaints the
 /// row's left edge: the anchor dies, the survivors keep only the foreground's low 24
 /// bits, and the run either names an image the terminal does not hold (drawing
-/// nothing) or — for babelmap's own `0x00B0_xxxx` ids, whose high byte is zero —
+/// nothing) or — for lanthorn's own `0x00B0_xxxx` ids, whose high byte is zero —
 /// resolves to the art's FIRST row, redrawn on every row and shifted a column right.
 /// A cell that carries its own three diacritics cannot be orphaned by anything that
 /// happens to its neighbours.
@@ -2151,7 +2151,7 @@ fn kitty_place_rows(id: u32, transmit: Option<&str>, area: Rect, buf: &mut Buffe
 /// placement it just wrote into the same self-describing, buffer-visible cells
 /// [`kitty_place_row`] emits (SQ-0772).
 ///
-/// WHY THIS WRAPPER EXISTS AT ALL. babelmap has two kitty emitters and only owns
+/// WHY THIS WRAPPER EXISTS AT ALL. lanthorn has two kitty emitters and only owns
 /// one. Everything drawn through a [`Protocol`] — the v6 raster composite, every
 /// chrome-ring band, inline story art, the picker's cover tiles — is placed by
 /// `ratatui-image`, whose kitty backend squeezes each row into its first cell and
@@ -3545,7 +3545,7 @@ mod tests {
     ///
     /// `retain_chrome_bands`/`invalidate_chrome_bands` recorded a `Drop` and dropped
     /// the `Protocol`, which releases nothing — `ratatui-image` has no output channel
-    /// and never deletes. The terminal kept every band babelmap ever encoded, and
+    /// and never deletes. The terminal kept every band lanthorn ever encoded, and
     /// kitty evicts by LRU including images that are CURRENTLY PLACED, so a big
     /// enough pile can blank a live one. Naming the abandoned upload was the blocker
     /// the quest recorded ("the image id lives inside ratatui-image's `Kitty` struct
@@ -3646,7 +3646,7 @@ mod tests {
         );
     }
 
-    /// SQ-0753 for the biggest upload babelmap makes: the v6 raster composite is the
+    /// SQ-0753 for the biggest upload lanthorn makes: the v6 raster composite is the
     /// whole pane in one image (2.8 MB on Journey at 117x64). It is abandoned twice
     /// over — wholesale when the hybrid ring takes the screen (`invalidate_v6`), and
     /// once per visible change in a raster-mode game, where `poll_v6_job` installs

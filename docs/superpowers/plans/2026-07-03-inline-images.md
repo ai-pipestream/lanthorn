@@ -1180,7 +1180,7 @@ Expected: FAIL to compile (`inline_image` field/selector missing).
 
 - [ ] **Step 3: Implement**
 
-1. Add `pub inline_image: Style` to `ColorScheme` (mirror `graphics`: same default — a neutral letterbox). 2. Add the `"inline_image"` selector arm in `style.rs` wherever `"graphics"` is handled (parse + apply). 3. Switch the two band-render call sites to `state.colors.inline_image`. 4. Add a README note under major features (per the README-major-features policy): a short paragraph that babelmap now renders Glk inline images in text-buffer windows as blocks, honoring the terminal's image protocol, themeable via the `inline_image` selector.
+1. Add `pub inline_image: Style` to `ColorScheme` (mirror `graphics`: same default — a neutral letterbox). 2. Add the `"inline_image"` selector arm in `style.rs` wherever `"graphics"` is handled (parse + apply). 3. Switch the two band-render call sites to `state.colors.inline_image`. 4. Add a README note under major features (per the README-major-features policy): a short paragraph that lanthorn now renders Glk inline images in text-buffer windows as blocks, honoring the terminal's image protocol, themeable via the `inline_image` selector.
 
 - [ ] **Step 4: Run tests + full workspace check**
 

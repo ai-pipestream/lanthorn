@@ -6,7 +6,7 @@
 
 ## Goal
 
-Make babelmap's colors theme-able via **Ghostty terminal theme files**. By default babelmap uses the terminal's own colors (today's ANSI-named palette, which already respects the terminal theme). Pointing `[colors] scheme` at a Ghostty theme file (or a built-in name) recolors every element from that theme's palette. Per-element remapping is available in config.
+Make lanthorn's colors theme-able via **Ghostty terminal theme files**. By default lanthorn uses the terminal's own colors (today's ANSI-named palette, which already respects the terminal theme). Pointing `[colors] scheme` at a Ghostty theme file (or a built-in name) recolors every element from that theme's palette. Per-element remapping is available in config.
 
 ## Format — Ghostty theme files
 
@@ -30,7 +30,7 @@ A scheme supplies the **16 ANSI palette colors** plus `background`, `foreground`
 [colors]
 scheme = "Tomorrow"      # a built-in name OR a path to a Ghostty theme file; omit = terminal colors
 
-[colors.elements]         # optional: remap a babelmap element to a role/color
+[colors.elements]         # optional: remap a lanthorn element to a role/color
 selected  = "palette:3"   # palette index
 distorted = "#ff5555"     # explicit hex (truecolor)
 connector = "cyan"        # ratatui named color
@@ -80,7 +80,7 @@ With no `[colors]` config, `ColorScheme::terminal_default()` reproduces today's 
 ## Out of scope / non-goals
 
 - An in-app color picker / gallery integration (selection is config-driven for v1; a future "Colors" gallery category could come later).
-- Writing/exporting Ghostty themes from babelmap.
+- Writing/exporting Ghostty themes from lanthorn.
 - Per-layer or per-room colors.
 - `mapper` changes (colors are app-side).
 - Re-theming the structural REVERSED modifiers' monochrome behavior beyond swapping the scheme's fg/bg.

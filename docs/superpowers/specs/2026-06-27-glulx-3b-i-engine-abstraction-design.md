@@ -152,7 +152,7 @@ use with the trait:
   **reproduces today's output exactly**. (The generic multi-window tree renderer
   is 3b-ii.)
 - Input: `KeyEvent → KeyInput → engine.submit_key(...)`.
-- Save/load: `engine.save_state()/restore_state()`; the `.babelmap` archive
+- Save/load: `engine.save_state()/restore_state()`; the `.lanthorn` archive
   records the `EngineSave` tag and refuses a mismatched-engine restore.
 - Play-aids: autocomplete / verb menu / inventory / room inspector read
   `engine.introspect()`; location via `engine.current_location()`.

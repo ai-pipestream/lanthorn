@@ -4,7 +4,7 @@
 //! # The report
 //!
 //! Shogun's ornate side panels are blue-and-white in the storm on deck and
-//! red-on-cream below decks on a real Amiga. babelmap drew them gold-on-dark in
+//! red-on-cream below decks on a real Amiga. lanthorn drew them gold-on-dark in
 //! every scene. And — the half that makes this a machine question rather than a
 //! bug with one right answer — the DOS press leaves them one colour throughout,
 //! which is *also* correct. One story, one border, two machines, two behaviours.

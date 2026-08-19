@@ -8,7 +8,7 @@ use mapper::persist::from_json;
 /// Metadata for one discovered save file.
 #[derive(Debug, Clone)]
 pub struct SaveInfo {
-    /// Absolute path to the `.babelmap` file.
+    /// Absolute path to the `.lanthorn` file.
     pub path: PathBuf,
     /// Human-readable name (slug-form for named saves, "(default)" for the
     /// quick-save slot).
@@ -25,13 +25,13 @@ pub struct SaveInfo {
     pub is_default: bool,
     /// What wrote this save, and therefore whether its game bytes are portable
     /// (SQ-0531). A bare `.qzl` is always `Ingame` — it IS a standard game save;
-    /// a `.babelmap` reports the trigger recorded in its `meta.json`.
+    /// a `.lanthorn` reports the trigger recorded in its `meta.json`.
     pub trigger: crate::archive::SaveTrigger,
 }
 
 /// List all Save-State files in a game dir (SQ-0284).
 ///
-/// Discovers `default.babelmap` (default slot) and `<slug>.babelmap` (named
+/// Discovers `default.lanthorn` (default slot) and `<slug>.lanthorn` (named
 /// slots) inside `game_dir`, reads their `Meta`, and returns sorted results:
 /// default slot first, then named saves sorted by `saved_at` descending (newest
 /// first). Files that fail to parse are silently skipped.
@@ -47,10 +47,10 @@ pub fn list_saves(game_dir: &Path) -> Vec<SaveInfo> {
         let path = entry.path();
         let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
 
-        if !fname.ends_with(".babelmap") {
+        if !fname.ends_with(".lanthorn") {
             continue;
         }
-        let is_default = fname == "default.babelmap";
+        let is_default = fname == "default.lanthorn";
 
         // Read only meta.json; skip on failure (corrupt/unsupported → not listed).
         let meta = match crate::archive::read_archive_meta(&path) {
@@ -61,8 +61,8 @@ pub fn list_saves(game_dir: &Path) -> Vec<SaveInfo> {
         let name = if is_default {
             "(default)".to_string()
         } else {
-            // The slug is the filename stem (`<slug>.babelmap`).
-            let slug = &fname[..fname.len() - ".babelmap".len()];
+            // The slug is the filename stem (`<slug>.lanthorn`).
+            let slug = &fname[..fname.len() - ".lanthorn".len()];
             // Prefer the name stored in Meta, fall back to the slug.
             meta.name.clone().unwrap_or_else(|| slug.to_string())
         };
@@ -91,7 +91,7 @@ pub fn list_saves(game_dir: &Path) -> Vec<SaveInfo> {
     infos
 }
 
-/// Write a named Save State: `<game_dir>/<slug>.babelmap` (SQ-0284).
+/// Write a named Save State: `<game_dir>/<slug>.lanthorn` (SQ-0284).
 ///
 /// `name` is sanitized into a filesystem-safe slug (lowercase alphanum +
 /// hyphens). The IFID is retained only as archive metadata (identity/display).
@@ -175,7 +175,7 @@ pub fn delete_save(path: &Path) -> io::Result<()> {
     std::fs::remove_file(path)
 }
 
-/// Resolve `name` to the `.babelmap` path it would write to inside
+/// Resolve `name` to the `.lanthorn` path it would write to inside
 /// `game_dir`, without touching the filesystem — the same validation
 /// `save_named` applies to its own `path`, factored out so a caller can ask
 /// "what file would this name hit?" before deciding to write it (SQ-0648: the
@@ -188,13 +188,13 @@ pub fn named_save_path(game_dir: &Path, name: &str) -> io::Result<PathBuf> {
     if crate::storage::is_reserved_slug(&slug) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "\"default\" is a reserved save name"));
     }
-    Ok(game_dir.join(format!("{}.babelmap", slug)))
+    Ok(game_dir.join(format!("{}.lanthorn", slug)))
 }
 
 /// The display name of the save ALREADY at `path`, if any (SQ-0648).
 ///
 /// Two different typed names can slugify to the same filename (`"Before
-/// Troll"` and `"before, troll!"` both land on `before-troll.babelmap`), so an
+/// Troll"` and `"before, troll!"` both land on `before-troll.lanthorn`), so an
 /// overwrite-confirm prompt built from the typed name alone would hide exactly
 /// the collision it exists to surface. This reads the CURRENT occupant's name
 /// instead — `Meta::name` if the archive parses, else the filename stem —
@@ -368,7 +368,7 @@ pub fn load_map(path: &Path) -> Option<Mapper> {
     match from_json(&contents) {
         Ok(mapper) => Some(mapper),
         Err(e) => {
-            eprintln!("babelmap: failed to parse map file {}: {}", path.display(), e);
+            eprintln!("lanthorn: failed to parse map file {}: {}", path.display(), e);
             None
         }
     }
@@ -408,8 +408,8 @@ fn game_save_path(game_dir: &Path, name: &str) -> io::Result<PathBuf> {
 }
 
 /// A `.qzl` file is a BARE game save: standard Quetzal with no wrapper, carried in
-/// from another interpreter (babelmap's own `@save` writes a `.babelmap` archive
-/// now — SQ-0531). Anything else is a `.babelmap`, whose PC convention is recorded
+/// from another interpreter (lanthorn's own `@save` writes a `.lanthorn` archive
+/// now — SQ-0531). Anything else is a `.lanthorn`, whose PC convention is recorded
 /// in its `Meta::trigger`, not in its extension. Restore sites use this only to
 /// tell "raw bytes" from "archive"; which convention the bytes follow comes from
 /// the trigger.
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("babelmap-test-{}", std::process::id()));
+        dir.push(format!("lanthorn-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ZCODE-1-x-0.map.json");
         let mut m = Mapper::default();
@@ -449,13 +449,13 @@ mod tests {
 
     #[test]
     fn load_missing_is_none() {
-        assert!(load_map(Path::new("/no/such/babelmap.map.json")).is_none());
+        assert!(load_map(Path::new("/no/such/lanthorn.map.json")).is_none());
     }
 
     #[test]
     fn load_corrupt_is_none() {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("babelmap-test-corrupt-{}", std::process::id()));
+        dir.push(format!("lanthorn-test-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("corrupt.map.json");
         std::fs::write(&path, b"this is not valid json {{{").unwrap();
@@ -467,7 +467,7 @@ mod tests {
     fn save_load_round_trips_layers_and_names() {
         use mapper::direction::Direction;
         let mut dir = std::env::temp_dir();
-        dir.push(format!("babelmap-layers-{}", std::process::id()));
+        dir.push(format!("lanthorn-layers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ZCODE-1-x-0.map.json");
         let mut m = Mapper::default();
@@ -495,7 +495,7 @@ mod tests {
         // step a few instructions so dynamic memory differs from the pristine image
         for _ in 0..50 { let _ = machine.step(); }
         let mut tmp = std::env::temp_dir();
-        tmp.push(format!("babelmap-save-{}.qzl", std::process::id()));
+        tmp.push(format!("lanthorn-save-{}.qzl", std::process::id()));
         save_game(&tmp, &machine).unwrap();
         let mut m2 = zvm::cpu::exec::Machine::new(
             zvm::memory::Memory::new(std::fs::read(&fixture).unwrap()).unwrap()
@@ -534,7 +534,7 @@ mod tests {
 
     fn make_temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir()
-            .join(format!("babelmap-saves-test-{}-{}", tag, std::process::id()));
+            .join(format!("lanthorn-saves-test-{}-{}", tag, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -569,8 +569,8 @@ mod tests {
         super::save_named(&dir, ifid, "before-troll", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 42, None, None, &[], &[], &[], &[], &[])
             .expect("save_named ok");
 
-        // Path is `<slug>.babelmap` inside the game dir (no ifid in the name).
-        assert!(dir.join("before-troll.babelmap").exists(), "named save lands at <slug>.babelmap");
+        // Path is `<slug>.lanthorn` inside the game dir (no ifid in the name).
+        assert!(dir.join("before-troll.lanthorn").exists(), "named save lands at <slug>.lanthorn");
 
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 1, "should have 1 save");
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn save_named_rejects_reserved_default_slug() {
         let Some(machine) = fake_machine() else { return };
-        let dir = make_temp_dir("reserved-babelmap");
+        let dir = make_temp_dir("reserved-lanthorn");
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0009";
 
@@ -623,7 +623,7 @@ mod tests {
         let err = super::save_named(&dir, ifid, "Default", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 1, None, None, &[], &[], &[], &[], &[])
             .expect_err("reserved slug must be rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        assert!(!dir.join("default.babelmap").exists(), "must not clobber the default slot");
+        assert!(!dir.join("default.lanthorn").exists(), "must not clobber the default slot");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -635,7 +635,7 @@ mod tests {
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0002";
 
-        // Write the default archive (`default.babelmap`).
+        // Write the default archive (`default.lanthorn`).
         let default_path = crate::storage::default_state_path(&dir);
         crate::archive::save_archive(&default_path, &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, &[], &[], &[], &[], &[], &[])
             .expect("default save ok");
@@ -664,7 +664,7 @@ mod tests {
         let dir = make_temp_dir("skip");
 
         // Write a non-archive file matching the extension.
-        std::fs::write(dir.join("notanarchive.babelmap"), b"garbage")
+        std::fs::write(dir.join("notanarchive.lanthorn"), b"garbage")
             .unwrap();
 
         let saves = super::list_saves(&dir);
@@ -674,13 +674,13 @@ mod tests {
     }
 
     #[test]
-    fn list_qzl_lists_qzl_by_stem_newest_first_and_skips_babelmap() {
+    fn list_qzl_lists_qzl_by_stem_newest_first_and_skips_lanthorn() {
         let dir = make_temp_dir("list-qzl");
-        std::fs::write(dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(dir.join("default.lanthorn"), b"x").unwrap();
         std::fs::write(dir.join("quick.qzl"), b"x").unwrap();
         std::fs::write(dir.join("older.qzl"), b"x").unwrap();
         let out = super::list_qzl(&dir);
-        assert_eq!(out.len(), 2); // .babelmap excluded
+        assert_eq!(out.len(), 2); // .lanthorn excluded
         assert!(out.iter().all(|q| q.path.extension().unwrap() == "qzl"));
         assert!(out.iter().all(|q| !q.is_default && q.turns == 0));
         assert!(out.iter().any(|q| q.name == "quick")); // name = stem
@@ -709,7 +709,7 @@ mod tests {
         // (game-managed) saves. list_qzl returns only the player save;
         // list_qzl_auto returns only the two `_`-prefixed ones.
         let dir = make_temp_dir("list-qzl-auto");
-        std::fs::write(dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(dir.join("default.lanthorn"), b"x").unwrap();
         std::fs::write(dir.join("quicksave.qzl"), b"x").unwrap();
         std::fs::write(dir.join("_undo-x.qzl"), b"x").unwrap();
         std::fs::write(dir.join("_startup.qzl"), b"x").unwrap();
@@ -764,7 +764,7 @@ mod tests {
         machine.init_caps();
         for _ in 0..50 { let _ = machine.step(); }
 
-        let dir = std::env::temp_dir().join(format!("babelmap-qzl-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-qzl-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("quick.qzl");
@@ -796,7 +796,7 @@ mod tests {
         machine.init_caps();
         for _ in 0..50 { let _ = machine.step(); }
 
-        let tmp = std::env::temp_dir().join(format!("babelmap-export-rt-{}.qzl", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-export-rt-{}.qzl", std::process::id()));
         save_game(&tmp, &machine).unwrap();
 
         // Bytes on disk should equal machine.save_quetzal().
@@ -826,7 +826,7 @@ mod tests {
         machine.init_caps();
         for _ in 0..50 { let _ = machine.step(); }
 
-        let tmp = std::env::temp_dir().join(format!("babelmap-import-map-{}.qzl", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-import-map-{}.qzl", std::process::id()));
         save_game(&tmp, &machine).unwrap();
 
         // Build a mapper with rooms.
@@ -925,7 +925,7 @@ mod tests {
         let Ok(story) = std::fs::read(&fixture) else { return };
 
         // Write clearly-invalid bytes.
-        let tmp = std::env::temp_dir().join(format!("babelmap-bad-save-{}.qzl", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-bad-save-{}.qzl", std::process::id()));
         std::fs::write(&tmp, b"this is not a quetzal save at all").unwrap();
 
         let mem = zvm::memory::Memory::new(story).unwrap();

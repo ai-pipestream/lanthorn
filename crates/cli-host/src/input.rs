@@ -97,7 +97,7 @@ pub const STATUS_COMMAND: &str = "/status";
 /// The leading slash is what makes interception safe. Any bare word — `status`,
 /// `score`, `look` — risks shadowing a verb the game itself defines, and a host
 /// that silently eats a real command is worse than no feature. No interactive
-/// fiction parser assigns meaning to a leading `/`, and babelmap's own TUI
+/// fiction parser assigns meaning to a leading `/`, and lanthorn's own TUI
 /// already spells its host commands that way, so the vocabulary is not new.
 pub fn is_status_request(line: &str) -> bool {
     line.trim().eq_ignore_ascii_case(STATUS_COMMAND)

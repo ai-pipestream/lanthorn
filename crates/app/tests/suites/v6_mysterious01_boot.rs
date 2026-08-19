@@ -1,4 +1,4 @@
-//! SQ-0722 / SQ-0725: mysterious01's boot draws two title cards and babelmap showed
+//! SQ-0722 / SQ-0725: mysterious01's boot draws two title cards and lanthorn showed
 //! at most one of them, in the wrong place.
 //!
 //! The game's boot picture sequence, read off `Machine::pending_pictures`, is three

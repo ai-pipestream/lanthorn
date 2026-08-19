@@ -733,7 +733,7 @@ pub struct GameSession {
     /// colour. On a real interpreter every v6 window is a clipping region over ONE
     /// screen bitmap, so that fill is opaque paint: it is what makes a menu panel hide
     /// the story behind it (advent.z6's `help` splits window 1 to 160px, erases it,
-    /// then paints the menu into it). babelmap composites layers instead, and an
+    /// then paints the menu into it). lanthorn composites layers instead, and an
     /// erased window used to become simply transparent — the panel's text floated over
     /// the story with nothing behind it. Recorded here at drain time, on the same
     /// ordered queue as picture draws, so the fill composites in sequence with them.
@@ -752,7 +752,7 @@ pub struct GameSession {
     /// This exists to make a palette change behave like real hardware. A v6 screen is
     /// a framebuffer of palette INDICES, so loading a new palette recolours
     /// everything already on it, in place, without disturbing what covers what.
-    /// babelmap bakes RGBA at draw time, so the only faithful way to recolour is to
+    /// lanthorn bakes RGBA at draw time, so the only faithful way to recolour is to
     /// replay the window from scratch under the new palette — which needs the erases
     /// as well as the draws, and needs them in order. (SQ-0567)
     ///
@@ -3276,7 +3276,7 @@ impl GameSession {
         // number there is one pair for the whole screen, it is not the current
         // window's, and it does not move — so it is a page in the full sense the
         // field means. `zvm::screen::amiga_screen_pair` reads it back out of the
-        // header ($2D/$2C), which is where §8.3.3 already had babelmap publishing
+        // header ($2D/$2C), which is where §8.3.3 already had lanthorn publishing
         // it to the story; before SQ-0740 nothing painted it, so an Amiga and an
         // IBM PC rendered identically and the profile was invisible on screen.
         // The windows' own pairs still ride on their own nodes and still win —
@@ -3725,7 +3725,7 @@ pub(crate) fn strip_read_prompt(s: &str) -> &str {
 /// i.e. whether the game just handed the player its command prompt.
 ///
 /// Defined in terms of `strip_read_prompt` rather than beside it so the two can
-/// never drift: babelmap has exactly one notion of "the game's read prompt", and
+/// never drift: lanthorn has exactly one notion of "the game's read prompt", and
 /// a game whose prompt this misses already shows the player a doubled prompt.
 pub(crate) fn ends_with_read_prompt(s: &str) -> bool {
     strip_read_prompt(s).len() < s.trim_end_matches([' ', '\t']).len()
@@ -3806,7 +3806,7 @@ pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenStat
 ///
 /// Every restore path runs the VM restore first — `Machine::restore_file` (host
 /// Save State) or `complete_restore_success` (in-game `@restore` of a
-/// `.babelmap`) — and both capture the host's dimensions BEFORE the restore
+/// `.lanthorn`) — and both capture the host's dimensions BEFORE the restore
 /// overwrites dynamic memory, then re-stamp them through `post_restore_fixups`.
 /// So by the time we get here bytes $20/$21 hold THIS host's pane size.
 ///
@@ -7291,7 +7291,7 @@ mod tests {
         let story = std::fs::read(&fixture).expect("read minizork.z3");
         let mut sess = GameSession::new(story.clone(), true, false, None).expect("new minizork.z3");
 
-        let dir = std::env::temp_dir().join(format!("babelmap-task5-qzl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-task5-qzl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
 
         // Reach a stable prompt, then @save via the game's save verb. Capture the

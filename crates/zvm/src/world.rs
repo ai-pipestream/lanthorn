@@ -12,7 +12,7 @@
 //! Everything here is therefore a heuristic with an explicit failure mode, and
 //! every failure mode points the same way: **show less**. When an inference is
 //! not confident the model reports `None` and the caller falls back to the
-//! room's direct children, which is what babelmap listed before this module
+//! room's direct children, which is what lanthorn listed before this module
 //! existed.
 //!
 //! # The two things it infers

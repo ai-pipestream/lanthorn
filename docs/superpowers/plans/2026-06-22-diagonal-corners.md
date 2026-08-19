@@ -302,7 +302,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Manual verification (after both tasks)
 
-Run babelmap on the A129 story, Boxes zoom: room #136 (`136 →SW→ 27`) should show `↙` at its bottom-left corner with the connector line leaving from there toward #27; cardinal connectors are unchanged. Toggle `Ctrl+P` — the diagonal corner arrow disappears with the other connector arrowheads.
+Run lanthorn on the A129 story, Boxes zoom: room #136 (`136 →SW→ 27`) should show `↙` at its bottom-left corner with the connector line leaving from there toward #27; cardinal connectors are unchanged. Toggle `Ctrl+P` — the diagonal corner arrow disappears with the other connector arrowheads.
 
 ## Notes / out of scope
 

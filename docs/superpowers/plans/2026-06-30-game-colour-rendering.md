@@ -791,7 +791,7 @@ EOF
 ## Manual verification (after all tasks)
 
 - `cargo run -p zvm-cli -- stories/beyondzork-r57-s871221.z5` → Character Setup menu selection is highlighted in colour; score box red; screen background black. `--no-game-colours` restores terminal colours.
-- `cargo run -p app -- stories/beyondzork-r57-s871221.z5` (binary `babelmap`) → menu highlighted; colours render; story-pane background black; automap keeps its theme. F2 `honor_game_colours` off restores the theme.
+- `cargo run -p app -- stories/beyondzork-r57-s871221.z5` (binary `lanthorn`) → menu highlighted; colours render; story-pane background black; automap keeps its theme. F2 `honor_game_colours` off restores the theme.
 
 ---
 

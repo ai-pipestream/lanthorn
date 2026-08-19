@@ -76,7 +76,7 @@ fn candidate(story: &Path, filename: &str) -> Option<ArtCandidate> {
 /// A per-game sidecar directory carrying a `pictures` key.
 fn game_dir_with(tag: &str, body: &str) -> PathBuf {
     let dir =
-        std::env::temp_dir().join(format!("babelmap-sq0862-{tag}-{}", std::process::id()));
+        std::env::temp_dir().join(format!("lanthorn-sq0862-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.toml"), body).unwrap();
@@ -283,7 +283,7 @@ fn a_single_volume_release_is_unchanged() {
 #[test]
 fn an_ordinary_story_file_spans_no_volumes() {
     let dir = std::env::temp_dir()
-        .join(format!("babelmap-sq0862-plain-{}", std::process::id()));
+        .join(format!("lanthorn-sq0862-plain-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let story = dir.join("story.z6");

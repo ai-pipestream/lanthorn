@@ -1,4 +1,4 @@
-//! Drive babelmap under a pty and write out the escape stream it emits, decoded
+//! Drive lanthorn under a pty and write out the escape stream it emits, decoded
 //! (SQ-0762). The ad-hoc face of the harness the integration test uses.
 //!
 //! ```sh
@@ -15,7 +15,7 @@
 //! caveats are in `tests/pty_stream/raster.rs`.
 //!
 //! The report names the graphics protocol that actually negotiated first, and
-//! refuses to pretend: if babelmap fell back to half-blocks, everything below it
+//! refuses to pretend: if lanthorn fell back to half-blocks, everything below it
 //! measures the wrong backend and the exit status says so.
 
 #[cfg(unix)]
@@ -140,10 +140,10 @@ fn main() -> std::process::ExitCode {
         eprintln!("pty_capture: no story at {}", story.display());
         return std::process::ExitCode::from(2);
     }
-    let Some(bin) = bin.or_else(driver::sibling_babelmap) else {
+    let Some(bin) = bin.or_else(driver::sibling_lanthorn) else {
         eprintln!(
-            "pty_capture: cannot find the babelmap binary. Run `cargo build -p app` first, \
-             or pass --bin <path> / set BABELMAP_BIN."
+            "pty_capture: cannot find the lanthorn binary. Run `cargo build -p app` first, \
+             or pass --bin <path> / set LANTHORN_BIN."
         );
         return std::process::ExitCode::from(2);
     };
@@ -152,7 +152,7 @@ fn main() -> std::process::ExitCode {
     }
 
     let user_dir = user_dir.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("babelmap-pty-{}", std::process::id()))
+        std::env::temp_dir().join(format!("lanthorn-pty-{}", std::process::id()))
     });
     let mut spec = Spec::new(bin, story, user_dir);
     spec.cols = cols;
@@ -267,16 +267,16 @@ fn oracle_section(
 
 #[cfg(unix)]
 const HELP: &str = "\
-pty_capture — drive babelmap under a pty and decode the escapes it emits
+pty_capture — drive lanthorn under a pty and decode the escapes it emits
 
   --story PATH        story file to run (required)
-  --bin PATH          babelmap binary (default: beside this example, or $BABELMAP_BIN)
+  --bin PATH          lanthorn binary (default: beside this example, or $LANTHORN_BIN)
   --size COLSxROWS    terminal size in cells (default 117x64 — a 115x61 story pane)
   --cell WxH          cell size in pixels to report for CSI 16 t (default 8x18)
   --keys LIST         comma list: cr esc tab space bs up down left right home end
                       pgup pgdn f1..f4, ctrl+X, text:foo, wait:MS
   --show-map          keep the map pane (default: hidden, so the story pane owns the frame)
-  --user-dir PATH     throwaway babelmap home (default: a temp dir)
+  --user-dir PATH     throwaway lanthorn home (default: a temp dir)
   --out PATH          write the full report here (stdout gets the decisive part)
   --raw PATH          also write the raw captured bytes
   --png PATH          also draw the resolved screen here (layout/art/colour only —
@@ -284,7 +284,7 @@ pty_capture — drive babelmap under a pty and decode the escapes it emits
   --png-diff BEFORE   put an earlier --png beside this run's, so a render change
                       can be reviewed as a before/after pair
   --timeout SECS      hard ceiling on the run (default 45)
-  --arg VALUE         extra argument passed through to babelmap
+  --arg VALUE         extra argument passed through to lanthorn
 
 Exit status 3 means the run did not negotiate kitty graphics — the capture then
 measures the wrong backend and must not be trusted.";

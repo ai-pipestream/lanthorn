@@ -570,7 +570,7 @@ chased.** Each is one line of why it matters.
    `crates/zvm-cli/src/main.rs:550` and `:1089` pass raw terminal rows/cols to
    `Machine::set_screen_dims` unconditionally. **READ** (subagent; not independently verified).
    *A v6 story under `zvm-cli` gets a different `$22`/`$24`/`$20`/`$21` from the same story under
-   `babelmap`, which makes the CLI a misleading oracle for exactly the v6 layout questions people
+   `lanthorn`, which makes the CLI a misleading oracle for exactly the v6 layout questions people
    reach for it to answer.* Looks like a live behavioural divergence, though `zvm-cli` is a
    debugging tool, so the blast radius is small.
 

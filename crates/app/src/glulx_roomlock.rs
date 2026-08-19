@@ -1,7 +1,7 @@
 //! Learn which RAM word holds a Glulx game's *current room*, and use it as the
 //! room's identity (SQ-0526).
 //!
-//! Glulx exposes no object tree, so babelmap recovers the current room from the
+//! Glulx exposes no object tree, so lanthorn recovers the current room from the
 //! room HEADING the game prints and hashes that name into a room id. Any two
 //! rooms sharing a name are therefore the same room as far as the map is
 //! concerned — which is exactly how Adventure's maze collapses into a single

@@ -161,7 +161,7 @@ use.
   `Save Game Style` with the Game button dimmed when `ifid` is empty.
 - All style-editor tests use the Phase 2.1 hermetic helper
   (`open_style_editor_hermetic`) so they never read the contributor's real
-  `~/.babelmap`.
+  `~/.lanthorn`.
 
 ## Out of scope
 

@@ -10,7 +10,7 @@ Three optional, config-driven behaviors in the event loop: save the archive afte
 
 ## What already exists (don't rebuild)
 
-- **Auto-load is already on:** startup loads `<ifid>.babelmap` and calls `restore_quetzal` unconditionally when an archive exists (main.rs:359-362); the map always loads. L21 only makes the *game resume* optional and adds *per-turn* saving.
+- **Auto-load is already on:** startup loads `<ifid>.lanthorn` and calls `restore_quetzal` unconditionally when an archive exists (main.rs:359-362); the map always loads. L21 only makes the *game resume* optional and adds *per-turn* saving.
 - **`save_archive_meta` / `load_archive`** exist (archive + saves work). Per-turn save reuses `save_archive_meta`.
 - **`Mapper::observe`** places new rooms **incrementally** (`place_incremental`, stable, no relayout). L29 optionally runs a full re-tidy on top.
 - **`run_tidy_pipeline(graph, layer)`** (app/input.rs) runs the auto-tidy and returns animation frames; the background path uses its final result WITHOUT animation playback.

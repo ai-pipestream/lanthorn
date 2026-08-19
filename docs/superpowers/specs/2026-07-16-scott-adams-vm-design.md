@@ -6,7 +6,7 @@ Captures the agreed shape before an implementation plan is written.
 ## Goal
 
 Add a native interpreter for classic **Scott Adams** adventure games (the
-ScottFree `.dat` text database format) as babelmap's first additional story
+ScottFree `.dat` text database format) as lanthorn's first additional story
 format beyond Z-machine and Glulx — playable in the TUI with the live
 automapper, and reachable through the existing story picker.
 
@@ -14,7 +14,7 @@ automapper, and reachable through the existing story picker.
 
 Scott Adams was chosen as the highest bang-for-buck additional VM: the
 interpreter is tiny and well-understood, the games are pure parser-with-rooms
-IF (so the automapper — babelmap's differentiator — applies directly), and it
+IF (so the automapper — lanthorn's differentiator — applies directly), and it
 carries a large classic corpus (Scott Adams' originals plus hundreds of
 fan/modern games authored via ScottKit, all distributed in the `.dat` format).
 

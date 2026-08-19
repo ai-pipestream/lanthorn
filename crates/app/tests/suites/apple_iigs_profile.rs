@@ -55,7 +55,7 @@
 //! should choose the interpreter number most suitable for the machine it will
 //! run on."* The number is a property of the machine in front of the player —
 //! which is precisely why Infocom detected it — so the question is which Apple II
-//! babelmap is. Of the three the YZIP will start on at all (`cmp #6 / bne
+//! lanthorn is. Of the three the YZIP will start on at all (`cmp #6 / bne
 //! BADMACH` refuses anything below an enhanced IIe), the IIgs is the top and the
 //! one a modern terminal resembles. The other two stay reachable by name.
 //!

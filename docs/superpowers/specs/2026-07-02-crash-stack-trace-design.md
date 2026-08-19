@@ -6,7 +6,7 @@ opcode, stack under/overflow), emit a **call-frame stack trace** — each frame'
 function address, return PC, locals, and working-stack operands, plus the
 faulting PC and decoded opcode — instead of today's process-aborting panic (zvm)
 or single-line diagnostic (gvm). Surfaces on `zvm-cli` stderr, `gvm-cli` stderr,
-and inline in the babelmap TUI transcript.
+and inline in the lanthorn TUI transcript.
 
 **Motivation:** The Brain Guzzlers heap fault during the Glulx survey took an
 investigation to localize; a frame trace would have made it a glance. More

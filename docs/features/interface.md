@@ -2,7 +2,7 @@
 
 [← back to README](../../README.md)
 
-The map draws itself, but you still have to drive it. babelmap gives you a
+The map draws itself, but you still have to drive it. lanthorn gives you a
 mouse-driven, copy-anything, keyboard-fast terminal cockpit for reading the map,
 inspecting the machine, and firing commands — without ever leaving the story.
 
@@ -204,7 +204,7 @@ know which side you're on).
   keypress, *every* key pages and nothing reaches the game until you've caught
   up — the key that lands at the bottom is consumed by the bar, the next one
   answers the game, exactly like a real Infocom interpreter. Menus that clear
-  and repaint start you at the top; output that fits shows no bar; babelmap's
+  and repaint start you at the top; output that fits shows no bar; lanthorn's
   own output (`/help` and friends) never pages; and a game that asks for
   `[MORE]` suppression (Zork Zero's demo mode) gets it. The bar is themeable
   via `more_prompt`. "First fresh screenful" is measured against the rows that
@@ -325,7 +325,7 @@ know which side you're on).
   earlier commands, shell-style (**Ctrl+↑**/**Ctrl+↓** work too, and are the
   only way to reach it while the command band is open, since plain **↑**/**↓**
   belong to the band's own row navigation there). History persists across
-  sessions inside the `.babelmap` archive; turn recording off with
+  sessions inside the `.lanthorn` archive; turn recording off with
   `record_history = false`.
 - **Readline-style line editing** at the story prompt: `Ctrl+A`/`Ctrl+E` jump to
   the start/end of the line, `Ctrl+U` clears back to the start, `Ctrl+K` clears
@@ -358,7 +358,7 @@ know which side you're on).
   wires, and remembered per game; if the story ships its own `HINT` command, the
   panel points you at that too. The downloaded *InvisiClues* files open on a
   "your screen is only N characters wide" banner (their menu names can be very
-  long); babelmap skips it for you and drops you straight on the topic menu —
+  long); lanthorn skips it for you and drops you straight on the topic menu —
   turn `hint_skip_screen_warning = false` in the settings if you'd rather see it.
 - **Reset** — restart the story from the top via a confirmation dialog with an
   opt-in "also clear the map" checkbox (the map is kept by default).
@@ -398,8 +398,8 @@ know which side you're on).
   optional `[file]` argument resolves the same way the transcript export does.
 
 ## Story picker
-Point babelmap at a directory instead of a story file
-(`babelmap path/to/stories/`) and it opens a picker of your whole library. Each
+Point lanthorn at a directory instead of a story file
+(`lanthorn path/to/stories/`) and it opens a picker of your whole library. Each
 row shows the title (or filename), and a right-hand **TYPE** column names the
 engine and version at a glance — `Z5`, `Z5 (blorb)`, `Z6 (ADF)`, `G3.1.2`,
 `Scott`, or `Scott (blorb)` — so all three engines are told apart on sight. Two
@@ -420,7 +420,7 @@ so a floppy named anything at all is labelled for the filesystem it actually
 carries, and a plain story file that happens to be called `.adf` is not labelled
 at all.
 
-**Every release medium babelmap can mount, the picker offers.** The scan decides
+**Every release medium lanthorn can mount, the picker offers.** The scan decides
 which files are worth opening from the same format table the mount reads, so a
 shelf of `.ima`, `.img`, `.st`, `.2mg`, `.dsk`, `.d64` and `.bin` floppies — and
 CDs — lists beside the
@@ -431,7 +431,7 @@ disk at all, and never shown.
 **And a row need not be a file.** *Arthur*'s Apple II press stores no story file
 anywhere on its disk — the game is a paging image scattered by block across five
 opaque segments — so the volume mounted, listed eleven files and offered nothing
-for as long as babelmap looked for a story file. It is an ordinary row now,
+for as long as lanthorn looked for a story file. It is an ordinary row now,
 `Z6 (ProDOS)` like any other Apple disk, because the mount reassembles the
 segments and proves the result against the game's own checksum before offering
 it. (*Journey*'s Apple press stays absent, and correctly: its image is missing
@@ -486,20 +486,20 @@ always clear which game on which image you are looking at.
 
 Those compilations mostly came as *sets*: seven Apple II volumes for *The Lost
 Treasures of Infocom*, nine Atari ST floppies, `floppy1.ima` through
-`floppy5.ima`. babelmap treats a set as one shelf of games rather than as a pile
+`floppy5.ima`. lanthorn treats a set as one shelf of games rather than as a pile
 of disks, and it works out which files belong together from their names — files
 in one directory, sharing a disk-image extension, with identical names except
 for one run of digits that counts 1, 2, 3…
 
 That list of extensions is read off the same format table as everything else,
-which paid off the moment babelmap learned to mount 5.25" Apple II disks:
+which paid off the moment lanthorn learned to mount 5.25" Apple II disks:
 `shogun_s1.dsk`…`s5` and `zork_zero_1.dsk`…`_4` had been sitting there refused
 for one reason only — `.dsk` was not a spelling any format claimed — and became
 sets the same day, with nothing in the grouping rule changed.
 
-**Name any one volume and you get the whole release.** `babelmap disk1.img` opens
+**Name any one volume and you get the whole release.** `lanthorn disk1.img` opens
 the browser on all eleven games across `disk1`–`disk4`, not the single story that
-one image happens to hold. `babelmap "Lost Treasures … (Disk 1 of 7).2mg"` opens
+one image happens to hold. `lanthorn "Lost Treasures … (Disk 1 of 7).2mg"` opens
 all thirty — and that one used to be an error, because the Apple II press puts a
 launcher on disk 1 and no story at all. Once you're in, it behaves like any
 library: pick a game, play it, `/quit-to-library` comes back to the same shelf.
@@ -524,7 +524,7 @@ A set that turns out to hold only **one** game gets the opposite treatment, and
 for the same reason: it doesn't need a menu, but its disks do belong to each
 other, so its artwork is shared across them. That is what the DOS presses of
 *Zork Zero* need — the 360K one puts the story alone on disk 2 with CGA on disk 1
-and EGA on disk 3, so booting the story disk drew nothing at all until babelmap
+and EGA on disk 3, so booting the story disk drew nothing at all until lanthorn
 learned to read the whole release. A set with two or more games gets the browser
 instead and keeps each disk's art on that disk; see
 [Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws).
@@ -541,7 +541,7 @@ detected at all — you'll still see every game, just listed disk by disk.
 
 When you launch from a directory this way, `/quit-to-library` drops the current
 story and returns you to the picker to choose another (honouring the usual
-save-on-quit prompt) — `/quit` still exits babelmap outright. Launched against a
+save-on-quit prompt) — `/quit` still exits lanthorn outright. Launched against a
 single story file, there's no library to return to, so `/quit-to-library` just
 says so.
 
@@ -600,7 +600,7 @@ what "detected" means and how to name an archive the detector can't see.
 `q`/`Esc` quits back to the shell.
 
 **Shift-Enter** opens the story's **launch options** instead of launching it —
-the boot-time choices babelmap can only honour *before* a game starts: which
+the boot-time choices lanthorn can only honour *before* a game starts: which
 picture archive to draw its art from, and which machine to present itself as.
 (`o` does the same, for terminals that can't tell Shift-Enter from plain Enter,
 and so does double-right-clicking a row.) Plain Enter is untouched, so you only
@@ -623,7 +623,7 @@ those same columns and **names the archive it will actually open**:
 That name is not a guess about what *ought* to happen; it comes from the very
 resolution the launch performs, so the row and the boot cannot disagree. For a
 story with a resource Blorb beside it, that is the Blorb — *Automatic — Zork0.blb
-(Blorb)* — which is the one thing babelmap can boot that the list of native
+(Blorb)* — which is the one thing lanthorn can boot that the list of native
 archives will never show you. When nothing can be shown to belong to the build
 you are booting, the row says so outright — *Automatic — no artwork found* — and
 the game plays without pictures rather than with another release's; see
@@ -662,7 +662,7 @@ for the one in use — the `↳` marking a wrapped continuation row carries
   list stays visible while you type and is only replaced once your search
   returns. **Tab**/**Shift-Tab** toggle focus between the `Search:` field and
   the list — so a half-typed query can be parked while you go back to arrow
-  through the results, and picked up again where you left it. babelmap queries IFDB's public search API (in the background — the
+  through the results, and picked up again where you left it. lanthorn queries IFDB's public search API (in the background — the
   picker never freezes) and lists the matching games with their author,
   rating, and year. `↑`/`↓` (or `j`/`k`) move — the wheel scrolls the results
   under the highlight instead — and `Enter` on a game fetches
@@ -676,7 +676,7 @@ for the one in use — the `↳` marking a wrapped continuation row carries
   still download it again; it lands beside the original under a new name). The
   file lands in the current library directory, the list refreshes,
   and the cursor jumps to your new story with a "Downloaded …" note. Only
-  files babelmap can actually open are offered (`.z3`–`.z8`, `.ulx`,
+  files lanthorn can actually open are offered (`.z3`–`.z8`, `.ulx`,
   `.gblorb`/`.zblorb`/`.blorb`/`.blb`, `.dat`); zips and executables are
   skipped — press `o` on a game with no direct story file to open its IFDB
   page in your browser instead. `Esc` backs out a level: from a typed
@@ -684,7 +684,7 @@ for the one in use — the `↳` marking a wrapped continuation row carries
   list it closes the modal. Downloads are capped at 16 MiB, filenames are
   sanitised, and an existing file is never overwritten (a `-2`, `-3`, … suffix
   is added). A "Results from IFDB" line credits the source, and every request
-  carries babelmap's User-Agent, honouring IFDB's low-volume, user-driven API
+  carries lanthorn's User-Agent, honouring IFDB's low-volume, user-driven API
   terms (search, browse, and downloads happen only when you ask — the browse
   list is one extra request per modal open, not a poll). The modal reuses the
   themeable `dialog.*` chrome plus the

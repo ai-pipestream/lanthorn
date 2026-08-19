@@ -92,7 +92,7 @@ turn-replay record). Add a shell-style recall:
   restores that draft. At the oldest entry, further Up is a no-op (stays).
   Shift+Up / Shift+Down still pan the map (unchanged).
 - Persistence: store the (capped) `command_history` as a new entry in the
-  `.babelmap` archive (e.g. `command_history.json`, a JSON array of strings),
+  `.lanthorn` archive (e.g. `command_history.json`, a JSON array of strings),
   written whenever the archive is written and read on game load. A missing entry
   is tolerated (→ empty history). It is per-game (each game's archive).
 

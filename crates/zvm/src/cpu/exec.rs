@@ -250,7 +250,7 @@ pub struct Machine {
     /// Initialised to [`Machine::DEFAULT_RNG_SEED`] — a fixed nonzero constant, so
     /// a bare `Machine` (every unit test) draws the same sequence every time. A
     /// HOST that wants a fresh game per launch calls [`Machine::set_rng_seed`]
-    /// before the boot run; babelmap seeds from the `random_seed` config key, or
+    /// before the boot run; lanthorn seeds from the `random_seed` config key, or
     /// from entropy when that key is unset (SQ-0811). Also seeded in-game by
     /// `random` with a negative argument (ZMSD §15).
     rng_state: u32,
@@ -289,7 +289,7 @@ pub struct Machine {
     /// The canvas-clear sentinel already on `pending_pictures` cannot express
     /// this: it says only "window N was cleared", so a host that moves and erases
     /// one window 500 times is left with a single empty canvas at the last
-    /// position — which is exactly what babelmap rendered (no cards at all).
+    /// position — which is exactly what lanthorn rendered (no cards at all).
     ///
     /// A separate queue rather than another `PictureEvent` field: an erase-fill
     /// is not a picture, it carries a rect and a colour instead of a resource
@@ -356,7 +356,7 @@ pub struct Machine {
     pub diagnostics: Vec<String>,
     /// In-memory auxiliary save table for the v5 `save/restore table` opcodes,
     /// keyed by the game-supplied name string. The host persists/repopulates it
-    /// (in the `.babelmap` archive or a per-game global file); the engine itself
+    /// (in the `.lanthorn` archive or a per-game global file); the engine itself
     /// never touches the filesystem.
     pub aux_data: std::collections::BTreeMap<String, Vec<u8>>,
     /// Set true whenever an aux `save table` writes the table. The host clears it

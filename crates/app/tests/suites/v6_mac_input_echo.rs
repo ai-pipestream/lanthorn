@@ -82,7 +82,7 @@ fn mac_at_prompt(pictures: Option<&str>, honor_game_colours: bool) -> Option<AtP
     assert_eq!(&bytes[0x12..0x18], MAC_SERIAL, "…and that release's serial");
 
     let dir = std::env::temp_dir().join(format!(
-        "babelmap-mac-echo-{}-{}",
+        "lanthorn-mac-echo-{}-{}",
         std::process::id(),
         pictures.unwrap_or("default")
     ));

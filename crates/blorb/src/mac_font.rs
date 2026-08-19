@@ -16,7 +16,7 @@
 //!
 //! **These are the fonts worth drawing with.** The Amiga's are the other half of the
 //! corpus and the wrong shape for us: Arthur's is proportional, and SQ-0916 has a
-//! rendered comparison showing that centring a proportional font in babelmap's fixed
+//! rendered comparison showing that centring a proportional font in lanthorn's fixed
 //! cell reads worse than the public-domain font it would replace. `FONT` 1033 gives
 //! every drawn character the same advance, so it drops into the cell model cleanly.
 //!

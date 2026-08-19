@@ -26,7 +26,7 @@ disk. Today `zvm-cli` keeps these tables only in memory and drops them on exit.
   - State lives on `Machine`: `pub aux_data: BTreeMap<String, Vec<u8>>` and
     `pub aux_dirty: bool`. Neither opcode suspends (no `StepResult`); the host
     is expected to watch `aux_dirty` and persist.
-- babelmap persists this via its `aux_storage` config (per-game `<ifid>.aux`).
+- lanthorn persists this via its `aux_storage` config (per-game `<ifid>.aux`).
   `zvm-cli` does **not** touch `aux_data`/`aux_dirty` at all, so the tables are
   session-only and never reloaded.
 - Because `restore table` reads the in-memory map (not disk), cross-session

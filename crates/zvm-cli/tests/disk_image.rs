@@ -473,7 +473,7 @@ fn a_real_prodos_disk_with_no_whole_story_reports_what_it_mounted() {
 
 /// **The first Apple II disk this front-end can actually PLAY** (SQ-0868).
 ///
-/// Every Apple format babelmap reads could be mounted here and never played,
+/// Every Apple format lanthorn reads could be mounted here and never played,
 /// because `zvm-cli` declines Version 6 by design and *Arthur*, *Journey*,
 /// *Shogun* and *Zork Zero* — the Apple releases in the corpus — are all v6. The
 /// two `.2mg` compilations above are the exception that proves it: they play

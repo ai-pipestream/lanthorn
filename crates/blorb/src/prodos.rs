@@ -4,7 +4,7 @@
 //!
 //! This is the Apple sibling of [`crate::adf`], [`crate::hfs`] and
 //! [`crate::fat12`], and it exists for the same reason: a floppy is a container
-//! babelmap can open rather than something a person has to unpack first.
+//! lanthorn can open rather than something a person has to unpack first.
 //! Everything below is measured against the **ten** ProDOS images in the user's
 //! corpus — `Arthur Quest 4 Excalibur.2mg`, `Journey.2mg`,
 //! `Beyond Zork (1988)(Infocom).2mg` and the seven volumes of

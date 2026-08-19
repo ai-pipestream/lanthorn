@@ -7,7 +7,7 @@
 //! A plotted pixel belongs to the SCREEN — so erasing a region must remove whatever
 //! any window put there, not only what the erased window drew itself.
 //!
-//! babelmap keeps a canvas per window, and an erase used to touch only that window's
+//! lanthorn keeps a canvas per window, and an erase used to touch only that window's
 //! own canvas. Arthur shows what that costs: its F2 map screen paints a full-screen
 //! background into window 7, and switching back to the F1 picture screen erases
 //! windows 2, 5 and 6 — never 7 — so the map background stayed under every later

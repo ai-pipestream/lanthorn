@@ -153,7 +153,7 @@ Updates the two lines at `exec.rs:1208–1209` and the `GLULX_NOTES.md` gestalt 
 - `Machine` gains `acceleration: bool` (default **true**) and
   `set_acceleration(&mut self, bool)`.
 - `gvm-cli` gains a `--no-accel` flag that calls `set_acceleration(false)` before run.
-- `babelmap` (app) gains the same `--no-accel` flag, wired to the gvm session's
+- `lanthorn` (app) gains the same `--no-accel` flag, wired to the gvm session's
   machine.
 - No config key, F-key toggle, or settings row: acceleration is not a gameplay
   preference. The flag exists solely to debug a game that misbehaves under

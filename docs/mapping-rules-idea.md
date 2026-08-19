@@ -1,4 +1,4 @@
-# babelmap Automapper — Current Rules Reference
+# lanthorn Automapper — Current Rules Reference
 
 > **Purpose.** A complete, faithful snapshot of how the automapper places rooms and
 > draws the map *today*, so we have a clear baseline to critique and redesign. This

@@ -137,14 +137,14 @@ mod tests {
 
     #[test]
     fn missing_file_reads_empty() {
-        let dir = std::env::temp_dir().join(format!("babelmap-pcs-missing-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-pcs-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(read_pcs(&dir).is_empty(), "absent file → empty");
     }
 
     #[test]
     fn global_file_round_trips() {
-        let dir = std::env::temp_dir().join(format!("babelmap-pcs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-pcs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(read_pcs(&dir).is_empty(), "absent file → empty");
         write_pcs(&dir, &sample()).unwrap();
@@ -158,7 +158,7 @@ mod tests {
     /// write is temp-then-rename, so an interrupted one keeps the old set instead.
     #[test]
     fn an_interrupted_pcs_write_keeps_the_previous_set() {
-        let dir = std::env::temp_dir().join(format!("babelmap-pcs-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-pcs-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write_pcs(&dir, &sample()).unwrap();

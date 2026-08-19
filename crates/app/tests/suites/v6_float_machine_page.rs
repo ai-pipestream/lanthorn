@@ -108,7 +108,7 @@ fn frame(file: &str, pictures: Option<&str>, honor: bool) -> Option<Frame> {
             return None;
         }
     };
-    let dir = std::env::temp_dir().join(format!("babelmap-sq848-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq848-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let over = match pictures {
         Some(name) => PictureOverride::resolve_with_session(&path, &dir, Some(name)),

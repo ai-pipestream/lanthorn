@@ -16,7 +16,7 @@
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
   `Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV`
 - Do NOT edit TODO.md. Surgical changes. Style-editor tests use `open_style_editor_hermetic`.
-- Use `git -C /Volumes/Videos/Source/babelmap` for git.
+- Use `git -C /Volumes/Videos/Source/lanthorn` for git.
 
 ---
 

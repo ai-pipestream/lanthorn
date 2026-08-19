@@ -59,10 +59,10 @@ pub(crate) fn exit_auto_save(
     for d in &v6_diags { state.note_v6_save(d); }
     match app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref(), v6_ground.as_deref()) {
         Ok(()) => {
-            eprintln!("babelmap: map saved to {}", arc_file.display());
+            eprintln!("lanthorn: map saved to {}", arc_file.display());
         }
         Err(e) => {
-            eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
+            eprintln!("lanthorn: warning: could not save to {}: {}", arc_file.display(), e);
         }
     }
 }
@@ -113,7 +113,7 @@ pub(crate) fn quit_dialog_save(
     match app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref(), v6_ground.as_deref()) {
         Ok(()) => None,
         Err(e) => Some(format!(
-            "babelmap: warning: \"Save State & quit\" could not save to {}: {}",
+            "lanthorn: warning: \"Save State & quit\" could not save to {}: {}",
             arc_file.display(),
             e
         )),
@@ -229,7 +229,7 @@ mod tests {
         // A path whose parent is a FILE, not a directory: the write cannot succeed.
         let blocker = std::env::temp_dir().join(format!("bm-quitsave-blocker-{}", std::process::id()));
         std::fs::write(&blocker, b"not a directory").unwrap();
-        let arc_file = blocker.join("save.babelmap");
+        let arc_file = blocker.join("save.lanthorn");
 
         let warn = super::quit_dialog_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file)
             .expect("a failed Save State & quit must report why");
@@ -245,7 +245,7 @@ mod tests {
         let mut engine = SnapshotableEngine::new();
         let state = app::state::AppState::default();
         let mapper = mapper::mapper::Mapper::default();
-        let arc_file = std::env::temp_dir().join(format!("bm-quitsave-ok-{}.babelmap", std::process::id()));
+        let arc_file = std::env::temp_dir().join(format!("bm-quitsave-ok-{}.lanthorn", std::process::id()));
         let _ = std::fs::remove_file(&arc_file);
 
         let warn = super::quit_dialog_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
@@ -274,7 +274,7 @@ mod tests {
         let mut state = app::state::AppState::default();
         state.config.auto_save = true;
         let mapper = mapper::mapper::Mapper::default();
-        let arc_file = std::env::temp_dir().join(format!("bm-exitsave-flag-{}.babelmap", std::process::id()));
+        let arc_file = std::env::temp_dir().join(format!("bm-exitsave-flag-{}.lanthorn", std::process::id()));
         let _ = std::fs::remove_file(&arc_file);
 
         super::exit_auto_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
@@ -298,7 +298,7 @@ mod tests {
         let mut state = app::state::AppState::default();
         state.config.auto_save = true;
         let mapper = mapper::mapper::Mapper::default();
-        let arc_file = std::env::temp_dir().join(format!("bm-t6-pending-{}.babelmap", std::process::id()));
+        let arc_file = std::env::temp_dir().join(format!("bm-t6-pending-{}.lanthorn", std::process::id()));
         let _ = std::fs::remove_file(&arc_file);
 
         // Must not panic (save_state()/aux_data() are unreachable!()) and must not
@@ -319,7 +319,7 @@ mod tests {
         let mut engine = SaveloadPendingEngine;
         let state = app::state::AppState::default();
         let mapper = mapper::mapper::Mapper::default();
-        let arc_file = std::env::temp_dir().join(format!("bm-t6-quit-pending-{}.babelmap", std::process::id()));
+        let arc_file = std::env::temp_dir().join(format!("bm-t6-quit-pending-{}.lanthorn", std::process::id()));
         let _ = std::fs::remove_file(&arc_file);
 
         // Must not panic (save_state()/aux_data() are unreachable!()) and must not

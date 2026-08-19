@@ -198,7 +198,7 @@ fn chrome_pixels_inside_story(s: &GameSession) -> Option<usize> {
 }
 
 /// Pane sizes every rendering case runs at: the reference 100x40 terminal minus
-/// babelmap's own chrome, a cramped one, and a large one.
+/// lanthorn's own chrome, a cramped one, and a large one.
 const PANES: &[(u16, u16)] = &[(98, 38), (78, 28), (157, 59)];
 
 /// An `AppState` set up the way the app runs this frame: hybrid, terminal-default

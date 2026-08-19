@@ -16,7 +16,7 @@
 //!
 //! So one card is hundreds of moves-and-erases of a single window. A host that
 //! reads only the canvas-clear sentinel keeps one empty canvas at the last
-//! position and draws nothing — which is exactly what babelmap did.
+//! position and draws nothing — which is exactly what lanthorn did.
 //!
 //! A unit test cannot catch a regression here: it would assert the same shape the
 //! implementation assumes. This drives the real story and counts real fills.
@@ -90,7 +90,7 @@ fn scopa_paints_its_cards_as_erase_window_fills() {
 
     // They land at MANY different positions — one window is moved between every
     // fill, which is the whole mechanism. A host keyed on the window's current
-    // rect (as babelmap was) collapses all of this to a single box.
+    // rect (as lanthorn was) collapses all of this to a single box.
     let distinct_positions =
         painted.iter().map(|f| (f.x, f.y)).collect::<std::collections::BTreeSet<_>>().len();
     assert!(

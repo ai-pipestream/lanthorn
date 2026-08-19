@@ -2,7 +2,7 @@
 
 [← back to README](../README.md) · see also [Saves & persistence (feature highlights)](features/saves.md)
 
-babelmap persists game progress at three distinct layers. They coexist and serve
+lanthorn persists game progress at three distinct layers. They coexist and serve
 different purposes: the game's own save, the host emulator snapshot, and an
 automatic per-story layer that needs no explicit save at all. This page explains
 what each one captures, when it triggers, and what survives.
@@ -11,7 +11,7 @@ what each one captures, when it triggers, and what survives.
 
 - **Save State / Restore State** — the *host* (emulator) snapshot. Engine-neutral,
   save-anywhere, captures the whole machine. Invoked with Ctrl+S / `/save-state`
-  and Ctrl+R / `/restore-state`. This is babelmap's own mechanism, not something
+  and Ctrl+R / `/restore-state`. This is lanthorn's own mechanism, not something
   the game knows about.
 - **`@save` / `@restore`** — the *game's* own in-game save, the standard path a
   story invokes when the player types `SAVE` / `RESTORE`. On both engines the VM
@@ -19,7 +19,7 @@ what each one captures, when it triggers, and what survives.
   Quetzal proper; on Glulx, standard **Glulx-Quetzal**.
 
 The two are different *mechanisms*, but in the app they are no longer different
-*files*: since SQ-0531 both write the same `.babelmap` archive, and `meta.json`'s
+*files*: since SQ-0531 both write the same `.lanthorn` archive, and `meta.json`'s
 `trigger` field (`"ingame"` / `"hoststate"`) records which one asked for it. Keep
 the names straight anyway — what a restore does with the file depends entirely on
 which trigger wrote it (see Layer 1 and Layer 2 below). The `zvm-cli`/`gvm-cli`
@@ -37,7 +37,7 @@ respectively.
 
 Player-initiated, from inside the story ("Type SAVE to save your position").
 
-**What it captures (SQ-0531).** In the app, `@save` writes a `.babelmap` archive —
+**What it captures (SQ-0531).** In the app, `@save` writes a `.lanthorn` archive —
 byte for byte the container a host Save State writes, carrying the map, screen,
 transcript (inline art included), aux data and turn metadata alongside the VM
 state. What makes it a *Layer 1* save is not the wrapper but the **PC convention
@@ -70,7 +70,7 @@ host on each save/restore request (`Machine::pending_saveload_request` →
   - **Player SAVE/RESTORE verb** — the game opens the file with
     `glk_fileref_create_by_prompt` (`by_prompt = true`). The host surfaces its
     save UI: `gvm-cli` prompts `Save to file:` / `Restore from file:`; the app
-    opens its saves dialog. Lands as `<slug>.babelmap` in the app, `<slug>.qzl`
+    opens its saves dialog. Lands as `<slug>.lanthorn` in the app, `<slug>.qzl`
     from `gvm-cli`.
   - **The game's OWN fixed-name saves** — `glk_fileref_create_by_name` /
     `create_by_usage` (`by_prompt = false`), e.g. Counterfeit Monkey's
@@ -101,7 +101,7 @@ story was laid out for (`GameSession::boot_screen_cols`, SQ-0679/0680) — and a
 restore replaces the running story with one *another* session booted, at its own
 width. Every restore that brings a screen with it (`restore_screen`, so: host
 Save State resume, auto-resume at launch, and the in-game `@restore` of a
-`.babelmap`) raises that floor to the restored upper window's grid width, which
+`.lanthorn`) raises that floor to the restored upper window's grid width, which
 is the saved session's own frame of reference; the floor only ever grows, so
 restoring a narrow save into a wide session changes nothing.
 `reconcile_restored_screen_size` applies the same floor, so the restored grid
@@ -113,7 +113,7 @@ unknowable: that path assumes the conventional 80 columns
 one for assuming this session's width.
 
 **Every engine, the same deal (SQ-0556).** `@save` behaves identically wherever you
-meet it: it writes a `.babelmap`, the archive shows up in the saves manager, and it
+meet it: it writes a `.lanthorn`, the archive shows up in the saves manager, and it
 comes back through *both* the game's own `restore` and the host restore path.
 Glulx used to be the exception — the saves manager answered
 `Glulx has no game-save (.qzl) format` — and no longer is. Its host restore now
@@ -139,17 +139,17 @@ with an inventory that has forgotten everything picked up afterwards.
 
 ## Layer 2 — host Save State / Restore State (emulator snapshot)
 
-babelmap's own save-anywhere snapshot, explicit and per-slot. Triggered by Ctrl+S
+lanthorn's own save-anywhere snapshot, explicit and per-slot. Triggered by Ctrl+S
 / `/save-state`, the named-slot saves manager, and the "Save State & quit" prompt.
 
-It captures the **entire machine plus babelmap's session context**: VM state, the
+It captures the **entire machine plus lanthorn's session context**: VM state, the
 Glk window/stream tree and screen, the map, the transcript, turn history, and
 metadata. Crucially it **includes the entire Glk file VFS** — every file a Glulx
 game has written through Glk file streams — embedded in the `Glk ` snapshot
 (`crates/gvm/src/glk.rs`, `GLK_SNAPSHOT_VERSION = 6`; the VFS has been embedded
 since v4, SQ-0277, and restore still accepts v4 onward).
 
-Save States are bundled into a self-contained `.babelmap` archive
+Save States are bundled into a self-contained `.lanthorn` archive
 (`crates/app/src/archive.rs`). Inside the archive the engine-tagged VM save is
 `game.glksave` for Glulx and `game.qzl` otherwise (the `save_ext` fallback, so
 the Z-machine's Quetzal and the Scott VM's `Vm::snapshot` blob both land as
@@ -161,7 +161,7 @@ all operate on this layer.
 
 ## Layer 3 — automatic per-story persistence (no explicit save)
 
-This layer needs **no player action and no Save State**. babelmap keeps a small
+This layer needs **no player action and no Save State**. lanthorn keeps a small
 per-story sidecar that it loads when the story opens and flushes after each turn
 (only when it changed). It is what makes a game's own external-storage files
 survive a plain quit — quit the game normally, relaunch, and the data is still
@@ -202,8 +202,8 @@ that game side by side:
 <base>/<story-key>.save/
     default.aux        # Z-machine aux sidecar (Layer 3)
     default.glkvfs     # Glulx VFS sidecar (Layer 3)
-    default.babelmap   # the auto/singleton Save State slot (Layer 2)
-    <slug>.babelmap     # named saves — Save States AND in-game @save (app only);
+    default.lanthorn   # the auto/singleton Save State slot (Layer 2)
+    <slug>.lanthorn     # named saves — Save States AND in-game @save (app only);
                         #   meta.json's `trigger` says which wrote each one
     <slug>.qzl           # bare in-game @save files: the CLI hosts, a game's own
                         #   fixed-name storage (`_`-prefixed), and saves carried
@@ -229,7 +229,7 @@ that game side by side:
 
 The image's filename cannot answer for a compilation: `Infocom Compilation 1
 (19xx)(-).st` carries six games and `floppy2.ima` six more, and under a
-filename key all of them shared one `default.babelmap` and overwrote each
+filename key all of them shared one `default.lanthorn` and overwrote each
 other in turn. Keying on the build gives three properties a filename never
 had — renaming the image keeps the saves, a game that moves between disks in a
 set keeps them, and two games on one disk cannot collide — and it is the same
@@ -255,7 +255,7 @@ file `Zork1.z5` (SQ-0294).
 differently per host, and every host accepts `--data-dir <path>` to override
 it:
 
-- **app** — `~/.babelmap/saves` (i.e. `<user_dir>/saves`; follows
+- **app** — `~/.lanthorn/saves` (i.e. `<user_dir>/saves`; follows
   `--user-dir` unless `--data-dir` is also given).
 - **`zvm-cli` / `gvm-cli`** — the story file's own directory (so a story run
   from `~/games/zork1.z5` gets `~/games/zork1.z5/...`).
@@ -292,8 +292,8 @@ value** is honored verbatim.
 ### No migration (alpha)
 
 There is **no migration** from the old IFID-keyed layout. Saves and sidecars
-previously written as `<save_dir>/<ifid>.babelmap`, `<ifid>.aux`, `<ifid>.gvfs`,
-etc. are orphaned — babelmap will not find or move them automatically. If you
+previously written as `<save_dir>/<ifid>.lanthorn`, `<ifid>.aux`, `<ifid>.gvfs`,
+etc. are orphaned — lanthorn will not find or move them automatically. If you
 have saves from before this change, either re-create them under the new
 layout or manually move the files into the new `<base>/<story-key>.save/`
 directory (renaming to the `default.*` / `<slug>.*` names above as needed).
@@ -302,14 +302,14 @@ directory (renaming to the `default.*` / `<slug>.*` names above as needed).
 
 | Layer | Engine | Host | File |
 |-------|--------|------|------|
-| 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>.save/<slug>.babelmap` (`trigger = "ingame"`; `game.qzl` inside is bare standard Quetzal) |
+| 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>.save/<slug>.lanthorn` (`trigger = "ingame"`; `game.qzl` inside is bare standard Quetzal) |
 | 1 — game's `@save`/`@restore` | Z-machine | `zvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
-| 1 — player SAVE verb (`create_by_prompt`) | Glulx | app | `<base>/<story-key>.save/<slug>.babelmap` (`trigger = "ingame"`; `game.glksave` inside is bare standard Glulx-Quetzal) |
+| 1 — player SAVE verb (`create_by_prompt`) | Glulx | app | `<base>/<story-key>.save/<slug>.lanthorn` (`trigger = "ingame"`; `game.glksave` inside is bare standard Glulx-Quetzal) |
 | 1 — player SAVE verb (`create_by_prompt`) | Glulx | `gvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
 | 1 — game's own save (`create_by_name`, SQ-0296) | Glulx | app & `gvm-cli` | `<base>/<story-key>.save/<name>.qzl` — silent, no prompt; hidden from the saves list |
-| 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside) |
-| 2 — Save State / Restore State | Glulx | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.glksave` inside; embeds full Glk VFS) |
-| 2 — Save State / Restore State | Scott Adams | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside = `Vm::snapshot` blob; Scott's only layer) |
+| 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>.save/default.lanthorn` or `<slug>.lanthorn` (`game.qzl` inside) |
+| 2 — Save State / Restore State | Glulx | app | `<base>/<story-key>.save/default.lanthorn` or `<slug>.lanthorn` (`game.glksave` inside; embeds full Glk VFS) |
+| 2 — Save State / Restore State | Scott Adams | app | `<base>/<story-key>.save/default.lanthorn` or `<slug>.lanthorn` (`game.qzl` inside = `Vm::snapshot` blob; Scott's only layer) |
 | 3 — auto per-story (aux) | Z-machine | app | `<base>/<story-key>.save/default.aux` |
 | 3 — auto per-story (aux) | Z-machine | `zvm-cli` | `<base>/<story-key>.save/default.aux` (`ZAUX`) |
 | 3 — auto per-story (Glk VFS) | Glulx | app | `<base>/<story-key>.save/default.glkvfs` (`GVFS`) |

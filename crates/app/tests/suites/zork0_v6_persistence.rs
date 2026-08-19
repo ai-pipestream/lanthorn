@@ -104,7 +104,7 @@ fn v6_host_save_state_restore_is_byte_identical() {
     let es = Engine::save_state(&session);
     let pics = session.pictures_png();
     assert!(!pics.is_empty(), "Zork0 has rasterized graphics canvases to persist");
-    let path = std::env::temp_dir().join(format!("zork0-persist-{}.babelmap", std::process::id()));
+    let path = std::env::temp_dir().join(format!("zork0-persist-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper,
@@ -215,7 +215,7 @@ fn inline_transcript_images_survive_archive_roundtrip_sq0518() {
 
     // Save through the REAL archive path (as /save, auto-save, exit-save, and
     // named slots all do), then reload.
-    let path = std::env::temp_dir().join(format!("zork0-inline-{}.babelmap", std::process::id()));
+    let path = std::env::temp_dir().join(format!("zork0-inline-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper::mapper::Mapper::default(),

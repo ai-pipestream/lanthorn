@@ -130,7 +130,7 @@ mod tests {
     fn confirm_delete_renders_title_body_and_buttons() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = AppState::default();
-        state.overlays.confirm_delete_save = Some(std::path::PathBuf::from("/saves/zork-hero.babelmap"));
+        state.overlays.confirm_delete_save = Some(std::path::PathBuf::from("/saves/zork-hero.lanthorn"));
         state.overlays.dialog_focus = 1;
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -143,7 +143,7 @@ mod tests {
         let all: String = terminal.backend().buffer().content().iter()
             .flat_map(|c| c.symbol().chars()).collect();
         assert!(all.contains("Delete this save?"), "title present");
-        assert!(all.contains("zork-hero.babelmap"), "save name present");
+        assert!(all.contains("zork-hero.lanthorn"), "save name present");
     }
 
     #[test]

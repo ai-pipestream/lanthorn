@@ -7,7 +7,7 @@
 
 ## Goal
 
-Make a real Version-6 Z-machine story **load, boot through its main routine, and take text turns** in babelmap without desync or abort. This is the first of four v6 slices; it delivers the addressing/boot plumbing plus safe stubs for the v6 opcode set, so the VM stays in sync while graphics and the window model remain unimplemented.
+Make a real Version-6 Z-machine story **load, boot through its main routine, and take text turns** in lanthorn without desync or abort. This is the first of four v6 slices; it delivers the addressing/boot plumbing plus safe stubs for the v6 opcode set, so the VM stays in sync while graphics and the window model remain unimplemented.
 
 ## Context: what v6 changes vs. the versions we already run
 
@@ -115,7 +115,7 @@ A v6 story flows straight into the debug inspector's disassembly and `--debug` e
 - **Mnemonics already complete.** `disasm.rs::mnemonic` already names all 18 v6 EXT opcodes (0x05–0x08, 0x10–0x1D). No additions needed.
 - **`Unpack` already v6-aware.** `disasm.rs::Unpack` reads `routine_off`/`string_off` for `version == 6 || version == 7`. Packed-routine reachability walks unpack correctly for v6 already.
 - **`operand_role` needs nothing.** v6 EXT opcodes take window/picture numbers and pixel coordinates — all plain integers, no routine/packed-address operands to annotate.
-- **Cleanup:** `cpu/opcode_help.rs:~280` carries a comment *"babelmap rejects v6 stories, so these …"* that becomes false once v6 is accepted. Fix the comment in-phase (orphan created by this change).
+- **Cleanup:** `cpu/opcode_help.rs:~280` carries a comment *"lanthorn rejects v6 stories, so these …"* that becomes false once v6 is accepted. Fix the comment in-phase (orphan created by this change).
 
 **Secondary oracle:** the debug inspector doubles as an independent correctness check for Phase 0. The Rd (reachable-disassembly) provenance walk and the `--debug` executed-PC trace both depend on exactly the decode/unpack correctness this phase delivers. A `--debug` headless run of Zork0 that disassembles the reached region cleanly and produces sane executed-PC coverage is strong evidence the EXT signatures and v6 addressing are right — corroborating the boot smoke from a different angle.
 

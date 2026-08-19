@@ -21,7 +21,7 @@ A headless screen-opcode trace of Zork0 (boot + a few turns, captured 2026-07-21
 
 ## The pixel / cell / font model
 
-v6 addresses windows and pictures in **pixels**; babelmap renders in **character cells**. The bridge is the font size the interpreter advertises in the header:
+v6 addresses windows and pictures in **pixels**; lanthorn renders in **character cells**. The bridge is the font size the interpreter advertises in the header:
 
 - Advertise a realistic v6 font cell size — **font width/height** in header bytes 0x26/0x27 — and **screen width/height in units** (0x22–0x25) = `cols × font_w` by `rows × font_h`. (v5 currently advertises font 1×1 / units = chars — correct for v5, wrong for v6 where pictures are real-pixel-sized.)
 - **Text window rects:** pixel `(x, y, w, h)` → cell rect by integer division by `font_w`/`font_h` (cell-quantize).

@@ -124,7 +124,7 @@ fn main() -> ExitCode {
         usage();
         return ExitCode::from(2);
     };
-    let out = out.unwrap_or_else(|| std::env::temp_dir().join("babelmap-border-preview"));
+    let out = out.unwrap_or_else(|| std::env::temp_dir().join("lanthorn-border-preview"));
 
     let Some((label, src)) = open(&archive, pictures.as_deref()) else {
         return ExitCode::from(1);

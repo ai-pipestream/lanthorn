@@ -4,7 +4,7 @@
 
 ## Customization
 
-Almost every pixel babelmap paints is yours to repaint. Colours, borders, box
+Almost every pixel lanthorn paints is yours to repaint. Colours, borders, box
 glyphs, the status line, the keymap, even the easing curve on a scroll — all of
 it lives in two plain TOML files you can edit and reload without leaving the
 game. This page walks the knobs from the ones you'll reach for first to the ones
@@ -24,7 +24,7 @@ still reach in and override any single selector by name.
   `parent = "<role>"`
   plus an optional delta (fg/bg/bold/italic/underline/dim/reversed) — so a
   minimal theme that only touches `[roles]` still looks fully coherent.
-- **Panels vs. windows.** *Panels* are the frames babelmap itself draws — the
+- **Panels vs. windows.** *Panels* are the frames lanthorn itself draws — the
   story pane, map, command band, debug inspector, and every dialog/overlay.
   *Windows* are the surfaces the story/VM generates (Glk buffer/grid/graphics
   windows, the v4+ upper window). Panels are host chrome and never honor game
@@ -43,7 +43,7 @@ still reach in and override any single selector by name.
   filename with no known title (or a file already named after it) shows with
   no parenthetical. The title is the *same* one the story browser lists, drawn
   from the same metadata in the same order — a blorb's own iFiction record, then
-  the fetched IFDB details cached beside your saves, then babelmap's bundled
+  the fetched IFDB details cached beside your saves, then lanthorn's bundled
   title tables — so a game can't be *Anchorhead* in the library and `anchor` in
   the pane. The game's opening banner is consulted only after all of those, and
   the filename is the last resort it was always meant to be. A story mounted off
@@ -55,7 +55,7 @@ still reach in and override any single selector by name.
   set `panel.terminator_left` / `panel.terminator_right` / `panel.tab_divider`
   to a `glyph` to override any of them. The map additionally sets
   its own canvas fill, `map.background`, since it isn't a Glk window.
-  The one *window* frame babelmap can draw itself is the box around a v4+ game's
+  The one *window* frame lanthorn can draw itself is the box around a v4+ game's
   status/upper window, and it answers to `upper_window_border` in `[elements]` —
   the selector that colours it carries its shape too. It is **off by default**:
   the status line sits flush against the story, and the whole pane is the screen
@@ -63,7 +63,7 @@ still reach in and override any single selector by name.
   `double`/`thick`/`rounded`), reach for `style_top` / `style_bottom` /
   `style_left` / `style_right` to rule one edge at a time, and remember that
   every side you turn on costs the story a row or a column. Don't reach for
-  `[statusbar]`'s `border` for this — that frames babelmap's own status bar, not
+  `[statusbar]`'s `border` for this — that frames lanthorn's own status bar, not
   the game's window.
 
   The **same selector draws the rule between two Glk windows** — the line you'd
@@ -152,7 +152,7 @@ still reach in and override any single selector by name.
 
 ### Everyday customization
 Below the full role system sit the knobs most people actually touch — the small
-switches that make babelmap feel like yours without opening the whole registry.
+switches that make lanthorn feel like yours without opening the whole registry.
 
 - **Room numbers** — room id numbers are hidden by default (portal icons take the
   freed bottom row); flip them on with the `toggle-room-numbers` command,
@@ -160,7 +160,7 @@ switches that make babelmap feel like yours without opening the whole registry.
 - **Color schemes** — recolor rooms, connectors, and chrome from a
   [Ghostty](https://ghostty.org) theme file or a built-in (mono / high-contrast /
   tomorrow-night), with per-role and per-selector overrides. Defaults to your
-  terminal colors — genuinely so: with no scheme set, babelmap asks the terminal
+  terminal colors — genuinely so: with no scheme set, lanthorn asks the terminal
   for its own default foreground and background (OSC 10/11, at startup) and hands
   the answer to the `chrome` role, so the status bar, upper window and dialog
   surfaces sit on your terminal's page rather than a black one. A terminal that
@@ -237,7 +237,7 @@ switches that make babelmap feel like yours without opening the whole registry.
   focus and not with a Ctrl modifier — that set is what "available without opening
   the leader panel" means. And while a story is waiting on a single keypress
   (menus, "press any key"), every *plain* key goes to the game; only Ctrl and Alt
-  combos are held back for babelmap. So a diagnostic you want reachable at any
+  combos are held back for lanthorn. So a diagnostic you want reachable at any
   moment wants a Ctrl binding:
 
   ```toml
@@ -246,7 +246,7 @@ switches that make babelmap feel like yours without opening the whole registry.
   "ctrl+g" = "dump-cells"
   ```
 - **The story browser's keys are bindable too** — the screen you get when
-  babelmap is pointed at a directory used to be the one surface whose keys were
+  lanthorn is pointed at a directory used to be the one surface whose keys were
   not data: hardcoded match arms, and a footer hint typed out by hand beside
   them. They now go through the same registry as everything else, in their own
   `Browser` context, so every one of them can be moved:
@@ -305,7 +305,7 @@ switches that make babelmap feel like yours without opening the whole registry.
 The file *is* the editor. All visual settings live in a standalone `style.toml`,
 referenced from `config.toml` by `style = "<name or path>"` (the single styling
 source — `config.toml` carries no style of its own). On first run, if you have no
-`style.toml`, babelmap seeds one in your user directory **fully commented out**:
+`style.toml`, lanthorn seeds one in your user directory **fully commented out**:
 every selector is there, grouped by section (roles, panels, Glk styles, map,
 debug, transcript rules, status bar), each with a short explanatory comment, and
 every commented line already spelling out the built-in default — so the seeded
@@ -330,7 +330,7 @@ when you toggle one of those for a story (`/game-colours`, `/borderless`, hiding
 the map), and it is a *sparse override layer*, not a copy of your global config:
 bare uncommented lines, only the keys that differ, and the file is deleted once
 nothing is overridden. An absent key means "inherit the global value" — which is
-why babelmap never seeds the annotated template into a game directory, and why you
+why lanthorn never seeds the annotated template into a game directory, and why you
 shouldn't either: every line you uncommented would become a per-game override
 pinning that value for that story.
 
@@ -344,7 +344,7 @@ to have your theme own every color regardless of what the game requests — see
 per-game slot always wins over the game, even with game colours honored.
 
 **garglk.ini import**: if a `garglk.ini` (or `<story>.ini`) sits beside the
-story, babelmap reads the section matching that game and imports what a terminal
+story, lanthorn reads the section matching that game and imports what a terminal
 can honor — its `tcolor`/`gcolor`/`linkcolor`/`bordercolor`/`windowcolor`
 palette, `stylehint` (→ `honor_game_colours`), the text-window margins
 (`tmarginx`/`tmarginy`, converted from pixels to character cells with a nominal
@@ -361,7 +361,7 @@ its own config file was applied. Kerkerkruip's ini sets `style_User2` to Fashion
 Fuchsia (`tcolor 10 F400A1 ffffff`) for no reason except that nobody else on
 earth would, then measures that style at startup; a host that answers "fuchsia"
 must be running the author's config, so the game skips its screen-reader prompt,
-switches its menus to hyperlinks and opens its graphical title screen. babelmap
+switches its menus to hyperlinks and opens its graphical title screen. lanthorn
 now reports the per-style colour it really renders, so the answer is honest —
 which means **shipping the ini beside the story is the opt-in for that
 presentation**. Keep `Kerkerkruip.ini` next to `Kerkerkruip.gblorb` and you get
@@ -371,35 +371,35 @@ usual way. Nothing else to configure: the file's presence is the switch.
 **Schema note (pre-release, breaking):** the `style.toml` schema described
 above is new. An old-schema file (with top-level `[colors]` / `[symbols]`
 sections) is left untouched — it is not auto-migrated or overwritten — but its
-sections no longer apply; regenerate by deleting it and letting babelmap
+sections no longer apply; regenerate by deleting it and letting lanthorn
 re-seed the new template, or hand-write the new shape from
 `style.example.toml`.
 
 ## Configuration
-- TOML config at `~/.babelmap/config.toml` plus command-line flags
+- TOML config at `~/.lanthorn/config.toml` plus command-line flags
   (`--user-dir`, `--config`); CLI overrides the file, which overrides defaults.
-- **The config file documents itself.** On first run babelmap seeds
+- **The config file documents itself.** On first run lanthorn seeds
   `config.toml` the same way it seeds `style.toml`: every setting it reads is
   listed, grouped and commented, with the value shown being the **default** — so
   the whole surface is browsable from the file instead of only from the source,
   and uncommenting a line as-is changes nothing. Where a default can't be written
-  down (an unset path, or a value babelmap picks per story) the line is marked as
+  down (an unset path, or a value lanthorn picks per story) the line is marked as
   an example, because uncommenting *that* does change behaviour. An existing
   config is never overwritten, and later edits from the settings screen preserve
   your comments.
 - **A broken config file says so.** TOML is parsed as one document, so a single
   stray character — an unclosed quote, a stray bracket — costs you every setting
-  in the file, not just the line it's on. The same is true of a value babelmap
+  in the file, not just the line it's on. The same is true of a value lanthorn
   can't use (`volume = 300`, `auto_load = "yes"`): the file is valid TOML, but
-  the *config* isn't, and it is dropped just as wholesale. babelmap names the
+  the *config* isn't, and it is dropped just as wholesale. lanthorn names the
   file and shows the error at startup instead of quietly running on defaults,
   and it refuses to save settings over a file it couldn't read, so the text you
   need in order to find the mistake is never overwritten. Fix the file (or move
-  it aside and let babelmap seed a fresh one) and saving resumes.
+  it aside and let lanthorn seed a fresh one) and saving resumes.
 - **A choice for one run stays a choice for one run.** `--no-sound`, `--user-dir`,
   `--no-game-colours` and `--interpreter` are instructions for the launch you typed
   them on,
-  and so are the things babelmap works out for itself: an interpreter number this
+  and so are the things lanthorn works out for itself: an interpreter number this
   game's own sidecar pins, a `garglk.ini` sitting beside the story, a `/game-colours`
   choice, or two-colour artwork that has no colours to give and so switches
   `honor_game_colours` off for that one rendition. None of them can reach
@@ -410,35 +410,35 @@ re-seed the new template, or hand-write the new shape from
   a value is still the one that launch handed it, the file keeps whatever *it* said.
   Change the setting on the settings screen and it becomes yours from then on —
   including when you change it to exactly what the flag asked for.
-- **Settings are written atomically.** Every file babelmap owns — `config.toml`,
+- **Settings are written atomically.** Every file lanthorn owns — `config.toml`,
   saves and archives, the aux/VFS sidecars — is built beside its target and moved
   into place in one step, so a crash, a power cut, or a kill during a write leaves
   the previous file intact rather than a truncated one.
-- **Default story directory** — `default_story_dir` is opened when babelmap is
-  launched with no path argument. The first time you point babelmap at a
+- **Default story directory** — `default_story_dir` is opened when lanthorn is
+  launched with no path argument. The first time you point lanthorn at a
   directory on the command line without one set, it offers to remember that
   directory as the default (writing it to the config file); after that, a bare
-  `babelmap` opens the story picker there. With no argument and no default set,
-  babelmap prints how to fix it and exits.
+  `lanthorn` opens the story picker there. With no argument and no default set,
+  lanthorn prints how to fix it and exits.
 - **Virtual screen size** — `virtual_screen_cols` / `virtual_screen_rows` pin the
   screen dimensions reported to the game. Leave them **unset** (the default) and
-  babelmap reports the story pane's real measured size and re-reports it whenever
+  lanthorn reports the story pane's real measured size and re-reports it whenever
   you resize the terminal, so a v4+ game's cursor-addressed forms and status
   displays fill the pane and line up with the prose. Set one to reproduce a game's
   original fixed layout (say `virtual_screen_cols = 80`) — a pinned width narrower
   than the pane is drawn centred, and a pinned width wider than it scrolls to
   follow the cursor. Version 6 stories ignore both: they lay out on their own
-  fixed pixel screen, which babelmap scales into whatever pane it has.
+  fixed pixel screen, which lanthorn scales into whatever pane it has.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
 - **Random seed** — `random_seed` pins the number every engine's random-number
-  generator starts from. Leave it **unset** (the default) and babelmap draws a
+  generator starts from. Leave it **unset** (the default) and lanthorn draws a
   fresh seed from the system at each launch, so the dice are different every
   time you sit down — which is the whole point of a game like *Kerkerkruip*,
   whose dungeon is dealt at the start. Set it and the story becomes a recording:
   the same shuffles, the same rolls, the same monsters in the same rooms, every
-  run. babelmap prints the seed it used on the console as it starts —
-  `babelmap: random seed 3735928559 (set random_seed = 3735928559 to replay this
+  run. lanthorn prints the seed it used on the console as it starts —
+  `lanthorn: random seed 3735928559 (set random_seed = 3735928559 to replay this
   run)` — so when a run turns out to be the good one, that number is how you ask
   for it again, and how you hand it to somebody else. A restart (`@restart`, or
   restarting from the menu) re-draws the seed the same way the launch did: pinned
@@ -478,14 +478,14 @@ re-seed the new template, or hand-write the new shape from
   alternating two they had, column by column — *Zork Zero*'s bronze arch is brown
   against bright red — and since those columns were half as wide as an MCGA
   pixel, the screen fused each pair into a colour the palette never held.
-  babelmap keeps all 640 columns, so it does the fusing itself. Set it `false` to
+  lanthorn keeps all 640 columns, so it does the fusing itself. Set it `false` to
   see the archive's own pixels instead, every column distinct. It changes nothing
   else: two-colour CGA line art is never fused either way (blurring line art only
   makes grey), and 320-wide MCGA and Amiga art has no dither at this frequency to
   fuse. See [Graphical v6](v6-graphics.md#the-colours-come-with-the-card).
 - **v6 arrow keys** — `v6_arrow_keys` (default `true`) controls whether arrow
   keypresses are forwarded to a v6 story as movement input; set it `false` (in
-  config.toml or the settings screen) to withhold them so arrows drive babelmap's own
+  config.toml or the settings screen) to withhold them so arrows drive lanthorn's own
   scrollback recall / map panning instead. Only v6 stories are affected — v1-5
   and Glulx games always get arrows. See [Graphical v6](v6-graphics.md#arrow-keys-movement-or-map-panning-your-call).
 - **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
@@ -498,7 +498,7 @@ re-seed the new template, or hand-write the new shape from
   the `open-config` key for a settings modal covering the common options, with an
   explicit Save (writes the config file, comments and layout preserved) and
   Cancel; changes apply live.
-- **Portable home** — everything babelmap keeps (config, style, saves, sidecars)
-  lives under `~/.babelmap` by default; point `--user-dir` somewhere else to
+- **Portable home** — everything lanthorn keeps (config, style, saves, sidecars)
+  lives under `~/.lanthorn` by default; point `--user-dir` somewhere else to
   relocate the whole home, or `--data-dir` to split just the saves and sidecars
   off on their own.

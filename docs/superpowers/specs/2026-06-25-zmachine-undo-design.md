@@ -49,7 +49,7 @@ Add to `Machine`:
   `save_quetzal` bytes with the **`save_undo` instruction's own store target**
   (so `restore_undo` can write `2` back into it).
 - `undo_cap: usize` — maximum retained snapshots (default 16). Session-only;
-  never written into `.babelmap` saves.
+  never written into `.lanthorn` saves.
 
 `Machine::new` initializes `undo_stack` empty and `undo_cap` to a default (16).
 
@@ -93,7 +93,7 @@ No app changes beyond wiring the cap. The game's `UNDO` command drives the
 opcodes; the app renders the resulting turn like any other. The map's
 **current-room highlight follows the undo** (it is derived from the VM location
 each turn), while already-discovered rooms remain drawn — a sensible superset.
-No babelmap-level undo hotkey (the game's command is the interface).
+No lanthorn-level undo hotkey (the game's command is the interface).
 
 ## Architecture / components
 
@@ -146,8 +146,8 @@ No babelmap-level undo hotkey (the game's command is the interface).
 
 ## Out of scope (deferred)
 
-- Persisting undo history into `.babelmap` saves (session-only).
-- A babelmap-level undo hotkey / app-driven undo (the game's `UNDO` is the path).
+- Persisting undo history into `.lanthorn` saves (session-only).
+- A lanthorn-level undo hotkey / app-driven undo (the game's `UNDO` is the path).
 - Reverting the accumulated map on undo (the current-room highlight follows; rooms
   remain a discovered superset).
 - `save_undo`/`restore_undo` for pre-v5 story files that lack the opcodes (these

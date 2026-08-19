@@ -6,7 +6,7 @@
 
 ## Goal
 
-A full-screen modal that lets the player browse the curated symbol presets per category, preview them on a live sample map, pick one preset per category, and persist the choices to `~/.babelmap/config.toml`. v1 scope: **pick one preset per category** (no per-glyph editing, no named themes).
+A full-screen modal that lets the player browse the curated symbol presets per category, preview them on a live sample map, pick one preset per category, and persist the choices to `~/.lanthorn/config.toml`. v1 scope: **pick one preset per category** (no per-glyph editing, no named themes).
 
 ## Dependencies
 
@@ -27,7 +27,7 @@ Full-screen two-pane modal:
 2. **`AppState.gallery: Option<GalleryState>`** where `GalleryState { category_idx: usize, selections: [usize; 4] }` (one selected preset index per category). `None` = closed. A helper `GalleryState::symbol_config(&self) -> SymbolConfig` maps the four selected indices to preset names.
 3. **Sub-mode routing in `key_to_action` (`input.rs`)** — when `state.gallery.is_some()`, route keys to a `gallery_key_to_action` (mirrors the existing prompt / tidy-anim sub-modes): ↑↓/←→ → gallery nav actions, Esc/Enter → close. Added as a new sub-mode layer; does NOT disturb the keymap lookups.
 4. **`symbols.rs` additions** — `BoxStyle::preset_names() -> &'static [&'static str]` and the same for `Arrows`/`PathGlyphs`/`PortalGlyphs`; a `SymbolSet::from_preset_names(box_, arrow, portal, path) -> SymbolSet` (delegates to `resolve` of a synthetic `SymbolConfig`).
-5. **Config writer — `config::write_symbols(dir: &Path, cfg: &SymbolConfig) -> std::io::Result<()>`** — load `~/.babelmap/config.toml` with `toml_edit` (or start a new document), set `[symbols] box_style/arrow_set/portal_icons/path_style`, and write back PRESERVING all other keys/comments. Creates the file and parent dir if absent.
+5. **Config writer — `config::write_symbols(dir: &Path, cfg: &SymbolConfig) -> std::io::Result<()>`** — load `~/.lanthorn/config.toml` with `toml_edit` (or start a new document), set `[symbols] box_style/arrow_set/portal_icons/path_style`, and write back PRESERVING all other keys/comments. Creates the file and parent dir if absent.
 6. **Keymap entry (post-L8)** — `Command::OpenGallery` → `Action::OpenGallery` (opens the gallery, seeding `GalleryState` selections from the current `AppState.symbols`/config); default binding `g` in Map focus; appears in the help screen and hint bar automatically.
 
 ## Data flow
@@ -36,7 +36,7 @@ Full-screen two-pane modal:
 gallery selections ─▶ SymbolConfig ─▶ SymbolSet::resolve
    ├─▶ AppState.symbols (live map updates as you scroll presets)
    ├─▶ the preview sub-map render
-   └─▶ on close: config::write_symbols persists to ~/.babelmap/config.toml
+   └─▶ on close: config::write_symbols persists to ~/.lanthorn/config.toml
 ```
 
 ## Actions / state additions

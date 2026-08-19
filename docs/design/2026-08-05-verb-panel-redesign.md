@@ -64,7 +64,7 @@ defects are structural, not cosmetic:
 Journey (Infocom v6) replaces the parser with a persistent bottom band:
 columns fill in left-to-right as a phrase narrows, everything visible is
 clickable, and the phrase under construction is always shown. The redesign
-adopts that shape, minus the party column (babelmap has no actors to select).
+adopts that shape, minus the party column (lanthorn has no actors to select).
 
 **This mockup is the ORIGINAL design, kept for history.** The 2026-08-05
 amendments below retired the frame, the phrase line, and the VERB column's

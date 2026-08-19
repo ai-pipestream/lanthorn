@@ -11,7 +11,7 @@
 //! those columns are half as wide as an MCGA pixel, so the card fused each pair
 //! into a colour the palette does not contain. Bocfel says the same of Zork
 //! Zero's EGA hint background (`z6/draw_border.cpp:745`): "no single pixel of the
-//! artwork is the colour the eye actually sees". babelmap keeps all 640 columns —
+//! artwork is the colour the eye actually sees". lanthorn keeps all 640 columns —
 //! `PictSource::art_scale` maps them at (1, 2), onto exactly the rectangle a
 //! 320-wide plate covers — so every art pixel survived as a distinct unit pixel
 //! and the dither reached the screen at full contrast.

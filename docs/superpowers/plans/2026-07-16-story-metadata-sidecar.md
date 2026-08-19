@@ -16,7 +16,7 @@
 - **`ureq` is 3.3, NOT 2.x.** The API changed. Verified surface: `Agent::config_builder().timeout_global(Some(Duration)).build()`; `agent.get(url).header("User-Agent", ua).call()?`; `.body_mut().read_to_string()?`. **A 404 arrives as `Err(ureq::Error::StatusCode(404))`, not `Ok`** — see Task 4. Do not write ureq 2.x code from memory; check `cargo doc -p ureq --open` for anything not stated here.
 - **No automatic network, ever.** No timer, no first-run prompt, no background retry, no fetch-on-idle. The only two things that may touch the network are the `f` and `r` keypresses.
 - **`FETCH_VERSION` starts at `1`** and is a `u32` constant in `app::story_info`. Never `CARGO_PKG_VERSION`.
-- **User-Agent is exactly** `babelmap/<CARGO_PKG_VERSION> (+https://github.com/sharkusk/babelmap)`.
+- **User-Agent is exactly** `lanthorn/<CARGO_PKG_VERSION> (+https://github.com/sharkusk/lanthorn)`.
 - **Inter-request delay in an `r` sweep: 500 ms. Per-request timeout: 10 s. Body caps: 1 MiB XML, 8 MiB cover.**
 - **Every new UI element is themeable**: a `ColorScheme` field + a `style.rs` selector + applied at render. Never a hard-coded `Style`/`Color`. This is a project standing rule.
 - **Pre-release: no back-compat.** A sidecar with an unknown `format_version` is ignored and overwritten. No migration, no tolerant decoding, no old-file fixtures.
@@ -644,10 +644,10 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_identifies_babelmap_and_its_repo() {
+    fn user_agent_identifies_lanthorn_and_its_repo() {
         let ua = user_agent();
-        assert!(ua.starts_with("babelmap/"));
-        assert!(ua.contains("github.com/sharkusk/babelmap"));
+        assert!(ua.starts_with("lanthorn/"));
+        assert!(ua.contains("github.com/sharkusk/lanthorn"));
         assert!(ua.contains(env!("CARGO_PKG_VERSION")));
     }
 
@@ -689,7 +689,7 @@ const MAX_XML: u64 = 1024 * 1024;          // 1 MiB
 const MAX_COVER: u64 = 8 * 1024 * 1024;    // 8 MiB
 
 fn user_agent() -> String {
-    format!("babelmap/{} (+https://github.com/sharkusk/babelmap)", env!("CARGO_PKG_VERSION"))
+    format!("lanthorn/{} (+https://github.com/sharkusk/lanthorn)", env!("CARGO_PKG_VERSION"))
 }
 
 fn ifiction_url(ifid: &str) -> String {

@@ -21,7 +21,7 @@
 - Never silently panic/quit on game-derived input; unknown channels resolve to safe defaults.
 - Scope: Base Sound selectors `0x00F0–0x00FC` only (no Sound2). `gestalt_Sound2` (21) stays 0. Notify **is** implemented. `schannel_play` returns 1 optimistically (does not verify the resource exists).
 
-**Build/test commands** (run from repo root `/Volumes/Videos/Source/babelmap`):
+**Build/test commands** (run from repo root `/Volumes/Videos/Source/lanthorn`):
 - gvm tests: `cargo test -p gvm`
 - audio tests: `cargo test -p audio`
 - app tests: `cargo test -p app`

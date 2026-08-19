@@ -4,7 +4,7 @@
 
 **Goal:** Key all save/sidecar storage by the story's filename inside a flat per-game directory `<base>/<story-key>/`, add `--data-dir` to all three hosts, and drop IFID from *storage* keying (keeping it for title/hint lookup).
 
-**Architecture:** Each host computes a sanitized `story_key` (the story basename incl. extension) and a `game_dir = base.join(story_key)`. Inside it: `default.aux`, `default.glkvfs`, `default.babelmap` (auto/singleton), plus `<slug>.babelmap` / `<slug>.qzl` (named). `--data-dir` overrides `base`; default base is the story dir (CLIs) or `~/.babelmap/saves` (app). Spec: `docs/superpowers/specs/2026-07-12-story-filename-storage-layout-design.md`.
+**Architecture:** Each host computes a sanitized `story_key` (the story basename incl. extension) and a `game_dir = base.join(story_key)`. Inside it: `default.aux`, `default.glkvfs`, `default.lanthorn` (auto/singleton), plus `<slug>.lanthorn` / `<slug>.qzl` (named). `--data-dir` overrides `base`; default base is the story dir (CLIs) or `~/.lanthorn/saves` (app). Spec: `docs/superpowers/specs/2026-07-12-story-filename-storage-layout-design.md`.
 
 **Tech Stack:** Rust workspace. app uses clap; both CLIs hand-roll arg parsing. No new deps needed.
 
@@ -217,21 +217,21 @@ pub fn is_reserved_slug(slug: &str) -> bool { slug == "default" }
 Run → PASS.
 
 - [ ] **Step 4: Rewrite the path builders (keyed by the per-game dir).** For each, change the `<ifid>`-keyed signature to take the game dir and emit fixed inner names. Suggested signatures:
-  - `ifid::archive_path(base, ifid)` → **`storage::default_state_path(game_dir) = game_dir.join("default.babelmap")`** (move/rename; update `mod`/`use`).
+  - `ifid::archive_path(base, ifid)` → **`storage::default_state_path(game_dir) = game_dir.join("default.lanthorn")`** (move/rename; update `mod`/`use`).
   - `aux_store::aux_path(save_dir, ifid)` → `aux_path(game_dir) = game_dir.join("default.aux")`.
   - `vfs_store::vfs_path(save_dir, ifid)` → `vfs_path(game_dir) = game_dir.join("default.glkvfs")` (**note `.glkvfs`**).
-  - `persist_files::save_named(dir, ifid, slug, …)` → path `game_dir.join(format!("{slug}.babelmap"))`; **reject/suffix** `slug` when `storage::is_reserved_slug(slug)` (append `-1` or return an error surfaced to the UI — match how the saves UI reports name errors; if none, suffix to `default-1`).
+  - `persist_files::save_named(dir, ifid, slug, …)` → path `game_dir.join(format!("{slug}.lanthorn"))`; **reject/suffix** `slug` when `storage::is_reserved_slug(slug)` (append `-1` or return an error surfaced to the UI — match how the saves UI reports name errors; if none, suffix to `default-1`).
   - `persist_files::save_game_named(dir, ifid, slug, …)` / `save_game_named_bytes(...)` → `game_dir.join(format!("{slug}.qzl"))`; same reserved-slug guard.
-  - `persist_files::list_saves(dir, ifid)` → `list_saves(game_dir)`: enumerate `*.babelmap` in `game_dir`; `default.babelmap` is the default slot, `<slug>.babelmap` are named (slug = filename stem). `list_qzl` (main.rs 4842-4866) → enumerate `*.qzl` similarly (skip `default.qzl` if it ever appears; there is no default qzl).
+  - `persist_files::list_saves(dir, ifid)` → `list_saves(game_dir)`: enumerate `*.lanthorn` in `game_dir`; `default.lanthorn` is the default slot, `<slug>.lanthorn` are named (slug = filename stem). `list_qzl` (main.rs 4842-4866) → enumerate `*.qzl` similarly (skip `default.qzl` if it ever appears; there is no default qzl).
   Add builder unit tests (default + named + reserved-slug) in the respective modules.
 
 - [ ] **Step 5: Add `--data-dir` to `Cli`** (`config.rs` 162-187): `#[arg(long, value_name = "PATH")] pub data_dir: Option<PathBuf>,`. Resolve the storage base: `let data_base = cli.data_dir.clone().unwrap_or_else(|| saves_dir(&cfg.user_dir));` (`saves_dir` stays `<user_dir>/saves`). Thread `data_base` to both the picker (1066) and the game session (1842).
 
 - [ ] **Step 6: Update the call sites** (main.rs + picker.rs) to compute `let key = storage::story_key(&story_path); let gdir = storage::game_dir(&data_base, &key);` once per session, create it (`create_dir_all(&gdir)`) before first write, and pass `&gdir` into every rewritten builder — replacing the `&save_dir, &ifid` argument pairs at the call sites enumerated in this task's **Files** list (main.rs setup 1840-1910; per-turn persist 4975-5007, 2562, 2601; in-game save dispatch 4547-4561, 4190; `combined_saves`/`list_qzl` 4835-4866; and the picker sites). Grep `&ifid` / `ifid.clone()` in `main.rs`+`picker.rs` and reclassify each: *storage* uses switch to `&gdir`/`key`; *title/hint/display* uses stay `ifid`. Keep `state.ifid = compute_ifid(...)` (titles/hints/display) unchanged. `arc_file` (1843/5058) becomes `storage::default_state_path(&gdir)`.
 
-- [ ] **Step 7: Picker badge + save presence** (picker.rs 566-570, resolve_aux 167; main.rs 1066-1076): replace `save_names.starts_with(ifid)` with a per-game-dir check. Compute each row's `game_dir = storage::game_dir(&data_base, &storage::story_key(&entry.path))`; badge is true iff that dir exists and contains a `.babelmap` or `.qzl`. `resolve_aux`'s `list_saves` call passes the row's game_dir. Title/hint lookups keep using `entry.meta.ifid`. Add a test: badge true with a save present, false for empty/absent dir.
+- [ ] **Step 7: Picker badge + save presence** (picker.rs 566-570, resolve_aux 167; main.rs 1066-1076): replace `save_names.starts_with(ifid)` with a per-game-dir check. Compute each row's `game_dir = storage::game_dir(&data_base, &storage::story_key(&entry.path))`; badge is true iff that dir exists and contains a `.lanthorn` or `.qzl`. `resolve_aux`'s `list_saves` call passes the row's game_dir. Title/hint lookups keep using `entry.meta.ifid`. Add a test: badge true with a save present, false for empty/absent dir.
 
-- [ ] **Step 8: Full build + tests.** `cargo build -p app --tests` clean (no warnings from your change — remove imports YOUR change orphaned, e.g. an unused `ifid` in a storage call). `cargo test -p app` — 0 failed. Verify the pre-existing Save State round-trip tests (`restore_from_file_completes_qzl_descriptor_and_resumes_babelmap_sq0163`, `save_state_is_tagged_and_round_trips_with_guard`) still pass, and that `compute_ifid`/`known_title`/hint tests are untouched.
+- [ ] **Step 8: Full build + tests.** `cargo build -p app --tests` clean (no warnings from your change — remove imports YOUR change orphaned, e.g. an unused `ifid` in a storage call). `cargo test -p app` — 0 failed. Verify the pre-existing Save State round-trip tests (`restore_from_file_completes_qzl_descriptor_and_resumes_lanthorn_sq0163`, `save_state_is_tagged_and_round_trips_with_guard`) still pass, and that `compute_ifid`/`known_title`/hint tests are untouched.
 
 - [ ] **Step 9: Commit** (`feat(app): key saves/sidecars by story filename in a per-game dir; add --data-dir (SQ-0284)`), staging only the edited `crates/app/src/*.rs` files.
 
@@ -243,7 +243,7 @@ Run → PASS.
 - Modify: `docs/persistence.md` (storage-location section), `README.md` (storage note + `--data-dir`), `docs/features/saves.md` if it names paths.
 - Modify/create: the changelog or a "storage layout changed" note.
 
-- [ ] **Step 1:** Update `docs/persistence.md` to describe the flat per-game dir (`<base>/<story-key>/` with `default.aux`/`default.glkvfs`/`default.babelmap` + `<slug>.babelmap`/`<slug>.qzl`), the per-host default base (app `~/.babelmap/saves`, CLIs story dir), and the `--data-dir` override. State the key is the story filename (IFID retained only for title/hint lookup).
+- [ ] **Step 1:** Update `docs/persistence.md` to describe the flat per-game dir (`<base>/<story-key>/` with `default.aux`/`default.glkvfs`/`default.lanthorn` + `<slug>.lanthorn`/`<slug>.qzl`), the per-host default base (app `~/.lanthorn/saves`, CLIs story dir), and the `--data-dir` override. State the key is the story filename (IFID retained only for title/hint lookup).
 - [ ] **Step 2:** Add the `--data-dir` flag to the README usage for app + both CLIs; note the interactive `@save` bare-name → per-game-dir resolution (path-bearing values verbatim).
 - [ ] **Step 3:** Add a **no-migration** note: existing `<ifid>.*` saves/sidecars orphan under the new filename-keyed layout (alpha); users re-create or manually move.
 - [ ] **Step 4:** Per project convention (memory: README major-features-only) — confirm this is a major storage change worth a README line; keep per-title/bugfix noise out.
@@ -259,7 +259,7 @@ cargo test -p zvm-cli && cargo test -p gvm-cli && cargo test -p app
 ```
 
 **Manual smoke:**
-- app: open a story, make a Save State + an in-game `@save quicksave`; confirm files land in `~/.babelmap/saves/<story-filename>/` as `default.babelmap` + `quicksave.qzl`. `--data-dir /tmp/bm` redirects them.
+- app: open a story, make a Save State + an in-game `@save quicksave`; confirm files land in `~/.lanthorn/saves/<story-filename>/` as `default.lanthorn` + `quicksave.qzl`. `--data-dir /tmp/bm` redirects them.
 - app picker: a story with a save in its per-game dir shows the save badge; one without doesn't.
 - zvm-cli `<story>`: aux writes to `<story-dir>/<story-filename>/default.aux`; `@save quick` → `<story-dir>/<story-filename>/quick.qzl`; `@save /tmp/x.qzl` → verbatim. `--data-dir /tmp/bm` redirects.
 - gvm-cli `<story>`: VFS writes to `<story-dir>/<story-filename>/default.glkvfs`; same `@save` behavior + `--data-dir`.

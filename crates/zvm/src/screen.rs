@@ -966,7 +966,7 @@ impl Default for ScreenState {
 /// **"When running Infocom's games."** §8.3.1.1 asks the same question of the
 /// palette knob — an interpreter may substitute its own colour values "if and
 /// only if they can detect they are running an original Infocom story file" —
-/// and gives no mechanism. babelmap answers both the same way, because the same
+/// and gives no mechanism. lanthorn answers both the same way, because the same
 /// thing answers them: interpreter 4 is only ever advertised by
 /// [`InterpreterProfile::Amiga`](../../app/interpreter/enum.InterpreterProfile.html),
 /// which is selected by an Amiga release floppy, by a native Amiga `Pic.data`
@@ -993,7 +993,7 @@ pub fn amiga_global_colour_pair(mem: &Memory) -> bool {
 ///   picks which member of [`crate::interpreter::MachineProfile`] is being asked
 ///   about; a number no row models answers `false`, never a substitute.
 /// - **Colours available** (Flags 1 bit 0, §8.3.2/§8.3.3) — with
-///   `honor_game_colours` off babelmap declares itself colourless, the host theme
+///   `honor_game_colours` off lanthorn declares itself colourless, the host theme
 ///   owns the screen, and there is no pair for the windows to share.
 fn machine_rule(mem: &Memory, claims: fn(&crate::interpreter::MachineProfile) -> bool) -> bool {
     mem.version() == 6
@@ -1017,7 +1017,7 @@ pub use crate::interpreter::AMIGA_INTERPRETER_NUMBER;
 ///
 /// **Why the host needs it, and why §8.3.3 alone was not enough.** Those two
 /// bytes are what §8.3.3 tells the *story* about the interpreter's defaults, and
-/// babelmap wrote them faithfully — but nothing ever PAINTED them, so a v6 window
+/// lanthorn wrote them faithfully — but nothing ever PAINTED them, so a v6 window
 /// left at [`ZColour::Default`] rendered in the host terminal's theme and an Amiga
 /// looked exactly like an IBM PC on screen. On the real machine the two registers
 /// are not advice, they are the screen: every pixel no picture and no `set_colour`
@@ -1093,7 +1093,7 @@ impl ScreenState {
     /// way:
     ///
     /// - §8.3's stated purpose is to *"simulate the Amiga hardware"*. A reading of
-    ///   it that makes babelmap diverge from that hardware defeats the rule's own
+    ///   it that makes lanthorn diverge from that hardware defeats the rule's own
     ///   reason for existing, and Infocom's shipped interpreter is the better
     ///   authority on how Infocom's own games looked on it.
     /// - It is what the machine actually did. `Journey - The Quest Begins.adf`
@@ -1580,7 +1580,7 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_availa
 /// the game that machine's colours.
 ///
 /// [`Palette::Standard`] is the §8.3.1 table verbatim and the default — it is
-/// what every babelmap session has always used. [`Palette::Amiga`] is the
+/// what every lanthorn session has always used. [`Palette::Amiga`] is the
 /// sibling, for the Amiga interpreter profile (SQ-0719).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Palette {
@@ -1598,7 +1598,7 @@ const PALETTE_AMIGA: u8 = 1;
 /// The process-wide active palette.
 ///
 /// Deliberately global rather than threaded through: the palette is a property
-/// of *the machine babelmap is pretending to be*, and there is exactly one of
+/// of *the machine lanthorn is pretending to be*, and there is exactly one of
 /// those per run. Every consumer — the VM's own `true_value` (window properties
 /// 17/18), the terminal cell renderer, the v6 pixel renderer and the CLI's SGR
 /// path — must agree on it or one game colour would look like two different
@@ -1618,7 +1618,7 @@ static INTERPRETER_VERSION: core::sync::atomic::AtomicU16 =
 /// Override the interpreter version written into header `$1F`, process-wide.
 ///
 /// Global for the same reason [`set_palette`] is, and it is the same KIND of
-/// fact: the byte is a property of the machine babelmap is pretending to be, and
+/// fact: the byte is a property of the machine lanthorn is pretending to be, and
 /// there is exactly one of those per run. It cannot be a session parameter
 /// because `GameSession`'s constructor runs the story to its first input, so the
 /// header has to be right before construction returns — and threading a
@@ -1786,7 +1786,7 @@ pub fn amiga_true_colour(n: u8) -> Option<u16> {
 /// ZMSD §8.3.1's true-colour table for standard colour numbers 2..=12, as
 /// 15-bit RGB. The spec's own table, transcribed verbatim; §8.3.1.1 calls these
 /// equivalences "recommended" and the interpreter default, and they are
-/// babelmap's default too ([`Palette::Standard`]).
+/// lanthorn's default too ([`Palette::Standard`]).
 pub fn zmsd_true_colour(n: u8) -> Option<u16> {
     Some(match n {
         2 => 0x0000,  // black
@@ -2899,7 +2899,7 @@ mod tests {
         for v in [3u8, 4, 5, 7, 8] {
             assert!(!amiga_global_colour_pair(&header_for(v, 4, true)), "version {v}");
         }
-        // …and with `honor_game_colours` off babelmap declares itself colourless
+        // …and with `honor_game_colours` off lanthorn declares itself colourless
         // (§8.3.2), so the host theme owns the screen and there is no pair to
         // share. The Amiga rule must not reach past that switch.
         assert!(
@@ -2910,7 +2910,7 @@ mod tests {
 
     /// The pair the host PAINTS with, as opposed to the pair §8.3.3 advertises to
     /// the story: on the Amiga they are the same two bytes, and before SQ-0740
-    /// babelmap wrote them and then painted the terminal's colours instead.
+    /// lanthorn wrote them and then painted the terminal's colours instead.
     #[test]
     fn the_amiga_screen_pair_is_the_headers_own_default_colours() {
         let mut mem = header_for(6, 4, true);

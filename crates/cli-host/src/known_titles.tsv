@@ -9,7 +9,7 @@
 # datafiles tabulated in "An Infocom Fact Sheet" rev 4.95 (Paul David Doherty),
 # section V.1.2 / V.1.3. Development, beta, and unreleased-final builds (marked
 # D/F/* in the source) are excluded, as are the two pre-1982 Zork builds that
-# predate the YYMMDD-serial convention (Z-code v1/v2, which babelmap can't run
+# predate the YYMMDD-serial convention (Z-code v1/v2, which lanthorn can't run
 # anyway). The release+serial pairs were cross-validated against 33 prefixes
 # computed directly from real story files (see crate::ifid::compute_ifid) — all
 # 33 matched the Fact Sheet, so the remaining (alternate-release) rows are
@@ -32,7 +32,7 @@
 #
 # Games are listed once per released version (a game with several disk releases
 # has several rows, ordered by serial date). v6 (YZIP graphical) titles are
-# included for completeness even though babelmap doesn't yet launch them.
+# included for completeness even though lanthorn doesn't yet launch them.
 #
 # ── Infocom: the 35 canonical games ──────────────────────────────────────────
 ZCODE-77-850814	A Mind Forever Voyaging

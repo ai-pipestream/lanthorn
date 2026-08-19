@@ -13,7 +13,7 @@
 
 Render the Z-machine **upper window** (a cursor-addressed character grid) and drive
 real-time `read_char` input, so v4+ status lines display correctly and cursor-addressed
-forms — e.g. Bureaucracy's licence-application form — are fillable in place. babelmap
+forms — e.g. Bureaucracy's licence-application form — are fillable in place. lanthorn
 today implements only the v3 model (scrolling text + a derived status line); the v4+
 windowed model is stubbed (window/cursor *state* is tracked, but there is no grid, no
 rendering, and only line input).
@@ -86,7 +86,7 @@ New module `crates/app/src/render/upper_window.rs`.
 - The bottom input prompt is hidden during `read_char`; a cursor block renders in the
   upper window at the game's cursor position.
 - **Escape-hatch:** during `read_char` mode keystrokes go to the game, EXCEPT the
-  configurable hotkey prefix (default Ctrl-K), which still opens babelmap's controls so
+  configurable hotkey prefix (default Ctrl-K), which still opens lanthorn's controls so
   the user is never trapped.
 
 ### 5. Theming

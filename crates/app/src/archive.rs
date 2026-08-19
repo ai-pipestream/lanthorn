@@ -1,4 +1,4 @@
-//! Single-file archive bundling a story's map + VM save into one `.babelmap` ZIP.
+//! Single-file archive bundling a story's map + VM save into one `.lanthorn` ZIP.
 //!
 //! # Integration points (for the follow-up wiring task)
 //!
@@ -14,7 +14,7 @@
 //!   machine.restore_quetzal(&ac.save).map_err(|e| ...)?;
 //!   ```
 //!
-//! Archive path convention (mirrors `ifid::map_path`): `<base_dir>/<ifid>.babelmap`
+//! Archive path convention (mirrors `ifid::map_path`): `<base_dir>/<ifid>.lanthorn`
 //!
 //! The `meta.ifid` field is currently populated by the caller; pass `None` until
 //! IFID computation is wired in. `load_archive` rejects only archives whose
@@ -153,7 +153,7 @@ fn save_ext(engine: &str) -> &'static str {
 }
 
 /// Whether an archive written by `archive_engine` may be restored while the app
-/// is running `current_engine`. The `.babelmap` archive records the engine that
+/// is running `current_engine`. The `.lanthorn` archive records the engine that
 /// produced the save (see [`ArchiveContents::engine`]); a save from a different
 /// engine is refused so a future Glulx save can't be fed to the Z-machine (or
 /// vice-versa). Only `"zmachine"` exists today, so this always allows in 3b-i.
@@ -162,7 +162,7 @@ pub fn restore_engine_allowed(archive_engine: &str, current_engine: &str) -> Res
         Ok(())
     } else {
         Err(format!(
-            "this save was written by the \"{archive_engine}\" engine, but babelmap is running the \"{current_engine}\" engine"
+            "this save was written by the \"{archive_engine}\" engine, but lanthorn is running the \"{current_engine}\" engine"
         ))
     }
 }
@@ -206,7 +206,7 @@ const ENTRY_TRANSCRIPT_IMG_PREFIX: &str = "transcript-img/";
 pub const CURRENT_FORMAT_VERSION: u32 = 8;
 
 /// What asked for this archive to be written (SQ-0531). Both triggers produce the
-/// SAME `.babelmap` container — map, transcript, screen, aux and all — so an
+/// SAME `.lanthorn` container — map, transcript, screen, aux and all — so an
 /// in-game `@save` is no longer a lesser save. What differs is the *convention* of
 /// the `game.<ext>` bytes inside, and it is this field that says which:
 ///
@@ -684,7 +684,7 @@ pub struct ArchiveContents {
     pub engine: String,
 }
 
-/// Write a `.babelmap` archive containing the current map and VM save.
+/// Write a `.lanthorn` archive containing the current map and VM save.
 ///
 /// `save` is the engine-tagged game state (from `Engine::save_state`); its
 /// `bytes` become `game.qzl` (Z-machine) or `game.glksave` (Glulx), and the
@@ -717,7 +717,7 @@ pub fn save_archive(
     }, transcript, transcript_kinds, transcript_runs, transcript_para, history, command_history)
 }
 
-/// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
+/// Write a `.lanthorn` archive with explicit metadata (name, turns, saved_at).
 ///
 /// Used by `persist_files::save_named` to attach save slot information. See
 /// [`save_archive`] for the `save`/`screen`/`aux` parameters. Persists no v6
@@ -743,7 +743,7 @@ pub fn save_archive_meta(
         transcript_kinds, transcript_runs, transcript_para, &[], history, command_history, &[], None, None)
 }
 
-/// Write a `.babelmap` archive including per-window v6 graphics-canvas PNG
+/// Write a `.lanthorn` archive including per-window v6 graphics-canvas PNG
 /// blobs (`pictures/win-N.png`), the host Save State entry point for v6 stories
 /// (Lane P). `pictures` is `(window_number, png_bytes)` — pass
 /// `GameSession::pictures_png()`. Non-v6 callers use [`save_archive_meta`],
@@ -968,7 +968,7 @@ pub fn save_archive_meta_pics(
     crate::storage::atomic_write(path, &bytes)
 }
 
-/// Read a `.babelmap` archive.
+/// Read a `.lanthorn` archive.
 ///
 /// Returns `Err` if the file is missing, corrupt, an entry is absent, or
 /// `meta.format_version` is greater than `CURRENT_FORMAT_VERSION`. The caller
@@ -1281,7 +1281,7 @@ impl ArchiveContents {
 
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
 ///
-/// If `path` is a `.babelmap` ZIP archive, returns its `game.qzl`/`game.glksave`
+/// If `path` is a `.lanthorn` ZIP archive, returns its `game.qzl`/`game.glksave`
 /// entry;
 /// otherwise returns the file's raw bytes (a plain `.qzl` Quetzal save).
 pub fn read_quetzal_from_file(path: &Path) -> io::Result<Vec<u8>> {
@@ -1306,7 +1306,7 @@ mod tests {
 
     fn temp_archive_path(tag: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("babelmap-archive-test-{}-{}.babelmap", tag, std::process::id()));
+        p.push(format!("lanthorn-archive-test-{}-{}.lanthorn", tag, std::process::id()));
         p
     }
 
@@ -1341,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn read_quetzal_extracts_game_sav_from_babelmap() {
+    fn read_quetzal_extracts_game_sav_from_lanthorn() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../zvm/tests/fixtures/czech.z5");
         if !fixture.exists() {
@@ -1350,12 +1350,12 @@ mod tests {
         let machine = dummy_machine();
         let expected = machine.save_quetzal();
 
-        let path = temp_archive_path("qzl-from-babelmap");
+        let path = temp_archive_path("qzl-from-lanthorn");
         save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save_archive");
         let got = read_quetzal_from_file(&path).expect("read_quetzal_from_file");
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(got, expected, "game.qzl bytes extracted from the .babelmap");
+        assert_eq!(got, expected, "game.qzl bytes extracted from the .lanthorn");
     }
 
     #[test]
@@ -2118,7 +2118,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // format freeze (docs/release/save-format-policy.md): the .babelmap archive
+    // format freeze (docs/release/save-format-policy.md): the .lanthorn archive
     // version is frozen at 5 (bumped from 4 by SQ-0531, which added `Meta.trigger`
     // so an archive says whether the game bytes inside it are the game's own
     // `@save` or a host snapshot). Changing this constant must be a deliberate
@@ -2424,7 +2424,7 @@ mod tests {
 
     // ── SQ-0644: the archive is written atomically ───────────────────────────
 
-    /// The auto-save rewrites `default.babelmap` EVERY turn, and the quit path can be
+    /// The auto-save rewrites `default.lanthorn` EVERY turn, and the quit path can be
     /// cut short by the exit watchdog — and it used to open the player's archive with
     /// `File::create`, truncating it before a byte of the replacement existed. A write
     /// that cannot complete must now leave the previous archive fully readable, which
@@ -2433,10 +2433,10 @@ mod tests {
     /// old archive on its way to the new one.
     #[test]
     fn an_interrupted_archive_write_keeps_the_previous_archive() {
-        let dir = std::env::temp_dir().join(format!("babelmap-arch-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-arch-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("default.babelmap");
+        let path = dir.join("default.lanthorn");
         let machine = dummy_machine();
         let meta = |turns: u32| Meta {
             format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns,

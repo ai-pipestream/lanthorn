@@ -86,7 +86,7 @@ fn story_ink_survives_a_save_state_resume() {
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(&session);
     let pics = session.pictures_png();
-    let path = std::env::temp_dir().join(format!("zork0-ink-{}.babelmap", std::process::id()));
+    let path = std::env::temp_dir().join(format!("zork0-ink-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper,
@@ -194,7 +194,7 @@ fn story_ink_survives_a_resume_without_a_v6_window_table() {
 
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(&session);
-    let arc = std::env::temp_dir().join(format!("photopia-ink-{}.babelmap", std::process::id()));
+    let arc = std::env::temp_dir().join(format!("photopia-ink-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &arc,
         &mapper,

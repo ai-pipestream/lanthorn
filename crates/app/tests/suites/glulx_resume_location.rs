@@ -62,7 +62,7 @@ fn a_resumed_glulx_game_reports_the_room_it_was_saved_in() {
     // `save_summary` records at every save site: the current room's name.
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(&session);
-    let path = std::env::temp_dir().join(format!("advent-resume-{}.babelmap", std::process::id()));
+    let path = std::env::temp_dir().join(format!("advent-resume-{}.lanthorn", std::process::id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper,

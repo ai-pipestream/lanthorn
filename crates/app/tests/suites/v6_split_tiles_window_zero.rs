@@ -7,7 +7,7 @@
 //! placed just below it (with its height suitably shortened, possibly making it
 //! disappear altogether if window 1 occupies the whole screen)."
 //!
-//! babelmap shortened window 0's height and left its origin at (1,1), so after a
+//! lanthorn shortened window 0's height and left its origin at (1,1), so after a
 //! split the story window sat *inside* the upper window's box. mysterious01.z6 is
 //! the case a player hit: it splits 260px for its artwork, draws into window 1, and
 //! narrates in window 0 — which it never moves, because it does not have to. The

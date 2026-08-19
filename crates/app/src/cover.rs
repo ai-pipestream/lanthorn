@@ -566,7 +566,7 @@ mod tests {
     /// caller via the returned dir's parent.
     fn temp_story_and_game_dir(name: &str, story_bytes: &[u8]) -> (PathBuf, PathBuf) {
         let base = std::env::temp_dir()
-            .join(format!("babelmap-cover-fallback-{}-{}", std::process::id(), name));
+            .join(format!("lanthorn-cover-fallback-{}-{}", std::process::id(), name));
         std::fs::create_dir_all(&base).unwrap();
         let story_path = base.join("game.gblorb");
         std::fs::write(&story_path, story_bytes).unwrap();
@@ -612,7 +612,7 @@ mod tests {
         // worker delivers `(path, None)` — exercises spawn → request → decode →
         // deliver with no cover fixture needed.
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("babelmap-cover-test-{}.txt", std::process::id()));
+        let path = dir.join(format!("lanthorn-cover-test-{}.txt", std::process::id()));
         std::fs::write(&path, b"not a blorb").unwrap();
 
         let d = CoverDecoder::new();

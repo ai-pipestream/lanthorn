@@ -1,5 +1,5 @@
 //! Compute the long version string at build time and expose it as an env var
-//! (`BABELMAP_LONG_VERSION`) that `src/lib.rs` reads with `env!`.
+//! (`LANTHORN_LONG_VERSION`) that `src/lib.rs` reads with `env!`.
 //!
 //! - On an exact release tag → the clean crate version (`0.1.0`).
 //! - Otherwise → `0.1.0 (<short-hash>)`, plus `-dirty` when the working tree has
@@ -31,7 +31,7 @@ fn main() {
     } else {
         base.clone()
     };
-    println!("cargo:rustc-env=BABELMAP_LONG_VERSION={long}");
+    println!("cargo:rustc-env=LANTHORN_LONG_VERSION={long}");
 
     // Rebuild when HEAD or the checked-out ref moves, so the hash stays current
     // after a commit or checkout. (Working-tree edits do not retrigger, so the

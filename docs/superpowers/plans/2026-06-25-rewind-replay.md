@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Optionally record a per-turn history of the game (VM Quetzal state + map snapshots) into the `.babelmap` archive, and add a modal that lets the player step/replay/rewind and **resume linearly** from any past turn (resuming truncates later turns). Gated by an opt-in config flag, default off.
+**Goal:** Optionally record a per-turn history of the game (VM Quetzal state + map snapshots) into the `.lanthorn` archive, and add a modal that lets the player step/replay/rewind and **resume linearly** from any past turn (resuming truncates later turns). Gated by an opt-in config flag, default off.
 
 **Architecture:** A new `app::history` module owns `TurnRecord` + pure capture/reconstruction helpers (no event-loop coupling, fully unit-testable). `AppState.history: Vec<TurnRecord>` is filled per-turn in `main.rs` when the flag is on (a map snapshot is stored only on turns that structurally change the graph, so storage ≈ #map-changes). `archive.rs` round-trips the history into the zip under `history/`. A `render/history.rs` modal + `AppState.replay: Option<ReplayState>` sub-mode (mirroring the existing `saves`/`tidy_anim` modals) renders a reconstructed preview map for the selected turn and resumes via `restore_quetzal` + `mapper` replacement.
 
@@ -278,8 +278,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/history.rs crates/app/src/lib.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): history module — TurnRecord + capture/replay helpers
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/history.rs crates/app/src/lib.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): history module — TurnRecord + capture/replay helpers
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -319,7 +319,7 @@ In `crates/app/src/config.rs`, in the `Config` struct, after the existing `recor
 
 ```rust
     /// When true, record a per-turn rewind/replay history (Quetzal save + map
-    /// snapshots) into the `.babelmap` archive. Default false (opt-in: it grows
+    /// snapshots) into the `.lanthorn` archive. Default false (opt-in: it grows
     /// the archive and keeps per-turn blobs in memory).
     #[serde(default)]
     pub record_turn_history: bool,
@@ -355,8 +355,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/config.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): record_turn_history config flag (default false)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/config.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): record_turn_history config flag (default false)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -397,7 +397,7 @@ In `crates/app/src/state.rs`, in `pub struct AppState`, near `pub turns: u32,` a
 
 ```rust
     /// Per-turn rewind/replay history. Filled when `config.record_turn_history`
-    /// is on; persisted into the `.babelmap` archive. Empty otherwise.
+    /// is on; persisted into the `.lanthorn` archive. Empty otherwise.
     pub history: Vec<crate::history::TurnRecord>,
 ```
 
@@ -447,8 +447,8 @@ Expected: builds clean, 0 warnings; suite PASS, including the headless smoke tes
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/state.rs crates/app/src/main.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): capture per-turn history when record_turn_history is on
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/state.rs crates/app/src/main.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): capture per-turn history when record_turn_history is on
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -456,7 +456,7 @@ Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
 
 ---
 
-### Task 4: Archive persistence — round-trip history into `.babelmap`
+### Task 4: Archive persistence — round-trip history into `.lanthorn`
 
 **Files:**
 - Modify: `crates/app/src/archive.rs` (`save_archive`/`save_archive_meta` gain a `history` param + write `history/` entries; `load_archive` reads them; `ArchiveContents.history`; `CURRENT_FORMAT_VERSION` → 2; version gate relaxed; tests)
@@ -703,7 +703,7 @@ Add `history` to the returned struct:
 
 The writers gained a param. Update every direct caller:
 
-- `crates/app/src/main.rs` — the `save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds)` calls at ~1085, ~1122, ~1492, ~1756, ~1841, ~2177: append `, &state.history` as the final argument (these write the live `.babelmap` and should carry history).
+- `crates/app/src/main.rs` — the `save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds)` calls at ~1085, ~1122, ~1492, ~1756, ~1841, ~2177: append `, &state.history` as the final argument (these write the live `.lanthorn` and should carry history).
 - `crates/app/src/persist_files.rs` — `save_named` wraps `save_archive_meta`; append `, &[]` (named-slot exports do not carry rewind history). If `save_named` is also called with history elsewhere, keep `&[]` — named saves are separate slots per the spec.
 - On the load path in `main.rs` (e.g. the auto-load block ~683 and restore blocks that bind `ac`): after a successful restore that sets `mapper = ac.mapper;`, also set `state.history = ac.history;` so a resumed game carries its recorded history forward (mirror the existing `state.transcript = ac.transcript;` line). Apply at the load sites near ~2067-2071 and ~1856-1882 and ~683 where `ac` is consumed.
 - Existing archive.rs tests (`round_trip_map_and_save_bytes`, etc.) call `save_archive(..., &[], &[])` — append `, &[]`.
@@ -716,8 +716,8 @@ Expected: PASS (incl. the two new history tests, the pre-existing `unknown_forma
 - [ ] **Step 9: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/archive.rs crates/app/src/main.rs crates/app/src/persist_files.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): round-trip rewind history into the .babelmap archive (format v2)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/archive.rs crates/app/src/main.rs crates/app/src/persist_files.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): round-trip rewind history into the .lanthorn archive (format v2)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -803,8 +803,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/keymap.rs crates/app/src/input.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): OpenHistory command + F4 binding + Files hotkey group
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/keymap.rs crates/app/src/input.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): OpenHistory command + F4 binding + Files hotkey group
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -1051,8 +1051,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 8: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/state.rs crates/app/src/input.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): ReplayState + replay sub-mode key routing and actions
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/state.rs crates/app/src/input.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): ReplayState + replay sub-mode key routing and actions
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -1343,8 +1343,8 @@ Expected: builds clean, 0 warnings; suite PASS including the smoke test. (The re
 - [ ] **Step 9: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/render/history.rs crates/app/src/render/mod.rs crates/app/src/main.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): replay/rewind modal — preview graph, transport, linear resume
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/render/history.rs crates/app/src/render/mod.rs crates/app/src/main.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): replay/rewind modal — preview graph, transport, linear resume
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

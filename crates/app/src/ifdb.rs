@@ -137,7 +137,7 @@ impl MetadataSource for IfdbClient {
 }
 
 fn user_agent() -> String {
-    format!("babelmap/{} (+https://github.com/sharkusk/babelmap)", env!("CARGO_PKG_VERSION"))
+    format!("lanthorn/{} (+https://github.com/sharkusk/lanthorn)", env!("CARGO_PKG_VERSION"))
 }
 
 fn ifiction_url(ifid: &str) -> String {
@@ -226,10 +226,10 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_identifies_babelmap_and_its_repo() {
+    fn user_agent_identifies_lanthorn_and_its_repo() {
         let ua = user_agent();
-        assert!(ua.starts_with("babelmap/"));
-        assert!(ua.contains("github.com/sharkusk/babelmap"));
+        assert!(ua.starts_with("lanthorn/"));
+        assert!(ua.contains("github.com/sharkusk/lanthorn"));
         assert!(ua.contains(env!("CARGO_PKG_VERSION")));
     }
 

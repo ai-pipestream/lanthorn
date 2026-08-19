@@ -20,7 +20,7 @@
   Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV
   ```
 - Validation (Change 1): confirm Flags1 bit 5 (v4+) + Flags2 bit 7 SET when `enable_sound=true` via zvm unit tests reading header 0x01/0x10.
-- Validation (Change 2): `babelmap <sound game>` → `/play-sound` lists resources; `/play-sound <n>` prints a step report ending `playback: started (sound id N)` (device) or `backend returned None` (headless).
+- Validation (Change 2): `lanthorn <sound game>` → `/play-sound` lists resources; `/play-sound <n>` prints a step report ending `playback: started (sound id N)` (device) or `backend returned None` (headless).
 
 ## File Structure
 | File | Responsibility |

@@ -4,7 +4,7 @@
 //! description, a game dumping its credits — and without a pause the beginning
 //! of it is gone before the player has read it. The original interpreters
 //! stopped at the bottom of each page and waited for a key, and so does
-//! babelmap's TUI.
+//! lanthorn's TUI.
 //!
 //! Only `zvm-cli` did. `gvm-cli` and `scott-cli` had no paging code at all
 //! (SQ-0617), which for Glulx also put `gvm-cli` behind an ordinary Glk library:

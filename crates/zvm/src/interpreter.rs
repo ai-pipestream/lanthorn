@@ -298,7 +298,7 @@ pub const APPLE_DEFAULT_FOREGROUND: u8 = 9;
 ///
 /// Three forms across five machines, and **none of them is what "invert the cell
 /// under the cursor" gives** — which is what a terminal front-end draws by default
-/// and what babelmap drew before this. Measured off the captures in
+/// and what lanthorn drew before this. Measured off the captures in
 /// `machine-screenshots/`, cell sizes included, so the proportions are the
 /// machine's rather than a guess at them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,11 +3,11 @@
 [← back to README](../../README.md)
 
 Quit mid-dungeon and come back to exactly where you stood — same room, same
-inventory, same map, same screen. babelmap layers a few different kinds of save
+inventory, same map, same screen. lanthorn layers a few different kinds of save
 on top of each other so you never lose progress, whether you save deliberately,
 let the game save itself, or never save at all.
 
-- **`.babelmap` Save States — freeze the whole session, not just the game.**
+- **`.lanthorn` Save States — freeze the whole session, not just the game.**
   Ctrl+S (`/save-state`) snapshots everything into one self-contained file: the
   VM's exact state, the map you've drawn, the on-screen windows, and the
   transcript. Ctrl+R (`/restore-state`) thaws it back. It's the emulator's own
@@ -17,7 +17,7 @@ let the game save itself, or never save at all.
   lists them (Enter to load, `s` to save-as, `d` to delete, `i` to import), each
   slot showing its name, type, turn count, and timestamp.
 - **One file format, whoever asked for it.** When a story runs its own `SAVE`,
-  babelmap writes the *same* `.babelmap` archive Ctrl+S writes — map, screen,
+  lanthorn writes the *same* `.lanthorn` archive Ctrl+S writes — map, screen,
   transcript and all. The old split, where an in-game save was a lesser file that
   held VM state and nothing else, is gone: `restore` from inside the game now
   brings your scrollback and its inline artwork back with it, even into a freshly
@@ -26,7 +26,7 @@ let the game save itself, or never save at all.
 
   And it's the same deal on every engine. Whether you're playing a Z-machine
   story, a Glulx one, or a Scott Adams adventure, typing `SAVE` leaves a
-  `.babelmap` that shows up in the saves manager and loads from either
+  `.lanthorn` that shows up in the saves manager and loads from either
   direction — the manager's Enter, or the game's own `RESTORE`. Glulx used to be
   the odd one out here, answering the saves manager with a flat "no such format";
   it isn't any more. A Glulx restore still leaves the windows you're looking at
@@ -50,11 +50,11 @@ let the game save itself, or never save at all.
 
   A save marked **State** is a host snapshot, taken *between* turns so you can
   bail out mid-puzzle. There is no save instruction at that program counter for
-  another interpreter to hand a result back to, so babelmap doesn't pretend those
+  another interpreter to hand a result back to, so lanthorn doesn't pretend those
   travel — the mark is there to be honest about it rather than to leave you
   guessing. (Glulx *cross-interpreter* interop isn't golden-tested yet either;
   tracked in SQ-0229.)
-- **Auto-save and auto-load.** Turn on auto-save and babelmap snapshots after
+- **Auto-save and auto-load.** Turn on auto-save and lanthorn snapshots after
   every turn; leave auto-load on (the default) and launching a story drops you
   straight back where you quit, map and all. Both are configurable — start fresh
   while keeping the accumulated map by switching auto-load off.
@@ -62,17 +62,17 @@ let the game save itself, or never save at all.
   transcripts, command recordings, and data files — live in an in-memory VFS that
   auto-persists per story across sessions, so they survive a plain quit with no
   explicit save (Kerkerkruip's scores and preferences stick, for instance). When
-  a game asks the *player* where to write (`create_by_prompt`), babelmap prompts
+  a game asks the *player* where to write (`create_by_prompt`), lanthorn prompts
   for a name; when it asks which file to read, it shows a picker of the story's
-  existing files. These files ride inside `.babelmap` Save States too. A Glulx
+  existing files. These files ride inside `.lanthorn` Save States too. A Glulx
   game's **own** fixed-name saves (`create_by_name` — e.g. Counterfeit Monkey's
   init cache, autosave, and undo slots) are written and read **silently**, with no
   prompt, and stay hidden from the player saves list; because they persist per
   story, a relaunch auto-restores them so the game skips its long init (SQ-0296).
   → [persistence model](../persistence.md)
-- **Rewind, replay, resume.** Switch on `record_turn_history` and babelmap keeps
+- **Rewind, replay, resume.** Switch on `record_turn_history` and lanthorn keeps
   a per-turn history — each turn's game save plus a snapshot of the map and
-  transcript — inside the `.babelmap` archive. Open the replay modal (the leader
+  transcript — inside the `.lanthorn` archive. Open the replay modal (the leader
   key then `h`, or `/open-history`) and step or auto-play through every past turn
   with the map reconstructed exactly as it looked at that moment, then resume the
   game from any earlier turn. It's undo that reaches back further than the game's

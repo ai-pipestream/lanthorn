@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When a VM fault halts the machine (out-of-bounds memory access, stack under/overflow), emit a call-frame stack trace instead of panicking (zvm) or a bare one-line diagnostic (gvm), surfaced on zvm-cli stderr, gvm-cli stderr, and inline in the babelmap TUI transcript.
+**Goal:** When a VM fault halts the machine (out-of-bounds memory access, stack under/overflow), emit a call-frame stack trace instead of panicking (zvm) or a bare one-line diagnostic (gvm), surfaced on zvm-cli stderr, gvm-cli stderr, and inline in the lanthorn TUI transcript.
 
 **Architecture:** Each zero-dep VM crate gains a `StackTrace`/`TraceFrame` value type plus a `to_lines() -> Vec<String>` formatter (pure string building — zero-dep). zvm gains a graceful fault path (a fault latch on `Memory` + `State`, a new `StepResult::Fault`, and a trace built from `state.frames`); gvm captures a trace at its existing `Err(String)` → `Quit` fault point by walking the Glulx frame-pointer chain. Hosts consume `to_lines()`: the two CLIs print to stderr and exit non-zero; the app stores the pre-formatted lines on `TurnResult.fault` and renders them with a new themeable `transcript:crash` style selector.
 

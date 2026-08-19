@@ -168,7 +168,7 @@ fn headless_e2e_smoke() {
 
     // ── Step 5: map file round-trips connections through load_map ─────────────
 
-    let tmp_dir = std::env::temp_dir().join(format!("babelmap-headless-{}", std::process::id()));
+    let tmp_dir = std::env::temp_dir().join(format!("lanthorn-headless-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
     let map_file = tmp_dir.join("test.map.json");
 

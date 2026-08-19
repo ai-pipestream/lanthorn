@@ -6,7 +6,7 @@
 
 ## Goal
 
-Optionally record a per-turn history of the game (VM state + map), stored in the `.babelmap` archive, and let the player **replay** turn-by-turn, **rewind**, and **resume** from any past turn (linear — resuming discards later turns).
+Optionally record a per-turn history of the game (VM state + map), stored in the `.lanthorn` archive, and let the player **replay** turn-by-turn, **rewind**, and **resume** from any past turn (linear — resuming discards later turns).
 
 ## Decisions
 
@@ -38,7 +38,7 @@ The `record_history=false` path adds nothing.
 
 ## Archive persistence (`archive.rs`)
 
-Extend the `.babelmap` zip with history entries (bump `Meta.format_version` to 2; v1 archives load with empty history):
+Extend the `.lanthorn` zip with history entries (bump `Meta.format_version` to 2; v1 archives load with empty history):
 - `history/index.json` — `Vec<{ turn, command, has_map: bool }>` (the per-turn metadata + ordering).
 - `history/turn-NNNN.sav` — the Quetzal bytes for each turn.
 - `history/turn-NNNN.map.json` — the map snapshot for turns that have one.
@@ -56,7 +56,7 @@ While open (a sub-mode in `key_to_action`, like saves/gallery):
 
 ## Config (`config.rs`)
 
-`#[serde(default)] pub record_history: bool` (default false) on `Config`. (Documented: enabling records per-turn snapshots into the `.babelmap`, growing the file.)
+`#[serde(default)] pub record_history: bool` (default false) on `Config`. (Documented: enabling records per-turn snapshots into the `.lanthorn`, growing the file.)
 
 ## Keymap
 
@@ -86,7 +86,7 @@ While open (a sub-mode in `key_to_action`, like saves/gallery):
 
 ## Risks & limitations (accepted)
 
-- **Archive size:** full per-turn Quetzal saves grow the `.babelmap`; mitigated by Deflate + map-snapshot-on-change, and the feature is opt-in (`record_history=false` default).
+- **Archive size:** full per-turn Quetzal saves grow the `.lanthorn`; mitigated by Deflate + map-snapshot-on-change, and the feature is opt-in (`record_history=false` default).
 - **Memory:** the full `history` lives in `AppState`; for very long sessions this is many Quetzal blobs in RAM. Acceptable for IF session lengths; a future cap could spill to disk.
 - **Resume fidelity:** restoring the VM is exact (Quetzal); the on-screen transcript is reconstructed from stored per-turn text, which should match what the player saw.
 - **`record_history` toggled mid-game:** history starts recording from when it is enabled; earlier turns are absent. Documented.

@@ -7,7 +7,7 @@
 
 ## Problem
 
-The story picker's info panel already has a **Saves** section, but it only lists `.babelmap` Save States by name/turn/date (`main.rs:1591`, fed by `StoryAux.saves` = `persist_files::list_saves`). It does **not** show:
+The story picker's info panel already has a **Saves** section, but it only lists `.lanthorn` Save States by name/turn/date (`main.rs:1591`, fed by `StoryAux.saves` = `persist_files::list_saves`). It does **not** show:
 - **where** the saves live on disk (the per-game dir path) — the SQ-0284 layout made this worth surfacing,
 - the story's **`.qzl` in-game saves**,
 - the **sidecars** (`default.aux` / `default.glkvfs`).
@@ -17,7 +17,7 @@ The user wants the browser to show a selected story's save files **and their on-
 ## Goals
 
 1. In the info panel's Saves section, show the story's **per-game directory path** as a header, so each listed file's full path is unambiguous (`<dir>/<filename>`).
-2. List **both** user-facing save types: `.babelmap` Save States (as today) **and** `.qzl` in-game saves.
+2. List **both** user-facing save types: `.lanthorn` Save States (as today) **and** `.qzl` in-game saves.
 3. Add a **secondary line** listing the present sidecars (`default.aux`, `default.glkvfs`).
 4. Everything is read-only display; no new actions. Keys off the same SQ-0284 per-game dir already resolved in `resolve_aux`.
 
@@ -34,18 +34,18 @@ The user wants the browser to show a selected story's save files **and their on-
 For a flat per-game dir, repeating the long absolute dir on every row is noise. Show it **once** as a header, then each file by filename (full path = header + filename):
 
 ```
-Saves · ~/.babelmap/saves/Zork1.z5/
- (default)   turn 42 · 2026-07-12   default.babelmap
- quicksave   turn 40 · 2026-07-11   quicksave.babelmap
+Saves · ~/.lanthorn/saves/Zork1.z5/
+ (default)   turn 42 · 2026-07-12   default.lanthorn
+ quicksave   turn 40 · 2026-07-11   quicksave.lanthorn
  quick       2026-07-11             quick.qzl
 Sidecars: default.aux · default.glkvfs
 ```
 
 - Header line: `Saves · <game_dir>` (abbreviate `$HOME` → `~`). Shown whenever the dir has any save OR sidecar.
-- `.babelmap` rows: `<name>  turn <n> · <date>  <filename>` (name/turn/date as today; **add the filename**).
+- `.lanthorn` rows: `<name>  turn <n> · <date>  <filename>` (name/turn/date as today; **add the filename**).
 - `.qzl` rows: `<name>  <date>  <filename>` (bare Quetzal has no turn/Meta — use the file mtime for the date).
 - Sidecars: one secondary line `Sidecars: <names present>` (`default.aux` and/or `default.glkvfs`), omitted if neither exists.
-- Ordering: `.babelmap` first (default slot, then named newest-first, as `list_saves` already sorts), then `.qzl` (newest-first by mtime).
+- Ordering: `.lanthorn` first (default slot, then named newest-first, as `list_saves` already sorts), then `.qzl` (newest-first by mtime).
 - Empty state: if no saves and no sidecars, show nothing (as today) — no empty header.
 
 > _Open display choice for review:_ dir-as-header + filenames (recommended, above) vs. a full absolute path on every row. Recommending the header form — clearer and fits the narrow panel. Say the word if you'd rather see the full path per line.
@@ -63,9 +63,9 @@ Extend `StoryAux` (resolved lazily per highlight in `resolve_aux`) with:
 
 ## Testing
 
-- `persist_files::list_qzl`: enumerates `<game_dir>/*.qzl` (name = stem, mtime date), skips `.babelmap`; empty dir → empty; sorted newest-first.
-- `picker::resolve_aux`: for a temp game dir containing `default.babelmap` + `quick.qzl` + `default.aux`, the returned `StoryAux` has the right `game_dir`, one `.babelmap` save, one `qzl_save`, and `["default.aux"]` sidecars.
-- `draw_info_panel`: extend the existing `info_panel_renders_metadata_features_and_resources` (main.rs:7199) — with an aux carrying a `.babelmap` save + a `.qzl` save + a sidecar, assert the rendered buffer contains the dir header, both filenames, and the `Sidecars:` line.
+- `persist_files::list_qzl`: enumerates `<game_dir>/*.qzl` (name = stem, mtime date), skips `.lanthorn`; empty dir → empty; sorted newest-first.
+- `picker::resolve_aux`: for a temp game dir containing `default.lanthorn` + `quick.qzl` + `default.aux`, the returned `StoryAux` has the right `game_dir`, one `.lanthorn` save, one `qzl_save`, and `["default.aux"]` sidecars.
+- `draw_info_panel`: extend the existing `info_panel_renders_metadata_features_and_resources` (main.rs:7199) — with an aux carrying a `.lanthorn` save + a `.qzl` save + a sidecar, assert the rendered buffer contains the dir header, both filenames, and the `Sidecars:` line.
 
 ## Rollout
 

@@ -6,7 +6,7 @@
 
 **Architecture:** A static command registry (`CommandSpec` table) replaces both the curated slash table and (by Wave 2) the `Command` enum's naming role. `parse()` looks a command up by name and runs its dispatch closure. Key bindings become command-strings dispatched through the same parser. Execution still flows through the existing `Action` enum (via `SlashOutcome::Action`) and `SlashOutcome` variants. Delivered in three waves, each green and usable.
 
-**Tech Stack:** Rust 2021 workspace; crate `app` (binary `babelmap`); ratatui 0.29; modules `crate::slash`, `crate::keymap`, `crate::input`, `crate::config`, `crate::render::transcript`, `crate::main`.
+**Tech Stack:** Rust 2021 workspace; crate `app` (binary `lanthorn`); ratatui 0.29; modules `crate::slash`, `crate::keymap`, `crate::input`, `crate::config`, `crate::render::transcript`, `crate::main`.
 
 ## Global Constraints
 
@@ -176,7 +176,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "reset-game [map]", description: "restart the game; 'reset-game map' also clears the map",
         dispatch: |a| SlashOutcome::Reset { map: a.first().copied() == Some("map") } },
     CommandSpec { name: "quit", category: Category::Game, context: Context::Global,
-        usage: "quit", description: "exit babelmap",
+        usage: "quit", description: "exit lanthorn",
         dispatch: |_| SlashOutcome::Quit },
     CommandSpec { name: "open-hints", category: Category::Game, context: Context::Global,
         usage: "open-hints", description: "open the hints panel",
@@ -996,7 +996,7 @@ Factor the existing typed-input `match slash::parse(...) { … }` body (Task 5) 
 - [ ] **Step 4: Run tests**
 
 Run: `cargo test -p app && cargo build -p app`
-Expected: builds 0 warnings; full suite green. Manually sanity-run `babelmap ./stories/minizork.z3`: arrows pan, `+`/`-` zoom, `c` centers, Ctrl+S saves, `g` opens gallery.
+Expected: builds 0 warnings; full suite green. Manually sanity-run `lanthorn ./stories/minizork.z3`: arrows pan, `+`/`-` zoom, `c` centers, Ctrl+S saves, `g` opens gallery.
 
 - [ ] **Step 5: Commit**
 

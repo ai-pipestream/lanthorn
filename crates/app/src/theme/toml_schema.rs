@@ -60,7 +60,7 @@ pub struct RawStatusBar {
 /// Current `style.toml` schema version. Bump when a change to the style schema
 /// (new/renamed selectors, changed defaults, structural moves) means an older
 /// hand-written file may no longer produce the intended look. The generated
-/// template stamps this as `version = N`; a future babelmap can compare a file's
+/// template stamps this as `version = N`; a future lanthorn can compare a file's
 /// `version` against this to flag an out-of-date style file.
 pub const STYLE_SCHEMA_VERSION: u32 = 1;
 

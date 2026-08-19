@@ -13,7 +13,7 @@
 //! rules, the box-drawing set, blocks, meter bars, and the 26 runes.
 //!
 //! **This is the only oracle here that can falsify the QUESTION rather than the
-//! answer.** Every other test asks whether babelmap does what the table says; this
+//! answer.** Every other test asks whether lanthorn does what the table says; this
 //! one asks whether the table is right, and it immediately found that codes 71–74
 //! put `U+FFFD` on screen where the Amiga inked a corner pixel.
 //!

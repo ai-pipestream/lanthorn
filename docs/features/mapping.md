@@ -6,7 +6,7 @@ Play the game; the map draws itself. Every room you enter and every exit you tak
 is boxed, connected, and de-overlapped on the fly, then continuously nudged into a
 clean layout — no graph paper, no pausing to annotate, no manual placement. Walk
 north and a new room slides into place north of where you stood; double back and
-the connection closes into a loop. This is babelmap's flagship feature, and it is
+the connection closes into a loop. This is lanthorn's flagship feature, and it is
 the reason the map pane earns half your terminal.
 
 The mapper is deliberately **engine-agnostic**. It never sees a Z-machine opcode
@@ -16,12 +16,12 @@ game**, whether you're charting the Great Underground Empire in *Zork*, threadin
 *Counterfeit Monkey* in Glulx, or exploring *Adventureland* in a classic Scott
 Adams adventure. One map builder, three engines, zero special cases.
 
-![babelmap playing Zork I with a live automap of the Great Underground Empire](../automapping.png)
+![lanthorn playing Zork I with a live automap of the Great Underground Empire](../automapping.png)
 
 ## Knowing where you are — across three engines
 
 Before the mapper can place a room it has to be told which room you're in, and
-each engine surfaces that differently. babelmap handles all of it, and records
+each engine surfaces that differently. lanthorn handles all of it, and records
 *how* it worked out each room the first time it finds it — right-click a room to see
 "Found by:" in the room dock's Diagnostics body. It is kept with the room, so the answer is
 still there long after the turn that discovered it.
@@ -35,7 +35,7 @@ still there long after the turn that discovered it.
   (`via player object`), and falling back to a name-only room otherwise
   (`via name match`, or `via name (unlinked)` when it can't be tied to an object).
   A status line can also label several things at once — *The Impossible Stairs*
-  reads `Year: 2001  Place: Front Lawn` — and babelmap does not assume which label
+  reads `Year: 2001  Place: Front Lawn` — and lanthorn does not assume which label
   means "room": each labelled field is offered to the object tree, and the one the
   game recognises as a place is the one mapped, under the name on screen rather
   than the compiler's identifier for it.
@@ -53,7 +53,7 @@ still there long after the turn that discovered it.
   validates against the player's room — so those now automap as well.
 - **Graphical v6 Z-machine** (Zork Zero, Shogun, Arthur) has no status line at
   all: the bar is *painted* pixel by pixel wherever the game feels like putting
-  it. babelmap finds it by asking where the prose window starts and reading the
+  it. lanthorn finds it by asking where the prose window starts and reading the
   band directly above it — which is how Arthur works, since it hides its bar
   twelve rows down the screen, tucked under a full-width panel of artwork. The
   glyphs are laid back onto their columns first, because Arthur paints its bar one
@@ -72,7 +72,7 @@ still there long after the turn that discovered it.
   player object's parent stays empty for the whole game), and every room object
   answers to the same compiled name, `ScottRoom`, with the line you actually read
   — "I'm in a dense SPOOKY Forest" — tucked away in a property. What the games do
-  keep is a variable holding the room you're standing in, and babelmap takes it —
+  keep is a variable holding the room you're standing in, and lanthorn takes it —
   but only after checking that the room it names is carrying, in its own
   properties, the very words on the screen this turn. Object tree and screen have
   to agree, every turn, and no variable is trusted just for being a variable. The
@@ -81,12 +81,12 @@ still there long after the turn that discovered it.
   all read "I'm in a Tunnel" — and a room known only by its name would fold every
   one of them into a single dot.
 - **Glulx (Inform 7)** games often keep the room out of the status bar entirely,
-  so babelmap reads the **Inform room heading** — the bold title line printed as
+  so lanthorn reads the **Inform room heading** — the bold title line printed as
   you enter a room (`via room heading`). Games like FooFoo and Superluminal
   Vagrant Twin map cleanly this way; rooms are matched by name since the Glulx
   world model isn't introspectable, and pre-game menus or character-setup screens
   correctly produce no room. Front matter is bolded the same way a room is, so
-  babelmap reads the *shape of the page* rather than the words on it: Inform
+  lanthorn reads the *shape of the page* rather than the words on it: Inform
   joins a room heading to the description underneath it and then hands you the
   **command prompt**, while a title, an act list or a content warning stands
   alone above a blank line on a page that never gets that far. That is why THE
@@ -120,7 +120,7 @@ The map is a place you can move through, not just a picture.
   name works in place of those (`move-region Cellar`).
   Everything is anchored on the **selected room** — click one, or `select-room` —
   and *its* side of whatever gets cut is the side that travels. You never have to
-  point at an edge, because babelmap works out which rooms go, in three steps.
+  point at an edge, because lanthorn works out which rooms go, in three steps.
   First it walks the compass exits and stops where the portals are: that is a floor,
   a cellar, a tower, and it needs nothing from you but the room you picked. If the
   walk finds no portal to stop at and swallows the whole layer — Zork's underground
@@ -148,7 +148,7 @@ The map is a place you can move through, not just a picture.
   lands on the nearest free one. Two things it will refuse, and it says which: a
   fresh layer for a region that is *already* the whole layer (that would only rename
   it), and anything that would leave `Main` with no rooms at all.
-- **The map sometimes speaks first** — twice in a game, babelmap notices that a set of
+- **The map sometimes speaks first** — twice in a game, lanthorn notices that a set of
   rooms wants to be a layer of its own, and says so. It never acts: layers still come
   only from a `move-region` you asked for. It **suggests**, and you decide.
   The first case is structural: a set of rooms that hangs off one portal and nothing else.
@@ -162,14 +162,14 @@ The map is a place you can move through, not just a picture.
   map has finished being drawn and you are the one who closed it. But Zork's trapdoor
   crashes shut and is barred behind you, and a cellar with no way out would on that rule
   never be mentioned at all — so when the rooms beyond a portal grow into a floor plan
-  while you are still down there, babelmap speaks on the room that makes it four, and then
+  while you are still down there, lanthorn speaks on the room that makes it four, and then
   goes quiet. One offer per region, not one per room you add to it.
   What it offers is always the side you are **on**, never the side you came from — that is
   the whole safety of asking on the way in. A region only counts as one when every room in
   it was found *after* the room it hangs off, so your starting town, which predates
   everything, can never be what a prompt proposes to peel away.
   The second case is the name. Walk into a room called **Maze** from a room that isn't
-  one, and babelmap says so at the doorway — no four-room floor, no waiting for you to
+  one, and lanthorn says so at the doorway — no four-room floor, no waiting for you to
   return, because the name *is* the evidence and it is there immediately. It fires on
   the way **in**, once, and then goes quiet: Zork's maze is fifteen rooms all called
   "Maze", and asking in each is the nagging this whole design exists to avoid.
@@ -181,7 +181,7 @@ The map is a place you can move through, not just a picture.
   layers in the first place, so the `down` you reached the cellar by must not be read as
   proof the cellar belongs upstairs. Grid position is not evidence either; the router
   derives it, so a suggestion built on it could change without the map changing.
-  And whatever you answer, babelmap remembers it, in the map file, against the passage you
+  And whatever you answer, lanthorn remembers it, in the map file, against the passage you
   will cross again — the way out when you were noticed leaving, the trapdoor itself when
   you were noticed inside. **Not now** re-arms
   the seam for your next crossing, **never** silences that passage for good, and folding
@@ -238,7 +238,7 @@ The map is a place you can move through, not just a picture.
 
 ## Connections that stay readable
 
-A naïve "one arrow per exit" map dissolves into spaghetti fast. babelmap routes
+A naïve "one arrow per exit" map dissolves into spaghetti fast. lanthorn routes
 connections through a lane system with crossing-elimination and overlap removal,
 and it understands the awkward cases:
 
@@ -257,7 +257,7 @@ and it understands the awkward cases:
   many ways you can actually walk it. Zork's around-the-house ring links each pair by
   both a cardinal and a diagonal; Adventure's maze will happily connect the same two
   rooms four different ways, and a staircase often shadows a compass passage. Drawing
-  them all means lines that exist only to cross each other, so babelmap picks a single
+  them all means lines that exist only to cross each other, so lanthorn picks a single
   representative: a **reciprocal** pairing first — the two ends are exact opposites, so
   the line runs straight and each arrowhead points the way you really travel — and
   otherwise by direction priority, **N, S, E, W, NE, NW, SE, SW, up, down**. The line
@@ -315,7 +315,7 @@ a grid can satisfy them. Eleven of the twelve rooms are called "Maze".
 
 Compass geometry is not what a maze *is*. What you actually know in a maze is a
 direction table per room: *west from here goes to that one, and the way back is
-north*. So babelmap will draw you the table.
+north*. So lanthorn will draw you the table.
 
 ```
                N     S     E     W    NE    NW    SE    SW     U     D     I     O
@@ -387,7 +387,7 @@ that room's row. Selecting a room **bolds every cell elsewhere that arrives at i
 question a row cannot answer about itself. That highlight is style, never a glyph:
 the table's text does not change.
 
-**Clicking a room also shows you the way there.** babelmap searches the map for the
+**Clicking a room also shows you the way there.** lanthorn searches the map for the
 shortest route it already knows how to walk, from the room you are standing in to
 the one you clicked, and marks **one cell per step: the row of the room you are in,
 in the column you leave by**. Read the marks top to bottom and you have walking
@@ -398,13 +398,13 @@ unlike the entrance bolding beside it: the two answer opposite questions, and th
 routinely light up in the same row.
 
 The search walks passages only in the direction you walked them, so a one-way
-corridor is never offered backwards — a route babelmap shows you is a route you can
+corridor is never offered backwards — a route lanthorn shows you is a route you can
 actually walk. It searches the *whole* map rather than just this layer, because a
 layer is a way of reading rooms, not a wall between them; steps that land on other
 layers simply have no row here to draw on, and where the route walks out of this
 layer the `⇱out` cell it leaves by is the one marked (that cell already footnotes
 where it goes). The view never jumps layers behind your back. If there is no known
-route at all, the room still selects and babelmap says so rather than falling
+route at all, the room still selects and lanthorn says so rather than falling
 silent — a half-route to somewhere nearer would be answering a question you did not
 ask.
 
@@ -431,7 +431,7 @@ fading breadcrumb (`map.trail`) — the "how did I get here" a drawn map would h
 answered by itself. The flag also puts a `⌗` marker on the layer's tab (`Maze ⌗`) in
 both tab strips, and takes it away again when unflagged.
 
-**The flag is always yours to set.** babelmap never guesses from *statistics* — you
+**The flag is always yours to set.** lanthorn never guesses from *statistics* — you
 are in the maze long before any measure of tangledness could tell, which is why the
 old asymmetry detector fired late, never, or on an ordinary ring of rooms. So the
 moment you decide "this is a maze", press `z`; there is nothing to wait for.

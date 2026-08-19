@@ -473,13 +473,13 @@ mod tests {
         let Ok(bytes) = std::fs::read(&fixture) else { return };
 
         let game_dir = std::env::temp_dir()
-            .join(format!("babelmap-reset-delete-{}", std::process::id()));
+            .join(format!("lanthorn-reset-delete-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&game_dir);
         std::fs::create_dir_all(&game_dir).unwrap();
-        for f in ["default.glkvfs", "default.aux", "default.babelmap"] {
+        for f in ["default.glkvfs", "default.aux", "default.lanthorn"] {
             std::fs::write(game_dir.join(f), b"x").unwrap();
         }
-        std::fs::write(game_dir.join("myslot.babelmap"), b"x").unwrap();
+        std::fs::write(game_dir.join("myslot.lanthorn"), b"x").unwrap();
         std::fs::write(game_dir.join("quick.qzl"), b"x").unwrap();
 
         let mut engine: Box<dyn app::engine::Engine> =
@@ -488,10 +488,10 @@ mod tests {
         let mut state = app::state::AppState::default();
         super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, &game_dir, false, true);
 
-        for f in ["default.glkvfs", "default.aux", "default.babelmap"] {
+        for f in ["default.glkvfs", "default.aux", "default.lanthorn"] {
             assert!(!game_dir.join(f).exists(), "{f} should be deleted by delete_data");
         }
-        assert!(game_dir.join("myslot.babelmap").exists(), "named save kept");
+        assert!(game_dir.join("myslot.lanthorn").exists(), "named save kept");
         assert!(game_dir.join("quick.qzl").exists(), "in-game save kept");
 
         let _ = std::fs::remove_dir_all(&game_dir);

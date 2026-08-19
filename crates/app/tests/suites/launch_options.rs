@@ -42,7 +42,7 @@ fn stories_dir() -> PathBuf {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("babelmap-launchopt-it-{}-{tag}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("lanthorn-launchopt-it-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -80,7 +80,7 @@ fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
         // than the shape.
         assert!(
             c.caveat().is_none(),
-            "{} still warns about something babelmap has fixed: {:?}",
+            "{} still warns about something lanthorn has fixed: {:?}",
             c.filename,
             c.caveat()
         );
@@ -594,7 +594,7 @@ fn the_dialog_renders_its_list_its_derived_number_and_its_checkbox() {
 //
 // Reported by the user against the browser: *"the story list dialog box doesn't
 // allow me to choose the b/w mac format."* The enumeration was a `read_dir` of
-// the story's own directory, written before babelmap could open a disk at all,
+// the story's own directory, written before lanthorn could open a disk at all,
 // so a story mounted out of `stories/Zork Zero Disk.image` could be offered
 // neither of the two archives that disk carries. `--pictures Pic.data` and the
 // per-game `pictures` key were the only doors to the Macintosh's two-colour art.

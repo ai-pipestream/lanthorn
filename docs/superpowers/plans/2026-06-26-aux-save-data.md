@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the v5 auxiliary `save table bytes name` / `restore table bytes name` opcodes (EXT:0x00 / EXT:0x01, store form, ≥3 operands) so games can persist a named region of memory. The engine owns an in-memory aux table (no filesystem, no suspend); the app persists it either inside the `.babelmap` archive or in a per-game global file, chosen once by the user via a `aux_storage` config (default "ask", with a first-use prompt). 0-operand `save`/`restore` keep the existing full game-state behavior.
+**Goal:** Implement the v5 auxiliary `save table bytes name` / `restore table bytes name` opcodes (EXT:0x00 / EXT:0x01, store form, ≥3 operands) so games can persist a named region of memory. The engine owns an in-memory aux table (no filesystem, no suspend); the app persists it either inside the `.lanthorn` archive or in a per-game global file, chosen once by the user via a `aux_storage` config (default "ask", with a first-use prompt). 0-operand `save`/`restore` keep the existing full game-state behavior.
 
 **Architecture:** Six layers. (1) zvm: `Machine.aux_data` + `aux_dirty` + the table-form opcodes. (2) app `aux_store` module: the blob codec + the global-file backend. (3) app `archive.rs`: always embed/extract an `aux.dat` zip entry. (4) app `config.rs` + config screen: the `aux_storage` tri-state setting. (5) app run-loop wiring: startup load (global mode), post-turn persist, archive-load sites repopulate the table. (6) app first-use prompt dialog (resolves "ask").
 
@@ -121,7 +121,7 @@ In `crates/zvm/src/cpu/exec.rs`, in `struct Machine` after `pub diagnostics: Vec
 ```rust
     /// In-memory auxiliary save table for the v5 `save/restore table` opcodes,
     /// keyed by the game-supplied name string. The host persists/repopulates it
-    /// (in the `.babelmap` archive or a per-game global file); the engine itself
+    /// (in the `.lanthorn` archive or a per-game global file); the engine itself
     /// never touches the filesystem.
     pub aux_data: std::collections::BTreeMap<String, Vec<u8>>,
     /// Set true whenever an aux `save table` writes the table. The host clears it
@@ -226,8 +226,8 @@ Run: `cargo test -p zvm` → PASS, 0 warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): v5 auxiliary save/restore table opcodes (in-memory table)
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): v5 auxiliary save/restore table opcodes (in-memory table)
 
 EXT:0x00/0x01 with >=3 operands now operate on an in-memory aux_data table
 keyed by the game-supplied name: save copies bytes from the table and stores
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn global_file_round_trips() {
-        let dir = std::env::temp_dir().join(format!("babelmap-aux-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-aux-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ifid = "ZCODE-1-840726-ABCD";
         assert!(read_global_aux(&dir, ifid).is_empty(), "absent file → empty");
@@ -397,8 +397,8 @@ Run: `cargo test -p app` → PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/aux_store.rs crates/app/src/lib.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): aux_store — aux-table blob codec + per-game global file
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/aux_store.rs crates/app/src/lib.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): aux_store — aux-table blob codec + per-game global file
 
 encode_aux/decode_aux serialize the BTreeMap<String,Vec<u8>> aux table as a
 compact length-prefixed blob (tolerant decode). aux_path/read_global_aux/
@@ -410,7 +410,7 @@ Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
 
 ---
 
-### Task 3: app — embed/extract `aux.dat` in the `.babelmap` archive
+### Task 3: app — embed/extract `aux.dat` in the `.lanthorn` archive
 
 **Files:**
 - Modify: `crates/app/src/archive.rs` — add `ENTRY_AUX`; embed aux in `save_archive_meta`; extract in `load_archive`; add `aux` to `ArchiveContents`; add a round-trip test.
@@ -488,8 +488,8 @@ Run: `cargo test -p app` → PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/archive.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): embed/extract aux.dat in the .babelmap archive
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/archive.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): embed/extract aux.dat in the .lanthorn archive
 
 save_archive_meta embeds the machine's aux_data as an aux.dat zip entry when
 non-empty; load_archive extracts it into ArchiveContents.aux (empty for older
@@ -549,7 +549,7 @@ pub enum AuxStorage {
     /// Ask the user on first use, then store the choice in config.
     #[default]
     Ask,
-    /// Inside each `.babelmap` save archive.
+    /// Inside each `.lanthorn` save archive.
     Archive,
     /// In one per-game file in the save directory (shared across playthroughs).
     Global,
@@ -609,8 +609,8 @@ Run: `cargo test -p app` → PASS, 0 warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/config.rs crates/app/src/render/config_screen.rs crates/app/src/input.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): aux_storage config setting (ask/archive/global)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/config.rs crates/app/src/render/config_screen.rs crates/app/src/input.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): aux_storage config setting (ask/archive/global)
 
 New tri-state config (default ask) controlling where v5 aux save data is
 persisted, wired through Default/resolve/write_config and the in-app config
@@ -698,8 +698,8 @@ Manual (not gating): with `aux_storage = global` in config, a v5 story that issu
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/main.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): persist/restore aux save data (archive + global modes)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/main.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): persist/restore aux save data (archive + global modes)
 
 Global mode writes the per-game <ifid>.aux after any turn that changed the aux
 table and pre-loads it at startup; archive mode rides the existing per-turn
@@ -730,7 +730,7 @@ In `crates/app/src/state.rs`, near `reset_dialog: bool` (~734): `pub aux_prompt:
 
 - [ ] **Step 2: Render the dialog**
 
-Create `crates/app/src/render/aux_dialog.rs` mirroring `render/reset_dialog.rs`: return `None` unless `state.aux_prompt`; draw a themed box titled e.g. "Side-data" with the message "This story saves persistent side-data. Where should babelmap keep it?" and two focusable buttons — index 0 "With each save" (Archive), index 1 "Globally" (Global) — highlighted by `state.dialog_focus`. Return a rects struct (`area`, `archive`, `global`, optional `close`) for mouse hit-testing. Register `pub mod aux_dialog;` in `render/mod.rs` and call it from the frame draw where `reset_dialog` is drawn.
+Create `crates/app/src/render/aux_dialog.rs` mirroring `render/reset_dialog.rs`: return `None` unless `state.aux_prompt`; draw a themed box titled e.g. "Side-data" with the message "This story saves persistent side-data. Where should lanthorn keep it?" and two focusable buttons — index 0 "With each save" (Archive), index 1 "Globally" (Global) — highlighted by `state.dialog_focus`. Return a rects struct (`area`, `archive`, `global`, optional `close`) for mouse hit-testing. Register `pub mod aux_dialog;` in `render/mod.rs` and call it from the frame draw where `reset_dialog` is drawn.
 
 - [ ] **Step 3: Trigger the dialog instead of treating Ask as Archive**
 
@@ -780,8 +780,8 @@ Manual (not gating): set `aux_storage = ask`; a story's first `save table` pops 
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/state.rs crates/app/src/render/aux_dialog.rs crates/app/src/render/mod.rs crates/app/src/main.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): first-use prompt for aux storage mode (resolves ask)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/state.rs crates/app/src/render/aux_dialog.rs crates/app/src/render/mod.rs crates/app/src/main.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): first-use prompt for aux storage mode (resolves ask)
 
 On the first aux save while aux_storage is ask, a themed dialog asks whether to
 keep side-data with each save or globally; the choice is written to config and

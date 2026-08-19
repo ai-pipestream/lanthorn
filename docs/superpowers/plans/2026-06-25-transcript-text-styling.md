@@ -203,8 +203,8 @@ Expected: PASS, 0 failures, 0 warnings.
 - [ ] **Step 11: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/state.rs crates/app/src/main.rs crates/app/src/render/transcript.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): four transcript kinds + filter mapping + room-name tracking
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/state.rs crates/app/src/main.rs crates/app/src/render/transcript.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): four transcript kinds + filter mapping + room-name tracking
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -344,8 +344,8 @@ Expected: PASS, 0 warnings. (Existing `resolve_empty_doc_equals_terminal_default
 - [ ] **Step 9: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/Cargo.toml crates/app/src/colors.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): per-category transcript Style fields + CompiledRule (regex)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/Cargo.toml crates/app/src/colors.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): per-category transcript Style fields + CompiledRule (regex)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -392,7 +392,7 @@ fn transcript_category_selectors_parse_and_apply() {
 #[test]
 fn write_style_full_round_trips_transcript_categories() {
     use ratatui::style::Color;
-    let dir = std::env::temp_dir().join(format!("babelmap-style-tcat-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-style-tcat-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tcat.toml");
     let mut cs = crate::colors::ColorScheme::terminal_default();
@@ -460,8 +460,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): transcript category + warning_marker style selectors
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): transcript category + warning_marker style selectors
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -665,8 +665,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 9: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): parse and compile user [[transcript.rule]] regex rules
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): parse and compile user [[transcript.rule]] regex rules
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -773,8 +773,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/colors.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): ColorScheme::resolve_story_style with built-in location/system
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/colors.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): ColorScheme::resolve_story_style with built-in location/system
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -875,8 +875,8 @@ Expected: PASS, 0 warnings. (`write_style_full_is_self_contained` exercises the 
 - [ ] **Step 9: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/symbols.rs crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): SymbolSet meta_gutter / warning_gutter glyph slots
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/symbols.rs crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): SymbolSet meta_gutter / warning_gutter glyph slots
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -1027,8 +1027,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/render/transcript.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): render transcript per-kind styles, gutters, story rules
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/render/transcript.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): render transcript per-kind styles, gutters, story rules
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -1086,8 +1086,8 @@ Run `cargo run -p app -- crates/zvm/tests/fixtures/minizork.z3` (or any story), 
 - [ ] **Step 4: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/main.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "fix(app): clear terminal on resize to drop stale gutter cells
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/main.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "fix(app): clear terminal on resize to drop stale gutter cells
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

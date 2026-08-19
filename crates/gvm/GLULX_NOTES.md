@@ -575,7 +575,7 @@ is absorbing at zero).
 `DEFAULT_SEED` is the seed a bare `Machine` starts from — fixed, so an unseeded
 machine is reproducible and the unit tests here mean something. Handing a PLAYER
 that same sequence on every launch is a bug (SQ-0811), so the host seeds the
-machine before the boot drive with `Machine::set_rng_seed`: babelmap uses the
+machine before the boot drive with `Machine::set_rng_seed`: lanthorn uses the
 `random_seed` config key when the user pinned one, and an entropy draw when they
 did not. `restart` deliberately leaves the state alone rather than snapping back
 to `DEFAULT_SEED`, so a restarted roguelike is a new game and not the last one.

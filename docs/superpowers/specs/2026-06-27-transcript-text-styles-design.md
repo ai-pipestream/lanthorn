@@ -171,7 +171,7 @@ lines/kinds). On load, older archives (no `runs`) default to empty per line;
 - Unstyled transcript lines (the common case) must render and persist exactly as
   today — `transcript_runs` empty, `draw_str_runs` collapses to the current
   single-style draw, `TranscriptData` round-trips identically when runs are empty.
-- Old `.babelmap` archives (no `runs`) load unchanged (serde default empty).
+- Old `.lanthorn` archives (no `runs`) load unchanged (serde default empty).
 - Commit-only on local `main`; one commit per task (TDD). No push.
 - Commit trailers, every commit (no backticks in the body):
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` and

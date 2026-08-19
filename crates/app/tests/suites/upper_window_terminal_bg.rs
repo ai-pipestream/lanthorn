@@ -53,7 +53,7 @@ fn answered_probe() -> TermDefaultColors {
 /// and whatever the terminal answered — loaded exactly the way startup and
 /// `/reload style` load it.
 fn state_with_probe(tag: &str, probe: TermDefaultColors, honor: bool) -> (AppState, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("babelmap-uwtb-{}-{}", tag, std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-uwtb-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 

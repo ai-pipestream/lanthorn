@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add real audio to babelmap — synthesised tones for the built-in Z-machine bleeps (#1/#2) and sampled playback (AIFF/Ogg/MOD) of Blorb `Snd ` resources (#≥3), in the `app` TUI and `zvm-cli`, with a finish-routine callback — while keeping the `zvm`/`gvm` VM crates zero-dependency.
+**Goal:** Add real audio to lanthorn — synthesised tones for the built-in Z-machine bleeps (#1/#2) and sampled playback (AIFF/Ogg/MOD) of Blorb `Snd ` resources (#≥3), in the `app` TUI and `zvm-cli`, with a finish-routine callback — while keeping the `zvm`/`gvm` VM crates zero-dependency.
 
 **Architecture:** A new host-side `crates/audio` crate wraps `rodio` (feature-gated, degrades to a compile-time / runtime no-op). `crates/blorb` gains a `sound(number)` accessor. `crates/zvm` records a richer `SoundEvent` (replacing the old `Beep`/`pending_beeps`) and exposes a general `run_routine`. The hosts own an `AudioBackend` + the loaded Blorb, drain sound events each turn, play tones/samples, and poll for completion to fire finish routines.
 
@@ -718,7 +718,7 @@ Expected: FAIL — `cannot find function gain` / `synth_tone` / `AudioBackend`.
 Prepend the implementation above the test module in `crates/audio/src/lib.rs`:
 
 ```rust
-//! Cross-platform host-side audio backend for babelmap. Plays synthesised tones
+//! Cross-platform host-side audio backend for lanthorn. Plays synthesised tones
 //! (Z-machine bleeps) and decoded samples (Blorb `Snd ` resources) via `rodio`.
 //! With the `playback` feature off, the backend is a compile-time no-op.
 

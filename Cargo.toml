@@ -15,7 +15,7 @@ license = "BSD-3-Clause"
 # off. `qwertty-term-vt` 0.4.0's kitty transmit path trips
 # `debug_assert!(!load.more)` (src/kitty/exec.rs:208) on a chunked
 # transmit-and-display: it hands back the deferred display on EVERY intermediate
-# `m=1` chunk instead of only the last. babelmap chunks every upload at 3072
+# `m=1` chunk instead of only the last. lanthorn chunks every upload at 3072
 # bytes, so replaying any real capture hits it on the second chunk. With the
 # assertion compiled out the port behaves as it does in release — the premature
 # display finds no stored image and is refused, and the final chunk places the

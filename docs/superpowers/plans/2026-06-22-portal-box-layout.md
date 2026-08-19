@@ -412,7 +412,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Manual verification (after both tasks)
 
-Run babelmap on the A129 story, Boxes zoom:
+Run lanthorn on the A129 story, Boxes zoom:
 - Normal view: room names are centered and wrap across two rows; `#id` is centered on row 3 (with the align code appended when Ctrl+A is on); portal icons sit on the interior right edge; connector arrows show as usual.
 - Ctrl+P: icons jump to the border (↑ top, ↓ bottom, mid right); destination names appear above/below/right of the box (overwriting neighbours/paths is fine); `?` shows no name; the cardinal arrowheads disappear. Ctrl+P again restores the normal view.
 

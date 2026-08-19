@@ -40,7 +40,7 @@ pub fn export_transcript(
     Ok(target)
 }
 
-/// The `/dump-windows` log, under the babelmap home: `<user_dir>/dump-windows.log`.
+/// The `/dump-windows` log, under the lanthorn home: `<user_dir>/dump-windows.log`.
 pub fn window_dump_path(user_dir: &Path) -> PathBuf {
     user_dir.join("dump-windows.log")
 }
@@ -72,7 +72,7 @@ pub fn append_window_dump(user_dir: &Path, lines: &[String]) -> io::Result<PathB
     Ok(target)
 }
 
-/// The `/dump-cells` log, under the babelmap home: `<user_dir>/dump-cells.log`.
+/// The `/dump-cells` log, under the lanthorn home: `<user_dir>/dump-cells.log`.
 pub fn cell_dump_path(user_dir: &Path) -> PathBuf {
     user_dir.join("dump-cells.log")
 }
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn export_transcript_resolves_dest_and_writes() {
-        let dir = std::env::temp_dir().join(format!("babelmap-export-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-export-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let lines = vec!["a".to_string(), "b".to_string()];
         let p1 = export_transcript(&lines, None, &dir).unwrap();

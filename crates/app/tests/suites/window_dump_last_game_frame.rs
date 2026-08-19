@@ -191,7 +191,7 @@ fn no_game_frame_reports_unavailable_rather_than_the_modals() {
 /// nothing but the dump.
 #[test]
 fn the_dump_is_written_to_a_copyable_log_verbatim() {
-    let dir = std::env::temp_dir().join(format!("babelmap-dumpwin-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-dumpwin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
     let long = format!("  win1  640x400 at (1,1)  {}", "x".repeat(400));

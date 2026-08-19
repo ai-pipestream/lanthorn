@@ -6,7 +6,7 @@
 
 **Architecture:** Six independent TDD tasks against the merged Phase 1/2/2.1 editor. Theme A (Tasks 2–4) reuses the existing `style::merge`, `style::write_style_full`, and `styles::per_game_style_path` plumbing — the editor doc becomes the merged active look on open, and a second run-loop save flag writes a self-contained per-game file. Theme B (Tasks 1, 5, 6) are localized changes to `style_mru.rs` and the property-pane renderer.
 
-**Tech Stack:** Rust workspace; `app` crate (ratatui TUI, binary `babelmap`). Tests via `cargo test -p app`. All style-editor tests use the Phase 2.1 hermetic helper `crate::input::open_style_editor_hermetic`.
+**Tech Stack:** Rust workspace; `app` crate (ratatui TUI, binary `lanthorn`). Tests via `cargo test -p app`. All style-editor tests use the Phase 2.1 hermetic helper `crate::input::open_style_editor_hermetic`.
 
 ## Global Constraints
 

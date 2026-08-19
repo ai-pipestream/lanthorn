@@ -164,7 +164,7 @@ fn parse_search_filter_export() {
 ```rust
 #[test]
 fn export_transcript_resolves_dest_and_writes() {
-    let dir = std::env::temp_dir().join(format!("babelmap-export-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-export-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let lines = vec!["a".to_string(), "b".to_string()];
     let p1 = export_transcript(&lines, None, &dir, "20260624-120000").unwrap();
@@ -176,7 +176,7 @@ fn export_transcript_resolves_dest_and_writes() {
 }
 ```
 - [ ] **Step 2: Run, confirm fail.**
-- [ ] **Step 3: Implement** `export.rs`. In `main.rs`: handle `SlashOutcome::Filter(arg)` → set `state.transcript_filter` (map the arg) + status `filter: <mode>`; handle `SlashOutcome::Export(dest)` → build the filtered lines (`visible_transcript_indices` → `state.transcript[i].clone()`), compute the exports dir (the babelmap user dir + `exports/`) and a `stamp` from `std::time::SystemTime` (format `YYYYMMDD-HHMMSS`; a helper is fine), call `export_transcript`, set status to the written path or the error. (Use the existing user-dir resolution in main.rs for the base path.)
+- [ ] **Step 3: Implement** `export.rs`. In `main.rs`: handle `SlashOutcome::Filter(arg)` → set `state.transcript_filter` (map the arg) + status `filter: <mode>`; handle `SlashOutcome::Export(dest)` → build the filtered lines (`visible_transcript_indices` → `state.transcript[i].clone()`), compute the exports dir (the lanthorn user dir + `exports/`) and a `stamp` from `std::time::SystemTime` (format `YYYYMMDD-HHMMSS`; a helper is fine), call `export_transcript`, set status to the written path or the error. (Use the existing user-dir resolution in main.rs for the base path.)
 - [ ] **Step 4: Run full `cargo test --workspace`; green + warning-clean.**
 - [ ] **Step 5: Commit** — "feat(transcript): export module + /filter and /export handling".
 

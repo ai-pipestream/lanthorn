@@ -153,7 +153,7 @@ fn meta() -> app::archive::Meta {
     }
 }
 
-/// Write `session` to a real `.babelmap` and read it back, exactly as a host Save
+/// Write `session` to a real `.lanthorn` and read it back, exactly as a host Save
 /// State does — display list, fallback canvases, and the painted ground.
 fn round_trip(session: &mut GameSession) -> app::archive::ArchiveContents {
     let es = Engine::save_state(session);
@@ -161,7 +161,7 @@ fn round_trip(session: &mut GameSession) -> app::archive::ArchiveContents {
     let pics = session.pictures_png_for(&fallback);
     let ground_png = session.paint_ground_png();
     let path = std::env::temp_dir()
-        .join(format!("scopa-ground-{}-{:?}.babelmap", std::process::id(), std::thread::current().id()));
+        .join(format!("scopa-ground-{}-{:?}.lanthorn", std::process::id(), std::thread::current().id()));
     app::archive::save_archive_meta_pics(
         &path,
         &mapper::mapper::Mapper::default(),

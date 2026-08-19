@@ -291,9 +291,9 @@ Add to the `#[cfg(test)] mod tests` in `crates/app/src/archive.rs` (reuse the ex
 ```rust
 #[test]
 fn read_archive_meta_matches_load_archive_meta() {
-    let dir = std::env::temp_dir().join(format!("babelmap-meta-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-meta-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("game.babelmap");
+    let path = dir.join("game.lanthorn");
 
     // Reuse an existing save fixture. `sample_archive_contents()` /
     // `save_archive` are already used by neighbouring tests in this module;
@@ -793,8 +793,8 @@ fn compute_row_badges_covers_each_signal() {
     let e_bare = entry_with("IFID-C", dir.join("c.z5"), None);
 
     let mut save_names = HashSet::new();
-    save_names.insert("IFID-A.babelmap".to_string());          // default save for A
-    save_names.insert("IFID-B-before.babelmap".to_string());   // named save for B
+    save_names.insert("IFID-A.lanthorn".to_string());          // default save for A
+    save_names.insert("IFID-B-before.lanthorn".to_string());   // named save for B
 
     let hi = hints::load_hint_index(&dir); // empty index (no hints/index.toml)
 
@@ -1686,7 +1686,7 @@ And append an `[i: info]` marker to the header line:
 
 ```rust
     let header = format!(
-        " babelmap — choose a story  ({} found in {})   [i: info]",
+        " lanthorn — choose a story  ({} found in {})   [i: info]",
         stories.len(),
         dir.display()
     );

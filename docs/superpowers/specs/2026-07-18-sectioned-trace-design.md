@@ -72,7 +72,7 @@ usage `trace [sections|all|none]`.
 
 ## Output
 
-- **File:** `<user_dir>/trace.log` (`~/.babelmap/trace.log` by default).
+- **File:** `<user_dir>/trace.log` (`~/.lanthorn/trace.log` by default).
 - **Lifecycle:** truncated fresh at boot so each run's trace stands alone;
   appended per turn thereafter.
 - **Line format:** `[<section>] <message>`, section tag left-padded to a common

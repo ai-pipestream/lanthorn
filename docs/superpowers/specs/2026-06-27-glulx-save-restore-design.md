@@ -1,4 +1,4 @@
-# Glulx Save/Restore (babelmap's own archives) — Design
+# Glulx Save/Restore (lanthorn's own archives) — Design
 
 **Date:** 2026-06-27
 **Status:** Approved, ready for planning
@@ -6,7 +6,7 @@
 
 ## Goal
 
-Make Glulx games **save and restore** in babelmap — quick save/restore, named
+Make Glulx games **save and restore** in lanthorn — quick save/restore, named
 saves, restore-from-archive, and auto-load-on-launch — by (1) making a `gvm`
 snapshot **self-contained** (it currently omits the Glk window model, breaking
 cross-session restore) and (2) routing the app's archive save/restore through
@@ -15,7 +15,7 @@ Turns the "not supported for Glulx" guards into working saves.
 
 **Out of scope (parked):** cross-interpreter Glulx Quetzal (sharing saves with
 Glulxe/Lectrote) — bundled with the future `@save`/`@restore` Glk-file-stream
-work; gvm's self-contained snapshot is fine for babelmap's own archives. Standard
+work; gvm's self-contained snapshot is fine for lanthorn's own archives. Standard
 `.qzl`/`.sav` import/export stays Z-machine-only.
 
 ## Background
@@ -48,7 +48,7 @@ Add a `Glk ` chunk to `save_state`/`restore_state` serializing `glk::Model`:
 - the **text-grid** windows' cells + cursor (cheap; restores the status display).
 
 The text-**buffer** windows' scrollback is **not** stored here — the primary
-buffer is babelmap's transcript (persisted separately via `transcript.json`);
+buffer is lanthorn's transcript (persisted separately via `transcript.json`);
 extra buffer windows redraw (documented minor gap). `restore_state` rebuilds the
 `Model` so the restored VM's window/stream references are valid. Back-compat: a
 snapshot without a `Glk ` chunk restores with an empty model (old gvm saves) —
@@ -82,7 +82,7 @@ non-fatal. `GlulxSession::save_state` is unchanged (it already wraps
 
 ### Back-compat
 
-Existing `.babelmap` archives: `game.sav` = raw Quetzal, `engine.txt` = `zmachine`
+Existing `.lanthorn` archives: `game.sav` = raw Quetzal, `engine.txt` = `zmachine`
 (or absent → default `zmachine`), `screen.json` present. These load unchanged:
 `EngineSave { zmachine, <Quetzal> }` → `GameSession::restore_state` → `restore_file`,
 plus `screen.json`. No migration needed.
@@ -107,7 +107,7 @@ plus `screen.json`. No migration needed.
 - `gvm` stays zero-dep; the `Glk ` chunk format is documented in `GLULX_NOTES.md`.
 - Z-machine save/restore/restart is **byte-for-byte unchanged** (zvm `EngineSave.bytes`
   == today's Quetzal; `screen.json` still written/restored for zvm).
-- Old `.babelmap` archives and old gvm snapshots load unchanged.
+- Old `.lanthorn` archives and old gvm snapshots load unchanged.
 - 0 warnings + full `cargo test --workspace` green per task.
 - Commit-only on the phase's worktree branch; one commit per task (TDD). No push.
 - Commit trailers, every commit (no backticks in the body):

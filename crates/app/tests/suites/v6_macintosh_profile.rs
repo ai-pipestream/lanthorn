@@ -108,7 +108,7 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
     assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), RELEASE, "this disk carries r{RELEASE}");
     assert_eq!(&bytes[0x12..0x18], SERIAL);
 
-    let dir = std::env::temp_dir().join(format!("babelmap-mac-profile-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-mac-profile-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let over = match pictures {
         Some(name) => PictureOverride::resolve_with_session(&path, &dir, Some(name)),
@@ -334,7 +334,7 @@ fn the_archive_in_hand_picks_which_macintosh_screen_the_game_is_told_about() {
     assert_eq!(mono.session.machine.mem.read_word(0x22), 480, "screen width, header $22");
     assert_eq!(mono.session.machine.mem.read_byte(0x21), 60, "columns");
     // 300 is not a whole number of 16-pixel v6 cells — a real Mac fitted 20 rows
-    // of its own 15-pixel Geneva into exactly 300, and babelmap's cell is fixed
+    // of its own 15-pixel Geneva into exactly 300, and lanthorn's cell is fixed
     // at 8×16 (see `InterpreterProfile::v6_font_cell`). The screen is rounded to
     // the NEAREST cell, 19 rows, so the game's screen contains its own 300-pixel
     // artwork with four pixels to spare; rounding down would have handed it a
@@ -428,7 +428,7 @@ fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
         return;
     }
     let path = mac_disk().expect("fixture");
-    let dir = std::env::temp_dir().join(format!("babelmap-mac-declines-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-mac-declines-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     for (archive, mono) in [("Pic.data", true), ("CPic.data", false)] {
         let over = PictureOverride::resolve_with_session(&path, &dir, Some(archive));

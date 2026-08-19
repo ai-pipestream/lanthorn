@@ -752,7 +752,7 @@ impl Machine {
     /// The PRNG seed a bare `Machine` starts from: fixed, so a machine nobody
     /// seeds replays one sequence (every unit test relies on that). A HOST that
     /// wants a fresh game per launch calls [`Machine::set_rng_seed`] before the
-    /// boot drive — babelmap seeds from the `random_seed` config key, or from
+    /// boot drive — lanthorn seeds from the `random_seed` config key, or from
     /// entropy when that key is unset (SQ-0811). Also the nonzero fallback for
     /// [`Machine::entropy_seed`] and for a state that reached 0.
     pub const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
@@ -6139,7 +6139,7 @@ mod tests {
         for extra in ["GReg", "Glk "] {
             assert!(
                 !chunk_ids(&chunks).contains(&extra.to_string()),
-                "{extra} is a babelmap extension and must stay out of the interop format",
+                "{extra} is a lanthorn extension and must stay out of the interop format",
             );
         }
     }
@@ -8091,7 +8091,7 @@ mod tests {
 
     /// `save_quetzal()` is the standard, spec-conformant bare save (Glulx spec
     /// §1.8): `IFhd`/`CMem`/`Stks`/`MAll` only — no `GReg`, no `Glk `. `save_state()`
-    /// (the host `.babelmap` snapshot) still carries both.
+    /// (the host `.lanthorn` snapshot) still carries both.
     #[test]
     fn save_quetzal_omits_greg_and_glk_chunks() {
         fn has_chunk(save: &[u8], id: &[u8; 4]) -> bool {

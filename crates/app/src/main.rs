@@ -67,7 +67,7 @@ use crate::engine_helpers::{
 
 // ── Run outcome ─────────────────────────────────────────────────────────────
 
-/// How the event loop ended: exit babelmap entirely, or return to the story
+/// How the event loop ended: exit lanthorn entirely, or return to the story
 /// picker (a library launch replays the picker; a single-file launch treats it
 /// as an exit). Mapped from `AppState.exit_target` at the loop's break sites. (SQ-0435)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -159,7 +159,7 @@ fn report_captured_stderr() {
         return;
     }
     if let Some(path) = app::stderr_redirect::log_path() {
-        eprintln!("babelmap: the system wrote {} line(s) of error output while the game was running", lines.len());
+        eprintln!("lanthorn: the system wrote {} line(s) of error output while the game was running", lines.len());
         for l in &lines {
             eprintln!("  {l}");
         }
@@ -355,7 +355,7 @@ fn exit_if_terminated_saving(
 /// termination watchdog) simply close their channel, which every reader treats
 /// as "no more results". Tearing the terminal down for one of those left the app
 /// drawing frames onto a cooked normal screen — the game still running, the
-/// display wrecked, and a "babelmap crashed" banner over a session that had not.
+/// display wrecked, and a "lanthorn crashed" banner over a session that had not.
 ///
 /// So: the main thread's panic is fatal (it unwinds out of the event loop and
 /// ends the process); no other thread's is. `main` is `None` only if the id was
@@ -424,13 +424,13 @@ fn install_panic_hook(user_dir: std::path::PathBuf) {
                 Ok(()) => log_path,
                 // Fall back to the temp dir if the user dir isn't writable.
                 Err(_) => {
-                    let tmp = std::env::temp_dir().join("babelmap-crash.log");
+                    let tmp = std::env::temp_dir().join("lanthorn-crash.log");
                     let _ = write_crash_log(&tmp, info, &backtrace);
                     tmp
                 }
             };
             if fatal {
-                eprintln!("babelmap crashed — details written to {}", path.display());
+                eprintln!("lanthorn crashed — details written to {}", path.display());
                 default_hook(info);
             }
         }));
@@ -445,10 +445,10 @@ fn write_crash_log(
 ) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(f, "\n=== babelmap panic ===\n{info}\n\nbacktrace:\n{backtrace}")
+    writeln!(f, "\n=== lanthorn panic ===\n{info}\n\nbacktrace:\n{backtrace}")
 }
 
-/// Directory holding per-game save archives (`.babelmap`, default + named) and
+/// Directory holding per-game save archives (`.lanthorn`, default + named) and
 /// the game's own standard `.qzl` saves. Kept separate from the map
 /// directory. Defaults to `config.user_dir/saves`.
 fn saves_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
@@ -1300,7 +1300,7 @@ fn abbreviate_home(p: &std::path::Path) -> String {
 /// Glulx games (e.g. Counterfeit Monkey at ~11 MB) take several seconds to reach
 /// the first prompt; without this the normal terminal sits frozen and looks hung.
 fn loading_line(name: &str, bytes: usize, frame: char) -> String {
-    format!("babelmap: loading {name} ({:.1} MB) {frame}", bytes as f64 / 1_048_576.0)
+    format!("lanthorn: loading {name} ({:.1} MB) {frame}", bytes as f64 / 1_048_576.0)
 }
 
 /// Format the startup line naming the PRNG seed this launch handed the engine
@@ -1750,7 +1750,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             }
             Err(e) => {
                 restore_terminal();
-                eprintln!("babelmap: draw error: {}", e);
+                eprintln!("lanthorn: draw error: {}", e);
                 // The engine is intact — only the terminal write failed — so the
                 // turn the player just took is still saveable. Without this, an
                 // error exit silently dropped it while every other exit path
@@ -1827,7 +1827,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     // bare error exit below. (SQ-0502)
                     exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
                     restore_terminal();
-                    eprintln!("babelmap: poll error: {}", e);
+                    eprintln!("lanthorn: poll error: {}", e);
                     // Same reasoning as the draw/read error exits: the terminal died,
                     // the engine did not. (SQ-0651)
                     exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
@@ -1929,7 +1929,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 Ok(e) => e,
                 Err(e) => {
                     restore_terminal();
-                    eprintln!("babelmap: read error: {}", e);
+                    eprintln!("lanthorn: read error: {}", e);
                     // Input is gone, but the engine is not: keep the progress. (SQ-0651)
                     exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
                     std::process::exit(1);
@@ -3214,7 +3214,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
             Action::SaveGame => {
                 // Dead post-unification: keys now route through SlashOutcome::Save. Retained as a no-cost match arm.
-                // Bundle map + game into a single .babelmap archive, with turn metadata.
+                // Bundle map + game into a single .lanthorn archive, with turn metadata.
                 let (location, score) = crate::engine_helpers::save_summary(&*session, &state);
                 let meta = app::archive::Meta {
                     format_version: app::archive::CURRENT_FORMAT_VERSION,
@@ -3255,7 +3255,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
             Action::RestoreGame => {
                 // Dead post-unification: keys now route through SlashOutcome::Load. Retained as a no-cost match arm.
-                // Restore map + game from the .babelmap archive.
+                // Restore map + game from the .lanthorn archive.
                 match load_archive(&arc_file) {
                     Ok(ac) => {
                         let restore_err = session.restore_state(&ac.engine_save()).map_err(restore_error_msg);
@@ -3311,7 +3311,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             // ── Saves-manager actions ─────────────────────────────────────────
 
             Action::OpenSaves => {
-                // Populate the saves list (both .babelmap Save States and .qzl
+                // Populate the saves list (both .lanthorn Save States and .qzl
                 // game saves — SQ-0227 Task 3) and open the modal.
                 let entries = combined_saves(&game_dir);
                 state.overlays.saves = Some(SavesState { entries, scroll: Default::default() });
@@ -3384,7 +3384,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 });
 
                 // In-game restore of a GAME save — a bare .qzl from another
-                // interpreter, or a .babelmap that babelmap's own @save wrote
+                // interpreter, or a .lanthorn that lanthorn's own @save wrote
                 // (SQ-0531): feed the descriptor-PC bytes back into the
                 // suspended VM, completing the @restore. When they came out of
                 // an archive, its map/transcript/screen ride along too. A host
@@ -3433,7 +3433,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     continue;
                 }
 
-                // Host Load (also reached for a .babelmap picked while an
+                // Host Load (also reached for a .lanthorn picked while an
                 // in-game @restore is pending: that fully resumes, abandoning
                 // the pending call; on failure the pending @restore is still
                 // answered with resume_restore(None) so the VM isn't left
@@ -3735,7 +3735,7 @@ fn game_echoes_command(transcript: &str, cmd: &str) -> bool {
     }
 }
 
-/// The current story's saves for the saves manager: `.babelmap` Save States and
+/// The current story's saves for the saves manager: `.lanthorn` Save States and
 /// `.qzl` game saves in `game_dir` merged into one list, sorted newest-first by
 /// save time. RFC3339 timestamps sort chronologically as strings; untimestamped/
 /// legacy saves (empty timestamp) sort to the bottom.
@@ -4268,24 +4268,24 @@ mod tests {
     // ── SQ-0230: list_qzl filters to the current story's game saves ─────────────
 
     #[test]
-    fn list_qzl_lists_game_saves_in_game_dir_and_skips_babelmap() {
+    fn list_qzl_lists_game_saves_in_game_dir_and_skips_lanthorn() {
         use std::fs;
         // SQ-0284: all `.qzl` in a per-game dir belong to this story (no IFID
-        // prefix filtering). `.babelmap` files are never picked up by list_qzl.
+        // prefix filtering). `.lanthorn` files are never picked up by list_qzl.
         let dir = std::env::temp_dir().join(format!("bm-listqzl-{}/Zork1.z5", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("slot1.qzl"), b"x").unwrap();
-        fs::write(dir.join("slot1.babelmap"), b"x").unwrap();
+        fs::write(dir.join("slot1.lanthorn"), b"x").unwrap();
 
-        // combined_saves merges .babelmap + .qzl newest-first; here the .babelmap
+        // combined_saves merges .lanthorn + .qzl newest-first; here the .lanthorn
         // has no valid archive so list_saves skips it, leaving the one game save.
         let combined: Vec<String> = super::combined_saves(&dir).iter().map(|s| s.name.clone()).collect();
         assert_eq!(combined, vec!["slot1".to_string()], "combined list includes the game save");
 
         let infos = app::persist_files::list_qzl(&dir);
         let names: Vec<String> = infos.iter().map(|s| s.name.clone()).collect();
-        // The `.qzl` suffix is stripped to the slug for display; the `.babelmap`
+        // The `.qzl` suffix is stripped to the slug for display; the `.lanthorn`
         // is excluded from list_qzl.
         assert_eq!(names, vec!["slot1".to_string()]);
         // And they carry a save timestamp read from the file's mtime.

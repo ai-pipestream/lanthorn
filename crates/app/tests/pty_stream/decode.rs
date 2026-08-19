@@ -5,7 +5,7 @@
 //! builds and unit-tests on Windows even though the pty that *produces* the bytes
 //! does not. See [`super::driver`] for the capture side.
 //!
-//! WHY A SCREEN MODEL AND NOT A LIST OF ESCAPES. babelmap places kitty images
+//! WHY A SCREEN MODEL AND NOT A LIST OF ESCAPES. lanthorn places kitty images
 //! through VIRTUAL placements: the transmit (`a=T,U=1`) declares an `r`×`c` grid
 //! but says nothing about WHERE on screen it lands — the position comes from the
 //! U+10EEEE placeholder cells printed afterwards, and their screen coordinates
@@ -82,7 +82,7 @@ pub struct Cell {
     pub marks: Vec<char>,
     pub style: Style,
     /// False when nothing was ever printed here (the cell is whatever the
-    /// terminal had; babelmap never touched it in this capture).
+    /// terminal had; lanthorn never touched it in this capture).
     pub written: bool,
     /// Which flush wrote it last — lets a report say "this frame painted these
     /// rows" instead of only "the screen ends up like this".
@@ -94,7 +94,7 @@ impl Cell {
         self.ch == PLACEHOLDER
     }
 
-    /// The kitty image id this placeholder belongs to. babelmap encodes it in the
+    /// The kitty image id this placeholder belongs to. lanthorn encodes it in the
     /// foreground colour (`ESC[38;2;r;g;b`), which is the protocol's own scheme.
     pub fn image_id(&self) -> Option<u32> {
         match (self.is_placeholder(), self.style.fg) {
@@ -440,7 +440,7 @@ impl Term {
         if self.cur_row + 1 < self.rows {
             self.cur_row += 1;
         }
-        // A scroll at the bottom is not modelled: babelmap draws with absolute
+        // A scroll at the bottom is not modelled: lanthorn draws with absolute
         // cursor moves inside the alternate screen and never relies on scrolling,
         // so pinning the row is closer to the truth than shifting the whole grid.
     }

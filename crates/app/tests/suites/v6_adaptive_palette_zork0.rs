@@ -4,7 +4,7 @@
 //! table). At boot Zork0 draws non-adaptive base art (Pict 5, then 497/498)
 //! which establishes the "Current Palette" — the Zork0 game palette — then draws
 //! the adaptive compass overlays, which must be plotted with that palette rather
-//! than their own EGA placeholder. Before SQ-0485 babelmap decoded every PNG
+//! than their own EGA placeholder. Before SQ-0485 lanthorn decoded every PNG
 //! with its embedded palette, so the compass rendered in wrong (EGA) colours.
 //!
 //! Skips cleanly when the gitignored story is absent (CI), mirroring the other
@@ -81,7 +81,7 @@ fn zork0_compass_overlay_decodes_with_the_base_game_palette() {
 
     // Placeholder decode: a fresh Pict source with no base picture ever drawn
     // through it falls back to the overlay's own EGA placeholder palette — what
-    // babelmap wrongly rendered before this fix.
+    // lanthorn wrongly rendered before this fix.
     let mut raw_src = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let raw = raw_src.image(10).expect("placeholder decode of Pict 10");
     let raw_colors = opaque_colors(&raw);

@@ -8,8 +8,8 @@
 ## Problem
 
 The `/export` slash commands don't follow the SQ-0284 per-game-dir convention:
-- `export-svg` / `export-dot` / `export-dump` write **fixed** paths `~/.babelmap/maps/<ifid>.{svg,dot,map.txt}` and take **no** path argument (`slash.rs:362-370` → `Action::Export{Svg,Dot,Dump}` → `main.rs:3656-3695`, paths built at `main.rs:1933-1936`).
-- `export-transcript [file]` already takes an optional `/`-aware path but defaults into a **different** place, `~/.babelmap/exports/transcript-<stamp>.txt` (`slash.rs:340-342` → `SlashOutcome::Export` → `main.rs:4395-4412`, resolver `export::export_transcript` at `export.rs:11-28`).
+- `export-svg` / `export-dot` / `export-dump` write **fixed** paths `~/.lanthorn/maps/<ifid>.{svg,dot,map.txt}` and take **no** path argument (`slash.rs:362-370` → `Action::Export{Svg,Dot,Dump}` → `main.rs:3656-3695`, paths built at `main.rs:1933-1936`).
+- `export-transcript [file]` already takes an optional `/`-aware path but defaults into a **different** place, `~/.lanthorn/exports/transcript-<stamp>.txt` (`slash.rs:340-342` → `SlashOutcome::Export` → `main.rs:4395-4412`, resolver `export::export_transcript` at `export.rs:11-28`).
 
 So exports scatter across `maps/` and `exports/`, keyed by IFID, ignoring the per-game dir where SQ-0284 put everything else.
 
@@ -28,7 +28,7 @@ All four export commands write into the story's **per-game dir** `<base>/<story-
 | `export-dump` | `<game_dir>/map.txt` |
 | `export-transcript` | `<game_dir>/transcript.txt` |
 
-Re-exporting overwrites the same file (one "current" artifact per type per game — matches SQ-0284's `default.*` singleton spirit). `<base>` honors `--data-dir` (it's the same `game_dir` as saves), so exports sit beside `default.babelmap`/`default.aux`/etc.
+Re-exporting overwrites the same file (one "current" artifact per type per game — matches SQ-0284's `default.*` singleton spirit). `<base>` honors `--data-dir` (it's the same `game_dir` as saves), so exports sit beside `default.lanthorn`/`default.aux`/etc.
 
 ### Optional `[file]` argument — SQ-0284 resolution
 

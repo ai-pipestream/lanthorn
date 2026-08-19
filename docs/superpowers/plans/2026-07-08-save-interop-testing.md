@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Automated tests proving babelmap's standard save files interoperate with reference interpreters (`dfrotz` for Z-machine, `glulxe` for Glulx) in both READ and WRITE directions, with the READ direction CI-enforced via checked-in golden saves.
+**Goal:** Automated tests proving lanthorn's standard save files interoperate with reference interpreters (`dfrotz` for Z-machine, `glulxe` for Glulx) in both READ and WRITE directions, with the READ direction CI-enforced via checked-in golden saves.
 
-**Architecture:** Cross-load equivalence oracle — within one interpreter, `play(prefix).probe()` must equal `restore(save_at_P).probe()`. READ tests run babelmap against checked-in reference-produced golden saves (no binary at test time). WRITE tests (`#[ignore]`) drive the reference binary to restore babelmap's saves. A one-time setup task (Task 1) empirically resolves the reference-tool scripting details, picks the deterministic prefix/probe, and generates the committed golden fixtures.
+**Architecture:** Cross-load equivalence oracle — within one interpreter, `play(prefix).probe()` must equal `restore(save_at_P).probe()`. READ tests run lanthorn against checked-in reference-produced golden saves (no binary at test time). WRITE tests (`#[ignore]`) drive the reference binary to restore lanthorn's saves. A one-time setup task (Task 1) empirically resolves the reference-tool scripting details, picks the deterministic prefix/probe, and generates the committed golden fixtures.
 
 **Tech Stack:** Rust integration tests (`crates/{zvm,gvm}/tests/`) using `std::process::Command` for reference binaries (test-only; library crates stay zero-dep). Reference tools: `dfrotz`, `glulxe`+`cheapglk` (homebrew). Fixture: public-domain `glulxercise.ulx`.
 
@@ -20,7 +20,7 @@
 
 - `zvm` and `gvm` **library** crates stay ZERO-dependency. Test code may use `std` (incl. `std::process::Command`); do NOT add dev-dependencies without calling it out.
 - Binary-gated tests are `#[ignore]` with a loud reason string (e.g. `"needs dfrotz on PATH; run with -- --ignored"`) — **never a silent skip that passes vacuously**.
-- The cross-load oracle compares two outputs from the **same** interpreter (never babelmap-vs-reference transcripts directly).
+- The cross-load oracle compares two outputs from the **same** interpreter (never lanthorn-vs-reference transcripts directly).
 - The prefix must mutate **more than one state class** (PC/room AND object/flag state); the probe must reveal all of them, so restore dropping any class fails.
 - Checked-in fixtures: `glulxercise.ulx` is **public domain** (verified). Every golden save gets a sibling `PROVENANCE.md` (story name+serial, interp+version, exact prefix).
 - Commit trailer on every commit: `Quest: SQ-0158`, then `Co-Authored-By` / `Claude-Session`.
@@ -184,7 +184,7 @@ Expected: PASS. Then sanity-check the guard: temporarily flip one byte of the in
 
 **Files:** Modify `crates/zvm/tests/save_interop.rs`.
 
-**Interfaces:** Consumes Task 1's `PREFIX_Z`/`PROBE_Z` and the working `dfrotz` invocation (incl. `-L <save>` load and stdin piping). Consumes zvm save API: produce babelmap's save bytes at P (drive `PREFIX_Z`, then `machine.save_quetzal()`).
+**Interfaces:** Consumes Task 1's `PREFIX_Z`/`PROBE_Z` and the working `dfrotz` invocation (incl. `-L <save>` load and stdin piping). Consumes zvm save API: produce lanthorn's save bytes at P (drive `PREFIX_Z`, then `machine.save_quetzal()`).
 
 - [ ] **Step 1: Write the `#[ignore]` test**
 
@@ -193,13 +193,13 @@ Expected: PASS. Then sanity-check the guard: temporarily flip one byte of the in
 #[ignore = "needs dfrotz on PATH; run with: cargo test -p zvm --test save_interop -- --ignored"]
 fn zmachine_save_read_by_dfrotz() {
     if which("dfrotz").is_none() { panic!("dfrotz not found — this --ignored test requires it"); }
-    // babelmap writes its save at P to a temp file.
-    let bab_save = babelmap_save_at_p();                 // drive PREFIX_Z, save_quetzal(), write temp
-    // Oracle: dfrotz restoring babelmap's save == dfrotz having played the prefix.
+    // lanthorn writes its save at P to a temp file.
+    let bab_save = lanthorn_save_at_p();                 // drive PREFIX_Z, save_quetzal(), write temp
+    // Oracle: dfrotz restoring lanthorn's save == dfrotz having played the prefix.
     let dfrotz_played   = dfrotz_run(STORY_PATH, /*load*/ None,      &PREFIX_Z, &PROBE_Z);
     let dfrotz_restored = dfrotz_run(STORY_PATH, /*load*/ Some(&bab_save), &[],  &PROBE_Z);
     assert_eq!(normalize(&dfrotz_restored), normalize(&dfrotz_played),
-        "dfrotz restoring babelmap's save must match dfrotz playing the prefix");
+        "dfrotz restoring lanthorn's save must match dfrotz playing the prefix");
 }
 ```
 `dfrotz_run` shells out via `std::process::Command` using the verbatim invocation Task 1 verified (`-L` for the load case; piping prefix+probe+`quit`+`y` on stdin). `normalize` trims trailing whitespace / the quit banner if needed (define minimally, only what Task 1 showed differs). `#[ignore]` reason is loud.
@@ -209,7 +209,7 @@ fn zmachine_save_read_by_dfrotz() {
 Run: `cargo test -p zvm --test save_interop -- --ignored zmachine_save_read_by_dfrotz`
 Expected: PASS locally (dfrotz present). If it fails, the divergence localizes a real interop bug — investigate before proceeding (do not weaken the assertion). Confirm the non-ignored suite still ignores it: `cargo test -p zvm --test save_interop` shows it as ignored.
 
-- [ ] **Step 3: Commit** (message `test(interop): dfrotz reads babelmap Quetzal save (SQ-0158)`, standard trailers).
+- [ ] **Step 3: Commit** (message `test(interop): dfrotz reads lanthorn Quetzal save (SQ-0158)`, standard trailers).
 
 ---
 
@@ -238,11 +238,11 @@ Run: `cargo test -p gvm --test save_interop glulx_reads_reference_save` → PASS
 
 **Interfaces:** Consumes Task 1's finding on whether `glulxe` is headless-scriptable and its verbatim invocation.
 
-- [ ] **Step 1 (if `glulxe` is scriptable):** Write `#[ignore]`-gated `glulx_save_read_by_glulxe`, same oracle as Task 3 (`glulxe.restore(babelmap_save).probe()` == `glulxe.play(prefix).probe()`), shelling out via `Command`. Loud `#[ignore]` reason. Run with `-- --ignored`, confirm PASS; do not weaken on divergence (investigate the interop bug).
+- [ ] **Step 1 (if `glulxe` is scriptable):** Write `#[ignore]`-gated `glulx_save_read_by_glulxe`, same oracle as Task 3 (`glulxe.restore(lanthorn_save).probe()` == `glulxe.play(prefix).probe()`), shelling out via `Command`. Loud `#[ignore]` reason. Run with `-- --ignored`, confirm PASS; do not weaken on divergence (investigate the interop bug).
 
-- [ ] **Step 1 (if `glulxe` is NOT headless-scriptable, per Task 1):** Instead of a test, add a **documented manual procedure** to `docs/features/saves.md` (or a `docs/interop-manual.md`): the exact steps to restore a babelmap `.glksave` in `glulxe`/Lectrote/Quixe and what to verify. `log`/note this limitation loudly; do not ship a skipping test that pretends to cover it.
+- [ ] **Step 1 (if `glulxe` is NOT headless-scriptable, per Task 1):** Instead of a test, add a **documented manual procedure** to `docs/features/saves.md` (or a `docs/interop-manual.md`): the exact steps to restore a lanthorn `.glksave` in `glulxe`/Lectrote/Quixe and what to verify. `log`/note this limitation loudly; do not ship a skipping test that pretends to cover it.
 
-- [ ] **Step 2: Commit** (message `test(interop): glulxe reads babelmap Glulx save (SQ-0158)` or `docs(interop): manual Glulx write-direction procedure (SQ-0158)`).
+- [ ] **Step 2: Commit** (message `test(interop): glulxe reads lanthorn Glulx save (SQ-0158)` or `docs(interop): manual Glulx write-direction procedure (SQ-0158)`).
 
 ---
 

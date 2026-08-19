@@ -26,7 +26,7 @@ Two sources could fix that, and the app uses neither:
 
 Separately, SQ-0276 wants to cache a runtime capability probe per story, and there is
 nowhere to put it: no per-story metadata sidecar exists. The only JSON in the tree lives
-*inside* the `.babelmap` save zip (`archive.rs:75-86`), which describes a save, not a story.
+*inside* the `.lanthorn` save zip (`archive.rs:75-86`), which describes a save, not a story.
 
 ## Goals
 
@@ -282,7 +282,7 @@ restart. This is what makes the list re-sort mid-sweep — see "Sorting".
   shape here: it runs on a worker thread, mirroring the established `CoverDecoder` pattern
   (`cover.rs:117-160`).
 - **Etiquette.** IFDB is volunteer-run and a 50-story library is 50-100 requests:
-  - `User-Agent: babelmap/<CARGO_PKG_VERSION> (+https://github.com/sharkusk/babelmap)`
+  - `User-Agent: lanthorn/<CARGO_PKG_VERSION> (+https://github.com/sharkusk/lanthorn)`
   - a fixed inter-request delay (**500 ms**) between stories in an `r` sweep — it is
     user-initiated and visibly progressing, so throughput is not the priority
   - 10 s timeout per request; a failure is per-story, never fatal to the sweep

@@ -135,7 +135,7 @@ fn without_the_ini_the_screen_reader_prompt_is_unchanged() {
 
     // Same story, no ini beside it — the player's escape hatch from the Gargoyle
     // presentation. Symlinked rather than copied: the fixture is 22 MB.
-    let dir = std::env::temp_dir().join(format!("babelmap-sq0803-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq0803-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(STORY);
     let _ = std::fs::remove_file(&path);

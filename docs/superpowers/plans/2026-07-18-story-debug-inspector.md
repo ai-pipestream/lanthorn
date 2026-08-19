@@ -1295,7 +1295,7 @@ Expected: no external dependencies (the disassembler added none).
 - [ ] **Step 3: Manual TTY smoke (record for the user to run)**
 
 This is the only non-headless step — leave it for the user (no TTY in CI):
-- `babelmap <story>.z5`, play a turn, type `/debug`. The panel opens on the Execution view: Disassembly (left), Locals + Stack (right).
+- `lanthorn <story>.z5`, play a turn, type `/debug`. The panel opens on the Execution view: Disassembly (left), Locals + Stack (right).
 - `Tab`/`Shift-Tab` cycles focus and rolls into the World-state view (Globals + Objects/Dictionary/Memory). Arrows/PgUp/PgDn scroll the focused pane; in Disassembly, `↓` advances by instruction and `↑` walks back; `g` jumps to PC. `Esc` closes.
 - On a Glulx (`.gblorb`) game, `/debug` prints "debugger not available for this engine" and opens no panel.
 - Confirm the panes pick up `style.toml` overrides for `debug_pane` / `debug_pane:focused` / `debug_title`.

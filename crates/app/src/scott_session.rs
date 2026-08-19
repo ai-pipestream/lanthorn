@@ -628,7 +628,7 @@ mod tests {
                 save, None, &[], None, None, s.aux_data(), 1, None, None, &[], &[], &[], &[], &[],
             )
             .expect("save_named writes the Scott archive");
-            let path = dir.join(format!("{name}.babelmap"));
+            let path = dir.join(format!("{name}.lanthorn"));
             assert_eq!(crate::archive::read_archive_meta(&path).unwrap().trigger, trigger);
 
             // Wander off, then restore through the path that trigger selects.

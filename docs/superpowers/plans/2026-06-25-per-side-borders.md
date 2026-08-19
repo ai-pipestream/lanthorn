@@ -243,8 +243,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/render/paneframe.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): PaneSides + draw_pane_frame_sides (per-side borders + corners)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/render/paneframe.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): PaneSides + draw_pane_frame_sides (per-side borders + corners)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -411,8 +411,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/render/paneframe.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): draw_header_plain + draw_framed (path select + header placement)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/render/paneframe.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): draw_header_plain + draw_framed (path select + header placement)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -515,8 +515,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/colors.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): per-side PaneSides + header bools on ColorScheme
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/colors.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): per-side PaneSides + header bools on ColorScheme
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -719,8 +719,8 @@ Expected: PASS, 0 warnings. (`resolve_sides` warning string contains "picture-fr
 - [ ] **Step 8: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): parse + apply per-side / header border keys
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): parse + apply per-side / header border keys
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -745,7 +745,7 @@ In `crates/app/src/style.rs`, inside `mod tests`, add:
 #[test]
 fn write_style_full_round_trips_per_side_and_header() {
     use crate::render::paneframe::{BorderStyle, PaneSides};
-    let dir = std::env::temp_dir().join(format!("babelmap-ps-rt-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lanthorn-ps-rt-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("ps.toml");
 
@@ -849,8 +849,8 @@ Expected: PASS, 0 warnings. (`write_style_full_is_self_contained` and the other 
 - [ ] **Step 6: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/style.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): export per-side + header border keys in write_style_full
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/style.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): export per-side + header border keys in write_style_full
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -979,8 +979,8 @@ Expected: PASS, 0 warnings. If a render call site used a differently-named local
 - [ ] **Step 9: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/main.rs crates/app/src/render/transcript.rs crates/app/src/render/upper_window.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): draw panes via draw_framed (per-side borders + header decoupling)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/main.rs crates/app/src/render/transcript.rs crates/app/src/render/upper_window.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): draw panes via draw_framed (per-side borders + header decoupling)
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
@@ -1014,8 +1014,8 @@ Expected: PASS (commented lines don't change resolution; the file still parses c
 - [ ] **Step 3: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add style.example.toml
-git -C /Volumes/Videos/Source/babelmap commit -m "docs: per-side border + header examples in style.example.toml
+git -C /Volumes/Videos/Source/lanthorn add style.example.toml
+git -C /Volumes/Videos/Source/lanthorn commit -m "docs: per-side border + header examples in style.example.toml
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"

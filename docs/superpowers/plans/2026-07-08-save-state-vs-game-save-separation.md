@@ -1,19 +1,19 @@
-# Separate Save State (.babelmap) from Game Save (.qzl) — Implementation Plan
+# Separate Save State (.lanthorn) from Game Save (.qzl) — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give babelmap's two save mechanisms different file formats — `.babelmap` = emulator Save State (resume-convention), `.qzl` = the game's `@save` (bare standard Quetzal, descriptor-convention) — so restore dispatches on extension, the SQ-0163 host-restore regression is fixed by construction, and game saves become portable.
+**Goal:** Give lanthorn's two save mechanisms different file formats — `.lanthorn` = emulator Save State (resume-convention), `.qzl` = the game's `@save` (bare standard Quetzal, descriptor-convention) — so restore dispatches on extension, the SQ-0163 host-restore regression is fixed by construction, and game saves become portable.
 
-**Architecture:** Extension = kind. Restore keys off the loaded file's extension: `.babelmap` → resume (`restore_file`); `.qzl` → complete the descriptor (`complete_restore_success` semantics). In-game `@save` writes a bare `.qzl` (VM state only). Save State keeps writing `.babelmap`. Plus the `save-game`→`save-state` rename.
+**Architecture:** Extension = kind. Restore keys off the loaded file's extension: `.lanthorn` → resume (`restore_file`); `.qzl` → complete the descriptor (`complete_restore_success` semantics). In-game `@save` writes a bare `.qzl` (VM state only). Save State keeps writing `.lanthorn`. Plus the `save-game`→`save-state` rename.
 
 **Tech Stack:** Rust — `crates/app` (ratatui TUI: `main.rs`, `session.rs`, `glulx_session.rs`, `engine.rs`, `persist_files.rs`, `slash.rs`, `keymap.rs`, `render/`), `crates/zvm` (`complete_restore_success` already exists).
 
 ## Global Constraints
 
 - `zvm`/`gvm` library crates stay ZERO-dependency (test code may use `std`).
-- Restore convention, exact: `.qzl` → complete descriptor (v3 branch true / v4+ store 2, advance PC); `.babelmap` → resume at saved PC. Foreign `.qzl` import completes the descriptor.
+- Restore convention, exact: `.qzl` → complete descriptor (v3 branch true / v4+ store 2, advance PC); `.lanthorn` → resume at saved PC. Foreign `.qzl` import completes the descriptor.
 - In-game `@save` writes a bare `.qzl` captured while `pending_save` is set (so `save_pc()` = descriptor PC). It is Z-machine only (Glulx has no `@save`).
-- No backward-compat/migration (user deletes old descriptor-PC `.babelmap` slots). Legacy resume-convention `.babelmap`s must still resume correctly.
+- No backward-compat/migration (user deletes old descriptor-PC `.lanthorn` slots). Legacy resume-convention `.lanthorn`s must still resume correctly.
 - Commit trailer on every commit: `Quest: SQ-0227`, then `Co-Authored-By` / `Claude-Session`.
 - Keep the diff surgical; match existing style.
 
@@ -128,11 +128,11 @@ Run: `cargo test -p app` — new test passes; existing save/restore tests stay g
 **Files:**
 - Modify: `crates/app/src/main.rs` (`PromptKind::SaveAs` submit handler ~4250-4290)
 - Modify: `crates/app/src/persist_files.rs` (a `.qzl` game-save write helper, if a path helper is wanted; else reuse `save_game`)
-- Test: an app-level test (or a focused `persist_files` test) that an in-game save writes `<ifid>-<slug>.qzl`, not `.babelmap`.
+- Test: an app-level test (or a focused `persist_files` test) that an in-game save writes `<ifid>-<slug>.qzl`, not `.lanthorn`.
 
 **Interfaces:**
 - Consumes: `persist_files::save_game(path, &machine)` (writes `machine.save_quetzal()`); `zvm_session_opt(&*session)` to reach `&z.machine`; the existing `slugify`/saves-dir conventions.
-- Produces: in-game `@save` → `<dir>/<ifid>-<slug>.qzl` (descriptor PC, since `pending_save` is set at this point). Host save-as (`ingame == false`) is unchanged (`.babelmap` via `save_named`).
+- Produces: in-game `@save` → `<dir>/<ifid>-<slug>.qzl` (descriptor PC, since `pending_save` is set at this point). Host save-as (`ingame == false`) is unchanged (`.lanthorn` via `save_named`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -177,7 +177,7 @@ In `main.rs` `PromptKind::SaveAs` submit handler, branch on the existing `ingame
                 let machine = &zvm_session_opt(&*session).expect("in-game save is Z-machine only").machine;
                 save_game_named(dir, ifid, &buf, machine).map(|_| ())
             } else {
-                // Host "Save State" named slot -> rich .babelmap archive.
+                // Host "Save State" named slot -> rich .lanthorn archive.
                 save_named(dir, ifid, &buf, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
             };
             match result {
@@ -200,20 +200,20 @@ Keep the existing `Ok`/`Err` bodies (transcript, saves-list refresh, `ingame_res
 - Test: `crates/app/src/main.rs` tests (or a focused integration) for extension dispatch + the regression.
 
 **Interfaces:**
-- Consumes: `Path::extension()`; `restore_game`/`restore_game_save` (Task 1, complete descriptor for `.qzl`); `restore_state`/`load_archive` (resume for `.babelmap`).
-- Rule (apply at every load site): if the selected file is `.qzl` → **complete the descriptor** (`session.restore_game_save(&bytes)` or `restore_game` for the bare-machine path); if `.babelmap` → **resume** (`load_archive` → `session.restore_state(&ac.engine_save())`, as today).
+- Consumes: `Path::extension()`; `restore_game`/`restore_game_save` (Task 1, complete descriptor for `.qzl`); `restore_state`/`load_archive` (resume for `.lanthorn`).
+- Rule (apply at every load site): if the selected file is `.qzl` → **complete the descriptor** (`session.restore_game_save(&bytes)` or `restore_game` for the bare-machine path); if `.lanthorn` → **resume** (`load_archive` → `session.restore_state(&ac.engine_save())`, as today).
 
 - [ ] **Step 1: Write the failing regression test**
 
-Drive a v4 (or v3) fixture story to an in-game `@save`, write the `.qzl` (Task 2 path), then restore it via the **host** load path and assert it resumes correctly (this is the SQ-0163 regression, currently red) — and that a `.babelmap` still resumes. Model on the existing app save/restore tests; assert on the resulting `session`/machine PC and a "restored" store value. (If a full app-loop test is heavy, write a focused test that calls the same extension-dispatch helper directly.)
+Drive a v4 (or v3) fixture story to an in-game `@save`, write the `.qzl` (Task 2 path), then restore it via the **host** load path and assert it resumes correctly (this is the SQ-0163 regression, currently red) — and that a `.lanthorn` still resumes. Model on the existing app save/restore tests; assert on the resulting `session`/machine PC and a "restored" store value. (If a full app-loop test is heavy, write a focused test that calls the same extension-dispatch helper directly.)
 
 - [ ] **Step 2: Run it, confirm it fails** (host restore of the `.qzl` currently resumes at the descriptor / uses `restore_file`).
 
 - [ ] **Step 3: Implement extension dispatch**
 
-Factor a small helper (e.g. in `main.rs` or a `persist_files` helper) `fn is_game_save(path: &Path) -> bool { path.extension().is_some_and(|e| e == "qzl") }`. At each load site, branch: `.qzl` → complete-descriptor restore; else → the existing archive-resume path. For the **in-game restore branch** (`state.ingame_io == Some(Restore)`, ~3516-3547) that currently always calls `resume_restore(Some(&bytes))`: keep `resume_restore` for `.qzl` (it already completes the descriptor via `complete_restore_success`), but for a picked `.babelmap` use the resume path. For the **host** saves-manager Load / `/load-game` / launch / auto paths that currently call `restore_state`: add the `.qzl` → `restore_game_save` branch.
+Factor a small helper (e.g. in `main.rs` or a `persist_files` helper) `fn is_game_save(path: &Path) -> bool { path.extension().is_some_and(|e| e == "qzl") }`. At each load site, branch: `.qzl` → complete-descriptor restore; else → the existing archive-resume path. For the **in-game restore branch** (`state.ingame_io == Some(Restore)`, ~3516-3547) that currently always calls `resume_restore(Some(&bytes))`: keep `resume_restore` for `.qzl` (it already completes the descriptor via `complete_restore_success`), but for a picked `.lanthorn` use the resume path. For the **host** saves-manager Load / `/load-game` / launch / auto paths that currently call `restore_state`: add the `.qzl` → `restore_game_save` branch.
 
-- [ ] **Step 4: Run to green** — regression test passes; `.babelmap` resume unchanged; `cargo test -p app` green.
+- [ ] **Step 4: Run to green** — regression test passes; `.lanthorn` resume unchanged; `cargo test -p app` green.
 
 - [ ] **Step 5: Commit** (`fix(app): dispatch restore on save file extension; fixes SQ-0163 host-restore regression (SQ-0227)`, trailers).
 
@@ -233,7 +233,7 @@ Factor a small helper (e.g. in `main.rs` or a `persist_files` helper) `fn is_gam
 
 - [ ] **Step 3: Rename bindings + hints** — `keymap.rs:212-213` bind Ctrl+S→`"save-state"`, Ctrl+R→`"restore-state"`; `GAME_HINTS` entries; the dialog/prompt label strings (`"Save name"`→context-appropriate; saves-manager footer/title as specified — keep the manager title "Saves").
 
-- [ ] **Step 4: Fix docs** — `docs/features/saves.md:13-17`: replace the inaccurate note with the correct model (`.babelmap` = Save State; `.qzl` = the game's standard save; different files). `README.md` bullet reworded.
+- [ ] **Step 4: Fix docs** — `docs/features/saves.md:13-17`: replace the inaccurate note with the correct model (`.lanthorn` = Save State; `.qzl` = the game's standard save; different files). `README.md` bullet reworded.
 
 - [ ] **Step 5: Run to green** — `cargo test -p app` green (renamed-label tests pass).
 
@@ -264,6 +264,6 @@ grep -rn "save-game\|load-game" crates/app/src   # only intentional (none, or hi
 
 - Each task ends green independently (Task 1 restore path, Task 2 write path, Task 3 dispatch+regression, Task 4 rename, Task 5 integration).
 - The regression test (Task 3) is red before Task 3 and green after — it is the acceptance proof.
-- No descriptor-PC data can reach a `.babelmap` (in-game `@save` writes `.qzl` only; Save State sites write `.babelmap` with `pending_save == None`).
-- Glulx: `restore_game_save` errors (never invoked — no `.qzl` for Glulx); Glulx Save State (`.babelmap`) unchanged.
+- No descriptor-PC data can reach a `.lanthorn` (in-game `@save` writes `.qzl` only; Save State sites write `.lanthorn` with `pending_save == None`).
+- Glulx: `restore_game_save` errors (never invoked — no `.qzl` for Glulx); Glulx Save State (`.lanthorn`) unchanged.
 - `zvm`/`gvm` gain no dependencies.

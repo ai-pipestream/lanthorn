@@ -1,7 +1,7 @@
 //! A terminal that answers our startup questions LATE must not have its answers
 //! read as keystrokes by the story (SQ-0769).
 //!
-//! WHAT THIS PINS. babelmap asks the terminal for its default fg/bg (OSC 10 /
+//! WHAT THIS PINS. lanthorn asks the terminal for its default fg/bg (OSC 10 /
 //! OSC 11) just before a story boots, and ends the batch with a DSR so it knows
 //! when the answers are in. In the field the answers sometimes arrived after the
 //! probe had stopped listening — a picker launch leaves the terminal busy with a
@@ -78,7 +78,7 @@ mod unix {
     }
 
     fn spec(lib: &Path, user: &Path) -> Spec {
-        let mut spec = Spec::new(env!("CARGO_BIN_EXE_babelmap"), lib, user);
+        let mut spec = Spec::new(env!("CARGO_BIN_EXE_lanthorn"), lib, user);
         spec.cols = 100;
         spec.rows = 40;
         // The per-game sidecar `hide_map` writes is keyed off the story path, and
@@ -126,7 +126,7 @@ mod unix {
             assert!(
                 !text.contains(needle),
                 "the terminal's colour answer was typed into the story: {needle:?} appears in \
-                 what babelmap painted, which is the SQ-0769 symptom verbatim"
+                 what lanthorn painted, which is the SQ-0769 symptom verbatim"
             );
         }
     }

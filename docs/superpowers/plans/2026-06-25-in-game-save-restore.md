@@ -2,12 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Wire the VM's own `@save`/`@restore` (v4+, store form) through babelmap's saves UI so a game that issues SAVE/RESTORE writes a real `.babelmap`/reads a `.qzl`-or-`.babelmap` and the VM **resumes** — and, on restore, the game **redraws its own status line** (the whole point: the standard-interpreter behavior babelmap's snapshot Ctrl+S/Ctrl+R can't do). v3 keeps the current "isn't wired" info message.
+**Goal:** Wire the VM's own `@save`/`@restore` (v4+, store form) through lanthorn's saves UI so a game that issues SAVE/RESTORE writes a real `.lanthorn`/reads a `.qzl`-or-`.lanthorn` and the VM **resumes** — and, on restore, the game **redraws its own status line** (the whole point: the standard-interpreter behavior lanthorn's snapshot Ctrl+S/Ctrl+R can't do). v3 keeps the current "isn't wired" info message.
 
 **Architecture:** Four layers, one per task.
 1. **zvm** — `Machine::complete_restore_success(&[u8])`: `restore_quetzal` then store `2` into the *original* `@save`'s target (`mem[pc-1]` for v4+), clear undo, clear the pending restore target. The companions `complete_save(ok)` / `complete_restore_failure()` already exist.
 2. **app/session.rs** — `run_until_input` stops *bubbling* a `RunStop` (it no longer auto-fails v4+ save/restore; v3 still auto-fails). `TurnResult` gains `pending_io: Option<PendingIo>`; new `resume_save` / `resume_restore` complete the VM and continue the turn.
-3. **app/archive.rs** — `read_quetzal_from_file(path)`: `game.sav` from a `.babelmap` zip, else raw bytes (a plain `.qzl`).
+3. **app/archive.rs** — `read_quetzal_from_file(path)`: `game.sav` from a `.lanthorn` zip, else raw bytes (a plain `.qzl`).
 4. **app/main.rs + state.rs** — `AppState.ingame_io: Option<PendingIo>`; after `submit`/`submit_char`/resume, if `pending_io` is `Some` open the saves dialog in an "in-game" mode whose confirm/cancel call `resume_*` (VM completion) instead of the direct Ctrl+S/Ctrl+R path. Remove the "isn't wired" line for v4+.
 
 **Tech Stack:** Rust (zvm + app crates).
@@ -136,8 +136,8 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/zvm/src/cpu/exec.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(zvm): complete_restore_success — game-initiated restore stores 2 into the original save target
+git -C /Volumes/Videos/Source/lanthorn add crates/zvm/src/cpu/exec.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(zvm): complete_restore_success — game-initiated restore stores 2 into the original save target
 
 The saved PC is post-instruction, so the v4+ save store byte is mem[pc-1];
 storing 2 there makes the original save 'return 2' on restore (the game
@@ -349,7 +349,7 @@ fn run_until_input(machine: &mut Machine) -> (RunStop, bool) {
         let location_method = detected.as_ref().map(Location::method);
 
         let info = if v3_failed {
-            Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
+            Some("(lanthorn: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
         } else {
             None
         };
@@ -441,8 +441,8 @@ Expected: PASS (including the headless smoke test), 0 warnings.
 - [ ] **Step 7: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/session.rs crates/app/src/main.rs crates/app/src/input.rs crates/app/tests/headless.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): bubble in-game save/restore from the session + resume API
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/session.rs crates/app/src/main.rs crates/app/src/input.rs crates/app/tests/headless.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): bubble in-game save/restore from the session + resume API
 
 run_until_input now returns a RunStop: v4+ save/restore bubble as
 SavePending/RestorePending instead of auto-failing; v3 still auto-fails and
@@ -470,7 +470,7 @@ In `crates/app/src/archive.rs`, inside `mod tests`, add:
 
 ```rust
     #[test]
-    fn read_quetzal_extracts_game_sav_from_babelmap() {
+    fn read_quetzal_extracts_game_sav_from_lanthorn() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../zvm/tests/fixtures/czech.z5");
         if !fixture.exists() {
@@ -479,12 +479,12 @@ In `crates/app/src/archive.rs`, inside `mod tests`, add:
         let machine = dummy_machine();
         let expected = machine.save_quetzal();
 
-        let path = temp_archive_path("qzl-from-babelmap");
+        let path = temp_archive_path("qzl-from-lanthorn");
         save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save_archive");
         let got = read_quetzal_from_file(&path).expect("read_quetzal_from_file");
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(got, expected, "game.sav bytes extracted from the .babelmap");
+        assert_eq!(got, expected, "game.sav bytes extracted from the .lanthorn");
     }
 
     #[test]
@@ -510,7 +510,7 @@ In `crates/app/src/archive.rs` (after `load_archive`), add. `std::io::Read` is a
 ```rust
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
 ///
-/// If `path` is a `.babelmap` ZIP archive, returns its `game.sav` entry;
+/// If `path` is a `.lanthorn` ZIP archive, returns its `game.sav` entry;
 /// otherwise returns the file's raw bytes (a plain `.qzl` Quetzal save).
 pub fn read_quetzal_from_file(path: &Path) -> io::Result<Vec<u8>> {
     let bytes = std::fs::read(path)?;
@@ -533,10 +533,10 @@ Expected: PASS, 0 warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/archive.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): read_quetzal_from_file — game.sav from a .babelmap, else raw .qzl
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/archive.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): read_quetzal_from_file — game.sav from a .lanthorn, else raw .qzl
 
-Used by the in-game RESTORE path so the picker can restore both babelmap
+Used by the in-game RESTORE path so the picker can restore both lanthorn
 archives and plain Quetzal saves.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
@@ -577,7 +577,7 @@ Add a small helper near `handle_saves_prompt` in `crates/app/src/main.rs`:
 ```rust
 /// Open the saves dialog in "in-game" mode for a game-initiated save/restore.
 /// SAVE: prompt for a save name (reuses the SaveAs prompt). RESTORE: open the
-/// saves list, including plain *.qzl files alongside *.babelmap saves.
+/// saves list, including plain *.qzl files alongside *.lanthorn saves.
 fn open_ingame_saves(
     io: app::session::PendingIo,
     save_dir: &std::path::Path,
@@ -597,7 +597,7 @@ fn open_ingame_saves(
             });
         }
         PendingIo::Restore => {
-            // The game asked to RESTORE: list babelmap saves + plain .qzl files.
+            // The game asked to RESTORE: list lanthorn saves + plain .qzl files.
             let mut entries = list_saves(save_dir, ifid);
             entries.extend(list_qzl(save_dir));
             state.saves = Some(SavesState { entries, selected: 0 });
@@ -661,7 +661,7 @@ In `Action::SavesLoad` (~2105), before the existing `load_archive`/`restore_file
                     // In-game restore: feed Quetzal bytes back into the suspended VM.
                     match app::archive::read_quetzal_from_file(&path) {
                         Ok(bytes) => {
-                            // For a .babelmap, also load its map (as Ctrl+R does).
+                            // For a .lanthorn, also load its map (as Ctrl+R does).
                             if let Ok(ac) = load_archive(&path) {
                                 mapper = ac.mapper;
                             }
@@ -760,7 +760,7 @@ SAVE confirm — in `handle_saves_prompt`, `PromptKind::SaveAs` arm (~2362): aft
 
 `handle_saves_prompt`'s signature lacks `last_panes`. To keep the resumed-turn rendering uniform, prefer NOT to resume inside `handle_saves_prompt`. Instead, set a flag (`state.ingame_resume_save = Some(true)`) and let the run-loop call site (right after `handle_saves_prompt(...)`, the two sites at ~1471 and ~2228) detect it and run `session.resume_save(true)` + `finish_resumed_turn(...)`. This keeps all VM-resume + recenter logic in the run loop where `session`, `mapper`, and `last_panes` are in scope. Add `pub ingame_resume_save: Option<bool>` to `AppState` (default `None`) for this hop, or — simpler — have `handle_saves_prompt` take `&mut session` (it already does) **and** an extra `last_panes: Panes` + `&mut Mapper` param and resume there. Pick whichever keeps the diff smallest; the flag-hop is the least invasive and is the recommended approach.
 
-Dialog CANCEL — in `Action::SavesClose` handling: babelmap closes the modal via `apply_action` (`state.saves = None`). For in-game restore, intercept in the run loop *before* dispatching, OR detect in the `SavesClose` arm if it is caller-handled. Since `SavesClose` is handled inside `apply_action` (input.rs ~1763) which has no `session`, add a run-loop guard: after `apply_action` returns, if the saves modal just closed (`state.saves` went from `Some` to `None`) **and** `state.ingame_io == Some(Restore)`, call `session.resume_restore(None)` + `finish_resumed_turn`, then clear `ingame_io`. Likewise for the SaveAs prompt being cancelled (Esc) while `ingame_io == Some(Save)` → `session.resume_save(false)`.
+Dialog CANCEL — in `Action::SavesClose` handling: lanthorn closes the modal via `apply_action` (`state.saves = None`). For in-game restore, intercept in the run loop *before* dispatching, OR detect in the `SavesClose` arm if it is caller-handled. Since `SavesClose` is handled inside `apply_action` (input.rs ~1763) which has no `session`, add a run-loop guard: after `apply_action` returns, if the saves modal just closed (`state.saves` went from `Some` to `None`) **and** `state.ingame_io == Some(Restore)`, call `session.resume_restore(None)` + `finish_resumed_turn`, then clear `ingame_io`. Likewise for the SaveAs prompt being cancelled (Esc) while `ingame_io == Some(Save)` → `session.resume_save(false)`.
 
 Concretely: capture `let saves_was_open = state.saves.is_some();` and `let prompt_was_save = matches!(&state.prompt, Some(p) if matches!(p.kind, PromptKind::SaveAs));` before `apply_action`, then after it check whether the overlay closed without a submit, and if `ingame_io` is still set, resume with the failure/cancel result. Mirror the wiring already used for `saves_prompt_submitted` (the run loop already inspects state after `apply_action`).
 
@@ -834,17 +834,17 @@ If the probe never reaches `@save`/`@restore` (Bureaucracy's opening form may in
 Run: `cargo build -p app && cargo test -p app`
 Expected: builds clean (0 warnings), suite PASS, headless smoke PASS, redraw test PASS-or-skips.
 
-Manual (not gating, but recommended): `cargo run -p app -- stories/bureaucr.z4`, navigate to a SAVE prompt, save (saves dialog appears, write a `.babelmap`), continue, then RESTORE it — the status line should redraw and the game resume mid-routine.
+Manual (not gating, but recommended): `cargo run -p app -- stories/bureaucr.z4`, navigate to a SAVE prompt, save (saves dialog appears, write a `.lanthorn`), continue, then RESTORE it — the status line should redraw and the game resume mid-routine.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git -C /Volumes/Videos/Source/babelmap add crates/app/src/state.rs crates/app/src/main.rs crates/app/src/session.rs
-git -C /Volumes/Videos/Source/babelmap commit -m "feat(app): wire game-initiated save/restore through the saves dialog (v4+)
+git -C /Volumes/Videos/Source/lanthorn add crates/app/src/state.rs crates/app/src/main.rs crates/app/src/session.rs
+git -C /Volumes/Videos/Source/lanthorn commit -m "feat(app): wire game-initiated save/restore through the saves dialog (v4+)
 
 After a turn suspends on its own @save/@restore, open the saves dialog in
-in-game mode: SAVE writes a .babelmap then resume_save(true); RESTORE reads a
-.babelmap/.qzl (loading the map for archives) then resume_restore(Some). Cancel
+in-game mode: SAVE writes a .lanthorn then resume_save(true); RESTORE reads a
+.lanthorn/.qzl (loading the map for archives) then resume_restore(Some). Cancel
 resumes with failure. The game resumes inside its own routine and redraws its
 status line. v3 keeps the host-mediated 'isn't wired' message.
 
@@ -857,7 +857,7 @@ Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV"
 ## Notes for the executor
 
 - **Dependency order:** 1 (zvm) → 2 (session) → 3 (archive) → 4 (app). Task 1 is `cargo test -p zvm`; Tasks 2-4 are `cargo test -p app`. Each ends green with 0 warnings before committing.
-- **Why store 2 into `mem[pc-1]`:** on a successful restore it is the original `@save` that "returns 2" (the game checks `result == 2` to redraw), not `@restore`. babelmap's saved PC is post-instruction, so a v4+ `@save`'s store byte is its last byte, at `saved_pc - 1`. No PC-convention change.
+- **Why store 2 into `mem[pc-1]`:** on a successful restore it is the original `@save` that "returns 2" (the game checks `result == 2` to redraw), not `@restore`. lanthorn's saved PC is post-instruction, so a v4+ `@save`'s store byte is its last byte, at `saved_pc - 1`. No PC-convention change.
 - **Task 2 literal churn:** adding `pending_io` to `TurnResult` is the only thing forcing edits in `main.rs`/`input.rs`/`headless.rs` in Task 2 — those are field-add-only; the run-loop *behavior* changes land in Task 4.
 - **Task 4 is the risk.** The saves dialog is asynchronous over event-loop frames; the integration spine is `state.ingame_io` + branching the existing `SavesLoad` (restore confirm), `SavesClose`/prompt-cancel (cancel), and `handle_saves_prompt::SaveAs` (save confirm). Keep VM-resume + recenter logic in the run loop (where `session`, `mapper`, `last_panes` are in scope) via a small flag-hop from `handle_saves_prompt`; do not resume inside `apply_action`/`handle_saves_prompt` directly. Mirror the existing restore re-observe block exactly — "in-game" only swaps `restore_file` for `resume_restore` and `save_archive`/`save_named` + `resume_save` for the direct save.
 - **Chained I/O:** a resume can itself end in another `pending_io` (e.g. game does `@save` then `@restore`). `finish_resumed_turn` re-records `ingame_io`; the call site re-opens the dialog. Handle it; it is rare but cheap to support.

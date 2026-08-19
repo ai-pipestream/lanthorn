@@ -7,7 +7,7 @@
 //! `blorb::medium`, one vocabulary, and no front-end that names a format. What
 //! it could not unify is code that never mounted anything — and the art
 //! enumeration in [`crate::launch_options`] was exactly that, a `read_dir` of
-//! the story's own directory, written before babelmap could open a disk at all.
+//! the story's own directory, written before lanthorn could open a disk at all.
 //!
 //! So a story opened out of `stories/Zork Zero Disk.image` had **no** pickable
 //! artwork: the two archives it wants are on the volume, and a directory scan
@@ -205,7 +205,7 @@ fn beside_the_story(story_path: &Path) -> Vec<AssetFile> {
 /// Source 2: the release the story came out of, when it came off a disk image.
 ///
 /// Content, not extension, and one mount path for every format — the sniff and
-/// the open are both `blorb::medium`'s, so a format babelmap can detect is a
+/// the open are both `blorb::medium`'s, so a format lanthorn can detect is a
 /// format this arm enumerates, and adding one touches nothing here (SQ-0840).
 ///
 /// A story that is not an image costs the read and the sniff and stops.
@@ -376,7 +376,7 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("babelmap-assets-{}-{}", tag, std::process::id()));
+        let d = std::env::temp_dir().join(format!("lanthorn-assets-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

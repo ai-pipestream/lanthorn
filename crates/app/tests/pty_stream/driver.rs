@@ -1,10 +1,10 @@
-//! Run the real `babelmap` binary under a pty, answer the terminal queries it
+//! Run the real `lanthorn` binary under a pty, answer the terminal queries it
 //! asks, feed it keystrokes, and keep every byte it writes back (SQ-0762).
 //!
 //! Unix only — a pty is. The decoder in [`super::decode`] is portable, and the
 //! callers gate this half with `#[cfg(unix)]`.
 //!
-//! WHY WE MUST PRETEND TO BE KITTY, PROPERLY. babelmap picks its graphics backend
+//! WHY WE MUST PRETEND TO BE KITTY, PROPERLY. lanthorn picks its graphics backend
 //! from `Picker::from_query_stdio`, which asks the terminal three questions before
 //! the UI starts and falls back to half-blocks when nobody answers. A pty answers
 //! nothing by itself, so a naive harness silently measures the half-block path —
@@ -83,7 +83,7 @@ pub struct Spec {
     pub bin: PathBuf,
     pub story: PathBuf,
     /// A throwaway `--user-dir`, so the run never reads or writes the player's
-    /// real `~/.babelmap` (and never resumes their save into the capture).
+    /// real `~/.lanthorn` (and never resumes their save into the capture).
     pub user_dir: PathBuf,
     pub cols: u16,
     pub rows: u16,
@@ -143,7 +143,7 @@ impl Spec {
 }
 
 /// One burst of output: bytes that arrived without a [`Spec::quiet`] gap between
-/// them. babelmap writes a frame in one go, so a burst is a frame in practice —
+/// them. lanthorn writes a frame in one go, so a burst is a frame in practice —
 /// and grouping by silence needs no cooperation from the app.
 #[derive(Clone, Debug)]
 pub struct Flush {
@@ -196,15 +196,15 @@ impl Negotiation {
 
     pub fn explain(&self) -> String {
         match (self.answered_kitty, self.apc_commands) {
-            (false, _) => "NOT KITTY — babelmap never asked the kitty capability query (or asked it in \
+            (false, _) => "NOT KITTY — lanthorn never asked the kitty capability query (or asked it in \
                  a spelling this harness does not answer), so it detected half-blocks"
                 .to_string(),
-            (true, 0) => "NOT KITTY — the harness answered the capability query, but babelmap emitted \
+            (true, 0) => "NOT KITTY — the harness answered the capability query, but lanthorn emitted \
                  no APC graphics at all: it fell back to a cell renderer, so this capture measures \
                  the wrong backend"
                 .to_string(),
             (true, n) => format!(
-                "KITTY — the harness answered the kitty capability query and babelmap emitted \
+                "KITTY — the harness answered the kitty capability query and lanthorn emitted \
                  {n} APC `_G` graphics command(s)"
             ),
         }
@@ -309,7 +309,7 @@ fn spawn(spec: &Spec, pty: &Pty) -> std::io::Result<Child> {
 
 // ── Answering the terminal queries ────────────────────────────────────────────
 
-/// The queries we answer, in the exact spelling ratatui-image and babelmap send.
+/// The queries we answer, in the exact spelling ratatui-image and lanthorn send.
 /// A query we do NOT answer is not a silent loss: the app's probes all end in a
 /// DSR, so an unanswered one costs a timeout and a wrong backend — which is what
 /// [`Negotiation`] exists to catch.
@@ -398,7 +398,7 @@ fn count_subslices(hay: &[u8], needle: &[u8]) -> usize {
 
 // ── The run ───────────────────────────────────────────────────────────────────
 
-/// Boot babelmap under a pty, drive `spec.keys`, and return every byte it wrote.
+/// Boot lanthorn under a pty, drive `spec.keys`, and return every byte it wrote.
 pub fn run(spec: Spec) -> std::io::Result<Capture> {
     std::fs::create_dir_all(&spec.user_dir)?;
     if spec.hide_map {
@@ -547,16 +547,16 @@ fn write_all(fd: RawFd, data: &[u8]) -> std::io::Result<()> {
     f.flush()
 }
 
-/// Find `target/<profile>/babelmap` from a binary that cargo built beside it —
+/// Find `target/<profile>/lanthorn` from a binary that cargo built beside it —
 /// the trick that lets `cargo run --example` reach the real app without the
 /// `CARGO_BIN_EXE_*` that only integration tests get.
-pub fn sibling_babelmap() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("BABELMAP_BIN") {
+pub fn sibling_lanthorn() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("LANTHORN_BIN") {
         return Some(PathBuf::from(p));
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    [dir.join("babelmap"), dir.parent()?.join("babelmap")].into_iter().find(|cand| cand.is_file())
+    [dir.join("lanthorn"), dir.parent()?.join("lanthorn")].into_iter().find(|cand| cand.is_file())
 }
 
 /// The repo's `stories/` directory, from this crate's manifest.

@@ -69,7 +69,7 @@
 //! | `Char` | any | no  | no  | no pager |
 //! | `Event` (Glulx timer/mouse-only `glk_select`) | any | any | any | no pager — out of scope |
 //! | any | any | any | **yes** | no pager (ZMSD §8.8.3.2.6 "never print [MORE]") |
-//! | babelmap meta output (`/help`, …) | — | — | — | no pager (never reaches an arm site) |
+//! | lanthorn meta output (`/help`, …) | — | — | — | no pager (never reaches an arm site) |
 //!
 //! A screen clear needs no special case: the clear preserves scrollback and marks
 //! an anchor, so *rows added by this turn* already measures exactly the post-clear

@@ -1118,10 +1118,10 @@ mod tests {
         use app::engine::Engine;
         use app::session::GameSession;
 
-        // A Save State (.babelmap) written with a non-zero turn count.
+        // A Save State (.lanthorn) written with a non-zero turn count.
         let sess = GameSession::new(crate::tests::read_char_then_save_v4_story(), true, false, None).expect("new");
         let save = sess.save_state();
-        let arc = std::env::temp_dir().join(format!("bm-sq260-{}.babelmap", std::process::id()));
+        let arc = std::env::temp_dir().join(format!("bm-sq260-{}.lanthorn", std::process::id()));
         let meta = app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None,
@@ -1135,7 +1135,7 @@ mod tests {
         app::archive::save_archive_meta(
             &arc, &mapper::mapper::Mapper::default(), &save, None,
             &std::collections::BTreeMap::new(), meta, &[], &[], &[], &[], &[], &[],
-        ).expect("write .babelmap with turns=42");
+        ).expect("write .lanthorn with turns=42");
 
         // Fresh session + default state (turns start at 0), then launch-resume.
         let mut fresh = GameSession::new(crate::tests::read_char_then_save_v4_story(), true, false, None).expect("new");
@@ -1191,7 +1191,7 @@ mod tests {
         let src_canvas_count = src.pictures_canvas.len();
         assert!(src_canvas_count > 0, "Zork0 boot draws graphics canvases");
         let save = src.save_state();
-        let arc = std::env::temp_dir().join(format!("bm-sq516-{}.babelmap", std::process::id()));
+        let arc = std::env::temp_dir().join(format!("bm-sq516-{}.lanthorn", std::process::id()));
         let meta = app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None,
@@ -1206,7 +1206,7 @@ mod tests {
             &arc, &mapper::mapper::Mapper::default(), &save, Some(&src.machine.screen),
             &src.machine.aux_data, meta, &[], &[], &[], &[], &[], &[], &[], &src.pictures_png(), None, None,
         )
-        .expect("write v6 .babelmap with pictures");
+        .expect("write v6 .lanthorn with pictures");
 
         // Fresh v6 session with an EMPTY canvas, then drive the REAL launch-resume.
         let mut fresh = boot(story_bytes);
@@ -1290,7 +1290,7 @@ mod tests {
         // whole menu into the primary buffer every keypress. Consecutive game-driven
         // clears must COLLAPSE — each reprint replaces the last instead of piling up
         // in scrollback — while pre-menu content is preserved.
-        let tmp = std::env::temp_dir().join(format!("babelmap-collapse-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-collapse-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut state = app::state::AppState::default();
         state.config.user_dir = tmp.clone();
@@ -1326,7 +1326,7 @@ mod tests {
         // this turn added measure the post-clear repaint alone) and a keypress
         // read arms like a command line; only `activation_target`, at render time,
         // decides fits-vs-overflows.
-        let tmp = std::env::temp_dir().join(format!("babelmap-pagerarm-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-pagerarm-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut state = app::state::AppState::default();
         state.config.user_dir = tmp.clone();
@@ -1373,7 +1373,7 @@ mod tests {
         // which would re-route the whole map on the main thread every keystroke
         // (the Counterfeit Monkey help-menu pause). A turn that reveals a NEW room
         // still must bump so the map updates.
-        let tmp = std::env::temp_dir().join(format!("babelmap-gdr-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-gdr-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut state = app::state::AppState::default();
         state.config.user_dir = tmp.clone();
@@ -1405,7 +1405,7 @@ mod tests {
         // not, so the VM stayed suspended on NeedFilename with NO modal open. Every
         // later drive re-reported it and every keypress was discarded against a
         // machine that could not advance — permanently wedged, with only a quit out.
-        let tmp = std::env::temp_dir().join(format!("babelmap-gdfn-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-gdfn-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut state = app::state::AppState::default();
         state.config.user_dir = tmp.clone();
@@ -1490,7 +1490,7 @@ mod tests {
 
     #[test]
     fn apply_turn_events_halts_and_logs_on_fault() {
-        let tmp = std::env::temp_dir().join(format!("babelmap-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).expect("create temp user_dir");
         let mut state = app::state::AppState::default();
         state.config.user_dir = tmp.clone();
@@ -1511,7 +1511,7 @@ mod tests {
     // ── Per-turn auto-save never prompts (SQ-0648) ──────────────────────────────
 
     /// The overwrite-confirm prompt exists for save-as (a name the PLAYER typed).
-    /// The per-turn auto-save writes the fixed `default.babelmap` slot every turn
+    /// The per-turn auto-save writes the fixed `default.lanthorn` slot every turn
     /// regardless of what is already there, and must keep doing that silently —
     /// it calls `save_archive_meta_pics` directly, never `save_named` /
     /// `handle_save_as`, so there is no typed name to collide on. This guards
@@ -1525,7 +1525,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("bm-sq0648-autosave-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let arc_file = dir.join("default.babelmap");
+        let arc_file = dir.join("default.lanthorn");
 
         // Pre-seed the slot as if from an earlier session.
         let seed_sess = GameSession::new(crate::tests::read_char_then_save_v4_story(), true, false, None).expect("new");
@@ -1537,7 +1537,7 @@ mod tests {
         app::archive::save_archive_meta(
             &arc_file, &mapper::mapper::Mapper::default(), &seed_sess.save_state(), None,
             &std::collections::BTreeMap::new(), seed_meta, &[], &[], &[], &[], &[], &[],
-        ).expect("seed default.babelmap");
+        ).expect("seed default.lanthorn");
         let before = std::fs::read(&arc_file).unwrap();
 
         let mut sess = GameSession::new(crate::tests::read_char_then_save_v4_story(), true, false, None).expect("new");

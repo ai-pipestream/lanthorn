@@ -6,7 +6,7 @@
 
 ## Goal
 
-Replace babelmap's greedy BFS grid layout with **constrained stress majorization**: minimize neato's stress objective (even, topology-respecting spacing) **subject to hard separation constraints** derived from the compass directions we already capture (N/S/E/W and diagonals). This guarantees compass directions are honored wherever geometrically feasible, pins global orientation (north = up), and degrades gracefully on contradictory maps by reusing the existing `distorted` flag.
+Replace lanthorn's greedy BFS grid layout with **constrained stress majorization**: minimize neato's stress objective (even, topology-respecting spacing) **subject to hard separation constraints** derived from the compass directions we already capture (N/S/E/W and diagonals). This guarantees compass directions are honored wherever geometrically feasible, pins global orientation (north = up), and degrades gracefully on contradictory maps by reusing the existing `distorted` flag.
 
 ## Background — current state
 

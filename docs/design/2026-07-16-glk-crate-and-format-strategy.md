@@ -47,7 +47,7 @@ Glk (Plotkin) is deliberately a two-sided, **N-VMs × M-displays** interface: an
 IF VM drives it; any display library implements it; neither knows the other.
 The same contract serves Z-machine, Glulx, TADS, Hugo, Alan, Level 9, Magnetic
 Scrolls, Scott Adams. **Gargoyle** is the living proof: one Glk implementation
-(`garglk`) hosts all of those as separate interpreters. babelmap currently
+(`garglk`) hosts all of those as separate interpreters. lanthorn currently
 *fuses* Glk into `gvm` — the one arrangement Glk was designed to prevent — so
 extracting it is realigning with what Glk already is.
 
@@ -130,7 +130,7 @@ native lets us express v6's model directly, undistorted, up to the final render.
 Formats split by whether their I/O fits the Glk/parser model.
 
 ### Camp A — Glk-family parser VMs (the natural fits)
-Reference Glk interpreters already exist, so in babelmap terms the display side
+Reference Glk interpreters already exist, so in lanthorn terms the display side
 is *free* (reuse `glk` + `ScreenModel` + renderer + **automapper**); the cost is
 the bytecode VM itself.
 
@@ -154,7 +154,7 @@ display fit.
 ### Camp B — choice-based / web-native (out of scope for this architecture)
 **Twine (Harlowe/SugarCube), Ink, Quest, ChoiceScript.** Input is
 clicking choices, not parser commands; they are HTML/JS-native (browser by
-design); and **they have no spatial room model, so the automapper — babelmap's
+design); and **they have no spatial room model, so the automapper — lanthorn's
 differentiator — does not apply.** These would be a separate product direction,
 naturally living in a web front-end, not a Rust VM behind a terminal.
 

@@ -381,7 +381,7 @@ fn wrap_panel_line(s: &str, first_w: usize, cont_w: usize) -> Vec<String> {
         };
         if broke_on_space {
             // The panel's own separators include double spaces (`… turn 42 ·
-            // 2026-06-30  save.babelmap`), so a break can land inside a RUN of
+            // 2026-06-30  save.lanthorn`), so a break can land inside a RUN of
             // them: none of that run belongs to either row.
             rows.push(rest[..take].trim_end_matches(' ').to_string());
             skip += rest[skip..].len() - rest[skip..].trim_start_matches(' ').len();
@@ -668,7 +668,7 @@ pub(crate) fn run_story_picker(
     let dir = dir.as_path();
     let mut stories = source.scan(data_base);
     if stories.is_empty() {
-        eprintln!("babelmap: no Z-machine story files found in '{}'", dir.display());
+        eprintln!("lanthorn: no Z-machine story files found in '{}'", dir.display());
         std::process::exit(1);
     }
 
@@ -1814,7 +1814,7 @@ pub(crate) fn run_story_picker(
 
     restore_terminal();
     if let Some(msg) = persist_error {
-        eprintln!("babelmap: {msg}");
+        eprintln!("lanthorn: {msg}");
     }
     chosen
 }
@@ -1872,7 +1872,7 @@ fn draw_story_picker(
 
     // Header.
     let header = format!(
-        " babelmap — choose a story  ({} found in {})   [i: info · g: covers]",
+        " lanthorn — choose a story  ({} found in {})   [i: info · g: covers]",
         stories.len(),
         dir.display()
     );
@@ -2109,7 +2109,7 @@ fn draw_story_gallery(
 
     // Header (matches the list view's, with the toggle hint flipped).
     let header = format!(
-        " babelmap — choose a story  ({} found in {})   [i: info · g: list]",
+        " lanthorn — choose a story  ({} found in {})   [i: info · g: list]",
         stories.len(),
         dir.display()
     );
@@ -3264,7 +3264,7 @@ mod tests {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return; // no story media here — skip
         };
-        let data_base = std::env::temp_dir().join(format!("babelmap-adf-label-{}", std::process::id()));
+        let data_base = std::env::temp_dir().join(format!("lanthorn-adf-label-{}", std::process::id()));
         let mut saw_image = false;
         let mut saw_bare = false;
         for e in entries.flatten() {
@@ -3927,11 +3927,11 @@ mod tests {
             ]),
             author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
-        let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
+        let game_dir = std::path::PathBuf::from("/tmp/lanthorn-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
             assoc_blorb: None,
             saves: vec![app::persist_files::SaveInfo {
-                path: game_dir.join("before-troll.babelmap"),
+                path: game_dir.join("before-troll.lanthorn"),
                 name: "before-troll".into(),
                 turns: 42,
                 saved_at: "2026-06-30T13:05:00Z".into(),
@@ -3988,7 +3988,7 @@ mod tests {
         assert!(text.contains("AIFF"));
         assert!(text.contains("15.4 kHz · 8-bit · mono · 2.2s"), "parsed detail: {text:?}");
         assert!(text.contains("Saves ·"), "saves dir header: {text:?}");
-        assert!(text.contains("before-troll.babelmap"), "babelmap filename: {text:?}");
+        assert!(text.contains("before-troll.lanthorn"), "lanthorn filename: {text:?}");
         // SQ-0411: the save summary surfaces location, score, and date + time-of-day.
         assert!(text.contains("The Troll Room"), "save location: {text:?}");
         assert!(text.contains("score 10"), "save score: {text:?}");
@@ -4348,7 +4348,7 @@ mod tests {
         assert_eq!(super::wrap_panel_line("宇宙船の物語", 9, 9), vec!["宇宙船の", "物語"]);
         // A run of spaces at a break point does not become a row of blanks (the
         // panel's own save rows use double spaces as column separators).
-        assert_eq!(super::wrap_panel_line("turn 42  save.babelmap", 8, 8), vec!["turn 42", "save.bab", "elmap"]);
+        assert_eq!(super::wrap_panel_line("turn 42  save.lanthorn", 8, 8), vec!["turn 42", "save.lan", "thorn"]);
         // Nothing fits at all: the glyph is taken anyway so the scan advances.
         assert_eq!(super::wrap_panel_line("宇宙", 1, 1), vec!["宇", "宙"]);
         // Zero width cannot make progress; the line comes back unwrapped.
@@ -5056,7 +5056,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let mut d = std::env::temp_dir();
-        d.push(format!("babelmap-picker-ui-{}-{}", tag, std::process::id()));
+        d.push(format!("lanthorn-picker-ui-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -5354,7 +5354,7 @@ mod tests {
     #[test]
     fn open_preview_decodes_an_image_resource_from_a_blorb() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("babelmap-preview-{}.blb", std::process::id()));
+        let path = dir.join(format!("lanthorn-preview-{}.blb", std::process::id()));
         std::fs::write(&path, blorb_with_pict(&tiny_png())).unwrap();
 
         let rref = super::ResourceRef {

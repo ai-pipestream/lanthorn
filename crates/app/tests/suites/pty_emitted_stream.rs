@@ -1,4 +1,4 @@
-//! What babelmap actually WRITES to the terminal, not what it computed (SQ-0762).
+//! What lanthorn actually WRITES to the terminal, not what it computed (SQ-0762).
 //!
 //! Every other harness here renders into a `Buffer` and asserts on cells. That
 //! cannot see a defect that lives between the model and the wire, and this
@@ -67,7 +67,7 @@ mod unix {
         let user_dir = out_dir().join("user-dir");
         let _ = std::fs::remove_dir_all(&user_dir);
 
-        let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_babelmap"), &story, &user_dir);
+        let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_lanthorn"), &story, &user_dir);
         spec.cols = COLS;
         spec.rows = ROWS;
         // Journey's intro wants a few keypresses before the party menu — the frame
@@ -85,7 +85,7 @@ mod unix {
             driver::Key::Wait(Duration::from_millis(900)),
         ];
 
-        let cap = driver::run(spec).expect("the pty harness should boot babelmap");
+        let cap = driver::run(spec).expect("the pty harness should boot lanthorn");
         let term = pty_stream::decode_capture(&cap);
         let report = pty_stream::report(&cap, &term);
         let path = out_dir().join("journey-r30-115x61.txt");
@@ -130,12 +130,12 @@ mod unix {
         params.split(',').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
     }
 
-    /// SQ-0753: every image babelmap stops showing must be FREED in the terminal.
+    /// SQ-0753: every image lanthorn stops showing must be FREED in the terminal.
     ///
     /// Deletes were **zero in every capture ever taken** of this app — the quest's
     /// headline fact, and the reason it mattered: kitty evicts by LRU and evicts
     /// images that are CURRENTLY PLACED, so an unbounded pile of orphans can blank a
-    /// live one. Only the graphics WINDOWS, whose ids babelmap allocates itself, were
+    /// live one. Only the graphics WINDOWS, whose ids lanthorn allocates itself, were
     /// ever deleted (SQ-0637); everything drawn through a `ratatui-image` `Protocol`
     /// — every chrome band, the whole-pane raster composite — was uploaded and
     /// abandoned. Journey release 30 over five keystrokes: 4.1 MB up, 0 bytes freed.
@@ -155,7 +155,7 @@ mod unix {
         let user_dir = out_dir().join("user-dir-deletes");
         let _ = std::fs::remove_dir_all(&user_dir);
 
-        let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_babelmap"), &story, &user_dir);
+        let mut spec = driver::Spec::new(env!("CARGO_BIN_EXE_lanthorn"), &story, &user_dir);
         spec.cols = COLS;
         spec.rows = ROWS;
         // Journey boots through the raster path and then hands the screen to the
@@ -173,7 +173,7 @@ mod unix {
             driver::Key::Wait(Duration::from_millis(1200)),
         ];
 
-        let cap = driver::run(spec).expect("the pty harness should boot babelmap");
+        let cap = driver::run(spec).expect("the pty harness should boot lanthorn");
         let term = pty_stream::decode_capture(&cap);
         let report = pty_stream::report(&cap, &term);
         let path = out_dir().join("journey-r30-deletes.txt");
@@ -196,7 +196,7 @@ mod unix {
                 .iter()
                 .filter(|a| param(&a.params, "a") == Some(action))
                 .filter_map(|a| param(&a.params, "i")?.parse::<u32>().ok())
-                // babelmap's own graphics-window ids are deliberately KEPT uploaded
+                // lanthorn's own graphics-window ids are deliberately KEPT uploaded
                 // and re-placed (`KITTY_CACHE`, SQ-0564), so an unplaced one is a
                 // cache entry, not a leak. Only the `ratatui-image` uploads — random
                 // ids, no cache of their own — are in scope here.
@@ -212,7 +212,7 @@ mod unix {
         assert!(
             !deleted.is_empty(),
             "the run uploaded {} image(s) and deleted none — this is exactly the state SQ-0753 \
-             measured, where every image babelmap ever sent stays in the terminal for good \
+             measured, where every image lanthorn ever sent stays in the terminal for good \
              (report at {})",
             uploaded.len(),
             path.display()

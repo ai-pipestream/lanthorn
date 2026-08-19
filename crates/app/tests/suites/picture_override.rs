@@ -51,7 +51,7 @@ fn stories_dir() -> PathBuf {
 /// A throwaway `game_dir` holding the sidecar `config.toml`, seeded with the
 /// bare lines given. `None` writes no sidecar at all.
 fn game_dir_with(tag: &str, body: Option<&str>) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("babelmap-picover-{}-{tag}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("lanthorn-picover-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     if let Some(body) = body {
@@ -527,7 +527,7 @@ fn zork_zeros_ega_rendition_boots_the_geometry_its_mcga_one_does() {
     for (name, s) in [("MCGA", &mcga), ("EGA", &ega)] {
         assert!(!s.quit, "{name} quit during boot");
         assert!(s.machine.fault_trace.is_none(), "{name} faulted during boot");
-        // The unit screen is babelmap's, not the card's, and never moves.
+        // The unit screen is lanthorn's, not the card's, and never moves.
         assert_eq!(s.machine.mem.read_word(0x22), 640, "{name} screen width, header $22");
         assert_eq!(s.machine.mem.read_word(0x24), 400, "{name} screen height, header $24");
         // …on the 8×16 cell, which is the EGA 80×25 character grid too.

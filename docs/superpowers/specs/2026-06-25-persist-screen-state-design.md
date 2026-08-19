@@ -4,7 +4,7 @@
 **Status:** Approved (quick spec) — implement directly on main.
 **Context:** Step **A** of the Bureaucracy restore investigation. The game-initiated
 restore path (step B, shipped) redraws the screen itself. The **snapshot path**
-(babelmap's Ctrl+R / auto-load at launch) bypasses the game's redraw: it slams the
+(lanthorn's Ctrl+R / auto-load at launch) bypasses the game's redraw: it slams the
 Quetzal in at a READ point. For a game that splits its upper window only once at
 startup (Bureaucracy), a fresh-launch auto-load leaves `upper_window_rows = 0`, so
 the status line is blank. Confirmed by the user: "Ctrl+R / auto-load the upper
@@ -13,7 +13,7 @@ window is not restored; the story's restore command works."
 ## Goal
 
 Persist the Z-machine **screen state** (upper-window split height + grid + cursor +
-current window) in the `.babelmap` archive, and re-apply it after a host-mediated
+current window) in the `.lanthorn` archive, and re-apply it after a host-mediated
 restore (`restore_file`), so the upper window shows the saved status line on
 Ctrl+R / auto-load.
 

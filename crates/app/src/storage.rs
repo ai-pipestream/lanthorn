@@ -2,14 +2,14 @@
 //! per-game directory `<base>/<story-key>.save/`. The `.save` suffix keeps the
 //! directory from colliding with the story file when `base` is the story's own
 //! directory. Inside it: `default.aux`, `default.glkvfs`,
-//! `default.babelmap` (auto/singleton), plus `<slug>.babelmap` / `<slug>.qzl`
+//! `default.lanthorn` (auto/singleton), plus `<slug>.lanthorn` / `<slug>.qzl`
 //! (named), and the per-game `style.toml` / `config.toml` overrides (SQ-0346).
 //!
 //! **The key is the story's filename, unless the story came off a disk image, in
 //! which case it is that story's own release and serial** (SQ-0850). One image
 //! held one game until the corpus grew compilations — `Infocom Compilation 1
 //! (19xx)(-).st` alone carries six — and a filename key gave all six of them one
-//! `default.babelmap` to overwrite in turn. The rule and its reasoning live in
+//! `default.lanthorn` to overwrite in turn. The rule and its reasoning live in
 //! [`cli_host::storage`], which `zvm-cli` reads from too, so the TUI and the CLI
 //! cannot name the same game's directory two ways. IFID is retained elsewhere
 //! for title/hint lookup only.
@@ -29,7 +29,7 @@ pub fn game_dir(base: &Path, key: &str) -> PathBuf {
 
 /// The default (auto/singleton) Save-State slot inside a game dir.
 pub fn default_state_path(game_dir: &Path) -> PathBuf {
-    game_dir.join("default.babelmap")
+    game_dir.join("default.lanthorn")
 }
 
 /// `default` is reserved for the auto/singleton slot; a user save may not use it.
@@ -39,13 +39,13 @@ pub fn is_reserved_slug(slug: &str) -> bool {
 
 /// Delete the game's AUTO persistent data so the next boot starts from scratch:
 /// the Glk VFS cache (`default.glkvfs`), the Z-machine aux sidecar (`default.aux`),
-/// the auto/singleton Save State (`default.babelmap`), and the debug executed-PC
+/// the auto/singleton Save State (`default.lanthorn`), and the debug executed-PC
 /// coverage sidecar (`default.pcs`). The player's named Save States
-/// (`<slug>.babelmap`) and in-game saves (`<slug>.qzl` / `_*.qzl`) are left
+/// (`<slug>.lanthorn`) and in-game saves (`<slug>.qzl` / `_*.qzl`) are left
 /// untouched — only the reserved `default.*` files go. A missing file is not an
 /// error.
 pub fn delete_auto_persistent(game_dir: &Path) {
-    for name in ["default.glkvfs", "default.aux", "default.babelmap", "default.pcs"] {
+    for name in ["default.glkvfs", "default.aux", "default.lanthorn", "default.pcs"] {
         let path = game_dir.join(name);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -65,19 +65,19 @@ static TMP_SERIAL: AtomicU64 = AtomicU64::new(0);
 /// always in the SAME directory (a rename is only atomic within one filesystem).
 ///
 /// The suffix goes AFTER the real extension on purpose: `list_saves` and friends
-/// match on `.babelmap` / `.qzl` endings, so an abandoned temp is invisible to
+/// match on `.lanthorn` / `.qzl` endings, so an abandoned temp is invisible to
 /// every picker and scan rather than showing up as a half-written save.
 fn temp_sibling(path: &Path) -> PathBuf {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("babelmap");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("lanthorn");
     let serial = TMP_SERIAL.fetch_add(1, Ordering::Relaxed);
     path.with_file_name(format!(".{name}.part-{}-{serial}", std::process::id()))
 }
 
 /// Write `bytes` to `path` atomically (SQ-0644).
 ///
-/// Every persistent file babelmap owns goes through here. `File::create` on the
+/// Every persistent file lanthorn owns goes through here. `File::create` on the
 /// final path truncates it *before* the replacement is durable, and these writers
-/// run at the worst possible moments — the auto-save rewrites `default.babelmap`
+/// run at the worst possible moments — the auto-save rewrites `default.lanthorn`
 /// on EVERY turn, and the quit path can be cut short by the exit watchdog — so a
 /// crash, a power loss, or a killed process left a zero-length or half-written
 /// file where the player's game used to be.
@@ -96,7 +96,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
-/// [`atomic_write`] for content a caller must stream (the `.babelmap` ZIP): `build`
+/// [`atomic_write`] for content a caller must stream (the `.lanthorn` ZIP): `build`
 /// is handed the temp path and writes whatever it likes there. The file is renamed
 /// over `path` only if `build` returns `Ok`; on any error the temp is removed and
 /// the target is left exactly as it was.
@@ -212,7 +212,7 @@ mod tests {
     /// suffix makes the two paths distinct.
     #[test]
     fn game_dir_does_not_collide_with_same_named_story_file() {
-        let tmp = std::env::temp_dir().join(format!("babelmap-storage-collision-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("lanthorn-storage-collision-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -231,7 +231,7 @@ mod tests {
     fn default_state_path_is_in_game_dir() {
         assert_eq!(
             default_state_path(Path::new("/base/Zork1.z5.save")),
-            PathBuf::from("/base/Zork1.z5.save/default.babelmap")
+            PathBuf::from("/base/Zork1.z5.save/default.lanthorn")
         );
     }
 
@@ -246,25 +246,25 @@ mod tests {
     #[test]
     fn delete_auto_persistent_removes_only_defaults() {
         let tmp = std::env::temp_dir()
-            .join(format!("babelmap-delete-auto-{}", std::process::id()));
+            .join(format!("lanthorn-delete-auto-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
         // The auto sidecars that must go.
-        for f in ["default.glkvfs", "default.aux", "default.babelmap", "default.pcs"] {
+        for f in ["default.glkvfs", "default.aux", "default.lanthorn", "default.pcs"] {
             std::fs::write(tmp.join(f), b"x").unwrap();
         }
         // Player data that must survive.
-        for f in ["myslot.babelmap", "quick.qzl", "_autosave.qzl"] {
+        for f in ["myslot.lanthorn", "quick.qzl", "_autosave.qzl"] {
             std::fs::write(tmp.join(f), b"x").unwrap();
         }
 
         delete_auto_persistent(&tmp);
 
-        for f in ["default.glkvfs", "default.aux", "default.babelmap", "default.pcs"] {
+        for f in ["default.glkvfs", "default.aux", "default.lanthorn", "default.pcs"] {
             assert!(!tmp.join(f).exists(), "{f} should be deleted");
         }
-        for f in ["myslot.babelmap", "quick.qzl", "_autosave.qzl"] {
+        for f in ["myslot.lanthorn", "quick.qzl", "_autosave.qzl"] {
             assert!(tmp.join(f).exists(), "{f} should be kept");
         }
 
@@ -274,7 +274,7 @@ mod tests {
     // ── atomic writes (SQ-0644) ──────────────────────────────────────────────
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("babelmap-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanthorn-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn atomic_write_replaces_the_target_and_cleans_up() {
         let dir = scratch("atomic-ok");
-        let target = dir.join("default.babelmap");
+        let target = dir.join("default.lanthorn");
         std::fs::write(&target, b"old").unwrap();
         atomic_write(&target, b"new contents").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn an_interrupted_write_leaves_the_old_file_readable() {
         let dir = scratch("atomic-fail");
-        let target = dir.join("default.babelmap");
+        let target = dir.join("default.lanthorn");
         std::fs::write(&target, b"the previous good save").unwrap();
 
         let err = atomic_write_with(&target, |tmp| {
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn delete_auto_persistent_ignores_missing() {
         let tmp = std::env::temp_dir()
-            .join(format!("babelmap-delete-auto-missing-{}", std::process::id()));
+            .join(format!("lanthorn-delete-auto-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         delete_auto_persistent(&tmp); // no default.* present -> no panic

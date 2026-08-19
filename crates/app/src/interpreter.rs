@@ -1,4 +1,4 @@
-//! The interpreter profile: which historical machine babelmap presents itself
+//! The interpreter profile: which historical machine lanthorn presents itself
 //! as (SQ-0719).
 //!
 //! A Version 6 story asks the header what it is running on and then behaves
@@ -120,7 +120,7 @@
 //! already governs whether the game's colour choices are honoured at all, so
 //! turning it off returns the user's theme, profile or no profile.
 //!
-//! It can also cost a babelmap CONVENIENCE, and that has to be paid too. §8.3's
+//! It can also cost a lanthorn CONVENIENCE, and that has to be paid too. §8.3's
 //! Amiga has exactly two pens for the whole screen, so the transcript's built-in
 //! "a whole line in brackets came from the interpreter, mute it" rule is wrong
 //! twice over there — the line is the game's prose, and the mute was picked to
@@ -131,7 +131,7 @@ use std::path::Path;
 
 use blorb::infocom_pics::Flavour;
 
-/// The machine babelmap presents itself to the story as. See the module docs.
+/// The machine lanthorn presents itself to the story as. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InterpreterProfile {
     /// Today's behaviour, named: an IBM PC (interpreter 6 on v6, 1 elsewhere),
@@ -334,7 +334,7 @@ impl InterpreterProfile {
     }
 
     /// The profile a story header byte `$1E` value implies, falling back to the
-    /// IBM PC bundle — the historical default — for a machine babelmap does not
+    /// IBM PC bundle — the historical default — for a machine lanthorn does not
     /// model.
     ///
     /// **The fallback is the honest answer and it is also a silent one**, which is
@@ -345,7 +345,7 @@ impl InterpreterProfile {
         Self::try_for_interpreter_number(n).unwrap_or(Self::IbmPc)
     }
 
-    /// The profile `n` names, or `None` when babelmap models no such machine.
+    /// The profile `n` names, or `None` when lanthorn models no such machine.
     ///
     /// The set is [`zvm::interpreter::MACHINES`]'s, which is where the gaps and
     /// the reason for each are argued: 1 (DECSystem-20) is a decision rather than
@@ -419,7 +419,7 @@ impl InterpreterProfile {
     /// answer as the only one.
     ///
     /// Blorb §11 lets a resource file declare its art's intended resolution in a
-    /// `Reso` chunk, and babelmap scales v6 artwork by 2 onto the 640×400 unit
+    /// `Reso` chunk, and lanthorn scales v6 artwork by 2 onto the 640×400 unit
     /// screen only when such a declaration exists — a file with no `Reso`
     /// declares its images non-scalable, so scopa and mysterious01 correctly
     /// draw at 1:1 (SQ-0715). A native Amiga `Pic.data` archive has no `Reso`
@@ -509,7 +509,7 @@ impl InterpreterProfile {
     /// ```
     ///
     /// — rows and columns of whatever display is attached, which is already what
-    /// babelmap tells a story about its pane.
+    /// lanthorn tells a story about its pane.
     ///
     /// # The Apple IIgs HAS an answer, and it is not this quantity
     ///
@@ -590,14 +590,14 @@ impl InterpreterProfile {
     /// terminal's own colours.
     ///
     /// [`Self::IbmPc`] returns `None`, which is right for a terminal-native
-    /// experience: babelmap tells the story what the player's terminal actually
+    /// experience: lanthorn tells the story what the player's terminal actually
     /// looks like, so "default" means what the player sees. A profile whose
     /// entire purpose is to present as an Amiga should not be describing the
     /// user's terminal, so [`Self::Amiga`] answers with the Amiga's own pair.
     ///
     /// **The pairs themselves are [`zvm::interpreter`]'s** (SQ-0872), which is
     /// where each is sourced out of Infocom's own interpreter for that machine —
-    /// and which is why `zvm-cli` can now paint the same page babelmap does. The
+    /// and which is why `zvm-cli` can now paint the same page lanthorn does. The
     /// Commodore 128's `None` is a *decline* rather than a default and is argued
     /// on the row: nothing in hand states the pair Infocom's Commodore
     /// interpreter reported, and the machine's famous light-blue-on-blue boot
@@ -717,7 +717,7 @@ impl InterpreterProfile {
     /// expressed** (SQ-0838, reported rather than quietly rounded). Infocom's
     /// Mac interpreter set `stdFont := geneva; textSize (12); lineHeight := 15
     /// {16}; colWidth := 7` — a 7×15 cell, giving 68×20 characters on the
-    /// 480×300 standard-Mac screen where babelmap's 8×16 gives 60×18. Honouring
+    /// 480×300 standard-Mac screen where lanthorn's 8×16 gives 60×18. Honouring
     /// it means making `V6_FONT_WIDTH`/`V6_FONT_HEIGHT` runtime state throughout
     /// `zvm`'s screen model, its location heuristics and the app's render path,
     /// which is the same refactor this knob declined for EGA and a far larger
@@ -729,7 +729,7 @@ impl InterpreterProfile {
     /// **The Apple IIgs differs further still, and is reported the same way**
     /// (SQ-0857). Its Version 6 cell is 3x9 — `MFONT_W EQU 3` and `FONT_H EQU 9`
     /// in `apple/yzip/rel.15/apple.equ`, handed to the story as `ZFWRD` — giving
-    /// 46x21 characters on the 140x192 screen where babelmap's 8x16 gives 70x24
+    /// 46x21 characters on the 140x192 screen where lanthorn's 8x16 gives 70x24
     /// on the 560x384 the archive asks for (SQ-0863). It is the same refactor
     /// declined twice above, and declining it is still what makes
     /// [`Self::std_window`] decline: a 140x192 CHARACTER grid is only the
@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_not_a_disk_image() {
-        let missing = std::path::Path::new("/nonexistent/babelmap/no-such-story.z6");
+        let missing = std::path::Path::new("/nonexistent/lanthorn/no-such-story.z6");
         assert_eq!(InterpreterProfile::resolve(missing, None, None, None), InterpreterProfile::IbmPc);
         // …and an explicit number still decides without ever touching the disk.
         assert_eq!(InterpreterProfile::resolve(missing, Some(4), None, None), InterpreterProfile::Amiga);
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test]
     fn the_named_archive_outranks_the_medium_and_yields_to_an_explicit_number() {
-        let plain = std::path::Path::new("/nonexistent/babelmap/no-such-story.z6");
+        let plain = std::path::Path::new("/nonexistent/lanthorn/no-such-story.z6");
         // Naming an Amiga archive beside an ordinary file makes it an Amiga…
         assert_eq!(
             InterpreterProfile::resolve(plain, None, Some(Flavour::AmigaMac), None),
