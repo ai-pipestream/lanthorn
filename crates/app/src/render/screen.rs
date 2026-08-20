@@ -2116,7 +2116,8 @@ fn render_node(
                                 let last = rows.max()?;
                                 Some((r.y, r.height.min(last - first + 1), first))
                             };
-                            let text_rows = menu_strips
+                            let mut packed_text: Vec<crate::render::graphics::PackedText> = Vec::new();
+                            if let Some(rows) = menu_strips
                                 .iter()
                                 .find_map(|s| match s {
                                     ChromeStrip::Text(r, runs) => packed(r, runs),
@@ -2127,8 +2128,34 @@ fn render_node(
                                         ChromeStrip::Text(r, runs) if r.y >= viewport.bottom() => packed(r, runs),
                                         _ => None,
                                     })
+                                })
+                            {
+                                // A chrome text strip packs its ROWS and still places
+                                // its columns through the scale, so it publishes no
+                                // column mapping and x keeps the proportional inverse.
+                                packed_text.push(crate::render::graphics::PackedText { rows, cols: None });
+                            }
+                            // SQ-0938: and the STORY BOX, which packs BOTH axes.
+                            //
+                            // The in-box run packing draws one terminal cell per native
+                            // text cell — rows from the box's top since SQ-0892, columns
+                            // from its left since SQ-0937 — so a click inside it has to
+                            // invert the same way or it lands on a different line than
+                            // the one under the pointer. Zork Zero's and Shogun's hint
+                            // menus say "(Or use mouse.)", so this is the screen working,
+                            // not a nicety.
+                            //
+                            // Recorded from the SAME numbers the drawing used
+                            // (`viewport`, `vp_native`), because a click map derived
+                            // independently of the draw is a second implementation of the
+                            // same geometry and will drift from it.
+                            if viewport.width > 0 && viewport.height > 0 {
+                                packed_text.push(crate::render::graphics::PackedText {
+                                    rows: (viewport.y, viewport.height, (vp_native.1 / v6::FONT_H) as u16),
+                                    cols: Some((viewport.x, viewport.width, vp_native.0 as u16)),
                                 });
-                            gr.record_hybrid_click_map(area, click_scale, native, cell_px, text_rows);
+                            }
+                            gr.record_hybrid_click_map(area, click_scale, native, cell_px, packed_text);
                         }
                         // The story window as real terminal text (primary-Buffer path).
                         //
@@ -10589,6 +10616,7 @@ mod tests {
             .graphics_render
             .borrow()
             .last_v6_map
+            .clone()
             .expect("the cell path publishes a v6 click map");
         // The model's native extent is its 320x200 game-pixel screen.
         let (nw, nh) = crate::render::v6_layout::native_extent(match &model.root {

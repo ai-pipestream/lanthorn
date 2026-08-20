@@ -326,6 +326,7 @@ fn journey_menu_click_where_drawn_reaches_the_game() {
                     .graphics_render
                     .borrow()
                     .last_v6_map
+                    .clone()
                     .expect("a v6 frame records a click map for the mouse handler");
 
                 // WHERE IT IS DRAWN: the cell the player sees "Cast" on.

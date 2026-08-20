@@ -397,7 +397,9 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
 /// v6 pane's top-left cell (`pane_x`, `pane_y`). The drawn game image occupies the
 /// device-pixel rect (`img_x`, `img_y`, `img_w`, `img_h`) inside that pane, and
 /// maps a `native_w × native_h` game-pixel canvas across it, aspect-preserved.
-#[derive(Clone, Copy, Debug, PartialEq)]
+// SQ-0938: no longer `Copy` — it carries a list of packed regions now, because a
+// frame can pack more than one and each publishes its own mapping.
+#[derive(Clone, Debug, PartialEq)]
 pub struct V6ClickMap {
     pub pane_x: u16,
     pub pane_y: u16,
@@ -409,19 +411,50 @@ pub struct V6ClickMap {
     pub img_h: f32,
     pub native_w: u16,
     pub native_h: u16,
-    /// SQ-0550: the rows of a TEXT strip that is drawn with one terminal row per
-    /// GAME row, as `(top terminal row, row count, first game row)`.
+    /// Every region of the pane that is drawn as PACKED CELLS rather than through
+    /// the letterbox scale — see [`PackedText`]. Empty when the whole pane is the
+    /// scaled image, which is the common case.
+    pub packed_text: Vec<PackedText>,
+}
+
+/// A rectangle the renderer draws at ONE TERMINAL CELL PER NATIVE TEXT CELL,
+/// instead of placing it through the letterbox scale.
+///
+/// # Why the proportional inverse is wrong inside one
+///
+/// SQ-0550, on rows, and the reasoning is the general case: a packed region does
+/// not inherit the scale's gaps, so "inside this span the linear inverse is wrong,
+/// and wrong by a growing amount — at a scale of 1.725 the letterbox spreads game
+/// rows 1.53 terminal rows apart while the strip draws them 1 apart, so by the
+/// fifth menu row the click lands two game rows high."
+///
+/// # The rule this expresses
+///
+/// **A click is resolved the way the pixel under it was drawn.** Proportionally
+/// where the frame is an image; by cell index where the text is glyphs. That is
+/// why this is a LIST rather than the single strip it began as: any number of
+/// regions can be packed on one frame, each publishes its own mapping, and a
+/// region nobody has met yet inverts correctly the moment the renderer records it.
+/// Nothing here knows which game it is looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedText {
+    /// First terminal row, its row count, and the native text ROW drawn at `top`.
+    pub rows: (u16, u16, u16),
+    /// First terminal column, its column count, and the native PIXEL x drawn at
+    /// `left` — a pixel rather than a column index because a story box does not
+    /// begin on a multiple of the cell (Zork Zero's starts at native x=86).
     ///
-    /// [`draw_chrome_text_strip`](crate::render::screen) does not place its runs
-    /// through the letterbox scale — it buckets them by game row and packs those
-    /// buckets onto CONSECUTIVE terminal rows from the strip's top (SQ-0543), so
-    /// the menu reads as a compact block instead of inheriting the scale's row
-    /// gaps. Inside this span the linear inverse below is therefore wrong, and
-    /// wrong by a growing amount: at a scale of 1.725 the letterbox spreads game
-    /// rows 1.53 terminal rows apart while the strip draws them 1 apart, so by the
-    /// fifth menu row the click lands two game rows high. `None` when no such
-    /// strip is on screen (every path but the hybrid Menu plan).
-    pub text_rows: Option<(u16, u16, u16)>,
+    /// `None` where the region packs only its rows and still places columns
+    /// through the scale, which is what a chrome text strip does.
+    pub cols: Option<(u16, u16, u16)>,
+}
+
+impl PackedText {
+    fn holds(&self, col: u16, row: u16) -> bool {
+        let (top, count, _) = self.rows;
+        row >= top && row < top.saturating_add(count)
+            && self.cols.is_none_or(|(left, n, _)| col >= left && col < left.saturating_add(n))
+    }
 }
 
 impl V6ClickMap {
@@ -447,15 +480,23 @@ impl V6ClickMap {
         if !(0.0..1.0).contains(&fx) {
             return None;
         }
-        let gx = (fx * self.native_w as f32).floor() as u16 + 1;
-        // A consecutively-packed text strip (see `text_rows`) inverts by row index,
-        // not by the letterbox: the clicked row's game row is its offset from the
-        // strip's top, and the game pixel is that row's VERTICAL MIDDLE, so the whole
-        // terminal row selects the menu line the player sees on it. The strip's own
-        // rows are drawn, so they need no `fy` range check.
-        let strip = self.text_rows.filter(|&(top, count, _)| row >= top && row < top.saturating_add(count));
-        let gy = match strip {
-            Some((top, _, first_game)) => (first_game as u32 + (row - top) as u32) * 16 + 8,
+        // A PACKED region inverts by cell index, not by the letterbox — on whichever
+        // axes it packs. Its own cells are drawn, so they need no range check.
+        let packed = self.packed_text.iter().find(|p| p.holds(col, row));
+        let gx = match packed.and_then(|p| p.cols) {
+            // The clicked column's game pixel is that cell's HORIZONTAL middle, so
+            // the whole terminal cell selects the character the player sees on it —
+            // the same rule the row mapping below uses vertically.
+            Some((left, _, native_x0)) => {
+                u32::from(native_x0) + u32::from(col - left) * 8 + 4
+            }
+            None => (fx * self.native_w as f32).floor() as u32 + 1,
+        };
+        let gy = match packed {
+            Some(p) => {
+                let (top, _, first_game) = p.rows;
+                (first_game as u32 + (row - top) as u32) * 16 + 8
+            }
             None => {
                 let fy = (dy - self.img_y) / self.img_h;
                 if !(0.0..1.0).contains(&fy) {
@@ -464,7 +505,7 @@ impl V6ClickMap {
                 (fy * self.native_h as f32).floor() as u32 + 1
             }
         };
-        Some((gx.min(self.native_w), (gy.min(self.native_h as u32)) as u16))
+        Some(((gx.min(self.native_w as u32)) as u16, (gy.min(self.native_h as u32)) as u16))
     }
 }
 
@@ -1245,7 +1286,7 @@ impl GraphicsRender {
             img_h: dest.height as f32 * ch as f32,
             native_w,
             native_h,
-            text_rows: None,
+            packed_text: Vec::new(),
         });
     }
 
@@ -1255,15 +1296,15 @@ impl GraphicsRender {
     /// the chrome bands were placed through, so the recovered game pixel matches
     /// what the player sees. `pane` is the whole v6 pane's cell rect; `native` is
     /// the chrome canvas's game-pixel extent; `cell_px` is the font cell size.
-    /// `text_rows` carries the interactive text strip's consecutive-row mapping when
-    /// one is on screen — see [`V6ClickMap::text_rows`].
+    /// `packed_text` carries every region drawn as packed cells rather than through
+    /// the scale — see [`PackedText`].
     pub fn record_hybrid_click_map(
         &mut self,
         pane: Rect,
         scale: &crate::render::v6_layout::Scale,
         native: (u16, u16),
         cell_px: (u16, u16),
-        text_rows: Option<(u16, u16, u16)>,
+        packed_text: Vec<PackedText>,
     ) {
         let (cw, ch) = (cell_px.0.max(1), cell_px.1.max(1));
         self.last_v6_map = Some(V6ClickMap {
@@ -1277,7 +1318,7 @@ impl GraphicsRender {
             img_h: native.1 as f32 * scale.s,
             native_w: native.0,
             native_h: native.1,
-            text_rows,
+            packed_text,
         });
     }
 
@@ -1310,7 +1351,7 @@ impl GraphicsRender {
             img_h: pane.height as f32 * ch as f32,
             native_w: native.0,
             native_h: native.1,
-            text_rows: None,
+            packed_text: Vec::new(),
         });
     }
 
@@ -2769,7 +2810,7 @@ mod tests {
             img_h: 100.0,
             native_w: 100,
             native_h: 100,
-            text_rows: None,
+            packed_text: Vec::new(),
         }
     }
 
@@ -2805,7 +2846,7 @@ mod tests {
             img_y: 4.0,
             img_w: 80.0, // 40 native * 2
             img_h: 80.0,
-            text_rows: None,
+            packed_text: Vec::new(),
             native_w: 40,
             native_h: 40,
         };

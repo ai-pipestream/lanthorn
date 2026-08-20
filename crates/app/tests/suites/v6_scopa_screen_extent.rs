@@ -186,6 +186,7 @@ fn the_dealt_table_composites_at_screen_scale_and_paints_no_black_bands() {
                 .graphics_render
                 .borrow()
                 .last_v6_map
+                .clone()
                 .expect("the raster path records a click map");
             assert_eq!(
                 (map.native_w, map.native_h),

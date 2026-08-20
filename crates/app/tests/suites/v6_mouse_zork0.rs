@@ -89,7 +89,7 @@ fn zork0_v6_compass_click_maps_writes_header_and_does_not_fault() {
         img_y: 0.0,
         img_w: 320.0,
         img_h: 200.0,
-        text_rows: None,
+        packed_text: Vec::new(),
         native_w: 320,
         native_h: 200,
     };
@@ -167,7 +167,7 @@ fn zork0_compass_click_ends_the_line_read_with_the_clicked_direction() {
         img_y: 0.0,
         img_w: 640.0,
         img_h: 400.0,
-        text_rows: None,
+        packed_text: Vec::new(),
         native_w: 640,
         native_h: 400,
     };
@@ -281,4 +281,86 @@ fn zork0_compass_click_maps_a_directional_edge() {
         (here, mapper::direction::Direction::N, there),
         "Great Hall --N--> Entrance Hall"
     );
+}
+
+/// SQ-0938: a click inside a PACKED region inverts by cell index on both axes, so
+/// it names the line and character the player sees under the pointer.
+///
+/// **The rule, stated once:** a click is resolved the way the pixel under it was
+/// drawn — proportionally where the frame is an image, by cell index where the text
+/// is glyphs. Nothing about it is specific to a game or a screen; a region the
+/// renderer packs publishes its own mapping and inverts correctly the first time
+/// anyone meets it.
+///
+/// These are unit cases on [`V6ClickMap`] because the geometry is the whole claim:
+/// they use Zork Zero's real hint-screen numbers (a story box at native x=86,
+/// y=78, drawn into a viewport at terminal 14,7) but need no story file, so they
+/// run everywhere rather than skipping on CI.
+#[test]
+fn a_click_in_a_packed_region_selects_the_row_and_column_under_the_pointer() {
+    use app::render::graphics::PackedText;
+    // A deliberately AWKWARD letterbox: scale 1.725 spreads native rows about 1.53
+    // terminal rows apart while a packed region draws them exactly 1 apart. That
+    // divergence is the defect — see `PackedText`'s docs — so a map whose scale
+    // agrees with its packing could not show it.
+    let map = V6ClickMap {
+        pane_x: 0,
+        pane_y: 0,
+        cell_w: 8,
+        cell_h: 18,
+        img_x: 0.0,
+        img_y: 0.0,
+        img_w: 640.0 * 1.725,
+        img_h: 400.0 * 1.725,
+        native_w: 640,
+        native_h: 400,
+        packed_text: vec![PackedText {
+            rows: (7, 27, 78 / 16),
+            cols: Some((14, 72, 86)),
+        }],
+    };
+
+    // Row by row down the menu: each terminal row names the NEXT native text row,
+    // one apart, and lands in that row's vertical middle.
+    for k in 0..10u16 {
+        let (_, gy) = map.map_click(20, 7 + k).expect("inside the packed region");
+        assert_eq!(gy, (78 / 16 + k) * 16 + 8, "terminal row {} is native text row {}", 7 + k, 78 / 16 + k);
+    }
+    // …and consecutive rows are exactly one native text row apart, which is the
+    // property the proportional inverse loses: at this scale it would spread them
+    // 1.53 apart and be two rows out by the fifth item.
+    let (_, first) = map.map_click(20, 7).unwrap();
+    let (_, fifth) = map.map_click(20, 11).unwrap();
+    assert_eq!(fifth - first, 4 * 16, "five packed rows are four native text rows apart");
+
+    // Column by column: the box starts at native x=86, and each terminal column is
+    // one native 8px cell, resolved at the cell's horizontal middle.
+    for k in 0..8u16 {
+        let (gx, _) = map.map_click(14 + k, 8).expect("inside the packed region");
+        assert_eq!(gx, 86 + k * 8 + 4, "terminal column {} is native x {}", 14 + k, 86 + k * 8);
+    }
+
+    // Outside the region the proportional inverse still governs — a packed region
+    // must not capture the frame around it.
+    let (gx, gy) = map.map_click(2, 2).expect("the letterbox still maps");
+    assert!(gx < 86, "a click in the left flank is not in the box: {gx}");
+    assert!(gy < 78, "a click in the banner is not in the box: {gy}");
+}
+
+/// A region that packs only its ROWS keeps the proportional inverse on x — the
+/// chrome text strip's arrangement, unchanged by SQ-0938. Pinned so a later tidy
+/// cannot quietly make both axes mandatory and move every strip click sideways.
+#[test]
+fn a_row_only_packed_region_leaves_the_column_proportional() {
+    use app::render::graphics::PackedText;
+    let map = V6ClickMap {
+        pane_x: 0, pane_y: 0, cell_w: 8, cell_h: 16,
+        img_x: 0.0, img_y: 0.0, img_w: 640.0, img_h: 400.0,
+        native_w: 640, native_h: 400,
+        packed_text: vec![PackedText { rows: (30, 4, 20), cols: None }],
+    };
+    let (gx, gy) = map.map_click(10, 31).expect("inside the strip");
+    assert_eq!(gy, (20 + 1) * 16 + 8, "the row still inverts by index");
+    // 1:1 scale here, so the proportional inverse puts cell 10's centre at 84.
+    assert_eq!(gx, 85, "the column is unchanged by the strip: {gx}");
 }

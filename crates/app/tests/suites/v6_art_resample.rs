@@ -257,6 +257,7 @@ fn the_raster_composite_shrinks_below_its_canvas_at_a_small_pane() {
                 .graphics_render
                 .borrow()
                 .last_v6_map
+                .clone()
                 .unwrap_or_else(|| panic!("pane {cols}x{rows}: the raster path drew no composite"));
             assert_eq!(
                 (map.native_w, map.native_h),

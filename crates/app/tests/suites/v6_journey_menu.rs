@@ -901,7 +901,7 @@ fn journey_hybrid_menu_clicks_hit_the_row_they_land_on() {
         let area = Rect::new(0, 0, w, 51);
         let mut buf = Buffer::empty(area);
         let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
-        let map = state.graphics_render.borrow().last_v6_map.expect("the hybrid path records a click map");
+        let map = state.graphics_render.borrow().last_v6_map.clone().expect("the hybrid path records a click map");
         let row_text = |y: u16| -> String {
             (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
         };

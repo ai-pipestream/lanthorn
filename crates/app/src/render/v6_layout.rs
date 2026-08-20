@@ -178,7 +178,7 @@ pub(crate) fn blit_clipped_src(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy
 /// `FONT_W`, Y by `FONT_H`. Glyph masters are 8×8; `blit_glyph` fills the 8×16
 /// cell by nearest-neighbour vertical doubling (DOS-authentic).
 pub(crate) const FONT_W: u32 = 8;
-const FONT_H: u32 = 16;
+pub(crate) const FONT_H: u32 = 16;
 
 /// A window-0 inline picture floated beside the story text: anchored to a
 /// wrapped display row, reserving columns for the picture and narrowing the rows

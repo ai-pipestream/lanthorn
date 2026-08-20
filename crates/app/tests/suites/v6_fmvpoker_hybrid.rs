@@ -654,6 +654,7 @@ fn fmvpoker_menu_labels_are_clickable_where_drawn(honor: bool, mode: app::config
             .graphics_render
             .borrow()
             .last_v6_map
+            .clone()
             .expect("a v6 frame records a click map for the mouse handler");
         let best = |lo: u32, hi: u32, origin: f32, size: f32, native: u16, cell: u16, pane: u16, n: u16| {
             let dev = |v: u32| origin + v as f32 * size / native as f32;
