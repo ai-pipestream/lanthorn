@@ -168,6 +168,9 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         state.config.interpreter_profile,
         state.config.period_look,
         state.config.honor_game_colours,
+        // SQ-0928's media rule, applied here too: a period look is what a machine's
+        // screen LOOKED LIKE, so being on that machine is what makes it true.
+        state.config.machine_colours_licensed(),
         state.story_zversion,
     );
     if let Some(look) = state.period_look {

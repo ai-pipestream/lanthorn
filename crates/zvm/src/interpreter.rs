@@ -678,8 +678,37 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
-        // Declined: no capture, and a PC's look was its display adapter's answer.
-        period_look: None,
+        // SQ-0873/SQ-0928, from `machine-screenshots/dos-hitchhiker.png` — the last
+        // period-look capture bar the Atari ST's. Hitchhiker's r47/840914 under a
+        // CGA colour display, and **Version 3** is what makes it a period look
+        // rather than a default pair: colour arrives with v5, so nothing on that
+        // screen was asked for by the story.
+        //
+        // Row- and column-censused: page #0F009E at 92.4% of the frame, ink
+        // #A0A0A0, and a cursor at x 44..58 by y 717..724 — 15px of a 14.5px cell
+        // wide and 8px of a ~29px cell tall, so one cell wide across its bottom
+        // quarter, in the ink colour. A DOS underscore.
+        //
+        // A PC's look was its display adapter's answer, which is why this row
+        // declined for so long; what is recorded is the CGA colour rendition, the
+        // same way the Apple's records the white-monitor one.
+        //
+        // **THE STATUS LINE IS SIMPLIFIED, DELIBERATELY.** The capture shows
+        // `PerRun` structure — 611 contiguous px of page run through the middle of
+        // the row — but its runs are #A2000D RED on grey, a colour in neither
+        // channel of the body pair and appearing nowhere else in the frame. That is
+        // `Own` colours applied per run, which `StatusBand` cannot express: its
+        // variants carry a structure or a pair, never both. Recorded as a plain
+        // `PerRun` on the user's instruction rather than growing the type for one
+        // glyph colour on one row. The red is real and is not modelled; see
+        // `machine-screenshots/info.txt`.
+        period_look: Some(PeriodLook {
+            page: (0x0F, 0x00, 0x9E),
+            ink: (0xA0, 0xA0, 0xA0),
+            status: StatusBand::PerRun,
+            cursor_shape: CursorShape::Underscore,
+            cursor_colour: (0xA0, 0xA0, 0xA0),
+        }),
     },
     MachineProfile {
         number: COMMODORE_128_INTERPRETER_NUMBER,
@@ -928,10 +957,13 @@ mod tests {
     fn the_machines_with_no_capture_decline() {
         let missing: Vec<_> =
             MACHINES.iter().filter(|m| m.period_look.is_none()).map(|m| m.number).collect();
+        // SQ-0873: the IBM PC left this list when `dos-hitchhiker.png` arrived —
+        // a v3 frame, so pure presentation. The Atari ST is the last machine with
+        // no capture at all.
         assert_eq!(
             missing,
-            vec![ATARI_ST_INTERPRETER_NUMBER, IBM_PC_INTERPRETER_NUMBER],
-            "only the two machines with nothing in machine-screenshots/ decline",
+            vec![ATARI_ST_INTERPRETER_NUMBER],
+            "only the machine with nothing in machine-screenshots/ declines",
         );
         // The Apple family shares one measurement, exactly as it shares one pair.
         let apples: Vec<_> = [

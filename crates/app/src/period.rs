@@ -57,6 +57,14 @@ use crate::theme::resolve::Theme;
 
 /// Does this launch get a period look, and which?
 ///
+/// `licensed` is `Config::machine_colours_licensed` — **the same media rule the
+/// machine's `$2C`/`$2D` pair obeys** (SQ-0928), and it applies here for the same
+/// reason. A period look is what a machine's screen LOOKED LIKE, so being on that
+/// machine is what makes it true of the launch. `InterpreterProfile::IbmPc` is
+/// what every story with no medium falls through to, and it has a period look now
+/// (`dos-hitchhiker.png`) — so without this, opening any bare v3 file would paint
+/// it DOS blue.
+///
 /// `zversion` is the story's header byte 0; pass `None` for an engine that has no
 /// such byte (Glulx, Scott Adams), which declines for the same reason a v5 story
 /// does — §11.1.3 interpreter numbers are the Z-machine's vocabulary and nothing
@@ -67,9 +75,10 @@ pub fn resolve(
     profile: InterpreterProfile,
     enabled: bool,
     honor_game_colours: bool,
+    licensed: bool,
     zversion: Option<u8>,
 ) -> Option<PeriodLook> {
-    if !enabled || !honor_game_colours {
+    if !enabled || !honor_game_colours || !licensed {
         return None;
     }
     if !matches!(zversion, Some(1..=4)) {
@@ -223,13 +232,13 @@ mod tests {
     fn colour_arrives_with_version_five_and_the_look_stops_there() {
         let amiga = InterpreterProfile::Amiga;
         for v in 1..=4 {
-            assert!(resolve(amiga, true, true, Some(v)).is_some(), "v{v} is pre-colour");
+            assert!(resolve(amiga, true, true, true, Some(v)).is_some(), "v{v} is pre-colour");
         }
         for v in 5..=8 {
-            assert!(resolve(amiga, true, true, Some(v)).is_none(), "v{v} states its own pair");
+            assert!(resolve(amiga, true, true, true, Some(v)).is_none(), "v{v} states its own pair");
         }
         // Glulx and Scott Adams have no §11.1.3 number to be a machine of.
-        assert!(resolve(amiga, true, true, None).is_none());
+        assert!(resolve(amiga, true, true, true, None).is_none());
     }
 
     /// One-way composition (SQ-0855/SQ-0860): the master switch takes the look
@@ -237,18 +246,31 @@ mod tests {
     #[test]
     fn honor_game_colours_is_the_master_and_the_key_is_narrower() {
         let amiga = InterpreterProfile::Amiga;
-        assert!(resolve(amiga, true, false, Some(3)).is_none(), "colours off takes the look");
-        assert!(resolve(amiga, false, true, Some(3)).is_none(), "and the key declines alone");
-        assert!(resolve(amiga, true, true, Some(3)).is_some());
+        assert!(resolve(amiga, true, false, true, Some(3)).is_none(), "colours off takes the look");
+        assert!(resolve(amiga, false, true, true, Some(3)).is_none(), "and the key declines alone");
+        assert!(resolve(amiga, true, true, true, Some(3)).is_some());
     }
 
     /// A machine with no capture has no look, and asking for one does not
     /// conjure it — the same sourced-or-declined standard the table itself keeps.
     #[test]
     fn an_unmeasured_machine_declines() {
-        for p in [InterpreterProfile::AtariSt, InterpreterProfile::IbmPc] {
-            assert!(resolve(p, true, true, Some(3)).is_none(), "{p:?} has no capture");
-        }
+        // The Atari ST is the last machine with no capture at all (SQ-0873). The
+        // IBM PC left that list when `dos-hitchhiker.png` arrived — so it is the
+        // LICENCE that stops a bare story file being painted DOS blue, not the
+        // absence of a measurement.
+        assert!(
+            resolve(InterpreterProfile::AtariSt, true, true, true, Some(3)).is_none(),
+            "the ST has no capture",
+        );
+        assert!(
+            resolve(InterpreterProfile::IbmPc, true, true, false, Some(3)).is_none(),
+            "the PC has one, and an unlicensed launch still declines it",
+        );
+        assert!(
+            resolve(InterpreterProfile::IbmPc, true, true, true, Some(3)).is_some(),
+            "…and a licensed one gets it",
+        );
     }
 
     /// The Amiga is the reason [`StatusBand::PerRun`] exists: the band's ground

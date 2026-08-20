@@ -111,7 +111,7 @@ fn the_medium_names_the_machine_and_the_version_decides_whether_it_dresses() {
         assert!(profile.period_look().is_some(), "{:?} is a measured machine", s.machine);
 
         // …and only a pre-colour story is dressed in it.
-        let look = app::period::resolve(profile, true, true, Some(zversion));
+        let look = app::period::resolve(profile, true, true, true, Some(zversion));
         assert_eq!(
             look.is_some(),
             s.dressed,
@@ -139,14 +139,14 @@ fn either_switch_declines_and_only_the_broad_one_is_the_master() {
         };
         seen += 1;
         let profile = InterpreterProfile::resolve(&path, None, None, None);
-        assert!(app::period::resolve(profile, true, true, Some(zversion)).is_some());
+        assert!(app::period::resolve(profile, true, true, true, Some(zversion)).is_some());
         assert!(
-            app::period::resolve(profile, true, false, Some(zversion)).is_none(),
+            app::period::resolve(profile, true, false, true, Some(zversion)).is_none(),
             "{}: colours off takes the look with it",
             s.file
         );
         assert!(
-            app::period::resolve(profile, false, true, Some(zversion)).is_none(),
+            app::period::resolve(profile, false, true, true, Some(zversion)).is_none(),
             "{}: and the narrow key declines on its own",
             s.file
         );
@@ -165,8 +165,15 @@ fn a_bare_story_file_off_no_disk_at_all_keeps_the_theme() {
     assert!(path.exists(), "the redistributable fixture is checked in");
     let profile = InterpreterProfile::resolve(&path, None, None, None);
     assert_eq!(profile, InterpreterProfile::IbmPc, "no medium, no machine");
-    assert!(profile.period_look().is_none(), "and the IBM PC has no capture anyway");
+    // SQ-0873/SQ-0928: the IBM PC HAS a period look now (`dos-hitchhiker.png`), so
+    // what keeps a bare story file on the player's theme is the LICENCE, not the
+    // absence of a measurement. That is the stronger guarantee — it holds for every
+    // machine, including ones measured later.
+    assert!(profile.period_look().is_some(), "the machine states one");
     for v in 1..=8 {
-        assert!(app::period::resolve(profile, true, true, Some(v)).is_none(), "v{v}");
+        assert!(
+            app::period::resolve(profile, true, true, false, Some(v)).is_none(),
+            "v{v}: a launch that named no machine is never dressed as one",
+        );
     }
 }
