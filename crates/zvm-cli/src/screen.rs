@@ -697,26 +697,37 @@ mod view_tests {
             format!("\x1b[4m{bar}\x1b[0m")
         );
 
-        // The Amiga reverses behind each RUN and lets the page show between —
-        // and the single space inside "Council Chamber" stays inside it.
-        let amiga = status_band_ansi(bar, Some(look(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)));
+        // SQ-0873: the Amiga measures per run — 376 px of page between "Council
+        // Chamber" and "Score: 0/0" — and draws a full-width reverse, on the
+        // user's ruling that a band in pieces reads as damage in a terminal.
         assert_eq!(
-            amiga,
+            status_band_ansi(bar, Some(look(zvm::interpreter::AMIGA_INTERPRETER_NUMBER))),
+            format!("\x1b[7m{bar}\x1b[0m"),
+            "drawn whole, measured per run"
+        );
+        // The IBM PC measures the same way and gets the same treatment.
+        assert_eq!(
+            status_band_ansi(bar, Some(look(zvm::interpreter::IBM_PC_INTERPRETER_NUMBER))),
+            format!("\x1b[7m{bar}\x1b[0m")
+        );
+        // The per-run RENDERING still exists and is still correct — nothing
+        // reaches it from the table, so it is exercised directly.
+        use zvm::interpreter::{CursorShape, PeriodLook, StatusBand};
+        let per_run = PeriodLook {
+            page: (0, 0, 0),
+            ink: (0xFF, 0xFF, 0xFF),
+            status: StatusBand::PerRun,
+            cursor_shape: CursorShape::Block,
+            cursor_colour: (0xFF, 0xFF, 0xFF),
+        };
+        assert_eq!(
+            status_band_ansi(bar, Some(per_run)),
             "\x1b[7m Council Chamber\x1b[0m   \x1b[7mScore: 0/0 \x1b[0m",
-            "the page shows between the runs"
+            "and a run breaks on three spaces, not the two inside a field"
         );
-        // …and the two spaces `status_text` puts inside the right-hand field are
-        // NOT a gap: the capture reverses "Score: 0/0" whole.
-        let together = status_band_ansi(
-            " West of House      Score: 0  Moves: 0 ",
-            Some(look(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)),
-        );
-        assert_eq!(
-            together,
-            "\x1b[7m West of House\x1b[0m      \x1b[7mScore: 0  Moves: 0 \x1b[0m"
-        );
+
         // Whatever the dressing, the visible text is untouched.
-        assert_eq!(strip_sgr(&amiga), bar);
+        assert_eq!(strip_sgr(&status_band_ansi(bar, None)), bar);
     }
 
     /// The one variant no row uses today, kept because the 1984 Commodore 64

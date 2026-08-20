@@ -360,6 +360,14 @@ pub enum StatusBand {
     /// The Amiga, and the reason this variant exists. Row-censused across
     /// `amiga-spellbreaker.png` at mid-band: 47..182 white behind "Council
     /// Chamber", **376 px of page**, then 559..680 white behind "Score: 0/0".
+    /// `dos-hitchhiker.png` is the same shape: 611 contiguous px of page run
+    /// through the middle of its status row.
+    ///
+    /// **No row uses it, by the user's ruling** — both machines that measure this
+    /// way draw a full-width reverse instead, because a band broken into pieces
+    /// reads as damage in a terminal where it read as design on the original
+    /// monitor. Kept for the same reason [`Self::Own`] is: the measurement is real
+    /// and does not stop being real because we chose not to draw it.
     PerRun,
     /// A ground and ink of its own, which are neither the body pair nor its
     /// reverse.
@@ -646,7 +654,13 @@ pub const MACHINES: &[MachineProfile] = &[
         period_look: Some(PeriodLook {
             page: (0x07, 0x4B, 0xA1),
             ink: (0xFF, 0xFF, 0xFF),
-            status: StatusBand::PerRun,
+            // SQ-0873: the capture reverses PER RUN — 376 px of page show between
+            // "Council Chamber" and "Score: 0/0" on `amiga-spellbreaker.png` — and
+            // a full-width reverse is what we draw, on the user's ruling. A band
+            // broken into pieces reads as damage in a terminal where it read as
+            // design on a 1989 monitor. The measurement stands in
+            // `StatusBand::PerRun`'s own doc; only the rendering is simplified.
+            status: StatusBand::FullReverse,
             cursor_shape: CursorShape::Block,
             cursor_colour: (0xFF, 0x7E, 0x1C),
         }),
@@ -684,10 +698,25 @@ pub const MACHINES: &[MachineProfile] = &[
         // rather than a default pair: colour arrives with v5, so nothing on that
         // screen was asked for by the story.
         //
-        // Row- and column-censused: page #0F009E at 92.4% of the frame, ink
-        // #A0A0A0, and a cursor at x 44..58 by y 717..724 — 15px of a 14.5px cell
+        // Row- and column-censused: page blue at 92.4% of the frame, light grey
+        // ink, and a cursor at x 44..58 by y 717..724 — 15px of a 14.5px cell
         // wide and 8px of a ~29px cell tall, so one cell wide across its bottom
         // quarter, in the ink colour. A DOS underscore.
+        //
+        // **THE RGB IS THE HARDWARE'S, NOT THE CAPTURE'S**, and this row is the
+        // one place in the period-look table where that distinction can be made.
+        // The capture measures #0F009E and #A0A0A0; the EGA/CGA palette is DIGITAL
+        // and exactly specified, so the honest values are its entries 1 and 7 —
+        // `blorb::infocom_pics::EGA_PALETTE`, verified there against four sources
+        // that agree entry for entry. The gap is video scaling, and it shows in
+        // the corpus: `dos-shogun.png` and `dos-arthur.png` measure #0000A1..A6
+        // with no red tint at all, while this capture's #0F009E carries 0x0F of
+        // red that no EGA colour has.
+        //
+        // Every other row here records what an emulator drew, because those
+        // machines' palettes are analogue (the VIC-II) or the register mapping is
+        // in doubt (the Amiga's #074BA1 against a bit-replicated $05A = #0055AA).
+        // This one does not have to guess.
         //
         // A PC's look was its display adapter's answer, which is why this row
         // declined for so long; what is recorded is the CGA colour rendition, the
@@ -703,11 +732,13 @@ pub const MACHINES: &[MachineProfile] = &[
         // glyph colour on one row. The red is real and is not modelled; see
         // `machine-screenshots/info.txt`.
         period_look: Some(PeriodLook {
-            page: (0x0F, 0x00, 0x9E),
-            ink: (0xA0, 0xA0, 0xA0),
-            status: StatusBand::PerRun,
+            page: (0x00, 0x00, 0xAA),
+            ink: (0xAA, 0xAA, 0xAA),
+            // Per-run in the capture, full-width here — the same ruling as the
+            // Amiga's above, and the same reason.
+            status: StatusBand::FullReverse,
             cursor_shape: CursorShape::Underscore,
-            cursor_colour: (0xA0, 0xA0, 0xA0),
+            cursor_colour: (0xAA, 0xAA, 0xAA),
         }),
     },
     MachineProfile {
@@ -933,7 +964,11 @@ mod tests {
         assert_eq!(apple.status, StatusBand::FullReverse);
         assert_eq!(c128.status, StatusBand::FullReverse);
         assert_eq!(mac.status, StatusBand::Ruled, "rules, not a ground");
-        assert_eq!(amiga.status, StatusBand::PerRun, "the page shows between the runs");
+        // SQ-0873: the Amiga's capture reverses PER RUN and it draws a full-width
+        // reverse, on the user's ruling — see `StatusBand::PerRun`. What this case
+        // is really about survives the change: the four measured behaviours are
+        // still not derivable from the body pair, and the Macintosh's is the proof.
+        assert_eq!(amiga.status, StatusBand::FullReverse, "drawn whole, measured per run");
 
         // Three cursor shapes, and the Macintosh's bar is the one no cell-inverting
         // front-end would ever draw.

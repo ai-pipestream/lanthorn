@@ -182,11 +182,18 @@ pub fn caret_over_text(look: &PeriodLook) -> Style {
 /// lanthorn means (this line is yours, this one is not the story's) and no
 /// machine has an opinion about it, but leaving their ground alone would punch
 /// the theme's page through the machine's in the middle of the transcript.
-fn painted(look: &PeriodLook) -> [(&'static str, &'static str, Style); 7] {
+fn painted(look: &PeriodLook) -> [(&'static str, &'static str, Style); 8] {
     let body = body_style(look);
     let page = Style::new().bg(rgb(look.page));
     [
         ("transcript", "text", body),
+        // SQ-0873: **and the upper window**, which is where the bleed showed. A
+        // v4 game's status bar is a grid it writes into, and *A Mind Forever
+        // Voyaging* does not write across the whole width — so every cell it left
+        // alone kept the host theme and the machine's page showed in stripes
+        // beside the bar. The pane flood underneath cannot help: `draw_upper_window`
+        // fills its own rect from this selector and paints over it.
+        ("upper_window", "chrome", body),
         ("input_line", "line", body),
         ("input_text", "text", body),
         ("input_prompt", "text", body),
@@ -273,25 +280,29 @@ mod tests {
         );
     }
 
-    /// The Amiga is the reason [`StatusBand::PerRun`] exists: the band's ground
-    /// is the PAGE and only the text runs are reversed. Every other machine's
-    /// band is uniform and its segments inherit the base.
+    /// **No machine reverses per run any more**, by the user's ruling (SQ-0873):
+    /// the Amiga and the IBM PC both measure that way and both draw a full-width
+    /// reverse, because a band broken into pieces reads as damage in a terminal.
+    /// So `status_run_style` answers `None` for every row, and this is the case
+    /// that fails if one quietly comes back.
     #[test]
-    fn only_the_amiga_reverses_per_run() {
-        let amiga = look_of(zvm::interpreter::AMIGA_INTERPRETER_NUMBER);
-        assert_eq!(status_style(&amiga), body_style(&amiga), "the page shows between the runs");
-        let run = status_run_style(&amiga).expect("the Amiga reverses behind its text");
-        assert_eq!(run.fg, Some(rgb(amiga.page)));
-        assert_eq!(run.bg, Some(rgb(amiga.ink)));
-
+    fn no_machine_reverses_per_run_and_the_bands_are_uniform() {
         for n in [
+            zvm::interpreter::AMIGA_INTERPRETER_NUMBER,
+            zvm::interpreter::IBM_PC_INTERPRETER_NUMBER,
             zvm::interpreter::APPLE_IIE_INTERPRETER_NUMBER,
             zvm::interpreter::COMMODORE_128_INTERPRETER_NUMBER,
             zvm::interpreter::COMMODORE_64_INTERPRETER_NUMBER,
             zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER,
         ] {
-            assert!(status_run_style(&look_of(n)).is_none(), "interpreter {n} has a uniform band");
+            assert!(status_run_style(&look_of(n)).is_none(), "interpreter {n}: uniform band");
         }
+        // A full reverse is the swapped body pair, stated outright — see
+        // `Theme::set_unclaimed` for why it is not left to a REVERSED modifier.
+        let amiga = look_of(zvm::interpreter::AMIGA_INTERPRETER_NUMBER);
+        let band = status_style(&amiga);
+        assert_eq!(band.fg, Some(rgb(amiga.page)));
+        assert_eq!(band.bg, Some(rgb(amiga.ink)));
     }
 
     /// The Macintosh does not distinguish its band by ground at all — it rules

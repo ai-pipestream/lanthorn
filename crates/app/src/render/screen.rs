@@ -275,8 +275,28 @@ fn render_story_pane_frame(
     // honoured background — Default keeps the theme).
     if state.config.honor_game_colours {
         let bg = crate::state::unpack_zcolour(model.bg);
-        if !matches!(bg, zvm::screen::ZColour::Default) {
-            let bg_color = crate::render::resolve_zcolour(bg, &state.colors);
+        let page = if !matches!(bg, zvm::screen::ZColour::Default) {
+            Some(crate::render::resolve_zcolour(bg, &state.colors))
+        } else {
+            // SQ-0873: …and where the game names nothing, the MACHINE's page, if
+            // this launch earned one. That is the only source a v1–v4 story can
+            // have: `$2C`/`$2D` are v5+ header bytes, so a v3 game reports
+            // `Default` here however faithfully the medium named its machine, and
+            // the flood above never fired for the games the period look is FOR.
+            //
+            // Without it the page reached only the cells that carry text —
+            // `apply_to_theme` patches the transcript's style, and a style paints
+            // where a glyph is drawn. Blank rows, the gap after a short line and
+            // the space between paragraphs all stayed on the host theme, so the
+            // screen came out striped instead of being the machine's screen.
+            //
+            // The game's own background still wins: this is the branch where it
+            // declared none.
+            state
+                .period_look
+                .map(|l| ratatui::style::Color::Rgb(l.page.0, l.page.1, l.page.2))
+        };
+        if let Some(bg_color) = page {
             for y in area.y..area.bottom() {
                 for x in area.x..area.right() {
                     if let Some(cell) = buf.cell_mut((x, y)) {

@@ -4810,12 +4810,14 @@ mod tests {
         assert_eq!(buf.cell((0, typed)).unwrap().bg, page, "and so does what you are typing");
     }
 
-    /// SQ-0873. The Amiga's status line is not a band: the reversal is applied
-    /// per RUN of text and the PAGE shows between the runs. Every other measured
-    /// machine's band is uniform, so this is the one case the theme alone cannot
-    /// express and the renderer has to know about.
+    /// SQ-0873. The Amiga's status line is a full-width reverse of its body pair.
+    ///
+    /// Its CAPTURE reverses per run, with 376 px of page showing between "Council
+    /// Chamber" and "Score: 0/0" — and we draw the band whole, on the user's
+    /// ruling that a band in pieces reads as damage in a terminal. The
+    /// measurement lives in `StatusBand::PerRun`'s doc; nothing renders it.
     #[test]
-    fn the_amiga_status_line_reverses_behind_its_text_and_shows_the_page_between() {
+    fn the_amiga_status_line_is_a_full_width_reverse_of_its_body_pair() {
         let machine = minimal_machine();
         let look = zvm::interpreter::machine(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)
             .unwrap()
@@ -4835,8 +4837,8 @@ mod tests {
         let row: Vec<Color> = (area.x..area.right())
             .map(|x| buf.cell((x, 0)).expect("status row").bg)
             .collect();
-        assert!(row.contains(&page), "the page shows between the runs");
-        assert!(row.contains(&ink), "and each run is reversed onto the ink");
+        assert!(row.iter().all(|&c| c == ink), "the whole band is the reversed ground: {row:?}");
+        assert!(!row.contains(&page), "no page shows through it");
     }
 
     #[test]

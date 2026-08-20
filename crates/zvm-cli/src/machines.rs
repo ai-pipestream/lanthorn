@@ -357,9 +357,13 @@ mod tests {
         for s in ["bar #000000", "block #FF7E1C", "underscore #55FFFF"] {
             assert!(t.contains(s), "cursor {s} missing:\n{t}");
         }
-        for s in ["reversed per run", "ruled, same ground"] {
+        // SQ-0873: "reversed per run" no longer appears — the two machines measured
+        // that way draw a full-width reverse instead, on the user's ruling. The
+        // variant survives in `StatusBand` as the record of the measurement.
+        for s in ["reversed", "ruled, same ground"] {
             assert!(t.contains(s), "status {s} missing");
         }
+        assert!(!t.contains("reversed per run"), "no row renders a per-run band now:\n{t}");
         // A machine with no capture is a decline, not a blank.
         let st = t.lines().find(|l| l.contains("Atari ST") && l.contains("no capture"));
         assert!(st.is_some(), "the ST's period row must say why it is empty");

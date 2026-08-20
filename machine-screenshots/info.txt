@@ -47,7 +47,8 @@ for interpreter 6 and why that row declines one.
 
 Measured, row- and column-censused rather than sampled:
 
-  body        page #0F009E (92.4% of the frame — EGA/CGA blue), ink #A0A0A0
+  body        page #0F009E (92.4% of the frame), ink #A0A0A0 — but see below:
+              what the TABLE records is the hardware's #0000AA / #AAAAAA
   status row  NOT a band: 611 contiguous px of the blue PAGE run through the
               middle of it (x 132..743 at y=14). The location sits on a grey
               ground; the labels are ink on the page.
@@ -72,4 +73,23 @@ TWO THINGS FOLLOW, and the second is a problem for the type as it stands.
 CAVEAT worth keeping: the capture is 1159x726, a non-integer scale of a 640x200
 or 720x350 text screen, so glyph edges interpolate and the run boundaries above
 are ±2px. The three COLOURS are unambiguous; the exact cell boundaries are not.
+
+A NOTE ON THE RGB IN THESE DOS CAPTURES, because the table does not use it
+
+`zvm::interpreter`'s IBM PC period look records **#0000AA / #AAAAAA** — EGA/CGA
+palette entries 1 and 7 out of `blorb::infocom_pics::EGA_PALETTE`, which is
+verified there against four independent sources — and NOT the #0F009E / #A0A0A0
+this capture measures.
+
+That is the opposite of what every other period-look row does, and the reason is
+that this is the one machine whose palette is DIGITAL and exactly specified. The
+VIC-II's is analogue, which is why Pepto, Colodore and VICE's default disagree on
+the Commodore 64's grey; the Amiga's #074BA1 is an emulator's rendering of what is
+almost certainly register $05A (bit-replicating to #0055AA). Those rows have to
+record what was drawn because nothing better exists. This one does not.
+
+The gap is video scaling and it is visible across the corpus: dos-shogun.png and
+dos-arthur.png measure #0000A1..A6 with no red tint, while dos-hitchhiker.png's
+#0F009E carries 0x0F of red that no EGA colour has. Three captures of one palette
+entry, three answers, none of them the palette.
 
