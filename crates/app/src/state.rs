@@ -2401,6 +2401,29 @@ pub struct AppState {
     /// arm so inline story pictures scale to match the chrome frame (see
     /// `render_transcript`). 0.0 (the Default) and 1.0 both mean "no scaling".
     pub v6_image_scale: std::cell::Cell<f32>,
+    /// The per-axis density of the artwork this launch mounted —
+    /// [`crate::graphics::PictSource::art_scale`], resolved once at boot by
+    /// `startup.rs` (and again by an `@restart`, `reset.rs`) from the archive's own
+    /// declared picture space.
+    ///
+    /// The render path needs it for one decision: `v6_pixel_lock`'s magnification
+    /// ladder, whose step is `1 / gcd` of this pair
+    /// ([`crate::render::v6_layout::scale_ladder_step`]). It is a fact about the
+    /// mounted ARCHIVE, which the screen model does not carry and the render cannot
+    /// re-derive, so it is published here beside the other boot facts rather than
+    /// threaded through `ScreenModel`. `(2, 2)` — the uniform
+    /// [`crate::session::V6_ART_SCALE`] — for every Blorb-sourced and non-v6 story,
+    /// which is the rule that has always applied to them. (SQ-0936)
+    pub v6_art_scale: (u32, u32),
+    /// This frame asked for `v6_pixel_lock` and could not have it: the pane is too
+    /// small for even the smallest rung of the ladder, so the frame fell back to
+    /// free scaling (SQ-0936).
+    ///
+    /// Published for diagnostics — the eventual `/info` — and deliberately NOT
+    /// surfaced on the game screen: every other too-small decision in this app
+    /// degrades rather than blocks, and a notification that fires on every frame of
+    /// a small terminal would be worse than the softness it warns about.
+    pub v6_scale_lock_fallback: std::cell::Cell<bool>,
     /// The page the v6 story window declared for the CURRENT frame, published by
     /// the render's Layered arm alongside the pane flood that paints it (SQ-0704).
     ///
@@ -2921,6 +2944,8 @@ impl Default for AppState {
             selection_edge: 0,
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
+            v6_art_scale: (crate::session::V6_ART_SCALE, crate::session::V6_ART_SCALE),
+            v6_scale_lock_fallback: std::cell::Cell::new(false),
             v6_story_page: std::cell::Cell::new(None),
             v6_page_pair: std::cell::Cell::new(None),
             v6_paint: std::cell::RefCell::new(None),

@@ -97,6 +97,12 @@ pub(crate) fn reset_game(
             // story playing its EGA rendition comes back with the same geometry
             // it booted with. `None` for every Blorb-sourced story.
             let v6_art_scale = picts.art_scale();
+            // SQ-0936: republish it for the render's magnification ladder, since a
+            // restart may have re-resolved a DIFFERENT archive (the sidecar, or a
+            // `--pictures` choice) and with it a different art density.
+            if let Some(scale) = v6_art_scale {
+                state.v6_art_scale = scale;
+            }
             let host_default_colours = if state.config.honor_game_colours {
                 state.config.machine_default_colours().or_else(|| {
                     app::colors::host_default_colour_pair(

@@ -873,7 +873,22 @@ fn render_node(
                             area.width as u32 * fs.width.max(1) as u32,
                             area.height as u32 * fs.height.max(1) as u32,
                         );
-                        let scale_center = v6::uniform_scale(native, pane_dev);
+                        // SQ-0936: one global letterbox factor for the whole native
+                        // screen, quantized to the artwork's own ladder when the
+                        // player has asked for it (`v6_pixel_lock`, default off).
+                        // GLOBAL rather than per-picture, and Journey is what settles
+                        // that: its picture sits in its own window beside a drawn
+                        // divider rule, so a per-picture rung would stop the art short
+                        // of its own frame and open a gap. A pane too small for even
+                        // the smallest rung falls back to free scaling and says so as
+                        // a diagnostic, never on the game screen.
+                        let (scale_center, lock_fallback) = v6::fitted_scale(
+                            native,
+                            pane_dev,
+                            state.v6_art_scale,
+                            state.config.v6_pixel_lock,
+                        );
+                        state.v6_scale_lock_fallback.set(lock_fallback);
                         // Publish the letterbox factor so inline story pictures
                         // (drop-caps, room icons) scale to match the chrome ring.
                         // The scale FACTOR is unchanged by the SQ-0505 anchoring

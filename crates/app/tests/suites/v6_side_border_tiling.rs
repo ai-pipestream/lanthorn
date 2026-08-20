@@ -2135,3 +2135,182 @@ fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
 // a taller pane the composition runs to 586 native rows on a 384-row screen and
 // the repeat is unmistakable. That needs a fix before it can have a test, and it
 // must be measured on the 560x384 screen the app actually gives it.
+
+// ── 13. SQ-0936: the locked magnification, on a real frame ───────────────────
+
+/// The art density this launch would mount, the way `startup.rs` resolves it —
+/// `PictSource::art_scale` off the same medium `boot` opens. `None` when the
+/// fixture is absent.
+///
+/// An archive with no picture space to declare (a Blorb) answers `None`, which is
+/// the uniform `V6_ART_SCALE` of `(2, 2)` — the same default `AppState` carries.
+fn launch_art_scale(file: &str) -> Option<(u32, u32)> {
+    let path = stories_dir().join(file);
+    if !path.exists() {
+        eprintln!("SKIP: gitignored story missing at {}", path.display());
+        return None;
+    }
+    Some(PictSource::resolve(&path, None).art_scale().unwrap_or((2, 2)))
+}
+
+/// [`frame_mags`] with `v6_pixel_lock` ON and the launch's own art density
+/// published to the render exactly as `startup.rs` publishes it (SQ-0936).
+///
+/// Returns the bands, the LOCKED scale, and the free one the same pane would have
+/// given — the pair being what makes the case falsifiable, since a pane where the
+/// two are equal cannot tell a quantized render from an unquantized one.
+fn frame_mags_locked(
+    session: &GameSession,
+    pane: (u16, u16),
+    art_scale: (u32, u32),
+) -> (Vec<app::render::graphics::BandMag>, f32, f32) {
+    let model = session.screen();
+    let mut state = render_state();
+    state.config.v6_pixel_lock = true;
+    state.v6_art_scale = art_scale;
+    let area = Rect::new(0, 0, pane.0, pane.1);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let pane_dev = (pane.0 as u32 * 8, pane.1 as u32 * 18);
+    let free = app::render::v6_layout::uniform_scale(native, pane_dev).s;
+    let locked = app::render::v6_layout::fitted_scale(native, pane_dev, art_scale, true).0.s;
+    let mags = state.graphics_render.borrow().band_mags.clone();
+    (mags, locked, free)
+}
+
+/// With `v6_pixel_lock` on, the frame the render actually draws puts one ART
+/// pixel on a whole number of device pixels — on real presses, at real panes.
+///
+/// Two halves, and both are needed:
+///
+///   * the frame's factor is on the ladder `1 / gcd(art_scale)` derives
+///     (`v6_layout::scale_ladder_step`), which is what "crisp" means here — an
+///     art pixel resampled onto a whole device pixel is nearest-neighbour exact;
+///   * every band showing the game's screen is drawn at THAT factor, which is
+///     what says the render adopted it rather than the test having computed a
+///     number nobody used.
+///
+/// The exemption is the same one
+/// [`every_band_draws_at_the_frames_one_magnification`] takes and for the same
+/// reason: the Menu-plan panel and the divider extension are not windows onto the
+/// game's screen, so the frame's scale is not what sizes them.
+///
+/// FALSIFIED by making `locked_scale` return the free scale unquantized — see the
+/// quest's report for the exact numbers it came back with.
+///
+/// The `differed` guard is what stops that falsification passing by luck. A pane
+/// whose free scale already sits on a rung draws the same frame either way, so a
+/// case that only ever saw such panes would be green with the quantization gone.
+#[test]
+fn locked_scaling_draws_the_frame_on_the_art_pixel_ladder() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    let mut bands_seen = 0;
+    let mut differed = 0;
+    for sp in SPECIMENS {
+        let Some(art_scale) = launch_art_scale(sp.file) else { continue };
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        ran += 1;
+        let step = app::render::v6_layout::scale_ladder_step(art_scale);
+        for (w, h) in all_panes() {
+            let (mags, locked, free) = frame_mags_locked(&s, (w, h), art_scale);
+            assert!(!mags.is_empty(), "{} at {w}x{h}: no bands drawn", sp.title);
+            if (locked - free).abs() > 1e-4 {
+                differed += 1;
+            }
+            // (a) The factor is a rung: one art pixel, whole device pixels, both axes.
+            for (axis, n) in [("x", art_scale.0), ("y", art_scale.1)] {
+                let dev = n as f32 * locked;
+                assert!(
+                    dev >= 1.0 && (dev - dev.round()).abs() <= 1e-3,
+                    "{} [release {}] at {w}x{h}: art_scale {art_scale:?} (step {step}) locked to \
+                     {locked}, which puts one art pixel on {dev} device pixels along {axis} — a \
+                     fraction of a device pixel is exactly the resample softness this mode removes",
+                    sp.title,
+                    sp.release,
+                );
+            }
+            // (b) …and the render drew at it. Same one-native-pixel tolerance as the
+            // sibling case: a source is whole native pixels and a destination whole
+            // device pixels, so half of each is unavoidable rounding.
+            let tol = locked.max(1.0);
+            for &(r, fit, src, dst) in &mags {
+                if !fit.on_the_letterbox_grid() {
+                    continue;
+                }
+                bands_seen += 1;
+                let off_x = dst.0 as f32 - src.0 as f32 * locked;
+                let off_y = dst.1 as f32 - src.1 as f32 * locked;
+                assert!(
+                    off_x.abs() <= tol && off_y.abs() <= tol,
+                    "{} [release {}] at {w}x{h}: band {}x{} at ({},{}) draws {}x{} device px from \
+                     {}x{} native px, but the frame's LOCKED scale is {locked} (free would be \
+                     {free}). Its far edge sits {off_x:.2}/{off_y:.2} device px from the ladder — \
+                     the render is not using the quantized factor.\nall bands: {mags:?}",
+                    sp.title,
+                    sp.release,
+                    r.width, r.height, r.x, r.y,
+                    dst.0, dst.1, src.0, src.1,
+                );
+            }
+        }
+    }
+    assert!(ran > 0 || !stories_dir().exists(), "no border specimen present — every case skipped");
+    assert!(
+        bands_seen > 0 || ran == 0,
+        "specimens booted but no letterbox band was measured — this case was vacuous"
+    );
+    assert!(
+        differed > 0 || ran == 0,
+        "every pane's free scale was already on the ladder, so nothing here could tell a \
+         quantized render from an unquantized one — add a pane that lands between two rungs"
+    );
+}
+
+/// The floor, on a real press: a pane too small for the smallest rung falls back
+/// to free scaling and still draws a frame. It must not block, clip, or print
+/// anything on the game screen — only report the fallback for a diagnostic.
+///
+/// `(20, 6)` is 160x108 device pixels. Every specimen here is a 640x400 or
+/// 560x384 native screen whose art doubles, so its smallest rung is 0.5 and needs
+/// at least 320x200 — well past what this pane has.
+#[test]
+fn a_pane_below_the_smallest_rung_still_renders_freely() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for sp in SPECIMENS {
+        let Some(art_scale) = launch_art_scale(sp.file) else { continue };
+        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        drive(&mut s, sp.turns);
+        ran += 1;
+        let pane = (20u16, 6u16);
+        let model = s.screen();
+        let native = match &model.root {
+            WinNode::Layered(items) => app::render::v6_layout::native_extent(items),
+            other => panic!("v6 Layered root, got {other:?}"),
+        };
+        let pane_dev = (pane.0 as u32 * 8, pane.1 as u32 * 18);
+        assert!(
+            app::render::v6_layout::locked_scale(native, pane_dev, art_scale).is_none(),
+            "{}: {native:?} into {pane_dev:?} must have no rung, or this case proves nothing",
+            sp.title,
+        );
+        let (scale, fell_back) =
+            app::render::v6_layout::fitted_scale(native, pane_dev, art_scale, true);
+        assert!(fell_back, "{}: the fallback is reported", sp.title);
+        assert_eq!(
+            scale.s,
+            app::render::v6_layout::uniform_scale(native, pane_dev).s,
+            "{}: and it degrades to the free scale rather than blocking",
+            sp.title,
+        );
+        // And the render still produces a frame at that pane with the mode on: a
+        // pane this small may legitimately draw no band at all — not drawing is
+        // fine, panicking or hanging is not.
+        let _ = frame_mags_locked(&s, pane, art_scale);
+    }
+    assert!(ran > 0 || !stories_dir().exists(), "no border specimen present — every case skipped");
+}

@@ -1617,11 +1617,119 @@ pub fn uniform_scale(native: (u16, u16), pane_dev: (u32, u32)) -> Scale {
     let nw = if native.0 == 0 { 1 } else { native.0 as u32 } as f32;
     let nh = if native.1 == 0 { 1 } else { native.1 as u32 } as f32;
     let s = (pane_dev.0 as f32 / nw).min(pane_dev.1 as f32 / nh);
-    let scaled_w = nw * s;
-    let scaled_h = nh * s;
-    let off_x = ((pane_dev.0 as f32 - scaled_w) / 2.0).max(0.0) as u32;
-    let off_y = ((pane_dev.1 as f32 - scaled_h) / 2.0).max(0.0) as u32;
+    centred(native, pane_dev, s)
+}
+
+/// Centre a screen scaled by `s` inside `pane_dev`. The one place the letterbox
+/// offsets are computed, so the free and locked scales cannot drift apart.
+fn centred(native: (u16, u16), pane_dev: (u32, u32), s: f32) -> Scale {
+    let nw = if native.0 == 0 { 1 } else { native.0 as u32 } as f32;
+    let nh = if native.1 == 0 { 1 } else { native.1 as u32 } as f32;
+    let off_x = ((pane_dev.0 as f32 - nw * s) / 2.0).max(0.0) as u32;
+    let off_y = ((pane_dev.1 as f32 - nh * s) / 2.0).max(0.0) as u32;
     Scale { s, off_x, off_y }
+}
+
+/// Greatest common divisor, for [`scale_ladder_step`]. Both inputs are clamped to
+/// at least 1 by the caller, so this never sees a zero.
+fn gcd(a: u32, b: u32) -> u32 {
+    let (mut a, mut b) = (a, b);
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// The step of the magnification LADDER implied by `art_scale` — the smallest
+/// increment of the uniform letterbox scale `s` that keeps one ART pixel a whole
+/// number of device pixels (SQ-0936).
+///
+/// This is DERIVED, not chosen, and that is the whole point. What has to land on
+/// a device-pixel boundary is the ART pixel, because that is where
+/// nearest-neighbour crispness lives — the unit-screen pixel is an interpreter
+/// fiction that no artist ever drew. An art pixel is `art_scale` unit pixels
+/// (`crate::graphics::PictSource::art_scale`, per axis, computed at boot from the
+/// archive's own declared picture space) and a unit pixel is `s` device pixels, so
+/// both axes need `art_scale.N · s ∈ ℤ`, and the coarsest `s` satisfying both is
+///
+/// ```text
+///     step = 1 / gcd(art_scale.0, art_scale.1)
+/// ```
+///
+/// Every press the corpus has falls out of that one line:
+///
+/// ```text
+///   press                      art space  art_scale  gcd  step  ladder
+///   most v6 (Blorb/Amiga/DOS)   320x200    (2, 2)      2   1/2   0.5, 1, 1.5, 2 …
+///   Macintosh mono Pic.data     480x300    (1, 1)      1   1     1, 2, 3 …
+///   Macintosh colour CPic.data  320x200    (2, 2)      2   1/2   half-steps
+///   EGA/CGA .eg1/.cg1           640x200    (1, 2)      1   1     1, 2, 3 …
+///   Apple II                    140x192    (4, 2)      2   1/2   half-steps
+/// ```
+///
+/// So the familiar "1x, 1.5x, 2x" intuition is right for the common case and
+/// arrives as a consequence rather than an assumption — while the standard
+/// Macintosh's mono plate and the 640-wide EGA/CGA renditions get whole steps
+/// only, which is correct for them and which a hardcoded half-step ladder would
+/// get wrong on both.
+pub fn scale_ladder_step(art_scale: (u32, u32)) -> f32 {
+    1.0 / gcd(art_scale.0.max(1), art_scale.1.max(1)) as f32
+}
+
+/// The uniform letterbox scale QUANTIZED down to the ladder
+/// [`scale_ladder_step`] derives from `art_scale`, centred in the pane exactly as
+/// [`uniform_scale`] centres the free one.
+///
+/// `None` when the pane cannot fit even the smallest step — the caller falls back
+/// to free scaling rather than blocking or clipping (SQ-0936), which is what every
+/// other too-small decision in this app does.
+///
+/// One GLOBAL factor for the whole native screen, never one per picture. Journey
+/// is what settles that: its picture sits in its OWN window beside a drawn divider
+/// rule, so quantizing per-picture would stop the art short of its own frame and
+/// open a gap between picture and rule. Quantizing the screen's one factor moves
+/// the window rect and the artwork in it together, and the art still fills it
+/// exactly.
+///
+/// Tiling needs nothing here. Vertical tiling happens in the already-scaled space
+/// and cuts at whole ART-pixel boundaries, so an integral art pixel makes every
+/// tile height integral for free — crisp art and seamless flanks are the same
+/// constraint, not two knobs.
+pub fn locked_scale(native: (u16, u16), pane_dev: (u32, u32), art_scale: (u32, u32)) -> Option<Scale> {
+    let free = uniform_scale(native, pane_dev).s;
+    let g = gcd(art_scale.0.max(1), art_scale.1.max(1)) as f32;
+    // Count whole steps in units of the step itself (`free · g`), so the floor is
+    // taken on an integer-valued quantity and a 2.9999996 that should be 3 does not
+    // drop a whole rung. `1e-4` is far below one step and far above f32's error at
+    // these magnitudes.
+    let steps = (free * g + 1e-4).floor();
+    if steps < 1.0 {
+        return None;
+    }
+    Some(centred(native, pane_dev, steps / g))
+}
+
+/// The scale the v6 hybrid ring draws this frame at: on the `art_scale` ladder
+/// when the player asked for it and the pane can hold a rung, free otherwise.
+///
+/// Returns the fallback flag beside the scale so the caller can publish it as a
+/// diagnostic; a pane too small for the smallest rung degrades silently on the
+/// game screen (SQ-0936).
+pub fn fitted_scale(
+    native: (u16, u16),
+    pane_dev: (u32, u32),
+    art_scale: (u32, u32),
+    lock: bool,
+) -> (Scale, bool) {
+    if !lock {
+        return (uniform_scale(native, pane_dev), false);
+    }
+    match locked_scale(native, pane_dev, art_scale) {
+        Some(s) => (s, false),
+        None => (uniform_scale(native, pane_dev), true),
+    }
 }
 
 /// The story window's clear-interior rect in NATIVE game pixels: its native rect
@@ -3424,6 +3532,178 @@ mod tests {
         assert_eq!(scale.s, 2.0);
         assert_eq!(scale.off_x, 0);
         assert_eq!(scale.off_y, 40);
+    }
+
+    // ── SQ-0936: the magnification ladder, derived per press ──────────────────
+
+    /// One row of the ladder table, straight out of the corpus: the press, the
+    /// art scale `PictSource::art_scale` computes for it, the step that implies,
+    /// the native screen the archive's picture space times that scale gives, and
+    /// what a 1024x600 device pane resolves to.
+    ///
+    /// The point of driving all four is that they are NOT the same ladder. A
+    /// hardcoded "1x / 1.5x / 2x" is right for the two `(2, 2)` presses and wrong
+    /// for the standard Macintosh's mono plate and for EGA, both of which may only
+    /// take whole steps — the Mac because its art is already 1:1 on the unit
+    /// screen, EGA because its pixels are half-width and a half-step would put an
+    /// art pixel on a half device pixel horizontally.
+    struct Rung {
+        press: &'static str,
+        art_scale: (u32, u32),
+        step: f32,
+        native: (u16, u16),
+        /// What [`LADDER_PANE`] resolves to: the free scale, then the rung below
+        /// it. Every press is measured at the SAME pane, which is what makes the
+        /// four answers a demonstration rather than four unrelated sums — and note
+        /// the 320-wide and EGA rows, whose unit screen is the same 640x400 and
+        /// whose rungs are 1.5 and 1.0 because their ARTWORK differs.
+        free_and_locked: (f32, f32),
+    }
+
+    /// One device pane, 1100x700 — a 137x38 terminal at an 8x18 cell, near enough
+    /// the panes the other v6 suites sweep, and chosen because all four presses
+    /// land strictly between two rungs on it.
+    const LADDER_PANE: (u32, u32) = (1100, 700);
+
+    const LADDER: &[Rung] = &[
+        // 320x200 art doubled onto the 640x400 unit screen — Blorb, Amiga
+        // `Pic.data`, DOS MCGA `.mg1`. free = min(1100/640, 700/400) = 1.71875,
+        // and the half-step ladder puts the rung below it at 1.5.
+        Rung { press: "320x200 (Blorb/Amiga/MCGA)", art_scale: (2, 2), step: 0.5, native: (640, 400), free_and_locked: (1.71875, 1.5) },
+        // The standard Macintosh's monochrome `Pic.data`: a 480x300 picture space
+        // drawn 1:1, so the unit screen IS 480x300 and only WHOLE steps are on the
+        // ladder. free = min(1100/480, 700/300) = 2.2916667 → 2.
+        Rung { press: "Macintosh mono Pic.data", art_scale: (1, 1), step: 1.0, native: (480, 300), free_and_locked: (2.2916667, 2.0) },
+        // EGA/CGA `.eg1`/`.cg1`: 640x200 art with half-width pixels, so (1, 2) onto
+        // the SAME 640x400 unit screen as the first row. gcd(1, 2) = 1 — whole steps
+        // only, because a half step would leave one art pixel half a device pixel
+        // wide — so the same free 1.71875 locks to 1.0 here and 1.5 there.
+        Rung { press: "EGA/CGA 640x200", art_scale: (1, 2), step: 1.0, native: (640, 400), free_and_locked: (1.71875, 1.0) },
+        // Apple II: 140x192 art at (4, 2) — see `PictSource::art_scale` for where
+        // that pair comes from — onto a 560x384 screen. gcd(4, 2) = 2, half steps.
+        // free = min(1100/560, 700/384) = 1.8229167 → 1.5.
+        Rung { press: "Apple II 140x192", art_scale: (4, 2), step: 0.5, native: (560, 384), free_and_locked: (1.8229167, 1.5) },
+    ];
+
+    /// The step is `1 / gcd(art_scale)` and nothing else, and each press in the
+    /// corpus lands where its own artwork puts it — never on a shared hardcoded
+    /// list. FALSIFY by returning a constant `0.5`: the Mac and EGA rows fail.
+    #[test]
+    fn the_ladder_step_is_derived_from_the_art_scale() {
+        for r in LADDER {
+            assert_eq!(
+                scale_ladder_step(r.art_scale),
+                r.step,
+                "{}: art_scale {:?} implies step {} — 1/gcd, not a chosen ladder",
+                r.press,
+                r.art_scale,
+                r.step,
+            );
+        }
+    }
+
+    /// Locking snaps the free scale DOWN to the rung below it, per press.
+    #[test]
+    fn locking_quantizes_the_free_scale_down_to_its_own_rung() {
+        let pane = LADDER_PANE;
+        for r in LADDER {
+            let (free, want) = r.free_and_locked;
+            assert!(
+                (uniform_scale(r.native, pane).s - free).abs() < 1e-4,
+                "{}: {:?} into {pane:?} scales freely by {free}",
+                r.press,
+                r.native,
+            );
+            let got = locked_scale(r.native, pane, r.art_scale).expect("1024x600 fits a rung").s;
+            assert!(
+                (got - want).abs() < 1e-6,
+                "{}: free {free} must lock to {want}, got {got}",
+                r.press,
+            );
+        }
+    }
+
+    /// The property the whole mode exists for: at the locked scale one ART pixel
+    /// is a whole number of device pixels on BOTH axes. `art_scale.N · s ∈ ℤ` is
+    /// the constraint the step was derived from, so this is the derivation checked
+    /// from the other end.
+    #[test]
+    fn a_locked_scale_puts_an_art_pixel_on_whole_device_pixels() {
+        for r in LADDER {
+            for pane in [(640u32, 400u32), LADDER_PANE, (800, 500), (1600, 1200), (900, 337)] {
+                let Some(sc) = locked_scale(r.native, pane, r.art_scale) else { continue };
+                for (axis, n) in [("x", r.art_scale.0), ("y", r.art_scale.1)] {
+                    let dev = n as f32 * sc.s;
+                    assert!(
+                        (dev - dev.round()).abs() < 1e-4 && dev >= 1.0,
+                        "{} at {pane:?}: s={} puts one art pixel on {dev} device pixels along {axis}",
+                        r.press,
+                        sc.s,
+                    );
+                }
+            }
+        }
+    }
+
+    /// A rung never overflows the pane, and the screen it leaves is centred — the
+    /// margin is the story's own page (`fill_pane_page`), not dead space.
+    #[test]
+    fn a_locked_screen_fits_the_pane_and_stays_centred() {
+        let pane = LADDER_PANE;
+        for r in LADDER {
+            let sc = locked_scale(r.native, pane, r.art_scale).expect("a rung fits");
+            let (w, h) = (r.native.0 as f32 * sc.s, r.native.1 as f32 * sc.s);
+            assert!(w <= pane.0 as f32 && h <= pane.1 as f32, "{}: {w}x{h} overflows {pane:?}", r.press);
+            assert_eq!(sc.off_x, ((pane.0 as f32 - w) / 2.0) as u32, "{}: centred horizontally", r.press);
+            assert_eq!(sc.off_y, ((pane.1 as f32 - h) / 2.0) as u32, "{}: centred vertically", r.press);
+        }
+    }
+
+    /// Too small for even the smallest rung → free scaling, never a block and
+    /// never a message on the game screen. A 320x200 press's smallest rung is
+    /// 0.5, so a pane under 320x200 device pixels has none; `fitted_scale` says
+    /// so through its flag, which is what a diagnostic reads.
+    #[test]
+    fn a_pane_too_small_for_the_smallest_rung_falls_back_to_free_scaling() {
+        let native = (640u16, 400u16);
+        let tiny = (240u32, 150u32); // free s = 0.375, below the 0.5 rung
+        assert!(locked_scale(native, tiny, (2, 2)).is_none(), "no rung fits a 240x150 pane");
+
+        let free = uniform_scale(native, tiny);
+        let (got, fell_back) = fitted_scale(native, tiny, (2, 2), true);
+        assert!(fell_back, "the fallback is reported, not silent");
+        assert_eq!(got.s, free.s, "and it IS the free scale — degrade, never block");
+        assert_eq!((got.off_x, got.off_y), (free.off_x, free.off_y));
+
+        // The Mac's whole-step ladder has a coarser floor: anything under 1.0.
+        assert!(locked_scale((480, 300), (470, 600), (1, 1)).is_none(), "0.979 is below the Mac's floor");
+        assert!(fitted_scale((480, 300), (470, 600), (1, 1), true).1, "and reports the fallback");
+    }
+
+    /// With the mode off nothing changes at all — this is opt-in, and the default
+    /// path must stay byte-for-byte `uniform_scale`.
+    #[test]
+    fn the_mode_is_opt_in_and_off_is_the_free_scale() {
+        for r in LADDER {
+            for pane in [LADDER_PANE, (784, 666), (240, 150)] {
+                let free = uniform_scale(r.native, pane);
+                let (got, fell_back) = fitted_scale(r.native, pane, r.art_scale, false);
+                assert_eq!(got.s, free.s, "{} at {pane:?}", r.press);
+                assert_eq!((got.off_x, got.off_y), (free.off_x, free.off_y));
+                assert!(!fell_back, "a mode that was never asked for cannot fall back");
+            }
+        }
+    }
+
+    /// A rung is exactly a rung: `(free · gcd).floor() / gcd` must not lose one to
+    /// float error when the free scale is already on the ladder. 1280x800 into
+    /// 640x400 is exactly 2.0 and must stay 2.0, not drop to 1.5.
+    #[test]
+    fn a_free_scale_already_on_the_ladder_is_left_alone() {
+        for (pane, want) in [((1280u32, 800u32), 2.0f32), ((640, 400), 1.0), ((320, 200), 0.5), ((960, 600), 1.5)] {
+            let got = locked_scale((640, 400), pane, (2, 2)).expect("a rung fits").s;
+            assert_eq!(got, want, "{pane:?} is exactly {want} and must not round down a step");
+        }
     }
 
 
