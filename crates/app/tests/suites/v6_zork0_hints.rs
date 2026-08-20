@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use app::engine::Engine;
+use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
@@ -96,15 +96,26 @@ fn zork0_hint_menu_paints_topics_by_row_and_keeps_transcript_clean() {
     );
 }
 
-/// SQ-0515: Zork0's InvisiClues hint menu paints its " InvisiClues (tm)" title as
-/// a reverse-video run (style bit 1) in a FULL-native-width grid window (w_px=640
-/// of 640). In HYBRID mode the painted-screen renderer must flood that whole
-/// terminal row edge to edge with the reverse bar — not reverse across only the
-/// title's own glyphs — while the nav-help row beneath it (non-reversed runs) and
-/// the selected-TOPIC highlight (a reverse run in the NARROW w_px=468 topic window)
-/// stay text-width. Skip-if-missing (gitignored story).
+/// SQ-0934: the hint screen's HEADER is drawn as raster, and its topic list as
+/// glyphs — the split that makes this screen a ring rather than a page of text.
+///
+/// **This case used to assert the opposite** and was right to, until the screen
+/// changed destination. The menu reached the runs-only arm (SQ-0477), which draws
+/// every run as terminal cells and discards every pixel, so the title really was a
+/// full-width reverse bar in the cell buffer. That arm threw the game's frame away
+/// with it, which is what SQ-0934 fixed: the screen is a ring — 78% of the top band
+/// and 70% of each flank opaque, middle 0.0% — and it now takes one.
+///
+/// So the header moved into the art. `" InvisiClues (tm)"` and the key legend sit
+/// ON the banner artwork at native y 1..33, and a terminal glyph cannot be drawn
+/// over a kitty placement; `ChromeStrip::Art` contributes no `glyph_rows`, so those
+/// rows keep their rasterised text (SQ-0903). The topic list is the opposite case —
+/// the ring's middle is 0.0% opaque, nothing is under it, and it is drawn with
+/// glyphs. That is CLAUDE.md's rule for hybrid, applied per strip and per frame.
+///
+/// Skip-if-missing (gitignored story).
 #[test]
-fn zork0_hybrid_hint_header_floods_full_width_reverse_bar() {
+fn zork0_hint_header_is_raster_on_the_banner_and_the_topics_are_glyphs() {
     let story_path = stories_dir().join("zork0-r393-s890714.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -127,82 +138,61 @@ fn zork0_hybrid_hint_header_floods_full_width_reverse_bar() {
     state.colors = app::colors::ColorScheme::terminal_default();
     state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
-    let area = Rect::new(0, 0, 80, 30);
+    let area = Rect::new(0, 0, 100, 34);
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
 
-    let row_text = |y: u16| -> String {
-        (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect()
-    };
-    let reversed_count = |y: u16| -> u16 {
-        (0..area.width).filter(|&x| buf.cell((x, y)).unwrap().modifier.contains(Modifier::REVERSED)).count() as u16
-    };
+    let screen: String = (0..area.height)
+        .map(|y| (0..area.width).map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    // Native row 0 (px y=1) carries the " InvisiClues (tm)" title — as terminal
-    // cells on terminal row 0, flooded edge to edge with the reverse bar.
-    let title = row_text(0);
-    assert!(title.contains("InvisiClues"), "row 0 is the InvisiClues title bar: {title:?}");
-    assert_eq!(
-        reversed_count(0), area.width,
-        "the title row is a solid reverse bar edge to edge (every cell reversed): {title:?}"
-    );
+    // The premise, so a frame that stopped being the menu cannot pass vacuously.
+    assert_eq!(state.v6_path_log.borrow().last().map(|(l, _)| l.clone()), Some("hybrid-ring".into()),
+        "the hint screen takes the ring:\n{screen}");
 
-    // The nav-help row below (native row 1 → terminal row 1: "N for next item." /
-    // "Return for hints.", non-reversed runs in the SAME full-width window) must
-    // NOT be flooded — its background gaps stay un-reversed.
-    let nav = row_text(1);
-    assert!(nav.contains("N for next item."), "row 1 is the nav-help row: {nav:?}");
-    assert!(
-        reversed_count(1) < area.width,
-        "the nav-help row is not flooded full-width (non-reversed runs): {nav:?} ({} reversed)",
-        reversed_count(1)
-    );
-
-    // The selected TOPIC highlight ("PROLOGUE", a reverse run in the NARROW
-    // w_px=468 topic window) stays a text-width block — its row is not flooded
-    // edge to edge.
-    let topic_row = (0..area.height).find(|&y| row_text(y).contains("PROLOGUE"));
-    if let Some(ty) = topic_row {
-        assert!(
-            reversed_count(ty) < area.width,
-            "the selected-topic highlight (narrow topic window) is not flooded full-width: {:?}",
-            row_text(ty)
-        );
+    // The TOPIC LIST is glyphs.
+    for topic in ["GREAT HALL AREA", "SECRET WING", "GENERAL QUESTIONS"] {
+        assert!(screen.contains(topic), "{topic:?} must be drawn with glyphs:\n{screen}");
     }
 
-    // FRAMELESS routes the hint menu through the SAME painted-screen renderer, so
-    // the header floods identically there.
-    // Force the CELL path: SQ-0895 removed frameless, which was the
-    // deliberate route in. Dropping the picker is the substitute whose
-    // ONLY effect is the one frameless contributed here — draw no game
-    // image. (A modal overlay also lands on the cell path, but it
-    // additionally suppresses the inlined input line, which shifts row
-    // counts.)
-    state.game_picker = None;
-    let mut fbuf = Buffer::empty(area);
-    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut fbuf);
-    let f_title: String = (0..area.width).map(|x| fbuf.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
-    assert!(f_title.contains("InvisiClues"), "frameless: row 0 is the InvisiClues title bar: {f_title:?}");
-    let f_rev = (0..area.width).filter(|&x| fbuf.cell((x, 0)).unwrap().modifier.contains(Modifier::REVERSED)).count() as u16;
-    assert_eq!(f_rev, area.width, "frameless: the title row floods edge to edge too: {f_title:?}");
+    // The HEADER is not. It is on the banner art, so it reaches the terminal as
+    // pixels inside a band — never as cells.
+    for header in ["InvisiClues", "N for next item.", "Q to resume story."] {
+        assert!(
+            !screen.contains(header),
+            "{header:?} sits on the banner ARTWORK and must be rasterised into the band, \
+             not drawn as a terminal glyph over a kitty placement:\n{screen}"
+        );
+    }
 }
 
 
-/// SQ-0637: the hybrid PAINTED-screen branch (the InvisiClues menu, SQ-0477) drops
-/// the pixel chrome ring for that frame — but it used to stamp no render path at
-/// all, so `state.v6_path_log` still said `hybrid-ring` from the frame before.
+/// SQ-0934: the hint menu DRAWS the ring, so the ring is continuous across the
+/// round trip into the menu and back.
 ///
-/// That log is what the resume gate reads (`render/screen.rs`): a ring frame that
-/// follows a NON-ring frame must invalidate the chrome-band cache, because the
-/// terminal no longer holds our placements and every band would otherwise be a
-/// cache hit that sends nothing (the SQ-0587 model). With the stale `hybrid-ring`
-/// stamp standing, leaving the hint menu resumed the ring with the frame art
-/// missing — and `/dump-windows` reported a ring frame that never ran.
+/// **What this case used to pin, and where that guarantee lives now.** SQ-0637
+/// found that the painted-screen branch dropped the ring for the menu's frames
+/// while leaving `hybrid-ring` stamped in `v6_path_log`, so the resume read a stale
+/// stamp, every band was a cache hit that sent nothing, and Zork Zero came back
+/// from InvisiClues with its frame art missing. The fix was to stamp the painted
+/// path; this case was the specimen.
+///
+/// The menu is not that frame any more — it takes the ring itself, so there is no
+/// drop to recover from. The GUARANTEE is untouched and is pinned mechanically
+/// rather than through this game:
+/// `v6_kitty_graphics::evicting_one_band_makes_the_survivors_re_upload_too` is the
+/// same rule without needing a specimen that drops the ring, and
+/// `v6_band_placement_lifecycle::an_unchanged_menu_frame_re_uploads_no_band` holds
+/// the other side of it.
+///
+/// What is pinned here instead is the stronger property the change bought: the ring
+/// never goes away, so the bands stay warm and the menu costs no re-upload at all.
 ///
 /// Pinned in BOTH `honor_game_colours` modes: the path taken must not depend on
 /// whether the game's colours are honoured. Skip-if-missing (gitignored story).
 #[test]
-fn zork0_hint_menu_stamps_a_non_ring_path_so_the_ring_re_uploads_on_resume() {
+fn zork0_hint_menu_draws_the_ring_and_keeps_its_bands_across_the_round_trip() {
     for honor in [true, false] {
         let story_path = stories_dir().join("zork0-r393-s890714.z6");
         let Ok(story_bytes) = std::fs::read(&story_path) else {
@@ -249,29 +239,104 @@ fn zork0_hint_menu_stamps_a_non_ring_path_so_the_ring_re_uploads_on_resume() {
         assert_eq!(last_path(&state), "hybrid-ring", "honor={honor}: gameplay draws the ring");
         assert!(band_uploads(&state) > 0, "honor={honor}: the ring uploaded its bands");
 
-        // Into the hint menu: the painted-screen branch, which drops the ring.
+        // Into the hint menu: a ring frame of its own now (SQ-0934).
         session.submit("hint");
         let entered = session.submit_char(b'y');
         assert!(entered.fault.is_none(), "entering the hint menu faulted: {:?}", entered.fault);
         frame(&session, &state);
-        let painted = last_path(&state);
-        assert!(
-            painted.starts_with("painted"),
-            "honor={honor}: the painted hint menu must stamp its own path, not leave the \
-             previous frame's — got {painted:?}"
+        let menu_path = last_path(&state);
+        assert_eq!(
+            menu_path, "hybrid-ring",
+            "honor={honor}: the hint screen is a ring — banner and flanks are the game's own \
+             artwork, and throwing them away is what SQ-0934 fixed"
         );
-        assert_ne!(painted, "hybrid-ring", "honor={honor}: this frame did NOT draw the ring");
 
-        // Out again: the ring RESUMES, and every band must be sent to the terminal
-        // afresh — the placements did not survive the frames the ring sat out.
+        let uploads_in_menu = band_uploads(&state);
+        // Out again: the ring was never gone, so its bands are still live.
         let quit = session.submit_char(b'q');
         assert!(quit.fault.is_none(), "leaving the hint menu faulted: {:?}", quit.fault);
         frame(&session, &state);
-        assert_eq!(last_path(&state), "hybrid-ring", "honor={honor}: the ring resumes");
-        assert!(
-            band_uploads(&state) > 0,
-            "honor={honor}: resuming the ring after a painted menu must RE-UPLOAD the chrome \
-             bands — cache hits send nothing and the frame art stays missing"
+        assert_eq!(last_path(&state), "hybrid-ring", "honor={honor}: still the ring");
+        // …and it never left, so there is nothing to recover: the bands the menu
+        // frame uploaded are still the ones on screen. A re-upload here would mean
+        // the ring had been dropped after all.
+        let after = band_uploads(&state);
+        assert_eq!(
+            after, uploads_in_menu,
+            "honor={honor}: the ring was continuous across the menu, so leaving it must \
+             re-upload NO band (uploaded {after}, had {uploads_in_menu})"
         );
     }
+}
+
+/// SQ-0934: the story surface on a hint screen is the GRID the game printed into
+/// the ring's clear middle — and it is the same screen in two different games.
+///
+/// Zork Zero and Shogun share one InvisiClues subsystem: measured on both, the
+/// frame artwork is a ring at 78% top band / 70% flanks / **0.0% middle**, and the
+/// header prints the same four strings at the same native rows. What differs is
+/// only the rect of the middle, and — across releases of the SAME game — whether
+/// the primary buffer is withdrawn at all. Blorb r393 and Amiga r366 withdraw it;
+/// the Macintosh r296 keeps it and reaches the ring by another road.
+///
+/// This pins the withdrawn case on real media, because the structural unit tests in
+/// `render::v6_layout` prove the RULE and cannot prove that any shipped game
+/// actually publishes this shape.
+///
+/// Skip-if-missing, and non-vacuous: a fixture that is present but yielded nothing
+/// fails rather than passing quietly.
+#[test]
+fn a_withdrawn_buffer_leaves_the_menu_grid_as_the_story_surface() {
+    let specimens: &[(&str, u16)] = &[("zork0-r393-s890714.z6", 393), ("shogun-r322-s890706.z6", 322)];
+    let mut seen = 0;
+    for (file, release) in specimens {
+        let path = stories_dir().join(file);
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored story missing at {}", path.display());
+            continue;
+        };
+        seen += 1;
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), *release, "{file} is not the pinned release");
+        let mut picts = PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
+        let dims = picts.all_pict_dims();
+        let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, picts.std_window(), None, None)
+            .expect("boots");
+        s.set_pict_source(Some(picts));
+        s.flush_boot_pictures();
+        let _ = s.take_transcript();
+        // Zork Zero asks for a LINE first; Shogun asks for a CHAR (its title
+        // splash). Answer whatever is in the way rather than assuming either.
+        for _ in 0..8 {
+            match s.pending_input() {
+                InputKind::Line => break,
+                InputKind::Char => {
+                    let _ = s.submit_char(13);
+                }
+                InputKind::Event => {
+                    let _ = s.submit("");
+                }
+            }
+        }
+        s.submit("hint");
+        let entered = s.submit_char(b'y');
+        assert!(entered.fault.is_none(), "{file}: entering hints faulted: {:?}", entered.fault);
+
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("{file}: v6 publishes a layered composite") };
+        // The premise: the game really did withdraw its buffer for this screen.
+        assert!(
+            !items.iter().any(|pw| matches!(&pw.node, WinNode::Buffer(b) if b.primary)),
+            "{file}: this release is expected to withdraw its primary buffer for the menu"
+        );
+        let layout = app::render::v6_layout::classify_windows(items);
+        let story = layout.story.unwrap_or_else(|| panic!("{file}: the middle grid must stand in for it"));
+        assert!(matches!(&story.node, WinNode::Grid(_)), "{file}: the surface is that Grid");
+        // …and it is still chrome, or the 22 topic runs it carries are never drawn.
+        assert!(
+            layout.chrome.iter().any(|c| std::ptr::eq(*c, story)),
+            "{file}: the promoted grid must remain in chrome"
+        );
+    }
+    let any = specimens.iter().any(|(f, _)| stories_dir().join(f).is_file());
+    assert!(!any || seen > 0, "stories are present but none was read");
 }

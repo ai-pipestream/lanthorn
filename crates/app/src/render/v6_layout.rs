@@ -276,10 +276,154 @@ pub struct V6Layout<'a> {
     pub chrome: Vec<&'a PositionedWindow>,
 }
 
+/// How much of a candidate's own rect the frame art may cover before it stops
+/// being a "clear middle" (SQ-0934). Measured 0.0% on every hint frame in the
+/// corpus — Zork Zero and Shogun both leave the middle perfectly transparent —
+/// so this is slack for a future frame with a stray pixel, not a threshold any
+/// known screen sits near.
+const RING_MIDDLE_MAX_INK: f32 = 0.005;
+
+/// How much of the art OUTSIDE a candidate must be opaque for the candidate to be
+/// framed rather than merely sitting on a blank screen. The hint frames measure
+/// 30.5% over the whole canvas (78% top band, 70% flanks); gameplay frames run
+/// 12–30%. A screen with nothing around the text is not a ring and must keep
+/// today's behaviour.
+const RING_MIDDLE_MIN_FRAME_INK: f32 = 0.05;
+
+/// The chrome `Grid` filling the clear middle of a ring of artwork (SQ-0934).
+///
+/// # The screen this exists for
+///
+/// Zork Zero's and Shogun's **InvisiClues screen is one screen**, shared by both
+/// games and identical on every medium: a full-screen graphics window whose
+/// opaque pixels form a ring — 78% of the top band, 70% of each flank, and a
+/// middle that is **0.0%** opaque — with the topic list printed into that clear
+/// middle and the title and key legend printed onto the banner art above it.
+///
+/// The games publish it by WITHDRAWING the primary buffer and printing the list
+/// into a `Grid` of the same rect. That made [`classify_windows`] answer
+/// `story: None`, and a no-story frame routes to the runs-only arm in
+/// `render::screen`, whose contract is that it draws the runs and discards every
+/// pixel on the screen. So the frame the game drew around the menu was thrown
+/// away and the menu came out as bare text on the player's theme.
+///
+/// Recognising the middle restores the ring, and nothing downstream needs to
+/// change: the bands come from content (SQ-0894), the banner text stays
+/// RASTERISED because its strip is art (`ChromeStrip::Art` contributes no
+/// `glyph_rows`, SQ-0903 — a glyph cannot sit over a kitty placement), and the
+/// topic list is packed onto the viewport as crisp glyphs (SQ-0892), which is
+/// what the Macintosh release — the one that keeps its buffer — already does.
+///
+/// **The classification has to be per-frame, not per-window.** Shogun's top band
+/// is 14% opaque during gameplay and 78% on the hint screen: the same window slot
+/// is a text strip in one frame and artwork in the next.
+///
+/// # What it deliberately does not match
+///
+/// The candidate must be framed by a chrome GRAPHICS window. scopa publishes no
+/// buffer either — its screen is three `Grid`s and it draws its card table with
+/// `erase_window` fills (SQ-0711) — but those fills are a paint ground, not a
+/// graphics window, so it finds no frame here and keeps the arm SQ-0711 chose.
+///
+/// A candidate spanning the whole screen is rejected too: a full-screen grid is
+/// not in a middle, it IS the screen.
+fn ring_middle_grid<'a>(chrome: &[&'a PositionedWindow], native: (u16, u16)) -> Option<&'a PositionedWindow> {
+    let resolved = |px: u16| (px as i16) > 0;
+    // The frame: every chrome graphics window that has ink in it. Asked as one
+    // surface, because a game is free to draw its border in more than one.
+    let art: Vec<&PositionedWindow> = chrome
+        .iter()
+        .copied()
+        .filter(|pw| matches!(&pw.node, WinNode::Graphics(g) if g.win != 0))
+        .collect();
+    if art.is_empty() {
+        return None;
+    }
+    let opaque_at = |x: u32, y: u32| -> bool {
+        art.iter().any(|pw| {
+            let WinNode::Graphics(g) = &pw.node else { return false };
+            let (ox, oy) = (u32::from(pw.x_px), u32::from(pw.y_px));
+            x >= ox
+                && y >= oy
+                && x - ox < g.canvas.width()
+                && y - oy < g.canvas.height()
+                && g.canvas.get_pixel(x - ox, y - oy)[3] >= 128
+        })
+    };
+    let (nw, nh) = (u32::from(native.0), u32::from(native.1));
+    let mut best: Option<(&PositionedWindow, u32)> = None;
+    for pw in chrome.iter().copied() {
+        let WinNode::Grid(g) = &pw.node else { continue };
+        // It must be carrying text — an empty grid is not a menu.
+        if !g.px_texts.iter().any(|t| !t.text.trim().is_empty()) {
+            continue;
+        }
+        if !resolved(pw.w_px) || !resolved(pw.h_px) {
+            continue;
+        }
+        let (x0, y0) = (u32::from(pw.x_px), u32::from(pw.y_px));
+        let (x1, y1) = ((x0 + u32::from(pw.w_px)).min(nw), (y0 + u32::from(pw.h_px)).min(nh));
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        // Not the whole screen.
+        if x0 == 0 && y0 == 0 && x1 >= nw && y1 >= nh {
+            continue;
+        }
+        let inside_area = (x1 - x0) * (y1 - y0);
+        let mut inside_ink = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if opaque_at(x, y) {
+                    inside_ink += 1;
+                }
+            }
+        }
+        if inside_ink as f32 > inside_area as f32 * RING_MIDDLE_MAX_INK {
+            continue;
+        }
+        // …and there has to be a frame AROUND it.
+        let mut outside_ink = 0u32;
+        let mut outside_area = 0u32;
+        for y in 0..nh {
+            for x in 0..nw {
+                if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                    continue;
+                }
+                outside_area += 1;
+                if opaque_at(x, y) {
+                    outside_ink += 1;
+                }
+            }
+        }
+        if outside_ink as f32 <= outside_area as f32 * RING_MIDDLE_MIN_FRAME_INK {
+            continue;
+        }
+        if best.is_none_or(|(_, a)| inside_area > a) {
+            best = Some((pw, inside_area));
+        }
+    }
+    best.map(|(pw, _)| pw)
+}
+
 /// Classify `items`: the first primary `Buffer` becomes `story`; window 0's own
 /// `Graphics` entry becomes `story_gfx` (story content); every other entry (in
-/// input order) goes into `chrome`. With no primary `Buffer`, `story` is `None`
-/// and non-window-0 graphics/grids are chrome.
+/// input order) goes into `chrome`.
+///
+/// With no primary `Buffer`, `story` falls back to the `Grid` filling the clear
+/// middle of a ring of artwork, if there is one — see [`ring_middle_grid`] for
+/// the screen that needs it and why. **That grid stays in `chrome` as well**,
+/// which is not an oversight: `story` is wanted for its RECT (the viewport the
+/// ring lays out around), while the grid's runs must still reach `chrome_runs`
+/// or the menu they carry would not be drawn at all. The Macintosh release
+/// already renders in exactly that arrangement — an empty story buffer whose
+/// runs live on a chrome grid — so this is the shape the ring path is known to
+/// handle, not a new one.
+///
+/// Every reader that wants a `Buffer` specifically already pattern-matches for
+/// one and declines otherwise ([`story_bg_rgba`], [`story_fg_rgba`],
+/// [`story_pair_packed`], [`draw_story_canvas_runs`]), so a `Grid` in this slot
+/// contributes its rect and nothing else.
 pub fn classify_windows(items: &[PositionedWindow]) -> V6Layout<'_> {
     let mut story = None;
     let mut story_gfx = None;
@@ -293,6 +437,9 @@ pub fn classify_windows(items: &[PositionedWindow]) -> V6Layout<'_> {
             chrome.push(pw);
         }
     }
+    if story.is_none() {
+        story = ring_middle_grid(&chrome, native_extent(items));
+    }
     V6Layout { story, story_gfx, chrome }
 }
 
@@ -302,11 +449,29 @@ pub fn classify_windows(items: &[PositionedWindow]) -> V6Layout<'_> {
 /// falls back to its resolved default page (SQ-0510); either way the rect ends
 /// up opaque, never left for a compositor to colour in.
 pub fn story_bg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> Option<Rgba<u8>> {
-    let WinNode::Buffer(b) = &story?.node else { return None };
+    // SQ-0934: a `Grid` reaches this slot when the game withdrew its buffer and
+    // printed into the clear middle of a ring instead (see `ring_middle_grid`). It
+    // carries `bg`/`fg` exactly as a buffer does, and it IS the story surface for
+    // that frame, so its page must fill the same rect — otherwise the middle keeps
+    // the host's backdrop and the page stops short of the frame.
+    let (bg, _) = story_surface_pair(story?)?;
     // `bg`, when `Some`, always packs a non-Default channel (see
     // `state::pack_zcolour`), so the fallback here is never actually used —
     // it exists only to satisfy `packed_to_rgba`'s signature.
-    Some(packed_to_rgba(b.bg?, Rgba([0, 0, 0, 255]), colors))
+    Some(packed_to_rgba(bg?, Rgba([0, 0, 0, 255]), colors))
+}
+
+/// The `(bg, fg)` a story surface declares, whichever kind of window it is.
+///
+/// One place, because the three readers below must not disagree about what a
+/// promoted grid means — and because a node that is neither is not a story
+/// surface at all, which is the case that keeps `Graphics` and `Blank` out.
+fn story_surface_pair(it: &PositionedWindow) -> Option<(Option<u32>, Option<u32>)> {
+    match &it.node {
+        WinNode::Buffer(b) => Some((b.bg, b.fg)),
+        WinNode::Grid(g) => Some((g.bg, g.fg)),
+        _ => None,
+    }
 }
 
 /// The story window's own FOREGROUND colour (set by the game via `set_colour`),
@@ -320,11 +485,11 @@ pub fn story_bg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> 
 /// page but keeping the host's own (light) default ink rasterized white-on-white
 /// prose that could not be read at all.
 pub fn story_fg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> Option<Rgba<u8>> {
-    let WinNode::Buffer(b) = &story?.node else { return None };
+    let (_, fg) = story_surface_pair(story?)?;
     // `fg`, when `Some`, always packs a non-Default channel (see
     // `state::pack_zcolour`), so the fallback here is never actually used —
     // it exists only to satisfy `packed_to_rgba`'s signature.
-    Some(packed_to_rgba(b.fg?, Rgba([255, 255, 255, 255]), colors))
+    Some(packed_to_rgba(fg?, Rgba([255, 255, 255, 255]), colors))
 }
 
 /// The story window's explicit `(fg, bg)` pair as PACKED z-colours (`0` when the
@@ -333,9 +498,9 @@ pub fn story_fg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> 
 /// than through the pixel path's [`story_fg_rgba`]/[`story_bg_rgba`]. Same
 /// source, same window, one resolution per path. (SQ-0532 wave-6)
 pub fn story_pair_packed(story: Option<&PositionedWindow>) -> (u32, u32) {
-    match story.map(|s| &s.node) {
-        Some(WinNode::Buffer(b)) => (b.fg.unwrap_or(0), b.bg.unwrap_or(0)),
-        _ => (0, 0),
+    match story.and_then(story_surface_pair) {
+        Some((bg, fg)) => (fg.unwrap_or(0), bg.unwrap_or(0)),
+        None => (0, 0),
     }
 }
 
@@ -2221,6 +2386,162 @@ mod tests {
         assert!(layout.story.is_none());
         assert!(layout.story_gfx.is_none());
         assert_eq!(layout.chrome.len(), items.len());
+    }
+
+    // ── ring_middle_grid (SQ-0934) ───────────────────────────────────────────
+    //
+    // The rule is STRUCTURAL and names no game: a chrome grid carrying text,
+    // whose rect the frame art leaves clear, with frame art around it. These
+    // cases are built from synthetic windows for exactly that reason — if the
+    // rule needed to know it was looking at InvisiClues, it could not be written
+    // without one.
+
+    /// A chrome graphics window `win` holding `native`-sized art with `rect`
+    /// painted opaque — a stand-in for any game's frame.
+    fn frame_art(native: (u32, u32), rects: &[(u32, u32, u32, u32)]) -> PositionedWindow {
+        let mut c = RgbaImage::new(native.0, native.1);
+        for &(rx, ry, rw, rh) in rects {
+            for y in ry..(ry + rh).min(native.1) {
+                for x in rx..(rx + rw).min(native.0) {
+                    c.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+                }
+            }
+        }
+        PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0,
+            w_px: native.0 as u16, h_px: native.1 as u16,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(GraphicsWindow { win: 7, canvas: Arc::new(c), version: 0, upscale: false }),
+        }
+    }
+
+    /// A chrome grid at a native rect, carrying `text` if non-empty.
+    fn text_grid(x: u16, y: u16, w: u16, h: u16, text: &str) -> PositionedWindow {
+        let px_texts = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![PxText { x: x + 1, y: y + 1, text: text.into(), style: 0, fg: 0, bg: 0 }]
+        };
+        PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w, h_px: h,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                fill: None, cols: 1, rows: 1, cells: vec![], active_rows: 1,
+                cursor: (0, 0), cursor_active: false, border: BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false, px_texts,
+            }),
+        }
+    }
+
+    /// A ring — banner across the top, a flank down each side, clear middle —
+    /// with a text grid filling the middle. This is the corpus shape: Zork Zero's
+    /// and Shogun's hint screen measure 78% of the top band and 70% of each flank
+    /// opaque with the middle at 0.0%.
+    fn ringed_menu() -> Vec<PositionedWindow> {
+        vec![
+            frame_art((640, 400), &[(0, 0, 640, 78), (0, 78, 86, 322), (554, 78, 86, 322)]),
+            text_grid(86, 78, 468, 322, "GREAT HALL AREA"),
+        ]
+    }
+
+    #[test]
+    fn a_text_grid_in_a_rings_clear_middle_becomes_the_story_surface() {
+        let items = ringed_menu();
+        let layout = classify_windows(&items);
+        let story = layout.story.expect("the middle grid stands in for the withdrawn buffer");
+        assert!(matches!(&story.node, WinNode::Grid(_)), "it is a Grid, not a Buffer");
+        assert_eq!((story.x_px, story.y_px, story.w_px, story.h_px), (86, 78, 468, 322));
+    }
+
+    /// **It stays in `chrome` as well**, which is the load-bearing half: `story`
+    /// is wanted for its RECT, while the runs it carries must still reach
+    /// `chrome_runs` or the menu would not be drawn at all.
+    #[test]
+    fn the_promoted_grid_remains_in_chrome_so_its_runs_are_still_drawn() {
+        let items = ringed_menu();
+        let layout = classify_windows(&items);
+        let story = layout.story.expect("promoted");
+        assert!(
+            layout.chrome.iter().any(|c| std::ptr::eq(*c, story)),
+            "the promoted grid must still be chrome, or its 22 menu runs vanish",
+        );
+    }
+
+    /// A frame with no artwork around it is not a ring. This is the guard that
+    /// keeps every ordinary no-story frame on the arm it already had.
+    #[test]
+    fn a_text_grid_with_no_frame_around_it_is_not_promoted() {
+        let items = vec![
+            frame_art((640, 400), &[]), // a graphics window, but empty
+            text_grid(86, 78, 468, 322, "GREAT HALL AREA"),
+        ];
+        assert!(classify_windows(&items).story.is_none(), "no ink outside means no ring");
+    }
+
+    /// scopa's shape (SQ-0711): grids and no graphics window at all. Its card
+    /// table is an `erase_window` paint ground, which is not a frame, so it keeps
+    /// the arm SQ-0711 chose for it.
+    #[test]
+    fn a_screen_of_grids_with_no_graphics_window_is_not_promoted() {
+        let items = vec![text_grid(0, 0, 320, 200, "abort"), text_grid(86, 78, 468, 322, "OK")];
+        assert!(classify_windows(&items).story.is_none(), "no graphics window, no frame");
+    }
+
+    /// Art THROUGH the candidate means it is not a clear middle — the game is
+    /// drawing over that rect, so the pixels there are somebody's artwork and
+    /// only the composite can show them.
+    #[test]
+    fn a_grid_with_art_behind_its_own_rect_is_not_promoted() {
+        let items = vec![
+            frame_art((640, 400), &[(0, 0, 640, 78), (0, 78, 86, 322), (554, 78, 86, 322), (86, 78, 468, 322)]),
+            text_grid(86, 78, 468, 322, "GREAT HALL AREA"),
+        ];
+        assert!(classify_windows(&items).story.is_none(), "opaque under the rect is not a clear middle");
+    }
+
+    /// A grid spanning the whole screen is not IN a middle, it IS the screen.
+    /// Zork Zero's Macintosh release publishes exactly such a grid alongside a
+    /// live buffer, and must not have it mistaken for a viewport.
+    #[test]
+    fn a_full_screen_grid_is_not_a_middle() {
+        let items = vec![
+            frame_art((640, 400), &[(0, 0, 640, 78), (0, 78, 86, 322), (554, 78, 86, 322)]),
+            text_grid(0, 0, 640, 400, "GREAT HALL AREA"),
+        ];
+        assert!(classify_windows(&items).story.is_none(), "the whole screen is not a middle");
+    }
+
+    /// An EMPTY grid in the middle is not a menu. Shogun publishes a 169×48 grid
+    /// with no runs on every frame; promoting that would hand the ring a viewport
+    /// with nothing in it.
+    #[test]
+    fn an_empty_grid_in_the_middle_is_not_promoted() {
+        let items = vec![
+            frame_art((640, 400), &[(0, 0, 640, 78), (0, 78, 86, 322), (554, 78, 86, 322)]),
+            text_grid(86, 78, 468, 322, ""),
+        ];
+        assert!(classify_windows(&items).story.is_none(), "a grid with no text is not a menu");
+    }
+
+    /// A real primary buffer always wins — the promotion is a fallback, so no
+    /// frame that has a story window today can change behaviour.
+    #[test]
+    fn a_primary_buffer_still_wins_over_a_ring_middle_grid() {
+        let mut items = ringed_menu();
+        items.push(story_box(86, 78, 468, 320));
+        let layout = classify_windows(&items);
+        let story = layout.story.expect("the buffer");
+        assert!(matches!(&story.node, WinNode::Buffer(_)), "a published buffer is never displaced");
+    }
+
+    /// The LARGEST qualifying grid wins, so a game that puts a caption in the
+    /// clear middle beside its menu does not hand the ring the caption.
+    #[test]
+    fn the_largest_clear_middle_grid_wins() {
+        let mut items = ringed_menu();
+        items.push(text_grid(100, 90, 60, 16, "caption"));
+        let story = classify_windows(&items).story.expect("promoted");
+        assert_eq!(story.w_px, 468, "the menu, not the caption");
     }
 
     #[test]

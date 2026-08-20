@@ -1526,7 +1526,33 @@ fn render_node(
                         // than reaching a carve afterwards.
                         let glyph_rows: std::collections::HashSet<u16> =
                             text_run_tops.iter().map(|&(top, _, _)| top).collect();
-                        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows));
+                        // SQ-0934: the chrome the CANVAS is built from excludes the
+                        // promoted story grid — the menu the game printed into the
+                        // ring's clear middle after withdrawing its buffer.
+                        //
+                        // It is in `chrome` because its runs must reach `chrome_runs`,
+                        // but it is the STORY SURFACE, and rasterising a story surface
+                        // is the thing hybrid exists not to do. Leaving it in put the
+                        // menu's pixels — its text AND the reverse-video bar under the
+                        // selected item — into the canvas the ring bands are cropped
+                        // from, so fragments of the menu came back out inside the ring:
+                        // a sliver of the first text column showing at the flank's inner
+                        // edge, and the selection bar's two ends appearing IN the left
+                        // and right flanks, level with the selection and then again
+                        // wherever a flank band tiles (SQ-0894). "Mirrored top and
+                        // bottom, and overrunning the frame", as reported, is a tiled
+                        // repeat of a strip that should never have carried text.
+                        //
+                        // The middle is drawn as terminal cells by `render_node` above,
+                        // which is the whole point of hybrid; the canvas only has to
+                        // carry what the bands ship, and the bands are the frame.
+                        let ring_chrome: Vec<&crate::engine::PositionedWindow> = layout
+                            .chrome
+                            .iter()
+                            .copied()
+                            .filter(|it| !layout.story.is_some_and(|st| std::ptr::eq(*it, st)))
+                            .collect();
+                        let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows));
                         // SQ-0896: …and the STORY window's own plate, which the chrome
                         // canvas excludes by construction — `classify_windows` sets a
                         // `win == 0` Graphics aside as `story_gfx` so the ring does not
@@ -1557,7 +1583,7 @@ fn render_node(
                         // opaque is not painted.
                         let ink = canvas.clone();
                         if state.config.honor_game_colours {
-                            v6::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &state.colors);
+                            v6::fill_window_pages(&mut canvas, &ring_chrome, layout.story, &state.colors);
                             // …and the story window's own page under the pixels the
                             // ring bands ship (SQ-0704, hybrid half). Raster flattens
                             // its whole canvas opaque before shipping; hybrid ships
@@ -2272,6 +2298,14 @@ fn render_node(
                         let mut in_box: std::collections::BTreeMap<u16, Vec<&crate::engine::PxText>> =
                             std::collections::BTreeMap::new();
                         for it in &layout.chrome {
+                            // SQ-0934: the promoted story grid is in `chrome` (its runs
+                            // must reach `chrome_runs`) AND is the story surface, so
+                            // `render_node` above has already drawn it into the viewport.
+                            // Stamping it here as well draws every glyph twice — the
+                            // rasterised-looking text under the glyphs that was reported.
+                            if layout.story.is_some_and(|st| std::ptr::eq(*it, st)) {
+                                continue;
+                            }
                             if let WinNode::Grid(g) = &it.node {
                                 for t in &g.px_texts {
                                     let px = t.x.max(1) as f32 - 1.0;
