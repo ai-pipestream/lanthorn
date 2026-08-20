@@ -340,3 +340,99 @@ fn a_withdrawn_buffer_leaves_the_menu_grid_as_the_story_surface() {
     let any = specimens.iter().any(|(f, _)| stories_dir().join(f).is_file());
     assert!(!any || seen > 0, "stories are present but none was read");
 }
+
+/// SQ-0937: every topic the game prints inside the story box reaches the screen,
+/// at every pane width — including the column that starts one pixel inside the
+/// box's left edge.
+///
+/// The Macintosh press is the specimen because it is the release that KEEPS its
+/// primary buffer for the hint screen, so its menu is chrome runs inside the box
+/// and takes the ring's in-box packing. Blorb and Amiga withdraw the buffer and
+/// have their menu grid promoted to the story surface instead (SQ-0934), drawn by
+/// `render_node`, so they never exercise this path and never showed the defect.
+///
+/// What failed: the run's COLUMN was mapped through the device scale while its ROW
+/// was box-relative. Zork Zero prints its left topic column at native x=87 against
+/// a box whose left edge is x=86; at a 136x50 pane that rounded to `viewport.x - 1`
+/// and the run was dropped, so the entire left column vanished while the right
+/// column at native x=320 drew normally.
+///
+/// **Swept across widths, because the defect is a rounding boundary** — it appears
+/// at some pane sizes and not others, which is exactly how it survived until a user
+/// happened to resize.
+#[test]
+fn the_macintosh_hint_menu_keeps_its_leftmost_topic_column_at_every_width() {
+    let path = stories_dir().join("Zork Zero Disk.image");
+    if !path.exists() {
+        eprintln!("SKIP: gitignored Macintosh medium missing at {}", path.display());
+        return;
+    }
+    let Ok(app::hints::LoadedStory::ZCode(bytes)) = app::hints::load_story(&path) else {
+        panic!("Story.data mounts off the HFS volume")
+    };
+    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 296, "the Mac disk carries r296");
+    // Boot the way startup.rs does — the profile from the medium, and the screen
+    // size through the full chain. Skip a link and the game lays its own windows
+    // out differently and every column measured afterwards is of another screen.
+    let profile = app::interpreter::InterpreterProfile::resolve(&path, None, None, None);
+    let _g = app::V6_PALETTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    zvm::screen::set_palette(profile.palette());
+    let mut picts = app::graphics::PictSource::resolve_with_override(&path, app::graphics::PictureOverride::Unset, None);
+    let dims = picts.all_pict_dims();
+    let std_window = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
+    let art_scale = picts.art_scale();
+    let honoured = !picts.declines_game_colours(profile.default_colours());
+    let mut s = app::session::GameSession::new_with_art_scale(
+        bytes, honoured, false, profile.interpreter_number(), false, dims, std_window, art_scale,
+        honoured.then(|| profile.default_colours()).flatten(), None, None,
+    )
+    .expect("Zork Zero boots off the Macintosh disk");
+    s.set_pict_source(Some(picts));
+    s.flush_boot_pictures();
+    let _ = s.take_transcript();
+    for _ in 0..8 {
+        match s.pending_input() {
+            InputKind::Line => break,
+            InputKind::Char => {
+                let _ = s.submit_char(13);
+            }
+            InputKind::Event => {
+                let _ = s.submit("");
+            }
+        }
+    }
+    s.submit("hint");
+    let entered = s.submit_char(b'y');
+    assert!(entered.fault.is_none(), "entering hints faulted: {:?}", entered.fault);
+
+    let model = s.screen();
+    // The premise: this release really does keep its buffer, so the menu really is
+    // taking the in-box packing rather than SQ-0934's promoted-grid road.
+    let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
+    assert!(
+        items.iter().any(|pw| matches!(&pw.node, WinNode::Buffer(b) if b.primary)),
+        "r296 keeps its primary buffer for the hint screen; without that this proves nothing"
+    );
+
+    // 136 wide is the reported size; the others are a sweep either side of it, so a
+    // fix that merely moved the boundary cannot pass.
+    for (w, h) in [(136u16, 50u16), (100, 34), (114, 50), (90, 30), (160, 60)] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        let screen: String = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The LEFT column — the one that was being dropped — and the right column,
+        // which always survived, so a frame that lost both fails differently.
+        for topic in ["GREAT HALL AREA", "SECRET WING", "THE JESTER"] {
+            assert!(screen.contains(topic), "{w}x{h}: the leftmost topic column must draw ({topic:?}):\n{screen}");
+        }
+        assert!(screen.contains("AS A LAST RESORT"), "{w}x{h}: the right column draws too");
+    }
+}

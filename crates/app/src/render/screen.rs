@@ -1524,8 +1524,6 @@ fn render_node(
                         // GLYPHS. `text_run_tops` is that decision, taken a few lines
                         // up and reaching the canvas builder before it paints rather
                         // than reaching a carve afterwards.
-                        let glyph_rows: std::collections::HashSet<u16> =
-                            text_run_tops.iter().map(|&(top, _, _)| top).collect();
                         // SQ-0934: the chrome the CANVAS is built from excludes the
                         // promoted story grid — the menu the game printed into the
                         // ring's clear middle after withdrawing its buffer.
@@ -1552,6 +1550,42 @@ fn render_node(
                             .copied()
                             .filter(|it| !layout.story.is_some_and(|st| std::ptr::eq(*it, st)))
                             .collect();
+                        let mut glyph_rows: std::collections::HashSet<u16> =
+                            text_run_tops.iter().map(|&(top, _, _)| top).collect();
+                        // SQ-0937: …and the rows the ring is about to stamp INSIDE the
+                        // story box, which are glyph rows for exactly the same reason and
+                        // had never been counted as such.
+                        //
+                        // `text_run_tops` collects from the ring's STRIPS, and the story
+                        // box is not a strip — so a chrome run landing in the box was
+                        // rasterised into the canvas AND stamped as a glyph a few hundred
+                        // lines below. Both, one over the other, and the rasterised copy
+                        // then travelled wherever the bands crop and tile from this canvas.
+                        //
+                        // The Macintosh press is where it shows, because it is the release
+                        // that KEEPS its primary buffer for the hint screen: its menu is
+                        // chrome runs inside the box, so it takes this path, while Blorb
+                        // and Amiga withdraw the buffer and have their menu grid promoted
+                        // to the story surface instead (SQ-0934), which is excluded from
+                        // this canvas outright.
+                        //
+                        // Same predicate as the packing below, deliberately — if the two
+                        // ever disagree about which runs are stamped, the difference is
+                        // drawn twice or not at all.
+                        for it in &ring_chrome {
+                            let WinNode::Grid(g) = &it.node else { continue };
+                            for t in &g.px_texts {
+                                let px = u32::from(t.x.max(1)) - 1;
+                                let py = u32::from(t.y.max(1)) - 1;
+                                if px >= vp_native.0
+                                    && px < vp_native.0 + vp_native.2
+                                    && py >= vp_native.1
+                                    && py < vp_native.1 + vp_native.3
+                                {
+                                    glyph_rows.insert(t.y.max(1) - 1);
+                                }
+                            }
+                        }
                         let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows));
                         // SQ-0896: …and the STORY window's own plate, which the chrome
                         // canvas excludes by construction — `classify_windows` sets a
@@ -2329,11 +2363,42 @@ fn render_node(
                         }
                         for row_runs in in_box.values_mut() {
                             row_runs.sort_by_key(|t| t.x);
-                            let cw = cell_px.0.max(1) as f32;
-                            // Pane-relative cell → absolute buffer cell.
+                            // SQ-0937: the run's COLUMN is counted from the story box's
+                            // own left edge — one terminal column per native 8px text
+                            // cell — exactly as the row a few lines below is counted from
+                            // its top. This is SQ-0892's rule, finally applied to the
+                            // other axis.
+                            //
+                            // It used to map through the ring scale absolutely:
+                            //
+                            //     area.x + ((scale.off_x + px * scale.s) / cw).round()
+                            //
+                            // which disagrees with how the run is then DRAWN. `run_col`'s
+                            // neighbours already say why: a run is positioned through the
+                            // scale but "its characters then advance ONE TERMINAL COLUMN
+                            // each, and the two rates coincide only where a column is one
+                            // native 8px text cell." Positioning a run at one rate and
+                            // advancing its characters at another makes the run drift away
+                            // from its own text, and rounds its ORIGIN independently of the
+                            // viewport it is being clipped against.
+                            //
+                            // MEASURED, on the Macintosh press (r296/881019) at a 136x50
+                            // pane: the InvisiClues topic list prints its left column at
+                            // native x=87 against a story box whose left edge is x=86. The
+                            // old expression rounded that to `viewport.x - 1`, and the
+                            // guard below DROPS a run outside the viewport — so the whole
+                            // left column of the menu vanished while the right column at
+                            // native x=320, far enough in to survive the rounding, drew
+                            // normally. The same boundary the other way is the "disconnected
+                            // reversed cells after the menu items" seen at other sizes.
+                            //
+                            // Counting from the box cannot disagree with the box: a run at
+                            // the box's first column IS the viewport's first column, by
+                            // construction. `px >= vp_native.0` is guaranteed by the filter
+                            // that built `in_box`, so the subtraction never goes negative.
                             let run_col = |t: &crate::engine::PxText| {
-                                let px = t.x.max(1) as f32 - 1.0;
-                                area.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32
+                                let px = t.x.max(1) as i32 - 1;
+                                viewport.x as i32 + (px - vp_native.0 as i32) / v6::FONT_W as i32
                             };
                             let merged = merge_strip_fragments(row_runs);
                             // SQ-0898: the cells this row's GLYPH runs occupy, so a
