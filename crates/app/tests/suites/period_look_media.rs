@@ -122,7 +122,12 @@ fn the_medium_names_the_machine_and_the_version_decides_whether_it_dresses() {
             assert_eq!(Some(look), profile.period_look(), "{} got another machine's screen", s.file);
         }
     }
-    assert!(seen > 0, "no release disk present; this case proved nothing");
+    // A fixture that is ABSENT is a clean skip (CLAUDE.md: `stories/` is
+    // gitignored, so CI has none). A fixture that is PRESENT and yielded nothing
+    // is a defect, and that is what this catches — the shape
+    // `honor_colours_artwork_pin` already uses.
+    let any_present = SPECIMENS.iter().any(|s| dir.join(s.file).is_file());
+    assert!(!any_present || seen > 0, "disks are present but none was read");
 }
 
 /// The two switches, on real media. `honor_game_colours` is the broad one and
@@ -151,7 +156,8 @@ fn either_switch_declines_and_only_the_broad_one_is_the_master() {
             s.file
         );
     }
-    assert!(seen > 0, "no pre-colour release disk present; this case proved nothing");
+    let any_present = SPECIMENS.iter().filter(|s| s.dressed).any(|s| dir.join(s.file).is_file());
+    assert!(!any_present || seen > 0, "disks are present but none was read");
 }
 
 /// An ordinary story file is not a machine, so it is not dressed as one — the
