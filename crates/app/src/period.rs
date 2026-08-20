@@ -109,7 +109,12 @@ pub fn resolve(
     if !matches!(zversion, Some(1..=6)) {
         return None;
     }
-    profile.period_look()
+    // SQ-0939: asked with the VERSION, because the IBM PC's white moved between
+    // Infocom's two interpreters and its body pair is its own palette's resolution
+    // of the pair it already states — one table lookup, not a second measurement to
+    // drift from the first. `zvm::interpreter::period_look_for` carries the rule and
+    // why the Amiga is excluded from it.
+    zvm::interpreter::period_look_for(profile.row_number(), zversion)
 }
 
 /// Is the status row's colour the MACHINE's to state on this version?

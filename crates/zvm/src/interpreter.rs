@@ -848,6 +848,46 @@ pub fn machine(number: u8) -> Option<&'static MachineProfile> {
     MACHINES.iter().find(|m| m.number == number)
 }
 
+/// This machine's period look for a story of Version `zversion` (SQ-0939).
+///
+/// **Almost every row answers its stored measurement unchanged**, and this exists
+/// for the one that cannot. A [`PeriodLook`]'s page and ink are RGB read off a
+/// capture, which is right for a machine whose screen is simply a fact — but the
+/// IBM PC's white MOVED between Infocom's two interpreters ([`Palette::IbmXzip`]
+/// versus [`Palette::IbmYzip`]), so one stored pair cannot be true for both.
+///
+/// For the machine whose palette is its OWN, the body pair is not an independent
+/// measurement at all: it is that palette's resolution of the pair the row already
+/// states in [`MachineProfile::default_colours`]. Deriving it means the screen a
+/// v1–v5 story is painted on and the colour a v6 story gets from `@set_colour(9)`
+/// cannot disagree — they are the same table lookup.
+///
+/// **The Amiga is why this is not done for everyone.** Its row reports 12/9, a GREY
+/// page, from its v5-era interpreter, while its v3 interpreter draws a BLUE one —
+/// the divergence `the_period_look_is_not_the_default_pair` exists to pin. Deriving
+/// its look from its pair would overwrite a measured blue screen with a grey one.
+/// So the derivation is gated on the machine resolving numbers through its own
+/// palette, which is exactly the case where the two are one fact.
+pub fn period_look_for(number: u8, zversion: Option<u8>) -> Option<PeriodLook> {
+    let m = machine(number)?;
+    let mut look = m.period_look?;
+    if let (Palette::IbmXzip | Palette::IbmYzip, Some((bg, fg))) = (m.palette, m.default_colours) {
+        let p = palette_for(number, zversion);
+        let resolve = |n: u8| match p {
+            Palette::IbmYzip => crate::screen::ega_true_colour(n, true),
+            _ => crate::screen::ega_true_colour(n, false),
+        }
+        .map(crate::screen::rgb15_to_888);
+        if let Some(rgb) = resolve(bg) {
+            look.page = rgb;
+        }
+        if let Some(rgb) = resolve(fg) {
+            look.ink = rgb;
+        }
+    }
+    Some(look)
+}
+
 /// The palette this machine resolves §8.3.1 colour numbers through, for a story
 /// of Version `zversion` (SQ-0939).
 ///

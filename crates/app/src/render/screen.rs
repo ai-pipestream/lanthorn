@@ -8422,7 +8422,29 @@ mod tests {
             );
             let look = state.period_look.unwrap_or_else(|| panic!("v{zversion}: a licensed DOS launch is dressed"));
             let machine_blue = ratatui::style::Color::Rgb(look.page.0, look.page.1, look.page.2);
-            assert_eq!(machine_blue, ratatui::style::Color::Rgb(0x00, 0x00, 0xAA), "EGA entry 1");
+            // The page IS the palette's resolution of the pair the row states —
+            // one table lookup, not a second measurement (SQ-0939). Asserting that
+            // identity rather than a literal is the point: it is what stops the
+            // screen a story is painted on drifting from the colour the same story
+            // gets out of `@set_colour(6)`.
+            let (bg, fg) = state.config.machine_default_colours().expect("licensed");
+            let via_palette = |n: u8| {
+                let (r, g, b) = zvm::screen::rgb15_to_888(
+                    zvm::screen::ega_true_colour(n, zversion == 6).expect("EGA carries 2..=9"),
+                );
+                ratatui::style::Color::Rgb(r, g, b)
+            };
+            assert_eq!(machine_blue, via_palette(bg), "the page is colour {bg} through EGA");
+            let ink = ratatui::style::Color::Rgb(look.ink.0, look.ink.1, look.ink.2);
+            assert_eq!(ink, via_palette(fg), "and the ink is colour {fg}");
+            // …and THAT is why this sweeps versions: colour 9 is EGA 7 under XZIP
+            // and EGA 15 under YZIP, so a v6 launch is white where v3 and v5 are grey.
+            let expect_white = zversion == 6;
+            assert_eq!(
+                ink == ratatui::style::Color::Rgb(0xFF, 0xFF, 0xFF),
+                expect_white,
+                "v{zversion}: Infocom's two IBM interpreters disagree about white",
+            );
 
             let model = model_with_page(ZColour::Default, ZColour::Default);
             assert_eq!(pane_page(&model, &state), Some(machine_blue), "v{zversion}: the machine's own page");
