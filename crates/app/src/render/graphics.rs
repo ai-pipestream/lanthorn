@@ -221,8 +221,35 @@ fn unassociate_alpha(img: &mut image::RgbaImage) {
 /// protocol's DEFAULT filter, Nearest, which drops whole rows and columns exactly
 /// where Journey's dithered foreground keeps its detail. Naming the area filter makes
 /// it one resample, from the best source there is, in the right direction.
-fn v6_fit_source(canvas: &image::RgbaImage, box_w: u32, box_h: u32) -> (image::RgbaImage, Resize) {
+fn v6_fit_source(
+    canvas: &image::RgbaImage,
+    box_w: u32,
+    box_h: u32,
+    lock: Option<f32>,
+) -> (image::RgbaImage, Resize) {
     let (cw, ch) = canvas.dimensions();
+    // SQ-0936: the LOCKED magnification, when the pane has one. The raster arm used
+    // to compute its own free scale here and so never saw `v6_pixel_lock` at all —
+    // which is not the "the setting does nothing in raster mode" caveat it looks
+    // like, because a title that publishes no primary Buffer falls through to this
+    // arm in HYBRID mode too. scopa (three Grids and `erase_window` fills, SQ-0711)
+    // and fmvpoker both do, and both measured 0 differing pixels with the lock on
+    // and off until this existed.
+    //
+    // A locked scale is always <= the free one, so the pre-scaled image always fits
+    // its box and the protocol's `Fit` (which only ever shrinks) leaves it alone and
+    // centres it.
+    if let Some(s) = lock.filter(|s| s.is_finite() && *s > 0.0) {
+        let s = f64::from(s).min(MAX_V6_UPSCALE);
+        let (tw, th) = (((cw as f64 * s) as u32).max(1), ((ch as f64 * s) as u32).max(1));
+        // Nearest in BOTH directions here, unlike the free path below, and that is
+        // the point rather than an oversight: a locked scale puts one art pixel on a
+        // whole number of device pixels, so nearest is exact — it duplicates or
+        // drops whole pixels and invents no intermediate colour. Area-averaging an
+        // exact 1/2 would blend pairs that the original never blended.
+        let scaled = image::imageops::resize(canvas, tw, th, image::imageops::FilterType::Nearest);
+        return (scaled, Resize::Fit(None));
+    }
     let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).min(MAX_V6_UPSCALE);
     if scale < 1.0 {
         return (canvas.clone(), Resize::Fit(Some(image::imageops::FilterType::Triangle)));
@@ -1123,11 +1150,11 @@ impl GraphicsRender {
     /// aspect preserved, capped at [`MAX_V6_UPSCALE`]. Pure/self-contained so it
     /// can run on a worker thread (SQ-0469). Returns `None` if the protocol
     /// encode fails.
-    fn encode_v6(picker: &Picker, canvas: &image::RgbaImage, gen: u64, area: Rect) -> Option<V6Ready> {
+    fn encode_v6(picker: &Picker, canvas: &image::RgbaImage, gen: u64, area: Rect, lock: Option<f32>) -> Option<V6Ready> {
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
-        let (img, fit) = v6_fit_source(canvas, box_w, box_h);
+        let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock);
         let img = image::DynamicImage::ImageRgba8(img);
         match picker.new_protocol(img, Size::new(area.width, area.height), fit) {
             Ok(proto) => Some(V6Ready {
@@ -1170,16 +1197,23 @@ impl GraphicsRender {
     /// transition there is no honest previous frame — the pane would blank, or
     /// worse flash whatever the raster path last showed (SQ-0578: entering the
     /// rebus flashed the title splash or the on-screen map for a split second).
-    pub fn spawn_v6_encode(&mut self, picker: &Picker, canvas: image::RgbaImage, gen: u64, area: Rect) {
+    pub fn spawn_v6_encode(
+        &mut self,
+        picker: &Picker,
+        canvas: image::RgbaImage,
+        gen: u64,
+        area: Rect,
+        lock: Option<f32>,
+    ) {
         if area.width == 0 || area.height == 0 || canvas.width() == 0 || canvas.height() == 0 {
             return;
         }
         if self.v6.is_none() {
-            self.v6 = Self::encode_v6(picker, &canvas, gen, area);
+            self.v6 = Self::encode_v6(picker, &canvas, gen, area, lock);
             return;
         }
         let picker = picker.clone();
-        self.v6_job = Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area)));
+        self.v6_job = Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area, lock)));
     }
 
     /// Drop the last-ready v6 raster composite (and detach any in-flight encode,
@@ -2627,7 +2661,7 @@ mod resample_tests {
         let fs = FontSize::new(8, 18);
         for (cols, rows) in [(60u16, 24u16), (70, 30), (76, 28), (100, 40), (160, 60)] {
             let (box_w, box_h) = (cols as u32 * 8, rows as u32 * 18);
-            let (src, fit) = super::v6_fit_source(&canvas, box_w, box_h);
+            let (src, fit) = super::v6_fit_source(&canvas, box_w, box_h, None);
             let dyn_src = image::DynamicImage::ImageRgba8(src.clone());
             let cells = fit.size_for(&dyn_src, fs, ratatui::layout::Size::new(cols, rows));
             let got = fit.resize(&dyn_src, fs, cells, None).to_rgba8();
@@ -3202,7 +3236,7 @@ mod tests {
         // last-ready composite the encode is SYNCHRONOUS (SQ-0578: a transition
         // frame has no honest previous image to show), so it is ready this frame.
         assert!(gr.v6_wants_build(7, area), "cold start wants the first build");
-        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area, None);
         assert!(gr.v6_job.is_none(), "a cold-start encode runs synchronously, no worker");
         assert!(gr.v6.is_some(), "the cold-start encode installed immediately");
         assert_eq!(gr.v6.as_ref().unwrap().gen, 7);
@@ -3212,7 +3246,7 @@ mod tests {
         // for a newer generation (newest wins: the in-flight one finishes, then
         // the next frame builds whatever the current generation is).
         assert!(gr.v6_wants_build(8, area), "a changed generation wants a fresh build");
-        gr.spawn_v6_encode(&picker, canvas.clone(), 8, area);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 8, area, None);
         assert!(gr.v6_job.is_some(), "a warm re-encode runs on the worker");
         assert!(!gr.v6_wants_build(8, area), "an in-flight encode suppresses a rebuild");
         assert!(!gr.v6_wants_build(9, area), "an in-flight encode suppresses even a newer generation");
@@ -3225,7 +3259,7 @@ mod tests {
         gr.invalidate_v6();
         assert!(gr.v6.is_none() && gr.v6_job.is_none(), "invalidation drops composite and job");
         assert!(gr.v6_wants_build(8, area), "an invalidated cache wants a rebuild");
-        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area, None);
         assert!(gr.v6_job.is_none() && gr.v6.is_some(), "post-invalidation encode is synchronous");
 
         // Same generation → no rebuild (the gate is the win: idle frames skip
@@ -3245,7 +3279,7 @@ mod tests {
         let picker = Picker::halfblocks();
         let area = Rect::new(0, 0, 200, 100);
         let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
-        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area).expect("encode");
+        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
         // The encoded protocol reports its device size; 4× of 32 = 128 px = at
         // most ceil(128/20)=7 cells tall / ceil(128/10)=13 wide. Assert it is far
         // smaller than the pane (the cap engaged), not the full 200×100.
@@ -3700,7 +3734,7 @@ mod tests {
         let mut gr = GraphicsRender::default();
         let canvas = image::RgbaImage::from_pixel(32, 54, image::Rgba([9, 8, 7, 255]));
 
-        gr.spawn_v6_encode(&picker, canvas.clone(), 1, area);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 1, area, None);
         gr.redraw_v6(&picker, area, &mut buf);
         let first = gr.v6.as_ref().and_then(|r| r.placed_id).expect("the composite knows its id");
 
@@ -3708,7 +3742,7 @@ mod tests {
         // replaces is the whole pane the terminal is showing, so its delete waits
         // BEHIND the placement that covers the pane again rather than riding ahead of
         // a pane-sized upload (SQ-0817).
-        gr.spawn_v6_encode(&picker, canvas.clone(), 2, area);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 2, area, None);
         drain_v6_job(&mut gr);
         assert!(
             queued_delete_ids(&gr).is_empty(),

@@ -2634,7 +2634,23 @@ fn render_node(
                     // Cache the fresh metrics for skipped frames, then hand the
                     // built canvas to the off-thread resize+encode worker.
                     state.v6_raster_metrics.set(raster_metrics);
-                    state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area);
+                    // SQ-0936: the raster arm takes the SAME locked magnification the
+                    // ring does, from the same `locked_scale` — so a title that lands
+                    // here sees `v6_pixel_lock` at all, and so the two paths agree.
+                    // That agreement is also the check: raster art at a locked scale
+                    // should match the ring's, minus the ring's tiling.
+                    let fs = picker.font_size();
+                    let pane_dev = (
+                        u32::from(area.width) * u32::from(fs.width.max(1)),
+                        u32::from(area.height) * u32::from(fs.height.max(1)),
+                    );
+                    let lock = state
+                        .config
+                        .v6_pixel_lock
+                        .then(|| v6::locked_scale(native, pane_dev, state.v6_art_scale))
+                        .flatten()
+                        .map(|sc| sc.s);
+                    state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area, lock);
                 }
                 // SQ-0532 wave-5: the game's own page runs to the pane EDGE. The
                 // composite is drawn letterboxed inside the pane, so the margins
