@@ -388,13 +388,37 @@ fn a_640_wide_rendition_arrives_at_half_width_pixels() {
         assert_eq!(picts.art_scale(), Some(want), "{name}");
         let _ = std::fs::remove_dir_all(&dir);
     }
-    // A Blorb has no picture space to declare one with, so the uniform rule stands.
+    // A BLORB answers from its `Reso` chunk (SQ-0936). This used to answer `None`
+    // — "a Blorb has no picture space to declare one with" — which was true of the
+    // NATIVE archive it asks and false of the Blorb, whose standard window says the
+    // same thing in its own words. It mattered once the magnification ladder was
+    // derived from this: `None` fell back to the doubled default, which is right for
+    // every Infocom blorb and wrong for one that declares nothing.
     if let Some(z0) = story("zork0-r393-s890714.z6") {
         if story("Zork0.blb").is_some() {
             let none = game_dir_with("scale-blorb", None);
             let picts =
                 PictSource::resolve_with_override(&z0, PictureOverride::resolve(&z0, &none), None);
-            assert_eq!(picts.art_scale(), None, "a Blorb keeps the uniform V6_ART_SCALE");
+            assert_eq!(
+                picts.art_scale(),
+                Some((2, 2)),
+                "an Infocom Blorb declares 320x200 and doubles, same as its native rendition",
+            );
+            let _ = std::fs::remove_dir_all(&none);
+        }
+    }
+    // …and one that declares NOTHING is 1:1, which is the case the ladder needed.
+    // Blorb §11: a resource file without a `Reso` has no scalable images at all —
+    // "one image pixel per screen pixel". scopa.blb is that file, because its card
+    // art is already drawn for the 640x400 screen; doubling it once told the game
+    // its cards were 104x168 and its sample cards overlapped and hung off the
+    // bottom. Handing it the doubled default would lock 1:1 art onto half-steps.
+    if let Some(sc) = story("scopa.z6") {
+        if story("scopa.blb").is_some() {
+            let none = game_dir_with("scale-blorb-undeclared", None);
+            let picts =
+                PictSource::resolve_with_override(&sc, PictureOverride::resolve(&sc, &none), None);
+            assert_eq!(picts.art_scale(), Some((1, 1)), "scopa declares no Reso, so its art is 1:1");
             let _ = std::fs::remove_dir_all(&none);
         }
     }

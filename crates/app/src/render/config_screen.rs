@@ -48,6 +48,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
     ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal story in a scaled pixel frame) or raster (whole pane as one pixel image)."),
     ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive lanthorn's scrollback and map panning instead."),
+    ("v6_pixel_lock",        ConfigRowKind::Bool, "Scale v6 artwork by whole device pixels per art pixel (0.5x/1x/1.5x on a 320-wide rendition, 1x/2x/3x on the Mac mono and EGA ones) instead of stretching it to fill the pane: crisper art and seamless borders, at the cost of a wider margin."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -249,6 +250,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
             crate::config::V6RenderMode::Raster => "raster".to_string(),
         },
         25 => bool_str(cfg.v6_arrow_keys),
+        26 => bool_str(cfg.v6_pixel_lock),
         _ => String::new(),
     }
 }

@@ -910,7 +910,65 @@ one art pixel is 3.69 device pixels wide, so the emitted image draws it as 3 pix
 sometimes and 4 others (measured across the plate: 7,757 runs of 4 against 3,372 of
 3). Snapping that factor to a whole number would make every art pixel exactly 4 wide
 — but the factor is the uniform letterbox scale the story viewport is mapped through
-as well, so it cannot be moved without moving the text with it. That trade is open.
+as well, so it cannot be moved without moving the text with it. That is the trade
+`v6_pixel_lock` now offers, and the next section is what it costs and what it buys.
+
+### `v6_pixel_lock` — a whole number of device pixels per art pixel
+
+Off by default. Turn it on (settings screen, or `v6_pixel_lock = true` in
+`config.toml`) and the letterbox magnification stops being whatever fraction fills
+your pane and becomes a rung of a ladder, chosen so that **one art pixel is always a
+whole number of device pixels**. The 3-and-4-wide runs above become 3s or 4s and
+nothing in between; a resampled edge meeting a font glyph on a shared boundary stops
+landing half a pixel off; and every tiled side border repeats on an exact boundary,
+because a tile is cut at whole art-pixel boundaries and an integral art pixel makes
+its height integral too. Crisp art and seamless flanks turn out to be the same
+constraint, so there is only the one switch.
+
+**The ladder is derived from the artwork, not chosen.** This matters more than it
+sounds, because the obvious ladder — 1×, 1.5×, 2× — is right for most of the corpus
+and wrong for two of its presses. An art pixel is `art_scale` unit pixels (the
+per-axis density lanthorn computes at boot from the archive's own declared picture
+space) and a unit pixel is `s` device pixels, so both axes need `art_scale · s` to be
+a whole number, and the coarsest step satisfying both is `1 / gcd(art_scale)`:
+
+| press | art space | `art_scale` | step | ladder |
+|---|---|---|---:|---|
+| most v6 — Blorb, Amiga `Pic.data`, MCGA `.mg1` | 320×200 | (2, 2) | ½ | 0.5×, 1×, 1.5×, 2× … |
+| Macintosh monochrome `Pic.data` | 480×300 | (1, 1) | 1 | 1×, 2×, 3× … |
+| Macintosh colour `CPic.data` | 320×200 | (2, 2) | ½ | half-steps |
+| EGA / CGA `.eg1` / `.cg1` | 640×200 | (1, 2) | 1 | 1×, 2×, 3× … |
+| Apple II | 140×192 | (4, 2) | ½ | half-steps |
+
+So the familiar half-step ladder falls out for the common case rather than being
+assumed, while the standard Macintosh's mono plate — already 1:1 on its own screen —
+and the 640-wide EGA and CGA renditions get whole steps only. A half step on EGA
+would put its half-width art pixels on half a device pixel, which is the very thing
+the mode exists to prevent. Pick the same rendition of one game on two different
+media and the ladder changes with it, because the artwork did.
+
+The magnification stays **uniform** — horizontal equals vertical. The non-squareness
+of EGA and Apple II pixels is already carried by `art_scale` itself, so a uniform
+factor on top of it preserves the shape the artist drew.
+
+**One factor for the whole screen, never one per picture.** Journey settles that.
+Its illustration sits in a window of its own with a drawn divider rule beside it, so
+quantizing each picture separately would stop the art short of its own frame and open
+a gap between the picture and the rule. Quantizing the screen's single factor moves
+the window and the artwork in it together, and the art still fills it exactly. Journey
+is treated like every other title: its frame letterboxes horizontally rather than
+spanning the pane.
+
+**What it costs is screen area.** The picture stops at the rung below your pane
+instead of filling it, so the margin around it gets wider — sometimes considerably,
+since the gap between rungs is up to half the picture. That margin is not dead space:
+it is painted with the story's own page, or the machine's when the story names none,
+exactly as it already was.
+
+**A pane too small for even the smallest rung falls back to free scaling.** It never
+blocks and never says anything on the game screen — the same way every other
+too-small decision in lanthorn degrades rather than refuses. (The fallback is
+diagnostic state, destined for `/info`.)
 
 ### A picture is not stretched by the grid it sits on
 

@@ -690,11 +690,35 @@ impl PictSource {
     /// unaided, so the Apple needs no special case in the arithmetic, only this
     /// paragraph saying why the arithmetic is right here.
     pub fn art_scale(&self) -> Option<(u32, u32)> {
-        let pics = self.native.as_ref()?;
-        let space_w = u32::from(pics.picture_space_width()).max(1);
-        let space_h = u32::from(pics.picture_space_height()).max(1);
         let unit_w = u32::from(INFOCOM_V6_STD_WINDOW.0) * crate::session::V6_ART_SCALE;
         let unit_h = u32::from(INFOCOM_V6_STD_WINDOW.1) * crate::session::V6_ART_SCALE;
+        let (space_w, space_h) = match self.native.as_ref() {
+            Some(pics) => (
+                u32::from(pics.picture_space_width()).max(1),
+                u32::from(pics.picture_space_height()).max(1),
+            ),
+            // SQ-0936: a BLORB has no native archive to ask, so the density comes
+            // from the same place the DOUBLING decision already takes it — the
+            // `Reso` chunk's standard window.
+            //
+            // Blorb §11 is explicit that a resource file without one has no
+            // scalable images: "non-scalable images are always displayed at their
+            // actual size. (One image pixel per screen pixel.)" Every Infocom v6
+            // blorb declares 320x200 and doubles; scopa.blb declares NOTHING
+            // because its card art is already drawn for the 640x400 screen, which
+            // is why doubling it once told the game its cards were 104x168 and its
+            // sample cards overlapped and hung off the bottom.
+            //
+            // So an undeclared blorb is 1:1, not the doubled default — and it
+            // matters beyond bookkeeping now, because the magnification ladder is
+            // derived from this. Handing scopa (2, 2) would lock its 1:1 art onto
+            // half-steps, putting one art pixel on 1.5 device pixels: the exact
+            // blur the lock exists to remove.
+            None => match self.std_window() {
+                Some((w, h)) => (u32::from(w).max(1), u32::from(h).max(1)),
+                None => (unit_w, unit_h),
+            },
+        };
         Some(((unit_w / space_w).max(1), (unit_h / space_h).max(1)))
     }
 

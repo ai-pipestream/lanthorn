@@ -873,7 +873,22 @@ fn render_node(
                             area.width as u32 * fs.width.max(1) as u32,
                             area.height as u32 * fs.height.max(1) as u32,
                         );
-                        let scale_center = v6::uniform_scale(native, pane_dev);
+                        // SQ-0936: one global letterbox factor for the whole native
+                        // screen, quantized to the artwork's own ladder when the
+                        // player has asked for it (`v6_pixel_lock`, default off).
+                        // GLOBAL rather than per-picture, and Journey is what settles
+                        // that: its picture sits in its own window beside a drawn
+                        // divider rule, so a per-picture rung would stop the art short
+                        // of its own frame and open a gap. A pane too small for even
+                        // the smallest rung falls back to free scaling and says so as
+                        // a diagnostic, never on the game screen.
+                        let (scale_center, lock_fallback) = v6::fitted_scale(
+                            native,
+                            pane_dev,
+                            state.v6_art_scale,
+                            state.config.v6_pixel_lock,
+                        );
+                        state.v6_scale_lock_fallback.set(lock_fallback);
                         // Publish the letterbox factor so inline story pictures
                         // (drop-caps, room icons) scale to match the chrome ring.
                         // The scale FACTOR is unchanged by the SQ-0505 anchoring
@@ -2619,7 +2634,23 @@ fn render_node(
                     // Cache the fresh metrics for skipped frames, then hand the
                     // built canvas to the off-thread resize+encode worker.
                     state.v6_raster_metrics.set(raster_metrics);
-                    state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area);
+                    // SQ-0936: the raster arm takes the SAME locked magnification the
+                    // ring does, from the same `locked_scale` — so a title that lands
+                    // here sees `v6_pixel_lock` at all, and so the two paths agree.
+                    // That agreement is also the check: raster art at a locked scale
+                    // should match the ring's, minus the ring's tiling.
+                    let fs = picker.font_size();
+                    let pane_dev = (
+                        u32::from(area.width) * u32::from(fs.width.max(1)),
+                        u32::from(area.height) * u32::from(fs.height.max(1)),
+                    );
+                    let lock = state
+                        .config
+                        .v6_pixel_lock
+                        .then(|| v6::locked_scale(native, pane_dev, state.v6_art_scale))
+                        .flatten()
+                        .map(|sc| sc.s);
+                    state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area, lock);
                 }
                 // SQ-0532 wave-5: the game's own page runs to the pane EDGE. The
                 // composite is drawn letterboxed inside the pane, so the margins

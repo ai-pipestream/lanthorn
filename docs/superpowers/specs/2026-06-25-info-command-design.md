@@ -82,6 +82,16 @@ active, what background tasks are doing, and the story/VM facts.
 - **Persistence:** `user_dir` · `save_dir` · auto-save/auto-load state · default
   archive exists? · named-save count for this IFID
 - **Config:** virtual screen size · command prefix · keymap source · `undo_levels`
+- **v6 magnification (`v6_pixel_lock`)** — added 2026-08-20 (SQ-0936). Whether the
+  lock is on; the launch's per-axis `art_scale` (`state.v6_art_scale`) and the
+  ladder step `1 / gcd` of it; the frame's letterbox scale
+  (`state.v6_image_scale`) and which rung that is; and — the reason this is here
+  at all — `state.v6_scale_lock_fallback`, set when the lock was asked for and the
+  pane could not hold even the smallest rung, so the frame fell back to free
+  scaling. That fallback is deliberately silent on the game screen (every
+  too-small decision in lanthorn degrades rather than blocks), which leaves
+  `/info` as the only place a player can find out why their artwork is soft
+  despite the setting being on.
 - **Build:** lanthorn version / build info
 
 ### Architecture (sketch)

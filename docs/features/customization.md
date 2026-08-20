@@ -488,6 +488,19 @@ re-seed the new template, or hand-write the new shape from
   config.toml or the settings screen) to withhold them so arrows drive lanthorn's own
   scrollback recall / map panning instead. Only v6 stories are affected — v1-5
   and Glulx games always get arrows. See [Graphical v6](v6-graphics.md#arrow-keys-movement-or-map-panning-your-call).
+- **Locking v6 art to whole pixels** — `v6_pixel_lock` (default `false`) snaps the
+  v6 letterbox magnification to a rung of a ladder on which one *art* pixel is
+  always a whole number of device pixels, instead of scaling by whatever fraction
+  fills your pane. Artwork comes out nearest-neighbour crisp, a resampled edge stops
+  landing half a pixel off the font glyph beside it, and every tiled side border
+  repeats on an exact boundary. The rungs are derived from the artwork you mounted,
+  not from a fixed list: a 320-wide rendition (Blorb, Amiga, MCGA) goes 0.5×, 1×,
+  1.5×, 2× …, while the standard Macintosh's monochrome plate and the 640-wide
+  EGA/CGA ones go 1×, 2×, 3× … The cost is screen area — the picture stops at the
+  rung below your pane rather than filling it, so the margin around it (painted with
+  the story's own page) gets wider. A pane too small for even the smallest rung
+  quietly falls back to free scaling. See
+  [Graphical v6](v6-graphics.md#v6_pixel_lock--a-whole-number-of-device-pixels-per-art-pixel).
 - **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
   blank columns on each side / rows top and bottom *inside* the story text pane,
   for a little breathing room around the transcript. The margin applies to the

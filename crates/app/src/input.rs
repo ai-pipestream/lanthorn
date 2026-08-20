@@ -4222,6 +4222,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         21 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hint_skip_screen_warning = !cs.working.hint_skip_screen_warning; } }
         24 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
         25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
+        26 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_pixel_lock = !cs.working.v6_pixel_lock; } }
         _ => {}
     }
 }
@@ -4305,6 +4306,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         22 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
         23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
         24 => config_cycle_v6_render(&mut working.v6_render, delta),
+        26 => working.v6_pixel_lock = !working.v6_pixel_lock,
         _ => {}
     }
 }

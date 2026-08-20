@@ -1045,6 +1045,22 @@ pub struct Config {
     /// always get arrows regardless of this setting.
     #[serde(default = "default_true")]
     pub v6_arrow_keys: bool,
+    /// Snap the v6 hybrid letterbox magnification to the ladder the ARTWORK
+    /// implies, so one art pixel is always a whole number of device pixels
+    /// (SQ-0936). Default false — free scaling uses the pane better, and this
+    /// trades screen area for crispness.
+    ///
+    /// The ladder's step is `1 / gcd(art_scale)` (see
+    /// `crate::render::v6_layout::scale_ladder_step`), which is half-steps for a
+    /// 320-wide rendition and whole steps for the standard Macintosh's mono plate
+    /// and the 640-wide EGA/CGA ones. Arbitrary fractional scaling is what produces
+    /// the resample softness and the ceil-vs-round seams; a rung of the ladder is
+    /// nearest-neighbour-exact and makes every tiled flank's repeat integral too.
+    ///
+    /// A pane too small for even the smallest rung falls back to free scaling
+    /// rather than blocking.
+    #[serde(default)]
+    pub v6_pixel_lock: bool,
     /// Keymap overrides: command_name → key-spec string(s).
     #[serde(default)]
     pub keymap: KeymapConfig,
@@ -1385,6 +1401,7 @@ impl Default for Config {
             fuse_art_dither: true,
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
+            v6_pixel_lock: false,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: None,
@@ -1510,6 +1527,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.fuse_art_dither = from_file.fuse_art_dither;
             cfg.glk_pixel_scale = from_file.glk_pixel_scale;
             cfg.v6_arrow_keys = from_file.v6_arrow_keys;
+            cfg.v6_pixel_lock = from_file.v6_pixel_lock;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
@@ -1795,6 +1813,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     };
     doc.put("glk_pixel_scale", scale_val, cfg.glk_pixel_scale == def.glk_pixel_scale);
     doc.put("v6_arrow_keys", cfg.v6_arrow_keys.into(), cfg.v6_arrow_keys == def.v6_arrow_keys);
+    doc.put("v6_pixel_lock", cfg.v6_pixel_lock.into(), cfg.v6_pixel_lock == def.v6_pixel_lock);
     doc.put("show_room_numbers", cfg.show_room_numbers.into(), cfg.show_room_numbers == def.show_room_numbers);
     doc.put("show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
     doc.put("hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
@@ -2574,6 +2593,7 @@ use_defaults = false
             fuse_art_dither: false,
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
+            v6_pixel_lock: false,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),

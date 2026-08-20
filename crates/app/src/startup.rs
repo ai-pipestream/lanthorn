@@ -554,6 +554,11 @@ pub(crate) fn boot_story(
     // per-story files — so the fact has to travel with the state, not just the
     // value. Always `false` for a non-Z-code engine: no Infocom archive is in play.
     let mut artwork_declines_colours = false;
+    // SQ-0936: and how dense the artwork it loaded is, escaped the same way. The
+    // render's `v6_pixel_lock` ladder is derived from this pair and the screen model
+    // does not carry it. `None` here means the uniform rule (a Blorb, or no v6 art
+    // at all), which `AppState`'s own default already is.
+    let mut launch_art_scale = None;
     // The story's Version, for SQ-0873's period look — which belongs only to a
     // v1-v4 story, since colour arrives with v5 and anything shown before it is
     // presentation rather than a fact the story can read. `None` for Glulx and
@@ -683,6 +688,7 @@ pub(crate) fn boot_story(
             // arrives at (1, 2). `None` for every Blorb-sourced story, which is
             // the uniform rule untouched.
             let v6_art_scale = picts.art_scale();
+            launch_art_scale = v6_art_scale;
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
@@ -956,6 +962,12 @@ pub(crate) fn boot_story(
     // same reason — the reload below re-reads the per-story files, and neither of
     // them knows what archive was loaded.
     state.artwork_declines_colours = artwork_declines_colours;
+    // SQ-0936: and the density of the artwork it mounted, which the v6 render's
+    // magnification ladder is derived from. An archive that declares no picture
+    // space keeps the uniform `V6_ART_SCALE`, which is the field's default.
+    if let Some(scale) = launch_art_scale {
+        state.v6_art_scale = scale;
+    }
     // SQ-0873: and the story's Version, which `reload_style` needs to decide
     // whether this launch gets its machine's period look. Same reason as the two
     // above — the reload re-derives from the config and the per-story files, and

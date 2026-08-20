@@ -212,7 +212,7 @@ fn selecting_a_different_card_repaints_the_screen() {
     let mut gr = app::render::graphics::GraphicsRender::default();
     let picker = ratatui_image::picker::Picker::halfblocks();
     assert!(gr.v6_wants_build(gen_a, PANE), "the first frame is always built — nothing is cached yet");
-    gr.spawn_v6_encode(&picker, frame_a.clone(), gen_a, PANE);
+    gr.spawn_v6_encode(&picker, frame_a.clone(), gen_a, PANE, None);
     assert!(
         !gr.v6_wants_build(gen_a, PANE),
         "the gate's own contract: an unchanged frame is skipped (this is what it is FOR)"
