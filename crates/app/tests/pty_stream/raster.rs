@@ -11,15 +11,19 @@
 //! all.
 //!
 //! WHAT IT IS NOT. It is not a screenshot, and no amount of squinting will make
-//! it one. Text is drawn with the repo's own 8x8 bitmap font
-//! ([`app::render::bitfont`], the one the v6 pixel composite uses), nearest-
-//! neighbour-scaled to fill each cell. There are no real font metrics, no
-//! hinting, no ligatures, no italics, and no bold — a synthesized face would be
-//! a second thing to be wrong about. What it IS honest about is LAYOUT, ART
-//! PLACEMENT and COLOUR: where the panes are, where the art landed, what was
-//! painted underneath it, which of two overlapping things won. Those are the
-//! defects the render quests are about. Judge geometry from this picture; never
-//! judge typography from it.
+//! it one. Text is drawn with the repo's own bitmap font
+//! ([`app::render::bitfont`], the one the v6 pixel composite uses) — Uni-VGA at
+//! 8x16 since SQ-0932, where it used to be an 8x8 master doubled into the cell,
+//! so these pictures gained real descenders and a proper stroke weight without
+//! anyone asking. There is still no hinting, no ligatures, and bold and italic
+//! are synthesized from the roman master rather than being real faces.
+//!
+//! What it IS honest about is LAYOUT, ART PLACEMENT and COLOUR: where the panes
+//! are, where the art landed, what was painted underneath it, which of two
+//! overlapping things won. Those are the defects the render quests are about.
+//! Judge geometry from this picture; never judge typography from it — and the
+//! better the face gets, the more tempting that becomes and the more firmly it
+//! stays wrong, because the face here is never the one in your terminal.
 //!
 //! WHAT IT REFUSES TO HIDE. Every draw is rasterised from its OWN resolved
 //! source rect ([`super::oracle::Draw`]), one per resolved placement — never
