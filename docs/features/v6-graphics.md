@@ -735,7 +735,13 @@ answers `picture_data` with the **doubled** dimensions — so the game lays its
 banner, columns, and compass out on the same 640-wide grid the original did.
 The 320×200 pictures themselves stay art-native in storage and are blitted 2×
 (crisp nearest-neighbour, DOS-authentic) into the composite; the bitmap text is
-rendered by doubling the 8×8 glyph masters vertically to fill the 8×16 cell.
+drawn with a natively 8×16 face — Uni-VGA, the IBM PC text font the profile's own
+blue and white belong to — so it fills the cell 1:1 with no resampling at all.
+Until SQ-0932 it was an 8×8 master doubled vertically, which spent half the cell's
+height on duplicated scanlines and gave no glyph a descender. **Font 3 still is**
+that doubled 8×8, deliberately: box drawing and block elements are a graphics
+character set rather than a typeface, and Uni-VGA's `│` is CP437's two-pixel
+vertical where every v6 rule in lanthorn is a one-pixel hairline.
 Screen size and picture size double *together*, so the frame-vs-content picture
 classification (which is pure ratios) lands exactly where it did before.
 

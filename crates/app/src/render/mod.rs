@@ -39,6 +39,7 @@ pub mod tidy_panel;
 pub mod transcript;
 pub mod v6_border;
 pub mod v6_layout;
+pub mod vga16;
 pub mod command_band;
 
 use ratatui::buffer::Buffer;

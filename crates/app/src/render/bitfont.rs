@@ -1,15 +1,42 @@
-//! Embedded 8×8 bitmap font, rasterized into an RGBA canvas for the v6 pixel
+//! Embedded bitmap fonts, rasterized into an RGBA canvas for the v6 pixel
 //! composite (Phase 1c). Glyphs are scaled to fill a `cw × ch` device-pixel
-//! cell so text stays legible at terminal cell sizes (~9×19). A taller/native
-//! font is future work; this pass (SQ-0450) is a coverage + quality revision
-//! of the existing 8×8 set plus optional edge smoothing when blit at exact 2×.
+//! cell so text stays legible at terminal cell sizes (~9×19).
+//!
+//! ## Two faces, and which one draws
+//!
+//! [`crate::render::vga16`] — Uni-VGA, natively **8×16** — is tried first, and
+//! [`glyph_bits`]'s 8×8 chain below is the fallback for what it doesn't carry.
+//! The cell is 8×16 at every production call site (`v6_layout`'s
+//! `FONT_W`/`FONT_H`), so the 16-row face samples **1:1** while an 8×8 master has
+//! to double each row into it. That doubling was the state of things from SQ-0450
+//! until SQ-0932, and this module's opening line used to call a taller font
+//! "future work".
+//!
+//! The split is TEXT versus **font 3**. Uni-VGA carries letters — ASCII, Latin-1,
+//! `Œ`/`œ` — and nothing else; box drawing, block elements, the cursor arrows, the
+//! APL quad and the runes all stay on the 8×8 masters, because font 3 is a
+//! graphics character set rather than a typeface and no story prints it as text.
+//! [`crate::render::vga16`]'s docs carry the full argument, including the pixel it
+//! costs Journey's frame border to get this wrong.
+//!
+//! **The two faces pack their bits in opposite directions** — `font8x8` is
+//! LSB-leftmost, `vga16` is MSB-leftmost (BDF's order, and `blorb`'s). Sampling
+//! one with the other's rule mirrors the glyph rather than corrupting it, so it
+//! still looks like a font; every place that reads a row says which order it is
+//! reading, and [`synthesize_face`] / [`synthesize_face16`] are a pair for the
+//! same reason.
 //!
 //! ## Provenance
-//! The bulk of the glyph data comes from the `font8x8` crate (`BASIC_FONTS`,
-//! `LATIN_FONTS`, `BOX_FONTS`, `BLOCK_FONTS`) — a CC0/public-domain 8×8 font
-//! ported from `https://github.com/dhepper/font8x8`, itself extracted from a
-//! public-domain `.asm` source. No copyrighted ROM font is used anywhere in
-//! this file.
+//!
+//! The 8×16 face is Uni-VGA, under the X licence — see
+//! `crates/app/assets/README.md` for its origin, its exact terms and how the
+//! subset beside it was cut. It was drawn from scratch rather than traced off
+//! silicon; no dumped ROM font is used anywhere in lanthorn.
+//!
+//! The 8×8 chain is the `font8x8` crate (`BASIC_FONTS`, `LATIN_FONTS`,
+//! `BOX_FONTS`, `BLOCK_FONTS`) — a CC0/public-domain font ported from
+//! `https://github.com/dhepper/font8x8`, itself extracted from a public-domain
+//! `.asm` source.
 //!
 //! `font8x8` doesn't cover every codepoint v6 titles actually print, though:
 //! BeyondZork's "font 3" (see `zvm::cpu::exec::font3_translate`) emits cursor
@@ -85,7 +112,7 @@ static EXTRA_GLYPHS: &[(char, [u8; 8])] = &[
 /// covering ASCII, the ZSCII default accented-character table, and
 /// BeyondZork's font-3 box/block glyphs) in order, then falls back to
 /// [`EXTRA_GLYPHS`] for the handful of codepoints those sets don't cover.
-fn glyph_bits(glyph: char) -> Option<[u8; 8]> {
+pub(crate) fn glyph_bits(glyph: char) -> Option<[u8; 8]> {
     font8x8::BASIC_FONTS
         .get(glyph)
         .or_else(|| font8x8::LATIN_FONTS.get(glyph))
@@ -193,6 +220,41 @@ fn synthesize_face(bits: [u8; 8], style: u8) -> [u8; 8] {
     out
 }
 
+/// [`synthesize_face`] for the 16-row master (SQ-0932). Same two transforms and
+/// the same reasoning — read that first; this documents only what differs.
+///
+/// **The shifts go the other way.** [`crate::render::vga16`] packs rows
+/// MSB-leftmost, so moving a glyph one column RIGHT is `>> 1`, not `<< 1`. The
+/// clipping guarantee survives the flip intact: the bit shifted out of a `u8` is
+/// column 7's, the rightmost, so an emboldened or sheared glyph still physically
+/// cannot bleed into the next cell.
+///
+/// **Italic shears at row 8**, the midpoint of the 16-row box, where the 8-row
+/// master shears at row 4 — the same fraction of the glyph, and it lands near the
+/// x-height on a face whose baseline is row 12 (`FONT_ASCENT 12`, `FONT_DESCENT 4`).
+///
+/// **What the shear clips is worth naming, because this face is wider.** The 8×8
+/// masters fill columns 0–6 and always have a spare column to lean into. Uni-VGA
+/// reserves column 7 as its inter-character gap too, but four Latin glyphs do
+/// reach it — `*`, `_`, `©` and `¶` — and so do 95 of the 150 box/block glyphs.
+/// Under italic those lose their rightmost column. That is the same trade the
+/// 8-row path already makes for box art, on a handful more glyphs, and italic
+/// box art is not something any v6 title does.
+fn synthesize_face16(bits: [u8; 16], style: u8) -> [u8; 16] {
+    let mut out = bits;
+    if style & STYLE_ITALIC != 0 {
+        for row in out.iter_mut().take(8) {
+            *row >>= 1;
+        }
+    }
+    if style & STYLE_BOLD != 0 {
+        for row in out.iter_mut() {
+            *row |= *row >> 1;
+        }
+    }
+    out
+}
+
 /// Blit one glyph into `canvas`, top-left at device pixel `(px, py)`, scaled to
 /// `cw × ch` device px. Set bits paint `fg`; clear bits paint `bg` when `Some`
 /// (skipped when `None`, leaving the canvas — transparent text over graphics).
@@ -234,26 +296,47 @@ pub fn blit_glyph_styled(
     bg: Option<Rgba<u8>>,
     style: u8,
 ) {
-    let bits = glyph_bits(glyph).map(|b| synthesize_face(b, style)); // Option<[u8; 8]>
-    let smoothed = (cw == 16 && ch == 16).then(|| bits.map(|b| scale2x(&b))).flatten();
+    // The 8x16 face first (SQ-0932): at the 8x16 cell every production call site
+    // uses it samples 1:1, where an 8x8 master has to double every row. The 8x8
+    // chain stays as the fallback for what it doesn't carry — the quadrant blocks,
+    // the APL quad, the runes — so `tall` and `short` are never both `Some`.
+    //
+    // `ch >= 16` because a taller face is only an improvement in a cell that can
+    // show its rows. Sample sixteen rows into eight and half of them are simply
+    // discarded, which is worse than an 8x8 master doubled — a thinner, more
+    // broken glyph, not a smaller one. No production call site asks for a short
+    // cell (they are all `v6_layout`'s FONT_W x FONT_H), but `blit_glyph` is public
+    // and its own sample-sheet test renders square cells at 1x.
+    let tall = (ch >= 16)
+        .then(|| crate::render::vga16::glyph(glyph).map(|b| synthesize_face16(b, style)))
+        .flatten();
+    let short =
+        if tall.is_some() { None } else { glyph_bits(glyph).map(|b| synthesize_face(b, style)) };
+    let smoothed = (cw == 16 && ch == 16).then(|| short.map(|b| scale2x(&b))).flatten();
     let (cwidth, cheight) = (canvas.width(), canvas.height());
     for dy in 0..ch {
         let oy = py + dy;
         if oy >= cheight {
             break;
         }
+        let tall_row = (dy * 16 / ch) as usize; // nearest source row, 16-row face
         let row = (dy * 8 / ch) as usize; // nearest source row (non-smoothed path)
         for dx in 0..cw {
             let ox = px + dx;
             if ox >= cwidth {
                 break;
             }
-            let on = if let Some(grid) = &smoothed {
+            let on = if let Some(g) = &tall {
+                let col = dx * 8 / cw; // nearest source col
+                // vga16 packs each row MSB = leftmost column — the OPPOSITE of
+                // font8x8 below. Both orders are live in this function.
+                g[tall_row] & (0x80 >> col) != 0
+            } else if let Some(grid) = &smoothed {
                 grid[dy as usize][dx as usize]
             } else {
                 let col = dx * 8 / cw; // nearest source col
                 // font8x8 packs each row LSB = leftmost column.
-                bits.is_some_and(|g| g[row] & (1 << col) != 0)
+                short.is_some_and(|g| g[row] & (1 << col) != 0)
             };
             if on {
                 canvas.put_pixel(ox, oy, fg);
@@ -481,7 +564,8 @@ mod tests {
 
     #[test]
     fn scale2x_reshapes_a_diagonal_versus_naive_doubling() {
-        // '╱' is a pure diagonal stroke — the textbook case scale2x smooths.
+        // '╱' is a pure diagonal stroke — the textbook case scale2x smooths. It is
+        // font 3, so it stays on the 8×8 master the smoothing belongs to (SQ-0932).
         let bits = glyph_bits('\u{2571}').expect("box diagonal glyph must exist");
         let mut smoothed = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 0]));
         blit_glyph(&mut smoothed, '\u{2571}', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None);
@@ -501,6 +585,133 @@ mod tests {
             }
         }
         assert_ne!(smoothed, naive, "scale2x should reshape corners vs naive doubling on a diagonal");
+    }
+
+    /// Read the rendered 8×16 cell back as sixteen row bitmaps, MSB-leftmost, so
+    /// a test can compare a blit against a face's own rows.
+    fn rendered_rows(glyph: char, style: u8) -> [u8; 16] {
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut canvas = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
+        blit_glyph_styled(&mut canvas, glyph, 0, 0, 8, 16, fg, None, style);
+        let mut rows = [0u8; 16];
+        for (y, row) in rows.iter_mut().enumerate() {
+            for x in 0..8u32 {
+                if *canvas.get_pixel(x, y as u32) == fg {
+                    *row |= 0x80 >> x;
+                }
+            }
+        }
+        rows
+    }
+
+    /// At the cell every production call site uses — 8×16, `v6_layout`'s
+    /// `FONT_W`/`FONT_H` — an ordinary letter is the 16-row face's own bitmap,
+    /// pixel for pixel. No resampling on either axis (SQ-0932).
+    #[test]
+    fn the_tall_face_blits_one_to_one_at_the_v6_cell() {
+        for ch in ['A', 'g', 'L', '~', 'É', 'ß', 'œ'] {
+            let face = crate::render::vga16::glyph(ch).expect("all of these are in the subset");
+            assert_eq!(rendered_rows(ch, 0), face, "{ch:?} is not its own bitmap on the canvas");
+        }
+    }
+
+    /// The regression this replaced, stated as the property that used to hold and
+    /// now must not: an 8×8 master doubled into a 16-row cell makes every row an
+    /// exact copy of its partner, so rows `2k` and `2k+1` were ALWAYS equal. If
+    /// this ever passes vacuously again, the 8×8 path has silently won.
+    #[test]
+    fn the_tall_face_is_not_a_doubled_eight_row_master() {
+        let rows = rendered_rows('A', 0);
+        let odd = (0..8).filter(|k| rows[2 * k] != rows[2 * k + 1]).count();
+        assert!(odd > 0, "every row pair is identical — 'A' is being doubled, not drawn: {rows:02X?}");
+    }
+
+    /// A descender is the thing an 8×8 master cannot express in this cell at all.
+    /// Uni-VGA's baseline is row 12 (`FONT_ASCENT 12`), so `g` must put ink below
+    /// it — and the tail must differ from the bowl above, or it is just doubling.
+    #[test]
+    fn a_descender_reaches_below_the_baseline() {
+        let rows = rendered_rows('g', 0);
+        assert!(rows[12..16].iter().any(|&r| r != 0), "g has no tail below the baseline: {rows:02X?}");
+        assert_ne!(rows[12], rows[11], "the tail is a copy of the bowl's last row");
+    }
+
+    /// A cell too short to show sixteen rows keeps the 8×8 master. Halving a
+    /// 16-row face throws away every other row, which breaks a glyph rather than
+    /// shrinking it — see the `ch >= 16` gate in [`blit_glyph_styled`].
+    #[test]
+    fn a_short_cell_keeps_the_eight_row_master() {
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut canvas = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 0]));
+        blit_glyph(&mut canvas, 'A', 0, 0, 8, 8, fg, None);
+        let eight = glyph_bits('A').expect("font8x8 has 'A'");
+        for (y, &src) in eight.iter().enumerate() {
+            let mut row = 0u8;
+            for x in 0..8u32 {
+                if *canvas.get_pixel(x, y as u32) == fg {
+                    row |= 0x80 >> x;
+                }
+            }
+            // font8x8 is LSB-leftmost; the canvas was read back MSB-leftmost.
+            assert_eq!(row, src.reverse_bits(), "row {y} of an 8x8 'A' is not the 8x8 master's");
+        }
+    }
+
+    /// Font 3 still draws, out of the 8×8 chain, and draws EXACTLY as it did
+    /// before the 16-row face existed — each master row doubled, nothing resampled.
+    /// That is the guarantee that keeps v6 rule geometry where SQ-0750 and
+    /// SQ-0755 left it: `│` is still one native pixel wide, not Uni-VGA's two.
+    #[test]
+    fn font_three_falls_back_and_doubles_exactly() {
+        for ch in ['\u{2500}', '\u{2502}', '\u{250C}', '\u{2588}', '\u{2591}', '\u{2596}', '\u{2190}', '\u{2395}'] {
+            assert!(crate::render::vga16::glyph(ch).is_none(), "the fallback is what's under test");
+            let rows = rendered_rows(ch, 0);
+            let eight = glyph_bits(ch).expect("the 8x8 chain carries every font-3 glyph");
+            for (k, &src) in eight.iter().enumerate() {
+                // font8x8 is LSB-leftmost; the canvas was read back MSB-leftmost.
+                let mirrored = src.reverse_bits();
+                assert_eq!(rows[2 * k], mirrored, "U+{:04X} row {k} top half", ch as u32);
+                assert_eq!(rows[2 * k + 1], mirrored, "U+{:04X} row {k} bottom half", ch as u32);
+            }
+        }
+    }
+
+    /// The specific pixel that decided the subset's boundary (SQ-0932). Uni-VGA
+    /// draws `│` as CP437 does, two columns wide; Journey's frame border is that
+    /// glyph, and `v6_journey_prose_containment` reads it as a hairline.
+    #[test]
+    fn the_vertical_rule_stays_one_pixel_wide() {
+        let rows = rendered_rows('\u{2502}', 0);
+        let ink = rows.iter().copied().find(|&r| r != 0).expect("the rule has ink");
+        assert_eq!(ink.count_ones(), 1, "`|` must stay a one-pixel hairline, not CP437's two: {ink:#010b}");
+    }
+
+    /// Bold on the 16-row face is additive and cannot bleed into the next cell —
+    /// the same two guarantees [`synthesize_face`] gives the 8-row master, checked
+    /// through the shift that runs the other way (SQ-0932).
+    #[test]
+    fn tall_bold_is_a_superset_and_stays_inside_the_cell() {
+        for ch in ['A', 'g', 'W', 'M'] {
+            let roman = rendered_rows(ch, 0);
+            let bold = rendered_rows(ch, STYLE_BOLD);
+            for (k, (&r, &b)) in roman.iter().zip(bold.iter()).enumerate() {
+                assert_eq!(b & r, r, "{ch:?} row {k}: bold dropped ink the roman face had");
+                assert!(b.count_ones() >= r.count_ones(), "{ch:?} row {k}: bold is not heavier");
+            }
+        }
+    }
+
+    /// Italic leans the top of the glyph one column RIGHT. On an MSB-leftmost row
+    /// that is `>> 1`, which is the easiest thing in this module to get backwards —
+    /// and a backwards shear still looks like a slanted font, just the wrong way.
+    #[test]
+    fn tall_italic_leans_forward_not_backward() {
+        let roman = rendered_rows('L', 0);
+        let italic = rendered_rows('L', STYLE_ITALIC);
+        let top = (0..8).find(|&k| roman[k] != 0).expect("L has ink in its top half");
+        assert_eq!(italic[top], roman[top] >> 1, "the top of L must move right, not left");
+        let bottom = (8..16).find(|&k| roman[k] != 0).expect("L has ink in its bottom half");
+        assert_eq!(italic[bottom], roman[bottom], "the bottom of L stays put");
     }
 
     #[test]
@@ -556,3 +767,5 @@ mod tests {
         canvas.save(&out_path).expect("write bitfont sample PNG");
     }
 }
+
+

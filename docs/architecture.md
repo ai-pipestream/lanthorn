@@ -345,9 +345,9 @@ to a PNG, then run the new one with `--png-diff /tmp/before.png --png
 them.
 
 **It is not a screenshot, and the difference is not cosmetic.** Text is drawn
-with the repo's own 8×8 bitmap font (`render/bitfont.rs`, the one the v6 pixel
-composite uses), nearest-neighbour-scaled to fill each cell: no real font
-metrics, no hinting, no ligatures, no italics, no bold. It is an oracle for
+with the repo's own bitmap fonts (`render/bitfont.rs`, the ones the v6 pixel
+composite uses), scaled to fill each cell: no hinting, no ligatures, and bold and
+italic are synthesized from the roman master rather than being real faces. It is an oracle for
 **layout, art placement and colour** — where the panes are, where the art
 landed, what was painted under it, which of two overlapping things won — drawn
 with our glyphs from what Ghostty's *algorithm* resolved. Judge geometry from
