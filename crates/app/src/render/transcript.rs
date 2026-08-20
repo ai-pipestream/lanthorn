@@ -4834,9 +4834,16 @@ mod tests {
 
         let page = Color::Rgb(look.page.0, look.page.1, look.page.2);
         let ink = Color::Rgb(look.ink.0, look.ink.1, look.ink.2);
-        let row: Vec<Color> = (area.x..area.right())
-            .map(|x| buf.cell((x, 0)).expect("status row").bg)
-            .collect();
+        // The DRAWN ground, not the stored one. Since SQ-0935 the band is the
+        // machine's pair patched under the row's own REVERSED modifier rather than
+        // a pre-swapped pair stated absolutely — reverse is just reverse — so the
+        // cell holds `bg = page` and the terminal swaps it. Asserting the stored
+        // value would be asserting which of two identical renderings we chose.
+        let drawn_bg = |x: u16| {
+            let c = buf.cell((x, 0)).expect("status row");
+            if c.modifier.contains(Modifier::REVERSED) { c.fg } else { c.bg }
+        };
+        let row: Vec<Color> = (area.x..area.right()).map(drawn_bg).collect();
         assert!(row.iter().all(|&c| c == ink), "the whole band is the reversed ground: {row:?}");
         assert!(!row.contains(&page), "no page shows through it");
     }

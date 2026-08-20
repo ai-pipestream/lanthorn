@@ -273,13 +273,35 @@ pub fn apply_to_theme(theme: &mut Theme, look: &PeriodLook, zversion: Option<u8>
     for (sel, role, style) in painted(look) {
         theme.fill_unclaimed(sel, role, style);
     }
-    // …but the BAND only while the row's colour is the machine's to state
-    // (SQ-0935). See [`machine_states_the_status_colour`] — the boundary is v5,
-    // where the game gains `set_colour` and can name that row itself, NOT v4, where
-    // it merely starts drawing it.
-    if machine_states_the_status_colour(zversion) {
-        // Stated absolutely rather than patched; see `Theme::set_unclaimed`.
-        theme.set_unclaimed("status_bar", "chrome", status_style(look));
+    match look.status {
+        // **Reverse is just reverse.** The `status_bar` row's registry default
+        // already carries REVERSED — that is lanthorn's own way of setting the bar
+        // apart — so patching the machine's UNswapped pair under it draws the band
+        // with nothing stated: ink over page, reversed at draw, which is page over
+        // ink. Identical to what stating `reversed(body)` absolutely produced, and
+        // it needs no version clause, because it is not an override of anything. It
+        // is what reversing the machine's screen means, and a game that colours its
+        // own status row still wins over the theme at draw time.
+        //
+        // This is also where `Theme::set_unclaimed` came from: a swapped pair
+        // patched under REVERSED swaps back, "a full reverse rendered as no reverse
+        // at all". Patching the pair unswapped removes the cause rather than
+        // working around it, so that hazard cannot recur here.
+        StatusBand::FullReverse | StatusBand::PerRun => {
+            theme.fill_unclaimed("status_bar", "chrome", body_style(look));
+        }
+        // The two bands that are NOT a reverse of anything: the Macintosh rules its
+        // row instead of grounding it, and `Own` names a pair unrelated to the
+        // body's. Those genuinely state the row rather than describing it, so they
+        // are stated absolutely — and only while the row's colour is the machine's
+        // to state (SQ-0935). See [`machine_states_the_status_colour`]: the boundary
+        // is v5, where the game gains `set_colour` and can name that row itself, NOT
+        // v4, where it merely starts drawing it.
+        StatusBand::Ruled | StatusBand::Own { .. } => {
+            if machine_states_the_status_colour(zversion) {
+                theme.set_unclaimed("status_bar", "chrome", status_style(look));
+            }
+        }
     }
 }
 
@@ -329,9 +351,14 @@ mod tests {
         // machine's colour, because `set_colour` does not exist until v5.
         assert!(machine_states_the_status_colour(Some(4)), "v4 draws the row but cannot colour it");
 
-        // …and it reaches the theme that way: the band selector is filled for a v3
-        // launch and left alone for a v6 one, off the SAME look.
-        let look = look_of(zvm::interpreter::IBM_PC_INTERPRETER_NUMBER);
+        // …and it reaches the theme that way — but only for a band that is not a
+        // plain reverse. The MACINTOSH is the specimen because its band is `Ruled`:
+        // it rules the row instead of grounding it, which states the row rather than
+        // describing it, and that is what the version clause guards. A full-reverse
+        // machine has nothing to gate (see
+        // `a_full_reverse_band_is_the_same_on_every_version_it_applies_to`).
+        let look = look_of(zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER);
+        assert!(matches!(look.status, StatusBand::Ruled), "the Mac rules its row");
         use crate::theme::resolve::{resolve as resolve_theme, Decls, Roles};
         let mut v3 = resolve_theme(&Roles::terminal_default(), &Decls::new(), &Decls::new(), &Decls::new());
         apply_to_theme(&mut v3, &look, Some(3));
@@ -475,24 +502,56 @@ mod tests {
         assert_eq!(inherited.get("transcript").style.fg, Some(Color::Green));
     }
 
-    /// The status bar ships REVERSED as its registry default, which is lanthorn's
-    /// way of setting the bar apart — and a swapped pair drawn under it swaps
-    /// back. The band is stated absolutely for exactly that reason; this is the
-    /// case that fails if it is ever patched instead.
+    /// **Reverse is just reverse**, so a full-reverse band states nothing and comes
+    /// out identical.
+    ///
+    /// This case used to assert the opposite, and was named for it. The status bar
+    /// ships REVERSED as its registry default — lanthorn's own way of setting the
+    /// bar apart — and stating `reversed(body)` under that swapped back, "a full
+    /// reverse rendered as no reverse at all", which is why `Theme::set_unclaimed`
+    /// exists. Patching the pair UNSWAPPED removes the cause instead: ink over page,
+    /// reversed at draw, which is page over ink.
+    ///
+    /// The assertion is the identity, because that is the whole claim — what the
+    /// row DRAWS is unchanged, and only the way it got there is simpler.
     #[test]
-    fn a_full_reverse_band_is_stated_and_not_left_to_reverse_itself() {
+    fn a_full_reverse_band_is_left_to_reverse_itself_and_draws_the_same() {
         use crate::theme::resolve::{resolve, Decls, Roles};
         let look = look_of(zvm::interpreter::COMMODORE_64_INTERPRETER_NUMBER);
         let mut theme = resolve(&Roles::terminal_default(), &Decls::new(), &Decls::new(), &Decls::new());
         assert!(
             theme.get("status_bar").style.add_modifier.contains(Modifier::REVERSED),
-            "the registry default this guards against"
+            "the registry default the band now leans on rather than guards against"
         );
         apply_to_theme(&mut theme, &look, Some(3));
         let band = theme.get("status_bar").style;
-        assert_eq!(band.fg, Some(rgb(look.page)), "the C64 reverses its body pair");
-        assert_eq!(band.bg, Some(rgb(look.ink)));
-        assert!(!band.add_modifier.contains(Modifier::REVERSED), "or it would reverse back");
+        // The pair is the body's, UNSWAPPED, and REVERSED survives to do the swap.
+        assert_eq!(band.fg, Some(rgb(look.ink)), "the machine's ink, unswapped");
+        assert_eq!(band.bg, Some(rgb(look.page)));
+        assert!(band.add_modifier.contains(Modifier::REVERSED), "and the row reverses it at draw");
+        // Which is the same thing on screen as the old stated band: page over ink.
+        assert_eq!(
+            (band.bg, band.fg),
+            (status_style(&look).fg, status_style(&look).bg),
+            "reversed at draw == what `status_style` stated absolutely",
+        );
+    }
+
+    /// …and because it is not an override, a full-reverse band needs no version
+    /// clause: it applies wherever the machine's screen does. The C64 is the same
+    /// row on a v3 story and a v6 one.
+    #[test]
+    fn a_full_reverse_band_is_the_same_on_every_version_it_applies_to() {
+        use crate::theme::resolve::{resolve, Decls, Roles};
+        let look = look_of(zvm::interpreter::COMMODORE_64_INTERPRETER_NUMBER);
+        let band = |v: u8| {
+            let mut t = resolve(&Roles::terminal_default(), &Decls::new(), &Decls::new(), &Decls::new());
+            apply_to_theme(&mut t, &look, Some(v));
+            t.get("status_bar").style
+        };
+        for v in 1..=6 {
+            assert_eq!(band(v), band(3), "v{v}: reversing the machine's pair is not an override");
+        }
     }
 
     /// Over a character the glyph must survive, so the shape stands down and only
