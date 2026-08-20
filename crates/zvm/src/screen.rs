@@ -1589,11 +1589,19 @@ pub enum Palette {
     Standard,
     /// The palette Infocom's own Amiga interpreter loaded.
     Amiga,
+    /// The IBM PC's EGA colours as Infocom's **XZIP** mapped them — the v1–v5
+    /// interpreter. See [`ega_true_colour`].
+    IbmXzip,
+    /// The same, as **YZIP** mapped them — the Version 6 interpreter. It differs
+    /// from [`Palette::IbmXzip`] in exactly one entry, and that entry is white.
+    IbmYzip,
 }
 
 /// The active palette, as a raw discriminant for [`ACTIVE_PALETTE`].
 const PALETTE_STANDARD: u8 = 0;
 const PALETTE_AMIGA: u8 = 1;
+const PALETTE_IBM_XZIP: u8 = 2;
+const PALETTE_IBM_YZIP: u8 = 3;
 
 /// The process-wide active palette.
 ///
@@ -1652,6 +1660,8 @@ pub fn set_palette(p: Palette) {
     let v = match p {
         Palette::Standard => PALETTE_STANDARD,
         Palette::Amiga => PALETTE_AMIGA,
+        Palette::IbmXzip => PALETTE_IBM_XZIP,
+        Palette::IbmYzip => PALETTE_IBM_YZIP,
     };
     ACTIVE_PALETTE.store(v, core::sync::atomic::Ordering::Relaxed);
 }
@@ -1660,6 +1670,8 @@ pub fn set_palette(p: Palette) {
 pub fn palette() -> Palette {
     match ACTIVE_PALETTE.load(core::sync::atomic::Ordering::Relaxed) {
         PALETTE_AMIGA => Palette::Amiga,
+        PALETTE_IBM_XZIP => Palette::IbmXzip,
+        PALETTE_IBM_YZIP => Palette::IbmYzip,
         _ => Palette::Standard,
     }
 }
@@ -1721,7 +1733,76 @@ pub fn standard_true_colour(n: u8) -> Option<u16> {
     match palette() {
         Palette::Standard => zmsd_true_colour(n),
         Palette::Amiga => amiga_true_colour(n),
+        Palette::IbmXzip => ega_true_colour(n, false).or_else(|| zmsd_true_colour(n)),
+        Palette::IbmYzip => ega_true_colour(n, true).or_else(|| zmsd_true_colour(n)),
     }
+}
+
+/// The IBM PC's colours for standard numbers 2..=9, as 15-bit RGB — Infocom's own
+/// mapping of Z-machine colour numbers onto EGA attributes.
+///
+/// # Source
+///
+/// The tables compiled into Infocom's IBM interpreters, which are the programs
+/// that painted these colours. `yzip/data.c`, the **Version 6** interpreter — the
+/// one Shogun's banner names as "IBM Interpreter version 6.68":
+///
+/// ```text
+///   char Zip_to_ega[] = {        /* map ZIP colors to EGA */
+///      0,       /* ZIP_BLACK */    4,       /* ZIP_RED */
+///      2,       /* ZIP_GREEN */    14,      /* ZIP_YELLOW */
+///      1,       /* ZIP_BLUE */     5,       /* ZIP_MAGENTA */
+///      3,       /* ZIP_CYAN */     15,      /* ZIP_WHITE */
+///      9,       /* ZIP_GREY */     7        /* ZIP_BROWN */ };
+/// ```
+///
+/// and `xzip/data.c`, the v1–v5 one:
+///
+/// ```text
+///   char zip_to_ibm_color[] = {-1, -2, 0, 4, /* nc, def, black, red */
+///                                    2, 14, 1, 5, /* green, ylw, blue, mag */
+///                                    3, 7};       /* cyan, white */
+/// ```
+///
+/// The RGB for each attribute is `Mcga_palette` in the same YZIP file, whose
+/// 6-bit DAC values (`0x00`, `0x15`, `0x2a`, `0x3f`) are the familiar
+/// `0x00`/`0x55`/`0xAA`/`0xFF`, and which its own comment says "maps to the same
+/// as the EGA colors".
+///
+/// # The two tables differ in exactly one entry, and it is WHITE
+///
+/// XZIP sends colour 9 to attribute **7**, `#AAAAAA`, EGA's light grey. YZIP sends
+/// it to **15**, `#FFFFFF`. Every other colour is identical between them.
+///
+/// Both are corroborated by a capture, which is what makes this a finding rather
+/// than a transcription: `machine-screenshots/dos-hitchhiker.png` is Version 3 and
+/// measures its ink at `#A0A0A0`, and `dos-shogun.png` is Version 6 and measures
+/// `#FDFFFF`, with 59% of its text pixels above `#C8C8C8`. Same machine, same
+/// colour number, two generations of interpreter, two whites.
+///
+/// # What is deliberately NOT modelled
+///
+/// Colours 10..=12 — §8.3.1's light, medium and dark greys, which are v6-only.
+/// YZIP's list ends `ZIP_GREY, ZIP_BROWN` against attributes 9 and 7, and 9 is
+/// `#5555FF`, a light BLUE. Whatever those two slots are, they are not the
+/// standard's three greys, and guessing which of 10/11/12 they answer would be
+/// inventing a mapping rather than reading one. They fall through to
+/// [`zmsd_true_colour`] until someone reads the YZIP screen code that indexes
+/// this table, or measures a frame that uses one.
+pub fn ega_true_colour(n: u8, yzip: bool) -> Option<u16> {
+    Some(match n {
+        2 => 0x0000,                            // black   EGA 0  #000000
+        3 => 0x0015,                            // red     EGA 4  #AA0000
+        4 => 0x02A0,                            // green   EGA 2  #00AA00
+        5 => 0x2BFF,                            // yellow  EGA 14 #FFFF55
+        6 => 0x5400,                            // blue    EGA 1  #0000AA
+        7 => 0x5415,                            // magenta EGA 5  #AA00AA
+        8 => 0x56A0,                            // cyan    EGA 3  #00AAAA
+        // The one entry the two interpreters disagree on.
+        9 if yzip => 0x7FFF,                    // white   EGA 15 #FFFFFF
+        9 => 0x56B5,                            // white   EGA 7  #AAAAAA
+        _ => return None,
+    })
 }
 
 /// The Amiga palette for standard colour numbers 2..=12, as 15-bit RGB.

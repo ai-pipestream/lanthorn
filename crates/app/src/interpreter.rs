@@ -498,7 +498,7 @@ impl InterpreterProfile {
     /// `None`, and reported that the IBM PC has no palette and no colours — which
     /// was invisible while the row declined a pair anyway, and became SQ-0928's
     /// whole feature failing silently the moment it stated one.
-    fn row_number(self) -> u8 {
+    pub fn row_number(self) -> u8 {
         self.interpreter_number().unwrap_or(IBM_PC_INTERPRETER_NUMBER)
     }
 
@@ -949,7 +949,18 @@ mod tests {
         assert_eq!(p, InterpreterProfile::IbmPc);
         assert_eq!(p.interpreter_number(), None, "defer to zvm's Frotz rule");
         assert_eq!(p.std_window(), None, "defer to the container's Reso chunk");
-        assert_eq!(p.palette(), zvm::screen::Palette::Standard, "ZMSD §8.3.1");
+        // SQ-0939 SPLIT A SECOND KNOB THE SAME WAY, for the same reason and with
+        // the same shape as `default_colours` below. The MACHINE resolves colour
+        // numbers through EGA — Infocom's own `Zip_to_ega`/`zip_to_ibm_color`
+        // tables — and the LAUNCH still defers, because `startup` downgrades an
+        // unlicensed one to §8.3.1's table before it ever reaches
+        // `zvm::screen::set_palette`.
+        assert_eq!(p.palette(), zvm::screen::Palette::IbmXzip, "the machine resolves through EGA");
+        assert_eq!(
+            zvm::interpreter::palette_for(p.row_number(), Some(6)),
+            zvm::screen::Palette::IbmYzip,
+            "…and a Version 6 story would have run under the other IBM interpreter",
+        );
         // SQ-0928 SPLIT THIS ONE KNOB IN TWO, and the split is the quest.
         //
         // The MACHINE states blue under white — observed from DOS captures, and a

@@ -145,6 +145,12 @@ pub fn table() -> String {
             match m.palette {
                 Palette::Standard => "standard",
                 Palette::Amiga => "Amiga",
+                // SQ-0939: the IBM PC resolves through EGA, and its white moves
+                // with the interpreter generation. The row shows the machine's
+                // BASE palette; `zvm::interpreter::palette_for` is what picks the
+                // v6 one at boot, so naming XZIP here would overstate what a row
+                // can say on its own.
+                Palette::IbmXzip | Palette::IbmYzip => "EGA",
             },
             yes_no(m.global_colour_pens),
             yes_no(m.v6_screen_page),
@@ -317,6 +323,7 @@ mod tests {
             let palette_name = match palette {
                 Palette::Standard => "standard",
                 Palette::Amiga => "Amiga",
+                Palette::IbmXzip | Palette::IbmYzip => "EGA",
             };
             assert!(all.contains(palette_name), "{name}: palette");
             // The three booleans share one spelling, so count rather than search:

@@ -722,7 +722,7 @@ pub const MACHINES: &[MachineProfile] = &[
         // `IBM_PC_DEFAULT_BACKGROUND`). A bare story file still gets the player's
         // own terminal, which is what that reasoning was protecting.
         default_colours: Some((IBM_PC_DEFAULT_BACKGROUND, IBM_PC_DEFAULT_FOREGROUND)),
-        palette: Palette::Standard,
+        palette: Palette::IbmXzip,
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
@@ -848,6 +848,29 @@ pub fn machine(number: u8) -> Option<&'static MachineProfile> {
     MACHINES.iter().find(|m| m.number == number)
 }
 
+/// The palette this machine resolves §8.3.1 colour numbers through, for a story
+/// of Version `zversion` (SQ-0939).
+///
+/// **Almost every machine answers the same for every version**, and this exists for
+/// the one that does not. Infocom shipped two IBM interpreters with two different
+/// mappings of colour numbers onto EGA attributes, and they differ in exactly one
+/// entry: XZIP (v1–v5) sends WHITE to attribute 7, `#AAAAAA`, and YZIP (v6) sends it
+/// to 15, `#FFFFFF`. Both are corroborated by a capture — see
+/// [`crate::screen::ega_true_colour`], which carries the tables and the evidence.
+///
+/// Asked at boot, before the story runs and before the host resolves a single
+/// colour, because the palette is process-wide state that every consumer must agree
+/// on (`crate::screen::ACTIVE_PALETTE`'s own docs). A version-dependent palette that
+/// were asked LATER would mean one colour number looking like two colours on one
+/// screen, which is precisely what that global exists to prevent.
+pub fn palette_for(number: u8, zversion: Option<u8>) -> Palette {
+    match machine(number).map(|m| m.palette) {
+        Some(Palette::IbmXzip) if zversion == Some(6) => Palette::IbmYzip,
+        Some(p) => p,
+        None => Palette::Standard,
+    }
+}
+
 /// The machine a story's header currently claims to be running on, or `None`
 /// when `$1E` names one this table does not model.
 ///
@@ -955,10 +978,16 @@ mod tests {
         // this machine. A bare story file still gets the player's own terminal.
         assert_eq!(pair(IBM_PC_INTERPRETER_NUMBER), Some((6, 9)), "blue under white");
         assert_eq!(pair(COMMODORE_128_INTERPRETER_NUMBER), None, "no source read");
-        // Only the Amiga loaded a palette of its own.
-        let amiga: Vec<_> =
+        // Two machines resolve colour NUMBERS through something other than
+        // §8.3.1's recommended table, and each is read out of the program that
+        // painted them: the Amiga's `colortable[]` and the IBM's
+        // `Zip_to_ega`/`zip_to_ibm_color` (SQ-0939). Every other row keeps the
+        // standard's own values, because reputation is not evidence — the Atari
+        // ST's famous 512 and the Commodore's sixteen are not in here for exactly
+        // that reason.
+        let own: Vec<_> =
             MACHINES.iter().filter(|m| m.palette != Palette::Standard).map(|m| m.number).collect();
-        assert_eq!(amiga, vec![AMIGA_INTERPRETER_NUMBER]);
+        assert_eq!(own, vec![AMIGA_INTERPRETER_NUMBER, IBM_PC_INTERPRETER_NUMBER]);
     }
 
     /// **A period look is not a `default_colours` pair**, and the two rows where
@@ -1018,6 +1047,57 @@ mod tests {
             "the Amiga's cursor is orange on a blue page under white ink",
         );
         assert_eq!(c128.cursor_colour, c128.ink, "…but the C128's is simply its ink");
+    }
+
+    /// The IBM PC resolves colour numbers through EGA, and its WHITE depends on
+    /// which of Infocom's two interpreters the story would have run under.
+    ///
+    /// `Zip_to_ega` (yzip, v6) sends white to attribute 15 and `zip_to_ibm_color`
+    /// (xzip, v1–v5) sends it to 7. Every other colour is identical between them,
+    /// which is what makes this worth a whole second palette rather than a fudge:
+    /// one entry, sourced from the two programs that painted it, and corroborated
+    /// by one capture each.
+    #[test]
+    fn the_ibm_pcs_white_is_the_one_colour_its_two_interpreters_disagree_on() {
+        use crate::screen::ega_true_colour;
+        for n in [2u8, 3, 4, 5, 6, 7, 8] {
+            assert_eq!(
+                ega_true_colour(n, true),
+                ega_true_colour(n, false),
+                "colour {n} is the same attribute in both interpreters",
+            );
+        }
+        assert_ne!(ega_true_colour(9, true), ega_true_colour(9, false), "…and white is not");
+        assert_eq!(ega_true_colour(9, true), Some(0x7FFF), "yzip: EGA 15, #FFFFFF");
+        assert_eq!(ega_true_colour(9, false), Some(0x56B5), "xzip: EGA 7, #AAAAAA");
+        // The page both agree on, and the one every DOS capture measures.
+        assert_eq!(ega_true_colour(6, true), Some(0x5400), "blue is EGA 1, #0000AA");
+        // 10..=12 are deliberately unmapped; see `ega_true_colour`'s docs.
+        for n in [10u8, 11, 12] {
+            assert_eq!(ega_true_colour(n, true), None, "the v6 greys are not guessed at");
+        }
+    }
+
+    /// The palette is chosen from the machine AND the version, once, before the
+    /// story runs — `palette_for` is that choice, and it is the only place the
+    /// version enters.
+    #[test]
+    fn the_palette_is_the_machines_except_where_the_version_moves_it() {
+        let ibm = IBM_PC_INTERPRETER_NUMBER;
+        assert_eq!(palette_for(ibm, Some(6)), Palette::IbmYzip, "v6 is YZIP's machine");
+        for v in [1u8, 2, 3, 4, 5, 7, 8] {
+            assert_eq!(palette_for(ibm, Some(v)), Palette::IbmXzip, "v{v} is not");
+        }
+        assert_eq!(palette_for(ibm, None), Palette::IbmXzip, "and no version byte is not either");
+        // No other machine moves with the version.
+        for n in [AMIGA_INTERPRETER_NUMBER, MACINTOSH_INTERPRETER_NUMBER, ATARI_ST_INTERPRETER_NUMBER] {
+            let base = machine(n).expect("modelled").palette;
+            for v in 1..=8 {
+                assert_eq!(palette_for(n, Some(v)), base, "machine {n} has one palette");
+            }
+        }
+        // An unmodelled number is not dressed as anything.
+        assert_eq!(palette_for(200, Some(6)), Palette::Standard);
     }
 
     /// Declines are declines, and the ones here are for want of a capture rather

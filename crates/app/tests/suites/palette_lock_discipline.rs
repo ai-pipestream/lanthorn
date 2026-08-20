@@ -59,6 +59,11 @@ fn a_suite_that_sets_the_palette_takes_the_shared_lock() {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("a suite in the checkout is readable");
+        // A plain substring scan, which is the right trade for a guard nobody will
+        // maintain — but it cannot tell a CALL from a MENTION, and a suite that
+        // merely names the function in a comment is reported as a setter. If that
+        // happens, reword the comment rather than taking a lock the file does not
+        // need; the guard erring toward noise is what makes it safe to leave alone.
         if !src.contains("zvm::screen::set_palette") {
             continue;
         }

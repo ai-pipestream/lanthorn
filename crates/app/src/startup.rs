@@ -336,7 +336,31 @@ pub(crate) fn boot_story(
             // (SQ-0876).
             disk_image,
         );
-    zvm::screen::set_palette(cfg.interpreter_profile.palette());
+    // SQ-0939: the palette, asked ONCE and asked HERE — before the session
+    // constructor runs the story, and before the host resolves a single colour.
+    //
+    // It is version-aware because Infocom shipped two IBM interpreters whose
+    // colour-number tables differ (XZIP's white is EGA 7, YZIP's is 15); see
+    // `zvm::interpreter::palette_for`. And it is LICENSED, because the IBM PC row
+    // is two answers wearing one name — the machine a DOS medium names, and what
+    // every story with no medium falls through to. Only the first may present the
+    // machine's colours (SQ-0928's rule), so an unlicensed launch resolves through
+    // §8.3.1's own table exactly as it always did.
+    //
+    // Every consumer reads this one global: the VM's own `true_value` for window
+    // properties 17/18, the ColorScheme's standard-colour seed, the v6 pixel path
+    // and the CLI's SGR path. Setting it late, or per-path, is how one colour
+    // number comes to look like two colours on one screen.
+    let machine_palette =
+        zvm::interpreter::palette_for(cfg.interpreter_profile.row_number(), story_bytes.first().copied());
+    zvm::screen::set_palette(match machine_palette {
+        zvm::screen::Palette::IbmXzip | zvm::screen::Palette::IbmYzip
+            if !cfg.machine_colours_licensed() =>
+        {
+            zvm::screen::Palette::Standard
+        }
+        p => p,
+    });
     // SQ-0885: an experiment knob for header `$1F`, set beside the palette
     // because it is the same kind of fact — one machine per run — and because
     // the session constructor runs the story, so it has to be in force before

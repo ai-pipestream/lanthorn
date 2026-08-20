@@ -305,10 +305,14 @@ fn the_ibm_pc_profile_changes_nothing_it_touches() {
     let (profile, source) = InterpreterProfile::resolve_with_source(&plain, None, None, None);
     assert_eq!(profile.interpreter_number(), None);
     assert_eq!(profile.std_window(), None);
-    assert_eq!(profile.palette(), zvm::screen::Palette::Standard);
-    // SQ-0928: what changes nothing is the LAUNCH, not the machine. This file
-    // named no medium, so the profile fell through here and the source licenses
-    // no colours — the pair the IBM PC states is real and simply out of reach.
+    // SQ-0928/SQ-0939: what changes nothing is the LAUNCH, not the machine. This
+    // file named no medium, so the profile fell through here and the source
+    // licenses no colours — the pair the IBM PC states, and the EGA table it
+    // resolves colour numbers through, are real and simply out of reach.
+    // `startup` downgrades an unlicensed launch to §8.3.1's own table before the
+    // process-global palette is ever set, which is what keeps every Inform game on
+    // the standard colours.
+    assert_eq!(profile.palette(), zvm::screen::Palette::IbmXzip, "the machine's own table");
     assert_eq!(source, app::interpreter::ProfileSource::Fallback);
     assert!(!source.licenses_machine_colours(true), "nothing rescues a fallback");
     assert_eq!(profile.default_colours(), Some((6, 9)), "the machine's own fact");
