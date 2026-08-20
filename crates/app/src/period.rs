@@ -37,10 +37,11 @@
 //! period screen to have measured.
 //!
 //! **The STATUS BAND is the exception and stops at v4** — see
-//! [`interpreter_draws_status`]. It is the one part of a look that describes a row
-//! whose owner changes: the interpreter draws the status line through v4 and the
-//! game paints its own from v5, so a band applied later would override the game
-//! rather than present the machine.
+//! [`machine_states_the_status_colour`]. The boundary is where the row's COLOUR
+//! changes hands, which is v5, and not where its drawing does, which is v4: a v4
+//! game already splits its own upper window and paints the row, but has no
+//! `set_colour` to shade it, so the shade is still the interpreter's. From v5 the
+//! game can name that pair and does.
 //!
 //! **`honor_game_colours` is the master switch and this one is narrower.** A
 //! player who turns game colours off has said "keep my terminal's colours", and
@@ -111,20 +112,30 @@ pub fn resolve(
     profile.period_look()
 }
 
-/// Does the INTERPRETER draw the status line on this version?
+/// Is the status row's colour the MACHINE's to state on this version?
 ///
-/// v1–v3 leave it to the interpreter outright (ZMSD §8.2), and v4 is where the
-/// measurements were taken — *Trinity* for the Commodore 128's. From v5 the game
-/// splits its own upper window and paints the row itself, so a machine's band is no
-/// longer a description of that row: it is an override of the game's.
+/// **Not "does the interpreter draw the row" — that boundary is v3/v4 and it is
+/// the wrong question.** ZMSD §8.2 has the interpreter print the status line in
+/// v1–v3 only; from v4 the game splits its own upper window and paints the row
+/// itself (`session::status_model_from_machine` draws exactly that line, `Classic`
+/// at `version() <= 3` and `HostManaged` above it). So a v4 game already owns the
+/// row, and this still answers true for it.
 ///
-/// This is the one part of a [`PeriodLook`] that does not generalise past v4.
-/// The body pair is the machine's screen whoever prints on it, and the cursor is
-/// the interpreter's own however the story is written — but the status band is a
-/// statement about a row that changes owner at v5. Shogun paints its own 548x32
-/// status strip and names a colour for it; reversing that would be presenting the
-/// machine at the game's expense.
-pub fn interpreter_draws_status(zversion: Option<u8>) -> bool {
+/// The question that decides the band is **who can COLOUR the row**, and colour
+/// arrives at v5. A v4 game paints its status as reverse-video spaces and has no
+/// `set_colour` to say what reverse means — the shade is the interpreter's, which
+/// makes it the machine's, which is exactly what a [`PeriodLook`] records. The
+/// Commodore 128's band was measured on *Trinity*, a v4 story, for that reason: the
+/// game drew the row and the machine coloured it.
+///
+/// From v5 the game can name that row's pair outright and games do — Shogun colours
+/// a 548x32 status strip of its own. Laying a machine's band under that would be
+/// overriding the game rather than presenting the machine.
+///
+/// This is the one part of a look that does not generalise past v4. The body pair
+/// is the machine's screen whoever prints on it, and the cursor is the
+/// interpreter's own however the story is written.
+pub fn machine_states_the_status_colour(zversion: Option<u8>) -> bool {
     matches!(zversion, Some(1..=4))
 }
 
@@ -262,11 +273,11 @@ pub fn apply_to_theme(theme: &mut Theme, look: &PeriodLook, zversion: Option<u8>
     for (sel, role, style) in painted(look) {
         theme.fill_unclaimed(sel, role, style);
     }
-    // …but the BAND only where the interpreter owns that row (SQ-0935). See
-    // [`interpreter_draws_status`]: from v5 the game splits its own upper window
-    // and paints the status itself, so laying a machine's band under it would be
-    // overriding the game rather than presenting the machine.
-    if interpreter_draws_status(zversion) {
+    // …but the BAND only while the row's colour is the machine's to state
+    // (SQ-0935). See [`machine_states_the_status_colour`] — the boundary is v5,
+    // where the game gains `set_colour` and can name that row itself, NOT v4, where
+    // it merely starts drawing it.
+    if machine_states_the_status_colour(zversion) {
         // Stated absolutely rather than patched; see `Theme::set_unclaimed`.
         theme.set_unclaimed("status_bar", "chrome", status_style(look));
     }
@@ -301,18 +312,22 @@ mod tests {
         assert!(resolve(amiga, true, true, true, None).is_none());
     }
 
-    /// …and the BAND is the one part that stops at v4, because that is where the
-    /// row changes owner (SQ-0935). A v5+ story splits its own upper window and
-    /// paints its status itself; Shogun colours a 548x32 strip of its own.
+    /// …and the BAND is the one part that stops at v4 — because that is where the
+    /// row's COLOUR changes hands, not where its drawing does (SQ-0935). A v4 game
+    /// already paints its own status row, but has no `set_colour` to shade it; from
+    /// v5 it does, and Shogun colours a 548x32 strip of its own.
     #[test]
     fn the_status_band_stops_where_the_game_starts_drawing_the_row() {
         for v in 1..=4 {
-            assert!(interpreter_draws_status(Some(v)), "v{v}: the interpreter draws the status line");
+            assert!(machine_states_the_status_colour(Some(v)), "v{v}: the machine states the row's colour");
         }
         for v in 5..=8 {
-            assert!(!interpreter_draws_status(Some(v)), "v{v}: the game draws its own");
+            assert!(!machine_states_the_status_colour(Some(v)), "v{v}: the game can name it with set_colour");
         }
-        assert!(!interpreter_draws_status(None), "an engine with no version byte is not a Z-machine");
+        assert!(!machine_states_the_status_colour(None), "an engine with no version byte is not a Z-machine");
+        // The distinction this is named for: v4 DRAWS its own row and still gets the
+        // machine's colour, because `set_colour` does not exist until v5.
+        assert!(machine_states_the_status_colour(Some(4)), "v4 draws the row but cannot colour it");
 
         // …and it reaches the theme that way: the band selector is filled for a v3
         // launch and left alone for a v6 one, off the SAME look.
