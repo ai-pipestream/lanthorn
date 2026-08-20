@@ -174,7 +174,7 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         state.story_zversion,
     );
     if let Some(look) = state.period_look {
-        crate::period::apply_to_theme(&mut state.colors.theme, &look);
+        crate::period::apply_to_theme(&mut state.colors.theme, &look, state.story_zversion);
     }
 
     // SQ-0700/SQ-0703: the frame STYLES still live on `ColorScheme` (the renderers

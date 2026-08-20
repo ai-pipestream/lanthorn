@@ -9,13 +9,13 @@
 //! at all. Every link is somebody else's code and the whole point is that they
 //! agree.
 //!
-//! **The Version is the interesting variable and it is read off the story, not
-//! assumed.** The same Amiga floppy shelf carries v3 (*Zork I*), v5 (*Sherlock*)
-//! and v6 (*Zork Zero*), so one medium answering one machine has to produce a
-//! look for the first and nothing for the other two. That is the clause a future
-//! refactor is most likely to lose, because it is the one that looks redundant:
-//! the profile is right, the machine is right, the look is right, and applying it
-//! would still be wrong.
+//! **The Version is still read off the story rather than assumed**, and the same
+//! Amiga shelf carries v3 (*Zork I*), v5 (*Sherlock*) and v6 (*Zork Zero*) — but
+//! all three are dressed now (SQ-0935). What the Version decides is narrower than
+//! it was: the machine's SCREEN applies to every version an Infocom interpreter
+//! shipped for, and only the STATUS BAND stops at v4, because that is the row whose
+//! owner changes. v7 and v8 decline outright, never having run on one of these
+//! machines at all.
 //!
 //! `stories/` is gitignored (CLAUDE.md), so every case skips vacuously when the
 //! disks are absent — and each one asserts it saw at least one specimen first, so
@@ -35,7 +35,9 @@ struct Specimen {
     file: &'static str,
     machine: InterpreterProfile,
     zversion: u8,
-    /// A capture-bearing machine AND a pre-colour story.
+    /// Whether this launch is dressed in its machine's screen. True for every
+    /// version an Infocom machine shipped an interpreter for — v1–v6 since
+    /// SQ-0935, where it used to stop at v4.
     dressed: bool,
 }
 
@@ -65,19 +67,23 @@ const SPECIMENS: &[Specimen] = &[
         zversion: 3,
         dressed: true,
     },
-    // The same shelf, past the colour boundary: the machine is right, the look
-    // exists, and it must not be applied.
+    // The same shelf, past the OLD colour boundary. These two are why the suite's
+    // doc used to say the Version was "the interesting variable": they were the
+    // clause that had to decline. They are dressed now, and the reason is in
+    // `app::period`'s module docs — the machine's measured RGB and the `$2C`/`$2D`
+    // numbers a v5+ story reads are two spellings of one row, so painting the first
+    // while answering the second is not a lie about the screen, it IS the screen.
     Specimen {
         file: "Sherlock - The Riddle of the Crown Jewels.adf",
         machine: InterpreterProfile::Amiga,
         zversion: 5,
-        dressed: false,
+        dressed: true,
     },
     Specimen {
         file: "Zork Zero - The Revenge of Megaboz.adf",
         machine: InterpreterProfile::Amiga,
         zversion: 6,
-        dressed: false,
+        dressed: true,
     },
 ];
 
@@ -115,7 +121,7 @@ fn the_medium_names_the_machine_and_the_version_decides_whether_it_dresses() {
         assert_eq!(
             look.is_some(),
             s.dressed,
-            "{} is v{zversion}: colour arrives with v5 and the look stops there",
+            "{} is v{zversion}: every version an Infocom machine shipped for is dressed",
             s.file
         );
         if let Some(look) = look {

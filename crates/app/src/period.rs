@@ -1,5 +1,5 @@
-//! The period look: painting a v1–v4 story the way its machine's own
-//! interpreter did (SQ-0873).
+//! The period look: painting a story the way its machine's own interpreter did
+//! (SQ-0873, extended to v1–v6 by SQ-0935).
 //!
 //! [`zvm::interpreter::PeriodLook`] holds the measurements — a body pair, how the
 //! status line was set apart, and the input cursor's shape and colour, for the
@@ -9,14 +9,38 @@
 //!
 //! # The gate, and why every clause of it is there
 //!
-//! **Colour arrives with Version 5.** `set_colour` and the `$2C`/`$2D` header
-//! bytes are v5+, so a v1–v4 story has no colour concept at all: it never sets,
-//! never reads, never branches. Anything shown for one is presentation, which is
-//! exactly what makes a period look legitimate — and exactly what would make it
-//! a lie for a v5+ story, where the pair on screen is a fact the story can read
-//! and [`crate::interpreter::InterpreterProfile::default_colours`] already
-//! supplies it from Infocom's own code. The two must not be confused; hence
-//! [`resolve`]'s version clause and not a knob.
+//! **The machine's screen is the machine's screen, v1 to v6.** This gate used to
+//! stop at v4, on the reasoning that a period look would be "a lie for a v5+
+//! story, where the pair on screen is a fact the story can read". That objection
+//! was real but it was aimed at the wrong thing: painting one colour and REPORTING
+//! another is the lie, not painting the machine's.
+//!
+//! Both come from the same row now. [`zvm::interpreter::MachineProfile`] holds a
+//! machine's `default_colours` — the §8.3.1 NUMBERS a v5+ story reads out of
+//! `$2C`/`$2D` — and its [`PeriodLook`], the RGB those numbers were on that
+//! machine. They are two spellings of one fact, so a launch that paints the second
+//! and answers the first is telling the story exactly what is on its screen. The
+//! IBM PC states 6 under 9 and measures `#0000AA` under `#AAAAAA`; 6 IS EGA blue.
+//!
+//! Before this, only v1–v4 read the RGB and v5+ resolved the number through the
+//! app's own theme, so the same DOS machine showed `#0000AA` to a v3 story and the
+//! theme's `#006BB5` to a v6 one — and Shogun, which never names a colour until it
+//! leaves InvisiClues, sat on the player's theme for the whole game and turned blue
+//! on the way out of a menu (SQ-0935).
+//!
+//! A story that DOES name a colour still wins, on every version: the machine's
+//! screen is the ground, laid under the theme by [`apply_to_theme`], and the game's
+//! own pair is applied over it by the render paths. Base coat, not override.
+//!
+//! **v7 and v8 decline**, which is the same evidence rule the rest of this module
+//! keeps: no Infocom machine shipped an interpreter for them, so there is no
+//! period screen to have measured.
+//!
+//! **The STATUS BAND is the exception and stops at v4** — see
+//! [`interpreter_draws_status`]. It is the one part of a look that describes a row
+//! whose owner changes: the interpreter draws the status line through v4 and the
+//! game paints its own from v5, so a band applied later would override the game
+//! rather than present the machine.
 //!
 //! **`honor_game_colours` is the master switch and this one is narrower.** A
 //! player who turns game colours off has said "keep my terminal's colours", and
@@ -81,10 +105,27 @@ pub fn resolve(
     if !enabled || !honor_game_colours || !licensed {
         return None;
     }
-    if !matches!(zversion, Some(1..=4)) {
+    if !matches!(zversion, Some(1..=6)) {
         return None;
     }
     profile.period_look()
+}
+
+/// Does the INTERPRETER draw the status line on this version?
+///
+/// v1–v3 leave it to the interpreter outright (ZMSD §8.2), and v4 is where the
+/// measurements were taken — *Trinity* for the Commodore 128's. From v5 the game
+/// splits its own upper window and paints the row itself, so a machine's band is no
+/// longer a description of that row: it is an override of the game's.
+///
+/// This is the one part of a [`PeriodLook`] that does not generalise past v4.
+/// The body pair is the machine's screen whoever prints on it, and the cursor is
+/// the interpreter's own however the story is written — but the status band is a
+/// statement about a row that changes owner at v5. Shogun paints its own 548x32
+/// status strip and names a colour for it; reversing that would be presenting the
+/// machine at the game's expense.
+pub fn interpreter_draws_status(zversion: Option<u8>) -> bool {
+    matches!(zversion, Some(1..=4))
 }
 
 fn rgb((r, g, b): (u8, u8, u8)) -> Color {
@@ -217,12 +258,18 @@ fn painted(look: &PeriodLook) -> [(&'static str, &'static str, Style); 8] {
 /// Called from `reload::reload_style`, which is the single place the theme is
 /// built — startup, `/reload-style`, the style watcher and the per-game overlay
 /// all funnel through it, so patching there reaches every path.
-pub fn apply_to_theme(theme: &mut Theme, look: &PeriodLook) {
+pub fn apply_to_theme(theme: &mut Theme, look: &PeriodLook, zversion: Option<u8>) {
     for (sel, role, style) in painted(look) {
         theme.fill_unclaimed(sel, role, style);
     }
-    // Stated absolutely rather than patched; see `Theme::set_unclaimed`.
-    theme.set_unclaimed("status_bar", "chrome", status_style(look));
+    // …but the BAND only where the interpreter owns that row (SQ-0935). See
+    // [`interpreter_draws_status`]: from v5 the game splits its own upper window
+    // and paints the status itself, so laying a machine's band under it would be
+    // overriding the game rather than presenting the machine.
+    if interpreter_draws_status(zversion) {
+        // Stated absolutely rather than patched; see `Theme::set_unclaimed`.
+        theme.set_unclaimed("status_bar", "chrome", status_style(look));
+    }
 }
 
 #[cfg(test)]
@@ -233,19 +280,55 @@ mod tests {
         zvm::interpreter::machine(n).expect("modelled").period_look.expect("measured")
     }
 
-    /// The gate's whole point: a v5 story's pair is a fact it can read, so the
-    /// period look must not touch it however the machine was reached.
+    /// The machine's screen is the machine's screen, v1 to v6 — and v7/v8 decline
+    /// because no Infocom machine shipped an interpreter for them.
+    ///
+    /// This case used to assert the opposite for v5+ and was named for it. The
+    /// objection it encoded — that a v5 story can READ its pair, so painting
+    /// something else would be a lie — is answered rather than overruled: the
+    /// painted RGB and the reported numbers are two spellings of one row now, so
+    /// there is nothing to be inconsistent with. See the module docs.
     #[test]
-    fn colour_arrives_with_version_five_and_the_look_stops_there() {
+    fn the_machines_screen_applies_through_version_six_and_no_further() {
         let amiga = InterpreterProfile::Amiga;
-        for v in 1..=4 {
-            assert!(resolve(amiga, true, true, true, Some(v)).is_some(), "v{v} is pre-colour");
+        for v in 1..=6 {
+            assert!(resolve(amiga, true, true, true, Some(v)).is_some(), "v{v} ran on this machine");
         }
-        for v in 5..=8 {
-            assert!(resolve(amiga, true, true, true, Some(v)).is_none(), "v{v} states its own pair");
+        for v in 7..=8 {
+            assert!(resolve(amiga, true, true, true, Some(v)).is_none(), "v{v} never shipped on one");
         }
         // Glulx and Scott Adams have no §11.1.3 number to be a machine of.
         assert!(resolve(amiga, true, true, true, None).is_none());
+    }
+
+    /// …and the BAND is the one part that stops at v4, because that is where the
+    /// row changes owner (SQ-0935). A v5+ story splits its own upper window and
+    /// paints its status itself; Shogun colours a 548x32 strip of its own.
+    #[test]
+    fn the_status_band_stops_where_the_game_starts_drawing_the_row() {
+        for v in 1..=4 {
+            assert!(interpreter_draws_status(Some(v)), "v{v}: the interpreter draws the status line");
+        }
+        for v in 5..=8 {
+            assert!(!interpreter_draws_status(Some(v)), "v{v}: the game draws its own");
+        }
+        assert!(!interpreter_draws_status(None), "an engine with no version byte is not a Z-machine");
+
+        // …and it reaches the theme that way: the band selector is filled for a v3
+        // launch and left alone for a v6 one, off the SAME look.
+        let look = look_of(zvm::interpreter::IBM_PC_INTERPRETER_NUMBER);
+        use crate::theme::resolve::{resolve as resolve_theme, Decls, Roles};
+        let mut v3 = resolve_theme(&Roles::terminal_default(), &Decls::new(), &Decls::new(), &Decls::new());
+        apply_to_theme(&mut v3, &look, Some(3));
+        let mut v6 = resolve_theme(&Roles::terminal_default(), &Decls::new(), &Decls::new(), &Decls::new());
+        apply_to_theme(&mut v6, &look, Some(6));
+        assert_ne!(
+            v3.get("status_bar").style,
+            v6.get("status_bar").style,
+            "the band is the version-specific part; the body pair is not"
+        );
+        // The body pair, by contrast, is identical on both.
+        assert_eq!(v3.get("transcript").style, v6.get("transcript").style, "the machine's screen does not change with the version");
     }
 
     /// One-way composition (SQ-0855/SQ-0860): the master switch takes the look
@@ -359,21 +442,21 @@ mod tests {
 
         // Nobody claimed anything: the Amiga's page and ink land.
         let mut bare = resolve(&Roles::terminal_default(), &Decls::new(), &Decls::new(), &Decls::new());
-        apply_to_theme(&mut bare, &look);
+        apply_to_theme(&mut bare, &look, Some(3));
         assert_eq!(bare.get("transcript").style.bg, Some(rgb(look.page)));
         assert_eq!(bare.get("transcript").style.fg, Some(rgb(look.ink)));
 
         // The selector itself claimed: the player's ink survives the floppy.
         let mine = one("transcript", Delta { fg: Some(Color::Green), ..Delta::EMPTY });
         let mut themed = resolve(&Roles::terminal_default(), &mine, &Decls::new(), &Decls::new());
-        apply_to_theme(&mut themed, &look);
+        apply_to_theme(&mut themed, &look, Some(3));
         assert_eq!(themed.get("transcript").style.fg, Some(Color::Green));
         assert_ne!(themed.get("transcript").style.bg, Some(rgb(look.page)));
 
         // Only the ROLE claimed, and that is a claim too.
         let role = one("text", Delta { fg: Some(Color::Green), ..Delta::EMPTY });
         let mut inherited = resolve(&Roles::terminal_default(), &role, &Decls::new(), &Decls::new());
-        apply_to_theme(&mut inherited, &look);
+        apply_to_theme(&mut inherited, &look, Some(3));
         assert_eq!(inherited.get("transcript").style.fg, Some(Color::Green));
     }
 
@@ -390,7 +473,7 @@ mod tests {
             theme.get("status_bar").style.add_modifier.contains(Modifier::REVERSED),
             "the registry default this guards against"
         );
-        apply_to_theme(&mut theme, &look);
+        apply_to_theme(&mut theme, &look, Some(3));
         let band = theme.get("status_bar").style;
         assert_eq!(band.fg, Some(rgb(look.page)), "the C64 reverses its body pair");
         assert_eq!(band.bg, Some(rgb(look.ink)));

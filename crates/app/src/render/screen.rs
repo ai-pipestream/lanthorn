@@ -8369,6 +8369,121 @@ mod tests {
         }
     }
 
+    // ── the machine's page, before the story names one (SQ-0935) ────────────
+
+    /// Flood the pane and report the background every cell came out with, or
+    /// `None` where they disagree — the pane page is one colour or it is nothing.
+    fn pane_page(model: &ScreenModel, state: &AppState) -> Option<ratatui::style::Color> {
+        let area = Rect::new(0, 0, 20, 5);
+        let mut buf = Buffer::empty(area);
+        let _ = render_story_pane(model, false, None, state, area, &mut buf);
+        let first = buf.cell((0, 0))?.style().bg?;
+        (0..area.height)
+            .all(|y| (0..area.width).all(|x| buf.cell((x, y)).and_then(|c| c.style().bg) == Some(first)))
+            .then_some(first)
+    }
+
+    /// A licensed launch presents the machine's page from the first frame, without
+    /// waiting for the story to name it — and it is the MACHINE's own RGB.
+    ///
+    /// Shogun r322 is why. Its window 0 carries `(0, 0)` — inherit on both channels
+    /// — from boot, through the whole opening and through InvisiClues, and names
+    /// `Standard(6)` under `Standard(9)` only when it LEAVES the hint menu and
+    /// restores the screen from the header. A game written for a DOS machine has no
+    /// reason to name its page: the screen it prints on is already blue.
+    ///
+    /// **The shade is the machine's, not the theme's** (SQ-0935/SQ-0939). The IBM
+    /// PC row measures `#0000AA` — EGA palette entry 1, which is what colour number
+    /// 6 IS on that machine. Resolving the number through the app's ColorScheme
+    /// instead gave `#006BB5`, so the same machine showed one blue to a v3 story and
+    /// another to a v6 one.
+    ///
+    /// **Not version-gated**, which is the change: the machine's screen applies to
+    /// every version an Infocom interpreter shipped for. `app::period` holds the
+    /// rule and the argument.
+    #[test]
+    fn a_licensed_machine_page_is_on_screen_before_the_story_names_one() {
+        use zvm::screen::ZColour;
+        for zversion in [3u8, 5, 6] {
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            state.config.honor_game_colours = true;
+            state.config.interpreter_profile = crate::interpreter::InterpreterProfile::IbmPc;
+            state.config.interpreter_source = crate::interpreter::ProfileSource::Medium;
+            state.story_zversion = Some(zversion);
+            // Resolved the way `reload::reload_style` resolves it, so this exercises
+            // the shipped gate rather than a hand-set field.
+            state.period_look = crate::period::resolve(
+                state.config.interpreter_profile,
+                state.config.period_look,
+                state.config.honor_game_colours,
+                state.config.machine_colours_licensed(),
+                state.story_zversion,
+            );
+            let look = state.period_look.unwrap_or_else(|| panic!("v{zversion}: a licensed DOS launch is dressed"));
+            let machine_blue = ratatui::style::Color::Rgb(look.page.0, look.page.1, look.page.2);
+            assert_eq!(machine_blue, ratatui::style::Color::Rgb(0x00, 0x00, 0xAA), "EGA entry 1");
+
+            let model = model_with_page(ZColour::Default, ZColour::Default);
+            assert_eq!(pane_page(&model, &state), Some(machine_blue), "v{zversion}: the machine's own page");
+        }
+    }
+
+    /// …and it is a BASE COAT, not an override: the moment the story names a page,
+    /// the story's wins. A v5 game that replaces the colours during its startup is
+    /// still the authority on its own screen.
+    #[test]
+    fn a_story_that_names_a_page_overrides_the_machine_one() {
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        state.config.interpreter_profile = crate::interpreter::InterpreterProfile::IbmPc;
+        state.config.interpreter_source = crate::interpreter::ProfileSource::Medium;
+        state.story_zversion = Some(6);
+        state.period_look = crate::period::resolve(
+            state.config.interpreter_profile, state.config.period_look,
+            state.config.honor_game_colours, state.config.machine_colours_licensed(),
+            state.story_zversion,
+        );
+        let machine = state.period_look.expect("licensed").page;
+        let model = model_with_page(ZColour::Standard(2), ZColour::Standard(9)); // black page
+        let page = pane_page(&model, &state).expect("the game's page floods");
+        assert_eq!(page, crate::render::resolve_zcolour(ZColour::Standard(2), &state.colors));
+        assert_ne!(page, ratatui::style::Color::Rgb(machine.0, machine.1, machine.2), "not the machine's");
+    }
+
+    /// An UNLICENSED launch keeps the player's theme — the SQ-0928 rule this
+    /// inherits. A bare story file off no disk never gets painted as a machine.
+    #[test]
+    fn an_unlicensed_launch_gets_no_machine_page() {
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        state.config.interpreter_profile = crate::interpreter::InterpreterProfile::IbmPc;
+        state.config.interpreter_source = crate::interpreter::ProfileSource::Fallback;
+        assert!(state.config.machine_default_colours().is_none(), "no medium named the machine");
+        let model = model_with_page(ZColour::Default, ZColour::Default);
+        let page = pane_page(&model, &state);
+        let blue = crate::render::resolve_zcolour(ZColour::Standard(6), &state.colors);
+        assert_ne!(page, Some(blue), "an unlicensed launch is not painted DOS blue");
+    }
+
+    /// `honor_game_colours = off` declines the machine's page with everything else.
+    #[test]
+    fn colours_declined_declines_the_machine_page_too() {
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = false;
+        state.config.interpreter_profile = crate::interpreter::InterpreterProfile::IbmPc;
+        state.config.interpreter_source = crate::interpreter::ProfileSource::Medium;
+        let model = model_with_page(ZColour::Default, ZColour::Default);
+        let blue = crate::render::resolve_zcolour(ZColour::Standard(6), &state.colors);
+        assert_ne!(pane_page(&model, &state), Some(blue), "colours off means colours off");
+    }
+
     #[test]
     fn grid_scheme_overrides_upper_window_with_game_page_colours() {
         // A game that set a black-on-white page (CounterfeitMonkey) → the grid base

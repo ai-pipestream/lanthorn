@@ -4784,7 +4784,7 @@ mod tests {
             .unwrap();
         let mut state = AppState::default();
         state.period_look = Some(look);
-        crate::period::apply_to_theme(&mut state.colors.theme, &look);
+        crate::period::apply_to_theme(&mut state.colors.theme, &look, Some(3));
         state.transcript = vec!["West of House".to_string()];
         state.transcript_kinds = vec![crate::state::TranscriptKind::Story];
         state.input.set("open mailbox", true);
@@ -4825,7 +4825,7 @@ mod tests {
             .unwrap();
         let mut state = AppState::default();
         state.period_look = Some(look);
-        crate::period::apply_to_theme(&mut state.colors.theme, &look);
+        crate::period::apply_to_theme(&mut state.colors.theme, &look, Some(3));
 
         let area = Rect::new(0, 0, 60, 8);
         let mut buf = Buffer::empty(area);
