@@ -577,11 +577,12 @@ pub struct MachineProfile {
     /// it — presentation, not a fact the story can read. See [`PeriodLook`],
     /// which is also where the provenance and its limits are stated.
     ///
-    /// `None` is a decline for want of a capture, not a claim that the machine
-    /// had no look: the Atari ST and the IBM PC have none in
-    /// `machine-screenshots/` at all. The IBM row may well decline permanently,
-    /// for the same reason its [`default_colours`](Self::default_colours) does —
-    /// what a PC looked like was the display adapter's answer, not Infocom's.
+    /// `None` is a decline for want of a capture, not a claim that the machine had
+    /// no look — and **no row declines any more**. The IBM PC's arrived with
+    /// `dos-hitchhiker.png` (SQ-0873/SQ-0928) and the Atari ST's, the last one,
+    /// with `st-zork1.png` (SQ-0933). The variant stays because the next machine
+    /// added to this table will start out unmeasured, and stating a look by
+    /// inference is what `the_machines_with_no_capture_decline` exists to stop.
     pub period_look: Option<PeriodLook>,
 }
 
@@ -673,8 +674,41 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
-        // Declined: no capture. stories/ holds Infocom Compilation 1-9 (19xx)(-).st.
-        period_look: None,
+        // SQ-0933, from `machine-screenshots/st-zork1.png` — Zork I revision 88 /
+        // serial 840726, the same release `stories/` carries. A v3 story, so it has
+        // no colour concept at all and every pixel is the interpreter's own
+        // presentation: this is a period-look capture in the same sense
+        // `dos-hitchhiker.png` is, and it is the one that empties
+        // `the_machines_with_no_capture_decline`.
+        //
+        // **READ THE CAPTURE'S NOTES BEFORE TRUSTING A NUMBER OFF IT.** The
+        // emulator applied a scanline filter, and it does not merely dim the frame
+        // — it INVERTS the answer. Censused whole, st-zork1.png is 53.6% black
+        // against 45.9% near-white, which reads as a black page. Split by row
+        // parity, the even rows are 99.2% pure black and the odd rows 92.0%
+        // #EBEBEB: the black is the gap between scanlines, and the page is white.
+        // Only the odd rows are picture.
+        //
+        // Corroborated from the other direction, which is why this row is stated
+        // rather than hedged: the machine's own v5 pair is already here from
+        // Infocom's `st/` interpreter — DEF_BACK 9 (white) under DEF_FORE 2 (black)
+        // — and the v3 capture shows the same two. What a v5 story is TOLD and what
+        // a v3 story is SHOWN agree, exactly as they did for the IBM PC.
+        period_look: Some(PeriodLook {
+            // WHITE, not the capture's #EBEBEB, for the same reason the IBM PC row
+            // takes EGA's #0000AA over a screenshot's #0F009E: the dimming belongs
+            // to the emulator's scanline filter, and standard colours 9 and 2 are
+            // white and black with no shade to be wrong about.
+            page: (0xFF, 0xFF, 0xFF),
+            ink: (0x00, 0x00, 0x00),
+            // Measured edge to edge on all eight rows of the band — x=0 and x=639
+            // both inked, the last row solid across — with the labels reversed out
+            // of it in the page colour.
+            status: StatusBand::FullReverse,
+            // A filled 8x8 cell immediately right of the `>` prompt.
+            cursor_shape: CursorShape::Block,
+            cursor_colour: (0x00, 0x00, 0x00),
+        }),
     },
     MachineProfile {
         number: IBM_PC_INTERPRETER_NUMBER,
@@ -992,14 +1026,34 @@ mod tests {
     fn the_machines_with_no_capture_decline() {
         let missing: Vec<_> =
             MACHINES.iter().filter(|m| m.period_look.is_none()).map(|m| m.number).collect();
-        // SQ-0873: the IBM PC left this list when `dos-hitchhiker.png` arrived —
-        // a v3 frame, so pure presentation. The Atari ST is the last machine with
-        // no capture at all.
+        // The list is EMPTY now, and that is the point of keeping the case rather
+        // than deleting it: the IBM PC left when `dos-hitchhiker.png` arrived
+        // (SQ-0873), the Atari ST when `st-zork1.png` did (SQ-0933), and the next
+        // machine anyone adds starts out unmeasured. This fails the moment a row
+        // states a look with nothing in `machine-screenshots/` behind it.
         assert_eq!(
             missing,
-            vec![ATARI_ST_INTERPRETER_NUMBER],
-            "only the machine with nothing in machine-screenshots/ declines",
+            Vec::<u8>::new(),
+            "every modelled machine has been measured; a new row must be too",
         );
+        // The Atari ST's capture is the one that emptied the list, and its two
+        // channels agree — which is the whole reason it could be stated. A v3
+        // frame shows white under black; the machine's own v5 pair, sourced from
+        // Infocom's `st/` interpreter long before any capture existed, is
+        // DEF_BACK 9 / DEF_FORE 2 — white and black in §8.3.1.
+        let st = machine(ATARI_ST_INTERPRETER_NUMBER).expect("modelled");
+        let look = st.period_look.expect("st-zork1.png, Zork I r88/840726");
+        assert_eq!(st.default_colours, Some((9, 2)), "told white under black");
+        assert_eq!(look.page, (0xFF, 0xFF, 0xFF), "…and shown the same");
+        assert_eq!(look.ink, (0x00, 0x00, 0x00));
+        // Not the capture's #EBEBEB: that dimming is the emulator's scanline
+        // filter, and a §8.3.1 white has no shade to be wrong about. The same
+        // judgement the IBM PC row makes about #0F009E.
+        assert_ne!(look.page, (0xEB, 0xEB, 0xEB), "the emulator's dimming is not the machine's white");
+        assert_eq!(look.status, StatusBand::FullReverse, "measured edge to edge on all eight rows");
+        assert_eq!(look.cursor_shape, CursorShape::Block);
+        assert_eq!(look.cursor_colour, look.ink, "a filled cell in the ink, like the C128's");
+
         // The Apple family shares one measurement, exactly as it shares one pair.
         let apples: Vec<_> = [
             APPLE_IIE_INTERPRETER_NUMBER,

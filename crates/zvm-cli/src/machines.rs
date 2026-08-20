@@ -364,9 +364,13 @@ mod tests {
             assert!(t.contains(s), "status {s} missing");
         }
         assert!(!t.contains("reversed per run"), "no row renders a per-run band now:\n{t}");
-        // A machine with no capture is a decline, not a blank.
-        let st = t.lines().find(|l| l.contains("Atari ST") && l.contains("no capture"));
-        assert!(st.is_some(), "the ST's period row must say why it is empty");
+        // SQ-0933: the Atari ST was the last row printing "no capture", and
+        // `st-zork1.png` filled it — so NO row says that now, and the ST prints a
+        // measured white page like every other machine. The decline branch above
+        // still covers a future unmeasured row; this pins that there isn't one.
+        assert!(!t.contains("no capture"), "every modelled machine is measured now:\n{t}");
+        let st = t.lines().find(|l| l.contains("Atari ST")).expect("the ST has a row");
+        assert!(st.contains("#FFFFFF"), "the ST's page is white: {st}");
     }
 
     /// The colours are resolved through the row's OWN palette, which is the

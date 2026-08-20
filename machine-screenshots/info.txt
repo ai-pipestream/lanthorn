@@ -93,3 +93,67 @@ dos-arthur.png measure #0000A1..A6 with no red tint, while dos-hitchhiker.png's
 #0F009E carries 0x0F of red that no EGA colour has. Three captures of one palette
 entry, three answers, none of them the palette.
 
+
+st-zork1.png CLOSES THE TABLE — INTERPRETER 5, THE LAST UNMEASURED MACHINE
+
+Zork I revision 88 / serial 840726 on an Atari ST, at the opening turn (West of
+House, Score 0/1) — the same release stories/ carries. Version 3, so the story
+has no colour concept whatsoever and every pixel in the frame is the
+interpreter's own presentation. That is what makes it a PERIOD LOOK capture in
+exactly the sense dos-hitchhiker.png is, and it is the frame that emptied
+zvm::interpreter's `the_machines_with_no_capture_decline`.
+
+READ THE SCANLINE FILTER FIRST. IT DOES NOT DIM THE ANSWER, IT INVERTS IT.
+
+The emulator drew every other line black. Censused whole, the frame is 53.6%
+#000000 against 45.9% #EBEBEB — which says the page is BLACK. Split by row
+parity it says the opposite, and unambiguously:
+
+  even rows   99.2% pure #000000          <- the gaps between scanlines
+  odd rows    92.0% #EBEBEB, 7.7% black   <- the picture
+
+So the page is white and the ink is black, and a census that does not ask about
+row parity gets the machine exactly backwards. Anything measured off this file
+must be measured on the odd rows alone.
+
+WHAT THE CONTENT ROWS SAY
+
+  page/ink    white page, black ink (see the RGB note below)
+  status      a FULL-WIDTH REVERSE band, 8 rows tall: x=0 and x=639 both inked
+              on every row of it, the last row solid across, with "West of
+              House" and "Score: 0/1" reversed out of it in the page colour.
+  cursor      a solid filled cell, 8x8, immediately right of the `>` prompt —
+              a BLOCK, drawn in the ink.
+
+Corroborated from the other direction, which is why the row is stated rather
+than hedged: the ST's v5 pair has been in the table since SQ-0835, read out of
+Infocom's own `st/` interpreter as DEF_BACK 9 under DEF_FORE 2 — white and
+black. What a v5 story is TOLD and what a v3 story is SHOWN agree, the same
+two-channel agreement that settled the IBM PC.
+
+A GEOMETRY FINDING THAT IS NOT IN THE TABLE, RECORDED SO IT IS NOT REDISCOVERED
+
+The capture is 642x401 and looks like a 640x400 screen. It is not. There are 200
+content rows, and glyphs dumped off consecutive content rows come out whole —
+complete, coherent 8x8 letterforms, not a 16-row face sampled every other line.
+The status band is 8 content rows. So this is the ST's MEDIUM resolution,
+640x200 on an 8x8 cell, 80x25 characters, displayed at 400 lines by the
+emulator's line doubling. Had the glyphs come back broken it would have been
+640x400 high-res mono with half the picture missing, and every row measurement
+above would have been off by a factor of two.
+
+None of that reaches `MachineProfile`: Zork I is v3 and has no pixel geometry to
+read, and `v6_font_cell` deliberately declines to model a per-machine cell (see
+its docs, and SQ-0917). It is here because it is the sort of thing the next
+person measures wrong.
+
+A NOTE ON THE RGB, BECAUSE THE TABLE AGAIN DOES NOT USE THE CAPTURE'S
+
+zvm::interpreter's Atari ST period look records #FFFFFF / #000000, not the
+#EBEBEB the content rows measure. Same judgement as the IBM PC row's #0000AA
+over dos-hitchhiker.png's #0F009E: the dimming belongs to the emulator's
+scanline filter, and standard colours 9 and 2 are white and black with no shade
+to be wrong about. The rows that DO record what was drawn — the Amiga's
+#074BA1, the C64's greys — do so because those machines' palettes are analogue
+or in doubt and nothing better exists. This one has nothing to be uncertain
+about.

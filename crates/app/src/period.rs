@@ -258,17 +258,22 @@ mod tests {
         assert!(resolve(amiga, true, true, true, Some(3)).is_some());
     }
 
-    /// A machine with no capture has no look, and asking for one does not
-    /// conjure it — the same sourced-or-declined standard the table itself keeps.
+    /// **The LICENCE is what declines, not the absence of a measurement** — and
+    /// that distinction is now the only one left, because every machine in the
+    /// table has been measured (the Atari ST was the last, SQ-0933).
+    ///
+    /// It was always the stronger guarantee, and it is why the change of
+    /// arrangement costs this case nothing: a rule that holds for every machine,
+    /// including ones measured later, beats one that happened to hold because a
+    /// screenshot was missing.
     #[test]
-    fn an_unmeasured_machine_declines() {
-        // The Atari ST is the last machine with no capture at all (SQ-0873). The
-        // IBM PC left that list when `dos-hitchhiker.png` arrived — so it is the
-        // LICENCE that stops a bare story file being painted DOS blue, not the
-        // absence of a measurement.
+    fn an_unlicensed_launch_declines_even_a_measured_machine() {
+        // Both of these machines HAVE a capture now.
+        assert!(InterpreterProfile::AtariSt.period_look().is_some(), "st-zork1.png");
+        assert!(InterpreterProfile::IbmPc.period_look().is_some(), "dos-hitchhiker.png");
         assert!(
-            resolve(InterpreterProfile::AtariSt, true, true, true, Some(3)).is_none(),
-            "the ST has no capture",
+            resolve(InterpreterProfile::AtariSt, true, true, false, Some(3)).is_none(),
+            "an unlicensed launch declines the ST's look",
         );
         assert!(
             resolve(InterpreterProfile::IbmPc, true, true, false, Some(3)).is_none(),
