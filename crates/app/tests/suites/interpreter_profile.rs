@@ -488,3 +488,78 @@ fn a_release_floppy_licenses_them_with_no_flag() {
     }
     assert!(seen > 0, "no release disk present; this case proved nothing");
 }
+
+
+// ── SQ-0930: the two meanings of `interpreter_number: None` ───────────────────
+
+/// **A DOS medium NAMES the IBM PC**, and reading its `None` as "no machine" cost
+/// two visible things at once.
+///
+/// `blorb::medium`'s DOS row answers `None` because the machine's §11.1.3 number is
+/// a version RULE, not because the disk is silent — its own comment says so. The
+/// ISO row's `None` means the opposite: a hybrid disc is both machines and a number
+/// would be wrong for half of it. Reading them alike made a DOS floppy resolve as a
+/// FALLBACK, so the story was told DECSystem-20 (`$1E` = 1) and the machine's own
+/// page never applied — on the one medium that unambiguously states it.
+#[test]
+fn a_dos_medium_names_the_ibm_pc_even_though_its_number_is_a_rule() {
+    use app::interpreter::ProfileSource;
+
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+    let mut seen = 0;
+    for file in ["floppy1.ima", "disk1.img"] {
+        let path = dir.join(file);
+        if !path.is_file() {
+            eprintln!("SKIP: gitignored disk missing at {}", path.display());
+            continue;
+        }
+        seen += 1;
+        let (profile, source) = InterpreterProfile::resolve_with_source(&path, None, None, None);
+        assert_eq!(profile, InterpreterProfile::IbmPc, "{file}");
+        assert_eq!(source, ProfileSource::Medium, "{file}: the disk names the machine");
+        assert!(source.licenses_machine_colours(false), "{file}: so its colours apply");
+
+        // …and the header says so. Deferring to zvm's version rule here advertised
+        // 1, which is the DECSystem-20.
+        let cfg = app::config::Config {
+            interpreter_profile: profile,
+            interpreter_source: source,
+            ..app::config::Config::default()
+        };
+        assert_eq!(
+            cfg.advertised_interpreter_number(),
+            Some(app::interpreter::IBM_PC_INTERPRETER_NUMBER),
+            "{file}: $1E must say IBM PC, not DECSystem-20",
+        );
+    }
+    assert!(seen > 0, "no DOS medium present; this case proved nothing");
+}
+
+/// **An unmodelled number is a fallback, not a machine the player asked for.**
+///
+/// `for_interpreter_number` lands every number this table does not model on
+/// `IbmPc`. That was inert while the variant stated nothing; it is not now that it
+/// states blue under white, and `--interpreter 1 --system-colours` would otherwise
+/// paint a DECSystem-20 in the IBM PC's own colours. The number still reaches
+/// `$1E` — the story asked and §11.1.3 has an answer — and only the presentation
+/// is withheld.
+#[test]
+fn an_unmodelled_number_never_borrows_the_ibm_pcs_colours() {
+    use app::interpreter::ProfileSource;
+
+    let bare = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../zvm/tests/fixtures/czech.z5");
+    for n in [1u8, 11] {
+        let (profile, source) = InterpreterProfile::resolve_with_source(&bare, Some(n), None, None);
+        assert_eq!(profile, InterpreterProfile::IbmPc, "-I {n} still falls back here");
+        assert_eq!(source, ProfileSource::Fallback, "-I {n} names no machine we model");
+        assert!(
+            !source.licenses_machine_colours(true),
+            "-I {n}: not even --system-colours may lend it the IBM PC's page",
+        );
+    }
+    // 6 is the IBM PC itself, so asking for it IS asking for a machine.
+    let (_, source) = InterpreterProfile::resolve_with_source(&bare, Some(6), None, None);
+    assert_eq!(source, ProfileSource::Asked);
+    assert!(source.licenses_machine_colours(true), "and the opt-in reaches it");
+}

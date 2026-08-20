@@ -665,8 +665,10 @@ pub(crate) fn boot_story(
             // SQ-0719: the configured number still wins; absent one, the profile
             // names its machine, and IBM PC names nothing so zvm's own default
             // rule (Frotz's: 6 for v6, 1 otherwise) stays in force untouched.
-            let interpreter_number =
-                cfg.interpreter_number.or_else(|| cfg.interpreter_profile.interpreter_number());
+            // SQ-0930: …except when a DOS MEDIUM named the IBM PC, where deferring
+            // to that rule told the story it was a DECSystem-20 off the one disk
+            // that says otherwise. See `Config::advertised_interpreter_number`.
+            let interpreter_number = cfg.advertised_interpreter_number();
             let mut s = match GameSession::new_with_art_scale(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, v6_art_scale, host_default_colours, host_screen, Some(random_seed)) {
                 Ok(s) => s,
                 Err(e) => {

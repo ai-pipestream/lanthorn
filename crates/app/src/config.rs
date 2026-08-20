@@ -1285,9 +1285,45 @@ impl Config {
     /// **The story READS this** in `$2C`/`$2D`, so it is not a paint: whatever
     /// this answers has to be what the screen shows, or a v5+ game asking for the
     /// default pair is told one thing and shown another.
+    /// The number to advertise in header `$1E`, for THIS launch (SQ-0930).
+    ///
+    /// [`InterpreterProfile::interpreter_number`] answers `None` for the IBM PC on
+    /// purpose, so zvm's own version rule (Frotz's 6-for-v6, 1-otherwise) stays in
+    /// force and naming the profile cannot change what the corpus advertises. That
+    /// is right for the FALLBACK — a story with no medium is not on any machine —
+    /// and wrong when a **DOS medium named it**, where 1 tells the story it is a
+    /// DECSystem-20 on the one disk that unambiguously says otherwise.
+    ///
+    /// **This is not inert and the change is deliberate.** `blorb::medium`'s DOS
+    /// row records the reason it declined to state 6: *Beyond Zork* swaps Font 3's
+    /// arrows for CP437 character graphics when it believes it is on an IBM PC, and
+    /// `BEYONDZO.DAT` sits on `floppy1.ima`. That is a visible rendering change on
+    /// real media — and it is what the Lost Treasures DOS release actually did, so
+    /// a launch off that floppy should have it.
+    pub fn advertised_interpreter_number(&self) -> Option<u8> {
+        if let Some(n) = self.interpreter_number {
+            return Some(n);
+        }
+        if self.interpreter_profile == crate::interpreter::InterpreterProfile::IbmPc
+            && self.interpreter_source == crate::interpreter::ProfileSource::Medium
+        {
+            return Some(crate::interpreter::IBM_PC_INTERPRETER_NUMBER);
+        }
+        self.interpreter_profile.interpreter_number()
+    }
+
+    /// May this launch present its machine at all? (SQ-0928)    /// May this launch present its machine at all? (SQ-0928)
+    ///
+    /// The medium named the machine, or the player named it and opted in. Both
+    /// [`Self::machine_default_colours`] and `crate::period::resolve` ask this —
+    /// a `$2C`/`$2D` pair and a period look are the same kind of claim about the
+    /// same machine, and it would be incoherent to license one and not the other.
+    pub fn machine_colours_licensed(&self) -> bool {
+        self.interpreter_source.licenses_machine_colours(self.system_colours)
+    }
+
     pub fn machine_default_colours(&self) -> Option<(u8, u8)> {
-        self.interpreter_source
-            .licenses_machine_colours(self.system_colours)
+        self.machine_colours_licensed()
             .then(|| self.interpreter_profile.default_colours())
             .flatten()
     }

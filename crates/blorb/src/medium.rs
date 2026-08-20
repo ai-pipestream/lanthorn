@@ -363,6 +363,13 @@ impl DiskImage {
         self.row().interpreter_number
     }
 
+    /// Does this medium name the IBM PC, whose number is a version rule?
+    /// See [`Row::implies_ibm_pc`] — this is the other half of
+    /// [`Self::interpreter_number`]'s `None`.
+    pub fn implies_ibm_pc(self) -> bool {
+        self.row().implies_ibm_pc
+    }
+
     /// The filename extensions this format is CONVENTIONALLY given — lowercase,
     /// no leading dot.
     ///
@@ -417,6 +424,17 @@ struct Format {
     label: &'static str,
     /// See [`DiskImage::interpreter_number`].
     interpreter_number: Option<u8>,
+    /// Does this medium name the **IBM PC**, whose §11.1.3 number is a version
+    /// RULE rather than a constant? (SQ-0930)
+    ///
+    /// `interpreter_number: None` above says two different things and this is the
+    /// half that got lost. A DOS floppy's `None` means "the rule already in force
+    /// IS the IBM PC's" — a machine, stated by deferral. The ISO's means "this
+    /// disc is both machines and a number here would be wrong for half of it".
+    /// One is a machine and the other is not, and reading them alike made a DOS
+    /// floppy resolve as *no medium at all*: it took the fallback profile, so the
+    /// story was told DECSystem-20 and the machine's own colours never applied.
+    implies_ibm_pc: bool,
     /// See [`DiskImage::extensions`]. Lowercase, no dot, at least one — a row
     /// with none is a format a directory scan can never offer, and the census
     /// test in this module says so.
@@ -480,6 +498,7 @@ const FORMATS: &[Format] = &[
         image: DiskImage::Adf,
         label: "ADF",
         interpreter_number: Some(AMIGA_INTERPRETER_NUMBER),
+        implies_ibm_pc: false,
         // Every Amiga floppy in the corpus is `.adf`; the format has no second
         // customary spelling.
         extensions: &["adf"],
@@ -491,6 +510,7 @@ const FORMATS: &[Format] = &[
         image: DiskImage::Hfs,
         label: "HFS",
         interpreter_number: Some(MACINTOSH_INTERPRETER_NUMBER),
+        implies_ibm_pc: false,
         // `.image` is DiskCopy 4.2's own name and what the corpus uses (`Zork
         // Zero Disk.image`). Macintosh volumes also circulate as `.img` and
         // `.dsk`; the first is admitted by the DOS row below and the second by
@@ -559,6 +579,9 @@ const FORMATS: &[Format] = &[
         // rendering change on real media that nothing in this lane establishes,
         // and it belongs to whoever can look at it.
         interpreter_number: None,
+        // …and THIS `None` is a deferral, not an absence: see the comment above.
+        // The machine is the IBM PC; only its number is a rule (SQ-0930).
+        implies_ibm_pc: true,
         // Two spellings of one thing, as this module's header already says:
         // `floppy1.ima` and `disk1.img` are the same raw sector dump and the
         // same reader opens both.
@@ -590,6 +613,7 @@ const FORMATS: &[Format] = &[
         // and it declines the one member nothing establishes: the ST never had a
         // YZIP, so it has no Version 6 art geometry to state.
         interpreter_number: Some(ATARI_ST_INTERPRETER_NUMBER),
+        implies_ibm_pc: false,
         // `.st` is the raw ST sector dump, which is what this reader opens and
         // what all nine compilations in the corpus are. **Not `.msa`**: Magic
         // Shadow Archiver images are RLE-compressed with their own header, not
@@ -657,6 +681,7 @@ const FORMATS: &[Format] = &[
         // Version 6 screen is 140x192 on a 3x9 cell, which is not a standard
         // window in this codebase's sense at all. See that knob's docs.
         interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
+        implies_ibm_pc: false,
         // Two spellings, one filesystem. `.2mg` is the wrapper every 3.5-inch
         // image in the corpus wears; `.dsk` is what a 5.25-inch dump is called,
         // and SQ-0864 established that those are ProDOS volumes too — the same
@@ -717,6 +742,7 @@ const FORMATS: &[Format] = &[
         // raw disk arriving later inherits the Apple II answer already argued
         // rather than a fresh guess.
         interpreter_number: Some(APPLE_IIGS_INTERPRETER_NUMBER),
+        implies_ibm_pc: false,
         // The same spelling as the ProDOS row, which the census handles by being
         // a UNION: a directory scan pre-filters on `.dsk` and
         // [`DiskImage::detect`] then says which of the two formats the bytes are.
@@ -743,6 +769,7 @@ const FORMATS: &[Format] = &[
         // touches the C128 MMU forty times. Declining would land it on 1, the
         // DECSystem-20 (SQ-0857). `--interpreter 8` names the Commodore 64.
         interpreter_number: Some(COMMODORE_128_INTERPRETER_NUMBER),
+        implies_ibm_pc: false,
         // `.d64` is the universal spelling for a 1541 dump and what all three
         // images in `stories/` wear — two of them shouting, which costs nothing:
         // the census is matched case-insensitively by every scan that uses it.
@@ -771,6 +798,7 @@ const FORMATS: &[Format] = &[
         // one it does not leaves the rule already in force, which is the IBM PC's
         // and is right for the DOS files on disc 1 that carry a blank creator.
         interpreter_number: None,
+        implies_ibm_pc: false,
         // `iso` is the universal spelling and what both discs wear. `bin` and
         // `img` are claimed by rows above and reach this one anyway, since a
         // scan pre-filters on the union and `looks_like` decides.

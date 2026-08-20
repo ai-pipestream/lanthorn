@@ -316,7 +316,18 @@ impl InterpreterProfile {
         mounted_as: Option<blorb::medium::DiskImage>,
     ) -> (Self, ProfileSource) {
         if let Some(n) = configured_interpreter_number {
-            return (Self::for_interpreter_number(n), ProfileSource::Asked);
+            // SQ-0930: a number this table does not model is a FALLBACK, not a
+            // machine the player asked for. `for_interpreter_number` lands every
+            // unmodelled number on `IbmPc` — which was inert while that variant
+            // stated nothing, and is not now that it states blue under white:
+            // `--interpreter 1 --system-colours` would have painted a
+            // DECSystem-20 in the IBM PC's colours. The number still reaches
+            // `$1E`, because the story asked and §11.1.3 has an answer.
+            let src = match Self::try_for_interpreter_number(n) {
+                Some(_) => ProfileSource::Asked,
+                None => ProfileSource::Fallback,
+            };
+            return (Self::for_interpreter_number(n), src);
         }
         let medium = mounted_as.or_else(|| Self::medium(story_path));
         // A named archive is an INSTRUCTION about which artwork to load, and it
@@ -325,12 +336,21 @@ impl InterpreterProfile {
         // player's. Naming an `.mg1` beside a bare story file is not original
         // media and does not license that machine's colours.
         if let Some(flavour) = named_art {
-            let from_medium = medium.and_then(|m| m.interpreter_number()).is_some();
+            let from_medium = medium
+                .is_some_and(|m| m.interpreter_number().is_some() || m.implies_ibm_pc());
             let src = if from_medium { ProfileSource::Medium } else { ProfileSource::Asked };
             return (Self::for_art_flavour_on(flavour, medium), src);
         }
         if let Some(n) = medium.and_then(|m| m.interpreter_number()) {
             return (Self::for_interpreter_number(n), ProfileSource::Medium);
+        }
+        // SQ-0930: a DOS medium NAMES the IBM PC — its `interpreter_number` is
+        // `None` because the machine's number is a version rule, not because the
+        // disk says nothing. Reading those two alike made a DOS floppy resolve as
+        // no medium at all: the story was told DECSystem-20 and the machine's own
+        // page never applied, on the one medium that unambiguously states it.
+        if medium.is_some_and(|m| m.implies_ibm_pc()) {
+            return (Self::IbmPc, ProfileSource::Medium);
         }
         (Self::IbmPc, ProfileSource::Fallback)
     }
