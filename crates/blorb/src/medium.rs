@@ -798,7 +798,17 @@ const FORMATS: &[Format] = &[
         // one it does not leaves the rule already in force, which is the IBM PC's
         // and is right for the DOS files on disc 1 that carry a blank creator.
         interpreter_number: None,
-        implies_ibm_pc: false,
+        // …and SQ-0930 makes that last sentence true rather than merely stated.
+        // Every one of `LostTreasures1.iso`'s nineteen `PC/DATA/*.DAT` stories
+        // carries a blank creator, so `image_of` cannot name their machine and
+        // they fall through to this row. While that fall-through meant "no
+        // machine", the whole PC side of the disc got no machine at all — no
+        // period look, no page — on a disc that says `PC/` in the path.
+        //
+        // The MAC side is unaffected: `image_of` answers `Hfs` for anything
+        // wearing Infocom's own creator, and only what it cannot name reaches
+        // here.
+        implies_ibm_pc: true,
         // `iso` is the universal spelling and what both discs wear. `bin` and
         // `img` are claimed by rows above and reach this one anyway, since a
         // scan pre-filters on the union and `looks_like` decides.

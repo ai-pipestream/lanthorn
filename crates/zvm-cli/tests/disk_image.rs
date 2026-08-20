@@ -1059,3 +1059,64 @@ fn one_build_in_three_files_is_still_three_distinguishable_rows() {
         assert!(rows.iter().any(|r| r.ends_with(name)), "no row for {name}:\n{err}");
     }
 }
+
+
+// ── SQ-0930: a hybrid disc is two machines, per story ─────────────────────────
+
+/// **The CLI read the IMAGE's format where it should have read the STORY's.**
+///
+/// Two compilation discs carry both machines' builds side by side, and the
+/// difference is per file, not per volume:
+///
+///   masterpieces .bin   mounts HFS   -> every PC build reported the MACINTOSH
+///   LostTreasures1.iso  mounts ISO   -> every PC build reported NOTHING
+///
+/// The TUI has resolved this per story since SQ-0876 (`read_story_file` calls
+/// `image_for`); the CLI never did, and it only became visible when a machine
+/// started carrying colours. Both discs are gitignored, so this skips vacuously —
+/// with a guard, because a skip that reads as a pass proves nothing.
+#[test]
+fn a_hybrid_disc_tells_a_pc_build_from_a_mac_one() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut seen = 0;
+    for (disc, pc_entry, mac_entry) in [
+        (
+            "masterpieces/Classic Text Adventure Masterpieces of Infocom (USA).bin",
+            "PC/DATA/ZORK1.DAT",
+            Some("MAC/ZORK I"),
+        ),
+        ("treasures/LostTreasures1.iso", "PC/DATA/ZORK1.DAT", Some("MAC/ZORK I")),
+    ] {
+        let path = root.join(disc);
+        if !path.is_file() {
+            eprintln!("SKIP: gitignored disc missing at {}", path.display());
+            continue;
+        }
+        let raw = std::fs::read(&path).expect("read");
+        let Ok(disk) = blorb::medium::MountedDisk::mount(raw) else {
+            panic!("{disc}: mounts")
+        };
+        seen += 1;
+
+        // The PC side names the IBM PC — by the row's `implies_ibm_pc`, because
+        // that machine's §11.1.3 number is a version rule rather than a constant.
+        let pc = disk.image_for(pc_entry);
+        assert!(
+            pc.implies_ibm_pc() || pc.interpreter_number() == Some(6),
+            "{disc}: {pc_entry} must name the IBM PC, got {pc:?}",
+        );
+
+        // …and the Mac side still names the Macintosh, which is the half that was
+        // already right and must not be traded away for the other.
+        if let Some(mac_entry) = mac_entry {
+            let mac = disk.image_for(mac_entry);
+            assert_eq!(
+                mac.interpreter_number(),
+                Some(3),
+                "{disc}: {mac_entry} must still name the Macintosh, got {mac:?}",
+            );
+            assert_ne!(pc, mac, "{disc}: the two halves must not resolve alike");
+        }
+    }
+    assert!(seen > 0, "no hybrid disc present; this case proved nothing");
+}

@@ -448,7 +448,7 @@ fn mount_and_pick(
     raw: Vec<u8>,
     stdin_is_tty: bool,
     want: Option<&str>,
-) -> Vec<u8> {
+) -> (Vec<u8>, Option<blorb::medium::DiskImage>) {
     let die = |e: String| -> ! {
         eprintln!("{e}");
         std::process::exit(1);
@@ -482,7 +482,8 @@ fn mount_and_pick(
     if cands.len() > 1 {
         println!("Opening {}) {}", chosen + 1, cands[chosen].label());
     }
-    cands.swap_remove(chosen).bytes
+    let c = cands.swap_remove(chosen);
+    (c.bytes, c.image)
 }
 
 // ── build_machine ─────────────────────────────────────────────────────────────
@@ -1408,8 +1409,17 @@ fn main() {
     // The question is `stdin_tty` — the device fact — not `stdin_is_tty`: a
     // screen-reader run has a real terminal in front of it and should be asked,
     // even though it wants no raw-mode line editing anywhere else.
+    // SQ-0930: the mount also reports the medium THIS story came off, which on a
+    // hybrid disc is not the image's own format. `medium` above is the image's;
+    // this narrows it, exactly as `app::hints::read_story_file` has since SQ-0876.
+    let mut medium = medium;
     let story_bytes = if media::looks_like_image(&story_bytes) {
-        mount_and_pick(&story_path, story_bytes, mode.stdin_tty(), args.story_pick.as_deref())
+        let (bytes, per_story) =
+            mount_and_pick(&story_path, story_bytes, mode.stdin_tty(), args.story_pick.as_deref());
+        if per_story.is_some() {
+            medium = per_story;
+        }
+        bytes
     } else {
         story_bytes
     };
@@ -1474,7 +1484,20 @@ fn main() {
     // medium's own answer, which in turn beats zvm's default rule (`None` here —
     // Frotz's 6-for-v6, 1 otherwise). Same order the TUI's
     // `InterpreterProfile::resolve` applies; only the default moves.
-    let interpreter = args.interpreter.or_else(|| medium.and_then(|m| m.interpreter_number()));
+    let interpreter = args
+        .interpreter
+        .or_else(|| medium.and_then(|m| m.interpreter_number()))
+        // SQ-0930: …and a DOS medium NAMES the IBM PC. Its `interpreter_number` is
+        // `None` because the machine's own number is a version rule, not because
+        // the disk is silent — so reading the two alike left every PC build on a
+        // hybrid disc with no machine at all, and no period look on a disc whose
+        // paths literally say `PC/`. The TUI does this in
+        // `Config::advertised_interpreter_number`.
+        .or_else(|| {
+            medium
+                .filter(|m| m.implies_ibm_pc())
+                .map(|_| zvm::interpreter::IBM_PC_INTERPRETER_NUMBER)
+        });
     // SQ-0928: a machine's `$2C`/`$2D` describes a MACHINE, and running a story off
     // its release disk makes that description true of the launch. Naming a number
     // by hand does not — and now that the IBM PC states a pair (blue under white),

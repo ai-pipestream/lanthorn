@@ -41,6 +41,16 @@ pub struct Candidate {
     pub name: String,
     /// The story bytes, read off the image.
     pub bytes: Vec<u8>,
+    /// The medium THIS story came off, which on a hybrid disc is not the image's
+    /// own format (SQ-0930).
+    ///
+    /// `Classic Text Adventure Masterpieces` mounts as HFS and carries both
+    /// machines' builds; `LostTreasures1.iso` mounts as ISO 9660 and does the
+    /// same. Reading the IMAGE's format told every PC story on the first that it
+    /// was a Macintosh, and every PC story on the second that it was nothing.
+    /// The TUI has resolved this per story since SQ-0876; this is the CLI
+    /// catching up.
+    pub image: Option<blorb::medium::DiskImage>,
 }
 
 impl Candidate {
@@ -164,7 +174,14 @@ pub fn story_candidates(path: &Path, raw: Vec<u8>) -> Result<Vec<Candidate>, Str
     let found: Vec<Candidate> = disk
         .stories()
         .into_iter()
-        .map(|s| Candidate { name: s.name, bytes: s.bytes })
+        .map(|s| {
+            // SQ-0930: the story's OWN half of the platter, not the image's
+            // format. `image_for` is the same call `app::hints::read_story_file`
+            // has made since SQ-0876, and its absence here is why a PC build on
+            // the Masterpieces disc reported the Macintosh.
+            let image = Some(disk.image_for(&s.name));
+            Candidate { name: s.name, bytes: s.bytes, image }
+        })
         .collect();
     if found.is_empty() {
         let files = if mounted == 1 { "file" } else { "files" };
@@ -336,7 +353,7 @@ mod tests {
     }
 
     fn cand(name: &str, v: u8, release: u16, serial: &str) -> Candidate {
-        Candidate { name: name.to_string(), bytes: story(v, release, serial) }
+        Candidate { name: name.to_string(), bytes: story(v, release, serial), image: None }
     }
 
     /// **The lookup** (SQ-0884). The whole point of showing the header was that
@@ -408,7 +425,7 @@ mod tests {
     fn a_high_ascii_serial_labels_as_the_text_it_is() {
         let mut bytes = story(3, 0, "......");
         bytes[0x12..0x18].copy_from_slice(&[0xc2, 0xec, 0xef, 0xf7, 0xee, 0xa1]);
-        let c = Candidate { name: "LEATHRGODDESSES".into(), bytes };
+        let c = Candidate { name: "LEATHRGODDESSES".into(), bytes, image: None };
         assert_eq!(c.header().as_deref(), Some("v3 r0 sBlown!"));
         assert_eq!(c.label(), "LEATHRGODDESSES  (v3 r0 sBlown!)");
     }
@@ -416,7 +433,7 @@ mod tests {
     /// Nothing to read a header out of (a Blorb, say) still gets a usable line.
     #[test]
     fn a_candidate_without_a_readable_header_is_labelled_by_name_alone() {
-        let c = Candidate { name: "game.blb".into(), bytes: b"FORM....IFRS".to_vec() };
+        let c = Candidate { name: "game.blb".into(), bytes: b"FORM....IFRS".to_vec(), image: None };
         assert_eq!(c.header(), None);
         assert_eq!(c.label(), "game.blb");
     }
