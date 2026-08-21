@@ -2166,6 +2166,24 @@ other: scopa's boot fills its green table, draws two card pictures and *then* fi
 the menu buttons over the top, and replaying the fills last let the opening
 full-screen clear wipe cards that had already been painted.
 
+### The ground is a screen, not a window
+
+A v6 game erases in *screen* coordinates — `erase_window` hands over an absolute
+rectangle, because the window that drew it has usually been moved and resized for
+that one fill and will move again before the next. The ground it lands on was cut
+to window 0's box instead, on the standard's word that window 0 opens as the whole
+screen: true at boot, false from the first `window_size`, which every v6 game
+issues within a keypress or two. Anything past that box was dropped without a
+trace. Shogun (r322, IBM PC) paints its score bar at native (46,0) 548×32,
+reaching to x=594 on a surface 548 wide, so the bar's right end simply stopped
+existing 46 columns short of the flank it belongs to — one half of a symptom whose
+other half was a different layer entirely, which is why fixing that layer cured one
+side of the bar and left the other standing. Journey's ProDOS press allocated
+304×288 for a 560×384 screen for the same reason. The ground is now allocated at
+the screen the header states, which is the same extent and the same coordinate
+space as the canvas the ring composites onto: 640×400 for an IBM PC press, 560×384
+for an Apple IIgs one.
+
 ### The ground has to survive a restore too
 
 The painted ground rides *beside* the window tree rather than inside it, and for a
