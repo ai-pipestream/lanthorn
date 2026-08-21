@@ -548,6 +548,23 @@ impl DebugPanelState {
         };
     }
 
+    /// Pan `window`'s active section sideways by one step, for the mouse wheel
+    /// (SQ-0981). `window` is explicit — like [`scroll_active`](Self::scroll_active)
+    /// and unlike the `h`/`l` key path, which only ever reaches the FOCUSED
+    /// window — so Shift+wheel over the hex dump pans it whether or not it holds
+    /// focus, matching the wheel's convention everywhere else in the inspector.
+    ///
+    /// Returns `false` when `window` shows a section that does not pan, so the
+    /// caller can fall back to a plain vertical scroll rather than swallowing
+    /// the gesture.
+    pub fn pan_active(&mut self, window: usize, right: bool) -> bool {
+        if self.active_section(window) != Section::Memory {
+            return false;
+        }
+        self.step_memory_h(right);
+        true
+    }
+
     fn scroll_list(&mut self, window: usize, section: Section, down: bool) {
         let max = self.snapshot.section(section).len().saturating_sub(1);
         self.scroll[window] = if down {
@@ -2057,6 +2074,77 @@ mod tests {
         p.goto_memory(0x3000, &MockDbg);
         assert_eq!(p.snapshot.memory_width, 72, "no Z-text column here");
         assert_eq!(p.mem_hscroll, 71, "so the scroll is pulled back onto the hex");
+    }
+
+    // ── Wheel pan (SQ-0981) ────────────────────────────────────────────────
+
+    /// The whole point: `h`/`l` only ever reach the FOCUSED window, but the
+    /// wheel addresses whatever is under the cursor. Shift+wheel over the hex
+    /// dump must pan it while the focus sits somewhere else entirely.
+    #[test]
+    fn the_wheel_pans_a_memory_window_that_does_not_have_focus() {
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        p.focus = 0; // Disassembly — the hex dump is visible but not focused.
+        assert_ne!(p.active_section(p.focus), Section::Memory, "focus is elsewhere");
+        // The key path is inert from here, exactly as before.
+        assert_eq!(p.handle_key(KeyCode::Char('l'), &MockDbg), DebugKey::Ignored);
+        assert_eq!(p.mem_hscroll, 0);
+        // The wheel is not.
+        assert!(p.pan_active(2, true), "window 2 shows Memory, so it pans");
+        assert_eq!(p.mem_hscroll, 6, "one step is two hex bytes and their spaces");
+        assert!(p.pan_active(2, false));
+        assert_eq!(p.mem_hscroll, 0);
+    }
+
+    #[test]
+    fn the_wheel_pan_clamps_exactly_as_h_and_l_do() {
+        let mut by_key = memory_focused_panel();
+        by_key.goto_memory(0x2005, &MockDbg);
+        for _ in 0..40 { by_key.handle_key(KeyCode::Char('l'), &MockDbg); }
+        let mut by_wheel = memory_focused_panel();
+        by_wheel.goto_memory(0x2005, &MockDbg);
+        by_wheel.focus = 0;
+        for _ in 0..40 { by_wheel.pan_active(2, true); }
+        assert_eq!(by_wheel.mem_hscroll, 80, "clamped to the widest row");
+        assert_eq!(by_wheel.mem_hscroll, by_key.mem_hscroll, "the same clamp as the keys");
+        for _ in 0..40 { by_wheel.pan_active(2, false); }
+        assert_eq!(by_wheel.mem_hscroll, 0, "and cannot go negative");
+    }
+
+    /// A window showing anything else reports "not mine", so the caller falls
+    /// back to a plain vertical scroll instead of eating the gesture.
+    #[test]
+    fn the_wheel_pan_declines_every_section_but_memory() {
+        let mut p = memory_focused_panel();
+        for w in 0..3 {
+            for tab in 0..p.tabs[w].len() {
+                p.tab[w] = tab;
+                let section = p.active_section(w);
+                let panned = p.pan_active(w, true);
+                assert_eq!(
+                    panned,
+                    section == Section::Memory,
+                    "{section:?} in window {w} should pan == {}",
+                    section == Section::Memory
+                );
+            }
+        }
+    }
+
+    /// The unmodified wheel is untouched: it still steps the dump's ADDRESS
+    /// down a row and leaves the sideways position alone.
+    #[test]
+    fn an_unmodified_wheel_still_scrolls_the_memory_window_vertically() {
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        p.focus = 0;
+        let addr = p.mem_addr;
+        p.pan_active(2, true); // put the pan somewhere non-zero first
+        assert_eq!(p.mem_hscroll, 6);
+        p.scroll_active(2, true, &MockDbg);
+        assert_eq!(p.mem_addr, addr + 16, "the wheel still moves a row down");
+        assert_eq!(p.mem_hscroll, 6, "and leaves the sideways pan where it was");
     }
 
     #[test]

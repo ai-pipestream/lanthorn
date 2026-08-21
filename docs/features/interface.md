@@ -136,7 +136,11 @@ built-in debugger that follows the running story instruction by instruction.
   decoded text even begins, and no inspector window is that wide. `h` and `l` pan
   the dump sideways (the arrows are the section cycler, so panning takes the
   vi keys, the same trade the animation view makes), clamped to the widest row.
-  The `addr:` line above stays put — it's a control, not part of the dump. A
+  **Shift+wheel** pans it too — and like every other wheel gesture in the
+  inspector it goes to the window under the cursor, so you can pan the hex dump
+  without first tabbing focus onto it. A trackpad's sideways swipe (or any
+  terminal that forwards a real horizontal wheel) pans it with no modifier at
+  all. The `addr:` line above stays put — it's a control, not part of the dump. A
   scrollbar along the bottom of the pane shows how far along the row you are and
   how much is still out to the right — the same themed bar every other
   scrollable surface uses (`scrollbar` and `scrollbar_track`). It appears only
