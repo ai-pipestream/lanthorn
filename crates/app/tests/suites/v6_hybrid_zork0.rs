@@ -184,33 +184,53 @@ fn zork0_frameless_status_band_is_anchored_full_width() {
 }
 
 /// (SQ-0500 pin) Zork0's status ("Moves:"/"Score:") sits ON opaque banner art, so
-/// in HYBRID mode its chrome band stays the pixel RING — the status labels must
-/// NOT appear as terminal cell text (unlike Arthur's clear-interior status row,
-/// which does become cells). Guards the "art behind → keep the ring" branch of the
-/// band decomposition.
+/// in HYBRID mode its chrome band stays the pixel RING — the strip is classified
+/// Art and the artwork goes up as an image, unlike Arthur's clear-interior status
+/// row, which becomes a Text strip. Guards the "art behind → keep the ring" branch
+/// of the band decomposition.
+///
+/// SQ-0944 made the MEDIUM of the text on that band depend on the backend, and
+/// this pin now says so on both. The strip is an Art strip on either — that is the
+/// branch being guarded, and it has not moved. What changed is that half-blocks
+/// draws the labels sitting on it as glyphs, because a rasterised 8x16 glyph is
+/// 8x2 there and unreadable, while kitty keeps them in the raster, which is both
+/// faithful and the only thing that works: a glyph printed into a cell a virtual
+/// placement covers deletes the image rather than layering over it.
 #[test]
 fn zork0_hybrid_status_on_art_stays_in_the_ring() {
+    use ratatui_image::picker::ProtocolType;
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
 
-    let mut state = render_state(app::config::V6RenderMode::Hybrid);
-    state.push_transcript("West of House");
-    let area = Rect::new(0, 0, 80, 30);
-    let mut buf = Buffer::empty(area);
-    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    for protocol in [ProtocolType::Kitty, ProtocolType::Halfblocks] {
+        let glyphs_over_art = protocol == ProtocolType::Halfblocks;
+        let mut state = render_state(app::config::V6RenderMode::Hybrid);
+        if let Some(p) = state.game_picker.as_mut() {
+            p.set_protocol_type(protocol);
+        }
+        state.push_transcript("West of House");
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
 
-    // The banner status labels are rasterized into the pixel ring, never stamped
-    // as terminal text cells.
-    let screen: String = (area.y..area.bottom())
-        .map(|y| {
-            (area.x..area.right())
-                .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
-                .collect::<String>()
-                + "\n"
-        })
-        .collect();
-    assert!(!screen.contains("Moves:"), "Zork0's on-art status stays in the ring, not cells:\n{screen}");
-    assert!(!screen.contains("Score:"), "Zork0's on-art score stays in the ring, not cells");
+        let screen: String = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        for label in ["Moves:", "Score:"] {
+            assert_eq!(
+                screen.contains(label),
+                glyphs_over_art,
+                "{protocol:?}: {label} rides the banner's ART band either way — rasterised into \
+                 it where a glyph cannot sit over a placement, stamped as glyphs where one \
+                 can:\n{screen}"
+            );
+        }
+    }
 }
 
 /// (SQ-0514 chrome-band freshness pin) Zork0 rasterizes its Score/Moves status into

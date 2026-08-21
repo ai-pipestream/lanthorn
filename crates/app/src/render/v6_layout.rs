@@ -1255,6 +1255,52 @@ pub fn clear_text_rows(canvas: &mut RgbaImage, runs: &[(u16, u32, u32)]) {
     }
 }
 
+/// The ink a chrome `px_texts` run is drawn in, and the block it sits on — `None`
+/// for "no block", meaning whatever is already behind the run shows through.
+///
+/// Extracted from [`build_chrome_canvas`]'s glyph loop (SQ-0944) because a SECOND
+/// caller now needs the identical answer: on a backend that can put a terminal
+/// glyph in a cell its artwork covers, `screen::stamp_runs_over_art` draws these
+/// same runs as glyphs instead of pixels, and it has to reach the same colours or
+/// the two renderings of one frame disagree. §6 of the pipeline document lists
+/// "two places deciding the same thing by different rules" as a defect class this
+/// file already suffers from, so there is one rule and both paths call it.
+///
+/// `over_art` is deferred because the answer costs a region scan and only the
+/// inherited-colours-plus-reverse branch needs it — the same laziness the inline
+/// code had.
+pub(crate) fn chrome_run_ink(
+    t: &PxText,
+    default_fg: Rgba<u8>,
+    default_bg: Rgba<u8>,
+    colors: &ColorScheme,
+    over_art: impl FnOnce() -> bool,
+) -> (Rgba<u8>, Option<Rgba<u8>>) {
+    // A packed colour is EXPLICIT only when the game named a real colour (see
+    // `packed_explicit`): inherited colours + reverse over frame art (Zork0's
+    // ribbon labels) must NOT paint an opaque block — the original renders dark
+    // ink directly ON the art. A block is painted only when the game chose colours.
+    if t.style & 1 == 0 {
+        return (
+            packed_to_rgba(t.fg, default_fg, colors),
+            packed_explicit(t.bg).then(|| packed_to_rgba(t.bg, default_bg, colors)),
+        );
+    }
+    if packed_explicit(t.fg) || packed_explicit(t.bg) {
+        // Real colour pair: swap and paint the block.
+        return (packed_to_rgba(t.bg, default_bg, colors), Some(packed_to_rgba(t.fg, default_fg, colors)));
+    }
+    // Inherited colours + reverse: whether to paint a block depends on what's
+    // BEHIND the run (SQ-0487). Over opaque frame art (Zork0's ribbon labels) a
+    // block would erase the art, so draw dark ink (default_bg) directly on it, no
+    // block. Over a CLEAR background (Shogun's boot-menu selection bar — no art
+    // behind it) the highlight must be visible, so paint the swapped block: a
+    // solid default_fg bar with default_bg ink, INCLUDING the blank gap runs the
+    // game paints between the item's words (a reversed space then fills its cell
+    // — no more moth-eaten bar).
+    if over_art() { (default_bg, None) } else { (default_bg, Some(default_fg)) }
+}
+
 /// Rasterise every chrome window into one native-sized canvas.
 ///
 /// How much of the TEXT layer this canvas owes pixels for (SQ-0903).
@@ -1342,12 +1388,10 @@ pub fn build_chrome_canvas(
             let px_texts: Vec<&PxText> =
                 g.px_texts.iter().filter(|t| !text.skips(t.y.max(1) - 1)).collect();
             if !px_texts.is_empty() {
-                // A packed colour is EXPLICIT only when the game named a real
-                // colour (see `packed_explicit`): inherited colours + reverse
-                // over frame art (Zork0's ribbon labels) must NOT paint an
-                // opaque block — the original renders dark ink directly ON the
-                // art. A block is painted only when the game chose colours.
-                let explicit = packed_explicit;
+                // The run colour rule itself now lives in `chrome_run_ink`, which the
+                // glyph loop below calls and so does the cell path that draws these
+                // same runs as terminal glyphs (SQ-0944).
+                //
                 // Fill pure-reverse-row gaps FIRST, so the glyph loop paints the run
                 // cells on top of them (SQ-0499). Both this fill and the glyph loop
                 // put their over-art question to `art`, never to `canvas`.
@@ -1365,36 +1409,12 @@ pub fn build_chrome_canvas(
                 for t in &px_texts {
                     let px0 = t.x.max(1) as u32 - 1;
                     let py = t.y.max(1) as u32 - 1;
-                    let (fg, bg) = if t.style & 1 != 0 {
-                        if explicit(t.fg) || explicit(t.bg) {
-                            // Real colour pair: swap and paint the block.
-                            (packed_to_rgba(t.bg, default_bg, colors), Some(packed_to_rgba(t.fg, default_fg, colors)))
-                        } else {
-                            // Inherited colours + reverse: whether to paint a block
-                            // depends on what's BEHIND the run (SQ-0487). Over opaque
-                            // frame art (Zork0's ribbon labels) a block would erase the
-                            // art, so draw dark ink (default_bg) directly on it, no
-                            // block. Over a CLEAR background (Shogun's boot-menu
-                            // selection bar — no art behind it) the highlight must be
-                            // visible, so paint the swapped block: a solid default_fg
-                            // bar with default_bg ink, INCLUDING the blank gap runs the
-                            // game paints between the item's words (a reversed space
-                            // then fills its cell — no more moth-eaten bar). `art` is
-                            // pass 1 frozen, so this sees the real artwork (or
-                            // transparency) and never another run's own block.
-                            let span_w = t.text.chars().count().max(1) as u32 * FONT_W;
-                            if region_has_opaque(&art, px0, py, span_w, FONT_H) {
-                                (default_bg, None)
-                            } else {
-                                (default_bg, Some(default_fg))
-                            }
-                        }
-                    } else {
-                        (
-                            packed_to_rgba(t.fg, default_fg, colors),
-                            explicit(t.bg).then(|| packed_to_rgba(t.bg, default_bg, colors)),
-                        )
-                    };
+                    let span_w = t.text.chars().count().max(1) as u32 * FONT_W;
+                    // `art` is pass 1 frozen, so the over-art question sees the real
+                    // artwork (or transparency) and never another run's own block.
+                    let (fg, bg) = chrome_run_ink(t, default_fg, default_bg, colors, || {
+                        region_has_opaque(&art, px0, py, span_w, FONT_H)
+                    });
                     // Run coords are SCREEN-absolute 1-based pixels stamped at
                     // paint time (v6 paint semantics) — no window-origin
                     // offset: the window may have moved/shrunk since (Shogun

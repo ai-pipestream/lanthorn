@@ -1014,7 +1014,23 @@ session-only switch that never touches your saved config:
   reversed vertical divider the game paints between picture and text) stays
   imaged; Arthur's location/date status row becomes a crisp reverse bar sitting
   between the graphics panel above it and the story below; and Zork Zero's
-  status, painted directly *onto* its banner art, stays in the ring. A pure
+  status, painted directly *onto* its banner art, stays in the ring.
+  On the **half-block** backend that last case is drawn with real glyphs anyway,
+  in a background sampled from the picture behind each cell, so "Banquet Hall" and
+  "Score: 0" sit *in* the ribbon rather than in a box. It is not a preference and
+  has no setting: a half-block cell is `▀` with a foreground and a background —
+  two vertical samples — so a rasterised 8×16 glyph arrives as 8×2 and is
+  unreadable rather than merely coarse. That is the backend a terminal with no
+  graphics protocol falls back to, the one tmux gets, and the one an asciinema
+  cast records, so the difference is between a legible game and coloured mush with
+  a picture in it. Under **kitty** the same text stays rasterised, and that is
+  faithful — art and characters composite exactly as the game drew them, at the
+  game's own resolution. It is also the only thing that works there: lanthorn's
+  placements are *virtual* (`U=1`), positioned by `U+10EEEE` placeholder
+  characters, so the image is the cell's content and printing a glyph into a
+  covered cell deletes the image instead of layering over it — and truncates the
+  rest of that row's run. Sixel and iTerm2 have no Z index at all. The capability
+  is therefore asked of the picker that negotiated rather than configured. A pure
   reverse-video row (a status/menu bar) fills **edge to edge across the full pane
   width**, so a bar the game drew as separate runs with bare cells between and
   around them reads as one solid block. A **rule** — three or more abutting

@@ -716,6 +716,78 @@ mod raster {
         }
     }
 
+    /// A glyph printed into a cell a VIRTUAL placement covers does not draw over
+    /// the image — it DELETES it, and takes the rest of the run with it.
+    ///
+    /// This is the measurement SQ-0944 turned on, and it contradicts a reading of
+    /// the two z tests above that is easy to arrive at and wrong. Those pin the
+    /// protocol's Z index using a PIN-ANCHORED placement, where the image is placed
+    /// by cursor position and the cells keep independent text — `z = -1` really
+    /// does put such an image under the glyphs. Every placement LANTHORN emits is a
+    /// different animal: `U=1`, positioned by `U+10EEEE` placeholder characters, so
+    /// the image IS the cell's content and there is no glyph layer in that cell for
+    /// anything to be over. (`ratatui-image`'s `transmit_virtual` emits no `z` at
+    /// all; the `-1` in `pty_stream/raster.rs`'s note is what the RENDERER sorts
+    /// virtual placements at internally, which that module says.)
+    ///
+    /// Both directions, because the interesting part is the second: the glyph's own
+    /// cell losing its image would be survivable, and the run TRUNCATING at the
+    /// glyph is what makes "just draw the text on top" unimplementable. A renderer
+    /// that layered glyphs over virtual placements would fail the first assertion;
+    /// one that dropped only the lettered cell would fail the last.
+    #[test]
+    fn a_glyph_printed_into_a_virtual_placement_erases_it() {
+        // The gradient art, then a 'W' printed into the placement's THIRD cell —
+        // a continuation cell, so the lead cell's diacritic triple survives and the
+        // run is not simply beheaded.
+        let glyph_col = ART_LEFT + 2;
+        let mut s = gradient_frame();
+        s.push_str(&format!("\x1b[{};{}H\x1b[38;2;255;255;255mW\x1b[0m", ART_TOP + 1, glyph_col + 1));
+        let res = oracle::resolve(
+            s.as_bytes(),
+            COLS,
+            ROWS,
+            CELL_W,
+            CELL_H,
+            Some((driver::ANSWERED_FG, driver::ANSWERED_BG)),
+        );
+
+        // Non-vacuity: the cells BEFORE the glyph still carry the image, so the
+        // stream really did place art on this row and the losses below mean something.
+        for col in ART_LEFT..glyph_col {
+            assert!(
+                res.cell(ART_TOP, col).image_id.is_some(),
+                "col {col}, before the glyph, must still carry the placement"
+            );
+        }
+        // The glyph's own cell holds the glyph and NO image.
+        let hit = res.cell(ART_TOP, glyph_col);
+        assert_eq!(hit.ch, 'W', "the printed character is what the cell holds");
+        assert!(hit.image_id.is_none(), "the glyph's cell lost the image rather than layering over it");
+        // …and so does every cell after it, though their placeholders are untouched.
+        for col in glyph_col + 1..ART_LEFT + ART_COLS {
+            let c = res.cell(ART_TOP, col);
+            assert_eq!(c.ch, '\u{10EEEE}', "col {col} still holds its placeholder");
+            assert!(
+                c.image_id.is_none(),
+                "col {col} is past the glyph, so the run is truncated and it draws no image"
+            );
+        }
+
+        // And in pixels: the glyph's cell shows the terminal's default ground, not art.
+        let canvas = draw(&s);
+        let (x0, y0) = (u32::from(glyph_col) * CELL_W, u32::from(ART_TOP) * CELL_H);
+        let cell: Vec<[u8; 4]> = (0..CELL_W)
+            .flat_map(|x| (0..CELL_H).map(move |y| (x, y)))
+            .map(|(x, y)| px(&canvas, x0 + x, y0 + y))
+            .collect();
+        assert!(cell.contains(&[255, 255, 255, 255]), "the 'W' is drawn");
+        assert!(
+            cell.iter().all(|p| *p == [255, 255, 255, 255] || *p == DEFAULT_BG),
+            "the rest of the glyph's cell is bare screen — no art survives under it"
+        );
+    }
+
     /// The before/after pair the whole feature is for: two rasters, side by side,
     /// each still readable at its own coordinates.
     #[test]

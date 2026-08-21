@@ -211,7 +211,17 @@ fn zork0_hybrid_ring_ships_no_black_behind_the_room_icons() {
     for y in 0..viewport.y {
         for x in viewport.x..viewport.right() {
             let cell = buf.cell((x, y)).expect("cell inside the pane");
-            if black(cell.fg) || black(cell.bg) {
+            // A BACKDROP is what this case is about, and which of a cell's two
+            // colours is backdrop depends on what the cell is. In a half-block ART
+            // cell (`▀`/`▄`) both are picture samples, so either being black is the
+            // flattened-transparency bug. Everywhere else the foreground is INK —
+            // since SQ-0944 the ring stamps the banner's labels as glyphs, and Zork
+            // Zero's chrome ink is `Standard(2)`, black on purpose — so only the
+            // background can be a backdrop there. Checking `fg` unconditionally
+            // flagged all 47 cells of "Banquet Hall"/"Flatheadia" as black
+            // backdrops; they are black letters on the ribbon.
+            let art = matches!(cell.symbol(), "▀" | "▄");
+            if black(cell.bg) || (art && black(cell.fg)) {
                 offenders.push((x, y));
             }
         }

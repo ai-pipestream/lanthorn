@@ -107,11 +107,21 @@ fn zork0_hint_menu_paints_topics_by_row_and_keeps_transcript_clean() {
 /// and 70% of each flank opaque, middle 0.0% — and it now takes one.
 ///
 /// So the header moved into the art. `" InvisiClues (tm)"` and the key legend sit
-/// ON the banner artwork at native y 1..33, and a terminal glyph cannot be drawn
-/// over a kitty placement; `ChromeStrip::Art` contributes no `glyph_rows`, so those
-/// rows keep their rasterised text (SQ-0903). The topic list is the opposite case —
+/// ON the banner artwork at native y 1..33. The topic list is the opposite case —
 /// the ring's middle is 0.0% opaque, nothing is under it, and it is drawn with
 /// glyphs. That is CLAUDE.md's rule for hybrid, applied per strip and per frame.
+///
+/// **SQ-0944 revisited the header half, and it was half right.** The reason given
+/// for rasterising it was "a terminal glyph cannot be drawn over a kitty
+/// placement", stated generally. Measured (`pty_oracle.rs`), the true statement is
+/// narrower and about lanthorn's placements rather than about kitty: they are
+/// VIRTUAL (`U=1`), positioned by `U+10EEEE` placeholder characters, so the image
+/// is the cell's content — printing a glyph into a covered cell deletes the image
+/// and truncates the rest of that row's run. Under kitty the conclusion therefore
+/// stands, and this case still pins it. It does NOT generalise to a backend with
+/// no placements at all: on half-blocks the ring stamps these rows as glyphs, in a
+/// ground sampled from the art, because a rasterised 8x16 glyph is 8x2 there and
+/// the header is simply unreadable. Both are asserted below.
 ///
 /// Skip-if-missing (gitignored story).
 #[test]
@@ -134,36 +144,44 @@ fn zork0_hint_header_is_raster_on_the_banner_and_the_topics_are_glyphs() {
     assert!(entered.fault.is_none(), "entering the hint menu faulted: {:?}", entered.fault);
 
     let model = session.screen();
-    let mut state = app::state::AppState::default();
-    state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-    state.config.v6_render = app::config::V6RenderMode::Hybrid;
-    let area = Rect::new(0, 0, 100, 34);
-    let mut buf = Buffer::empty(area);
-    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    for protocol in [ratatui_image::picker::ProtocolType::Kitty, ratatui_image::picker::ProtocolType::Halfblocks] {
+        let glyphs_over_art = protocol == ratatui_image::picker::ProtocolType::Halfblocks;
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some({
+            let mut p = ratatui_image::picker::Picker::halfblocks();
+            p.set_protocol_type(protocol);
+            p
+        });
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        let area = Rect::new(0, 0, 100, 34);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
 
-    let screen: String = (0..area.height)
-        .map(|y| (0..area.width).map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))).collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n");
+        let screen: String = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    // The premise, so a frame that stopped being the menu cannot pass vacuously.
-    assert_eq!(state.v6_path_log.borrow().last().map(|(l, _)| l.clone()), Some("hybrid-ring".into()),
-        "the hint screen takes the ring:\n{screen}");
+        // The premise, so a frame that stopped being the menu cannot pass vacuously.
+        assert_eq!(state.v6_path_log.borrow().last().map(|(l, _)| l.clone()), Some("hybrid-ring".into()),
+            "{protocol:?}: the hint screen takes the ring:\n{screen}");
 
-    // The TOPIC LIST is glyphs.
-    for topic in ["GREAT HALL AREA", "SECRET WING", "GENERAL QUESTIONS"] {
-        assert!(screen.contains(topic), "{topic:?} must be drawn with glyphs:\n{screen}");
-    }
+        // The TOPIC LIST is glyphs on BOTH — nothing is under it to argue with.
+        for topic in ["GREAT HALL AREA", "SECRET WING", "GENERAL QUESTIONS"] {
+            assert!(screen.contains(topic), "{protocol:?}: {topic:?} must be drawn with glyphs:\n{screen}");
+        }
 
-    // The HEADER is not. It is on the banner art, so it reaches the terminal as
-    // pixels inside a band — never as cells.
-    for header in ["InvisiClues", "N for next item.", "Q to resume story."] {
-        assert!(
-            !screen.contains(header),
-            "{header:?} sits on the banner ARTWORK and must be rasterised into the band, \
-             not drawn as a terminal glyph over a kitty placement:\n{screen}"
-        );
+        // The HEADER is on the banner ARTWORK, so its medium follows the backend.
+        for header in ["InvisiClues", "N for next item.", "Q to resume story."] {
+            assert_eq!(
+                screen.contains(header),
+                glyphs_over_art,
+                "{protocol:?}: {header:?} sits on the banner artwork — it must be rasterised \
+                 into the band where a glyph in a covered cell would delete the placement, and \
+                 stamped as glyphs where there is no placement to delete:\n{screen}"
+            );
+        }
     }
 }
 

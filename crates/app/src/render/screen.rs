@@ -1282,7 +1282,14 @@ fn render_node(
                             }
                             ring_bands.retain(|(_, b)| b.height > 0 && b.width > 0);
                         }
-                        let mut strips = decompose_chrome_strips(&ring_bands, &row_oracle);
+                        // SQ-0944: `over_art_runs` is the text the game printed ON its
+                        // artwork. Empty unless this backend can show a glyph in a cell
+                        // an image covers — see `backend_layers_glyphs_over_art`, which
+                        // is the whole gate: everywhere else these runs stay pixels and
+                        // every line below this one behaves exactly as it did.
+                        let (mut strips, over_art_runs) = decompose_chrome_strips(&ring_bands, &row_oracle);
+                        let over_art_runs: Vec<&crate::engine::PxText> =
+                            if backend_layers_glyphs_over_art(picker) { over_art_runs } else { Vec::new() };
                         // An ART strip with no actual art behind it draws a rasterized
                         // slice of the chrome canvas — which carries TEXT too, so on a
                         // text-only v6 story (advent) that is pure noise painted over the
@@ -1567,6 +1574,20 @@ fn render_node(
                             .collect();
                         let mut glyph_rows: std::collections::HashSet<u16> =
                             text_run_tops.iter().map(|&(top, _, _)| top).collect();
+                        // SQ-0944: …and the rows of text the game printed ON its
+                        // artwork, when this backend can draw a glyph in a cell the
+                        // art covers. `over_art_runs` is already empty on every
+                        // backend that cannot, so this adds nothing there and the
+                        // canvas keeps rasterising them exactly as before.
+                        //
+                        // Pass 1 of `build_chrome_canvas` — the ARTWORK — is never
+                        // skipped, so the band still ships the picture these glyphs
+                        // will sit on. Only the TEXT layer stops being painted, which
+                        // is what stops the crisp glyph landing on a blurred copy of
+                        // itself and, worse, what stops the ground sampled from under
+                        // it being a sample of the rasterised text.
+                        glyph_rows.extend(over_art_runs.iter().map(|t| t.y.max(1) - 1));
+
                         // SQ-0937: …and the rows the ring is about to stamp INSIDE the
                         // story box, which are glyph rows for exactly the same reason and
                         // had never been counted as such.
@@ -2081,6 +2102,28 @@ fn render_node(
                                         ),
                                     }
                                 }
+                            }
+                            // SQ-0944: the text the game printed ON its artwork, as
+                            // GLYPHS over the bands just drawn. Last, so nothing the
+                            // ring paints afterwards covers it again, and after the
+                            // bands rather than before because the ground each glyph
+                            // sits on is read back out of the cells they wrote.
+                            //
+                            // `over_art_runs` is empty unless the backend can layer a
+                            // glyph over art, so on kitty, sixel and iTerm2 this is a
+                            // walk over nothing.
+                            if !over_art_runs.is_empty() {
+                                let art_rects: Vec<Rect> = strips
+                                    .iter()
+                                    .filter_map(|s| match s {
+                                        ChromeStrip::Art(_, r) => Some(*r),
+                                        ChromeStrip::Text(..) => None,
+                                    })
+                                    .collect();
+                                stamp_runs_over_art(
+                                    &over_art_runs, &art_rects, &scale, cell_px, area, &gfx,
+                                    default_fg, default_bg, &state.colors, buf,
+                                );
                             }
                             // Record the letterbox geometry for click→game-pixel
                             // mapping (Lane M): the chrome ring shares this scale. In
@@ -5904,7 +5947,12 @@ fn menu_band_strips<'a>(
 /// One terminal row's class within the chrome ring.
 enum RowClass<'b> {
     Text(Vec<&'b crate::engine::PxText>),
-    Art,
+    /// The row carries runs AND opaque frame art behind them — Zork Zero's banner
+    /// labels. The runs ride along (SQ-0944) so a backend that can put a glyph in a
+    /// cell its artwork covers can draw them as characters instead of pixels; the
+    /// strip is still an Art strip either way, because the art still has to reach
+    /// the screen as an image.
+    Art(Vec<&'b crate::engine::PxText>),
     /// No runs and no opaque frame art behind — bare background.
     Empty,
     /// A secondary prose window owns this row; the ring must not draw here.
@@ -5988,7 +6036,7 @@ impl<'b> ChromeRowOracle<'_, 'b> {
         if rr.is_empty() {
             RowClass::Empty
         } else if rr.iter().any(|t| self.over_art(t)) {
-            RowClass::Art
+            RowClass::Art(rr)
         } else {
             RowClass::Text(rr)
         }
@@ -6439,11 +6487,19 @@ fn content_ring_bands(
 /// classing them ART made the ring rasterize a slice of the chrome canvas straight
 /// over the panel, and under a graphics protocol like kitty the image composites
 /// ABOVE the cells, so the panel's text vanished behind stray rasterized banner.
+///
+/// Returns the strips, and beside them every run that landed on an ART row —
+/// text the game printed ON its artwork (SQ-0944). Those runs are drawn as pixels
+/// in the chrome canvas as they always were; a backend that can put a glyph in a
+/// cell an image covers uses this list to draw them as characters instead, which
+/// is the difference between legible and unreadable on half-blocks. The strips
+/// themselves are unchanged: the art still ships as an image either way.
 fn decompose_chrome_strips<'a>(
     bands: &[(crate::render::v6_layout::BandRole, Rect)],
     oracle: &ChromeRowOracle<'_, 'a>,
-) -> Vec<ChromeStrip<'a>> {
+) -> (Vec<ChromeStrip<'a>>, Vec<&'a crate::engine::PxText>) {
     let mut out = Vec::new();
+    let mut over_art: Vec<&'a crate::engine::PxText> = Vec::new();
     for (role, band) in bands {
         // A FLANK is never text — one Art strip. Asked by role since SQ-0894: the
         // test used to be `band.width < pane.width`, which answers correctly only
@@ -6498,8 +6554,13 @@ fn decompose_chrome_strips<'a>(
                 && !matches!(classes[j], RowClass::Panel)
                 && (matches!(classes[j], RowClass::Text(_)) || bridge[j]) == text
             {
-                if let RowClass::Text(rr) = &classes[j] {
-                    text_runs.extend(rr.iter().copied());
+                match &classes[j] {
+                    RowClass::Text(rr) => text_runs.extend(rr.iter().copied()),
+                    // A bridged Art row is folded into a TEXT strip, and a text strip
+                    // draws its own runs — so only the rows that really stay Art
+                    // contribute here, or the same run would be stamped twice.
+                    RowClass::Art(rr) if !text => over_art.extend(rr.iter().copied()),
+                    _ => {}
                 }
                 j += 1;
             }
@@ -6508,7 +6569,7 @@ fn decompose_chrome_strips<'a>(
             i = j;
         }
     }
-    out
+    (out, over_art)
 }
 
 /// How many terminal columns one uploaded chrome-band image covers (SQ-0818).
@@ -6599,6 +6660,175 @@ fn band_tiles(band: Rect, tile_cols: u16) -> Vec<Rect> {
 /// gap between its two labels. Mixed rows (Journey's menu body — normal verb text
 /// with reversed dividers) are not flood-reversed.
 #[allow(clippy::too_many_arguments)]
+/// Can this graphics backend show a terminal GLYPH in a cell its artwork covers?
+///
+/// A CAPABILITY, asked of the picker that actually negotiated (the same source
+/// `examples/pty_capture`'s VERDICT line reads) rather than guessed from config —
+/// SQ-0936's trap was an option that appeared to apply generally and quietly did
+/// nothing on some paths, and the fix for that is to ask.
+///
+/// **Half-blocks: yes, and it is not a preference.** The backend draws `▀` with a
+/// foreground and a background, so a cell is two vertical samples and a rasterised
+/// 8x16 glyph arrives as 8x2 — not ugly, unreadable. Real glyphs are exact. That
+/// makes it the difference between a usable and an unusable backend for terminals
+/// with no graphics protocol at all, for tmux, and for asciinema casts, which
+/// record exactly this backend because it is glyphs plus 24-bit SGR. There is no
+/// reason a player would want the mush back, so there is no setting.
+///
+/// **Kitty: NO — and this is the part that was measured rather than assumed.**
+/// SQ-0944 set out to stop rasterising here too, on the reading that every
+/// placement sits at kitty's `z = -1` ("over the backgrounds but under the text")
+/// and so a glyph would simply appear on top. The oracle says otherwise, and the
+/// reason has nothing to do with z: lanthorn's placements are **virtual** (`U=1`),
+/// positioned BY `U+10EEEE` placeholder characters, so the image IS the cell's
+/// content and there is no glyph layer in that cell to be over anything. Printing
+/// a character into a covered cell does not composite over the image, it DELETES
+/// it — the cell loses the placement, and the rest of the row's run goes with it
+/// (measured both ways: on the lead cell, which carries the diacritic triple, the
+/// whole row dies; on a continuation cell, everything from there rightward does).
+/// `pty_oracle::raster::a_glyph_printed_into_a_virtual_placement_erases_it` pins
+/// it. Two further facts agree: `ratatui-image`'s `transmit_virtual` emits no `z`
+/// parameter at all, and it marks every cell after a row's first `Skip`, so the
+/// app could not address those cells even if the protocol allowed it. The z=-1 in
+/// `pty_stream/raster.rs`'s note is what the RENDERER sorts virtual placements at
+/// internally — that module says so — not what lanthorn asks for, and it governs
+/// classic pin-anchored placements, which is what
+/// `a_negative_z_placement_draws_under_the_text` covers.
+///
+/// **Sixel and iTerm2: no.** Neither has a Z index at all; their images become
+/// cell content outright.
+///
+/// So the capability is absent on three of the four backends, for two different
+/// reasons, and present on the one where it is not optional. That is why this is a
+/// predicate and not a config key: there is nothing left for a player to choose.
+fn backend_layers_glyphs_over_art(picker: &ratatui_image::picker::Picker) -> bool {
+    matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Halfblocks)
+}
+
+/// The cells one run puts on screen: column, row and character per glyph that
+/// landed inside an art strip. Named for [`stamp_runs_over_art`], which groups its
+/// work by run so the colour rule is asked once each rather than once per glyph.
+type StampedCells = Vec<(u16, u16, char)>;
+
+/// Stamp the runs a game printed ON its artwork as terminal glyphs, over the art
+/// band that has already been drawn into these cells (SQ-0944).
+///
+/// Only reached on a backend [`backend_layers_glyphs_over_art`] approves, which
+/// today means half-blocks. There is no z-order there — text and art share one
+/// cell — so a glyph must carry a background, and the right one is the art behind
+/// it. It is sampled from the BUFFER rather than re-derived from the chrome canvas
+/// on purpose: the band has already resolved the whole device→native mapping and
+/// written the answer into `cell.fg` (the upper half) and `cell.bg` (the lower),
+/// so reading it back is exact by construction and adds no fourth implementation
+/// of an inverse whose rounding is where v6 geometry bugs live. The two halves are
+/// each a mean of their half, so their mean is the mean of the cell — the nearest
+/// flat ground the picture offers.
+///
+/// Colour comes from [`v6_layout::chrome_run_ink`], the same rule that decides
+/// what the RASTER would have drawn, so the glyph is the rasterised glyph made
+/// crisp rather than a second opinion about it. A run the game gave a real
+/// background keeps that background, opaque, exactly as the pixels would; a run
+/// with inherited colours gets the sampled ground and sits in the picture.
+#[allow(clippy::too_many_arguments)]
+fn stamp_runs_over_art(
+    runs: &[&crate::engine::PxText],
+    art_rects: &[Rect],
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    gfx: &image::RgbaImage,
+    default_fg: image::Rgba<u8>,
+    default_bg: image::Rgba<u8>,
+    colors: &ColorScheme,
+    buf: &mut Buffer,
+) {
+    use std::collections::HashMap;
+    const FONT_W: u32 = 8;
+    const FONT_H: u32 = 16;
+
+    let rgb = |c: image::Rgba<u8>| ratatui::style::Color::Rgb(c.0[0], c.0[1], c.0[2]);
+    // SQ-0892's rule, which this path has to obey like every other glyph path: a
+    // run is POSITIONED through the scale — `run_cell` on its own origin — and then
+    // ADVANCES ONE TERMINAL COLUMN per character. Mapping each character's own
+    // native pixel instead looks more principled and is wrong: at the measured
+    // Zork Zero frame (120x40 pane, native 640x400, s = 1.875) one 8-px native
+    // character is 1.5 columns, so consecutive letters round to every OTHER cell
+    // and the label comes out "B▄an▄qu▄et▄ H▄al▄l" with the ribbon showing between
+    // its letters. Terminal text is one cell per character whatever the art does.
+    let in_art = |col: i32, row: i32| -> bool {
+        art_rects.iter().any(|r| {
+            col >= r.x as i32 && col < r.right() as i32 && row >= r.y as i32 && row < r.bottom() as i32
+        })
+    };
+
+    // Every cell about to be stamped, with the ground the ART left in it. Sampled
+    // in a pass of its own because a scale below 1 maps two characters into one
+    // cell, and sampling as we stamp would read the first glyph's own background
+    // back as if it were the picture.
+    //
+    // Grouped by run rather than flattened so the colour rule — whose over-art
+    // arm costs a region scan — is asked ONCE per run and not once per character.
+    let mut placed: Vec<(&crate::engine::PxText, StampedCells)> = Vec::new();
+    for t in runs {
+        let (col0, row) = run_cell(t, scale, cell_px, pane);
+        let cells: Vec<(u16, u16, char)> = t
+            .text
+            .chars()
+            .enumerate()
+            .filter_map(|(i, ch)| {
+                let col = col0 + i as i32;
+                (col >= 0 && row >= 0 && in_art(col, row)).then_some((col as u16, row as u16, ch))
+            })
+            .collect();
+        if !cells.is_empty() {
+            placed.push((t, cells));
+        }
+    }
+    let mut ground: HashMap<(u16, u16), ratatui::style::Color> = HashMap::new();
+    for (col, row, _) in placed.iter().flat_map(|(_, cells)| cells) {
+        let Some(cell) = buf.cell((*col, *row)) else { continue };
+        let mean = match (cell.fg, cell.bg) {
+            (ratatui::style::Color::Rgb(r0, g0, b0), ratatui::style::Color::Rgb(r1, g1, b1)) => {
+                ratatui::style::Color::Rgb(
+                    ((u16::from(r0) + u16::from(r1)) / 2) as u8,
+                    ((u16::from(g0) + u16::from(g1)) / 2) as u8,
+                    ((u16::from(b0) + u16::from(b1)) / 2) as u8,
+                )
+            }
+            // A cell the band did not paint in true colour has no picture in it to
+            // match; the run's own resolved background is the honest fallback.
+            _ => rgb(default_bg),
+        };
+        ground.insert((*col, *row), mean);
+    }
+
+    for (t, cells) in placed {
+        let span_w = t.text.chars().count().max(1) as u32 * FONT_W;
+        let (px0, py) = (t.x.max(1) as u32 - 1, t.y.max(1) as u32 - 1);
+        let (ink, block) = crate::render::v6_layout::chrome_run_ink(t, default_fg, default_bg, colors, || {
+            crate::render::v6_layout::region_has_opaque(gfx, px0, py, span_w, FONT_H)
+        });
+        // Reverse is already resolved into the pair by `chrome_run_ink`, so the
+        // REVERSED modifier must NOT be set as well — the terminal would swap the
+        // pair a second time and paint the picture's own colour as ink on a solid
+        // block, which is exactly the block SQ-0487 says must not be there.
+        let mut base_style = ratatui::style::Style::default().fg(rgb(ink));
+        if t.style & 2 != 0 {
+            base_style = base_style.add_modifier(ratatui::style::Modifier::BOLD);
+        }
+        if t.style & 4 != 0 {
+            base_style = base_style.add_modifier(ratatui::style::Modifier::ITALIC);
+        }
+        for (col, row, ch) in cells {
+            // A run the game gave a real background keeps it, opaque, exactly as
+            // the pixels would; otherwise the ground is the art this cell held.
+            let bg = block
+                .map_or_else(|| ground.get(&(col, row)).copied().unwrap_or(rgb(default_bg)), rgb);
+            buf.set_stringn(col, row, ch.to_string(), 1, base_style.bg(bg));
+        }
+    }
+}
+
 fn draw_chrome_text_strip(
     runs: &[&crate::engine::PxText],
     rect: Rect,
@@ -10069,9 +10299,29 @@ mod tests {
         // ordinary gameplay chrome, NOT a menu takeover: the ring path must be
         // kept (the status text belongs to the pixel ring, so it must NOT be
         // painted into the terminal cells the way a routed menu screen is).
+        //
+        // SQ-0944 split this by backend, and the split is the point rather than an
+        // accommodation. "Did the run reach a cell?" was only ever a PROXY for "was
+        // the ring path taken", and on half-blocks the ring itself now stamps text
+        // that sits on artwork as glyphs — same path, same owner, different medium.
+        // So the proxy is asserted where it still discriminates (kitty, which is
+        // what Arthur's real case runs on) and inverted where the new behaviour
+        // says it must appear; `metrics.is_some()` asserts the ring path directly
+        // on both, and a menu takeover would fail that on either.
+        for protocol in [
+            ratatui_image::picker::ProtocolType::Kitty,
+            ratatui_image::picker::ProtocolType::Halfblocks,
+        ] {
+        let glyphs_over_art = protocol == ratatui_image::picker::ProtocolType::Halfblocks;
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.game_picker = Some({
+            // `halfblocks()` then override: the only non-deprecated constructor
+            // that does not need a live terminal to query.
+            let mut p = ratatui_image::picker::Picker::halfblocks();
+            p.set_protocol_type(protocol);
+            p
+        });
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.push_transcript("HELLO STORY WORLD");
 
@@ -10120,10 +10370,14 @@ mod tests {
         let screen: String = (0..area.height)
             .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>() + "\n")
             .collect();
-        assert!(
-            !screen.contains("Score: 0"),
-            "deep-but-outside-story status chrome stays in the pixel ring, not cells:\n{screen}"
+        assert_eq!(
+            screen.contains("Score: 0"),
+            glyphs_over_art,
+            "{protocol:?}: the deep-but-outside-story status belongs to the ring either way — \
+             rasterised into its band where a glyph cannot sit over a placement, stamped as \
+             glyphs where one can, and never routed into cells as a menu takeover:\n{screen}"
         );
+        }
     }
 
     #[test]
