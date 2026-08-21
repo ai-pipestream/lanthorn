@@ -309,6 +309,26 @@ capture asserts agreement on *both* axes. Ours still can't read a high byte
 (see above), so a disagreement there remains an id-masking question, not a
 coverage one.
 
+**What the oracle reports is a function of the bytes, and that had to be made
+true twice.** `resolve_placements` documents itself as returning "placements in
+arbitrary order" — it walks a `HashMap` — so anything downstream that reads a
+candidate list positionally gets a fresh random permutation on every call.
+`resolve_rects` did that in two places (SQ-0982). It took a cell's `source_y`
+from whichever candidate ended up LAST in the list, and it read a pin
+placement's declared cell grid off whichever placement of that image the map
+yielded FIRST. Both are now decided: candidates are sorted by
+`(z, image id, cell offset, source rect)` and the one on TOP supplies the cell,
+because `OracleCell::source_y` answers "which pixel row lands here" and what
+lands is the topmost draw; the declared grid is matched by pin POSITION, so an
+image pinned twice at two sizes no longer lends both of its rects an arbitrary
+one of the two. The z-then-id key is the same expression `raster.rs` sorts
+draws by, for the same reason and off the same protocol sentence (see the
+rasteriser section below); same z and same id is undefined upstream, so the
+position tail is arbitrary-but-stable. `the_same_bytes_always_resolve_the_same_way`
+and `several_placements_on_one_cell_report_the_topmost_source_row` are the
+guards. An oracle that answers differently on different runs is worse than one
+that is merely wrong, because nobody can tell which answer they got.
+
 **A stronger oracle exists in principle but isn't built.** For literal
 Ghostty ground truth (not a port of it), `libghostty-vt` — Ghostty's own C
 library — is reachable in theory, but only as a prebuilt artifact. Building

@@ -59,7 +59,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use qwertty_term_vt::kitty::storage::Location;
-use qwertty_term_vt::kitty::{TerminalGeometry, resolve_placements, resolve_window, unicode};
+use qwertty_term_vt::kitty::{
+    RenderImagePlacement, TerminalGeometry, resolve_placements, resolve_window, unicode,
+};
 use qwertty_term_vt::point::Tag;
 use qwertty_term_vt::snapshot::{SnapshotColor, SnapshotWindow};
 use qwertty_term_vt::stream::{Stream, TerminalHandler};
@@ -411,6 +413,29 @@ fn capture_draws(t: &Terminal, grid: Grid) -> (Vec<Draw>, BTreeMap<u32, RasterIm
     (draws, images)
 }
 
+/// Where one resolved placement sits in the stack a renderer draws, lowest
+/// first. Sorting by this and taking the LAST is "the one on top" (SQ-0982).
+///
+/// Read off the protocol document rather than recalled. `z` is the whole of its
+/// stated rule bar one tie-break: "if two images with the same z-index overlap
+/// then the image with the lower id is considered to have the lower z-index"
+/// (kitty graphics protocol, "Controlling displayed image layout") — which is the
+/// second element, and which cannot actually discriminate at the one call site
+/// below, because that compares entries already keyed by image id. It is here so
+/// this key is the same expression as `super::raster::render_with`'s: the two
+/// halves of this instrument must never disagree about which draw is on top, and
+/// a key that merely happens to agree today is one edit away from not.
+///
+/// Same z AND same id is undefined upstream — nothing in the protocol says which
+/// of two placements of one image at one spot wins — so the tail is the
+/// destination offset and then the source rect: arbitrary, but a function of the
+/// bytes, which is the property the caller actually needs. The grid position is
+/// not in it because the caller only ever compares entries at one
+/// `(image, col, row)`, where only the sub-cell offset can differ.
+fn draw_order(p: &RenderImagePlacement) -> (i32, u32, u32, u32, u32, u32) {
+    (p.z, p.image_id, p.cell_offset_y, p.cell_offset_x, p.source_y, p.source_x)
+}
+
 /// Work out which cells an image actually lands on, and aggregate the per-row
 /// entries into one rect per image.
 ///
@@ -440,9 +465,19 @@ fn resolve_rects(t: &Terminal, grid: Grid, cells: &mut [OracleCell]) -> Vec<Imag
 
     // Which resolved entries sit at each (image, col, row) — a list of indices,
     // not a flag: nothing in the protocol forbids two runs landing on one cell.
+    //
+    // Each list is then sorted into DRAW order, bottom first, so the `pop` below
+    // hands back the entry a renderer would put on TOP. `resolve_placements`
+    // documents itself as returning "placements in arbitrary order" and means it —
+    // it walks `ImageStorage::placements`, a `HashMap` — so an unsorted list has a
+    // fresh random permutation on every call and popping off its end was a coin
+    // flip between two different readings of the same bytes (SQ-0982).
     let mut pending: BTreeMap<(u32, u32, i32), Vec<usize>> = BTreeMap::new();
     for (i, p) in resolved.iter().enumerate() {
         pending.entry((p.image_id, p.grid_col, p.grid_row)).or_default().push(i);
+    }
+    for idxs in pending.values_mut() {
+        idxs.sort_by_key(|&i| draw_order(&resolved[i]));
     }
 
     let mut acc: BTreeMap<(u32, Origin), Acc> = BTreeMap::new();
@@ -468,6 +503,11 @@ fn resolve_rects(t: &Terminal, grid: Grid, cells: &mut [OracleCell]) -> Vec<Imag
         // No resolved placement here means the terminal walked these cells and
         // declined to draw: an unknown image id, or a destination that rounds
         // away. Those cells are placeholders on screen and pixels nowhere.
+        //
+        // `pop` off a list already in draw order, so several placements of one
+        // image on one cell report the TOPMOST one's source row — the pixels a
+        // viewer would actually see there. Whatever is underneath stays in
+        // `pending` and is accounted for as a pin below.
         let Some(idx) = pending.get_mut(&(run.image_id, col, row as i32)).and_then(Vec::pop) else {
             continue;
         };
@@ -496,14 +536,31 @@ fn resolve_rects(t: &Terminal, grid: Grid, cells: &mut [OracleCell]) -> Vec<Imag
             // destination pixels when it declared none. `div_ceil` can
             // over-report by a cell against an aspect-fit shrink; there is
             // nothing better to read, and the fallback is documented as such.
+            //
+            // Which stored placement to read it off is settled by POSITION, not by
+            // whichever the `HashMap` yields first: an image pinned twice at two
+            // sizes otherwise lent both of its rects an arbitrary one of the two,
+            // and a different one on the next run (SQ-0982). The `min` behind it is
+            // the residue — same image, same cell, two declared grids is undefined
+            // upstream — and is arbitrary-but-stable.
             let stored = screen
                 .kitty_images
                 .placements
                 .iter()
-                .filter(|(k, v)| k.image_id == image_id && matches!(v.location, Location::Pin(_)))
-                .map(|(_, v)| (v.columns, v.rows))
-                .next()
-                .unwrap_or((0, 0));
+                .filter_map(|(k, v)| {
+                    let Location::Pin(pin) = v.location else { return None };
+                    if k.image_id != image_id {
+                        return None;
+                    }
+                    // SAFETY: the pin is tracked by `screen.pages` for as long as
+                    // its placement is stored, and `t` owns both.
+                    let point = screen.pages.point_from_pin(Tag::Screen, unsafe { *pin })?;
+                    let here = u32::from(point.coord.x) == col
+                        && i64::from(point.coord.y) - grid.window_top as i64 == i64::from(grid_row);
+                    Some((!here, v.columns, v.rows))
+                })
+                .min()
+                .map_or((0, 0), |(_, cols, rows)| (cols, rows));
             let w = if stored.0 > 0 { stored.0 } else { p.dest_width.div_ceil(grid.cell_w.max(1)) };
             let h = if stored.1 > 0 { stored.1 } else { p.dest_height.div_ceil(grid.cell_h.max(1)) };
             let z = authored.get(&image_id).copied().unwrap_or(p.z);
