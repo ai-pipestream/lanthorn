@@ -277,6 +277,73 @@ fn a_loose_story_files_directory_does_not_move() {
     assert!(ran > 0 || !any_media_present(), "no loose story file present");
 }
 
+// ── The volume whose story is not on it ──────────────────────────────────────
+
+/// A volume whose story comes from the RELEASE rather than from itself must key
+/// the same through the path-only door as through the launch path (SQ-0952).
+///
+/// `story_key_at` reads the file and mounts it; `startup.rs` keys on the build it
+/// actually loaded. Those agreed for every volume that carries its own story and
+/// disagreed for every volume that does not, because the path-only door mounted
+/// the PLATTER while the launch path mounts the SET. One game, two identities,
+/// decided by which door the caller came in.
+///
+/// **`both_front_ends_name_one_directory` below cannot see this**, and that is
+/// worth stating rather than leaving to be rediscovered: it mounts the platter,
+/// asks `disk.story()`, and `continue`s when there is none — so the exact volumes
+/// this is about are the ones it silently skips.
+///
+/// It shows on the story list. `picker::metadata_title` reads a story's fetched
+/// metadata out of the directory this key names, while `startup.rs` hands the
+/// in-game pane the build-keyed one — and `metadata_title`'s own doc promises
+/// that "the list and the pane cannot name the same game differently".
+#[test]
+fn a_volume_that_carries_no_story_keys_on_the_one_its_release_holds() {
+    let mut ran = 0;
+    let mut discriminating = 0;
+    let Ok(rd) = std::fs::read_dir(stories_dir()) else {
+        assert!(!any_media_present(), "stories/ is unreadable but media are present");
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Ok(raw) = std::fs::read(&path) else { continue };
+        if blorb::medium::DiskImage::detect(&raw).is_none() {
+            continue;
+        }
+        // What the LAUNCH path would load: the set, not the platter.
+        let Ok(set) = app::disk_set::mount_at(&path, raw.clone()) else { continue };
+        let Some(story) = set.story() else { continue };
+        ran += 1;
+
+        // Is this one of the volumes the quest is about — a disk with no story
+        // of its own? Counted so the case cannot pass vacuously on a shelf where
+        // every image happens to carry its own.
+        let platter_has_none = blorb::medium::MountedDisk::mount(raw)
+            .ok()
+            .and_then(|d| d.story())
+            .is_none();
+        if platter_has_none {
+            discriminating += 1;
+        }
+
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+        assert_eq!(
+            story_key_at(&path),
+            story_key_for(&path, DiskBuild::of(&story.bytes).as_ref()),
+            "{name}: the path-only door and the launch path must name one directory\
+             (this volume's story {} on the platter itself)",
+            if platter_has_none { "is NOT" } else { "is" },
+        );
+    }
+    assert!(ran > 0 || !any_media_present(), "no mountable disk image present");
+    assert!(
+        discriminating > 0 || !any_media_present(),
+        "every image on this shelf carries its own story, so this case proved nothing — \
+         it needs a volume whose story comes from a sibling (a DOS disk 1, or a paged .dsk)",
+    );
+}
+
 // ── One key, both front-ends ─────────────────────────────────────────────────
 
 /// `zvm-cli` and the TUI must reach the same directory for the same game off the

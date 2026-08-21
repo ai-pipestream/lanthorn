@@ -202,10 +202,27 @@ pub fn story_key_at_from(story_path: &Path, disk_entry: Option<&str>) -> String 
 /// format's own tiebreak decides, as it always did.
 fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuild> {
     let raw = std::fs::read(story_path).ok()?;
-    // `detect` first: `mount` consumes the bytes, and the overwhelming majority
+    // `detect` first: mounting consumes the bytes, and the overwhelming majority
     // of calls are about an ordinary story file.
     blorb::medium::DiskImage::detect(&raw)?;
-    let disk = blorb::medium::MountedDisk::mount(raw).ok()?;
+    // Across the SET, exactly as the launch path mounts (SQ-0952). This used to
+    // be `MountedDisk::mount` — the platter alone — so a volume whose story comes
+    // from the RELEASE rather than from itself found nothing, returned `None`,
+    // and its caller fell back to the basename key while `startup.rs` keyed the
+    // same game on its build. Two identities for one game, decided by which door
+    // the caller came in.
+    //
+    // It shows on the story list. `picker::metadata_title` reads a story's
+    // fetched metadata out of the directory this key names, and `startup.rs`
+    // hands the in-game pane the build-keyed one (`metadata_title_in`) — whose
+    // doc promises "the list and the pane cannot name the same game differently".
+    // For a set-sourced volume they did, and which of the two could see the
+    // metadata depended on which had fetched it.
+    //
+    // Costs sibling reads only when the platter yields nothing: `mount_at`
+    // returns as soon as the named volume has a story of its own, which is every
+    // loose file and every single-disk press.
+    let disk = crate::disk_set::mount_at(story_path, raw).ok()?;
     let chosen = match disk_entry {
         Some(want) => disk
             .stories()
