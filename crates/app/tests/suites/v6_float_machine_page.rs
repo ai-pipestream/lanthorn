@@ -124,7 +124,8 @@ fn frame(file: &str, pictures: Option<&str>, honor: bool) -> Option<Frame> {
         .or(named_art_std_window)
         .or_else(|| picts.native_std_window())
         .or_else(|| profile.std_window());
-    let honoured = honor && !picts.declines_game_colours(profile.default_colours());
+    let honoured = honor
+        && !picts.declines_game_colours(profile.default_colours(), profile.two_colour_colours());
     let mut session = GameSession::new_with_art_scale(
         bytes,
         honoured,

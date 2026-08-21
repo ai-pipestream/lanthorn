@@ -731,6 +731,38 @@ impl InterpreterProfile {
         self.machine()?.default_colours
     }
 
+    /// The `(background, foreground)` this machine's screen states when its
+    /// display is showing **two colours** — the ground a two-colour picture
+    /// archive's transparency reveals (SQ-0956).
+    ///
+    /// A rendition belongs to a machine, and what a stencil reveals belongs to
+    /// that machine's display MODE — never to the story, which cannot see which
+    /// archive was loaded (Zork Zero issues `set_colour(fg=2, bg=9)` for every
+    /// video card alike). So this is the same kind of claim as
+    /// [`Self::default_colours`], asked of a narrower screen.
+    ///
+    /// **Only the IBM PC answers differently, and only in one channel.** Its
+    /// CGA plate is one of four renditions the same machine could show, and the
+    /// card it is showing is not the machine: `machine-screenshots/dos-zorkzero-cga.png`
+    /// gives a **black** page under white ink where
+    /// [`zvm::interpreter::IBM_PC_DEFAULT_BACKGROUND`] is blue. That constant's
+    /// doc carries the census.
+    ///
+    /// **Every other machine falls through, and the Macintosh is why that is not
+    /// an omission.** A Mac's screen IS a two-colour display — `mac/xzip.lst`'s
+    /// `SetColor := (zWHITE*256) + zBLACK` and the mono `Pic.data` that same
+    /// interpreter chose *for* it are one decision (SQ-0838) — so its two-colour
+    /// pair is its pair, stated once and not twice. Nothing here exempts it; it
+    /// simply has nothing extra to say, and the rule that reads this
+    /// ([`crate::graphics::PictSource::declines_game_colours`]) leaves it
+    /// untouched by construction rather than by a branch.
+    pub fn two_colour_colours(self) -> Option<(u8, u8)> {
+        match self {
+            Self::IbmPc => Some((IBM_PC_TWO_COLOUR_BACKGROUND, IBM_PC_DEFAULT_FOREGROUND)),
+            _ => self.default_colours(),
+        }
+    }
+
     /// What this machine's screen LOOKED LIKE for a story that has no opinion
     /// about it — the page and ink, how the status line was set apart, and the
     /// shape and colour of the input cursor (SQ-0873).
@@ -909,8 +941,8 @@ pub use zvm::interpreter::{
 /// and what that machine looked like by only one.
 pub use zvm::interpreter::{
     AMIGA_DEFAULT_BACKGROUND, AMIGA_DEFAULT_FOREGROUND, APPLE_DEFAULT_BACKGROUND,
-    APPLE_DEFAULT_FOREGROUND, MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND,
-    ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND,
+    APPLE_DEFAULT_FOREGROUND, IBM_PC_DEFAULT_FOREGROUND, IBM_PC_TWO_COLOUR_BACKGROUND,
+    MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND, ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND,
 };
 
 /// The Macintosh Version 6 standard window: the **big colour** Mac's, 320×200

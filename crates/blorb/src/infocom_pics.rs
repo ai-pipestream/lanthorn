@@ -1206,8 +1206,11 @@ impl InfocomPics {
     ///
     /// The same `EF_MONO` test [`Self::hardware_palette`] uses to choose the
     /// two-colour table, asked directly, because the answer decides more than
-    /// which palette to expand through: a two-colour display has no colours to
-    /// give a story at all (SQ-0806).
+    /// which palette to expand through: a two-colour display cannot give a story
+    /// the arbitrary colours §8.3 lets it name (SQ-0806). Two STATES is not none
+    /// — Zork Zero's own `color` command on a CGA machine offers a swap of them,
+    /// observed on the emulator — but a story asking for blue is asking for
+    /// something that is not there.
     ///
     /// Content, not extension — a `.cg1` somebody renamed is still a `.cg1`, a
     /// `.eg1` somebody renamed is not one, and the Macintosh's monochrome

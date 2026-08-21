@@ -419,39 +419,70 @@ impl PictSource {
     }
 
     /// Should this launch declare the interpreter COLOURLESS to the story
-    /// (`honor_game_colours = false`), because the artwork in hand has no
-    /// colours to give? SQ-0806, refined by SQ-0846.
+    /// (`honor_game_colours = false`), because the artwork in hand is a
+    /// two-colour rendition of a display the story may not colour? SQ-0806,
+    /// refined by SQ-0846 and SQ-0956.
     ///
-    /// **The archive's half is a guess about a machine, and that is the whole
+    /// **"Colourless" means "cannot name arbitrary colours", not "has no colour
+    /// choice".** A two-colour display is two states, and Zork Zero's own `color`
+    /// command on a CGA machine offers exactly one bit of choice — a swap of those
+    /// two states, black and light grey, and nothing else (observed on the
+    /// emulator). Declining §8.3's palette to the story is a claim about the
+    /// eight colours it cannot have, not about that swap, which is SQ-0957's.
+    ///
+    /// **The archive's half is what the story cannot see, and that is the whole
     /// point.** A two-colour rendition is a stencil whose transparency reveals a
     /// ground the artwork never had to store, and the story cannot see which
     /// archive was loaded — Zork Zero issues `set_colour(fg=2, bg=9)` for every
     /// video card alike, so honouring it paints the white pillars out against
-    /// the white page it asked for. Nothing in a `.CG1` names its machine; the
-    /// monochrome flag is the only evidence there is, and bocfel says as much
-    /// ("the flags always *seem* to equal 0xe if the graphics are monochrome").
-    /// Declaring the interpreter colourless hands the ground back to the host
-    /// theme and the stencil reads again.
+    /// the white page it asked for. The `EF_MONO` flag is the evidence that a
+    /// stencil is what is in hand, and bocfel says as much ("the flags always
+    /// *seem* to equal 0xe if the graphics are monochrome"). Declaring the
+    /// interpreter colourless hands the ground back to the host theme and the
+    /// stencil reads again.
     ///
-    /// **A profile that states its own defaults is not a guess, and outranks
-    /// one.** [`InterpreterProfile::default_colours`] is `None` for the IBM PC
-    /// precisely because lanthorn has no machine there to speak for — which is
-    /// every launch the rule above was written for. Where it answers, the answer
-    /// came off that machine's own interpreter: the Macintosh's white page under
-    /// black ink is `mac/xzip.lst`'s `SetColor := (zWHITE*256) + zBLACK`, and a
-    /// mono Mac `Pic.data` is the archive that same interpreter chose *for* that
-    /// page, in one decision (SQ-0838). Turning colours off there does not save
-    /// a stencil from a colour the game asked for; it throws away the one machine
-    /// whose colours are known, and it cost SQ-0846's status banner its ink.
-    /// `machine_pair` is `Config::machine_default_colours` — the §8.3.3 pair for
-    /// THIS launch, not the profile's own fact (SQ-0928). The distinction is
-    /// load-bearing here: `InterpreterProfile::IbmPc` now states blue under white,
-    /// but it states it as a MACHINE, and a bare story file that merely fell
-    /// through to that variant has no machine at all. Asking the profile directly
-    /// would stop this rule firing for every CGA stencil opened off a plain `.z6`
-    /// — which is precisely the regression SQ-0806/SQ-0860 exist to prevent.
-    pub fn declines_game_colours(&self, machine_pair: Option<(u8, u8)>) -> bool {
-        self.is_monochrome() && machine_pair.is_none()
+    /// **A machine that already presents that page is not being guessed at, and
+    /// outranks the guess.** Where a launch names a machine, the answer came off
+    /// that machine's own interpreter: the Macintosh's white page under black ink
+    /// is `mac/xzip.lst`'s `SetColor := (zWHITE*256) + zBLACK`, and a mono Mac
+    /// `Pic.data` is the archive that same interpreter chose *for* that page, in
+    /// one decision (SQ-0838). Turning colours off there does not save a stencil
+    /// from a colour the game asked for; it throws away the one machine whose
+    /// colours are known, and it cost SQ-0846's status banner its ink.
+    ///
+    /// **But "names a machine" was the wrong question, and SQ-0928 is what
+    /// showed it.** This rule used to be `is_monochrome() && machine_pair.is_none()`,
+    /// on the reasoning that `InterpreterProfile::IbmPc` stated no defaults — so
+    /// a `.CG1` could only ever be met by a launch with no machine at all. SQ-0928
+    /// then gave the IBM PC a machine pair, and the rule stopped firing on exactly
+    /// the launches CGA art comes from: the 360K Zork Zero press serves its `.cg1`
+    /// off disk 1 with no `--pictures` at all, `ProfileSource::Medium` licenses the
+    /// machine, and the guard read that licence as the fact it was standing down
+    /// for. The reported symptom is the white page bleeding into the artwork.
+    ///
+    /// **The question the guard was reaching for is whether the machine's own
+    /// screen IS this two-colour display**, and the numbers answer it without
+    /// naming anybody. `machine_pair` is `Config::machine_default_colours` and
+    /// `two_colour_pair` is `Config::machine_two_colour_colours` — the same claim
+    /// about the narrower screen (see
+    /// [`InterpreterProfile::two_colour_colours`](crate::interpreter::InterpreterProfile::two_colour_colours)):
+    ///
+    /// | launch                          | machine | two-colour | declines |
+    /// |---------------------------------|---------|------------|----------|
+    /// | Mac HFS volume, mono `Pic.data` | (9, 2)  | (9, 2)     | no — the Mac's screen already IS that display |
+    /// | DOS press, `.CG1`               | (6, 9)  | (2, 9)     | **yes** — blue is the machine, black is the card |
+    /// | bare `.z6` + `--pictures *.cg1` | none    | none       | yes — SQ-0806 unmoved |
+    ///
+    /// One channel separates the two machines, and it is the only thing this
+    /// rule reads. Nothing here mentions the Macintosh: it declines to decline
+    /// because it states its two-colour page once instead of twice, which is a
+    /// property of the machine table rather than an exemption in the rule.
+    pub fn declines_game_colours(
+        &self,
+        machine_pair: Option<(u8, u8)>,
+        two_colour_pair: Option<(u8, u8)>,
+    ) -> bool {
+        self.is_monochrome() && (machine_pair.is_none() || machine_pair != two_colour_pair)
     }
 
     /// Is this Pict declared adaptive by the container's `APal` chunk (§11.3)?

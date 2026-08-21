@@ -129,7 +129,8 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
     let monochrome = picts.is_monochrome();
     // SQ-0806/SQ-0846: two-colour artwork declares the interpreter colourless —
     // but only where the machine has no colours of its own to declare.
-    let honoured = honor_game_colours && !picts.declines_game_colours(profile.default_colours());
+    let honoured = honor_game_colours
+        && !picts.declines_game_colours(profile.default_colours(), profile.two_colour_colours());
     let default_colours = honoured.then(|| profile.default_colours()).flatten();
     let mut session = GameSession::new_with_art_scale(
         bytes,
@@ -402,25 +403,36 @@ fn every_macintosh_plate_and_its_screen_are_in_the_same_space() {
 
 // ── The colours, on screen ───────────────────────────────────────────────────
 
-/// **The archive may not talk the Macintosh out of its own colours** (SQ-0846).
+/// **The archive may not talk the Macintosh out of its own colours** (SQ-0846,
+/// restated by SQ-0956).
 ///
 /// SQ-0806 reads a two-colour archive as evidence that the interpreter has no
-/// colours to offer, and on an IBM PC that is the only evidence there is: a
-/// `.CG1` names no machine, [`InterpreterProfile::IbmPc`] states no defaults,
-/// and bocfel's own note on the flag is *"the flags always seem to equal 0xe if
-/// the graphics are monochrome"* — a heuristic, doing the best that can be done.
+/// colours to offer, and bocfel's own note on the flag is *"the flags always
+/// seem to equal 0xe if the graphics are monochrome"* — a heuristic, doing the
+/// best that can be done with an archive alone.
 ///
 /// A Macintosh is not that case. The medium named the machine (an HFS volume is
 /// Apple's and nobody else's), and the machine's own interpreter named its
 /// colours — `mac/xzip.lst`'s `SetColor := (zWHITE*256) + zBLACK`. That same
 /// interpreter picked `Pic.Data` *for* that white page, in one decision. So the
-/// guess stands down in front of the fact, and the discriminator is exactly
-/// that: does the profile state defaults of its own?
+/// guess stands down in front of the fact.
 ///
-/// **The same bytes, two machines, two answers** — which is what makes this a
-/// profile question rather than an archive one. Ask the disk's monochrome
-/// archive under the Macintosh and it keeps its colours; ask it under the IBM PC
-/// and SQ-0806's rule fires on it unchanged.
+/// **What the discriminator IS has moved, and this test is where the difference
+/// shows.** SQ-0846 wrote it as "does the profile state defaults of its own?",
+/// which was serviceable while [`InterpreterProfile::IbmPc`] stated none; SQ-0928
+/// gave it blue under white and the question started answering yes for a `.CG1`
+/// off a DOS medium, where the whole point had been that it answers no. The
+/// question is now the machine's PAGE — is this machine's own screen the very
+/// two-colour display the stencil was drawn for? — and it is read off one
+/// channel: `two_colour_colours` against `default_colours`. The Mac states
+/// (9, 2) both times, the IBM PC states (6, 9) and (2, 9).
+///
+/// **The same bytes, two machines, two answers**, which is what makes this a
+/// machine question rather than an archive one — and it is now asserted with the
+/// IBM PC's REAL pair rather than with `None` standing in for it, because `None`
+/// can no longer tell the two apart. Ask the disk's monochrome archive under the
+/// Macintosh and it keeps its colours; ask it under the IBM PC — or under a
+/// launch that named no machine at all — and SQ-0806's rule fires on it.
 #[test]
 fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
@@ -430,20 +442,37 @@ fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
     let path = mac_disk().expect("fixture");
     let dir = std::env::temp_dir().join(format!("lanthorn-mac-declines-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
+    let mac = InterpreterProfile::Macintosh;
+    let pc = InterpreterProfile::IbmPc;
+    assert_eq!(
+        (mac.default_colours(), mac.two_colour_colours()),
+        (Some((9, 2)), Some((9, 2))),
+        "the Macintosh states its two-colour page once, not twice",
+    );
+    assert_eq!(
+        (pc.default_colours(), pc.two_colour_colours()),
+        (Some((6, 9)), Some((2, 9))),
+        "the IBM PC's card is not the IBM PC: one channel, blue 6 to black 2",
+    );
     for (archive, mono) in [("Pic.data", true), ("CPic.data", false)] {
         let over = PictureOverride::resolve_with_session(&path, &dir, Some(archive));
         let picts = PictSource::resolve_with_override(&path, over, None);
         assert_eq!(picts.is_monochrome(), mono, "{archive}: the archive's own EF_MONO flags");
         assert!(
-            !picts.declines_game_colours(InterpreterProfile::Macintosh.default_colours()),
-            "{archive}: a machine that states its own defaults keeps them",
+            !picts.declines_game_colours(mac.default_colours(), mac.two_colour_colours()),
+            "{archive}: a machine whose own screen IS this display keeps its colours",
+        );
+        assert_eq!(
+            picts.declines_game_colours(pc.default_colours(), pc.two_colour_colours()),
+            mono,
+            "{archive}: the same bytes on the IBM PC — SQ-0806's rule, back in force",
         );
         assert_eq!(
             // SQ-0928: `IbmPc` used to BE "a machine with no defaults" and is not
             // any more — it states blue under white. What has no defaults is a
             // LAUNCH that never named a machine, which is what this line meant all
             // along and now has to say outright.
-            picts.declines_game_colours(None),
+            picts.declines_game_colours(None, None),
             mono,
             "{archive}: the same bytes with no machine named — SQ-0806, unmoved",
         );

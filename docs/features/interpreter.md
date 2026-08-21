@@ -1107,6 +1107,17 @@ Amiga floppy or anywhere else.
   and is also what every story with no medium falls through to; without the
   distinction, opening any modern Inform game would paint it blue.
 
+  **And the card it is showing is not the machine.** The IBM PC's blue belongs to
+  a full-colour screen; put a CGA plate in front of it and the display is two
+  states, black under light grey — the exact inverse of what *Zork Zero* asks for,
+  and visible in `machine-screenshots/dos-zorkzero-cga.png`. So the profile states
+  a second pair for its two-colour display, differing from the first in the page
+  alone, and that one channel is what tells a `.CG1` (whose ground is not the
+  machine's) from a Macintosh's monochrome plate (whose is). It is read as a
+  discriminator rather than painted: what follows from it is that the story's own
+  colours are declined, which is
+  [the stencil rule](v6-graphics.md#the-colours-come-with-the-card).
+
   You can set it per game as well as globally. The
   [launch-options dialog](v6-graphics.md#three-ways-to-say-it) — **Shift-Enter**
   on a story in the browser — shows the number your art choice implies *and where

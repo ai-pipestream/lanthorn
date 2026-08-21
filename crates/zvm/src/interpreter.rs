@@ -127,6 +127,29 @@ pub const IBM_PC_DEFAULT_BACKGROUND: u8 = 6;
 /// The IBM PC's default ink: §8.3.1's **white**. See [`IBM_PC_DEFAULT_BACKGROUND`].
 pub const IBM_PC_DEFAULT_FOREGROUND: u8 = 9;
 
+/// The IBM PC's page when its display is showing **two colours**: §8.3.1's
+/// **black** (SQ-0956).
+///
+/// The card the machine is showing is not the machine. [`IBM_PC_DEFAULT_BACKGROUND`]
+/// is blue, measured off three DOS captures of the full-colour renditions, and it
+/// stands for those. Put a CGA plate on the same machine and the screen inverts:
+/// `machine-screenshots/dos-zorkzero-cga.png` — Zork Zero r393 at the Banquet Hall,
+/// a DOS emulator in CGA mode running `zork0.cg1` — censuses **48.3% `#000000`**
+/// page under **8.8% `#A0A0A0`** ink, 161 distinct colours from video scaling and
+/// no second hue anywhere in the frame. Row parity was checked first, because an
+/// interlaced capture censuses backwards (SQ-0933): even rows 39,252 black /
+/// 7,135 grey, odd rows 38,391 / 6,968 — they agree, so the whole-frame census is
+/// the honest one.
+///
+/// **A colour NUMBER, not a shade**, exactly as the constant above. The ink is
+/// white 9 — `#A0A0A0` is the same value `dos-hitchhiker.png` measures for its
+/// ink, and the IBM PC row already resolves white through EGA entry 7
+/// ([`crate::screen::ega_true_colour`]) — so **one channel moves**: the page,
+/// from blue 6 to black 2. That single difference is the whole discriminator
+/// `app::graphics::PictSource::declines_game_colours` reads; see
+/// `app::interpreter::InterpreterProfile::two_colour_colours`.
+pub const IBM_PC_TWO_COLOUR_BACKGROUND: u8 = 2;
+
 /// Commodore 128, from the same §11.1.3 table (SQ-0869)/// Commodore 128, from the same §11.1.3 table (SQ-0869) — the one row
 /// corroborated by a DISK rather than by an interpreter source tree.
 /// `TRINITY1.D64` opens with the Commodore 128's `CBM` autoboot signature and

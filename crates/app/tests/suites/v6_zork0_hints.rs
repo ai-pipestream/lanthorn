@@ -399,7 +399,8 @@ fn the_macintosh_hint_menu_keeps_its_leftmost_topic_column_at_every_width() {
     let dims = picts.all_pict_dims();
     let std_window = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
     let art_scale = picts.art_scale();
-    let honoured = !picts.declines_game_colours(profile.default_colours());
+    let honoured =
+        !picts.declines_game_colours(profile.default_colours(), profile.two_colour_colours());
     let mut s = app::session::GameSession::new_with_art_scale(
         bytes, honoured, false, profile.interpreter_number(), false, dims, std_window, art_scale,
         honoured.then(|| profile.default_colours()).flatten(), None, None,

@@ -363,7 +363,8 @@ fn boot_named(
     let profile = InterpreterProfile::for_art_flavour(pics.flavour());
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::from_native(pics);
-    let honoured = honour && !picts.declines_game_colours(profile.default_colours());
+    let honoured = honour
+        && !picts.declines_game_colours(profile.default_colours(), profile.two_colour_colours());
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
     let v6_art_scale = picts.art_scale();
@@ -443,8 +444,10 @@ fn flank_pixels(session: &GameSession) -> (u64, u64) {
 /// whether it was offered colours.
 ///
 /// The Macintosh carve-out is checked in the same breath, because the way to
-/// regress this is to widen it: `zork0.cg1` and `shogun.cg1` state no machine,
-/// so they must still decline colours exactly as they did.
+/// regress this is to widen it: a `.cg1` must still decline colours exactly as
+/// it did — whether the launch named no machine at all, or named the IBM PC off
+/// a DOS press, which since SQ-0956 are two different questions with the same
+/// answer.
 #[test]
 fn shoguns_flanks_survive_the_rule_that_spared_them() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
@@ -461,9 +464,19 @@ fn shoguns_flanks_survive_the_rule_that_spared_them() {
             // "a PC states no colours of its own" was really asserting. The IBM PC
             // itself now states blue under white; it just does not reach a launch
             // that only named an archive.
-            src.declines_game_colours(None),
+            src.declines_game_colours(None, None),
             src.is_monochrome(),
             "{archive}: SQ-0806's rule, unmoved — this launch named no machine",
+        );
+        assert_eq!(
+            // SQ-0956: and it answers the same when the launch DOES reach the
+            // machine — off a DOS press, where the medium licenses the IBM PC's
+            // pair. The card is not the machine: blue 6 is the IBM PC's screen and
+            // black 2 is what a CGA plate reveals, so a `.cg1` declines there too
+            // while the sixteen-colour `.eg1` beside it never did.
+            src.declines_game_colours(profile.default_colours(), profile.two_colour_colours()),
+            src.is_monochrome(),
+            "{archive}: and again with the IBM PC's own pair in hand",
         );
 
         for honour in [true, false] {

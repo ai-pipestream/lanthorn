@@ -1345,6 +1345,20 @@ impl Config {
             .flatten()
     }
 
+    /// The same claim about a narrower screen: the pair this launch's machine
+    /// states when its display is showing **two colours** (SQ-0956).
+    ///
+    /// Licensed by the same rule and for the same reason —
+    /// [`crate::interpreter::InterpreterProfile::two_colour_colours`] is a fact
+    /// about a machine, so a launch that never named one gets `None` here as it
+    /// gets `None` above, and a `.cg1` opened beside a bare `.z6` keeps SQ-0806's
+    /// behaviour exactly.
+    pub fn machine_two_colour_colours(&self) -> Option<(u8, u8)> {
+        self.machine_colours_licensed()
+            .then(|| self.interpreter_profile.two_colour_colours())
+            .flatten()
+    }
+
     /// True while `interpreter_number` is still the one a one-run source pinned
     /// — `--interpreter`, the launch-options dialog, or this game's own
     /// sidecar — and nothing has changed it (SQ-0646/0789). A convenience over
