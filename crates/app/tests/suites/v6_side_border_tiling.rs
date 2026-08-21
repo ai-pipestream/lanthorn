@@ -985,8 +985,17 @@ fn no_tile_join_steps_harder_than_the_pillar_shaft_itself() {
             let (at, worst) = (art.1 as usize + K..(BAND - base) as usize - K)
                 .map(|y| (y, luma_step(&prof, y, K)))
                 .fold((0usize, 0.0f64), |a, b| if b.1 > a.1 { b } else { a });
+            // A few ulps of slack, because both sides are MEANS of the same
+            // pixels summed in a different order: a seamless tile makes the two
+            // maxima the same step, and `zork0.cg1` lands on that tie exactly —
+            // 9.38953488372091 against 9.38953488372088, equal to twelve
+            // significant figures and ordered by the last three bits. (It came to
+            // the surface when SQ-0956 moved the CGA lit state from 255 to 170,
+            // which rescales every luma in the profile and re-rolls the rounding;
+            // the pixels are the same tile they always were.)
+            const ULPS: f64 = 1e-9;
             assert!(
-                worst <= natural,
+                worst <= natural + ULPS,
                 "{name} [release {}] cols {x0}..{x1}: the extension steps {worst:.2} at band row \
                  {at}, harder than the {:.2} the pillar shaft ({top}..{bottom}) ever steps by \
                  itself. That is a tile join resetting the pillar's shading — the CGA column is \

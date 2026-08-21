@@ -1112,11 +1112,15 @@ Amiga floppy or anywhere else.
   states, black under light grey — the exact inverse of what *Zork Zero* asks for,
   and visible in `machine-screenshots/dos-zorkzero-cga.png`. So the profile states
   a second pair for its two-colour display, differing from the first in the page
-  alone, and that one channel is what tells a `.CG1` (whose ground is not the
-  machine's) from a Macintosh's monochrome plate (whose is). It is read as a
-  discriminator rather than painted: what follows from it is that the story's own
-  colours are declined, which is
-  [the stencil rule](v6-graphics.md#the-colours-come-with-the-card).
+  alone, and *that* is what a launch off a `.CG1` reports in `$2C`/`$2D`: black 2
+  under white 9, with white resolving to the card's `#AAAAAA` rather than the
+  full-colour screen's `#FFFFFF`. The Macintosh's monochrome plate states the same
+  pair its machine already states, so nothing about it moves.
+
+  Which card is showing comes from the ARCHIVE's container, because nothing else
+  can say: a `.CG1` is a card, an Amiga/Mac `Pic.data` is not, and the same
+  `EF_MONO` flag is set on both. See
+  [a two-colour card takes one bit](v6-graphics.md#a-two-colour-card-takes-one-bit).
 
   You can set it per game as well as globally. The
   [launch-options dialog](v6-graphics.md#three-ways-to-say-it) — **Shift-Enter**
@@ -1377,13 +1381,17 @@ same sidecar. Nothing is written back to your config: probing one game with colo
 off cannot leave every later launch monochrome. And it is not a lock — a
 `/set-game-colours` while you play is you overriding your own flag, and wins.
 
-One thing turns it off for you. A game drawing **two-colour (CGA) artwork** is
-told the interpreter has no colours, because it has none — that artwork is a
-stencil whose own white is paint and whose transparency is meant to show your
-background through, and a story that thinks it is on a colour display paints over
-both. See [The colours come with the card](v6-graphics.md#the-colours-come-with-the-card).
-It applies to that story only and is never written back to your config, so
-choosing a `.cg1` once cannot quietly strip the colours from every other game.
+One thing turns it off for you, and only when nothing else can speak. A game
+drawing **two-colour (CGA) artwork** off no medium at all — a bare `.z6` with
+`--pictures zork0.cg1` — is told the interpreter has no colours, because in that
+launch it genuinely has none to state: that artwork is a stencil whose own paint
+is opaque and whose transparency is meant to show your background through, and a
+story that thinks it is on a colour display paints over both. Off a real DOS press
+the card states a screen instead and the colours stay ON, which is what *Zork
+Zero*'s in-game `color` command needs — see
+[a two-colour card takes one bit](v6-graphics.md#a-two-colour-card-takes-one-bit).
+Either way it applies to that story only and is never written back to your config,
+so choosing a `.cg1` once cannot quietly strip the colours from every other game.
 
 ## The period look
 

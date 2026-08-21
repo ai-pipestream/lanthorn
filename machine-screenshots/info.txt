@@ -183,10 +183,14 @@ WHAT IT SETTLES, AND IT IS NOT MERELY "THE BACKGROUND WAS BLACK"
 Zork Zero issues `set_colour(fg=2, bg=9)` — black ink on a white page — for every
 video card alike, and dos-zorkzero.png shows that honoured on the colour
 rendition (25.7% #FFFFFF). This frame is the OPPOSITE POLARITY: light ink on a
-black page. So a two-colour display does not substitute a different background,
-it does not honour the story's pair at all — which is what
-`app::graphics::PictSource::declines_game_colours` already asserts in prose and
-what SQ-0806 exists for.
+black page. So a two-colour display does not substitute a different background;
+the pair reaches it as ONE BIT — which of the two channels wants the lit state —
+and the card shows its own two colours in that polarity. That is
+`zvm::screen::two_colour_card_request`, and SQ-0956's notes are where the
+reasoning sits. Turning the story's colours off (SQ-0806) reproduces this same
+frame, because the game checks the colour flag before it does any colour work at
+all — but it also disables Zork Zero's in-game `color` command, which on this
+machine offers exactly the swap the bit describes.
 
 In colour NUMBERS rather than shades, which is what this directory pins: page 0
 (black) under ink 7 (light grey). #A0A0A0 is the same value dos-hitchhiker.png
@@ -204,10 +208,13 @@ Two two-colour archives, opposite polarity — and
 `blorb::infocom_pics::InfocomPics::is_monochrome` answers **true** for both, by
 its own documentation ("the Macintosh's monochrome Pic.data answers yes under
 exactly the same test as a .cg1"). That boolean is where the two machines are
-flattened together; `hardware_palette()` is the function that can still tell them
-apart. SQ-0956.
+flattened together; the CONTAINER is what tells them apart, and since SQ-0956 they
+resolve through two tables — CGA_PALETTE and MAC_MONO_PALETTE — rather than one.
 
-One thing left deliberately unreconciled: CGA_PALETTE slot 1 — the packed SET
-bit — is pure white, while this capture's ink is colour 7. Mode 6's foreground is
-selectable, so both are defensible, and the two should be squared up on purpose
-rather than by accident.
+RECONCILED, SQ-0956: CGA_PALETTE's lit state was pure white while this capture's
+ink is colour 7, and sampling the frame by region settles it — status text
+(160,160,160) over 1850 px, left pillar art (160,160,160) over 1570 px. The SAME
+shade for the ink and the artwork, because the card has two colours and everything
+on the screen is one of them. The table now says #AAAAAA, and the Macintosh's mono
+plate — whose white really is white, see mac-zorkzero-bw.jpg, 31.6% #FFFFFF inside
+the game window — moved to a table of its own rather than sharing this one.

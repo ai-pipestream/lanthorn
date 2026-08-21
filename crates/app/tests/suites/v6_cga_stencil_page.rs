@@ -1,15 +1,17 @@
-//! SQ-0956 — a two-colour stencil loses its ground when the machine pair is
-//! licensed: Zork Zero's white page paints out its own CGA artwork on a DOS press.
+//! SQ-0956 — the CARD an IBM PC is showing is part of the machine, and a CGA
+//! card's screen is not the machine's: Zork Zero's white page painted out its own
+//! CGA artwork on a DOS press.
 //!
 //! # As reported
 //!
 //! *DOS Zork Zero with the CGA rendition shows a white page bleeding into its
 //! artwork* — and, in the same breath, the constraint that shapes the fix: **the
-//! PC background SHOULD be white for Zork Zero normally, just not for CGA.** So
-//! this is not "the IBM PC's page is wrong". It is "a two-colour rendition needs a
-//! different ground from the one the story asked for".
+//! PC background SHOULD be white for Zork Zero normally, just not for CGA.** Then,
+//! after a first fix that turned the story's colours OFF for a two-colour
+//! rendition: *that killed the in-game `color` command*, which is a regression and
+//! is why this file's mechanism is not that one.
 //!
-//! # The two machine screenshots that settle it
+//! # The three machine screenshots that settle it
 //!
 //! `machine-screenshots/dos-zorkzero.png` — the Banquet Hall on the COLOUR
 //! rendition, **25.7% `#FFFFFF`**. White, and the user confirms white is right
@@ -22,47 +24,38 @@
 //! | share | value     | what                                   |
 //! |-------|-----------|----------------------------------------|
 //! | 48.3% | `#000000` | the page                               |
-//! |  8.8% | `#A0A0A0` | the ink                                |
+//! |  8.8% | `#A0A0A0` | the ink AND the artwork, one shade     |
 //! |   —   | 161 hues  | a grey ramp from video scaling, no second colour |
 //!
 //! Row parity was checked before the census, because an interlaced capture
 //! censuses backwards (SQ-0933): even rows 39,252 black / 7,135 grey, odd rows
 //! 38,391 / 6,968 — they agree, so the whole-frame number is the honest one.
 //!
-//! **That is the story's own pair INVERTED.** Zork Zero asks for black ink on a
-//! white page; the CGA screen is light ink on a black page. So the page is not the
-//! story's to set here, which is what `PictSource::declines_game_colours` exists
-//! to say.
+//! `machine-screenshots/mac-zorkzero-bw.jpg` — the OTHER two-colour archive, and
+//! the control that keeps this from being "two colours means dark": 31.6%
+//! `#FFFFFF` inside the game window with the pillars dithered black on it. Same
+//! `EF_MONO` flag, opposite polarity, a real white. That is why
+//! `blorb::infocom_pics` now carries two tables instead of one.
 //!
-//! **What is NOT claimed is that the display has no colour choice at all.** The
-//! user went back to the emulator: Zork Zero's in-game `color` command on CGA
-//! offers a **swap** of the two states, black and light grey, and nothing else. A
-//! two-colour display is two states and one bit of choice — it cannot name
-//! arbitrary colours, which is the only thing declining §8.3's palette to the
-//! story asserts. (The same visit also found that the swapped, light-ground state
-//! washes the plates out on the real machine exactly as it does for us: the art is
-//! light line work authored for a black ground. The swap is SQ-0957's and is out
-//! of scope here; nothing below implements or assumes it.)
+//! # The mechanism, and why it is not the honour flag
 //!
-//! # Why the rule had stopped saying it
+//! The CGA frame is the story's own pair INVERTED — it asks for black ink on a
+//! white page and the card shows light ink on a black one. Turning colours OFF
+//! reproduces that frame, because the game checks the colour flag and issues no
+//! `set_colour` at all when it is clear (measured on this press) — and it costs the
+//! `color` command for the same reason. So the flag stays SET and the CARD
+//! answers instead: a display with two states takes one bit from a §8.3.1 pair,
+//! which channel wants the lit state, and shows its own two colours in that
+//! polarity. `zvm::screen::two_colour_card_request` is the rule and carries the
+//! argument; [`zvm::screen::Palette::IbmCga`] is what installs it, off
+//! `PictSource::two_colour_card` — the archive's CONTAINER, which is the only
+//! thing that names the card.
 //!
-//! SQ-0806's rule was `is_monochrome() && machine_pair.is_none()`, written when
-//! `InterpreterProfile::IbmPc` stated no defaults at all. SQ-0928 gave it blue
-//! under white, and `ProfileSource::Medium` licenses a machine's colours — so on
-//! the one kind of launch CGA art actually comes from, a real DOS press, the guard
-//! read the licence as the fact it was standing down for and the rule went quiet.
-//!
-//! The discriminator is now the machine's PAGE rather than whether it named one,
-//! and it is **one channel**: `two_colour_colours` against `default_colours`.
-//!
-//! | machine   | its screen | its two-colour display | declines |
-//! |-----------|------------|------------------------|----------|
-//! | IBM PC    | (6, 9)     | **(2, 9)**             | yes      |
-//! | Macintosh | (9, 2)     | (9, 2)                 | no       |
-//!
-//! The Macintosh is not exempted anywhere; it states its two-colour page once
-//! instead of twice, so the rule passes over it by construction. `v6_macintosh_profile`
-//! is where that half is pinned.
+//! | launch                          | palette   | reported pair | story's colours |
+//! |---------------------------------|-----------|---------------|-----------------|
+//! | DOS press, `.CG1`               | `IbmCga`  | **(2, 9)**    | honoured, through the card |
+//! | DOS press, `.EG1`/`.MG1`        | `IbmYzip` | (6, 9)        | honoured, as named |
+//! | bare `.z6` + `--pictures *.cg1` | Standard  | none          | declined — SQ-0806 unmoved |
 //!
 //! # Specimens
 //!
@@ -82,7 +75,8 @@
 //! none. **Turn count: zero.** Every frame below is the boot banner, flushed
 //! through the real elems pipeline; Zork Zero paints its ornate border and its
 //! window-0 page before it asks for anything, so the bleed is on screen at the
-//! first prompt and driving keys would only add ways for the frame to differ.
+//! first prompt and driving keys would only add ways for the frame to differ. The
+//! one case that must move the ground drives one turn and says so.
 //!
 //! Both `honor_game_colours` modes are pinned throughout, per the project's colour
 //! convention — and here the `true` half is the load-bearing one, since it is the
@@ -138,11 +132,15 @@ struct Decision {
     profile: InterpreterProfile,
     source: ProfileSource,
     monochrome: bool,
+    /// `PictSource::two_colour_card` — is the archive a VIDEO CARD's two colours?
+    card: bool,
     /// `Config::machine_default_colours` — the machine's own screen.
     machine_pair: Option<(u8, u8)>,
-    /// `Config::machine_two_colour_colours` — the same machine, two-colour display.
+    /// `Config::machine_two_colour_colours` — the card's, when one is showing.
     two_colour_pair: Option<(u8, u8)>,
     declines: bool,
+    /// The pair `startup.rs` hands the session, which reaches header `$2C`/`$2D`.
+    reported: Option<(u8, u8)>,
 }
 
 /// `startup.rs`'s colour sequence for one volume, run through the real
@@ -168,16 +166,38 @@ fn decide(file: &str) -> Option<Decision> {
     };
     let machine_pair = cfg.machine_default_colours();
     let two_colour_pair = cfg.machine_two_colour_colours();
+    let card_screen = picts.two_colour_card_screen(&cfg);
+    let card = card_screen.is_some();
     let d = Decision {
         profile,
         source,
         monochrome: picts.is_monochrome(),
+        card,
         machine_pair,
         two_colour_pair,
-        declines: picts.declines_game_colours(machine_pair, two_colour_pair),
+        declines: picts.declines_game_colours(machine_pair),
+        // `startup.rs`'s own order: the card's pair when one is showing, else the
+        // machine's. The theme fallback below it cannot be reached here, because a
+        // DOS press always licenses a machine.
+        reported: card_screen.map(|(_, pair)| pair).or(machine_pair),
     };
     let _ = std::fs::remove_dir_all(&dir);
     Some(d)
+}
+
+/// Whether the launch is allowed to know which CARD it is showing.
+///
+/// `Card::Blind` is the pre-SQ-0956 screen, reproduced on purpose: the same press,
+/// the same archive, the same honoured colours, with the machine's own pair and
+/// palette (`IbmYzip`, white `#FFFFFF`) instead of the card's. That is the frame
+/// the defect was reported on, and every measurement below is a comparison against
+/// it rather than against a literal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Card {
+    /// What lanthorn ships: the archive names the card, the card states the screen.
+    Read,
+    /// The card unread — the machine's pair for a display that is not the machine's.
+    Blind,
 }
 
 /// One booted-and-rendered frame, plus the honour answer that produced it.
@@ -194,16 +214,21 @@ struct Frame {
     /// that fill a transparent hole can be asked the same question.
     model: app::engine::ScreenModel,
     state: AppState,
+    /// The palette this frame was rendered under — carried so a case that builds
+    /// a SECOND surface from `model`/`state` after the fact can reinstall it.
+    /// Without that the composite resolves colour numbers through whichever
+    /// palette the last `frame_after` call left behind, which is the reader half
+    /// of SQ-0958 and cost this file two frames measured under the wrong table.
+    palette: zvm::screen::Palette,
 }
 
 /// Boot one volume the way `startup.rs` boots — the medium picks the profile and
-/// the palette, the archive has its say about colours, the four screen-size links
-/// resolve in order — and render one hybrid frame of the boot banner.
+/// the palette, the archive names the card and states the pair, the four
+/// screen-size links resolve in order — and render one hybrid frame after `turns`
+/// blank lines.
 ///
-/// `force_honour` is the caller overruling the archive, which is how the
-/// pre-SQ-0956 screen is reproduced for comparison: `Some(true)` honours the
-/// story's colours whatever the plate says.
-fn frame(file: &str, force_honour: Option<bool>) -> Option<Frame> {
+/// `card` is the one knob, and it is the whole experiment: see [`Card`].
+fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
     let path = stories_dir().join(file);
     let bytes = match app::hints::load_story(&path) {
         Ok(app::hints::LoadedStory::ZCode(b)) => b,
@@ -237,9 +262,20 @@ fn frame(file: &str, force_honour: Option<bool>) -> Option<Frame> {
         interpreter_source: source,
         ..Default::default()
     };
-    let honoured = force_honour.unwrap_or(
-        !picts.declines_game_colours(cfg.machine_default_colours(), cfg.machine_two_colour_colours()),
-    );
+    let honoured = !picts.declines_game_colours(cfg.machine_default_colours());
+    // `startup.rs`'s two lines, through the SHIPPED function rather than a copy of
+    // it — `PictSource::two_colour_card_screen` is what boot and restart both call,
+    // so a regression there fails here (SQ-0956). `Card::Blind` is the only thing
+    // this harness does differently, and it does it by declining to ask.
+    let card_screen = match card {
+        Card::Read => picts.two_colour_card_screen(&cfg),
+        Card::Blind => None,
+    };
+    if let Some((palette, _)) = card_screen {
+        zvm::screen::set_palette(palette);
+    }
+    let reported =
+        card_screen.map(|(_, pair)| pair).or_else(|| cfg.machine_default_colours());
     let mut session = GameSession::new_with_art_scale(
         bytes,
         honoured,
@@ -249,7 +285,7 @@ fn frame(file: &str, force_honour: Option<bool>) -> Option<Frame> {
         picture_dims,
         std_window,
         picts.art_scale(),
-        honoured.then(|| cfg.machine_default_colours()).flatten(),
+        honoured.then_some(reported).flatten(),
         None,
         None,
     )
@@ -257,6 +293,9 @@ fn frame(file: &str, force_honour: Option<bool>) -> Option<Frame> {
     assert!(!session.quit && session.machine.fault_trace.is_none(), "{file} booted cleanly");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
+    for _ in 0..turns {
+        let _ = Engine::submit(&mut session, "");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 
     let mut state = AppState::default();
@@ -287,7 +326,21 @@ fn frame(file: &str, force_honour: Option<bool>) -> Option<Frame> {
         .get()
         .expect("hybrid renders window 0 as a terminal transcript")
         .area;
-    Some(Frame { buf, viewport, honoured, story_bg, story_page, model, state })
+    Some(Frame {
+        buf,
+        viewport,
+        honoured,
+        story_bg,
+        story_page,
+        model,
+        state,
+        palette: zvm::screen::palette(),
+    })
+}
+
+/// The boot frame — turn count **zero**, which is every case here but one.
+fn frame(file: &str, card: Card) -> Option<Frame> {
+    frame_after(file, card, 0)
 }
 
 /// How many cells of the story viewport are read on `page`.
@@ -328,6 +381,9 @@ struct ArtDetail {
     hues: usize,
     lit: usize,
     ground: ratatui::style::Color,
+    /// The commonest colour in the plate's region that is NOT the ground — the
+    /// plate's own lit state, which on this card must be its light grey.
+    paint: Option<ratatui::style::Color>,
 }
 
 fn art_detail(f: &Frame) -> ArtDetail {
@@ -342,6 +398,8 @@ fn art_detail(f: &Frame) -> ArtDetail {
     let ground = grounds.values().max_by_key(|(n, _)| *n).map(|(_, c)| *c).expect("a drawn pane");
 
     let mut hues = std::collections::BTreeSet::new();
+    let mut paints: std::collections::BTreeMap<String, (usize, ratatui::style::Color)> =
+        Default::default();
     let mut lit = 0usize;
     for (x, y) in art_region(f) {
         let Some(c) = f.buf.cell((x, y)) else { continue };
@@ -353,8 +411,14 @@ fn art_detail(f: &Frame) -> ArtDetail {
         if shows(c.bg) || (shows(c.fg) && c.symbol() != " ") {
             lit += 1;
         }
+        for col in [c.bg, c.fg] {
+            if shows(col) {
+                paints.entry(format!("{col:?}")).or_insert((0, col)).0 += 1;
+            }
+        }
     }
-    ArtDetail { hues: hues.len(), lit, ground }
+    let paint = paints.values().max_by_key(|(n, _)| *n).map(|(_, c)| *c);
+    ArtDetail { hues: hues.len(), lit, ground, paint }
 }
 
 
@@ -380,39 +444,34 @@ fn the_press_was_actually_read() {
             "{file}: the plate this volume serves — the archive is the only thing that moves \
              across this table",
         );
+        assert_eq!(
+            d.card, *two_colour,
+            "{file}: and a DOS two-colour plate is a CGA CARD, which is the thing the \
+             Macintosh's mono archive is not",
+        );
     }
     assert!(!any || seen > 0, "the press is on disk but not one volume was read");
 }
 
 // ── The rule ─────────────────────────────────────────────────────────────────
 
-/// **One channel, and it is the whole discriminator** (SQ-0956).
-///
-/// Asserted on the machine table rather than on a launch, because this is the
-/// fact the rule reads and everything else here follows from it. The ink does not
-/// move: white 9 both times, which is the `#A0A0A0` the CGA capture measures and
-/// the same value `dos-hitchhiker.png` gives for its ink on the same emulator
-/// family.
-#[test]
-fn the_ibm_pcs_two_colour_display_moves_one_channel() {
-    let pc = InterpreterProfile::IbmPc;
-    let (page, ink) = pc.default_colours().expect("SQ-0928: the IBM PC states its pair");
-    let (two_page, two_ink) = pc.two_colour_colours().expect("and states its two-colour page");
-    assert_eq!((page, ink), (6, 9), "the machine's screen: blue under white");
-    assert_eq!((two_page, two_ink), (2, 9), "its CGA plate: BLACK under the same white");
-    assert_eq!(ink, two_ink, "one channel — the ink is the card's, unmoved");
-    assert_ne!(page, two_page, "…and the page is not");
-}
-
 /// **THE DEFECT, at the decision that causes it.** The CGA volume of a real DOS
-/// press declines the story's colours; the EGA volume beside it does not.
+/// press reports the CARD's pair — black 2 under white 9 — where the EGA volume
+/// beside it reports the machine's blue 6. Neither declines the story's colours,
+/// which is what the `color` command needs and what the first fix took away.
 ///
-/// FALSIFIED by restoring the old guard (`machine_pair.is_none()`): the CGA rows
-/// then report `declines = false`, because `ProfileSource::Medium` licenses the
-/// IBM PC's pair and the guard reads that licence as a reason to stand down. That
-/// is the reported launch exactly — no `--pictures`, just the disk in the drive.
+/// FALSIFIED by unreading the card (`Card::Blind`, or dropping
+/// `PictSource::two_colour_card` from `startup.rs`): every row then reports
+/// `(6, 9)`, the CGA rows included, and blue is a colour a two-state display does
+/// not have.
+///
+/// The last row is SQ-0806's rule, which is all that is left of it: a stencil
+/// opened beside a bare `.z6` has no machine to state a screen, so the interpreter
+/// declares itself colourless and the host theme is the ground. That launch is not
+/// on this press — it is pinned in `honor_colours_artwork_pin` — but the licence
+/// gate it turns on is asserted here, because this is the file that would break it.
 #[test]
-fn a_cga_volume_declines_the_storys_colours_and_an_ega_volume_does_not() {
+fn a_cga_volume_reports_the_cards_pair_and_an_ega_volume_the_machines() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     let any = PRESS.iter().any(|(f, _)| present(f));
     let mut seen = 0usize;
@@ -421,12 +480,40 @@ fn a_cga_volume_declines_the_storys_colours_and_an_ega_volume_does_not() {
         seen += 1;
         assert_eq!(d.machine_pair, Some((6, 9)), "{file}: the IBM PC's own screen");
         assert_eq!(d.two_colour_pair, Some((2, 9)), "{file}: and its two-colour display");
+        assert!(
+            !d.declines,
+            "{file}: a licensed machine keeps the story's colours — `color` needs the flag set",
+        );
         assert_eq!(
-            d.declines, *two_colour,
-            "{file}: a stencil declines the story's pair, a sixteen-colour plate has no reason to",
+            d.reported,
+            Some(if *two_colour { (2, 9) } else { (6, 9) }),
+            "{file}: header $2C/$2D carries the CARD's page, not the machine's",
         );
     }
     assert!(!any || seen > 0, "the press is on disk but not one volume was read");
+}
+
+/// **One channel is what moves, and the ink is not it** (SQ-0956).
+///
+/// The card's pair against the machine's, asserted on the tables rather than on a
+/// launch: white 9 both times, and only the page moves, blue 6 to black 2. The ink
+/// LOOKS different all the same, because `Palette::IbmCga` resolves that one number
+/// to the card's `#AAAAAA` where `IbmYzip` gives `#FFFFFF` — which is
+/// `zvm::screen`'s to pin and is pinned there.
+#[test]
+fn the_cards_pair_is_the_machines_with_one_channel_moved() {
+    let pc = InterpreterProfile::IbmPc;
+    let (page, ink) = pc.default_colours().expect("SQ-0928: the IBM PC states its pair");
+    let (card_page, card_ink) = pc.two_colour_colours().expect("and states its card's page");
+    assert_eq!((page, ink), (6, 9), "the machine's screen: blue under white");
+    assert_eq!((card_page, card_ink), (2, 9), "its CGA card: BLACK under the same white");
+    assert_eq!(ink, card_ink, "one channel — the ink is the card's, unmoved");
+    assert_ne!(page, card_page, "…and the page is not");
+    assert_eq!(
+        (card_ink, card_page),
+        zvm::screen::CGA_CARD_PAIR,
+        "and it is the same pair `two_colour_card_request` shows, stated once",
+    );
 }
 
 // ── The screen ───────────────────────────────────────────────────────────────
@@ -436,87 +523,129 @@ fn a_cga_volume_declines_the_storys_colours_and_an_ega_volume_does_not() {
 ///
 /// Zork Zero issues `set_colour(fg=2, bg=9)` on a window the size of the screen
 /// for every video card alike — it cannot see which plate was loaded — so with the
-/// story's colours honoured that page floods the story viewport and the two-colour
-/// border art is read on it. On the colour renditions that is right, and
+/// card unread that page floods the story viewport and the two-colour border art
+/// is read on it. On the colour renditions that is right, and
 /// `machine-screenshots/dos-zorkzero.png` shows it. On the CGA plate the machine
-/// shows the opposite polarity entirely.
+/// shows the opposite polarity entirely, and reading the card is what produces it:
+/// the pair arrives at `two_colour_card_request`, the card takes the one bit it
+/// carries, and window 0 comes out white 9 over black 2 instead of black over
+/// white.
 ///
-/// **The RELATION is asserted, never an RGB.** The page goes through the IBM PC's
+/// **The RELATION is asserted, never an RGB.** The page goes through the card's
 /// palette and the player's theme, so a literal would be pinning the resolver
 /// rather than the rule. What is pinned is that the ground the CGA frame is read
-/// on is not the ground the story asked for — while the same frame with the story
-/// honoured (the pre-fix screen, reproduced here on purpose) is covered in it.
+/// on is not the ground the story asked for — while the same frame with the card
+/// unread (the pre-fix screen, reproduced here on purpose) is covered in it.
 ///
 /// **And then what the user actually reported, which a colour equality cannot
 /// see.** On the real machine the black background punches through the plate in
 /// its transparent areas; in lanthorn those areas stayed white, the light line
-/// work sat on white, *and a lot of detail simply disappeared*. A ground
-/// assertion passes the moment one pixel is right — so the second half counts how
-/// much of the plate can be told apart from whatever it ended up sitting on, each
-/// frame against its own ground. Measured on the boot frame, both presses:
+/// work sat on white, *and a lot of detail simply disappeared*. So the second half
+/// asks what the plate is PAINTED IN and what it is standing ON, each frame
+/// against its own ground. Re-measured on the boot frame, both presses:
 ///
-/// | the story's page | frame's ground | distinct colours | cells lit |
-/// |------------------|----------------|------------------|-----------|
-/// | honoured         | `#FFFFFF`      | 251              | 1,115     |
-/// | declined         | `#000000`      | 256              | **1,672** |
+/// | the card | frame's ground | plate's paint | hues | cells lit |
+/// |----------|----------------|---------------|------|-----------|
+/// | unread   | `#FFFFFF`      | `#AAAAAA`     | 253  | 1,639     |
+/// | read     | `#000000`      | `#AAAAAA`     | 172  | 1,635     |
 ///
-/// FALSIFIED by restoring the old guard: the `declined` column becomes the
-/// `honoured` one, the story viewport comes back flooded with white and the plate
-/// loses those 557 cells again, which is the report verbatim. The `honoured`
-/// column is also the non-vacuity guard — if the story ever stops setting that
-/// page, this test proves nothing and says so.
+/// **The `lit` count no longer separates the two frames, and that is a real
+/// finding rather than a loosened assertion.** It was 1,115 against 1,672 while
+/// `CGA_PALETTE`'s lit state was pure `#FFFFFF`: the plate's own paint WAS the
+/// story's page, so half the artwork was a hole. The capture says that paint is
+/// the card's `#AAAAAA` and the table now says so too, which lifts the unread
+/// frame's count on its own — a light-grey plate reads on a white page, badly, and
+/// the user has seen exactly that on the real machine after choosing the light
+/// ground from Zork Zero's own `color` menu. What separates the frames is the
+/// polarity, so that is what is asserted: the plate is the card's grey **on the
+/// card's black**, and the hue count falls to a two-colour screen's.
+///
+/// FALSIFIED by unreading the card: the ground comes back `#FFFFFF`, the story
+/// viewport is flooded with it again and `story_bg` is `Standard(9)`. Falsified
+/// the other way by restoring `CGA_PALETTE`'s pure white: `paint` comes back
+/// `Rgb(255, 255, 255)`, which no pixel of the capture has. Both halves are needed
+/// and both are pinned — and reverting BOTH puts the reported frame back exactly,
+/// **1,115 cells lit of 251 hues, paint `#000000` on a `#FFFFFF` ground**, which
+/// are the figures the first attempt at this quest recorded for the defect. The
+/// plate's paint being its own black is the report in one field: everything the
+/// artwork drew in white had vanished into the page. The `unread` column is also
+/// the non-vacuity guard — if the story ever stops setting that page, this test
+/// proves nothing and says so.
 #[test]
 fn the_storys_white_page_does_not_reach_a_cga_frame() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     let any = present(CGA_DISK) || present(CGA_DISK_720);
     let mut seen = 0usize;
     for file in [CGA_DISK, CGA_DISK_720] {
-        let Some(forced) = frame(file, Some(true)) else { continue };
-        let Some(shipped) = frame(file, None) else { continue };
+        let Some(blind) = frame(file, Card::Blind) else { continue };
+        let Some(shipped) = frame(file, Card::Read) else { continue };
         seen += 1;
-        assert!(forced.honoured, "{file}: the pre-fix frame honours the story's colours");
+        assert!(blind.honoured, "{file}: both frames honour the story's colours");
+        assert!(shipped.honoured, "{file}: …including the shipped one — `color` needs the flag");
         assert_eq!(
-            forced.story_bg,
+            blind.story_bg,
             zvm::screen::ZColour::Standard(9),
             "{file}: premise — Zork Zero really does ask for §8.3.1's white page",
         );
-        let white = forced.story_page.expect("an honoured page resolves to a colour");
-        let flooded = cells_on(&forced, white);
+        let white = blind.story_page.expect("an honoured page resolves to a colour");
+        let flooded = cells_on(&blind, white);
         assert!(
             flooded > 0,
-            "{file}: the symptom must reproduce with colours honoured, else this proves nothing",
+            "{file}: the symptom must reproduce with the card unread, else this proves nothing",
         );
 
-        // The detail first, because it is what was reported and what a colour
-        // equality cannot see — and because reverting the fix must fail HERE,
-        // with the line work gone, rather than on a ground that merely reads
-        // differently.
-        let before = art_detail(&forced);
+        // The detail next, because it is what was reported and what a colour
+        // equality cannot see. Both frames are printed, because the interesting
+        // fact is not one number: it is that the plate's own paint and the ground
+        // it stands on are the CARD's two colours once the card is read, and two
+        // colours the card never had before.
+        let before = art_detail(&blind);
         let after = art_detail(&shipped);
         eprintln!(
-            "{file}: honoured {flooded} cells on the story's page {white:?}; art detail — {} \
-             cells lit of {} colours on ground {:?} honoured, {} of {} on ground {:?} declined",
-            before.lit, before.hues, before.ground, after.lit, after.hues, after.ground,
+            "{file}: card unread, {flooded} cells on the story's page {white:?}; art detail — {} \
+             cells lit of {} hues, paint {:?} on ground {:?} UNREAD; {} of {}, paint {:?} on \
+             ground {:?} READ",
+            before.lit, before.hues, before.paint, before.ground,
+            after.lit, after.hues, after.paint, after.ground,
+        );
+        assert_eq!(
+            after.ground,
+            ratatui::style::Color::Rgb(0, 0, 0),
+            "{file}: read, the plate stands on the card's own black page",
+        );
+        assert_eq!(
+            after.paint,
+            Some(ratatui::style::Color::Rgb(0xAA, 0xAA, 0xAA)),
+            "{file}: …and its paint is the card's light grey, `CGA_PALETTE`'s lit state — \
+             which is the `#A0A0A0` the capture measures for every lit pixel it has",
         );
         assert!(
-            after.lit > before.lit && after.hues >= before.hues,
-            "{file}: the plate's line work must SURVIVE — {} distinguishable cells of {} colours \
-             when the story's page is honoured, {} of {} when it is not",
-            before.lit,
-            before.hues,
+            after.lit > 0 && after.paint != Some(after.ground),
+            "{file}: the plate's line work must be TELLABLE APART from the ground — {} cells \
+             lit, paint {:?}, ground {:?}",
             after.lit,
-            after.hues,
+            after.paint,
+            after.ground,
         );
+        // The card unread is the reported screen, and this is where it differs:
+        // the same paint on the story's white page, which is the washed-out
+        // polarity the user also saw on the real machine when they chose it from
+        // the game's own `color` menu. Half a shade of contrast where the card
+        // gives a full one.
+        assert_eq!(before.ground, white, "{file}: unread, the plate sits on the story's page");
+        assert_ne!(after.ground, white, "{file}: read, it does not");
 
         // …and the ground itself, which is what makes the detail above possible.
-        assert!(!shipped.honoured, "{file}: the shipped frame declines them — SQ-0806's rule");
-        assert_eq!(before.ground, white, "{file}: honoured, the plate sits on the story's page");
-        assert_ne!(after.ground, white, "{file}: declined, it does not");
+        assert_eq!(
+            shipped.story_bg,
+            zvm::screen::ZColour::Standard(2),
+            "{file}: the card took the bit — the story's white page is its BLACK one",
+        );
         assert_eq!(
             cells_on(&shipped, white),
             0,
             "{file}: not one cell of the story's page on a two-colour frame — {flooded} of them \
-             before the rule fired again",
+             before the card was read",
         );
     }
     assert!(!any || seen > 0, "a CGA volume is on disk but no frame was rendered");
@@ -536,43 +665,47 @@ fn the_storys_white_page_does_not_reach_a_cga_frame() {
 /// WHOLE canvas opaque before shipping: every hole in the plate becomes a real
 /// pixel of the page. It is measured in PIXELS, and with the same detail oracle
 /// as the ring — **not** by counting the story's white, which cannot tell the
-/// bleed apart from the plate's own paint. `CGA_PALETTE`'s set bit is pure white,
-/// so a `.CG1`'s line work IS white: measured on this frame, 221,263 white pixels
-/// with the story's page honoured and 45,688 with it declined, of which the
-/// second number is entirely the artwork. That is exactly the trap the user's
-/// report describes from the other side — light line work on a white ground — and
-/// it is why "how much can be told apart from the ground" is the honest question.
+/// bleed apart from the plate's own paint. Counting the story's white is exactly
+/// the trap the user's report describes from the other side — light line work on a
+/// light ground — which is why "how much can be told apart from the ground" is the
+/// honest question here too.
 ///
-/// Measured on the boot frame, 360K disk 1 and 720K disk 2 alike:
+/// Re-measured on the boot frame, 360K disk 1 and 720K disk 2 alike:
 ///
-/// | the story's page | composite's ground | distinct colours | pixels lit |
-/// |------------------|--------------------|------------------|------------|
-/// | honoured         | `#FFFFFF`          | **2**            | 34,737     |
-/// | declined         | `#000000`          | **3**            | **61,341** |
+/// | the card | composite's ground | colours | pixels lit |
+/// |----------|--------------------|---------|------------|
+/// | unread   | `#FFFFFF`          | 3       | 80,425     |
+/// | read     | `#000000`          | 3       | 61,341     |
 ///
-/// Two colours in a two-colour plate is the collapse itself: with the white page
-/// underneath, the plate's own white IS the ground and only its black strokes are
-/// left to see. Declined, the ground is a third value and 1.77x as much of the
-/// artwork can be told apart from it.
+/// The lit count is HIGHER with the card unread and that is arithmetic, not a
+/// regression: on a white ground both of the plate's states differ from it, on a
+/// black ground only its light one does. What the count cannot say and the ground
+/// can is which of them the machine shows, so the ground is what is asserted, and
+/// beside it the three values themselves — `#000000`, the plate's `#AAAAAA` and the
+/// ink's `#ADADAD`, every one a grey. The capture's own summary is "161 distinct
+/// colours, a grey ramp from video scaling, with no second hue anywhere in the
+/// frame"; a composite carries no video scaling, so the honest form of that claim
+/// here is that nothing in it has a hue at all.
 #[test]
 fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     let any = present(CGA_DISK) || present(CGA_DISK_720);
     let mut seen = 0usize;
     for file in [CGA_DISK, CGA_DISK_720] {
-        let Some(forced) = frame(file, Some(true)) else { continue };
-        let Some(shipped) = frame(file, None) else { continue };
+        let Some(blind) = frame(file, Card::Blind) else { continue };
+        let Some(shipped) = frame(file, Card::Read) else { continue };
         seen += 1;
-        let white = forced.story_page.expect("an honoured page resolves to a colour");
+        let white = blind.story_page.expect("an honoured page resolves to a colour");
         let ratatui::style::Color::Rgb(r, g, b) = white else { panic!("{file}: an RGB page") };
         let white_px = image::Rgba([r, g, b, 255]);
 
         let mut raster = Vec::new();
-        for (what, f, want_white) in [("honoured", &forced, true), ("declined", &shipped, false)] {
+        for (what, f, want_white) in [("unread", &blind, true), ("read", &shipped, false)] {
             // The raster composite, built exactly as `render::screen` builds it.
             let app::engine::WinNode::Layered(items) = &f.model.root else {
                 panic!("v6 builds a Layered root")
             };
+            zvm::screen::set_palette(f.palette);
             let native = app::render::v6_layout::native_extent(items);
             let layout = app::render::v6_layout::classify_windows(items);
             let (canvas, _) =
@@ -583,6 +716,23 @@ fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
             }
             let ground = *tally.iter().max_by_key(|(_, n)| **n).expect("a built canvas").0;
             let lit: usize = tally.iter().filter(|(c, _)| **c != ground).map(|(_, n)| *n).sum();
+            if !want_white {
+                // The shipped composite is a two-state screen: every value in it is
+                // one of the card's greys, which is the capture's "no second hue"
+                // asserted in the form a composite can carry (it has no video
+                // scaling to spread a ramp).
+                for c in tally.keys() {
+                    assert!(
+                        c[0] == c[1] && c[1] == c[2],
+                        "{file}: a CGA composite has no hue in it — found {c:?}",
+                    );
+                }
+                assert_eq!(
+                    tally.get(&[0xAA, 0xAA, 0xAA, 255]).copied().unwrap_or(0),
+                    45_688,
+                    "{file}: the plate's own paint, in the card's light grey",
+                );
+            }
             let flooded = tally.get(&white_px.0).copied().unwrap_or(0);
             eprintln!(
                 "{file} ({what}): raster ground {ground:?}, {lit} px lit of {} colours, {flooded} \
@@ -606,11 +756,104 @@ fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
             );
         }
         assert!(
-            raster[1] > raster[0],
-            "{file}: more of the plate must be distinguishable once the story's page is \
-             declined — {} px lit honoured, {} px declined",
+            raster[0] > 0 && raster[1] > 0,
+            "{file}: both frames must have artwork in them at all — {} px lit unread, {} px read",
             raster[0],
             raster[1],
+        );
+    }
+    assert!(!any || seen > 0, "a CGA volume is on disk but no frame was rendered");
+}
+
+/// **The `color` command, which is the regression this quest was reopened for**
+/// (SQ-0956, and SQ-0957's mechanism).
+///
+/// The first fix declared the interpreter colourless. Zork Zero checks that flag
+/// before it does any colour work at all — with it clear the boot press issues no
+/// `set_colour` whatsoever, measured on this very volume — so the in-game `color`
+/// command had nothing to act through. The flag is set again, which is asserted
+/// two cases up; what this one pins is that a colour change still MOVES THE
+/// GROUND, and that the plate's transparent holes come with it.
+///
+/// **Driven at the model rather than through the menu.** Zork Zero's `color`
+/// picker is a graphical menu with no prose in the transcript, and driving it
+/// headlessly would be pinning a key sequence rather than a colour rule. So the
+/// swap is applied where the opcode applies it — every window's own pair, set to
+/// the OTHER side of the card's one bit — and the composite is rebuilt. That is
+/// exactly the state `two_colour_card_request(Some(2), Some(9))` produces, which
+/// `zvm::screen`'s own tests pin from the opcode end.
+///
+/// **Perturb, then assert.** The frame immediately after a change is not the
+/// question; the question is whether the surfaces that resolve a transparent pixel
+/// went and looked again.
+///
+/// The swapped state is the washed-out one — a light plate on a light ground,
+/// which the user confirmed looks the same way on the real machine — and that is
+/// the point: it is the player's choice to make, and lanthorn now lets the game
+/// offer it. Nothing here claims it looks good.
+#[test]
+fn a_story_colour_change_moves_the_ground_the_plate_stands_on() {
+    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let any = present(CGA_DISK) || present(CGA_DISK_720);
+    let mut seen = 0usize;
+    for file in [CGA_DISK, CGA_DISK_720] {
+        let Some(mut f) = frame(file, Card::Read) else { continue };
+        seen += 1;
+        zvm::screen::set_palette(f.palette);
+        let ground = |f: &Frame| {
+            let app::engine::WinNode::Layered(items) = &f.model.root else {
+                panic!("v6 builds a Layered root")
+            };
+            let native = app::render::v6_layout::native_extent(items);
+            let layout = app::render::v6_layout::classify_windows(items);
+            let (canvas, _) =
+                app::render::screen::build_v6_raster_canvas(&layout, native, &f.state);
+            let mut tally: std::collections::BTreeMap<[u8; 4], usize> = Default::default();
+            for p in canvas.pixels() {
+                *tally.entry(p.0).or_default() += 1;
+            }
+            let g = *tally.iter().max_by_key(|(_, n)| **n).expect("a built canvas").0;
+            (g, tally.get(&g).copied().unwrap_or(0))
+        };
+        let (before, before_n) = ground(&f);
+        assert_eq!(before, [0, 0, 0, 255], "{file}: the card boots on its own black page");
+
+        // The swap, applied where `@set_colour` applies it.
+        let app::engine::WinNode::Layered(items) = &mut f.model.root else {
+            panic!("v6 builds a Layered root")
+        };
+        let mut moved = 0usize;
+        for it in items.iter_mut() {
+            let pair = app::render::v6_layout::story_pair_packed(Some(it));
+            if pair == (0, 0) {
+                continue; // a window that named no colour is not the story's to swap
+            }
+            match &mut it.node {
+                app::engine::WinNode::Grid(g) => {
+                    g.fg = Some(app::state::pack_zcolour(zvm::screen::ZColour::Standard(2)));
+                    g.bg = Some(app::state::pack_zcolour(zvm::screen::ZColour::Standard(9)));
+                    moved += 1;
+                }
+                app::engine::WinNode::Buffer(b) => {
+                    b.fg = Some(app::state::pack_zcolour(zvm::screen::ZColour::Standard(2)));
+                    b.bg = Some(app::state::pack_zcolour(zvm::screen::ZColour::Standard(9)));
+                    moved += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(moved > 0, "{file}: premise — the story coloured some window to swap");
+
+        let (after, after_n) = ground(&f);
+        eprintln!(
+            "{file}: composite ground {before:?} ({before_n} px) before the swap, {after:?} \
+             ({after_n} px) after"
+        );
+        assert_ne!(after, before, "{file}: a colour change must move the ground — SQ-0957");
+        assert_eq!(
+            after,
+            [0xAD, 0xAD, 0xAD, 255],
+            "{file}: …to the other side of the card's one bit, colour 9 through `IbmCga`",
         );
     }
     assert!(!any || seen > 0, "a CGA volume is on disk but no frame was rendered");
@@ -628,7 +871,7 @@ fn the_colour_renditions_keep_the_white_page_they_asked_for() {
     let any = present(EGA_DISK) || present(MCGA_DISK_720);
     let mut seen = 0usize;
     for file in [EGA_DISK, MCGA_DISK_720] {
-        let Some(f) = frame(file, None) else { continue };
+        let Some(f) = frame(file, Card::Read) else { continue };
         seen += 1;
         assert!(f.honoured, "{file}: a sixteen-colour plate has colours to give");
         assert_eq!(

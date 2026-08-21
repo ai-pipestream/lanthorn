@@ -532,7 +532,7 @@ pub(crate) fn boot_story(
     // page and ink, not the user's terminal's. `honor_game_colours = false` still
     // wins over both — that declares the interpreter colourless (§8.3.2) and
     // leaves the VM's own black-on-white seed alone.
-    let host_default_colours = if cfg.honor_game_colours {
+    let mut host_default_colours = if cfg.honor_game_colours {
         cfg.machine_default_colours().or_else(|| {
             app::colors::host_default_colour_pair(
                 cs.theme.get("transcript").style,
@@ -638,17 +638,15 @@ pub(crate) fn boot_story(
             // Blorb (which is not in play at all when an override loaded) and
             // before the machine, because a 320-wide `.MG1` implies the ordinary
             // standard window on a machine, IBM PC, that declares none.
-            // SQ-0806: a TWO-COLOUR rendition cannot give a story the arbitrary
-            // colours §8.3 lets it name, so the story is told the interpreter has
-            // none — `honor_game_colours` off, which is exactly what that flag
-            // already means (§8.3.2, see `loop_tick::poll_zvm_default_colours`).
-            // Two STATES is not none, and the machine proves it: Zork Zero's own
-            // `color` command on CGA offers a swap of black and light grey. That
-            // swap is SQ-0957's and nothing here implements it.
+            // SQ-0806: a TWO-COLOUR rendition with no machine behind it cannot
+            // give a story the arbitrary colours §8.3 lets it name, so the story
+            // is told the interpreter has none — `honor_game_colours` off, which
+            // is exactly what that flag already means (§8.3.2, see
+            // `loop_tick::poll_zvm_default_colours`).
             //
             // A `.CG1` archive is a STENCIL. On Zork Zero's border: 46,336
-            // opaque white pixels, 17,152 opaque black, and 192,512 TRANSPARENT
-            // — its white is paint, the lit face of the pillars, and its
+            // opaque lit pixels, 17,152 opaque black, and 192,512 TRANSPARENT
+            // — its lit state is paint, the face of the pillars, and its
             // transparency is drawn so the ground behind reads as a colour the
             // two-bit artwork never had to store. Zork Zero asks for a white
             // page anyway, because it issues `set_colour(fg=2, bg=9)` for every
@@ -670,30 +668,40 @@ pub(crate) fn boot_story(
             // two-colour display — a Macintosh, whose interpreter chose its white
             // page and its mono `Pic.data` in one decision.
             //
-            // SQ-0956: which is a question about the machine's PAGE, not about
-            // whether it named one. The pair a two-colour display states is the
-            // second argument, and only the IBM PC answers it differently from
-            // its own screen (black 2 rather than blue 6) — which is why a `.CG1`
-            // declines and a mono `Pic.data` does not. See
-            // `PictSource::declines_game_colours`; before this the licence a DOS
-            // medium carries was itself read as the fact to stand down for, and
-            // Zork Zero's white page painted out its own CGA artwork.
+            // SQ-0956: nor on a DOS press, which SQ-0928 turned into a machine
+            // as well. Declining there cost Zork Zero its `color` command, and
+            // the ground it fell back to was the host theme's — right on a dark
+            // terminal by luck and wrong on a light one. The card states its own
+            // screen instead, three lines below.
             //
             // SQ-0860: recorded on `AppState` too (`artwork_declines_colours`),
             // because the post-IFID `reload_style` re-derives this key from the
             // per-story FILES and would otherwise land back on the global base —
             // captured above, BEFORE this ran — undoing both the value and the pin
             // a few lines after they were set.
-            if picts
-                .declines_game_colours(
-                    cfg.machine_default_colours(),
-                    cfg.machine_two_colour_colours(),
-                )
-                && cfg.honor_game_colours
-            {
+            if picts.declines_game_colours(cfg.machine_default_colours()) && cfg.honor_game_colours {
                 artwork_declines_colours = true;
                 cfg.honor_game_colours = false;
                 cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, false);
+            }
+            // SQ-0956: and where the launch DOES have a machine, the card it is
+            // showing is part of it. A `.CG1` is a CGA card in the 640-wide mode,
+            // which has two states — black under light grey — and the palette says
+            // so: white 9 is EGA entry 7 there, `#AAAAAA`, which is what every lit
+            // pixel of `machine-screenshots/dos-zorkzero-cga.png` measures, text
+            // and artwork alike. `Palette::IbmCga` carries both halves of that:
+            // the table, and the fact that the display has one bit, which
+            // `zvm::screen::two_colour_card_request` is the reader of.
+            //
+            // Set HERE and not beside the palette above, because the archive is
+            // what names the card and it was not resolved yet up there — but still
+            // before the session constructor, which runs the story to its first
+            // prompt and is where the game's own `set_colour` lands.
+            if let Some((palette, pair)) = picts.two_colour_card_screen(&cfg) {
+                zvm::screen::set_palette(palette);
+                // …and the pair §8.3.3 reports is the card's, not the machine's:
+                // black 2 rather than blue 6, with the ink unmoved at white 9.
+                host_default_colours = Some(pair);
             }
             // SQ-0837/SQ-0838: then the archive the MEDIUM supplied, and only
             // then the machine. The archive comes first because Infocom's own

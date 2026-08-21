@@ -309,8 +309,9 @@ fn the_fusion_is_not_a_function_of_the_pane_width() {
 /// SQ-0806 stopped the CGA stencil from having.
 ///
 /// Falsified by dropping `&& !src.is_monochrome()` from the gate: the frame comes
-/// back carrying (64,64,64), (128,128,128) and (191,191,191) — the greys a tent
-/// makes of a one-bit edge — and the two-colour assertion below fails on them.
+/// back carrying the intermediate values a tent makes of a one-bit edge — a
+/// quarter, a half and three quarters of the card's lit state — and the
+/// two-colour assertion below fails on them.
 #[test]
 fn cga_line_art_is_never_blended() {
     let _g = standard_palette();
@@ -321,16 +322,19 @@ fn cga_line_art_is_never_blended() {
             c.pixels().filter(|p| p.0[3] != 0).map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
         assert_eq!(
             seen,
-            BTreeSet::from([[0, 0, 0], [255, 255, 255]]),
-            "honor={honor_game_colours}: a CGA frame stays two colours — no grey may appear"
+            BTreeSet::from([[0, 0, 0], [170, 170, 170]]),
+            "honor={honor_game_colours}: a CGA frame stays the card's two states — no third"
         );
-        // Its one-bit edges keep their full contrast: measured 57.412, and a tent
-        // across them would take it to 15.140.
+        // Its one-bit edges keep their full contrast: measured 38.275, and a tent
+        // across them would take it to 10.09. Both numbers are two thirds of what
+        // they were before SQ-0956 moved the card's lit state from 255 to 170 —
+        // the same edges, a shorter ladder, so the ratio between sharp and tented
+        // is what carries the claim and it is unchanged.
         let s = speckle(&c);
         assert!(
-            s > 40.0,
+            s > 25.0,
             "honor={honor_game_colours}: CGA line work has been softened (speckle {s:.3}, \
-             sharp is 57.4 and tented is 15.1)"
+             sharp is 38.3 and tented is 10.1)"
         );
     }
 
@@ -567,8 +571,8 @@ fn no_setting_can_make_cga_blend() {
         img.pixels().filter(|p| p.0[3] == 255).map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
     assert_eq!(
         seen,
-        BTreeSet::from([[0, 0, 0], [255, 255, 255]]),
-        "a CGA picture stays two colours whatever the setting says"
+        BTreeSet::from([[0, 0, 0], [170, 170, 170]]),
+        "a CGA picture stays the card's two states whatever the setting says"
     );
 }
 

@@ -104,13 +104,24 @@ pub(crate) fn reset_game(
                 state.v6_art_scale = scale;
             }
             let host_default_colours = if state.config.honor_game_colours {
-                state.config.machine_default_colours().or_else(|| {
-                    app::colors::host_default_colour_pair(
-                        state.colors.theme.get("transcript").style,
-                        state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
-                        state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
-                    )
-                })
+                // SQ-0956: the CARD's pair when the archive this restart resolved
+                // is a two-colour one, exactly as `startup.rs` resolves it — a
+                // restart may have landed on a different rendition (the sidecar,
+                // or a `--pictures` choice), so this is asked again rather than
+                // carried.
+                let card = picts.two_colour_card_screen(&state.config);
+                if let Some((palette, _)) = card {
+                    zvm::screen::set_palette(palette);
+                }
+                card.map(|(_, pair)| pair)
+                    .or_else(|| state.config.machine_default_colours())
+                    .or_else(|| {
+                        app::colors::host_default_colour_pair(
+                            state.colors.theme.get("transcript").style,
+                            state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                            state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                        )
+                    })
             } else {
                 None
             };

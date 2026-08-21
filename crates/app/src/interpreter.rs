@@ -753,9 +753,15 @@ impl InterpreterProfile {
     /// `SetColor := (zWHITE*256) + zBLACK` and the mono `Pic.data` that same
     /// interpreter chose *for* it are one decision (SQ-0838) — so its two-colour
     /// pair is its pair, stated once and not twice. Nothing here exempts it; it
-    /// simply has nothing extra to say, and the rule that reads this
-    /// ([`crate::graphics::PictSource::declines_game_colours`]) leaves it
-    /// untouched by construction rather than by a branch.
+    /// simply has nothing extra to say.
+    ///
+    /// **This is what a two-colour launch REPORTS**, in header `$2C`/`$2D` — see
+    /// [`crate::graphics::PictSource::two_colour_card_screen`], which is the one
+    /// place `startup.rs`, `reset.rs` and the pins all ask. It is reported and not
+    /// merely compared: with the pair in the header and
+    /// [`zvm::screen::Palette::IbmCga`] installed beside it, a story's own
+    /// `set_colour` reaches `zvm::screen::two_colour_card_request` and the card
+    /// shows these two colours in whichever polarity the story asked for.
     pub fn two_colour_colours(self) -> Option<(u8, u8)> {
         match self {
             Self::IbmPc => Some((IBM_PC_TWO_COLOUR_BACKGROUND, IBM_PC_DEFAULT_FOREGROUND)),

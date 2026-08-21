@@ -374,20 +374,34 @@ pub const EGA_PALETTE: [Rgb; 16] = [
     [255, 255, 255],
 ];
 
-/// The colours a TWO-COLOUR archive's pixel indices name — **black and white,
-/// and nothing else** (SQ-0794).
+/// The colours an IBM PC two-colour archive's pixel indices name — **black and
+/// the card's light grey, and nothing else** (SQ-0794, SQ-0956).
 ///
-/// # Two machines, one table
+/// # Two machines, TWO tables — the lit state is not the same colour
 ///
-/// It keeps the CGA name because a `.CG1` is where it was first needed, but it
-/// is not the IBM's alone: the Macintosh's monochrome `Pic.data` resolves
-/// through it too (SQ-0838), and it does so under the same `EF_MONO` test and
-/// with the same stored colour numbers. bocfel writes that identity into its own
-/// code — `populate_color_table` handles `kGraphicsTypeMacBW` and
-/// `kGraphicsTypeCGA` in a single fallthrough — and the Mac archive's pixels
-/// bear it out: across all 386 of Zork Zero's monochrome pictures the indices
-/// that appear are exactly `{0, 2, 3}`, with 0 appearing only in the 128
-/// pictures that declare `EF_TRANS`.
+/// This was one table for both two-colour machines until a capture of each was
+/// put beside the other, and they disagree about white (SQ-0956):
+///
+/// | capture                                  | page      | lit state |
+/// |------------------------------------------|-----------|-----------|
+/// | `machine-screenshots/dos-zorkzero-cga.png` | `#000000` | `#A0A0A0` |
+/// | `machine-screenshots/mac-zorkzero-bw.jpg`  | `#FFFFFF` | `#000000` (ink) |
+///
+/// The Macintosh's plate is black ink on a real white page — 31.6% of that frame
+/// is `#FFFFFF`, and the pillars are dithered black against it — so it keeps the
+/// white it always had, in [`MAC_MONO_PALETTE`]. The IBM's is the other polarity
+/// and its lit state is **light grey**: `#A0A0A0` is a DOS emulator's rendering of
+/// EGA entry 7, `#AAAAAA`, the same value `dos-hitchhiker.png` measures for its ink
+/// and the value `zvm::interpreter`'s IBM PC row already records. A colour NUMBER,
+/// not a shade — see `machine-screenshots/info.txt` on why these captures pin
+/// numbers.
+///
+/// The `EF_MONO` flag cannot tell the two apart (bocfel handles
+/// `kGraphicsTypeMacBW` and `kGraphicsTypeCGA` in a single fallthrough, and the
+/// Mac archive's pixels bear the identity out: across all 386 of Zork Zero's
+/// monochrome pictures the indices that appear are exactly `{0, 2, 3}`, with 0
+/// appearing only in the 128 that declare `EF_TRANS`). The CONTAINER can, and
+/// that is what [`InfocomPics::two_colour_palette`] reads.
 ///
 /// # Why a CGA rendition has two colours and not four
 ///
@@ -410,7 +424,7 @@ pub const EGA_PALETTE: [Rgb; 16] = [
 ///   Its opaque path, `draw_opaque_cga`, expands one bit per pixel to
 ///   `monochrome_white`/`monochrome_black`.
 ///
-/// # Why slots 1 and 2 are both white
+/// # Why slots 1 and 2 are both the lit state
 ///
 /// [`InfocomPics::decode`] normalises a CGA archive's **two** pixel packings into
 /// one index-per-pixel buffer, and they do not agree on which index means white:
@@ -427,11 +441,11 @@ pub const EGA_PALETTE: [Rgb; 16] = [
 ///
 /// Slots 2 and 3 are the archive's own colour numbers, exactly as both witnesses
 /// above read them. Slot 1 is this decoder's rendering of a set bit, and giving
-/// it white is unambiguous because the two packings never share a picture: across
-/// `zork0.cg1`, `arthur.cg1`, `journey.cg1` and `shogun.cg1` — 710 pictures — the
-/// packed ones use `{0, 1}` and only `{0, 1}`, and the byte-per-pixel ones use
-/// `{0, 2, 3}` and only `{0, 2, 3}`. Index 1 therefore never appears in a picture
-/// where it would have to mean black.
+/// it the lit state is unambiguous because the two packings never share a picture:
+/// across `zork0.cg1`, `arthur.cg1`, `journey.cg1` and `shogun.cg1` — 710 pictures
+/// — the packed ones use `{0, 1}` and only `{0, 1}`, and the byte-per-pixel ones
+/// use `{0, 2, 3}` and only `{0, 2, 3}`. Index 1 therefore never appears in a
+/// picture where it would have to mean black.
 ///
 /// Slot 0 is black for the packed pictures; in the byte-per-pixel ones it is the
 /// transparent colour, which [`Picture::rgba_with`] drops before this table is
@@ -442,9 +456,44 @@ pub const EGA_PALETTE: [Rgb; 16] = [
 /// recolour it can pass its own table to [`Picture::rgba_with`].
 pub const CGA_PALETTE: [Rgb; 16] = [
     [0, 0, 0],       // 0: packed clear bit; transparent in the byte-per-pixel form
-    [255, 255, 255], // 1: packed set bit
-    [255, 255, 255], // 2: the archive's white
+    [170, 170, 170], // 1: packed set bit — the card's light grey, EGA entry 7
+    [170, 170, 170], // 2: the archive's white, as the card showed it
     [0, 0, 0],       // 3: the archive's black
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+];
+
+/// The colours the **Macintosh's** monochrome `Pic.data` names: black ink on a
+/// real white page (SQ-0838, split from [`CGA_PALETTE`] by SQ-0956).
+///
+/// Same `EF_MONO` flag, same byte-per-pixel packing, same `{0, 2, 3}` indices — and
+/// a different lit state, which is the whole reason this is a second constant.
+/// `machine-screenshots/mac-zorkzero-bw.jpg` (Zork Zero at the Banquet Hall on a
+/// Macintosh, 640x480) censuses **31.6% `#FFFFFF`** inside the game window with the
+/// pillars dithered black against it; the frame's `#333333` plurality is the
+/// desktop OUTSIDE the window and belongs to the Finder, not to the plate. That
+/// white is the same one `mac/xzip.lst` states for the machine's own page
+/// (`SetColor := (zWHITE*256) + zBLACK`), so the archive and the interpreter agree,
+/// exactly as SQ-0838 found them agreeing about the window size.
+///
+/// Slot 1 is unreachable here — monochrome Mac art is never bit-packed — but it is
+/// filled in for the same reason the CGA table fills it: the two tables must be
+/// interchangeable at every index a caller can index.
+pub const MAC_MONO_PALETTE: [Rgb; 16] = [
+    [0, 0, 0],       // 0: transparent in the byte-per-pixel form
+    [255, 255, 255], // 1: a set bit, were one ever packed
+    [255, 255, 255], // 2: the archive's white — the Mac's page
+    [0, 0, 0],       // 3: the archive's black — its ink
     [0, 0, 0],
     [0, 0, 0],
     [0, 0, 0],
@@ -1216,7 +1265,31 @@ impl InfocomPics {
     /// `.eg1` somebody renamed is not one, and the Macintosh's monochrome
     /// `Pic.data` answers yes under exactly the same test as a `.cg1`.
     pub fn is_monochrome(&self) -> bool {
-        self.hardware_palette() == Some(CGA_PALETTE)
+        self.two_colour_palette().is_some()
+    }
+
+    /// The two-colour table for the machine THIS archive came off, or `None`
+    /// when the archive is not a two-colour rendition (SQ-0956).
+    ///
+    /// The `EF_MONO` test is one test and the answer is two tables, because the
+    /// two machines' lit state is not the same colour — see [`CGA_PALETTE`] and
+    /// [`MAC_MONO_PALETTE`], each of which carries its own capture. The flavour is
+    /// the discriminator and it is the only one there is: nothing inside a `.CG1`
+    /// names its machine, but the container format does.
+    pub fn two_colour_palette(&self) -> Option<[Rgb; 16]> {
+        if self.entries.iter().any(|e| e.has_own_palette()) || self.flavour == Flavour::Apple {
+            return None;
+        }
+        let mut with_pixels = 0usize;
+        let mut mono = 0usize;
+        for e in self.entries.iter().filter(|e| e.has_pixels()) {
+            with_pixels += 1;
+            mono += usize::from(e.flags & EF_MONO != 0);
+        }
+        if with_pixels == 0 || mono != with_pixels {
+            return None;
+        }
+        Some(if self.flavour == Flavour::Pc { CGA_PALETTE } else { MAC_MONO_PALETTE })
     }
 
     pub fn hardware_palette(&self) -> Option<[Rgb; 16]> {
@@ -1230,18 +1303,12 @@ impl InfocomPics {
         if self.flavour == Flavour::Apple {
             return self.entries.iter().any(|e| e.has_pixels()).then_some(APPLE_DHGR_PALETTE);
         }
-        let mut with_pixels = 0usize;
-        let mut mono = 0usize;
-        for e in self.entries.iter().filter(|e| e.has_pixels()) {
-            with_pixels += 1;
-            mono += usize::from(e.flags & EF_MONO != 0);
+        // Two colours, and WHICH two is the machine's to say (SQ-0838, SQ-0956).
+        if let Some(two) = self.two_colour_palette() {
+            return Some(two);
         }
-        if with_pixels == 0 {
+        if !self.entries.iter().any(|e| e.has_pixels()) {
             return None;
-        }
-        if mono == with_pixels {
-            // Two colours, whichever machine drew them (SQ-0838).
-            return Some(CGA_PALETTE);
         }
         // The sixteen-colour fallback is the PC's alone. An Amiga/Mac archive
         // that stores no palettes is *adaptive* — its colours come from the
@@ -1910,7 +1977,9 @@ mod tests {
         assert!(!pics.entry(7).unwrap().has_own_palette());
         assert!(p.palette.is_none());
         assert!(pics.is_monochrome());
-        assert_eq!(pics.hardware_palette(), Some(CGA_PALETTE));
+        // …and it is the MACINTOSH's two-colour table, not the card's: the
+        // container is what names the machine (SQ-0956).
+        assert_eq!(pics.hardware_palette(), Some(MAC_MONO_PALETTE));
 
         // And the picture space is the standard Macintosh's, not the Amiga's —
         // even though bit 3 of `0x0e` is the same bit that means 640 on the PC.
@@ -2362,15 +2431,44 @@ mod tests {
 
     /// SQ-0794. A CGA rendition is two colours, because the only 640-wide mode
     /// the IBM CGA had was 640x200 mode 6 — and both witnesses read the archive's
-    /// indices the same way: 2 is white and 3 is black, with slot 1 standing in
-    /// for a set bit in the packed form.
+    /// indices the same way: 2 is the lit state and 3 is black, with slot 1
+    /// standing in for a set bit in the packed form.
+    ///
+    /// **SQ-0956 moved the lit state**, and this is the pin: `#AAAAAA`, the card's
+    /// light grey, not pure white. `machine-screenshots/dos-zorkzero-cga.png`
+    /// measures `#A0A0A0` for every lit pixel it has, artwork and text alike — a
+    /// DOS emulator's rendering of EGA entry 7, which is the value
+    /// [`EGA_PALETTE`] already carries at that index and the value
+    /// `dos-hitchhiker.png` measures for its ink on the same emulator family.
     #[test]
-    fn the_cga_table_is_black_and_white_only() {
+    fn the_cga_table_is_the_cards_two_states() {
         assert_eq!(CGA_PALETTE[0], [0, 0, 0]);
-        assert_eq!(CGA_PALETTE[1], [255, 255, 255], "a set bit in the packed form");
-        assert_eq!(CGA_PALETTE[2], [255, 255, 255], "the archive's white");
+        assert_eq!(CGA_PALETTE[1], [170, 170, 170], "a set bit in the packed form");
+        assert_eq!(CGA_PALETTE[2], [170, 170, 170], "the archive's white, as the card showed it");
         assert_eq!(CGA_PALETTE[3], [0, 0, 0], "the archive's black");
+        assert_eq!(CGA_PALETTE[1], EGA_PALETTE[7], "and it is EGA entry 7, stated once");
         for (i, c) in CGA_PALETTE.iter().enumerate().skip(4) {
+            assert_eq!(*c, [0, 0, 0], "entry {i} is unused and stays black");
+        }
+    }
+
+    /// SQ-0956. The Macintosh's mono plate is the OTHER two-colour table, and the
+    /// reason there are two: `machine-screenshots/mac-zorkzero-bw.jpg` is 31.6%
+    /// `#FFFFFF` inside the game window with the pillars dithered black on it, so
+    /// its white is a real white and the card's is not.
+    ///
+    /// The two tables must stay interchangeable at every index a caller can index,
+    /// because `hardware_palette` hands one or the other to the same decoder.
+    #[test]
+    fn the_mac_mono_table_keeps_a_real_white() {
+        assert_eq!(MAC_MONO_PALETTE[2], [255, 255, 255], "the Mac's page");
+        assert_eq!(MAC_MONO_PALETTE[3], [0, 0, 0], "under its ink");
+        assert_ne!(
+            MAC_MONO_PALETTE[2], CGA_PALETTE[2],
+            "the whole point: one EF_MONO flag, two machines, two lit states",
+        );
+        assert_eq!(MAC_MONO_PALETTE.len(), CGA_PALETTE.len());
+        for (i, c) in MAC_MONO_PALETTE.iter().enumerate().skip(4) {
             assert_eq!(*c, [0, 0, 0], "entry {i} is unused and stays black");
         }
     }
@@ -3418,7 +3516,7 @@ mod tests {
         let Some((mono, _)) = mac_zork_zero() else { return };
         assert_eq!(mono.flavour(), Flavour::AmigaMac, "big-endian, one global Huffman tree");
         assert!(mono.is_monochrome());
-        assert_eq!(mono.hardware_palette(), Some(CGA_PALETTE));
+        assert_eq!(mono.hardware_palette(), Some(MAC_MONO_PALETTE), "an AmigaMac container");
         assert_eq!((mono.picture_space_width(), mono.picture_space_height()), (480, 300));
         // No 12-byte record can carry a palette, so all 386 are adaptive and the
         // hardware table above is the only thing that colours them.
