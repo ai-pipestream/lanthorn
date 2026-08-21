@@ -3,6 +3,7 @@
 //! Extracted verbatim from `main.rs` (SQ-0306) as a pure move — no behavior
 //! change. A pure view builder, so it lives in `render/` alongside its siblings.
 
+use crate::debug_panel::Section;
 use crate::keymap::{Context, HotkeyLayout, KeyMap};
 
 /// Priority-ordered command-string lists for the bottom hint bar.
@@ -32,20 +33,66 @@ pub const ANIM_HINTS: &[&str] = &[
     "zoom-map in",
 ];
 
-/// Debug-inspector hint bar: `(key, label)` pairs. Unlike the other hint
+/// Debug-inspector hint bar, the part that holds in every section: window and
+/// tab navigation, scrolling, paging, and the way out. Unlike the other hint
 /// lists above, these bindings are internal to the debug panel (handled by
 /// `DebugPanelState::handle_key`), not registered commands in the global
 /// keymap — so they're rendered via [`literal_hint_bar`] instead of
 /// [`hint_bar`]'s keymap-resolution path.
-pub const DEBUG_HINTS: &[(&str, &str)] = &[
+///
+/// These come **last** in the assembled bar (see [`debug_hints`]) precisely
+/// because [`literal_hint_bar`] truncates from the right: Tab, the arrows and
+/// Esc are conventions a user will try unprompted, so losing them off the end
+/// of a narrow pane costs far less than losing a key that exists in one
+/// section only.
+pub const DEBUG_HINTS_UNIVERSAL: &[(&str, &str)] = &[
     ("Tab", "window"),
     ("\u{2190}\u{2192}", "section"),
     ("\u{2191}\u{2193}", "scroll"),
-    ("hl", "pan"),
-    ("g", "PC"),
-    ("r", "raw"),
+    ("PgUp/PgDn", "page"),
     ("Esc", "back"),
 ];
+
+/// The keys that exist only in `section`. Empty for every section whose only
+/// bindings are the universal ones — those show [`DEBUG_HINTS_UNIVERSAL`]
+/// alone rather than advertising a key that does nothing where the user is
+/// standing.
+///
+/// `g` is listed under Disassembly rather than universally: `handle_key`
+/// accepts it from any tab, but all it does is re-anchor the disassembly, which
+/// is invisible from anywhere else.
+fn debug_section_hints(
+    section: Section,
+    disasm_mode: &'static str,
+) -> Vec<(&'static str, &'static str)> {
+    match section {
+        Section::Disasm => vec![("g", "PC"), ("r", disasm_mode)],
+        // `:` (or `/`) opens the address box, which also takes a variable
+        // token (`sp`, `g44`, `local10`) — never advertised before SQ-0980.
+        Section::Memory => vec![("hl", "pan"), (":", "address")],
+        _ => Vec::new(),
+    }
+}
+
+/// The debug hint bar for the focused window's active `section`: that
+/// section's own keys first, then [`DEBUG_HINTS_UNIVERSAL`].
+///
+/// Section-specific first is the whole point (SQ-0980). The old fixed list
+/// advertised `hl: pan` in tabs that cannot pan and `r: raw` in tabs that have
+/// no render mode to cycle, while [`literal_hint_bar`]'s right-hand truncation
+/// cut those same entries off first at a debug pane's real width — so the bar
+/// hid the local keys and promised the absent ones in one stroke.
+///
+/// `disasm_mode` is [`crate::debug_panel::DebugPanelState::disasm_mode_label`],
+/// so the `r:` entry names the mode currently showing.
+pub fn debug_hints(
+    section: Section,
+    disasm_mode: &'static str,
+) -> Vec<(&'static str, &'static str)> {
+    let mut hints = debug_section_hints(section, disasm_mode);
+    hints.extend_from_slice(DEBUG_HINTS_UNIVERSAL);
+    hints
+}
 
 /// Build a hint bar string from a fixed literal `(key, label)` list. Mirrors
 /// [`hint_bar`]'s join/truncate behavior, without the keymap-resolution gates
@@ -132,18 +179,73 @@ pub fn hint_bar(
 
 #[cfg(test)]
 mod tests {
-    use super::{hint_bar, literal_hint_bar, ANIM_HINTS, DEBUG_HINTS, GAME_HINTS};
+    use super::{debug_hints, hint_bar, literal_hint_bar, ANIM_HINTS, GAME_HINTS};
+    use crate::debug_panel::Section;
     use crate::keymap::{Context, HotkeyLayout, KeyMap};
+
+    /// The universal tail, spelled out once so the per-section cases below
+    /// assert on the whole line rather than on fragments of it.
+    const TAIL: &str = "Tab: window | \u{2190}\u{2192}: section | \u{2191}\u{2193}: scroll | PgUp/PgDn: page | Esc: back";
 
     #[test]
     fn literal_hint_bar_joins_debug_hints() {
-        let line = literal_hint_bar(DEBUG_HINTS, 200);
-        assert_eq!(line, "Tab: window | \u{2190}\u{2192}: section | \u{2191}\u{2193}: scroll | hl: pan | g: PC | r: raw | Esc: back");
+        // Was a single fixed list for every tab; now the exact line per section
+        // (SQ-0980). Disassembly leads with its own two keys, and the `r:`
+        // entry names the live render mode.
+        let line = literal_hint_bar(&debug_hints(Section::Disasm, "full"), 200);
+        assert_eq!(line, format!("g: PC | r: full | {TAIL}"));
+        let line = literal_hint_bar(&debug_hints(Section::Memory, "full"), 200);
+        assert_eq!(line, format!("hl: pan | :: address | {TAIL}"));
+        // A section with no keys of its own shows the universal set alone.
+        let line = literal_hint_bar(&debug_hints(Section::Globals, "full"), 200);
+        assert_eq!(line, TAIL);
+    }
+
+    /// SQ-0980: the bar advertised `hl: pan` and `r: raw` in every tab, so it
+    /// promised keys that do nothing where the user was standing.
+    #[test]
+    fn a_section_is_never_offered_another_sections_keys() {
+        for section in [
+            Section::Globals,
+            Section::Locals,
+            Section::Objects,
+            Section::Dict,
+            Section::CallStack,
+            Section::EvalStack,
+        ] {
+            let line = literal_hint_bar(&debug_hints(section, "full"), 200);
+            assert!(!line.contains("pan"), "{section:?} cannot pan: {line}");
+            assert!(!line.contains("address"), "{section:?} has no address box: {line}");
+            assert!(!line.contains("g: PC"), "{section:?} shows no disassembly: {line}");
+            assert!(!line.contains("r: "), "{section:?} has no render mode: {line}");
+        }
+        let disasm = literal_hint_bar(&debug_hints(Section::Disasm, "raw"), 200);
+        assert!(!disasm.contains("pan"), "the disassembly does not pan: {disasm}");
+        assert!(!disasm.contains(": address"), "no address box here: {disasm}");
+        let memory = literal_hint_bar(&debug_hints(Section::Memory, "raw"), 200);
+        assert!(!memory.contains("g: PC"), "the hex dump has no PC: {memory}");
+        assert!(!memory.contains("r: "), "and no render mode: {memory}");
+    }
+
+    /// The ordering exists for this: `literal_hint_bar` truncates from the
+    /// RIGHT, so whatever a narrow debug pane can still show must be the keys
+    /// that only work here. A user who could not find the pan they had just
+    /// been given is what started SQ-0980.
+    #[test]
+    fn a_narrow_pane_keeps_the_local_keys_and_drops_the_conventional_ones() {
+        // 24 columns is narrower than a real debug pane, and the point still
+        // has to hold there.
+        let line = literal_hint_bar(&debug_hints(Section::Memory, "full"), 24);
+        assert!(line.chars().count() <= 24, "{line}");
+        assert!(line.starts_with("hl: pan | :: address"), "the pan survives: {line}");
+        assert!(line.ends_with('…'), "and the universal tail is what got cut: {line}");
+        let line = literal_hint_bar(&debug_hints(Section::Disasm, "basic"), 24);
+        assert!(line.starts_with("g: PC | r: basic"), "{line}");
     }
 
     #[test]
     fn literal_hint_bar_truncates_at_width() {
-        let line = literal_hint_bar(DEBUG_HINTS, 10);
+        let line = literal_hint_bar(&debug_hints(Section::Memory, "full"), 10);
         assert!(line.chars().count() <= 10);
         assert!(line.ends_with('…'));
     }

@@ -103,8 +103,14 @@ built-in debugger that follows the running story instruction by instruction.
   plus **Locals**, **Objects**, and **Dictionary**) and a bottom window (**Call
   Stack**, **Stack**, and **Memory**). **Tab** / **Shift-Tab** move focus one
   window at a time — the story pane and each debug window are stops in the same
-  cycle — **←**/**→** switch the sub-tab inside the focused window, and
-  **↑**/**↓** scroll it.
+  cycle — **←**/**→** switch the sub-tab inside the focused window,
+  **↑**/**↓** scroll it, and **PgUp**/**PgDn** move it a screenful at a time.
+- **A hint bar that follows the tab you are on.** The bottom row leads with the
+  keys that only work in the section you are looking at — `g` and `r` in the
+  Disassembly, `h`/`l` and `:` in the Memory view — and puts the universal Tab
+  / arrows / Esc after them. The row truncates from the right when the pane is
+  narrow, so the local keys are the ones that survive; before, a fixed list
+  advertised the pan in tabs that cannot pan and hid it in the one that can.
 - **Opcode hover help** — hover an instruction and a tooltip decodes the opcode
   and every operand: what each argument is, and where the result lands.
 - **Click-to-jump operands** — addresses in the disassembly are underlined and

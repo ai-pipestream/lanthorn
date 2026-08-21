@@ -998,10 +998,13 @@ fn draw_frame(
                     hint_bar(&state.keymap, &state.hotkeys, Context::Global, hints, w)
                 }
                 Focus::Map if state.debug.is_some() => {
-                    // Show the live disassembly mode in the `r:` hint entry.
-                    let mode = state.debug.as_ref().map(|p| p.disasm_mode_label()).unwrap_or("full");
-                    let hints: Vec<(&str, &str)> = app::render::hintbar::DEBUG_HINTS.iter()
-                        .map(|&(k, v)| if k == "r" { ("r", mode) } else { (k, v) }).collect();
+                    // The bar follows the focused window's active tab (SQ-0980):
+                    // section-specific keys first, universal ones after. The
+                    // live disassembly mode shows in the `r:` entry.
+                    let (section, mode) = state.debug.as_ref()
+                        .map(|p| (p.active_section(p.focus), p.disasm_mode_label()))
+                        .unwrap_or((app::debug_panel::Section::Disasm, "full"));
+                    let hints = app::render::hintbar::debug_hints(section, mode);
                     app::render::hintbar::literal_hint_bar(&hints, w)
                 }
                 // Unreachable in practice: `Focus::Map` is only ever set while
