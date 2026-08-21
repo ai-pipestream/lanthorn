@@ -157,3 +157,57 @@ to be wrong about. The rows that DO record what was drawn — the Amiga's
 #074BA1, the C64's greys — do so because those machines' palettes are analogue
 or in doubt and nothing better exists. This one has nothing to be uncertain
 about.
+
+
+dos-zorkzero-cga.png IS THE ONE THAT SAYS A TWO-COLOUR RENDITION HAS ITS OWN PAIR
+
+Zork Zero r393 at the Banquet Hall with [MORE] showing, in a DOS emulator in CGA
+mode, running the CGA plates (`zork0.cg1`) rather than the EGA/MCGA ones. It was
+captured to answer a question the corpus could not: every other DOS capture here
+is a colour rendition, so nothing in the directory could say what the two-colour
+one presented on.
+
+Censused whole, 507x317:
+
+  page   48.3% #000000
+  ink     8.8% #A0A0A0, and 161 distinct colours — a grey ramp from video
+          scaling, with no second hue anywhere in the frame
+
+Row parity was checked FIRST, because st-zork1.png taught this directory that an
+interlaced capture censuses backwards: even rows 39,252 black / 7,135 grey, odd
+rows 38,391 / 6,968. They agree, so this one is not interlaced and the
+whole-frame census is the honest reading.
+
+WHAT IT SETTLES, AND IT IS NOT MERELY "THE BACKGROUND WAS BLACK"
+
+Zork Zero issues `set_colour(fg=2, bg=9)` — black ink on a white page — for every
+video card alike, and dos-zorkzero.png shows that honoured on the colour
+rendition (25.7% #FFFFFF). This frame is the OPPOSITE POLARITY: light ink on a
+black page. So a two-colour display does not substitute a different background,
+it does not honour the story's pair at all — which is what
+`app::graphics::PictSource::declines_game_colours` already asserts in prose and
+what SQ-0806 exists for.
+
+In colour NUMBERS rather than shades, which is what this directory pins: page 0
+(black) under ink 7 (light grey). #A0A0A0 is the same value dos-hitchhiker.png
+measures for ITS ink, and the IBM PC row already records #AAAAAA as EGA/CGA
+entry 7 — two captures from the same emulator family agreeing is what makes this
+a number and not an artifact. Same judgement as the RGB notes above.
+
+AND IT PAIRS WITH THE MACINTOSH TO SHOW THE POLARITY IS PER MACHINE
+
+  Macintosh mono Pic.data  ->  WHITE page, BLACK ink  (mac/xzip.lst's
+                               SetColor := (zWHITE*256) + zBLACK)
+  IBM PC .CG1              ->  BLACK page, LIGHT ink  (this file)
+
+Two two-colour archives, opposite polarity — and
+`blorb::infocom_pics::InfocomPics::is_monochrome` answers **true** for both, by
+its own documentation ("the Macintosh's monochrome Pic.data answers yes under
+exactly the same test as a .cg1"). That boolean is where the two machines are
+flattened together; `hardware_palette()` is the function that can still tell them
+apart. SQ-0956.
+
+One thing left deliberately unreconciled: CGA_PALETTE slot 1 — the packed SET
+bit — is pure white, while this capture's ink is colour 7. Mode 6's foreground is
+selectable, so both are defensible, and the two should be squared up on purpose
+rather than by accident.
