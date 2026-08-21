@@ -343,7 +343,7 @@ pub const APPLE_DEFAULT_FOREGROUND: u8 = 9;
 ///
 /// The shape a machine's own interpreter drew its input cursor as (SQ-0873).
 ///
-/// Three forms across five machines, and **none of them is what "invert the cell
+/// Three forms stored across the nine machines, and **none of them is what "invert the cell
 /// under the cursor" gives** — which is what a terminal front-end draws by default
 /// and what lanthorn drew before this. Measured off the captures in
 /// `machine-screenshots/`, cell sizes included, so the proportions are the
@@ -397,7 +397,7 @@ pub enum CursorShape {
 /// How a machine's own interpreter set the status line apart from the story
 /// (SQ-0873).
 ///
-/// **Five machines, four behaviours, and not one of them derives from the body
+/// **Nine machines, four measured behaviours, and not one of them derives from the body
 /// pair** — which is the finding that shaped [`PeriodLook`]. A field carrying only
 /// a page and an ink could express none of the last three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,10 +451,12 @@ pub enum StatusBand {
 /// `st/stx1.s`) — and the two must not be confused. Hence two fields.
 ///
 /// **And the two genuinely differ.** The Amiga's row reports 12/9, a grey page under
-/// white ink, from its v5-era interpreter; its v3 interpreter draws a BLUE page. The
-/// Commodore 64's grey page cannot be expressed as a §8.3.1 colour number at all
-/// (2..9 contain no grey, and `clamp_default_colour` accepts 10..12 only for v6), so
-/// reusing `default_colours` would have silently clamped it to black. Two of five.
+/// white ink, from its v5-era interpreter; its v3 interpreter draws a BLUE page — the
+/// one machine of the nine whose two answers are different colours, and the case this
+/// field was split out for. The Commodore 64 is the same problem from the other side:
+/// the grey page of its 1984 capture cannot be expressed as a §8.3.1 colour number at
+/// all (2..9 contain no grey, and `clamp_default_colour` accepts 10..12 only for v6),
+/// so reusing `default_colours` would have silently clamped it to black.
 ///
 /// # Provenance, and the standard it does NOT meet
 ///
@@ -499,8 +501,10 @@ pub struct PeriodLook {
     pub status: StatusBand,
     /// The input cursor's shape.
     pub cursor_shape: CursorShape,
-    /// The input cursor's colour, which on two of five machines is **neither the
-    /// page nor the ink** — the Amiga's orange and the Commodore 64's black.
+    /// The input cursor's colour, which on **one of the nine machines is neither
+    /// the page nor the ink** — the Amiga's `#FF7E1C` orange, drawn over a blue
+    /// page under white ink. Every other row's caret is that row's own ink, which
+    /// is what a consumer would guess; the Amiga is why it cannot be derived.
     ///
     /// Says nothing under [`CursorShape::ReverseSpace`], which is a caret with no
     /// colour to state; [`period_look_for`] parks the ink here so a consumer that
@@ -1126,8 +1130,8 @@ mod tests {
     }
 
     /// The three sub-decisions are independent — the finding that fixed this
-    /// field's shape. Five machines produced four status behaviours and three
-    /// cursor shapes, and neither follows from the body pair.
+    /// field's shape. Nine machines produced four measured status behaviours and
+    /// three stored cursor shapes, and neither follows from the body pair.
     #[test]
     fn the_status_band_and_cursor_do_not_follow_from_the_body_pair() {
         let look = |n| machine(n).expect("modelled").period_look.expect("measured");
@@ -1154,13 +1158,33 @@ mod tests {
         assert_eq!(amiga.cursor_shape, CursorShape::Block);
         assert_eq!(c128.cursor_shape, CursorShape::Underscore);
 
-        // And on two machines the cursor's colour is neither the page nor the ink,
+        // And on one machine the cursor's colour is neither the page nor the ink,
         // so it cannot be dropped and recomputed.
         assert!(
             amiga.cursor_colour != amiga.page && amiga.cursor_colour != amiga.ink,
             "the Amiga's cursor is orange on a blue page under white ink",
         );
         assert_eq!(c128.cursor_colour, c128.ink, "…but the C128's is simply its ink");
+
+        // **The COUNT is the part that went stale** (SQ-0970): this field's rustdoc
+        // said "two of five machines", naming the Commodore 64's black as the
+        // second — which IS its ink, on a black page under white — while the table
+        // had grown from five machines to nine. Sampling two rows is what let that
+        // happen, so census every row instead: the claim the doc makes is a
+        // property of the whole table and only the whole table can falsify it.
+        let odd: Vec<&str> = MACHINES
+            .iter()
+            .filter_map(|m| m.period_look.map(|l| (m.name, l)))
+            .filter(|(_, l)| l.cursor_colour != l.page && l.cursor_colour != l.ink)
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(odd, ["Amiga"], "exactly one caret is neither its page nor its ink");
+        assert_eq!(MACHINES.len(), 9, "…out of nine machines");
+        assert_eq!(
+            MACHINES.iter().filter(|m| m.period_look.is_some()).count(),
+            9,
+            "every one of which is measured, so none of them is excused from the census",
+        );
     }
 
     /// The IBM PC resolves colour numbers through EGA, and its WHITE depends on
