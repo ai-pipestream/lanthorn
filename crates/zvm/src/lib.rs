@@ -7,6 +7,7 @@ pub mod ifid;
 pub mod interpreter;
 pub mod io;
 pub mod location;
+pub mod machines;
 pub mod memory;
 pub mod objects;
 pub mod quetzal;

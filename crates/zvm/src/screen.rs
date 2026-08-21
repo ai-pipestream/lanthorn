@@ -1860,7 +1860,21 @@ pub fn write_default_colours(mem: &mut Memory, bg: u8, fg: u8) {
 /// palette Infocom's own Amiga interpreter loaded, which §8.3.1.1 explicitly
 /// permits an interpreter to substitute.
 pub fn standard_true_colour(n: u8) -> Option<u16> {
-    match palette() {
+    true_colour_in(palette(), n)
+}
+
+/// [`standard_true_colour`] for a NAMED palette, resolving nothing through the
+/// process-wide one.
+///
+/// A run presents as one machine, so the global is the right shape for the VM. A
+/// *table* presents as all of them at once — [`crate::machines`] prints every
+/// machine's page and ink side by side — and reaching that through
+/// [`set_palette`] would make printing a table a write to state every other
+/// thread in the process can see. Under `cargo test`, where a whole crate's cases
+/// share one process, that is the SQ-0904 race exactly: a borrow-and-hand-back is
+/// atomic to nobody. Asking by value cannot race with anything.
+pub fn true_colour_in(p: Palette, n: u8) -> Option<u16> {
+    match p {
         Palette::Standard => zmsd_true_colour(n),
         Palette::Amiga => amiga_true_colour(n),
         Palette::IbmXzip => ega_true_colour(n, false).or_else(|| zmsd_true_colour(n)),

@@ -1061,22 +1061,47 @@ Amiga floppy or anywhere else.
   story *branches* on the byte rather than merely printing it is exactly what it
   exists to find out.
 
-  You can read the whole table without opening the source or starting a game:
+  You can read the whole table without opening the source or starting a game,
+  from either front-end:
 
   ```sh
+  lanthorn --machines
   zvm-cli --machines
   ```
 
-  It prints every machine `zvm` models, in number order, with every setting each
-  one carries — the number it writes into `$1E`, the default page and ink it
-  reports in `$2C`/`$2D`, the palette those colour numbers resolve through, and
-  the two §8.3 screen rules — followed by the numbers that have no row and the
-  argument for each absence. The colours come out **resolved through each
-  machine's own palette**, which is the only rendering in which the page and ink
-  columns mean what they say: colour 12 is `#5A5A5A` under §8.3.1 and `#424242`
-  on the Amiga, where it happens to be the Amiga's own page. The output is
-  generated from the table itself, so a machine added to `zvm` appears there with
-  no second copy to keep in step.
+  Both print the same string, because both ask `zvm` for it — the reporter lives
+  beside the table it reports (`zvm::machines`), so there is no second copy to go
+  stale. It prints every machine `zvm` models, in number order, with every
+  setting each one carries — the number it writes into `$1E`, the default page
+  and ink it reports in `$2C`/`$2D`, the palette those colour numbers resolve
+  through, and the two §8.3 screen rules — followed by the numbers that have no
+  row and the argument for each absence. The colours come out **resolved through
+  each machine's own palette**, which is the only rendering in which the page and
+  ink columns mean what they say: colour 12 is `#5A5A5A` under §8.3.1 and
+  `#424242` on the Amiga, where it happens to be the Amiga's own page. The output
+  is generated from the table itself, so a machine added to `zvm` appears there
+  with no second copy to keep in step.
+
+  **A machine is not a screen, and a third block says where the two come apart.**
+  Ask for the IBM PC's look and the answer depends on the story's *Version*,
+  because Infocom shipped two IBM interpreters that disagree about white — XZIP
+  (v1–v5) sends it to EGA attribute 7 and YZIP (v6) to attribute 15. So after the
+  per-machine blocks comes a list of exactly the rows a Version moves, generated
+  by asking `period_look_for` and `palette_for` both ways: the IBM PC's graphics
+  mode and its ink, and the caret on both the IBM PC and the Amiga, which Version
+  6 turned into the pair on screen reversed. Everything else answers the same for
+  any story and so has no row there. The card that is *not* a Version — CGA,
+  which a `--pictures foo.cg1` installs from the archive rather than from the
+  story — is named in that block's legend for the same reason: a reader comparing
+  two EGA rows would otherwise conclude EGA is all there is.
+
+  One number in that block is worth knowing about before it surprises you. The
+  measured block records the IBM PC's page as `#0000AA`, the adapter's own byte,
+  and the Version block prints `#0000AD` — because a colour number reaches a
+  story through the Z-machine's 15-bit colour space, where `0xAA` truncates to
+  21/31 and comes back bit-replicated as `0xAD`. Three parts in 255, and the
+  Version block is the one that matches your screen: `period_look_for` is what
+  lanthorn actually asks.
 
   In a terminal, note that a machine's page is what the story is *told*, not
   something painted over your theme. Where a game names no colour, `zvm-cli` and
