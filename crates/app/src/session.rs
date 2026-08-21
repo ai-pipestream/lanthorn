@@ -4844,7 +4844,17 @@ impl Debugger for GameSession {
             |o| zvm::objects::get_child(mem, o),
             |o| zvm::objects::get_sibling(mem, o),
             |o| zvm::objects::short_name(mem, o),
-            |o| zvm::objects::object_entry_addr(mem, o),
+            // The row's `@0x……` link jumps the Memory view, so it must land
+            // where the object's TEXT is — the property table (§12.4: a
+            // one-byte word count, then the short name), not the entry (§12.3:
+            // flags, tree links and the pointer that got us here), whose bytes
+            // never contain a character of the name and which for a low object
+            // number puts the name off the bottom of the window entirely
+            // (SQ-0975). The entry stays one click away in the expanded detail.
+            // An unaddressable object has no table to point at; its entry
+            // address is the only address it has.
+            |o| zvm::objects::object_prop_table_addr(mem, o)
+                .unwrap_or_else(|| zvm::objects::object_entry_addr(mem, o)),
         );
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
@@ -4902,6 +4912,11 @@ impl Debugger for GameSession {
         let attr_count: u8 = if mem.version() <= 3 { 32 } else { 48 };
         let attrs: Vec<u8> = (0..attr_count).filter(|&a| zvm::objects::get_attr(mem, obj, a)).collect();
         let mut out = Vec::new();
+        // The tree row's `@0x……` points at the property table, where the name
+        // is; the §12.3 entry — the attribute flags these next lines decode and
+        // the tree links — is reached from here, as its own clickable jump
+        // (SQ-0975). Both addresses stay one click from the object.
+        out.push(format!("entry @0x{:06x}", zvm::objects::object_entry_addr(mem, obj)));
         if attrs.is_empty() {
             out.push("attrs: (none)".to_string());
         } else {
@@ -8051,6 +8066,91 @@ mod debugger_impl_tests {
         assert!(shifted > 0, "…at least one needing an alphabet shift mid-string");
         assert!(long_word > 0, "…at least one expanding an abbreviation");
         assert!(split > 0, "…and at least one split across two rows by its own bytes");
+    }
+
+    /// SQ-0975: clicking an object row jumps the Memory view to the row's
+    /// `@0x……` token, so that address must be the one whose bytes hold the
+    /// object's TEXT. §12.3's entry does not — it is flags, tree links and a
+    /// pointer — while §12.4's property table opens with the name's word count
+    /// and the name itself. Landing on the entry showed the wrong bytes, and for
+    /// a low object number put the name far below the window.
+    ///
+    /// FALSIFY by restoring `object_entry_addr` as `object_tree_lines`' address
+    /// closure: `lands_on_the_property_table` fails on the very first object,
+    /// and with the assertion relaxed the decode check fails too — the name is
+    /// nowhere in the window, which is the originally reported symptom.
+    #[test]
+    fn an_object_rows_address_lands_on_its_name_not_its_entry() {
+        let Some(s) = zvm_session() else { return };
+        let d = s.debugger().expect("z-machine debugger");
+        let mem = &s.machine.mem;
+        let lines = d.object_tree_lines();
+        // `@0x{addr:06x} {indent}[{n}] {name}` — recover both ends of the row.
+        let row = |line: &str| -> Option<(u32, u16)> {
+            let addr = u32::from_str_radix(line.strip_prefix("@0x")?.get(..6)?, 16).ok()?;
+            let n = line.split_once('[')?.1.split_once(']')?.0.parse().ok()?;
+            Some((addr, n))
+        };
+        let mut checked = 0;
+        let mut empty_named = 0;
+        for line in &lines {
+            let Some((addr, obj)) = row(line) else { continue };
+            let ptbl = zvm::objects::object_prop_table_addr(mem, obj).expect("a real object");
+            assert_eq!(addr, ptbl, "object {obj}'s row must point at its property table");
+            // §12.4's length byte is the first thing the landing row shows.
+            let name_words = mem.read_byte(ptbl) as u32;
+            if name_words == 0 {
+                // A zero-length name is legal; the table is still the sensible
+                // landing, because the count byte lives there to be read.
+                empty_named += 1;
+                assert_eq!(zvm::objects::short_name_span(mem, obj), None);
+                continue;
+            }
+            // The Memory view aligns a jump down to the 16-byte row grid, so the
+            // name decodes at the TOP of the window it opens — that pairing is
+            // the whole point of moving the address.
+            let base = addr & !0xF;
+            let zs = d.memory_zstrings(base, 4);
+            let first = zs.iter().position(|z| z.is_some());
+            assert!(
+                matches!(first, Some(0 | 1)),
+                "object {obj}'s decode must start in the window's first rows, got {first:?}",
+            );
+            let name = zvm::objects::short_name(mem, obj);
+            let window: String = zs.iter().flatten().map(String::as_str).collect();
+            assert!(
+                window.contains(name.trim()),
+                "object {obj}'s name {name:?} must be readable at the top of its own window, got {window:?}",
+            );
+            checked += 1;
+        }
+        assert!(checked >= 20, "minizork has plenty of named objects (checked {checked})");
+        // Non-vacuity for the empty-name branch: minizork's object table is a
+        // real one, so if it happens to hold no unnamed object the branch is
+        // simply untested here — `objects.rs` pins it on a built fixture.
+        let _ = empty_named;
+    }
+
+    /// The §12.3 entry did not become unreachable when the row stopped pointing
+    /// at it (SQ-0975): expanding an object publishes it as the detail's own
+    /// `@0x……` link, which the panel hit-tests exactly like the tree row's.
+    #[test]
+    fn an_expanded_object_publishes_its_entry_address_as_its_own_link() {
+        let Some(s) = zvm_session() else { return };
+        let d = s.debugger().expect("z-machine debugger");
+        let detail = d.object_detail(1);
+        let entry = zvm::objects::object_entry_addr(&s.machine.mem, 1);
+        assert_eq!(
+            detail.first().map(String::as_str),
+            Some(format!("entry @0x{entry:06x}").as_str()),
+            "the entry leads the detail, as a clickable address: {detail:?}",
+        );
+        // …and it is a DIFFERENT address from the row's, or nothing was gained.
+        assert_ne!(
+            Some(entry),
+            zvm::objects::object_prop_table_addr(&s.machine.mem, 1),
+            "the two addresses are genuinely distinct",
+        );
     }
 
     // ── Runtime-confirmation fold (SQ-0418, Task 9) ────────────────────────

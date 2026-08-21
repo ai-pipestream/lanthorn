@@ -1054,7 +1054,20 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
                                 other => other,
                             })
                     }
-                    ObjRow::Detail { .. } => None,
+                    // Detail rows carry the object ENTRY's own `@0x……` link
+                    // (SQ-0975), so the §12.3 entry stays reachable now that the
+                    // tree row jumps to the property table instead. They draw
+                    // under a 4-column indent (see `draw_objects`).
+                    ObjRow::Detail { obj, di } => {
+                        let line = panel.snapshot.object_details.get(obj)?.get(*di)?;
+                        let off = (col.checked_sub(content.x + 4))? as usize;
+                        clickable_spans(section, line).into_iter()
+                            .find(|(range, _)| range.contains(&off))
+                            .map(|(_, t)| match t {
+                                ClickTarget::Memory(a) if functions_mode => ClickTarget::Code(a),
+                                other => other,
+                            })
+                    }
                 }
             }
             // Dictionary rows draw with no marker (the plain list path), so the
@@ -1701,6 +1714,42 @@ mod tests {
         // Line text draws past the 2-col "▶ " marker; the `@0x` sits at its start.
         let col = content.x + 2 + p.snapshot.objects[0].find("@0x").unwrap() as u16;
         assert_eq!(clickable_at(region, &p, col, content.y), Some(ClickTarget::Memory(0x110)));
+    }
+
+    /// SQ-0975: the tree row now points at the property table (where the name
+    /// is), so the §12.3 entry lives on the expanded detail's `entry @0x……`
+    /// line — and that line has to be clickable, or the entry stops being
+    /// reachable at all. Detail rows draw under a 4-column indent.
+    #[test]
+    fn clickable_at_resolves_an_expanded_detail_entry_address_click_to_a_memory_jump() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        let (ow, ot) = locate_section(Section::Objects);
+        p.focus = ow;
+        p.tab[ow] = ot;
+        // The tree row carries the PROPERTY TABLE address, the detail the entry.
+        p.snapshot.objects = vec!["@0x000340 [1] lamp".to_string()];
+        p.expanded_objects.insert(1);
+        p.snapshot.object_details.insert(1, vec!["entry @0x000110".into(), "attrs: (none)".into()]);
+        let wrect = window_rects(region)[ow];
+        let content = Rect::new(wrect.x + 1, wrect.y + 1, wrect.width.saturating_sub(2), wrect.height.saturating_sub(2));
+        // Row 0 is the tree line → the property table.
+        let tree_col = content.x + 2 + p.snapshot.objects[0].find("@0x").unwrap() as u16;
+        assert_eq!(
+            clickable_at(region, &p, tree_col, content.y),
+            Some(ClickTarget::Memory(0x340)),
+            "the row itself jumps to the name",
+        );
+        // Row 1 is the first detail line → the entry, still one click away.
+        let detail = &p.snapshot.object_details[&1][0];
+        let det_col = content.x + 4 + detail.find("@0x").unwrap() as u16;
+        assert_eq!(
+            clickable_at(region, &p, det_col, content.y + 1),
+            Some(ClickTarget::Memory(0x110)),
+            "the entry stays reachable from the expanded detail",
+        );
+        // A detail row with no address is still inert (the old behaviour).
+        assert_eq!(clickable_at(region, &p, content.x + 4, content.y + 2), None);
     }
 
     #[test]

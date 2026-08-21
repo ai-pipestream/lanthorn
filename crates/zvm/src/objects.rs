@@ -220,6 +220,19 @@ fn prop_table_addr(mem: &Memory, obj: u16) -> u32 {
     mem.read_word(base) as u32
 }
 
+/// Byte address of object `obj`'s property table — the ZMSD §12.4 header, i.e.
+/// the one-byte count of the short name's Z-text *words*, immediately followed
+/// by the name itself and then the properties. `None` when `obj` is not an
+/// addressable object.
+///
+/// Public counterpart to [`object_entry_addr`]: the entry (§12.3) holds the
+/// attribute flags, the tree links and this pointer, but none of the object's
+/// text — so a caller wanting to *see* an object's name wants this address, not
+/// the entry's.
+pub fn object_prop_table_addr(mem: &Memory, obj: u16) -> Option<u32> {
+    addressable(mem, obj).then(|| prop_table_addr(mem, obj))
+}
+
 // ── Short name ────────────────────────────────────────────────────────────────
 
 /// Decode the short name of object `obj` from its property table.
@@ -725,6 +738,48 @@ mod tests {
             assert_eq!(text, short_name(&m, obj), "…and holds exactly its short name");
         }
         assert_eq!(short_name_span(&m, 0), None, "object 0 is the null object");
+    }
+
+    /// §12.3 vs §12.4: the entry is flags, tree links and a POINTER; the text
+    /// lives at the other end of that pointer. `object_prop_table_addr` returns
+    /// the pointed-at header, whose first byte is the name's word count and
+    /// whose second byte begins the name — so a reader landing there sees both.
+    #[test]
+    fn object_prop_table_addr_is_where_the_short_name_lives_not_the_entry() {
+        let buf = build_v3_story();
+        let m = Memory::new(buf).unwrap();
+        for obj in [1u16, 2, 3] {
+            let ptbl = object_prop_table_addr(&m, obj).expect("a real object");
+            assert_ne!(ptbl, object_entry_addr(&m, obj), "the table is not the entry");
+            // §12.4: byte 0 is the name's length in 2-byte words, name at +1.
+            let words = m.read_byte(ptbl) as u32;
+            assert_eq!(
+                short_name_span(&m, obj),
+                (words > 0).then(|| (ptbl + 1, ptbl + 1 + words * 2)),
+                "object {obj}'s name starts one byte past the table it points at",
+            );
+            // The entry is 9 bytes of §12.3 fields and holds none of that text.
+            let entry = object_entry_addr(&m, obj);
+            let (start, _) = short_name_span(&m, obj).expect("all three are named");
+            assert!(
+                start < entry || start >= entry + entry_size(m.version()),
+                "object {obj}'s name is nowhere inside its entry",
+            );
+        }
+        assert_eq!(object_prop_table_addr(&m, 0), None, "object 0 is the null object");
+    }
+
+    /// A name of zero words is legal (§12.4: "the text-length may be 0"). The
+    /// table address is still the right place to land — the length byte is
+    /// there to be read, even though `short_name_span` has nothing to offer.
+    #[test]
+    fn object_prop_table_addr_answers_for_an_object_with_no_short_name() {
+        let mut buf = build_v3_story();
+        buf[PROP3_TBL as usize] = 0; // obj3's name shrinks to nothing
+        let m = Memory::new(buf).unwrap();
+        assert_eq!(object_prop_table_addr(&m, 3), Some(PROP3_TBL));
+        assert_eq!(short_name(&m, 3), "", "no name to decode");
+        assert_eq!(short_name_span(&m, 3), None, "…and so no span");
     }
 
     // ── v3 property tests ─────────────────────────────────────────────────────
