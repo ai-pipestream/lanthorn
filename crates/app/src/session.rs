@@ -1767,6 +1767,9 @@ impl GameSession {
         // Arthur's intro erases all eight windows, Zork Zero's boot erases the
         // screen. So it drops the painted ground instead, which is also what
         // keeps this surface bounded when a card table repaints for a new hand.
+        // "Whole screen" means the screen: `v6_native_extent` used to answer with
+        // window 0's box, which made a fill the size of the STORY window read as a
+        // clear and take the status ribbon's ground down with it (SQ-0967).
         if u32::from(f.w) >= sw && u32::from(f.h) >= sh {
             self.paint = None;
             return;
@@ -1784,9 +1787,36 @@ impl GameSession {
         }
     }
 
-    /// The v6 screen's size in native pixels — window 0's box, which the standard
-    /// makes the whole screen, falling back to the 640x400 the era assumed.
+    /// The v6 SCREEN's size in native pixels — the extent the painted ground is
+    /// allocated at, and the space every fill recorded into it is addressed in.
+    ///
+    /// Header words $22/$24 (ZMSD §11.1: screen width and height "in units",
+    /// which Version 6 measures in pixels). `zvm::screen::write_screen_dims` is
+    /// their only writer and the app seeds it at boot from the whole `std_window`
+    /// chain, so this is the one place that states the SCREEN rather than a
+    /// window: 640x400 for an IBM PC press, 560x384 for an Apple IIgs one.
+    ///
+    /// This used to read window 0's box instead, on the standard's word that
+    /// window 0 opens as the whole screen — true at boot and false from the first
+    /// `window_size`, which every v6 game issues. `erase_window` records its
+    /// rectangle in SCREEN coordinates, so a surface cut to the STORY window
+    /// silently dropped whatever fell outside it: Shogun r322's status erase at
+    /// native (46,0) 548x32 was clipped at x=548 on a 548x368 surface and never
+    /// reached the right flank at native 590, and Journey r77 (ProDOS) allocated
+    /// 304x288 for a 560x384 screen. One symptom, one side each, two layers —
+    /// SQ-0948 fixed the declared page and this is the painted ground beneath it
+    /// (SQ-0967).
+    ///
+    /// Window 0's box remains the fallback for a story booted with no screen size
+    /// stated, then the 640x400 the era assumed.
     fn v6_native_extent(&self) -> (u32, u32) {
+        let hdr = (
+            u32::from(self.machine.mem.read_word(0x22)),
+            u32::from(self.machine.mem.read_word(0x24)),
+        );
+        if hdr.0 > 1 && hdr.1 > 1 {
+            return hdr;
+        }
         self.machine
             .screen
             .v6

@@ -345,3 +345,111 @@ fn arthurs_poles_run_through_the_status_row_unbroken() {
     }
     assert_eq!(checked, 8, "every pane and colour mode was measured");
 }
+
+// ── SQ-0967: the painted ground is a SCREEN, not the story window ────────────
+
+/// Shogun's status erase reaches the RIGHT flank on the painted ground.
+///
+/// The third layer of the same defect. `erase_window` records its rectangle in
+/// SCREEN coordinates (`GameSession::apply_erase_fill`), but the surface it is
+/// recorded into was allocated at window 0's box — the STORY window — so every
+/// pixel past that box was silently dropped. Shogun r322 erases native (46,0)
+/// 548x32 for its score bar, reaching to x=594, on a 548x368 surface: the fill
+/// stopped dead at 548 and never reached the right flank at native 590. SQ-0948
+/// fixed the declared page and cured the right-hand block; the left one survived
+/// on this layer, which is what cost that lane a round.
+///
+/// Not Shogun-specific — the ProDOS presses allocate short too (Journey r77:
+/// 304x288 for a 560x384 screen; Shogun r311: 560x320) — but Shogun r322 is where
+/// the overhang has pixels in it, so it is the specimen.
+///
+/// **Frame**: six taps of Enter, the same gameplay frame the SQ-0948 case above
+/// uses, guarded on the same window rect.
+///
+/// **Palette**: stated, not inherited (SQ-0958) — the fill's colour is one the game
+/// named outright, resolved through the profile's own table.
+///
+/// No colour-mode sweep: this is the engine's own surface, built from the colour
+/// the game named (`explicit_pixel_rgba`) with no `ColorScheme` in the path, so
+/// `honor_game_colours` cannot reach it. The two cases above sweep the ring that
+/// consumes it.
+#[test]
+fn shoguns_status_erase_reaches_past_the_story_window_on_the_painted_ground() {
+    let _g = app::v6_palette(InterpreterProfile::IbmPc.palette());
+    let Some(session) = boot("shogun-r322-s890706.z6", 13, 6) else { return };
+    let model = session.screen();
+    let Some((sx, sy, sw, sh)) = status_window(&model, "Score:") else {
+        panic!("six taps in, Shogun's status window carries `Score:` — the frame this case is about")
+    };
+    assert_eq!(
+        (sx, sy, sw, sh),
+        (46, 0, 548, 32),
+        "the specimen is the status window at native (46,0) 548x32"
+    );
+
+    // The premise, and the whole of the defect: the window the ground USED to be cut
+    // to is narrower than the rectangle the game erased. Without this the case would
+    // pass on a frame where nothing hangs over and prove nothing.
+    let w0 = session.machine.screen.v6.as_ref().map(|v6| {
+        let w = &v6.windows[0];
+        (u32::from(w.x_size), u32::from(w.y_size))
+    });
+    assert_eq!(w0, Some((548, 368)), "window 0 is Shogun's STORY window, not its screen");
+    let right = u32::from(sx) + u32::from(sw);
+    assert!(
+        right > 548,
+        "the status erase must reach past window 0's 548 columns — it ends at {right}"
+    );
+
+    let ground = Engine::paint_surface(&session).expect("the score bar's erase paints a ground");
+    // The reported symptom first, so reverting the fix fails on it rather than on the
+    // allocation it is a consequence of. A pixel off the surface counts as bare, which
+    // is precisely what clipping did to it.
+    let opaque = |x: u32, y: u32| {
+        x < ground.width() && y < ground.height() && ground.get_pixel(x, y)[3] != 0
+    };
+
+    // Every pixel of the erased rectangle is on the ground — including the 46 columns
+    // past window 0's edge, where the score bar's right end lives.
+    let painted = (0..u32::from(sh))
+        .flat_map(|y| (u32::from(sx)..right).map(move |x| (x, y)))
+        .filter(|&(x, y)| opaque(x, y))
+        .count();
+    assert_eq!(
+        painted,
+        usize::from(sw) * usize::from(sh),
+        "the whole 548x32 fill reaches the ground; clipped at window 0's 548 columns it \
+         is {} pixels short",
+        (right - 548) as usize * usize::from(sh)
+    );
+
+    // …and the reported symptom itself: native 590 is inside the RIGHT flank, 42
+    // columns past where the surface used to end.
+    let overhang: Vec<(u32, u32)> =
+        (0..u32::from(sh)).map(|y| (590u32, y)).filter(|&(x, y)| !opaque(x, y)).collect();
+    assert!(
+        overhang.is_empty(),
+        "the ribbon's ground must cover native x=590 on all {sh} of its rows — the flank \
+         is exactly what a surface cut to the story window could not represent (SQ-0967); \
+         bare at {overhang:?}"
+    );
+    assert_eq!(
+        *ground.get_pixel(590, 16),
+        image::Rgba([173, 173, 173, 255]),
+        "and it is the colour the game named for its score bar, resolved through the IBM \
+         PC table — §8.3.1 white is 255,255,255 and this press's is 173,173,173, which is \
+         the difference a stated palette makes (SQ-0958)"
+    );
+
+    // The allocation those pixels depend on: the ground shares a coordinate space AND
+    // an extent with the chrome canvas `blit_paint_ground` copies it into.
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items.as_slice());
+    assert_eq!(
+        (ground.width(), ground.height()),
+        (u32::from(native.0), u32::from(native.1)),
+        "the painted ground is the size of the screen the ring composites onto, not of \
+         one window inside it"
+    );
+    assert_eq!((ground.width(), ground.height()), (640, 400), "Shogun r322 is an IBM PC press");
+}
