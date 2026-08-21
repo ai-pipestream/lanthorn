@@ -30,3 +30,26 @@ debug-assertions = false
 # Remove (or raise to `debug = true`) if you need full lldb variable inspection.
 [profile.dev]
 debug = "line-tables-only"
+
+# SQ-0972: ratatui-image 11.0.6's halfblocks encoder allocates its cell buffer
+# with `(size.width * size.height) as usize` — a u16 multiply, which WRAPS — and
+# then indexes it with `x + (size.width as usize) * (y / 2)`, in usize, which
+# does not. Below 65535 cells the two agree exactly; one cell past it the buffer
+# is allocated modulo 65536 while the loop walks the true extent, and the encode
+# panics. A 460x147 terminal gives the game pane 458x144 = 65952 cells, which
+# allocated as 416 and died at index 416.
+#
+# Half-blocks is the backend that reaches this first, because its resolution IS
+# the cell grid — SQ-0964 removed the 2x magnification cap there precisely so a
+# smaller font would buy a sharper picture, which walks straight into the
+# ceiling. Seven more of the same shape in `cells * font_size` (src/lib.rs,
+# src/sliced.rs) do not panic; they silently compute a wrapped pixel dimension.
+#
+# The branch is the v11.0.6 release commit plus exactly those eight lines —
+# deliberately NOT master, which carries an unrelated change to font-size
+# detection (ioctl + env hints), the very input this geometry is derived from.
+# Upstream PR: https://github.com/ratatui/ratatui-image/pull/189
+# REMOVE THIS once a release carrying the fix exists: delete the stanza and bump
+# the version in crates/app/Cargo.toml.
+[patch.crates-io]
+ratatui-image = { git = "https://github.com/sharkusk/ratatui-image", branch = "lanthorn-11.0.6-u16-fix" }
