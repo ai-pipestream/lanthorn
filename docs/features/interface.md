@@ -112,6 +112,16 @@ built-in debugger that follows the running story instruction by instruction.
   on the PC, and `r` cycles the disassembly render mode (Full → Basic → Raw). In
   the Memory tab, `:` or `/` opens an address box that also accepts a variable
   token (`sp`, `g44`, `local10`).
+- **Decoded story text over the hex.** Land the Memory view on a dictionary entry
+  or an object entry — by clicking its `@0x……` link in the Dictionary or Objects
+  tab, or by typing the address — and the dump is captioned with the entry's
+  actual text: `dict word: "lantern"`, `object 27 name: "brass lantern"`. The hex
+  row's own character column can't show you this: it reads one byte as one
+  character, while a dictionary key and an object's short name are Z-encoded —
+  three characters packed into every 16-bit word — so that column is noise over
+  exactly the entries you jump to, and the caption is what confirms you landed on
+  the one you meant. Style it with `debug.zstring`; it appears only when there's
+  text there, so a jump to plain data costs you no row of hex.
 - **Execution coverage.** Once a line's address runs it turns blue and stays
   blue for the rest of the session, so you build up a map of what has actually
   executed; a `|` gutter bar additionally marks just the lines the *last* command

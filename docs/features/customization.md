@@ -105,10 +105,10 @@ still reach in and override any single selector by name.
   fonts without Unicode 13 Legacy Computing coverage. Individual glyphs are
   overridden one slot at a time in a `[map.overrides]` table keyed by slot name
   — `"room.normal.tl" = "+"`, `"arrow.north" = "^"`, `"path.diag_ul" = "/"`.
-- **`[debug]`** holds only the disassembly-specific selectors for the debug
-  inspector: `pc` and the four confidence tiers that shade how sure the
-  disassembler is that a byte is really code. The defaults read as a risk
-  gradient — **blue** verified, **yellow** medium, **red** high-risk:
+- **`[debug]`** holds the selectors particular to the debug inspector: `pc`, the
+  four confidence tiers that shade how sure the disassembler is that a byte is
+  really code, and `zstring`. The tier defaults read as a risk gradient —
+  **blue** verified, **yellow** medium, **red** high-risk:
   - **`disasm_executed`** (blue) — the line's address has *ever* run. Ground
     truth; it wins over any static guess and stays blue for the rest of the
     session (cumulative coverage). Its `|` gutter mark is separate: it flags only
@@ -120,6 +120,11 @@ still reach in and override any single selector by name.
     the "don't fully trust this" tier.
   - **`disasm_data`** — bytes shown as `.byte`, not decoded as code at all
     (muted; it's not a risk level).
+
+  - **`zstring`** — the Memory view's caption naming the decoded dictionary word
+    or object short name at the address you jumped to. Story text rather than a
+    confidence tier, so it takes `accent` and italics by default, to read as a
+    gloss on the hex dump instead of another row of it.
 
   Each tier carries both a line style and a gutter **`glyph`** (e.g.
   `disasm_executed`'s `|` mark; the others default to a blank space — set

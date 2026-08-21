@@ -4948,6 +4948,46 @@ impl Debugger for GameSession {
             n => Some(self.machine.global(n - 16)),
         }
     }
+
+    /// Recognise the two entries the inspector can jump to, because those are
+    /// the two whose text the byte-per-ZSCII char column cannot show:
+    ///
+    /// - a **dictionary entry** — the entries follow the dictionary header
+    ///   immediately (ZMSD §13.5) at `base + i * entry_length`, and that stride
+    ///   is a byte the *game* chose (§13.2 gives only a minimum), so an entry is
+    ///   very often at an odd address; the key is a plain Z-string filling the
+    ///   entry's first 4 bytes in v1–3 (§13.3) or 6 in v4+ (§13.4);
+    /// - an **object entry** — its short name is not at the entry at all but in
+    ///   the property table it points at, after the one-byte text-length field
+    ///   (ZMSD §12.4, the same layout in every version).
+    ///
+    /// Neither address is word-aligned in general; only *packed* string
+    /// addresses are. `decode_string` reads 2-byte words forward from wherever
+    /// it is pointed until the word with the end bit set, so a plain byte
+    /// address is all it ever wanted.
+    ///
+    /// Resolved through the same two address maps the disassembly annotator
+    /// builds its `[obj#N]` / `[word]` tags from — object first, exactly as
+    /// `annotate_refs` prefers it — so a caption here and a tag there can never
+    /// disagree about what lives at an address.
+    ///
+    /// The decode is zvm's own and inherits its version coverage: the v3+ text
+    /// rules (Z-chars 1–3 abbreviations, 4/5 one-shot shifts). A v1/v2 story,
+    /// where 2/3 shift and 4/5 shift-*lock* (ZMSD §3.2.2–3), is read through
+    /// those v3+ rules here exactly as it is everywhere else in the interpreter;
+    /// a debug caption is not the place to diverge from what the VM prints.
+    fn zstring_at(&self, addr: u32) -> Option<String> {
+        let out = match self.object_addr_map().get(&addr) {
+            Some(&n) => {
+                let name = zvm::objects::short_name(&self.machine.mem, n);
+                let name = name.trim().to_string();
+                (!name.is_empty()).then(|| format!("object {n} name: \"{name}\""))
+            }
+            None => self.dict_addr_map().get(&addr).map(|w| format!("dict word: \"{w}\"")),
+        };
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
+    }
 }
 
 /// Render the object hierarchy as indented `[N] name` lines in **tree order**:
@@ -7836,6 +7876,65 @@ mod debugger_impl_tests {
         let hex = d.memory_hex(0, 2);
         assert_eq!(hex.len(), 2);
         assert!(hex[0].starts_with("000000"));
+    }
+
+    // ── Z-string annotation for the Memory view (SQ-0448) ──────────────────
+
+    #[test]
+    fn every_dictionary_row_the_inspector_lists_annotates_at_the_address_it_links() {
+        // The real-game half: the Dictionary tab prints `@0x…… word` rows whose
+        // address is what a click jumps the Memory view to, so the annotation at
+        // that address must reproduce that row's own word — that round trip is
+        // the confirmation SQ-0448 exists to give.
+        let Some(s) = zvm_session() else { return };
+        let d = s.debugger().expect("z-machine debugger");
+        let rows = d.dictionary_lines();
+        assert!(!rows.is_empty(), "minizork has a dictionary");
+        let mut odd = 0;
+        for row in rows.iter().take(40) {
+            let addr = u32::from_str_radix(&row[3..9], 16).expect("`@0x……` row prefix");
+            let word = row[10..].trim();
+            assert_eq!(
+                d.zstring_at(addr).as_deref(),
+                Some(format!("dict word: \"{word}\"").as_str()),
+                "row {row:?} must annotate as its own word",
+            );
+            odd += (addr % 2) as usize;
+        }
+        // Non-vacuity: minizork's entry_length is odd, so half these addresses
+        // are odd — the case a decoder that assumed word alignment would get
+        // wrong, and the reason the annotation decodes from the address the row
+        // links rather than from a rounded one.
+        assert!(odd > 0, "at least one of the checked entries is at an ODD address");
+    }
+
+    #[test]
+    fn an_address_no_table_accounts_for_annotates_with_nothing() {
+        let Some(s) = zvm_session() else { return };
+        let d = s.debugger().expect("z-machine debugger");
+        let entry = u32::from_str_radix(&d.dictionary_lines()[0][3..9], 16).expect("first entry");
+        assert_eq!(
+            d.zstring_at(entry + 1), None,
+            "one byte into an entry is the middle of a Z-string; decoding there \
+             would produce confident nonsense, so it annotates with nothing",
+        );
+        assert_eq!(d.zstring_at(0), None, "the header is not a string at all");
+    }
+
+    #[test]
+    fn a_real_object_entry_annotates_with_the_name_the_object_tree_prints() {
+        let Some(s) = zvm_session() else { return };
+        let d = s.debugger().expect("z-machine debugger");
+        let mem = &s.machine.mem;
+        // Object 1 exists in every real story; take its name from zvm directly
+        // and require the annotation at its entry address to agree.
+        let name = zvm::objects::short_name(mem, 1);
+        assert!(!name.is_empty(), "minizork's object 1 has a short name");
+        let addr = zvm::objects::object_entry_addr(mem, 1);
+        assert_eq!(
+            d.zstring_at(addr).as_deref(),
+            Some(format!("object 1 name: \"{}\"", name.trim()).as_str()),
+        );
     }
 
     // ── Runtime-confirmation fold (SQ-0418, Task 9) ────────────────────────

@@ -187,6 +187,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # disasm_rd = { parent = "text", fg = "yellow", glyph = " " }
 # disasm_soft = { parent = "muted", fg = "red", glyph = " " }
 # disasm_data = { parent = "muted", italic = true, glyph = " " }
+# zstring = { parent = "accent", italic = true }
 
 # ═══ SURFACES — bordered boxes: a background + frame + the text drawn on them ═══
 

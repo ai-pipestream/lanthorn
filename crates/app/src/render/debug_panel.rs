@@ -259,9 +259,20 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
         None => (format!("addr: 0x{:06x}  (: jump — hex, gNN, localN, sp)", panel.mem_addr), body),
     };
     draw_str_clipped(buf, content.x, content.y, &line, style, content);
-    let height = content.height.saturating_sub(1);
+    // The jumped-to entry's decoded text, captioning the dump below it. The hex
+    // row's char column reads one ZSCII code per byte, which is noise over the
+    // packed Z-characters of a dictionary key or an object short name — this
+    // caption is the only readable confirmation that the jump landed on the
+    // entry the Dictionary/Objects tab named (SQ-0448). Absent (and costing no
+    // row) when the target holds no Z-string.
+    let mut top = content.y + 1;
+    if let Some(text) = panel.mem_annotation() {
+        draw_str_clipped(buf, content.x, top, text, state.colors.theme.get("debug.zstring").style, content);
+        top += 1;
+    }
+    let height = content.height.saturating_sub(top - content.y);
     for (row, hex) in panel.snapshot.memory.iter().take(height as usize).enumerate() {
-        draw_str_clipped(buf, content.x, content.y + 1 + row as u16, hex, body, content);
+        draw_str_clipped(buf, content.x, top + row as u16, hex, body, content);
     }
 }
 
@@ -466,6 +477,78 @@ mod tests {
         assert!(text.contains("Disassembly"));
         assert!(text.contains("Locals"));
         assert!(text.contains("Stack"));
+    }
+
+    /// The Memory tab, jumped to `addr`, drawn into an 80x24 buffer.
+    fn memory_view_at(addr: u32) -> (crate::state::AppState, Buffer) {
+        struct Dict;
+        impl crate::engine::Debugger for Dict {
+            fn pc(&self) -> u32 { 0 }
+            fn disassemble(&self, _a: u32, _n: usize) -> Vec<String> { Vec::new() }
+            fn disassemble_raw(&self, _a: u32, _n: usize) -> Vec<String> { Vec::new() }
+            fn disassemble_basic(&self, _a: u32, _n: usize) -> Vec<String> { Vec::new() }
+            fn next_instr(&self, a: u32) -> u32 { a }
+            fn prev_instr(&self, a: u32) -> u32 { a }
+            fn executed_pcs(&self) -> std::collections::HashSet<u32> { Default::default() }
+            fn stack_lines(&self) -> Vec<String> { Vec::new() }
+            fn eval_stack_lines(&self) -> Vec<String> { Vec::new() }
+            fn locals_lines(&self) -> Vec<String> { Vec::new() }
+            fn globals_lines(&self) -> Vec<String> { Vec::new() }
+            fn object_tree_lines(&self) -> Vec<String> { Vec::new() }
+            fn dictionary_lines(&self) -> Vec<String> { Vec::new() }
+            fn memory_hex(&self, a: u32, r: usize) -> Vec<String> {
+                (0..r).map(|i| format!("{:06x}  ..", a + i as u32 * 16)).collect()
+            }
+            fn memory_len(&self) -> u32 { 0x10000 }
+            fn object_detail(&self, _o: u16) -> Vec<String> { Vec::new() }
+            fn frame_locals(&self, _i: usize) -> Vec<String> { Vec::new() }
+            fn var_value(&self, _v: u8) -> Option<u16> { None }
+            fn zstring_at(&self, addr: u32) -> Option<String> {
+                (addr == 0x2005).then(|| "dict word: \"lantern\"".to_string())
+            }
+        }
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0);
+        panel.goto_memory(addr, &Dict);
+        state.debug = Some(panel);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+        (state, buf)
+    }
+
+    #[test]
+    fn the_memory_view_captions_a_jumped_to_entry_with_its_decoded_z_string() {
+        // SQ-0448: the hex row's char column reads one ZSCII code per byte, which
+        // is noise over packed Z-characters, so this caption is the only readable
+        // confirmation the jump landed on the entry the Dictionary tab named.
+        let (state, buf) = memory_view_at(0x2005);
+        assert!(buf_text(&buf).contains("dict word: \"lantern\""));
+
+        // Themed, never hard-coded: the caption's cells carry `debug.zstring`.
+        // Window 2 (right-bottom) content starts at (41, 13); row 0 is the
+        // `addr:` line, so the caption is row 1.
+        let want = state.colors.theme.get("debug.zstring").style;
+        let cell = buf.cell((41, 14)).expect("caption cell");
+        assert_eq!(Some(cell.fg), want.fg, "caption takes its colour from debug.zstring");
+        assert_eq!(cell.modifier, want.add_modifier, "…and its modifiers");
+    }
+
+    #[test]
+    fn the_caption_pushes_the_hex_down_a_row_and_costs_nothing_without_one() {
+        // With a caption the dump starts one row lower; with none it sits right
+        // under the `addr:` line, so a jump to plain data loses no hex row.
+        let (_, with) = memory_view_at(0x2005);
+        assert!(row_text(&with, 15).contains("002000"), "hex starts below the caption");
+        let (_, without) = memory_view_at(0x3000);
+        assert!(!buf_text(&without).contains("dict word"), "no caption for plain data");
+        assert!(row_text(&without, 14).contains("003000"), "and the hex reclaims the row");
+    }
+
+    /// The drawn text of one buffer row.
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (buf.area.x..buf.area.right()).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect()
     }
 
     #[test]
