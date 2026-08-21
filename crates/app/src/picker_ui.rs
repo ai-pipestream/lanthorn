@@ -2961,11 +2961,11 @@ fn draw_resource_preview(
                         // The fitted view is a reduction — a blorb Pict is usually
                         // larger than the modal — so it needs the area filter, and
                         // a cut-out picture needs its alpha associated (SQ-0829).
-                        // The zoom arm below is already right by construction:
-                        // an integer magnification is what Nearest is FOR.
-                        let (fitted, size) =
-                            app::render::graphics::fit_for_protocol(picker, img, target, false);
-                        picker.new_protocol(fitted, size, ratatui_image::Resize::Fit(None))
+                        // On half-blocks it is ONE reduction, straight onto the
+                        // sample grid the backend draws (SQ-0979). The zoom arm
+                        // below is already right by construction: an integer
+                        // magnification is what Nearest is FOR.
+                        app::render::graphics::fitted_protocol(picker, img, target, false)
                     }
                     PreviewZoom::Factor(n) => {
                         // Scale to an exact integer multiple of the native pixel
@@ -2982,10 +2982,10 @@ fn draw_resource_preview(
                         let scaled = img.resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Nearest);
                         let (cx, cy, cw, ch) = center_crop_rect((scaled_w, scaled_h), budget);
                         let cropped = scaled.crop_imm(cx, cy, cw, ch);
-                        picker.new_protocol(cropped, target, ratatui_image::Resize::Fit(None))
+                        picker.new_protocol(cropped, target, ratatui_image::Resize::Fit(None)).ok()
                     }
                 };
-                if let Ok(built) = built {
+                if let Some(built) = built {
                     pv.proto = Some((content.width, content.height, pv.zoom, built));
                 }
             }

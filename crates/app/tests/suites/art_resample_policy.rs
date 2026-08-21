@@ -34,6 +34,17 @@
 //! count that explodes on magnification, an RMS against the area average that jumps
 //! by an order of magnitude on minification, a black fringe on a cut-out edge.
 //!
+//! Those four `Resize::Fit(None)` sites now make one call, `fitted_protocol`, and on
+//! every backend that ENCODES pixels it is exactly the pair this file measures —
+//! `fit_for_protocol` then an identity `Fit`, which is why the cases below still drive
+//! `fit_for_protocol` through a kitty picker. Half-blocks encodes nothing and takes a
+//! different route: it resolves the image straight into cells at one sample per column
+//! and two per row, so the device-pixel pre-scale was an intermediate built to be
+//! thrown away, and there the reduction is ONE pass onto that sample grid (SQ-0979).
+//! The policy is unchanged — `resize_directional` does the pass either way — and the
+//! half-blocks arm is measured against this same ideal in `graphics.rs`'s
+//! `resample_tests`, including SQ-0829's own 1104-px toolbar.
+//!
 //! No `honor_game_colours` axis here, deliberately: not one of these paths consults
 //! a game colour or a theme. They resample artwork, and the ground an inline picture
 //! is later flattened onto (`page_for`/`flatten_onto`, which IS mode-dependent) is
