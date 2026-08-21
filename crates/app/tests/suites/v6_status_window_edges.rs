@@ -42,7 +42,8 @@
 //! of it.
 //!
 //! **Palette: stated, not inherited** (SQ-0958). Each case installs the profile's
-//! own table under `app::v6_palette`, which takes `V6_PALETTE_LOCK` in the same call.
+//! own table under `app::v6_palette`, which takes the shared lock in the same call and
+//! hands the default back when it drops.
 
 use std::path::PathBuf;
 

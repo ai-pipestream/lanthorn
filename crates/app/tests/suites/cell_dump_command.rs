@@ -18,7 +18,6 @@
 //! since a modal is drawn straight over the cells.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::cell_dump::{format_cell_dump, is_graphics_cell, DumpMeta};
 use app::config::KeymapConfig;
@@ -34,10 +33,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
-
-/// `zvm::screen::set_palette` is process-global, so two profiles must not boot side
-/// by side.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The pane the capture is taken at.
 const PANE: Rect = Rect { x: 0, y: 0, width: 115, height: 61 };
@@ -76,7 +71,7 @@ fn journey_at_menu() -> Option<(GameSession, AppState)> {
         }
     };
     let profile = InterpreterProfile::Amiga;
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&story_path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -137,7 +132,7 @@ fn menu_frame() -> Option<(AppState, Buffer, Vec<String>)> {
 /// cells rather than on a synthetic pair.
 #[test]
 fn every_cell_of_a_real_frame_round_trips_through_the_legend() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((_state, buf, lines)) = menu_frame() else { return };
 
     let legend = parse_legend(&lines);
@@ -187,7 +182,7 @@ fn every_cell_of_a_real_frame_round_trips_through_the_legend() {
 /// frame a colour landed, and the menu labels are what the reports name.
 #[test]
 fn the_glyph_grid_reads_as_the_screen_does() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((_state, _buf, lines)) = menu_frame() else { return };
     let (glyphs, _) = parse_grid(&lines);
     let text: Vec<String> = glyphs.iter().map(|r| r.iter().collect()).collect();
@@ -209,7 +204,7 @@ fn the_glyph_grid_reads_as_the_screen_does() {
 /// check, not a synthetic pair of cells.
 #[test]
 fn a_real_v6_frame_dumps_without_one_escape_sequence() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((_state, _buf, lines)) = menu_frame() else { return };
     for (i, line) in lines.iter().enumerate() {
         assert!(!line.contains('\u{1b}'), "line {i} carries an escape: {line:?}");
@@ -222,7 +217,7 @@ fn a_real_v6_frame_dumps_without_one_escape_sequence() {
 /// different thing and the one a reader has to be told about (SQ-0747).
 #[test]
 fn the_regions_an_image_covers_are_named_not_left_blank() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((state, buf, lines)) = menu_frame() else { return };
     let head = lines.iter().take_while(|l| !l.starts_with("styles:")).cloned().collect::<Vec<_>>();
     assert!(
@@ -278,7 +273,7 @@ fn the_regions_an_image_covers_are_named_not_left_blank() {
 /// appear under that colour, and every row the section claims must really be one.
 #[test]
 fn a_background_that_owns_whole_rows_states_the_range() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((_state, buf, lines)) = menu_frame() else { return };
 
     let claimed = parse_row_backgrounds(&lines);
@@ -372,7 +367,7 @@ fn the_documented_ctrl_binding_dispatches_with_no_modal() {
 /// describes is the one on screen.
 #[test]
 fn a_bound_key_capture_leaves_the_frame_it_reports_untouched() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((session, transcript_state)) = journey_at_menu() else { return };
     let model = session.screen();
 

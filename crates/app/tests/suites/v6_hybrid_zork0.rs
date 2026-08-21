@@ -40,10 +40,6 @@ use app::session::GameSession;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-/// `zvm::screen::set_palette` is process-global, and `boot_zork0` sets it, so no
-/// two cases here may boot at once (SQ-0904/SQ-0905).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -54,7 +50,7 @@ fn boot_zork0() -> Option<GameSession> {
     // The bare story file names no machine, so its colour numbers resolve through
     // ZMSD §8.3.1's own table — which is what every assertion below was written
     // against. Stated here rather than inherited; see the module header.
-    zvm::screen::set_palette(zvm::screen::Palette::Standard);
+    app::v6_set_palette(zvm::screen::Palette::Standard);
     let story_path = stories_dir().join("zork0-r393-s890714.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -93,7 +89,7 @@ fn cell_path_state() -> app::state::AppState {
 
 #[test]
 fn zork0_hybrid_renders_story_as_terminal_text() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
     assert!(matches!(model.root, WinNode::Layered(_)), "v6 root is a layered composite");
@@ -143,7 +139,7 @@ fn zork0_hybrid_renders_story_as_terminal_text() {
 
 #[test]
 fn zork0_raster_mode_publishes_scroll_geometry() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
 
@@ -176,7 +172,7 @@ fn zork0_raster_mode_publishes_scroll_geometry() {
 /// bunched mid-pane as the old per-run cell-quantization produced.
 #[test]
 fn zork0_frameless_status_band_is_anchored_full_width() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
 
@@ -222,7 +218,7 @@ fn zork0_frameless_status_band_is_anchored_full_width() {
 /// placement covers deletes the image rather than layering over it.
 #[test]
 fn zork0_hybrid_status_on_art_stays_in_the_ring() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     use ratatui_image::picker::ProtocolType;
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
@@ -267,7 +263,7 @@ fn zork0_hybrid_status_on_art_stays_in_the_ring() {
 /// and assert at least one band re-encoded while at least one other stayed fresh.
 #[test]
 fn zork0_hybrid_status_change_keeps_flank_bands_fresh() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(mut session) = boot_zork0() else { return };
     let mut state = render_state(app::config::V6RenderMode::Hybrid);
     state.push_transcript("West of House");
@@ -310,7 +306,7 @@ fn zork0_hybrid_status_change_keeps_flank_bands_fresh() {
 /// 640×400, scale 1.40625, off_y 0). One column is reserved for the scrollbar.
 #[test]
 fn zork0_hybrid_tall_pane_frame_reclaim() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     use ratatui::style::Color;
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
@@ -415,7 +411,7 @@ fn zork0_showing_map() -> Option<GameSession> {
 /// reporter confirmed already renders this screen correctly.
 #[test]
 fn zork0_hybrid_shows_the_full_screen_map() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = zork0_showing_map() else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
@@ -523,7 +519,7 @@ fn walk_to_rebus(session: &mut GameSession) {
 /// normal frame.
 #[test]
 fn zork0_rebus_picture_shows_without_a_text_column() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = zork0_looking_at_rebus() else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
@@ -619,7 +615,7 @@ fn zork0_rebus_picture_shows_without_a_text_column() {
 /// (raster). The rebus frame must not reproduce the map frame's cells.
 #[test]
 fn zork0_rebus_after_map_never_flashes_the_stale_composite() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(mut session) = zork0_showing_map() else { return };
     let mut state = render_state(app::config::V6RenderMode::Hybrid);
     let area = Rect::new(0, 0, 96, 40);

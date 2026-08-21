@@ -1,14 +1,25 @@
 //! Two rules, checked mechanically, either side of the same process-global palette:
-//! a suite that SETS it must take the shared lock (SQ-0905), and a suite that READS
-//! it must state which palette it read (SQ-0958).
+//! a suite that SETS it must do so through a guard (SQ-0905/SQ-0987), and a suite that
+//! READS it must state which palette it read (SQ-0958).
 //!
 //! **A mutex only excludes the parties that take it.** SQ-0904 gave every suite that
-//! already declared a `PALETTE` mutex the shared [`app::V6_PALETTE_LOCK`], which
-//! fixed twenty-three suites that were each locking their own private mutex —
-//! indistinguishable from one lock under nextest, from none under `cargo test`. But
-//! three files set `zvm::screen::set_palette` without acquiring anything at all, and
-//! those do not merely go unprotected: they can flip the palette in the middle of a
-//! lock-holder's case, and the lock-holder has no way to notice.
+//! already declared a `PALETTE` mutex one shared lock, which fixed twenty-three suites
+//! that were each locking their own private mutex — indistinguishable from one lock
+//! under nextest, from none under `cargo test`. But three files set
+//! `zvm::screen::set_palette` without acquiring anything at all, and those do not
+//! merely go unprotected: they can flip the palette in the middle of a lock-holder's
+//! case, and the lock-holder has no way to notice.
+//!
+//! **And a lock only says "not while I hold this", never "and afterwards".** SQ-0959
+//! made the shared lock a guard that puts `Palette::Standard` back on drop; SQ-0987
+//! made the guard the only way to reach either the lock or the setter. The lock is
+//! private to `app`, so a suite cannot take it raw — that is a compile error rather
+//! than a convention — and `app::v6_set_palette` panics unless the calling thread
+//! holds a guard, which is what lets the thirty harnesses that resolve a profile deep
+//! inside their own `boot()` keep setting the palette exactly where they always did.
+//! What this file adds is the source-level half: it fails a suite that reaches
+//! `zvm::screen::set_palette` DIRECTLY, which is the one spelling that would slip past
+//! both the privacy and the panic.
 //!
 //! Every file under `tests/suites/` is compiled into one of the ~14 group binaries,
 //! so any two of them may share a process and run on parallel threads. That is what
@@ -32,8 +43,12 @@
 //! isolation argument is at the binary level and holds. `zvm` also takes zero
 //! external dependencies, so it could not share this lock even if it wanted to.
 //!
-//! Production callers are exempt for the same kind of reason: `startup.rs` and
-//! `zvm-cli` are single-threaded and set one machine's palette per run.
+//! Production callers are exempt for the same kind of reason: `startup.rs`,
+//! `reset.rs` and `zvm-cli` are single-threaded and set one machine's palette per
+//! run. So are `crates/app/examples/ring_scout.rs` and `flank_shape.rs`, which are
+//! hand-run diagnostics with one boot each and no second thread to race — they are
+//! the only raw callers left outside production, and they are outside this directory
+//! deliberately rather than by oversight.
 
 use std::path::PathBuf;
 
@@ -59,47 +74,75 @@ fn suite_sources() -> Vec<(String, String)> {
     out
 }
 
-/// A suite says which palette it is using either by taking the raw lock or — better —
-/// by asking for the two together through `app::v6_palette`.
+/// A suite says which palette it is using by taking a guard: `app::v6_palette(p)` when
+/// it can name the table at the lock site, `app::v6_palette_at_boot()` when its own
+/// `boot()` names it a few rows further down. Both restore `Standard` on drop.
 fn states_a_palette(src: &str) -> bool {
-    src.contains("V6_PALETTE_LOCK") || src.contains("v6_palette(")
+    src.contains("v6_palette(") || src.contains("v6_palette_at_boot(")
 }
 
-/// Every suite that writes the process-global palette also takes the shared lock.
+/// Does `src` name `set_palette` anywhere except as `app::v6_set_palette`?
 ///
-/// Asserted over the source, because there is no runtime signal for it: a suite that
-/// ignores the lock produces a green run until the day its scheduling happens to
-/// interleave with a lock-holder, and then produces a failure in the OTHER suite.
+/// A plain substring scan, which is the right trade for a guard nobody will maintain —
+/// but it cannot tell a CALL from a MENTION, so a suite that merely names the raw
+/// function in a comment is reported too. If that happens, reword the comment: the
+/// spelling is what the next author copies, and prose that shows the forbidden form is
+/// how the form comes back. It catches an aliased import (`use zvm::screen::set_palette
+/// as sp;`) for the same reason — the `use` line names it.
+fn reaches_set_palette_raw(src: &str) -> bool {
+    src.match_indices("set_palette").any(|(at, _)| !src[..at].ends_with("v6_"))
+}
+
+/// The ONLY route from a suite to the process-global palette is a guard that puts the
+/// default back.
 ///
-/// Falsified by deleting the `V6_PALETTE_LOCK` line from any guarded suite, which
-/// names that file here.
+/// Two of the three locks on that route are not source checks at all, and this case
+/// exists to catch the one spelling neither of them can see:
+///
+/// | lock | catches | when |
+/// |---|---|---|
+/// | `app::V6_PALETTE_LOCK` is private | taking the lock raw, then setting and restoring nothing | compile |
+/// | `app::v6_set_palette` asserts a thread-local witness | setting with no guard held | run |
+/// | this case | calling `zvm::screen::set_palette` directly, past both | source |
+///
+/// That third row is not hypothetical. A direct call compiles — `zvm` is a dependency
+/// of the group binaries and every suite already names `zvm::screen::Palette` — and
+/// its damage is invisible to `cargo nextest run`, where every test owns its process.
+/// It would produce a green local gate and an intermittent failure in some OTHER suite
+/// under CI's `cargo test`, which is SQ-0904 exactly. It is also the only one of the
+/// three that fires without the suite RUNNING, which matters here: nearly every case
+/// in this directory is gated behind a gitignored story and skips vacuously on CI, so
+/// the panic in `v6_set_palette` may never get the chance.
+///
+/// Falsified by putting `zvm::screen::set_palette(...)` back into any migrated suite,
+/// which names that file here. Done, for SQ-0987, with `v6_shogun_title_header.rs`.
 #[test]
-fn a_suite_that_sets_the_palette_takes_the_shared_lock() {
-    let (mut setters, mut unguarded) = (0usize, Vec::new());
+fn the_only_route_to_the_palette_is_through_a_guard() {
+    let (mut setters, mut raw) = (0usize, Vec::new());
     for (name, src) in suite_sources() {
-        // A plain substring scan, which is the right trade for a guard nobody will
-        // maintain — but it cannot tell a CALL from a MENTION, and a suite that
-        // merely names the function in a comment is reported as a setter. If that
-        // happens, reword the comment rather than taking a lock the file does not
-        // need; the guard erring toward noise is what makes it safe to leave alone.
-        if !src.contains("zvm::screen::set_palette") {
+        // This file spells the forbidden form out, in its prose and in its own scan.
+        if name == "palette_lock_discipline.rs" {
             continue;
         }
-        setters += 1;
-        if !states_a_palette(&src) {
-            unguarded.push(name);
+        if src.contains("v6_set_palette(") {
+            setters += 1;
+        }
+        if reaches_set_palette_raw(&src) {
+            raw.push(name);
         }
     }
     assert!(
-        unguarded.is_empty(),
-        "these suites set the process-global palette without taking app::V6_PALETTE_LOCK: {unguarded:?}\n\
-         Every file under tests/suites/ shares a group binary with a dozen others, and cargo test \
-         runs a binary's cases on parallel threads. A mutex only excludes the parties that take it, \
-         so an unguarded setter can flip the palette under a lock-holder — which fails the OTHER \
-         suite, and only sometimes (SQ-0904/SQ-0905). Add:\n\
-         \x20   static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;\n\
-         and open each case that stands up a session with\n\
-         \x20   let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());",
+        raw.is_empty(),
+        "these suites reach zvm::screen::set_palette directly: {raw:?}\n\
+         The palette is process-global and every file under tests/suites/ shares a group binary — \
+         and therefore a process and a palette — with a dozen others, which cargo test runs on \
+         parallel threads. A raw call both races its neighbours and leaves the table installed for \
+         the rest of the run, so the next suite to look reads a machine it never booted \
+         (SQ-0904/SQ-0958/SQ-0959). Open each case with a guard:\n\
+         \x20   let _g = app::v6_palette(zvm::screen::Palette::Standard);   // palette known here\n\
+         \x20   let _g = app::v6_palette_at_boot();                        // named inside boot()\n\
+         held for the whole case, and set the table from inside the harness with\n\
+         \x20   app::v6_set_palette(profile.palette());",
     );
     assert!(
         setters >= 25,
@@ -136,7 +179,8 @@ const ASSERTS_A_COLOUR: [&str; 6] =
     ["Rgb(", "Rgba(", "RgbaImage", "paint_surface", "pictures_canvas", "to_rgba8"];
 
 /// Every suite that asserts a resolved colour also states the palette it resolved
-/// through — [`app::v6_palette`], or the raw lock plus its own `set_palette`.
+/// through — [`app::v6_palette`], or [`app::v6_palette_at_boot`] when its own harness
+/// names the table.
 ///
 /// # Why this cannot be a runtime check
 ///

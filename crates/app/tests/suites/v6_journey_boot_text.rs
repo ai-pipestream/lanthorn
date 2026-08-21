@@ -37,7 +37,6 @@
 //! measuring.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -47,10 +46,6 @@ use app::state::TranscriptKind;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, so the two profiles must not boot
-/// side by side.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The pane from the user's own `/dump-windows` of the defective frame: 159×61 at
 /// (1,1), cell 8×18, hybrid.
@@ -88,7 +83,7 @@ fn boot_release(file: &str, profile: InterpreterProfile) -> Option<GameSession> 
             return None;
         }
     };
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&story_path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -225,7 +220,7 @@ const ANY_KEY: &str = "[Press any key to begin]";
 /// correct on both builds before this fix.
 #[test]
 fn journey_never_shows_an_erased_title_block_on_either_release() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, profile) in [
         (AMIGA_RELEASE, InterpreterProfile::Amiga),
         (PC_RELEASE, InterpreterProfile::IbmPc),
@@ -306,7 +301,7 @@ fn journey_never_shows_an_erased_title_block_on_either_release() {
 /// > it`
 #[test]
 fn journey_boot_passage_starts_at_the_top_of_the_story_panel() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
         for honor in [true, false] {
             let Some((session, state)) = journey_at_boot_passage(profile, honor) else { return };
@@ -388,7 +383,7 @@ fn journey_boot_passage_starts_at_the_top_of_the_story_panel() {
 /// wrong was what stood above it.
 #[test]
 fn journey_declares_a_right_hand_story_panel_at_boot_under_both_profiles() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut seen = Vec::new();
     for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
         let Some((session, state)) = journey_at_boot_passage(profile, true) else { return };

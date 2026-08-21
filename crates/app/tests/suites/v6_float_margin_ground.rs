@@ -38,7 +38,6 @@
 //! The story media are gitignored, so every case **skips cleanly** when absent.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -48,10 +47,6 @@ use app::state::AppState;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, so two profiles must not boot
-/// side by side (nextest gives each test its own process; `cargo test` does not).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga release floppy the defect was reported on.
 const AMIGA_RELEASE: &str = "Zork Zero - The Revenge of Megaboz.adf";
@@ -76,7 +71,7 @@ fn zork0_with_floats(profile: InterpreterProfile, honor: bool) -> Option<(GameSe
             return None;
         }
     };
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&story_path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -180,7 +175,7 @@ fn measure(profile: InterpreterProfile, honor: bool) -> Option<(AppState, Vec<Fl
 /// must take the prose's page: that is the whole fix.
 #[test]
 fn amiga_float_margin_takes_the_page_the_prose_sits_on() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((state, rows)) = measure(InterpreterProfile::Amiga, true) else { return };
 
     // The premise that makes this case non-vacuous: this is the one machine whose
@@ -219,7 +214,7 @@ fn amiga_float_margin_takes_the_page_the_prose_sits_on() {
 /// move on this profile.
 #[test]
 fn ibmpc_float_margin_and_prose_already_share_a_ground() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((state, rows)) = measure(InterpreterProfile::IbmPc, true) else { return };
 
     assert!(
@@ -242,7 +237,7 @@ fn ibmpc_float_margin_and_prose_already_share_a_ground() {
 /// the prose fall back to the same base and must still agree.
 #[test]
 fn amiga_float_margin_holds_with_the_games_colours_declined() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((state, rows)) = measure(InterpreterProfile::Amiga, false) else { return };
 
     assert!(state.v6_page_pair.get().is_none(), "colours declined: no machine pair to lay down");
@@ -258,7 +253,7 @@ fn amiga_float_margin_holds_with_the_games_colours_declined() {
 /// **IBM PC, colours declined.** The fourth corner of the pair, for completeness.
 #[test]
 fn ibmpc_float_margin_holds_with_the_games_colours_declined() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((_state, rows)) = measure(InterpreterProfile::IbmPc, false) else { return };
     for f in &rows {
         assert_eq!(f.margin_bg, f.prose_bg, "row {}: margin and prose share one ground", f.row);

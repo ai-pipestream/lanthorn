@@ -2,7 +2,7 @@
 // clearer than a full struct literal here. Silence the pedantic lint in tests only.
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
-/// The ONE lock the integration suites take around `zvm::screen::set_palette`.
+/// The ONE lock every integration suite holds while the process-global palette is set.
 ///
 /// The palette is process-global. Every suite that boots a story on a machine profile
 /// sets it, and every suite that asserts a resolved colour depends on it, so they must
@@ -21,18 +21,37 @@
 /// is 68, because another suite in `v6_render` held the standard palette at the moment
 /// it looked (SQ-0904).
 ///
-/// A suite takes it with `static PALETTE: &Mutex<()> = &app::V6_PALETTE_LOCK;` so its
-/// own call sites are unchanged. It lives in the library rather than in a test module
-/// because one static per PROCESS is what correctness needs, and every group binary
-/// links this crate.
-pub static V6_PALETTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// It lives in the library rather than in a test module because one static per
+/// PROCESS is what correctness needs, and every group binary links this crate.
+///
+/// **Private since SQ-0987.** It was `pub`, and thirty suites took it directly and
+/// then called `zvm::screen::set_palette` themselves — which meant the lock was held
+/// but nothing was ever put back, so the first machine press a group binary booted
+/// stayed installed for the rest of the process. Taking the raw lock is now
+/// impossible from outside this crate: the only ways in are [`v6_palette`] and
+/// [`v6_palette_at_boot`], both of which hand back a [`V6PaletteGuard`] that restores
+/// `Palette::Standard` on drop. That is a compile error rather than a convention, and
+/// it is half of what makes "a suite cannot set the palette without something that
+/// restores it" true; [`v6_set_palette`] is the other half.
+static V6_PALETTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    /// Whether THIS thread currently holds a [`V6PaletteGuard`].
+    ///
+    /// The witness that lets [`v6_set_palette`] be safe without threading a guard
+    /// through every harness's `boot()`. Set when a guard is handed out, cleared when
+    /// it drops; a `std::sync::Mutex` is not reentrant, so at most one guard exists at
+    /// a time and a plain flag is enough. Cleared on an unwinding panic too, because
+    /// `Drop` runs.
+    static PALETTE_GUARD_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Take [`V6_PALETTE_LOCK`] **and** state the palette, in one call that cannot do
 /// one without the other.
 ///
-/// The lock alone only ever protected the WRITERS. `palette_lock_discipline` fails a
-/// suite that calls `zvm::screen::set_palette` without taking the lock, because a
-/// write is a call and a call is visible in source. The other half is a suite that
+/// The lock alone only ever protected the WRITERS, and a write is a call and a call is
+/// visible in source — `palette_lock_discipline` fails a suite that reaches
+/// `zvm::screen::set_palette` outside a guard. The other half is a suite that
 /// merely READS — one that asserts a resolved colour without installing a palette of
 /// its own, and so believes whatever the last suite in its group binary happened to
 /// leave behind. That is an ABSENCE, invisible both to the source check and to the
@@ -61,9 +80,75 @@ pub static V6_PALETTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// it also puts `Palette::Standard` back, so an early drop moves the table under the
 /// case that asked for it.
 pub fn v6_palette(p: zvm::screen::Palette) -> V6PaletteGuard {
-    let lock = V6_PALETTE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = take_lock();
     zvm::screen::set_palette(p);
+    guard
+}
+
+/// A guard for a case whose palette is named by its own `boot()`, not here.
+///
+/// Identical to `v6_palette(Palette::Standard)` — it installs the default and holds
+/// the lock — and it exists because thirty harnesses cannot use the other spelling.
+/// Each of them resolves an `InterpreterProfile` from a medium DEEP INSIDE its `boot()`
+/// and sets `profile.palette()` there, several rows below the point at which the case
+/// took the lock. At the lock site nobody knows which palette is wanted yet, so the
+/// only honest thing a case can state there is where it starts; it names the table it
+/// actually measures through [`v6_set_palette`] a moment later.
+///
+/// It still installs `Standard` rather than leaving the table alone, and that is the
+/// point rather than a detail. "Leave whatever was there" is how SQ-0958 happened: a
+/// case that never writes a palette is asserting against whatever its group binary's
+/// last writer left, which is `Standard` under `cargo nextest run` and a machine's
+/// table under `cargo test`. A guard that starts from a known table has no such
+/// question in it, whether or not its `boot()` goes on to name another.
+///
+/// ```ignore
+/// let _g = app::v6_palette_at_boot();     // held for the whole case
+/// let session = boot(story, profile)?;    // calls app::v6_set_palette inside
+/// ```
+pub fn v6_palette_at_boot() -> V6PaletteGuard {
+    let guard = take_lock();
+    zvm::screen::set_palette(zvm::screen::Palette::Standard);
+    guard
+}
+
+/// Take [`V6_PALETTE_LOCK`] and post the thread's witness that it is held.
+fn take_lock() -> V6PaletteGuard {
+    let lock = V6_PALETTE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    PALETTE_GUARD_HELD.with(|held| held.set(true));
     V6PaletteGuard { _lock: lock }
+}
+
+/// Install a palette from inside a harness, having already taken a guard.
+///
+/// **The only route to `zvm::screen::set_palette` open to a test**, and the reason
+/// SQ-0987 could migrate thirty suites without touching one line of any harness's boot
+/// ORDER. Those harnesses resolve their profile below the lock site and set the table
+/// from it; the two alternatives were to hoist the profile above the lock — restructuring
+/// thirty `boot()`s, which is exactly how CLAUDE.md says one starts measuring a screen
+/// the app never draws — or to thread a `&V6PaletteGuard` down through every boot
+/// signature and its hundred-odd call sites. This does neither: the guard posts a
+/// thread-local witness when it is handed out, and this asserts on it.
+///
+/// # Panics
+///
+/// If this thread holds no [`V6PaletteGuard`] — which is a caller that would have set
+/// the process-global palette with nothing undertaking to put it back, and, worse,
+/// without excluding the case running beside it in the same group binary. The panic is
+/// the point: it names the defect in the writer rather than producing an inexplicable
+/// colour in some other suite an hour later (SQ-0904).
+pub fn v6_set_palette(p: zvm::screen::Palette) {
+    assert!(
+        PALETTE_GUARD_HELD.with(std::cell::Cell::get),
+        "app::v6_set_palette was called on a thread holding no V6PaletteGuard.\n\
+         The palette is process-global and every file under crates/app/tests/suites/ shares \
+         a group binary — and therefore a process and a palette — with a dozen others, so a \
+         write that takes no guard both races its neighbours and leaves the table dirty for \
+         the rest of the run (SQ-0904/SQ-0959). Open the case with\n\
+         \x20   let _g = app::v6_palette_at_boot();\n\
+         held for as long as the boot and every assertion about its colours."
+    );
+    zvm::screen::set_palette(p);
 }
 
 /// What [`v6_palette`] hands back: the shared lock, plus the undertaking to put the
@@ -87,14 +172,17 @@ pub fn v6_palette(p: zvm::screen::Palette) -> V6PaletteGuard {
 /// the right one for `zvm-cli`'s `swatch`, which borrows the palette per table row
 /// inside a run whose machine is a real fact. Here there is no such fact: a test
 /// process has no machine, and the value a guard would find on entry is only
-/// meaningful if every writer restores. Twenty-eight suites still take the raw
-/// [`V6_PALETTE_LOCK`] and set the palette themselves, restoring nothing — each from
-/// inside its own `boot()`, after resolving a profile the case has not seen yet, which
-/// is why they cannot simply name a palette here — and restore-previous would copy
-/// whichever machine's table they left through every later guard, for ever. Restoring
-/// `Standard` needs no saved state, is idempotent, cleans up after the writers that do
-/// not, and leaves each case starting from the same table nextest's fresh process
-/// gives it, which is the property the reader rule assumes.
+/// meaningful if every writer restores. Restoring `Standard` needs no saved state, is
+/// idempotent, and leaves each case starting from the same table nextest's fresh
+/// process gives it, which is the property the reader rule assumes.
+///
+/// That reasoning was written (SQ-0959) while thirty suites still took the raw lock and
+/// restored nothing, so restore-previous would have copied whichever machine's table
+/// they left through every later guard for ever. SQ-0987 closed that: the lock is
+/// private, [`v6_set_palette`] is the only route in, and there is no writer left that
+/// does not restore. Restore-previous would now be merely pointless rather than
+/// actively wrong — every value a guard could find on entry is `Standard` — which is
+/// the invariant `the_only_route_to_the_palette_is_through_a_guard` asserts.
 ///
 /// The palette goes back while the lock is still held: `Drop::drop` runs before the
 /// struct's fields, so no other guard can be admitted into the window between.
@@ -108,25 +196,29 @@ pub struct V6PaletteGuard {
 impl Drop for V6PaletteGuard {
     fn drop(&mut self) {
         zvm::screen::set_palette(zvm::screen::Palette::Standard);
+        PALETTE_GUARD_HELD.with(|held| held.set(false));
     }
 }
 
 /// The guard's own behaviour, asserted HERE rather than in an integration suite.
 ///
 /// `tests/suites/` is the wrong place for it: every one of those files is compiled
-/// into a group binary beside a dozen others, several of which take the raw lock and
-/// set the palette themselves without restoring, so reading the table back after a
-/// drop is a race against whichever sibling happens to hold the lock next. This
-/// crate's own test binary has no palette writer at all — `interpreter.rs`'s cases
-/// only ask a *profile* which palette it names, which touches nothing global. One
-/// case rather than two, deliberately: two would race with each other for the same
-/// reason.
+/// into a group binary beside a dozen others, so reading the table back after a drop
+/// is a race against whichever sibling happens to hold the lock next. This crate's own
+/// test binary has no palette writer at all — `interpreter.rs`'s cases only ask a
+/// *profile* which palette it names, which touches nothing global.
+///
+/// Both cases below could otherwise race EACH OTHER, and only one of them writes: the
+/// `#[should_panic]` case asserts before it sets anything, so it leaves the table
+/// exactly as it found it. Any third case that installs a palette has to be folded
+/// into the first rather than added beside it.
 #[cfg(test)]
 mod v6_palette_guard {
     use zvm::screen::{palette, set_palette, Palette};
 
     /// The guard installs the palette it names, puts `Standard` back when it drops,
-    /// and puts back `Standard` rather than the value it displaced.
+    /// puts back `Standard` rather than the value it displaced, and is the only thing
+    /// that opens [`super::v6_set_palette`].
     ///
     /// Falsified by deleting the `Drop` impl above: the second assertion then reads
     /// `Amiga`, which is exactly the dirt SQ-0959 is about.
@@ -140,13 +232,36 @@ mod v6_palette_guard {
         assert_eq!(palette(), Palette::Standard, "and hands the default back on drop");
 
         // Now the other half of the choice: leave the table dirty the way a raw-lock
-        // suite leaves it, and guard over the top. Restoring the DISPLACED value would
-        // carry the IBM table forward for ever; restoring the default ends it here.
+        // suite left it before SQ-0987, and guard over the top. Restoring the DISPLACED
+        // value would carry the IBM table forward for ever; the default ends it here.
         set_palette(Palette::IbmCga);
         {
             let _g = super::v6_palette(Palette::IbmYzip);
         }
         assert_eq!(palette(), Palette::Standard, "the guard cleans up after the writer before it");
+
+        // The deferred spelling the thirty migrated harnesses use: the guard states
+        // where the case starts, `boot()` names the table it measures further down,
+        // and the drop still ends on the default.
+        {
+            let _g = super::v6_palette_at_boot();
+            assert_eq!(palette(), Palette::Standard, "a deferred guard starts from the default");
+            super::v6_set_palette(Palette::IbmXzip);
+            assert_eq!(palette(), Palette::IbmXzip, "and the harness names its own table");
+        }
+        assert_eq!(palette(), Palette::Standard, "which the drop still puts back");
+    }
+
+    /// Setting the palette with no guard held panics rather than dirtying the process.
+    ///
+    /// The runtime half of SQ-0987's rule; `palette_lock_discipline`'s source scan is
+    /// the other half, and catches the same defect one step earlier. Both are needed:
+    /// the scan cannot see a call made through a re-export or an alias, and this cannot
+    /// see a suite that calls `zvm::screen::set_palette` directly.
+    #[test]
+    #[should_panic(expected = "holding no V6PaletteGuard")]
+    fn setting_the_palette_outside_a_guard_panics() {
+        super::v6_set_palette(Palette::Amiga);
     }
 }
 

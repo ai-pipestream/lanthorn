@@ -56,7 +56,6 @@
 //! The story media are gitignored, so every case **skips cleanly** when absent.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::Engine;
 use app::graphics::{PictSource, PictureOverride};
@@ -66,10 +65,6 @@ use app::state::AppState;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, so two profiles must not boot
-/// side by side (nextest gives each test its own process; `cargo test` does not).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Macintosh release disk the defect was reported on: Zork Zero r296/881019.
 const MAC_DISK: &str = "Zork Zero Disk.image";
@@ -116,7 +111,7 @@ fn frame(file: &str, pictures: Option<&str>, honor: bool) -> Option<Frame> {
     };
     let named_art_std_window = over.std_window();
     let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
     let std_window = picts
@@ -264,7 +259,7 @@ fn assert_float_ground_is_the_prose_ground(f: &Frame, what: &str) {
 /// white story pane background"*, verbatim.
 #[test]
 fn the_macintosh_float_ground_is_the_machines_white_page() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for archive in [None, Some("Pic.data")] {
         let Some(f) = frame(MAC_DISK, archive, true) else { return };
         let what = format!("mac r296 {archive:?}");
@@ -301,7 +296,7 @@ fn the_macintosh_float_ground_is_the_machines_white_page() {
 /// white must not reach it by any other route.
 #[test]
 fn the_macintosh_machine_page_never_survives_declined_colours() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for archive in [None, Some("Pic.data")] {
         let Some(f) = frame(MAC_DISK, archive, false) else { return };
         let what = format!("mac r296 {archive:?} declined");
@@ -330,7 +325,7 @@ fn the_macintosh_machine_page_never_survives_declined_colours() {
 /// that does not exist on this frame.
 #[test]
 fn the_ibm_pc_control_has_no_machine_page_to_gain() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(f) = frame(IBM_PC_STORY, None, true) else { return };
     assert!(
         f.state.v6_page_pair.get().is_none(),
@@ -354,7 +349,7 @@ fn the_ibm_pc_control_has_no_machine_page_to_gain() {
 /// different colours, or this case would prove nothing.
 #[test]
 fn an_explicit_window_page_still_beats_the_machines() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(f) = frame(AMIGA_FLOPPY, None, true) else { return };
     let story = f.state.v6_story_page.get().expect("Zork Zero declares its own window-0 page");
     let machine = app::render::screen::v6_host_pair(&f.state).1;

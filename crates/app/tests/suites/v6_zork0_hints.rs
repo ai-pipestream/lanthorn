@@ -393,8 +393,8 @@ fn the_macintosh_hint_menu_keeps_its_leftmost_topic_column_at_every_width() {
     // size through the full chain. Skip a link and the game lays its own windows
     // out differently and every column measured afterwards is of another screen.
     let profile = app::interpreter::InterpreterProfile::resolve(&path, None, None, None);
-    let _g = app::V6_PALETTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    zvm::screen::set_palette(profile.palette());
+    let _g = app::v6_palette_at_boot();
+    app::v6_set_palette(profile.palette());
     let mut picts = app::graphics::PictSource::resolve_with_override(&path, app::graphics::PictureOverride::Unset, None);
     let dims = picts.all_pict_dims();
     let std_window = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());

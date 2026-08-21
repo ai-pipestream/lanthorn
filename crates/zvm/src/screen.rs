@@ -2243,7 +2243,7 @@ mod tests {
     // These take no lock and need none: `set_palette` is process-global and the
     // crate's own tests run in one binary, but nothing else in this module reads
     // the palette, and nextest gives each case its own process. The app-side
-    // suites are the ones that must take `app::V6_PALETTE_LOCK` (SQ-0905/0958).
+    // suites are the ones that must hold an `app::V6PaletteGuard` (SQ-0905/0958/0987).
 
     /// The card's table is XZIP's — one entry from YZIP's, and that entry is the
     /// one the capture measures.

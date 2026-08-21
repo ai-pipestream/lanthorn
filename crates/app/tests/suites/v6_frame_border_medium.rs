@@ -45,7 +45,6 @@
 //! modes per the project's colour-render convention.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::{Engine, PxText, WinNode};
 use app::graphics::PictSource;
@@ -55,9 +54,6 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
-
-/// `zvm::screen::set_palette` is process-global, so no two cases here may boot at once.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// A rect as `/dump-windows` records it: `(x, y, w, h)`.
 type Quad = (u16, u16, u16, u16);
@@ -105,7 +101,7 @@ fn boot(file: &str, profile: Option<InterpreterProfile>, turns: usize) -> Option
         }
     };
     let profile = profile.unwrap_or_else(|| InterpreterProfile::resolve(&path, None, None, None));
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -331,7 +327,7 @@ fn stamped_once(buf: &Buffer, ext: Quad, y: u16, t: &PxText) -> Result<(), Strin
 /// covers it`.
 #[test]
 fn journeys_frame_side_rules_are_the_characters_the_game_printed() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, profile, want_glyphs) in [
         ("Journey - The Quest Begins.adf", None, 3),
         ("journey-r83-s890706.z6", Some(InterpreterProfile::Amiga), 3),
@@ -433,7 +429,7 @@ fn journeys_frame_side_rules_are_the_characters_the_game_printed() {
 /// `glyph_borders_only` trim, and this is what proves the two agree.
 #[test]
 fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, profile, want_glyphs) in [
         ("Journey - The Quest Begins.adf", None, 3),
         ("journey-r83-s890706.z6", Some(InterpreterProfile::Amiga), 3),
@@ -570,7 +566,7 @@ fn journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack() {
 /// runs into the frame's own rule at native 0..8`.
 #[test]
 fn journeys_picture_band_carries_no_pixel_of_the_frames_own_rules() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     // Wide panes, where a native text cell covers more than one terminal column, in
     // both regimes: the first four are `letterbox` (18·rows <= 5·cols) and the rest
     // reclaim. 234x65 is the user's own 236x68 terminal.
@@ -670,7 +666,7 @@ fn journeys_picture_band_carries_no_pixel_of_the_frames_own_rules() {
 /// nothing at all`.
 #[test]
 fn no_unwritten_row_stands_between_the_frames_top_rule_and_the_story() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, profile) in [
         ("Journey - The Quest Begins.adf", None),
         ("journey-r83-s890706.z6", Some(InterpreterProfile::Amiga)),
@@ -744,7 +740,7 @@ fn no_unwritten_row_stands_between_the_frames_top_rule_and_the_story() {
 /// frame's rule at (1, 2, 2, 23)`.
 #[test]
 fn no_full_width_band_paints_across_the_frames_side_rules() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, profile) in [
         ("Journey - The Quest Begins.adf", None),
         ("journey-r83-s890706.z6", Some(InterpreterProfile::Amiga)),
@@ -835,7 +831,7 @@ fn no_full_width_band_paints_across_the_frames_side_rules() {
 /// last of them`.
 #[test]
 fn the_frames_edge_reaches_the_panes_last_column() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(mut session) = boot("Journey - The Quest Begins.adf", None, 40) else { return };
     let transcript = session.take_transcript();
     let model = session.screen();
@@ -921,7 +917,7 @@ fn the_frames_edge_reaches_the_panes_last_column() {
 /// longer drawn as art`.
 #[test]
 fn a_side_column_that_is_artwork_stays_a_bitmap() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for file in [
         "zork0-r393-s890714.z6",
         "Zork Zero - The Revenge of Megaboz.adf",

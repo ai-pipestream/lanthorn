@@ -49,7 +49,6 @@
 //! The stories are gitignored, so every case skips cleanly when absent.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
@@ -58,10 +57,6 @@ use app::session::{GameSession, InputKind};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global (a profile's colour numbers resolve
-/// through it), so a case that boots one profile must not run beside the other.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga release floppy the report was filed against — release 295 / serial
 /// 890321, a DIFFERENT BUILD from the bare story file below.
@@ -104,7 +99,7 @@ fn shogun_in_play(name: &str, profile: InterpreterProfile, honor: bool) -> Optio
             return None;
         }
     };
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&story_path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -208,7 +203,7 @@ fn is_frame_art(c: char) -> bool {
 /// columns at every width except 80 and 81, which is the reported symptom.
 #[test]
 fn score_and_moves_share_a_column_at_every_pane_width() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (name, profile) in CASES {
         for honor in [true, false] {
             let Some(session) = shogun_in_play(name, profile, honor) else { return };
@@ -246,7 +241,7 @@ fn score_and_moves_share_a_column_at_every_pane_width() {
 /// arrive whole, with their values beside them, at every pane swept.
 #[test]
 fn the_fields_stay_whole_beside_their_values() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (name, profile) in CASES {
         let Some(session) = shogun_in_play(name, profile, true) else { return };
         let model = session.screen();
@@ -284,7 +279,7 @@ fn the_fields_stay_whole_beside_their_values() {
 /// end at the same native x.
 #[test]
 fn the_raster_composite_keeps_both_rows_right_justified() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (name, profile) in CASES {
         for honor in [true, false] {
             let Some(session) = shogun_in_play(name, profile, honor) else { return };

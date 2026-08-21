@@ -37,10 +37,6 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-/// `zvm::screen::set_palette` is process-global, and this suite's helper sets it,
-/// so no two cases boot at once (SQ-0904/SQ-0905).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -94,7 +90,7 @@ fn mac_at_prompt(pictures: Option<&str>, honor_game_colours: bool) -> Option<AtP
     let named_art_std_window = over.std_window();
     let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
     assert_eq!(profile, InterpreterProfile::Macintosh, "an HFS volume is Apple's and nobody else's");
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
     let std_window = picts
@@ -273,7 +269,7 @@ const TYPED: &str = "look";
 /// stays black, which is the report verbatim.
 #[test]
 fn the_macintosh_types_in_the_same_ink_it_commits_in() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -318,7 +314,7 @@ fn the_macintosh_types_in_the_same_ink_it_commits_in() {
 /// and equally broken screen.
 #[test]
 fn nothing_typed_on_the_machines_page_is_drawn_in_the_themes_ink() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -356,7 +352,7 @@ fn nothing_typed_on_the_machines_page_is_drawn_in_the_themes_ink() {
 /// ceremonial: the whole of SQ-0846's design was keeping that switch meaningful.
 #[test]
 fn with_game_colours_declined_the_typed_line_is_the_themes_own() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -386,7 +382,7 @@ fn with_game_colours_declined_the_typed_line_is_the_themes_own() {
 /// overwrites the magenta the player asked for.
 #[test]
 fn an_explicitly_themed_input_line_wins_over_the_machines_page() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }

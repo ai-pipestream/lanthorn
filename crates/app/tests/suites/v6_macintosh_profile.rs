@@ -66,10 +66,6 @@ use std::path::PathBuf;
 const RELEASE: u16 = 296;
 const SERIAL: &[u8] = b"881019";
 
-/// `zvm::screen::set_palette` is process-global, and this suite's helper sets it,
-/// so no two cases boot at once (SQ-0904/SQ-0905).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
 fn mac_disk() -> Option<PathBuf> {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/Zork Zero Disk.image");
@@ -116,7 +112,7 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
     };
     let named_art_std_window = over.std_window();
     let profile = InterpreterProfile::resolve(&path, explicit, over.flavour(), None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
     // The four links, in `startup.rs`'s order.
@@ -188,7 +184,7 @@ fn version_line(s: &mut GameSession) -> String {
 /// exactly the behaviour that changed.
 #[test]
 fn zork_zero_off_the_macintosh_disk_says_it_is_on_a_macintosh() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -230,7 +226,7 @@ fn zork_zero_off_the_macintosh_disk_says_it_is_on_a_macintosh() {
 /// `the_macintoshs_own_archive_no_longer_declines_its_own_colours` below.)
 #[test]
 fn naming_either_of_the_disks_archives_still_boots_a_macintosh() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -269,7 +265,7 @@ fn naming_either_of_the_disks_archives_still_boots_a_macintosh() {
 /// its colours in behind that switch.
 #[test]
 fn the_macintosh_page_is_white_and_only_when_game_colours_are_honoured() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -300,7 +296,7 @@ fn the_macintosh_page_is_white_and_only_when_game_colours_are_honoured() {
 /// under.
 #[test]
 fn the_archive_in_hand_picks_which_macintosh_screen_the_game_is_told_about() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -362,7 +358,7 @@ fn the_archive_in_hand_picks_which_macintosh_screen_the_game_is_told_about() {
 /// "art doubles", which was true of every rendition Infocom shipped except one.
 #[test]
 fn every_macintosh_plate_and_its_screen_are_in_the_same_space() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -431,7 +427,7 @@ fn every_macintosh_plate_and_its_screen_are_in_the_same_space() {
 /// yes for a `.cg1`, which is the container telling the two machines apart.
 #[test]
 fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -507,7 +503,7 @@ fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
 /// §8.3.2 seed, which is nobody's machine.
 #[test]
 fn the_macintosh_screen_model_carries_the_machines_white_page() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -631,7 +627,7 @@ fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
 /// which is the report verbatim.
 #[test]
 fn the_macintosh_status_banner_is_black_ink_and_never_the_themes_grey() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }

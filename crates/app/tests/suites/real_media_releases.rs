@@ -29,7 +29,6 @@
 //! cannot exist.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -39,10 +38,6 @@ use app::session::{GameSession, InputKind};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global (an Amiga medium loads the
-/// Amiga palette), so no two cases here may boot at once.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 // ── The table ────────────────────────────────────────────────────────────────
 
@@ -606,7 +601,7 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
     assert_is_the_pinned_release(m, &bytes);
     let path = stories_dir().join(m.file);
     let profile = InterpreterProfile::resolve(&path, None, None, None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     // The same chain, in the same order: the Blorb's `Reso`, the archive the
@@ -1064,7 +1059,7 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
 /// window 2 and the story file's r83 into window 0.
 #[test]
 fn each_v6_medium_narrates_through_the_window_its_own_release_uses() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for f in V6_FRAMES {
         let m = MEDIA.iter().find(|m| m.file == f.file).expect("frame names a medium in MEDIA");
@@ -1096,7 +1091,7 @@ fn each_v6_medium_narrates_through_the_window_its_own_release_uses() {
 /// 4, so the medium's profile is visible in the game's own output.
 #[test]
 fn a_game_that_names_its_release_names_the_one_the_medium_carries() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for (file, wanted) in NARRATED {
         let m = MEDIA.iter().find(|m| m.file == *file).expect("NARRATED names a medium in MEDIA");
@@ -1240,7 +1235,7 @@ fn artwork_on_a_dos_floppy_is_both_listed_and_loadable() {
 #[test]
 fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
     const ZTUU: &str = "Zork - The Undiscovered Underground.adf";
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let m = MEDIA.iter().find(|m| m.file == ZTUU).expect("ZTUU is in MEDIA");
     let Some(bytes) = story_bytes(m) else { return };
     assert_is_the_pinned_release(m, &bytes);
@@ -1250,7 +1245,7 @@ fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
     let path = stories_dir().join(m.file);
     let profile = InterpreterProfile::resolve(&path, Some(6), None, None);
     assert_eq!(profile, InterpreterProfile::IbmPc, "{}: explicit beats the medium", ctx(m));
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
 
     let mut s = GameSession::new_with_trace(
         bytes,
@@ -1302,7 +1297,7 @@ fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
 /// beside it, window 0.
 #[test]
 fn each_v6_medium_renders_the_story_viewport_its_own_release_lays_out() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for f in V6_FRAMES {
         let m = MEDIA.iter().find(|m| m.file == f.file).expect("frame names a medium in MEDIA");
