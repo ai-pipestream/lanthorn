@@ -28,6 +28,8 @@ mod v6_mac_input_echo;
 mod v6_mac_pillar_feet;
 #[path = "suites/v6_macintosh_profile.rs"]
 mod v6_macintosh_profile;
+#[path = "suites/v6_hint_menu_mouse.rs"]
+mod v6_hint_menu_mouse;
 #[path = "suites/v6_mouse_zork0.rs"]
 mod v6_mouse_zork0;
 #[path = "suites/v6_zork0_hints.rs"]

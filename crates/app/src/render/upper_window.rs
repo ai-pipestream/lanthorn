@@ -97,6 +97,31 @@ pub fn grid_border_overhead(grid: &GridWindow, colors: &ColorScheme) -> u16 {
         + (if sides.bottom != BorderStyle::None { 1 } else { 0 })
 }
 
+/// The pane columns [`draw_grid`] draws `upper`'s own grid columns on inside
+/// `area`: the column its FIRST grid column lands on, and how many of them fit.
+///
+/// The grid is the GAME's screen (`upper.cols` wide), not the pane, so a pane
+/// wider than the game centres it — see the placement in `draw_grid`, which is
+/// this function. A pane narrower than the game left-aligns and clips.
+///
+/// Public because a caller that has to **invert** the placement must ask the
+/// drawing where it put the text rather than restate the arithmetic. The v6
+/// hybrid click map is that caller (SQ-0951): it resolves a click by the cell
+/// the character under it was drawn in, and it had been assuming the game's
+/// first column sat on the story viewport's first column. It does not when the
+/// viewport is wider than the game — Zork Zero's InvisiClues grid is 58 columns
+/// against a 138-column viewport at a 190x60 pane, so every topic is drawn forty
+/// columns right of where the map looked for it, and the player had to click far
+/// to the left of a topic to select it.
+pub fn grid_content_x_span(upper: &GridWindow, colors: &ColorScheme, area: Rect) -> (u16, u16) {
+    let sides = resolved_grid_sides(upper, colors);
+    let left = u16::from(sides.left != BorderStyle::None);
+    let border_cols = left + u16::from(sides.right != BorderStyle::None);
+    let uw_w = upper.cols.saturating_add(border_cols).min(area.width).max(1);
+    let x_off = area.width.saturating_sub(uw_w) / 2;
+    (area.x + x_off + left, uw_w.saturating_sub(border_cols))
+}
+
 // ── Core grid renderer ────────────────────────────────────────────────────────
 
 /// Draw the upper-window grid into `area`.
@@ -161,14 +186,18 @@ pub fn draw_grid(
     // stretched to the pane edge. When the pane is narrower than the game screen,
     // use the full pane width and left-align (the col-offset scroll below handles
     // the overflow).
+    //
+    // The horizontal placement itself is [`grid_content_x_span`] — one piece of
+    // arithmetic, so the v6 click map inverts exactly what is drawn here instead
+    // of restating it (SQ-0951).
+    let left_border: u16 = if sides.left != BorderStyle::None { 1 } else { 0 };
     let border_cols: u16 =
-        (if sides.left != BorderStyle::None { 1 } else { 0 })
-        + (if sides.right != BorderStyle::None { 1 } else { 0 });
+        left_border + (if sides.right != BorderStyle::None { 1 } else { 0 });
     let uw_w = upper.cols.saturating_add(border_cols).min(area.width).max(1);
-    let x_off = area.width.saturating_sub(uw_w) / 2;
+    let (content_x, _) = grid_content_x_span(upper, colors, area);
 
     // Carve out the centered top region for the upper window.
-    let uw_area = Rect::new(area.x + x_off, area.y, uw_w, needed);
+    let uw_area = Rect::new(content_x - left_border, area.y, uw_w, needed);
 
     // Draw the optional border and get the inner content rect.
     let frame = draw_framed(buf, uw_area, sides, &colors.upper_window_border_glyphs, border_color, false);

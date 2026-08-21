@@ -296,6 +296,12 @@ fn zork0_compass_click_maps_a_directional_edge() {
 /// they use Zork Zero's real hint-screen numbers (a story box at native x=86,
 /// y=78, drawn into a viewport at terminal 14,7) but need no story file, so they
 /// run everywhere rather than skipping on CI.
+///
+/// **They are also SYNTHETIC, which is how SQ-0951 got through**: nothing here
+/// drives the menu, so a map that inverts its own numbers perfectly and disagrees
+/// with the DRAW passes. The case that clicks a real topic and asserts the right
+/// one is selected is `v6_hint_menu_mouse`; this pair holds the axis rules it
+/// depends on.
 #[test]
 fn a_click_in_a_packed_region_selects_the_row_and_column_under_the_pointer() {
     use app::render::graphics::PackedText;
@@ -314,8 +320,10 @@ fn a_click_in_a_packed_region_selects_the_row_and_column_under_the_pointer() {
         img_h: 400.0 * 1.725,
         native_w: 640,
         native_h: 400,
+        // SQ-0951: the row origin is the box's own native PIXEL top (78), not its
+        // row index (4) — Zork Zero's box does not begin on a multiple of the cell.
         packed_text: vec![PackedText {
-            rows: (7, 27, 78 / 16),
+            rows: (7, 27, 78),
             cols: Some((14, 72, 86)),
         }],
     };
@@ -324,7 +332,7 @@ fn a_click_in_a_packed_region_selects_the_row_and_column_under_the_pointer() {
     // one apart, and lands in that row's vertical middle.
     for k in 0..10u16 {
         let (_, gy) = map.map_click(20, 7 + k).expect("inside the packed region");
-        assert_eq!(gy, (78 / 16 + k) * 16 + 8, "terminal row {} is native text row {}", 7 + k, 78 / 16 + k);
+        assert_eq!(gy, 78 + k * 16 + 8, "terminal row {} is the box's row {k}", 7 + k);
     }
     // …and consecutive rows are exactly one native text row apart, which is the
     // property the proportional inverse loses: at this scale it would spread them
@@ -340,11 +348,21 @@ fn a_click_in_a_packed_region_selects_the_row_and_column_under_the_pointer() {
         assert_eq!(gx, 86 + k * 8 + 4, "terminal column {} is native x {}", 14 + k, 86 + k * 8);
     }
 
-    // Outside the region the proportional inverse still governs — a packed region
-    // must not capture the frame around it.
+    // Outside the region's ROWS the proportional inverse still governs — a packed
+    // region must not capture the frame above or below it.
     let (gx, gy) = map.map_click(2, 2).expect("the letterbox still maps");
     assert!(gx < 86, "a click in the left flank is not in the box: {gx}");
     assert!(gy < 78, "a click in the banner is not in the box: {gy}");
+
+    // SQ-0951: beside the region, ON one of its rows, the COLUMN is proportional
+    // (that cell is the frame's own artwork) but the ROW still packs — the pane's
+    // vertical layout across those rows IS the packing, and inverting the row
+    // proportionally there reported a native y from elsewhere on the screen
+    // entirely, which is what made a click one column left of a topic select an
+    // item several lines lower.
+    let (gx, gy) = map.map_click(2, 12).expect("a flank cell on a packed row still maps");
+    assert!(gx < 86, "the column beside the box is still the frame's: {gx}");
+    assert_eq!(gy, 78 + 5 * 16 + 8, "…and its row is the row under the pointer");
 }
 
 /// A region that packs only its ROWS keeps the proportional inverse on x — the
@@ -357,10 +375,10 @@ fn a_row_only_packed_region_leaves_the_column_proportional() {
         pane_x: 0, pane_y: 0, cell_w: 8, cell_h: 16,
         img_x: 0.0, img_y: 0.0, img_w: 640.0, img_h: 400.0,
         native_w: 640, native_h: 400,
-        packed_text: vec![PackedText { rows: (30, 4, 20), cols: None }],
+        packed_text: vec![PackedText { rows: (30, 4, 20 * 16), cols: None }],
     };
     let (gx, gy) = map.map_click(10, 31).expect("inside the strip");
-    assert_eq!(gy, (20 + 1) * 16 + 8, "the row still inverts by index");
+    assert_eq!(gy, 20 * 16 + 16 + 8, "the row still inverts by packing");
     // 1:1 scale here, so the proportional inverse puts cell 10's centre at 84.
     assert_eq!(gx, 85, "the column is unchanged by the strip: {gx}");
 }
