@@ -104,11 +104,15 @@ built-in debugger that follows the running story instruction by instruction.
   Stack**, **Stack**, and **Memory**). **Tab** / **Shift-Tab** move focus one
   window at a time — the story pane and each debug window are stops in the same
   cycle — **←**/**→** switch the sub-tab inside the focused window,
-  **↑**/**↓** scroll it, and **PgUp**/**PgDn** move it a screenful at a time.
+  **↑**/**↓** scroll it, **PgUp**/**PgDn** move it a screenful at a time, and
+  **Home**/**End** go to its ends — the top, and as far as it will go. The two
+  address-anchored views ask the engine where their ends are, so **End** in the
+  Disassembly lands on the last unit the disassembler holds and **End** in the
+  Memory view on the last full sixteen-byte row.
 - **A hint bar that follows the tab you are on.** The bottom row leads with the
   keys that only work in the section you are looking at — `g` and `r` in the
   Disassembly, `h`/`l` and `:` in the Memory view — and puts the universal Tab
-  / arrows / Esc after them. The row truncates from the right when the pane is
+  / arrows / paging / Home-End / Esc after them. The row truncates from the right when the pane is
   narrow, so the local keys are the ones that survive; before, a fixed list
   advertised the pan in tabs that cannot pan and hid it in the one that can.
 - **Opcode hover help** — hover an instruction and a tooltip decodes the opcode

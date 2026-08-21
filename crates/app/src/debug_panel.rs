@@ -414,7 +414,12 @@ impl DebugPanelState {
         match code {
             KeyCode::Left => self.cycle_tab(-1),
             KeyCode::Right => self.cycle_tab(1),
-            KeyCode::Char('g') => {
+            // Only in the Disasm tab, like `r` below: re-anchoring the
+            // disassembly is invisible from any other section, so accepting it
+            // there only swallowed the key and did nothing a user could see.
+            // The hint bar has listed it under Disassembly alone since SQ-0980;
+            // this is the handler catching up (SQ-0984).
+            KeyCode::Char('g') if self.active_section(self.focus) == Section::Disasm => {
                 self.disasm_addr = self.pc;
                 self.reload_disasm(dbg);
             }
@@ -440,14 +445,17 @@ impl DebugPanelState {
             KeyCode::Char('l') if self.active_section(self.focus) == Section::Memory => {
                 self.step_memory_h(true);
             }
-            KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp
-            | KeyCode::Home | KeyCode::End => {
+            // Home/End go to the ends, in every section — see `jump_active`.
+            KeyCode::Home | KeyCode::End => {
+                self.jump_active(self.focus, code == KeyCode::End, dbg);
+            }
+            KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp => {
                 let window = self.focus;
                 match self.active_section(window) {
                     Section::Disasm | Section::Memory => {
                         let step = matches!(code, KeyCode::PageDown | KeyCode::PageUp)
                             .then(|| self.page()).unwrap_or(1);
-                        let down = matches!(code, KeyCode::Down | KeyCode::PageDown | KeyCode::End);
+                        let down = matches!(code, KeyCode::Down | KeyCode::PageDown);
                         for _ in 0..step { self.scroll_active(window, down, dbg); }
                     }
                     section => self.scroll_list_key(window, section, code),
@@ -511,6 +519,42 @@ impl DebugPanelState {
             Section::Disasm => self.step_disasm(down, dbg),
             Section::Memory => self.step_memory(down, dbg),
             section => self.scroll_list(window, section, down),
+        }
+    }
+
+    /// Jump `window`'s active section to one end of itself: the top, or as far
+    /// as it will go (SQ-0984).
+    ///
+    /// One meaning for `Home`/`End` in every section, and the meaning is "where
+    /// holding the arrow key gets you". They used to be that only in the list
+    /// sections; in Disassembly and Memory they were routed through the same
+    /// per-step loop as `Down`/`Up` with a step count of ONE, so they moved a
+    /// single instruction or a single hex row — which is why SQ-0980 declined to
+    /// advertise them at all. A key the hint bar cannot describe in one word is a
+    /// key that means two things.
+    ///
+    /// The two address-anchored sections ask the ENGINE where their ends are
+    /// rather than assuming: `prev_instr`/`next_instr` clamp to the first and last
+    /// unit the disassembler holds, so handing them the ends of the address space
+    /// lands exactly on those units whatever region the story's code occupies, and
+    /// Memory's end is `step_memory`'s own clamp — the last row a full 16 bytes
+    /// wide. The list sections keep the offsets `scroll_list` converges on.
+    fn jump_active(&mut self, window: usize, end: bool, dbg: &dyn Debugger) {
+        self.sel = None; // as in `scroll_active`: the content moves out from under it
+        match self.active_section(window) {
+            Section::Disasm => {
+                self.disasm_addr =
+                    if end { dbg.next_instr(dbg.memory_len()) } else { dbg.prev_instr(0) };
+                self.reload_disasm(dbg);
+            }
+            Section::Memory => {
+                self.mem_addr = if end { dbg.memory_len().saturating_sub(16) } else { 0 };
+                self.reload_memory(dbg);
+            }
+            section => {
+                let max = self.snapshot.section(section).len().saturating_sub(1);
+                self.scroll[window] = if end { max } else { 0 };
+            }
         }
     }
 
@@ -584,8 +628,8 @@ impl DebugPanelState {
             KeyCode::Up => self.scroll[window].saturating_sub(1),
             KeyCode::PageDown => (self.scroll[window] + vp).min(max),
             KeyCode::PageUp => self.scroll[window].saturating_sub(vp),
-            KeyCode::Home => 0,
-            KeyCode::End => max,
+            // Home/End never reach here — `handle_key` sends them to
+            // `jump_active`, which is the one place that says what they mean.
             _ => self.scroll[window],
         };
     }
@@ -1396,6 +1440,26 @@ mod tests {
         assert_eq!(p.disasm_mode, DisasmMode::Full, "no cycle outside the Disasm tab");
     }
 
+    /// SQ-0984: `g` was accepted from every tab and only ever re-anchored the
+    /// disassembly, so outside Disassembly it swallowed the key and did nothing
+    /// the user could see — while the hint bar had already listed it under
+    /// Disassembly alone.
+    #[test]
+    fn g_is_ignored_outside_the_disasm_tab() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 2;
+        p.tab[2] = 0; // Call Stack — not Disasm.
+        p.disasm_addr = 0x3000;
+        assert_eq!(p.handle_key(KeyCode::Char('g'), &MockDbg), DebugKey::Ignored);
+        assert_eq!(p.disasm_addr, 0x3000, "no re-anchor from a tab that shows no disassembly");
+
+        // And the direction that stops that passing for a `g` nobody handles:
+        // in the Disassembly it still jumps to the PC.
+        p.focus = 0;
+        assert_eq!(p.handle_key(KeyCode::Char('g'), &MockDbg), DebugKey::Consumed);
+        assert_eq!(p.disasm_addr, 0x1000, "MockDbg parks the PC at 0x1000");
+    }
+
     #[test]
     fn disasm_mode_label_names_each_variant() {
         let mut p = DebugPanelState::new(0x1000);
@@ -1451,12 +1515,52 @@ mod tests {
 
     #[test]
     fn memory_scroll_clamps_at_memory_len() {
-        let mut p = DebugPanelState::new(0x1000);
-        p.focus = 2;
-        p.tab[2] = 1; // Memory
+        let mut p = memory_focused_panel();
         p.mem_addr = 0x10000 - 16;
         p.handle_key(KeyCode::Down, &MockDbg);
-        assert!(p.mem_addr < 0x10000);
+        // Was `tab[2] = 1`, which is the Stack — so this drove a LIST scroll and
+        // asserted `mem_addr` had not changed, which it never could (SQ-0984).
+        assert_eq!(p.mem_addr, 0x10000 - 16, "the last full row is as far down as it goes");
+    }
+
+    /// SQ-0984: `Home`/`End` mean "the ends" in every section.
+    ///
+    /// They already did in the list sections. In Disassembly and Memory they were
+    /// routed through the same per-step loop as the arrows with a step count of
+    /// one, so they moved a SINGLE instruction or a single hex row — which is why
+    /// the hint bar could not name them. Both directions here, in all three kinds
+    /// of section, because "jumps to the end" and "steps once" agree whenever the
+    /// cursor happens to start one step from the end.
+    #[test]
+    fn home_and_end_go_to_the_ends_of_every_section() {
+        // Disassembly: the engine is asked where its ends are — `prev_instr`/
+        // `next_instr` clamp to the first and last unit a real cache holds, and
+        // MockDbg's unbounded ±4 shows the question being put to it.
+        let mut p = DebugPanelState::new(0x1000);
+        p.handle_key(KeyCode::Home, &MockDbg);
+        assert_eq!(p.disasm_addr, 0, "prev_instr(0), not one instruction back from the PC");
+        p.handle_key(KeyCode::End, &MockDbg);
+        assert_eq!(p.disasm_addr, 0x10004, "next_instr(memory_len), not one instruction on");
+
+        // Memory: the top of the dump, and the last row a full sixteen bytes wide —
+        // which is exactly where holding Down ends up (`memory_scroll_clamps…`).
+        let mut p = memory_focused_panel();
+        p.mem_addr = 0x8000;
+        p.handle_key(KeyCode::Home, &MockDbg);
+        assert_eq!(p.mem_addr, 0, "the start of memory, not 16 bytes back");
+        p.handle_key(KeyCode::End, &MockDbg);
+        assert_eq!(p.mem_addr, 0x10000 - 16, "the last full row, not 16 bytes on");
+
+        // A list section: unchanged, and pinned here so the three read as one rule.
+        let mut p = DebugPanelState::new(0x1000);
+        p.refresh(&MockDbg);
+        p.focus = 1; // Globals, MockDbg's 240 lines.
+        let last = p.snapshot.globals.len() - 1;
+        assert!(last > 1, "the mock must supply a list worth scrolling: {last}");
+        p.handle_key(KeyCode::End, &MockDbg);
+        assert_eq!(p.scroll[1], last);
+        p.handle_key(KeyCode::Home, &MockDbg);
+        assert_eq!(p.scroll[1], 0);
     }
 
     #[test]
