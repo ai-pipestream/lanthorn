@@ -998,10 +998,13 @@ fn draw_frame(
                     hint_bar(&state.keymap, &state.hotkeys, Context::Global, hints, w)
                 }
                 Focus::Map if state.debug.is_some() => {
-                    // Show the live disassembly mode in the `r:` hint entry.
-                    let mode = state.debug.as_ref().map(|p| p.disasm_mode_label()).unwrap_or("full");
-                    let hints: Vec<(&str, &str)> = app::render::hintbar::DEBUG_HINTS.iter()
-                        .map(|&(k, v)| if k == "r" { ("r", mode) } else { (k, v) }).collect();
+                    // The bar follows the focused window's active tab (SQ-0980):
+                    // section-specific keys first, universal ones after. The
+                    // live disassembly mode shows in the `r:` entry.
+                    let (section, mode) = state.debug.as_ref()
+                        .map(|p| (p.active_section(p.focus), p.disasm_mode_label()))
+                        .unwrap_or((app::debug_panel::Section::Disasm, "full"));
+                    let hints = app::render::hintbar::debug_hints(section, mode);
                     app::render::hintbar::literal_hint_bar(&hints, w)
                 }
                 // Unreachable in practice: `Focus::Map` is only ever set while
@@ -2431,7 +2434,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // map area the debug region currently occupies.
         if state.debug.is_some() {
             if let Event::Mouse(m) = &event {
-                use crossterm::event::{MouseButton, MouseEventKind};
+                use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
                 let region = last_panes.map;
                 let in_region = region.width > 0 && m.column >= region.x && m.column < region.right()
                     && m.row >= region.y && m.row < region.bottom();
@@ -2444,9 +2447,35 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             if let Some(i) = over {
                                 let down = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert)
                                     .map(|d| d > 0).unwrap_or(false);
+                                // Shift+wheel pans the hex dump sideways
+                                // (SQ-0981) — the gesture the map pane already
+                                // takes, and like every other wheel here it
+                                // addresses the window under the cursor, focused
+                                // or not. `wheel_delta` resolves the invert
+                                // preference once, so wheel-down pans right
+                                // whichever way the user has their wheel set.
+                                // A window with nothing to pan scrolls as usual
+                                // rather than swallowing the event.
+                                let shift = m.modifiers.contains(KeyModifiers::SHIFT);
                                 if let Some(dbg) = session.debugger() {
-                                    if let Some(p) = state.debug.as_mut() { p.scroll_active(i, down, dbg); }
+                                    if let Some(p) = state.debug.as_mut() {
+                                        if !(shift && p.pan_active(i, down)) {
+                                            p.scroll_active(i, down, dbg);
+                                        }
+                                    }
                                 }
+                            }
+                            continue; // pre-empt the map wheel arms
+                        }
+                        // A true horizontal wheel (trackpads, and terminals that
+                        // forward xterm's buttons 6/7) needs no modifier — the
+                        // map pane reads these the same way. Nothing to fall
+                        // back to: a sideways gesture must never scroll a
+                        // section vertically.
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                            if let Some(i) = over {
+                                let right = matches!(m.kind, MouseEventKind::ScrollRight);
+                                if let Some(p) = state.debug.as_mut() { p.pan_active(i, right); }
                             }
                             continue; // pre-empt the map wheel arms
                         }

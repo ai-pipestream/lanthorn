@@ -103,8 +103,14 @@ built-in debugger that follows the running story instruction by instruction.
   plus **Locals**, **Objects**, and **Dictionary**) and a bottom window (**Call
   Stack**, **Stack**, and **Memory**). **Tab** / **Shift-Tab** move focus one
   window at a time — the story pane and each debug window are stops in the same
-  cycle — **←**/**→** switch the sub-tab inside the focused window, and
-  **↑**/**↓** scroll it.
+  cycle — **←**/**→** switch the sub-tab inside the focused window,
+  **↑**/**↓** scroll it, and **PgUp**/**PgDn** move it a screenful at a time.
+- **A hint bar that follows the tab you are on.** The bottom row leads with the
+  keys that only work in the section you are looking at — `g` and `r` in the
+  Disassembly, `h`/`l` and `:` in the Memory view — and puts the universal Tab
+  / arrows / Esc after them. The row truncates from the right when the pane is
+  narrow, so the local keys are the ones that survive; before, a fixed list
+  advertised the pan in tabs that cannot pan and hid it in the one that can.
 - **Opcode hover help** — hover an instruction and a tooltip decodes the opcode
   and every operand: what each argument is, and where the result lands.
 - **Click-to-jump operands** — addresses in the disassembly are underlined and
@@ -130,7 +136,11 @@ built-in debugger that follows the running story instruction by instruction.
   decoded text even begins, and no inspector window is that wide. `h` and `l` pan
   the dump sideways (the arrows are the section cycler, so panning takes the
   vi keys, the same trade the animation view makes), clamped to the widest row.
-  The `addr:` line above stays put — it's a control, not part of the dump. A
+  **Shift+wheel** pans it too — and like every other wheel gesture in the
+  inspector it goes to the window under the cursor, so you can pan the hex dump
+  without first tabbing focus onto it. A trackpad's sideways swipe (or any
+  terminal that forwards a real horizontal wheel) pans it with no modifier at
+  all. The `addr:` line above stays put — it's a control, not part of the dump. A
   scrollbar along the bottom of the pane shows how far along the row you are and
   how much is still out to the right — the same themed bar every other
   scrollable surface uses (`scrollbar` and `scrollbar_track`). It appears only
