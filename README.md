@@ -81,7 +81,9 @@ release, four binaries in each: `lanthorn` itself plus the no-map CLI players
 ```
 
 Platform notes (Gatekeeper on macOS, SmartScreen on Windows, `libasound2` on
-Linux) are covered in each release's notes.
+Linux) are covered in each release's notes. Per-platform behaviour differences —
+what Windows cannot be asked, and what it cannot do on the way out — are in
+[docs/features/platforms.md](docs/features/platforms.md).
 
 Don't have a story yet? Launch the picker and press **`/`** to browse IFDB's
 popular list or search by title/author, then **download a playable story file
