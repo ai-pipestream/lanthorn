@@ -287,7 +287,7 @@ impl Fat12 {
     /// Walk one directory's raw bytes, recursing into subdirectories.
     fn walk(&self, dir: &[u8], parent: Option<&str>, depth: usize) -> Vec<Fat12Entry> {
         let mut out = Vec::new();
-        for e in dir.chunks_exact(DIR_ENTRY) {
+        for e in dir.as_chunks::<DIR_ENTRY>().0 {
             match e[0] {
                 DIR_FREE => break,
                 DIR_DELETED => continue,
@@ -515,7 +515,7 @@ impl Bpb {
 /// The volume label from a root directory's entries, trimmed of the padding
 /// spaces and NULs real disks leave behind (`Tresure 1\0\0`).
 fn volume_label(root: &[u8]) -> Option<String> {
-    for e in root.chunks_exact(DIR_ENTRY) {
+    for e in root.as_chunks::<DIR_ENTRY>().0 {
         if e[0] == DIR_FREE {
             break;
         }

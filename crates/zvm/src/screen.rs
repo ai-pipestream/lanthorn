@@ -199,9 +199,7 @@ impl UpperWindow {
     /// adds "Even if the text style is Reverse Video the new blank space should
     /// not have reversed colours" — hence style 0 (no reverse bit) on the blank.
     pub fn clear_to(&mut self, bg: ZColour) {
-        for c in &mut self.cells {
-            *c = Cell { ch: ' ', style: 0, fg: ZColour::Default, bg };
-        }
+        self.cells.fill(Cell { ch: ' ', style: 0, fg: ZColour::Default, bg });
     }
     /// Grow the grid to at least `new_rows` rows, preserving existing content.
     /// No-op when the grid is already tall enough. Used when a game draws in the

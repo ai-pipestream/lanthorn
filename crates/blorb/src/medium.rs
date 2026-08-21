@@ -2603,7 +2603,7 @@ mod tests {
             return;
         };
         let cooked: Vec<u8> =
-            raw.chunks_exact(2352).flat_map(|s| s[16..16 + 2048].iter().copied()).collect();
+            raw.as_chunks::<2352>().0.iter().flat_map(|s| s[16..16 + 2048].iter().copied()).collect();
         assert!(
             DiskImage::detect(&cooked) == Some(DiskImage::Hfs),
             "the cooked image is the same Macintosh volume"

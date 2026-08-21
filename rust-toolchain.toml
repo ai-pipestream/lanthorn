@@ -1,0 +1,22 @@
+[toolchain]
+# Pinned so the CLIPPY GATE MEANS WHAT IT SAYS (SQ-0966).
+#
+# CI runs `dtolnay/rust-toolchain@stable`, so it floats; a working copy is
+# whatever `rustup update` last fetched. On 2026-08-21 those were 1.98.0 and
+# 1.97.1, and the gap was invisible until GitHub went red: two lints that do not
+# exist on 1.97 — `clippy::chunks_exact_to_as_chunks` and
+# `clippy::manual_slice_fill` — failed five pushes in a row while
+# `cargo clippy --workspace --all-targets -- -D warnings` reported clean locally
+# every time. A gate that cannot observe the failure it guards is the shape this
+# repository keeps getting caught by; `cargo nextest` versus `cargo test` and the
+# process-global palette (SQ-0905) are the same story.
+#
+# rustup reads this file for every cargo invocation, INCLUDING on CI after the
+# action has installed stable, so the version lives here and nowhere else. Do not
+# also name it in `.github/workflows/*.yml` — two copies is how it goes stale.
+#
+# Moving the pin is a deliberate act: bump it, run the clippy gate, fix what the
+# new lints find, and land that as its own commit. New lints then arrive when
+# somebody is looking at them rather than when CI happens to break.
+channel = "1.98"
+components = ["clippy", "rustfmt"]

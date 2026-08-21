@@ -163,7 +163,7 @@ fn no_one_pixel_line_at_the_flank_seam(honor: bool) {
         cap.spec.rows,
         u32::from(cap.spec.cell_w),
         u32::from(cap.spec.cell_h),
-        Some((driver::ANSWERED_FG, driver::ANSWERED_BG)),
+        Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)),
     );
     // The flanks: the tallest images on the screen, and the ones that shrink.
     let flanks: Vec<_> = res.placements.iter().filter(|p| p.bottom - p.top > 20).collect();

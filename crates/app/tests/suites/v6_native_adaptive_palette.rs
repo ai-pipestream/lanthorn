@@ -78,7 +78,7 @@ fn max_delta(a: &(u32, u32, Vec<u8>), b: &(u32, u32, Vec<u8>)) -> Option<u16> {
         return None;
     }
     let mut m = 0u16;
-    for (p, q) in a.2.chunks_exact(4).zip(b.2.chunks_exact(4)) {
+    for (p, q) in a.2.as_chunks::<4>().0.iter().zip(b.2.as_chunks::<4>().0.iter()) {
         if p[3] == 0 && q[3] == 0 {
             continue;
         }

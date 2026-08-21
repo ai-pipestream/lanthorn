@@ -153,8 +153,10 @@ fn replay(file: &str) -> Option<Report> {
                 } else {
                     let px = got
                         .2
-                        .chunks_exact(4)
-                        .zip(want.2.chunks_exact(4))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(want.2.as_chunks::<4>().0.iter())
                         .filter(|(a, b)| a != b)
                         .count();
                     format!("{px} of {} pixels differ", got.0 * got.1)

@@ -119,7 +119,7 @@ fn poll_sound_finish(sound: Option<&mut CliSound>, machine: &mut Machine, view: 
     // A finish routine may itself start sounds (into machine.pending_sounds);
     // play them now rather than deferring to the next main-loop step().
     if !machine.pending_sounds.is_empty() {
-        let events: Vec<zvm::cpu::exec::SoundEvent> = machine.pending_sounds.drain(..).collect();
+        let events: Vec<zvm::cpu::exec::SoundEvent> = std::mem::take(&mut machine.pending_sounds);
         play_cli_sounds(cs, &events);
     }
     if ran && is_tty {
@@ -1678,7 +1678,7 @@ fn main() {
         // Bleeps + sampled sounds: drain the turn's sound events. Ring the bell for
         // #1/#2 (TTY only), and play audio when enabled.
         if !machine.pending_sounds.is_empty() {
-            let events: Vec<zvm::cpu::exec::SoundEvent> = machine.pending_sounds.drain(..).collect();
+            let events: Vec<zvm::cpu::exec::SoundEvent> = std::mem::take(&mut machine.pending_sounds);
             let beeps = events.iter().filter(|e| e.number == 1 || e.number == 2).count();
             if beeps > 0 {
                 // The device fact, not `rich`: a bell is not an escape sequence

@@ -1782,8 +1782,8 @@ fn blend_half_width_columns(img: &mut image::RgbaImage) {
 /// index is ever left without a colour.
 fn colour_table(plte: &[u8]) -> [blorb::infocom_pics::Rgb; 16] {
     let mut pal = blorb::infocom_pics::DEFAULT_PALETTE;
-    for (slot, c) in pal.iter_mut().zip(plte.chunks_exact(3)) {
-        *slot = [c[0], c[1], c[2]];
+    for (slot, c) in pal.iter_mut().zip(plte.as_chunks::<3>().0.iter()) {
+        *slot = *c;
     }
     pal
 }

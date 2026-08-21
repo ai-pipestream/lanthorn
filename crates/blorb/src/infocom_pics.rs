@@ -1574,7 +1574,7 @@ impl InfocomPics {
         let count = usize::from(*self.data.get(e.palette)?);
         let rgb = self.data.get(e.palette + 1..e.palette + 1 + count * 3)?;
         let mut pal = DEFAULT_PALETTE;
-        for (i, c) in rgb.chunks_exact(3).enumerate() {
+        for (i, c) in rgb.as_chunks::<3>().0.iter().enumerate() {
             match pal.get_mut(PALETTE_BASE + i) {
                 Some(slot) => *slot = [c[0], c[1], c[2]],
                 None => break,
@@ -2215,7 +2215,7 @@ mod tests {
         assert_eq!(named.transparent, Some(1), "the top nibble names the colour that drops out");
         let pal = [[9u8, 9, 9]; 16];
         assert_eq!(
-            named.rgba_with(&pal).chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>(),
+            named.rgba_with(&pal).as_chunks::<4>().0.iter().map(|p| p[3]).collect::<Vec<_>>(),
             vec![255, 0, 255, 0],
             "colour 1 and only colour 1 reaches the host as alpha 0"
         );
@@ -2223,7 +2223,7 @@ mod tests {
         let opaque = pics.decode(2).unwrap();
         assert_eq!(opaque.transparent, None, "bit 0 clear is no transparent colour at all");
         assert!(
-            opaque.rgba_with(&pal).chunks_exact(4).all(|p| p[3] == 255),
+            opaque.rgba_with(&pal).as_chunks::<4>().0.iter().all(|p| p[3] == 255),
             "an opaque picture paints its whole rectangle, colour 0 included"
         );
     }

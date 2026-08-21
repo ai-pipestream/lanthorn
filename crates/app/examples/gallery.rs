@@ -191,7 +191,7 @@ fn main() -> std::process::ExitCode {
                 c.spec.rows,
                 u32::from(cell_w),
                 u32::from(cell_h),
-                Some((pty_stream::driver::ANSWERED_FG, pty_stream::driver::ANSWERED_BG)),
+                Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)),
             );
             match gallery::check_expectations(shot, &r) {
                 Ok(()) => {

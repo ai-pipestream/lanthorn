@@ -221,7 +221,7 @@ impl Colors {
     /// app→terminal direction only, so the reply we typed back is not among the
     /// bytes being resolved. Without it this fell back to the emulator palette's
     /// own entry 0 and drew a screen belonging to a different terminal than the
-    /// one lanthorn was told about — see [`crate::driver::ANSWERED_BG`] for what
+    /// one lanthorn was told about — see [`crate::pty_stream::ANSWERED_BG`] for what
     /// that manufactured.
     ///
     /// A default the APP set dynamically still wins, because that one really is in

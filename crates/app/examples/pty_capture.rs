@@ -186,7 +186,7 @@ fn main() -> std::process::ExitCode {
         cap.spec.rows,
         u32::from(cap.spec.cell_w),
         u32::from(cap.spec.cell_h),
-        Some((driver::ANSWERED_FG, driver::ANSWERED_BG)),
+        Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)),
     );
     if let Some(path) = &png {
         let mut canvas = pty_stream::raster::render(&res);

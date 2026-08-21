@@ -212,9 +212,9 @@ fn shogun_boots_off_its_floppy_and_draws_its_title_screen() {
         // Real art, not a blank fill — and every colour on it is one of the
         // title screen's own, so the pixels came out of the floppy's archive.
         let want: std::collections::HashSet<[u8; 3]> =
-            title.to_rgba8().chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+            title.to_rgba8().as_chunks::<4>().0.iter().map(|p| [p[0], p[1], p[2]]).collect();
         let got: std::collections::HashSet<[u8; 3]> =
-            canvas.img.as_raw().chunks_exact(4).map(|p| [p[0], p[1], p[2]]).collect();
+            canvas.img.as_raw().as_chunks::<4>().0.iter().map(|p| [p[0], p[1], p[2]]).collect();
         assert!(
             got.len() >= 8,
             "honor_game_colours={honor_game_colours}: the boot canvas is a flat fill, not the title screen ({} colours)",

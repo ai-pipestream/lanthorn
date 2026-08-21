@@ -39,6 +39,38 @@ pub mod gallery;
 pub mod oracle;
 pub mod raster;
 
+// ── The terminal this harness claims to be ───────────────────────────────────
+//
+// PORTABLE ON PURPOSE, and that is the whole of SQ-0966. These live beside the
+// modules rather than inside `driver` because `driver` is unix-only while every
+// consumer of them is not: `oracle::resolve` must be handed them on any platform
+// or its picture is of a different terminal than the one lanthorn was answering.
+// While they sat in `driver`, three portable modules of `pty_oracle.rs` imported
+// a unix-only module for two constants and the `pty` test binary would not
+// COMPILE on Windows — a split that `mod.rs` documented correctly and one import
+// crossed.
+
+/// The default foreground this harness answers **OSC 10** with.
+///
+/// A capture only carries the app→terminal direction, so the reply we type back
+/// is not in the bytes the oracle resolves. That makes these two constants the
+/// only record of what terminal the app thought it was talking to, and
+/// `oracle::resolve` has to be handed them or its picture is of a different
+/// terminal than the one lanthorn was answering (SQ-0929).
+pub const ANSWERED_FG: [u8; 3] = [0xC0, 0xC0, 0xC0];
+
+/// The default background this harness answers **OSC 11** with.
+///
+/// It matches the emulator palette's own entry 0, which is what an unpainted cell
+/// is filled with — and that agreement is the whole point. While it did not
+/// agree, the harness told lanthorn "my background is #000000", lanthorn dutifully
+/// painted its chrome cells #000000, and the rasteriser drew every unpainted cell
+/// #1D1F21. The result was a black rectangle floating on grey in every v6 capture:
+/// a defect that existed nowhere but in the instrument, and that cost a long
+/// investigation of the renderer before anyone read this file.
+pub const ANSWERED_BG: [u8; 3] = [0x1D, 0x1F, 0x21];
+
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 

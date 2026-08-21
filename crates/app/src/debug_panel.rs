@@ -1267,7 +1267,7 @@ mod tests {
         }
         fn memory_len(&self) -> u32 { 0x10000 }
         fn object_detail(&self, _obj: u16) -> Vec<String> { vec!["attrs: (none)".into()] }
-        fn frame_locals(&self, _idx: usize) -> Vec<String> { vec![format!("local0 = 0x0001  (1)")] }
+        fn frame_locals(&self, _idx: usize) -> Vec<String> { vec!["local0 = 0x0001  (1)".to_string()] }
         // Deterministic, distinct-per-var value so deref jumps are testable.
         fn var_value(&self, var: u8) -> Option<u16> { Some(0x1000 + var as u16 * 0x10) }
         // One "dictionary entry", deliberately at an ODD address inside a row —

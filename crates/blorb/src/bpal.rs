@@ -47,7 +47,9 @@ pub fn palette_bakes(bytes: &[u8]) -> Vec<PaletteBake> {
     let Some(data) = top_level_chunk(bytes, b"BPal") else {
         return Vec::new();
     };
-    data.chunks_exact(12)
+    data.as_chunks::<12>()
+        .0
+        .iter()
         .map(|r| PaletteBake {
             background: be_u32(r, 0),
             adaptive: be_u32(r, 4),
