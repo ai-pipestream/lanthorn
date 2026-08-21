@@ -130,7 +130,7 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
     // SQ-0806/SQ-0846: two-colour artwork declares the interpreter colourless —
     // but only where the machine has no colours of its own to declare.
     let honoured = honor_game_colours
-        && !picts.declines_game_colours(profile.default_colours(), profile.two_colour_colours());
+        && !picts.declines_game_colours(profile.default_colours());
     let default_colours = honoured.then(|| profile.default_colours()).flatten();
     let mut session = GameSession::new_with_art_scale(
         bytes,
@@ -417,22 +417,18 @@ fn every_macintosh_plate_and_its_screen_are_in_the_same_space() {
 /// interpreter picked `Pic.Data` *for* that white page, in one decision. So the
 /// guess stands down in front of the fact.
 ///
-/// **What the discriminator IS has moved, and this test is where the difference
-/// shows.** SQ-0846 wrote it as "does the profile state defaults of its own?",
-/// which was serviceable while [`InterpreterProfile::IbmPc`] stated none; SQ-0928
-/// gave it blue under white and the question started answering yes for a `.CG1`
-/// off a DOS medium, where the whole point had been that it answers no. The
-/// question is now the machine's PAGE — is this machine's own screen the very
-/// two-colour display the stencil was drawn for? — and it is read off one
-/// channel: `two_colour_colours` against `default_colours`. The Mac states
-/// (9, 2) both times, the IBM PC states (6, 9) and (2, 9).
+/// **And SQ-0956 widened it to every machine**, which is why the middle assertion
+/// below now reads the other way. SQ-0846's rule spared the Mac because the Mac's
+/// own screen IS a white page under black ink; SQ-0928 then gave the IBM PC a
+/// screen too, and SQ-0956 gave the CGA card inside it one of its own — black
+/// under light grey, `Palette::IbmCga`. A licensed machine of either kind keeps
+/// its colours, so what is left of SQ-0806 is the launch that named NO machine,
+/// asserted last.
 ///
-/// **The same bytes, two machines, two answers**, which is what makes this a
-/// machine question rather than an archive one — and it is now asserted with the
-/// IBM PC's REAL pair rather than with `None` standing in for it, because `None`
-/// can no longer tell the two apart. Ask the disk's monochrome archive under the
-/// Macintosh and it keeps its colours; ask it under the IBM PC — or under a
-/// launch that named no machine at all — and SQ-0806's rule fires on it.
+/// **The Mac is still the case that must not move**, and it does not: the mono
+/// archive keeps its colours under the Macintosh, exactly as SQ-0846 left it, and
+/// it is not a two-colour CARD — `PictSource::two_colour_card` says no for it and
+/// yes for a `.cg1`, which is the container telling the two machines apart.
 #[test]
 fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
@@ -459,20 +455,27 @@ fn the_macintoshs_own_archive_no_longer_declines_its_own_colours() {
         let picts = PictSource::resolve_with_override(&path, over, None);
         assert_eq!(picts.is_monochrome(), mono, "{archive}: the archive's own EF_MONO flags");
         assert!(
-            !picts.declines_game_colours(mac.default_colours(), mac.two_colour_colours()),
+            !picts.declines_game_colours(mac.default_colours()),
             "{archive}: a machine whose own screen IS this display keeps its colours",
         );
-        assert_eq!(
-            picts.declines_game_colours(pc.default_colours(), pc.two_colour_colours()),
-            mono,
-            "{archive}: the same bytes on the IBM PC — SQ-0806's rule, back in force",
+        assert!(
+            // SQ-0956: and on the IBM PC too, where the card states the screen
+            // instead. Declining there was the reported defect.
+            !picts.declines_game_colours(pc.default_colours()),
+            "{archive}: a licensed machine of either kind keeps the story's colours",
+        );
+        assert!(
+            // …and this Mac archive is not a CGA card whatever machine is asked,
+            // because the CONTAINER is what names the card (SQ-0956).
+            !picts.two_colour_card(),
+            "{archive}: an Amiga/Mac container is never a video card",
         );
         assert_eq!(
             // SQ-0928: `IbmPc` used to BE "a machine with no defaults" and is not
             // any more — it states blue under white. What has no defaults is a
-            // LAUNCH that never named a machine, which is what this line meant all
-            // along and now has to say outright.
-            picts.declines_game_colours(None, None),
+            // LAUNCH that never named a machine, and that is all SQ-0806's rule
+            // has left to answer.
+            picts.declines_game_colours(None),
             mono,
             "{archive}: the same bytes with no machine named — SQ-0806, unmoved",
         );

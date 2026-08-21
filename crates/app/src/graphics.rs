@@ -418,17 +418,31 @@ impl PictSource {
         self.native.as_ref().is_some_and(blorb::infocom_pics::InfocomPics::is_monochrome)
     }
 
+    /// Is the artwork a two-colour rendition of a **video card** — a display with
+    /// an ink, a page and no third state (SQ-0956)?
+    ///
+    /// `is_monochrome` above answers `true` for the Macintosh's mono `Pic.data`
+    /// under exactly the same `EF_MONO` test, and that machine's screen is not a
+    /// two-state display: its interpreter names ordinary §8.3.1 colours and
+    /// `mac/xzip.lst` sets a white page under black ink like any other pair. The
+    /// CARD is the one that collapses, and the archive's container is what says
+    /// which machine drew it — see
+    /// [`blorb::infocom_pics::InfocomPics::two_colour_palette`], whose two tables
+    /// each carry their own capture.
+    ///
+    /// This is what installs [`zvm::screen::Palette::IbmCga`] at boot, and through
+    /// it what `zvm::screen::two_colour_card_request` reads.
+    pub fn two_colour_card(&self) -> bool {
+        self.native
+            .as_ref()
+            .and_then(blorb::infocom_pics::InfocomPics::two_colour_palette)
+            .is_some_and(|p| p == blorb::infocom_pics::CGA_PALETTE)
+    }
+
     /// Should this launch declare the interpreter COLOURLESS to the story
     /// (`honor_game_colours = false`), because the artwork in hand is a
-    /// two-colour rendition of a display the story may not colour? SQ-0806,
-    /// refined by SQ-0846 and SQ-0956.
-    ///
-    /// **"Colourless" means "cannot name arbitrary colours", not "has no colour
-    /// choice".** A two-colour display is two states, and Zork Zero's own `color`
-    /// command on a CGA machine offers exactly one bit of choice — a swap of those
-    /// two states, black and light grey, and nothing else (observed on the
-    /// emulator). Declining §8.3's palette to the story is a claim about the
-    /// eight colours it cannot have, not about that swap, which is SQ-0957's.
+    /// two-colour rendition and no machine is present to say what that display
+    /// shows? SQ-0806, refined by SQ-0846 and SQ-0956.
     ///
     /// **The archive's half is what the story cannot see, and that is the whole
     /// point.** A two-colour rendition is a stencil whose transparency reveals a
@@ -450,39 +464,58 @@ impl PictSource {
     /// from a colour the game asked for; it throws away the one machine whose
     /// colours are known, and it cost SQ-0846's status banner its ink.
     ///
-    /// **But "names a machine" was the wrong question, and SQ-0928 is what
-    /// showed it.** This rule used to be `is_monochrome() && machine_pair.is_none()`,
-    /// on the reasoning that `InterpreterProfile::IbmPc` stated no defaults — so
-    /// a `.CG1` could only ever be met by a launch with no machine at all. SQ-0928
-    /// then gave the IBM PC a machine pair, and the rule stopped firing on exactly
-    /// the launches CGA art comes from: the 360K Zork Zero press serves its `.cg1`
-    /// off disk 1 with no `--pictures` at all, `ProfileSource::Medium` licenses the
-    /// machine, and the guard read that licence as the fact it was standing down
-    /// for. The reported symptom is the white page bleeding into the artwork.
+    /// **And the IBM PC is now a machine too**, which is what SQ-0956 turns on.
+    /// SQ-0928 gave it blue under white and `ProfileSource::Medium` licenses it, so
+    /// a real DOS press stopped reaching this rule — reported as Zork Zero's white
+    /// page bleeding into its own CGA artwork. The answer is not to decline harder:
+    /// a CGA card HAS a screen, it is black under light grey, and a story gets to
+    /// choose which side of it is the ink. That lives in
+    /// [`Self::two_colour_card`] and `zvm::screen::two_colour_card_request`, with
+    /// the colour flag left SET so the `color` command still works.
     ///
-    /// **The question the guard was reaching for is whether the machine's own
-    /// screen IS this two-colour display**, and the numbers answer it without
-    /// naming anybody. `machine_pair` is `Config::machine_default_colours` and
-    /// `two_colour_pair` is `Config::machine_two_colour_colours` — the same claim
-    /// about the narrower screen (see
-    /// [`InterpreterProfile::two_colour_colours`](crate::interpreter::InterpreterProfile::two_colour_colours)):
+    /// | launch                          | machine | declines |
+    /// |---------------------------------|---------|----------|
+    /// | Mac HFS volume, mono `Pic.data` | (9, 2)  | no — SQ-0846, the Mac's own page |
+    /// | DOS press, `.CG1`               | (6, 9)  | no — the card states its own, SQ-0956 |
+    /// | bare `.z6` + `--pictures *.cg1` | none    | **yes** — SQ-0806 unmoved |
     ///
-    /// | launch                          | machine | two-colour | declines |
-    /// |---------------------------------|---------|------------|----------|
-    /// | Mac HFS volume, mono `Pic.data` | (9, 2)  | (9, 2)     | no — the Mac's screen already IS that display |
-    /// | DOS press, `.CG1`               | (6, 9)  | (2, 9)     | **yes** — blue is the machine, black is the card |
-    /// | bare `.z6` + `--pictures *.cg1` | none    | none       | yes — SQ-0806 unmoved |
+    /// The last row is the whole of what is left, and it is what the rule was
+    /// written for: a stencil with no machine behind it, where the host theme is
+    /// the only ground there is.
+    pub fn declines_game_colours(&self, machine_pair: Option<(u8, u8)>) -> bool {
+        self.is_monochrome() && machine_pair.is_none()
+    }
+
+    /// **The screen this launch is showing, when a two-colour CARD is what it is
+    /// showing it on** — the palette to install and the §8.3.3 pair to report, or
+    /// `None` for every other launch (SQ-0956).
     ///
-    /// One channel separates the two machines, and it is the only thing this
-    /// rule reads. Nothing here mentions the Macintosh: it declines to decline
-    /// because it states its two-colour page once instead of twice, which is a
-    /// property of the machine table rather than an exemption in the rule.
-    pub fn declines_game_colours(
+    /// One function because three callers must not drift: `startup.rs` at boot,
+    /// `reset.rs` on a `@restart` (which may have re-resolved a different
+    /// rendition), and `v6_cga_stencil_page`, which measures the frame that comes
+    /// out. A harness that re-derived this instead of calling it would keep
+    /// passing while the shipped path regressed — the hazard CLAUDE.md names as
+    /// "boot a harness the way `startup.rs` boots".
+    ///
+    /// Three things have to be true together, and each is a different kind of fact:
+    ///
+    /// - the ARCHIVE is a video card's two colours ([`Self::two_colour_card`],
+    ///   read off the container — a `.CG1` and not a Macintosh `Pic.data`);
+    /// - the LAUNCH may present its machine (`ProfileSource`'s licence, SQ-0928:
+    ///   a medium always, an asked-for machine on request, a bare story file
+    ///   never), which is also what stops a `.cg1` opened beside a plain `.z6`
+    ///   from reaching here — that launch keeps SQ-0806's decline;
+    /// - the PLAYER has not declined game colours, since a card that cannot be
+    ///   told to the story has nothing to say.
+    pub fn two_colour_card_screen(
         &self,
-        machine_pair: Option<(u8, u8)>,
-        two_colour_pair: Option<(u8, u8)>,
-    ) -> bool {
-        self.is_monochrome() && (machine_pair.is_none() || machine_pair != two_colour_pair)
+        cfg: &crate::config::Config,
+    ) -> Option<(zvm::screen::Palette, (u8, u8))> {
+        if !cfg.honor_game_colours || !self.two_colour_card() {
+            return None;
+        }
+        let pair = cfg.machine_two_colour_colours()?;
+        Some((zvm::screen::Palette::IbmCga, pair))
     }
 
     /// Is this Pict declared adaptive by the container's `APal` chunk (§11.3)?

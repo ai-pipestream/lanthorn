@@ -1360,17 +1360,31 @@ impl Machine {
                     );
                 } else if let Some(v6) = self.screen.v6.as_mut() {
                     let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
+                    // SQ-0956: a TWO-COLOUR CARD has one bit, and a §8.3.1 pair
+                    // carries one bit for it — see
+                    // `screen::two_colour_card_request`, which is where the whole
+                    // argument and the capture live. It returns the request
+                    // unchanged on every other display, so the per-window model
+                    // below is one code path and not two.
+                    let req = (decode_set_colour_v6(a), decode_set_colour_v6(b));
+                    let (req_fg, req_bg) = crate::screen::two_colour_card_request(req.0, req.1);
                     if self.trace_screen {
-                        let fg = decode_set_colour_v6(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
-                        let bg = decode_set_colour_v6(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
-                        self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg}, window={win})"));
+                        let name = |c: Option<crate::screen::ZColour>, raw: u16| {
+                            c.map(zscreen_colour_name).unwrap_or_else(|| raw.to_string())
+                        };
+                        let card = if (req_fg, req_bg) == req { "" } else { " [two-colour card]" };
+                        self.screen_trace.push(format!(
+                            "@set_colour(fg={}, bg={}, window={win}){card}",
+                            name(req_fg, a),
+                            name(req_bg, b),
+                        ));
                     }
                     let mut mirror = None;
                     if let Some(w) = v6.windows.get_mut(win as usize) {
-                        if let Some(c) = decode_set_colour_v6(a) {
+                        if let Some(c) = req_fg {
                             w.fg = c;
                         }
-                        if let Some(c) = decode_set_colour_v6(b) {
+                        if let Some(c) = req_bg {
                             w.bg = c;
                         }
                         w.colour_data = pack_colour_data(w.fg, w.bg);

@@ -2561,9 +2561,10 @@ pub struct AppState {
     /// `--interpreter` follows (SQ-0646).
     pub no_game_colours_cli: bool,
 
-    /// True when the artwork this launch loaded has no colours to give, so
-    /// `startup.rs` declared the interpreter colourless (SQ-0806/SQ-0846, see
-    /// [`crate::graphics::PictSource::declines_game_colours`]).
+    /// True when the artwork this launch loaded is a two-colour rendition with no
+    /// machine behind it to state a screen, so `startup.rs` declared the
+    /// interpreter colourless (SQ-0806/SQ-0846, narrowed by SQ-0956 to exactly
+    /// that launch — see [`crate::graphics::PictSource::declines_game_colours`]).
     ///
     /// Recorded here for exactly the reason `no_game_colours_cli` above is: the
     /// force-off happens on `Config` before the engine is built, and the boot

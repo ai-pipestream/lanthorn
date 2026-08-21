@@ -104,7 +104,7 @@ fn mac_at_prompt(pictures: Option<&str>, honor_game_colours: bool) -> Option<AtP
         .or_else(|| profile.std_window());
     let art_scale = picts.art_scale();
     let honoured = honor_game_colours
-        && !picts.declines_game_colours(profile.default_colours(), profile.two_colour_colours());
+        && !picts.declines_game_colours(profile.default_colours());
     let mut session = GameSession::new_with_art_scale(
         bytes,
         honoured,

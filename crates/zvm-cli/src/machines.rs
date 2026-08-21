@@ -156,7 +156,10 @@ pub fn table() -> String {
                 // BASE palette; `zvm::interpreter::palette_for` is what picks the
                 // v6 one at boot, so naming XZIP here would overstate what a row
                 // can say on its own.
-                Palette::IbmXzip | Palette::IbmYzip => "EGA",
+                // SQ-0956: `IbmCga` is a CARD rather than a machine, so no row
+                // states it — it is installed at boot from the ARCHIVE a launch
+                // loaded, which this table has no column for and cannot.
+                Palette::IbmXzip | Palette::IbmYzip | Palette::IbmCga => "EGA",
             },
             yes_no(m.global_colour_pens),
             yes_no(m.v6_screen_page),
@@ -329,7 +332,9 @@ mod tests {
             let palette_name = match palette {
                 Palette::Standard => "standard",
                 Palette::Amiga => "Amiga",
-                Palette::IbmXzip | Palette::IbmYzip => "EGA",
+                // No MachineProfile states `IbmCga` — it is a card, installed
+                // from the archive rather than from a row (SQ-0956).
+                Palette::IbmXzip | Palette::IbmYzip | Palette::IbmCga => "EGA",
             };
             assert!(all.contains(palette_name), "{name}: palette");
             // The three booleans share one spelling, so count rather than search:

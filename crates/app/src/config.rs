@@ -1353,6 +1353,10 @@ impl Config {
     /// about a machine, so a launch that never named one gets `None` here as it
     /// gets `None` above, and a `.cg1` opened beside a bare `.z6` keeps SQ-0806's
     /// behaviour exactly.
+    ///
+    /// Whether the launch is actually SHOWING that display is the archive's to
+    /// say, not the machine's: see
+    /// [`crate::graphics::PictSource::two_colour_card_screen`], the only caller.
     pub fn machine_two_colour_colours(&self) -> Option<(u8, u8)> {
         self.machine_colours_licensed()
             .then(|| self.interpreter_profile.two_colour_colours())

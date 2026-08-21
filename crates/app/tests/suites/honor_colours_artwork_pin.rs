@@ -92,16 +92,11 @@ fn boot_colour_decision(story: &str, pictures: Option<&str>) -> Option<Boot> {
         InterpreterProfile::resolve_with_source(&path, None, over.flavour(), None);
     let licensed = source.licenses_machine_colours(false);
     let machine_pair = licensed.then(|| profile.default_colours()).flatten();
-    // SQ-0956: and the same claim about the narrower screen, licensed by the same
-    // rule — `Config::machine_two_colour_colours`. The rule reads both, because
-    // whether a stencil declines the story's colours turns on whether the machine's
-    // own page IS the one the stencil reveals.
-    let two_colour_pair = licensed.then(|| profile.two_colour_colours()).flatten();
     let picts = PictSource::resolve_with_override(&path, over, None);
     let decision = Boot {
         profile,
         monochrome: picts.is_monochrome(),
-        declines: picts.declines_game_colours(machine_pair, two_colour_pair),
+        declines: picts.declines_game_colours(machine_pair),
     };
     let _ = std::fs::remove_dir_all(&dir);
     Some(decision)

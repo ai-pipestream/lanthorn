@@ -1593,6 +1593,135 @@ pub enum Palette {
     /// The same, as **YZIP** mapped them — the Version 6 interpreter. It differs
     /// from [`Palette::IbmXzip`] in exactly one entry, and that entry is white.
     IbmYzip,
+    /// The same machine again, showing a **CGA** card: two colours, black and
+    /// light grey, and no third (SQ-0956).
+    ///
+    /// The card is not the machine. An IBM PC running the EGA or MCGA rendition
+    /// of a Version 6 game resolves numbers through [`Palette::IbmYzip`], where
+    /// white is `#FFFFFF`; put the CGA plates in the same machine and the screen
+    /// has two states, `#000000` and `#AAAAAA` — EGA entry 7, which is the value
+    /// the XZIP table already gives for white and the value
+    /// `machine-screenshots/dos-zorkzero-cga.png` measures for every lit pixel in
+    /// the frame, text and artwork alike. So the numbers resolve exactly as XZIP's
+    /// do; what makes this a variant of its own is [`Palette::two_colour_card`],
+    /// which is a claim about the DISPLAY rather than about a table.
+    IbmCga,
+}
+
+impl Palette {
+    /// Is this palette a **two-state display** — one that has an ink and a page
+    /// and nothing else (SQ-0956)?
+    ///
+    /// Only the CGA card answers. The Macintosh's monochrome plate is two-colour
+    /// art on a machine whose screen is not: its interpreter names ordinary
+    /// §8.3.1 colours and `mac/xzip.lst` sets a white page under black ink like
+    /// any other pair, so nothing about it collapses.
+    ///
+    /// [`two_colour_card_pair`] is the pair it shows, and
+    /// `Machine::set_colour`'s CGA arm is the one caller that matters — see there
+    /// for what a story's request means on a display with one bit.
+    pub fn two_colour_card(self) -> bool {
+        matches!(self, Self::IbmCga)
+    }
+}
+
+/// The `(foreground, background)` a two-colour card shows, as §8.3.1 colour
+/// numbers: **white 9 over black 2** (SQ-0956).
+///
+/// Stated here rather than read from the machine table because it is a fact about
+/// the CARD: `zvm::interpreter::IBM_PC_DEFAULT_BACKGROUND` is the PC's blue, which
+/// is what the EGA and MCGA renditions of the same machine show, and
+/// [`crate::interpreter::IBM_PC_TWO_COLOUR_BACKGROUND`] carries the census that
+/// says the CGA plate's is black instead. The ink does not move: white 9 both
+/// times, which this palette resolves to the card's `#AAAAAA`.
+pub const CGA_CARD_PAIR: (u8, u8) =
+    (crate::interpreter::IBM_PC_DEFAULT_FOREGROUND, crate::interpreter::IBM_PC_TWO_COLOUR_BACKGROUND);
+
+/// What a story's `@set_colour(fg, bg)` MEANS on a two-colour card — the pair as
+/// requested on every other display, and the card's own two states on that one
+/// (SQ-0956).
+///
+/// # A display with one bit cannot take a pair of colours, but it can take a side
+///
+/// A CGA card in the 640-wide mode a `.CG1` was drawn for has two states and no
+/// third: the page, `#000000`, and the ink, `#AAAAAA` ([`CGA_CARD_PAIR`], resolved
+/// through [`Palette::IbmCga`]). A story naming blue is naming something that is
+/// not there. What a story CAN say is which of its two channels wants the lit
+/// state, and that is one bit — which is exactly what the machine offers back:
+/// Zork Zero's own in-game `color` command on a CGA machine presents a **swap** of
+/// the two states and nothing else (observed on the emulator).
+///
+/// So this maps a request onto the card: whichever channel the story named for its
+/// INK gets the card's page, and the other gets the card's ink.
+///
+/// # Why that is a swap and not "the pair as named", which is the surprise
+///
+/// `machine-screenshots/dos-zorkzero-cga.png` — Zork Zero r393 at the Banquet
+/// Hall, a DOS emulator in CGA mode running `zork0.cg1` — censuses **48.3%
+/// `#000000`** page under **8.8% `#A0A0A0`** ink, with no second hue in the frame.
+/// The story asked for the opposite: r393 issues `set_colour(fg=2, bg=9)` — BLACK
+/// ink on a WHITE page — for every video card alike, measured identical across
+/// `.cg1`, `.eg1` and `.mg1`, and `dos-zorkzero.png` shows that honoured on the
+/// colour rendition at 25.7% `#FFFFFF`. Same story, same release, same machine,
+/// opposite polarity; the card is the only thing that moved.
+///
+/// The user's second visit to the emulator pins the other side of the bit, which
+/// is what makes this a rule rather than a fudge fitted to one frame: choosing the
+/// light ground from that `color` menu washes the plates out **on the real machine
+/// too**, because `.cg1` art is light line work authored for a black ground. Both
+/// states of the card's one bit are therefore accounted for by a capture or by the
+/// machine, and this function reproduces both.
+///
+/// # Why it is not `honor_game_colours = false`
+///
+/// Declining §8.3's palette to the story produces the same boot frame — the game
+/// checks the colour flag and issues no `set_colour` at all when it is clear
+/// (measured on this press) — and it costs the `color` command, which needs the
+/// flag set to do anything. Two states is not no colours. SQ-0806's rule survives
+/// for the launch that genuinely has no machine to speak for; see
+/// `app::graphics::PictSource::declines_game_colours`.
+///
+/// A `None` channel is "keep this one" (the opcode's 0 sentinel) and a
+/// [`ZColour::Default`] is the -1 "colour under the cursor" carve-out; neither
+/// names a colour, so neither can carry the bit, and a request with fewer than two
+/// named channels is passed through untouched.
+pub fn two_colour_card_request(
+    fg: Option<ZColour>,
+    bg: Option<ZColour>,
+) -> (Option<ZColour>, Option<ZColour>) {
+    if !palette().two_colour_card() {
+        return (fg, bg);
+    }
+    let named = |c: Option<ZColour>| match c {
+        Some(ZColour::Standard(n)) => standard_true_colour(n),
+        _ => None,
+    };
+    let (Some(want_ink), Some(want_page)) = (named(fg), named(bg)) else {
+        return (fg, bg);
+    };
+    // The two channels have to differ for either to be a side of the bit; a story
+    // asking for one colour twice is asking for a blank screen, and the card has
+    // nothing to say about that.
+    if want_ink == want_page {
+        return (fg, bg);
+    }
+    let (card_ink, card_page) = CGA_CARD_PAIR;
+    let (ink, page) = if luma15(want_ink) < luma15(want_page) {
+        // The story wants the DARKER of its two colours as ink — the polarity the
+        // card boots in, page under ink.
+        (card_ink, card_page)
+    } else {
+        (card_page, card_ink)
+    };
+    (Some(ZColour::Standard(ink)), Some(ZColour::Standard(page)))
+}
+
+/// A 15-bit colour's brightness, for ordering two of them. Rec. 601 weights on
+/// the 5-bit channels, which is enough to say which of two colours is the darker
+/// and is never asked anything finer.
+fn luma15(c: u16) -> u32 {
+    let (r, g, b) = ((c >> 10) & 31, (c >> 5) & 31, c & 31);
+    u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114
 }
 
 /// The active palette, as a raw discriminant for [`ACTIVE_PALETTE`].
@@ -1600,6 +1729,7 @@ const PALETTE_STANDARD: u8 = 0;
 const PALETTE_AMIGA: u8 = 1;
 const PALETTE_IBM_XZIP: u8 = 2;
 const PALETTE_IBM_YZIP: u8 = 3;
+const PALETTE_IBM_CGA: u8 = 4;
 
 /// The process-wide active palette.
 ///
@@ -1660,6 +1790,7 @@ pub fn set_palette(p: Palette) {
         Palette::Amiga => PALETTE_AMIGA,
         Palette::IbmXzip => PALETTE_IBM_XZIP,
         Palette::IbmYzip => PALETTE_IBM_YZIP,
+        Palette::IbmCga => PALETTE_IBM_CGA,
     };
     ACTIVE_PALETTE.store(v, core::sync::atomic::Ordering::Relaxed);
 }
@@ -1670,6 +1801,7 @@ pub fn palette() -> Palette {
         PALETTE_AMIGA => Palette::Amiga,
         PALETTE_IBM_XZIP => Palette::IbmXzip,
         PALETTE_IBM_YZIP => Palette::IbmYzip,
+        PALETTE_IBM_CGA => Palette::IbmCga,
         _ => Palette::Standard,
     }
 }
@@ -1733,6 +1865,9 @@ pub fn standard_true_colour(n: u8) -> Option<u16> {
         Palette::Amiga => amiga_true_colour(n),
         Palette::IbmXzip => ega_true_colour(n, false).or_else(|| zmsd_true_colour(n)),
         Palette::IbmYzip => ega_true_colour(n, true).or_else(|| zmsd_true_colour(n)),
+        // The card's two states are black and EGA 7, which is exactly where the
+        // XZIP table sends white — so one table serves both (SQ-0956).
+        Palette::IbmCga => ega_true_colour(n, false).or_else(|| zmsd_true_colour(n)),
     }
 }
 
@@ -2088,6 +2223,81 @@ pub fn compute_status_line(mem: &Memory) -> StatusLine {
 
 #[cfg(test)]
 mod tests {
+
+    // ── SQ-0956: the two-colour card ─────────────────────────────────────────
+    //
+    // These take no lock and need none: `set_palette` is process-global and the
+    // crate's own tests run in one binary, but nothing else in this module reads
+    // the palette, and nextest gives each case its own process. The app-side
+    // suites are the ones that must take `app::V6_PALETTE_LOCK` (SQ-0905/0958).
+
+    /// The card's table is XZIP's — one entry from YZIP's, and that entry is the
+    /// one the capture measures.
+    #[test]
+    fn the_cga_card_resolves_white_to_the_cards_light_grey() {
+        let held = palette();
+        set_palette(Palette::IbmCga);
+        assert_eq!(standard_true_colour(9), Some(0x56B5), "white 9 is EGA entry 7, #AAAAAA");
+        assert_eq!(standard_true_colour(2), Some(0x0000), "and black 2 is black");
+        set_palette(Palette::IbmYzip);
+        assert_eq!(standard_true_colour(9), Some(0x7FFF), "…where the same machine's EGA is #FFFFFF");
+        set_palette(held);
+    }
+
+    /// Only the card is a two-state display, and the round trip through
+    /// [`set_palette`] survives the new discriminant.
+    #[test]
+    fn only_the_cga_card_is_a_two_state_display() {
+        let held = palette();
+        for p in [Palette::Standard, Palette::Amiga, Palette::IbmXzip, Palette::IbmYzip, Palette::IbmCga] {
+            set_palette(p);
+            assert_eq!(palette(), p, "{p:?} survives the round trip");
+            assert_eq!(p.two_colour_card(), p == Palette::IbmCga, "{p:?}");
+        }
+        set_palette(held);
+        assert_eq!(CGA_CARD_PAIR, (9, 2), "white ink over a black page");
+    }
+
+    /// **The rule, both ways round.** A pair carries one bit for a two-state
+    /// display: which channel wants the lit state. Zork Zero's boot pair asks for
+    /// dark ink on a light page and the card shows the opposite polarity —
+    /// `machine-screenshots/dos-zorkzero-cga.png`, black page under light ink —
+    /// and the pair its own `color` menu offers gives that page back.
+    #[test]
+    fn a_two_colour_card_takes_one_bit_from_a_pair() {
+        let held = palette();
+        set_palette(Palette::IbmCga);
+        let std = |n: u8| Some(ZColour::Standard(n));
+        assert_eq!(
+            two_colour_card_request(std(2), std(9)),
+            (std(9), std(2)),
+            "black ink on a white page is the card's own polarity: light ink, black page",
+        );
+        assert_eq!(
+            two_colour_card_request(std(9), std(2)),
+            (std(2), std(9)),
+            "…and the swap the game's `color` menu offers is the other side of the bit",
+        );
+        // A channel that names no colour cannot carry a bit.
+        assert_eq!(two_colour_card_request(std(2), None), (std(2), None), "one channel kept");
+        assert_eq!(
+            two_colour_card_request(std(2), Some(ZColour::Default)),
+            (std(2), Some(ZColour::Default)),
+            "the -1 carve-out names no colour either",
+        );
+        assert_eq!(two_colour_card_request(std(9), std(9)), (std(9), std(9)), "one colour twice");
+
+        // …and on every other display the request is what it says it is.
+        for p in [Palette::Standard, Palette::Amiga, Palette::IbmXzip, Palette::IbmYzip] {
+            set_palette(p);
+            assert_eq!(
+                two_colour_card_request(std(2), std(9)),
+                (std(2), std(9)),
+                "{p:?}: a screen with colours takes the pair as named",
+            );
+        }
+        set_palette(held);
+    }
     use super::*;
     use crate::header::tests_support::sample_story;
     use crate::memory::Memory;

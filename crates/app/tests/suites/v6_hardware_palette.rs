@@ -183,21 +183,27 @@ fn zork_zeros_ega_frame_is_drawn_in_ega_brown_not_dark_yellow() {
 }
 
 /// CGA is two colours, not four: its only 640-wide mode was 640x200 mode 6. The
-/// archive's indices 2 and 3 are white and black, and `DEFAULT_PALETTE` renders
-/// them green and cyan.
+/// archive's indices 2 and 3 are the lit state and black, and `DEFAULT_PALETTE`
+/// renders them green and cyan.
+///
+/// **The lit state is the CARD's light grey**, `#AAAAAA`, not pure white
+/// (SQ-0956): `machine-screenshots/dos-zorkzero-cga.png` measures `#A0A0A0` for
+/// every lit pixel of the frame, artwork and text alike, which is a DOS
+/// emulator's rendering of EGA entry 7. The Macintosh's mono plate keeps a real
+/// white and is the control — `v6_macintosh_profile` holds that half.
 ///
 /// Falsified the same way as the EGA case: the frame comes back as
 /// `(0, 170, 0)` and `(0, 170, 170)` and nothing else.
 #[test]
-fn zork_zeros_cga_frame_is_black_and_white() {
+fn zork_zeros_cga_frame_is_the_cards_two_states() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
     for honor_game_colours in [true, false] {
         let Some(session) = boot("zork0.cg1", honor_game_colours) else { return };
         let seen = frame_colours(&session);
         assert_eq!(
             seen,
-            BTreeSet::from([[0, 0, 0], [255, 255, 255]]),
-            "honor={honor_game_colours}: a CGA frame is black and white only"
+            BTreeSet::from([[0, 0, 0], [170, 170, 170]]),
+            "honor={honor_game_colours}: a CGA frame is the card's two states only"
         );
         assert!(!seen.contains(&DEFAULT_PALETTE[2]), "the fallback's green is the defect");
         assert!(!seen.contains(&DEFAULT_PALETTE[3]), "the fallback's cyan is the defect");
@@ -364,7 +370,7 @@ fn boot_named(
     zvm::screen::set_palette(profile.palette());
     let mut picts = PictSource::from_native(pics);
     let honoured = honour
-        && !picts.declines_game_colours(profile.default_colours(), profile.two_colour_colours());
+        && !picts.declines_game_colours(profile.default_colours());
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
     let v6_art_scale = picts.art_scale();
@@ -444,10 +450,10 @@ fn flank_pixels(session: &GameSession) -> (u64, u64) {
 /// whether it was offered colours.
 ///
 /// The Macintosh carve-out is checked in the same breath, because the way to
-/// regress this is to widen it: a `.cg1` must still decline colours exactly as
-/// it did — whether the launch named no machine at all, or named the IBM PC off
-/// a DOS press, which since SQ-0956 are two different questions with the same
-/// answer.
+/// regress this is to widen it: a `.cg1` named beside a bare story file must
+/// still decline colours exactly as it did. Off a DOS PRESS it no longer does —
+/// SQ-0956 gives the card a screen of its own instead — and that is the other
+/// half asserted here, because the two launches are now two different answers.
 #[test]
 fn shoguns_flanks_survive_the_rule_that_spared_them() {
     let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
@@ -464,19 +470,23 @@ fn shoguns_flanks_survive_the_rule_that_spared_them() {
             // "a PC states no colours of its own" was really asserting. The IBM PC
             // itself now states blue under white; it just does not reach a launch
             // that only named an archive.
-            src.declines_game_colours(None, None),
+            src.declines_game_colours(None),
             src.is_monochrome(),
             "{archive}: SQ-0806's rule, unmoved — this launch named no machine",
         );
+        assert!(
+            // SQ-0956: and it answers NO once the launch reaches the machine — off
+            // a DOS press, where the medium licenses the IBM PC's pair. Declining
+            // there was the defect: the card has a screen (black under light grey,
+            // `Palette::IbmCga`) and a story that can still call `set_colour`.
+            !src.declines_game_colours(profile.default_colours()),
+            "{archive}: a licensed machine keeps its colours — the card states its own",
+        );
         assert_eq!(
-            // SQ-0956: and it answers the same when the launch DOES reach the
-            // machine — off a DOS press, where the medium licenses the IBM PC's
-            // pair. The card is not the machine: blue 6 is the IBM PC's screen and
-            // black 2 is what a CGA plate reveals, so a `.cg1` declines there too
-            // while the sixteen-colour `.eg1` beside it never did.
-            src.declines_game_colours(profile.default_colours(), profile.two_colour_colours()),
+            src.two_colour_card(),
             src.is_monochrome(),
-            "{archive}: and again with the IBM PC's own pair in hand",
+            "{archive}: and a DOS two-colour archive is a CGA card, which is what \
+             installs the two-state palette",
         );
 
         for honour in [true, false] {
