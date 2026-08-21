@@ -52,7 +52,7 @@ fn stories_dir() -> PathBuf {
 ///
 /// Shogun's bare story file names no machine, so its colour numbers resolve through
 /// ZMSD §8.3.1's own table — which is what every assertion below was written against.
-fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+fn standard_palette() -> app::V6PaletteGuard {
     app::v6_palette(zvm::screen::Palette::Standard)
 }
 

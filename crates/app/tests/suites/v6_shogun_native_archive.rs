@@ -74,7 +74,7 @@ fn matches_top_left(native: &[u8], nw: usize, blorb: &[u8], bw: usize, bh: usize
 /// takes the shared lock; hold the guard for the whole case, because the two frames
 /// a repaint case compares are only comparable if the palette did not move between
 /// them.
-fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+fn standard_palette() -> app::V6PaletteGuard {
     app::v6_palette(zvm::screen::Palette::Standard)
 }
 

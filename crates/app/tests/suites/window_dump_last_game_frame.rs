@@ -92,7 +92,7 @@ fn path_rect(cells: &[app::state::V6CellRect]) -> (u16, u16, u16, u16) {
 /// one of them happened to leave `Standard` there, and not at all once a sibling boots
 /// a machine press. See [`app::v6_palette`], which is why this both names a palette
 /// and takes the shared lock. Hold the guard for the whole case.
-fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+fn standard_palette() -> app::V6PaletteGuard {
     app::v6_palette(zvm::screen::Palette::Standard)
 }
 
