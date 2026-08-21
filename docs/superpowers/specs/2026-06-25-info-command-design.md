@@ -91,7 +91,11 @@ active, what background tasks are doing, and the story/VM facts.
   scaling. That fallback is deliberately silent on the game screen (every
   too-small decision in lanthorn degrades rather than blocks), which leaves
   `/info` as the only place a player can find out why their artwork is soft
-  despite the setting being on.
+  despite the setting being on. Added 2026-08-21 (SQ-0945): and **where the
+  setting came from** — this game's `config.toml` sidecar or the global key —
+  since `/set-v6-pixel-lock` makes it a per-game answer, and "on" reads very
+  differently depending on whether you said it about this story or about all of
+  them. (`config.one_run.holds(keys::V6_PIXEL_LOCK)` is the discriminator.)
 - **Build:** lanthorn version / build info
 
 ### Architecture (sketch)

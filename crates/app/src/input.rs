@@ -4265,6 +4265,10 @@ fn one_run_key_for_row(row: usize) -> Option<&'static str> {
         8 => Some(keys::HONOR_GAME_COLOURS),
         11 => Some(keys::ENABLE_SOUND),
         20 => Some(keys::INTERPRETER_NUMBER),
+        // SQ-0945: this game's sidecar pins the key at boot; editing the row here
+        // is the user speaking about every game, so it ends the hold and the value
+        // persists to the global config like any other setting.
+        26 => Some(keys::V6_PIXEL_LOCK),
         _ => None,
     }
 }

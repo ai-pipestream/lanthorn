@@ -108,10 +108,33 @@ pub enum SlashOutcome {
     /// next mode (`None` = bare). Session-only — the config screen persists.
     /// Handled in `slash_dispatch` (mutates `state.config.v6_render`).
     SetV6Render(Option<crate::config::V6RenderMode>),
+    /// Set this game's v6 pixel-lock preference (SQ-0945). Applies live —
+    /// `state.config.v6_pixel_lock` is read afresh every frame — and is persisted
+    /// in the per-game `config.toml` sidecar, never the global one. Handled in
+    /// `slash_dispatch`.
+    SetV6PixelLock(V6PixelLockArg),
     /// Act on the pre-game story browser. The browser has no `AppState`, so it
     /// cannot take an [`Action`]; its verbs are their own type and are applied
     /// by the picker loop. See [`crate::browser`] (SQ-0796).
     Browser(crate::browser::BrowserAction),
+}
+
+// ── V6PixelLockArg ────────────────────────────────────────────────────────────
+
+/// Argument for `set-v6-pixel-lock`. Four states rather than the `Option<bool>`
+/// its per-game siblings carry, because the bare form is a TOGGLE of the live
+/// value and that is a different thing from `Auto` — which clears the override
+/// and falls back to the global `v6_pixel_lock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6PixelLockArg {
+    /// Lock this game's magnification to the ladder.
+    On,
+    /// Free-scale this game's magnification to fill the pane.
+    Off,
+    /// Clear the per-game override: inherit the global `v6_pixel_lock`.
+    Auto,
+    /// Flip whatever is in force, and persist the result for this game.
+    Toggle,
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -430,6 +453,15 @@ pub static COMMANDS: &[CommandSpec] = &[
                 Some("raster")    => SlashOutcome::SetV6Render(Some(V6RenderMode::Raster)),
                 Some(s) => err(format!("set-v6-render: unknown mode '{s}' (hybrid | raster, or bare to toggle)")),
             }
+        } },
+    CommandSpec { name: "set-v6-pixel-lock", category: Category::Style, context: Context::Global,
+        usage: "set-v6-pixel-lock [on|off|auto]", description: "lock v6 art to a whole number of device pixels per art pixel — bare toggles, auto inherits the global setting; persisted per-game",
+        dispatch: |a| match a.first().copied() {
+            None         => SlashOutcome::SetV6PixelLock(V6PixelLockArg::Toggle),
+            Some("on")   => SlashOutcome::SetV6PixelLock(V6PixelLockArg::On),
+            Some("off")  => SlashOutcome::SetV6PixelLock(V6PixelLockArg::Off),
+            Some("auto") => SlashOutcome::SetV6PixelLock(V6PixelLockArg::Auto),
+            Some(s) => err(format!("set-v6-pixel-lock: unknown argument '{s}' (on | off | auto, or bare to toggle)")),
         } },
     CommandSpec { name: "set-game-borders", category: Category::Style, context: Context::Global,
         usage: "set-game-borders on|off|auto", description: "show this game's Glk window borders (on), or render borderless/abutting (off); auto = default (on); persisted per-game",
@@ -927,13 +959,15 @@ mod tests {
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (Game 12, Map 21, View 6,
-        // Transcript 3, Style 7, Export 3, Animation 4, Help 3). `open-saves`
+        // Transcript 3, Style 8, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
         // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
         // and `open-style-editor` were removed (SQ-0309): the interactive
         // gallery/style-editor UIs are gone; `reload-style` remains.
         // `quit-to-library` (SQ-0435) exits to the story picker.
         // `set-v6-render` switches/cycles the v6 render mode live.
+        // SQ-0945 added `set-v6-pixel-lock`, the runtime switch for the
+        // magnification ladder, persisted in the per-game sidecar.
         // `nudge-room` was removed with Manual layout mode (SQ-0600).
         // `toggle-untried-exits` was retired with the overlay it drove (SQ-0666); `view-map`
         // and `mark-maze-layer` arrived with the matrix view.
@@ -945,7 +979,7 @@ mod tests {
         // registry entirely.
         // SQ-0439 retired `peel-layer` and `merge-layer` for the one verb they
         // always were, `move-region` — two entries out, one in.
-        assert_eq!(COMMANDS.len(), 77, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 78, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of
@@ -1069,6 +1103,19 @@ mod tests {
         assert!(matches!(parse("set-v6-render", '/'), SlashOutcome::SetV6Render(None)));
         assert!(matches!(parse("set-v6-render sepia", '/'), SlashOutcome::Error(_)));
         assert_eq!(find_command("set-v6-render").expect("set-v6-render").category, Category::Style);
+    }
+
+    /// SQ-0945: the runtime switch for SQ-0936's magnification ladder. Bare is a
+    /// TOGGLE — the form a key binding wants — and is distinct from `auto`, which
+    /// clears this game's override rather than flipping it.
+    #[test]
+    fn set_v6_pixel_lock_parses_on_off_auto_and_bare_toggles() {
+        assert!(matches!(parse("set-v6-pixel-lock on", '/'), SlashOutcome::SetV6PixelLock(V6PixelLockArg::On)));
+        assert!(matches!(parse("set-v6-pixel-lock off", '/'), SlashOutcome::SetV6PixelLock(V6PixelLockArg::Off)));
+        assert!(matches!(parse("set-v6-pixel-lock auto", '/'), SlashOutcome::SetV6PixelLock(V6PixelLockArg::Auto)));
+        assert!(matches!(parse("set-v6-pixel-lock", '/'), SlashOutcome::SetV6PixelLock(V6PixelLockArg::Toggle)));
+        assert!(matches!(parse("set-v6-pixel-lock maybe", '/'), SlashOutcome::Error(_)));
+        assert_eq!(find_command("set-v6-pixel-lock").expect("set-v6-pixel-lock").category, Category::Style);
     }
 
     #[test]

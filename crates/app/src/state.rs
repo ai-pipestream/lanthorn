@@ -2538,6 +2538,15 @@ pub struct AppState {
     /// (SQ-0318), so `auto` (no per-game override) falls back here.
     pub honor_game_colours_base: bool,
 
+    /// The global `v6_pixel_lock` default (from config.toml, before this game's
+    /// own sidecar override), captured at boot (SQ-0945).
+    ///
+    /// `set-v6-pixel-lock auto` clears the per-game key and has to put the live
+    /// `config.v6_pixel_lock` back to what the global file says — and by then the
+    /// boot-time override has already overwritten that field, exactly as
+    /// `honor_game_colours_base` exists to survive.
+    pub v6_pixel_lock_base: bool,
+
     /// True when `--no-game-colours` was typed on this launch (SQ-0855).
     ///
     /// The base above is already `false` in that case, but a base is only the
@@ -2897,6 +2906,7 @@ impl Default for AppState {
             transcript_filter: TranscriptFilter::Both,
             garglk_overlay: None,
             honor_game_colours_base: true,
+            v6_pixel_lock_base: false,
             no_game_colours_cli: false,
             artwork_declines_colours: false,
             story_zversion: None,

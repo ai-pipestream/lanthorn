@@ -325,9 +325,10 @@ you write the file directly.
 
 **Per-game settings**: alongside that style file, a game's save directory can hold
 its own `config.toml` — a separate, deliberately tiny sidecar carrying at most
-`honor_game_colours`, `borderless_windows` and `show_map`. It is written for you
-when you toggle one of those for a story (`/game-colours`, `/borderless`, hiding
-the map), and it is a *sparse override layer*, not a copy of your global config:
+`honor_game_colours`, `borderless_windows`, `show_map` and `v6_pixel_lock`. It is
+written for you when you toggle one of those for a story (`/set-game-colours`,
+`/set-game-borders`, `/set-v6-pixel-lock`, hiding the map), and it is a *sparse
+override layer*, not a copy of your global config:
 bare uncommented lines, only the keys that differ, and the file is deleted once
 nothing is overridden. An absent key means "inherit the global value" — which is
 why lanthorn never seeds the annotated template into a game directory, and why you
@@ -499,7 +500,11 @@ re-seed the new template, or hand-write the new shape from
   EGA/CGA ones go 1×, 2×, 3× … The cost is screen area — the picture stops at the
   rung below your pane rather than filling it, so the margin around it (painted with
   the story's own page) gets wider. A pane too small for even the smallest rung
-  quietly falls back to free scaling. See
+  quietly falls back to free scaling. Whether the trade is worth it depends on the
+  press you mounted, so it is settled **per game**: `/set-v6-pixel-lock` toggles it
+  live (`on` / `off` to say so outright, `auto` to go back to inheriting this global
+  key) and remembers the answer in that story's own sidecar, below — your global
+  `config.toml` is never written by it. See
   [Graphical v6](v6-graphics.md#v6_pixel_lock--a-whole-number-of-device-pixels-per-art-pixel).
 - **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
   blank columns on each side / rows top and bottom *inside* the story text pane,

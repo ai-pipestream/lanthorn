@@ -915,8 +915,9 @@ as well, so it cannot be moved without moving the text with it. That is the trad
 
 ### `v6_pixel_lock` — a whole number of device pixels per art pixel
 
-Off by default. Turn it on (settings screen, or `v6_pixel_lock = true` in
-`config.toml`) and the letterbox magnification stops being whatever fraction fills
+Off by default. Turn it on (settings screen, `v6_pixel_lock = true` in
+`config.toml`, or `/set-v6-pixel-lock` mid-game — see below) and the letterbox
+magnification stops being whatever fraction fills
 your pane and becomes a rung of a ladder, chosen so that **one art pixel is always a
 whole number of device pixels**. The 3-and-4-wide runs above become 3s or 4s and
 nothing in between; a resampled edge meeting a font glyph on a shared boundary stops
@@ -969,6 +970,25 @@ exactly as it already was.
 blocks and never says anything on the game screen — the same way every other
 too-small decision in lanthorn degrades rather than refuses. (The fallback is
 diagnostic state, destined for `/info`.)
+
+**And it is a per-game preference, not a global one.** Which side of that trade you
+want depends on the press you mounted — a 320-wide Amiga rendition has half-steps to
+land on and gives up little, while the Macintosh mono plate's whole-number ladder can
+cost you half the picture. So `/set-v6-pixel-lock` writes its answer into *this*
+game's `config.toml` sidecar and nowhere else:
+
+| | |
+|---|---|
+| `/set-v6-pixel-lock` | flip whatever is in force, and remember it for this game |
+| `/set-v6-pixel-lock on` / `off` | say it outright |
+| `/set-v6-pixel-lock auto` | forget this game's answer and inherit your global `v6_pixel_lock` |
+
+It takes effect on the next frame — there is no reload, and no restart. The bare
+form is a toggle precisely so it can be bound to a key and used to flip back and
+forth while you decide. Your global `config.toml` is never touched by any of this,
+including when you have the settings screen open at the time: a per-game value is
+held apart from the file exactly as `--no-game-colours` is, and only an edit to the
+settings screen's own **v6 pixel lock** row changes the global default.
 
 ### A picture is not stretched by the grid it sits on
 

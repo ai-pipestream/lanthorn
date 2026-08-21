@@ -13,9 +13,9 @@ pub fn per_game_style_path(game_dir: &Path) -> PathBuf {
 
 /// The per-game NON-style config sidecar: `<game_dir>/config.toml`. Holds
 /// per-game overrides that are not part of the style schema
-/// (`honor_game_colours`, `borderless_windows`, `show_map`, `pictures`), kept
-/// separate from `style.toml` so the style parser/writer stays a pure style
-/// document.
+/// (`honor_game_colours`, `borderless_windows`, `show_map`, `pictures`,
+/// `v6_pixel_lock`), kept separate from `style.toml` so the style parser/writer
+/// stays a pure style document.
 pub fn per_game_config_path(game_dir: &Path) -> PathBuf {
     game_dir.join("config.toml")
 }
@@ -84,6 +84,17 @@ pub fn read_per_game_interpreter_number(game_dir: &Path) -> Option<u8> {
     u8::try_from(v.get("interpreter_number")?.as_integer()?).ok()
 }
 
+/// Read the per-game `v6_pixel_lock` override, if the user set one (SQ-0945).
+/// `None` = no override, so the global `v6_pixel_lock` decides.
+///
+/// Which rung of the magnification ladder a story's artwork looks right on is a
+/// fact about that story's own press — the density its archive declares is what
+/// [`crate::render::v6_layout::scale_ladder_step`] derives the ladder from — so
+/// the switch is per-game before it is global. Written by `set-v6-pixel-lock`.
+pub fn read_per_game_v6_pixel_lock(game_dir: &Path) -> Option<bool> {
+    read_config_bool(game_dir, "v6_pixel_lock")
+}
+
 /// Write the per-game `config.toml` with the given overrides, omitting a `None`
 /// key and deleting the file entirely when all are `None`. Centralised so each
 /// key's writer preserves the others' values (SQ-0341). Creates `game_dir` if
@@ -95,6 +106,7 @@ fn write_per_game_config(
     show_map: Option<bool>,
     pictures: Option<String>,
     interpreter_number: Option<u8>,
+    v6_pixel_lock: Option<bool>,
 ) -> std::io::Result<()> {
     let path = per_game_config_path(game_dir);
     let mut body = String::new();
@@ -116,6 +128,9 @@ fn write_per_game_config(
     }
     if let Some(v) = interpreter_number {
         body.push_str(&format!("interpreter_number = {v}\n"));
+    }
+    if let Some(v) = v6_pixel_lock {
+        body.push_str(&format!("v6_pixel_lock = {v}\n"));
     }
     if body.is_empty() {
         return match std::fs::remove_file(&path) {
@@ -141,6 +156,7 @@ pub fn write_per_game_honor(game_dir: &Path, value: Option<bool>) -> std::io::Re
         read_per_game_show_map(game_dir),
         read_per_game_pictures(game_dir),
         read_per_game_interpreter_number(game_dir),
+        read_per_game_v6_pixel_lock(game_dir),
     )
 }
 
@@ -154,6 +170,7 @@ pub fn write_per_game_borderless(game_dir: &Path, value: Option<bool>) -> std::i
         read_per_game_show_map(game_dir),
         read_per_game_pictures(game_dir),
         read_per_game_interpreter_number(game_dir),
+        read_per_game_v6_pixel_lock(game_dir),
     )
 }
 
@@ -168,6 +185,7 @@ pub fn write_per_game_show_map(game_dir: &Path, value: Option<bool>) -> std::io:
         value,
         read_per_game_pictures(game_dir),
         read_per_game_interpreter_number(game_dir),
+        read_per_game_v6_pixel_lock(game_dir),
     )
 }
 
@@ -185,6 +203,7 @@ pub fn write_per_game_pictures(game_dir: &Path, value: Option<String>) -> std::i
         read_per_game_show_map(game_dir),
         value,
         read_per_game_interpreter_number(game_dir),
+        read_per_game_v6_pixel_lock(game_dir),
     )
 }
 
@@ -198,6 +217,22 @@ pub fn write_per_game_interpreter_number(game_dir: &Path, value: Option<u8>) -> 
         read_per_game_borderless(game_dir),
         read_per_game_show_map(game_dir),
         read_per_game_pictures(game_dir),
+        value,
+        read_per_game_v6_pixel_lock(game_dir),
+    )
+}
+
+/// Persist (or clear) the per-game `v6_pixel_lock` override (SQ-0945),
+/// preserving every sibling key. `None` clears it back to inheriting the global
+/// `v6_pixel_lock`, which is NOT the same as writing the global value down.
+pub fn write_per_game_v6_pixel_lock(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
+    write_per_game_config(
+        game_dir,
+        read_per_game_honor(game_dir),
+        read_per_game_borderless(game_dir),
+        read_per_game_show_map(game_dir),
+        read_per_game_pictures(game_dir),
+        read_per_game_interpreter_number(game_dir),
         value,
     )
 }
@@ -350,4 +385,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SQ-0945: `v6_pixel_lock` round-trips, clears back to ABSENT — which is
+    /// "inherit the global key", not "written at the default" — and survives
+    /// every sibling's whole-file rewrite, as every key in this sidecar must.
+    #[test]
+    fn per_game_v6_pixel_lock_roundtrips_and_coexists_with_others() {
+        let dir = tmp("pixellock");
+        assert_eq!(read_per_game_v6_pixel_lock(&dir), None);
+
+        write_per_game_v6_pixel_lock(&dir, Some(true)).unwrap();
+        assert_eq!(read_per_game_v6_pixel_lock(&dir), Some(true));
+        write_per_game_v6_pixel_lock(&dir, Some(false)).unwrap();
+        assert_eq!(read_per_game_v6_pixel_lock(&dir), Some(false));
+
+        // `false` is a CHOICE here, not a default to elide: it says "free-scale
+        // this one story" even when the global key is on. So it must be written.
+        assert!(
+            std::fs::read_to_string(per_game_config_path(&dir)).unwrap().contains("v6_pixel_lock = false"),
+            "an explicit off is a per-game override and has to reach the file"
+        );
+
+        // Every other writer carries it through.
+        write_per_game_honor(&dir, Some(true)).unwrap();
+        write_per_game_borderless(&dir, Some(true)).unwrap();
+        write_per_game_show_map(&dir, Some(false)).unwrap();
+        write_per_game_pictures(&dir, Some("zork0.mg1".into())).unwrap();
+        write_per_game_interpreter_number(&dir, Some(4)).unwrap();
+        assert_eq!(read_per_game_v6_pixel_lock(&dir), Some(false), "sibling writes kept it");
+
+        // And it carries THEM through.
+        write_per_game_v6_pixel_lock(&dir, Some(true)).unwrap();
+        assert_eq!(read_per_game_honor(&dir), Some(true));
+        assert_eq!(read_per_game_borderless(&dir), Some(true));
+        assert_eq!(read_per_game_show_map(&dir), Some(false));
+        assert_eq!(read_per_game_pictures(&dir), Some("zork0.mg1".to_string()));
+        assert_eq!(read_per_game_interpreter_number(&dir), Some(4));
+
+        // Clearing it leaves the siblings; clearing the last removes the file.
+        write_per_game_v6_pixel_lock(&dir, None).unwrap();
+        assert_eq!(read_per_game_v6_pixel_lock(&dir), None);
+        assert_eq!(read_per_game_honor(&dir), Some(true), "its clear kept honor");
+        write_per_game_honor(&dir, None).unwrap();
+        write_per_game_borderless(&dir, None).unwrap();
+        write_per_game_show_map(&dir, None).unwrap();
+        write_per_game_pictures(&dir, None).unwrap();
+        write_per_game_interpreter_number(&dir, None).unwrap();
+        assert!(!per_game_config_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

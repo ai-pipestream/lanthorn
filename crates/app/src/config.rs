@@ -808,6 +808,7 @@ pub mod keys {
     pub const HONOR_GAME_COLOURS: &str = "honor_game_colours";
     pub const ENABLE_SOUND: &str = "enable_sound";
     pub const INTERPRETER_NUMBER: &str = "interpreter_number";
+    pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
 }
 
 /// A value a one-run source pinned, in the shape the TOML key holds it.
@@ -3397,6 +3398,57 @@ use_defaults = false
         let back = std::fs::read_to_string(&cfg_path).unwrap();
         let reread: Config = toml::from_str(&back).unwrap();
         assert!(!reread.honor_game_colours, "a user's own choice persists as always");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SQ-0945: a per-game `v6_pixel_lock` is one story's preference, and a later
+    /// settings save must not turn it into everyone's. Same guard as the artwork
+    /// force above, reached from a different source — the game's own sidecar.
+    #[test]
+    fn a_per_game_v6_pixel_lock_does_not_persist_to_the_global_config() {
+        let dir = std::env::temp_dir().join(format!("bm-pixellock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        // Present and false — the case `put` rewrites even at the default.
+        std::fs::write(&cfg_path, "v6_pixel_lock = false
+").unwrap();
+
+        let mut cfg = resolve(&Cli {
+            story: Some(PathBuf::from("foo.z6")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(cfg_path.clone()),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            no_game_colours: false,
+            system_colours: false,
+            interpreter_number: None,
+            interpreter_version: None,
+            pictures: None,
+            trace: None,
+            debug: false,
+        });
+        assert!(!cfg.v6_pixel_lock, "the file's value loads");
+
+        // Boot with this game's sidecar saying "lock it", pinned as one-run.
+        cfg.v6_pixel_lock = true;
+        cfg.one_run.pin(keys::V6_PIXEL_LOCK, true);
+
+        write_config(&dir, &cfg).unwrap();
+        let reread: Config = toml::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        assert!(
+            !reread.v6_pixel_lock,
+            "the FILE must still say false — one game asked for the lock, not every game"
+        );
+
+        // …and the settings screen's own edit (which releases the pin) persists.
+        cfg.one_run.release(keys::V6_PIXEL_LOCK);
+        write_config(&dir, &cfg).unwrap();
+        let reread: Config = toml::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        assert!(reread.v6_pixel_lock, "a deliberate global edit persists as always");
 
         std::fs::remove_dir_all(&dir).ok();
     }
