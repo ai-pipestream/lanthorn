@@ -413,18 +413,54 @@ cargo run -p app --example gallery -- --list        # what it would take
 cargo run -p app --example gallery -- --only journey-amiga
 ```
 
-Four things are deliberate:
+Five things are deliberate:
 
 - **The output is labelled a render inside its own pixels.** Every frame gets a
   footer strip saying so, drawn in the bitmap face whatever the frame above it
   used. An image gets separated from its page the first time somebody drags it
   into a chat window, and the only claim that survives that trip is the one in
   the pixels. This is the price of the next bullet.
-- **It draws with a real typeface** (`--font`, else the first system monospace
-  face that loads, else the bitmap master; `fontdue` is a dev-dependency).
+- **It draws with a real typeface** (`--font`, else the first candidate that
+  loads, else the bitmap master; `fontdue` is a dev-dependency).
   `raster::render` keeps the bitmap face and the tests never pass the flag, so
   the geometry oracle goes on looking as synthetic as it should — giving *that*
   a real font would make it 90% convincing at a job it cannot do.
+
+  The default face and its size are a **measurement** (SQ-0963). A half-block
+  sample is one cell wide and half a cell tall, so square samples want a cell of
+  exactly 1:2 — and because a cell is `round(advance · px)` by `round(line · px)`,
+  what matters is how often the *rounded* cell lands there. Fira Code (0.615 /
+  1.231 em = 2.000) does at ten sizes in 6..24 px/em — 5x10, 6x12, 7x14, 8x16,
+  9x18, 10x20, 11x22, 13x26, 14x28, 15x30, the historical terminal cells — where
+  JetBrains Mono (2.200), which this list used to lead with, manages one. So Fira
+  Code leads the list, the shots are captured at 8x16 (kitty, was 8x18) and 10x20
+  (half-blocks), and the rasterisation size comes from the face's own line
+  metrics rather than a `0.78 × cell_h` guess: 13px and 16px respectively, with a
+  printed complaint if some other face's cell does not match the box it sits in.
+
+  Coverage stopped being the deciding question at the same time. `Face::draw`
+  used to send a fixed RANGE — U+2500..=U+259F — to the bitmap master and
+  everything else to fontdue, so the map's arrowheads (Arrows and Geometric
+  Shapes) came out as `.notdef` boxes under Monaco. It now asks the face whether
+  it **has** the glyph (`fontdue::Font::has_glyph`) and falls back for anything it
+  does not, which fixes every face rather than one; the structural range still
+  goes to the bitmap master even when the face has it, because a text face draws
+  those with gaps at the cell seams. Anything neither can draw is named in the
+  run's output, since a blank cell is quieter than a tofu box and this quest
+  exists because a tofu box went unnoticed.
+
+- **A shot's `size` is a magnification.** A v6 press lays out on a fixed native
+  screen (640x400 for everything in the manifest) and lanthorn letterboxes it
+  into the story pane at `min(box_w / native_w, box_h / native_h)`, unrounded;
+  the composite is then resized once to `round(native · s)` with every band a 1:1
+  crop out of it. So `s` is the only place softness can enter, and the manifest's
+  sizes are the ones where it is a whole number — 96x28, 162x53 and 242x78 for a
+  640x400 press at an 8x16 cell (1x, 2x, 3x), 130x43 at half-blocks' 10x20. The
+  first draft was 117x40 throughout, which is 1.4375x. `Provenance` derives the
+  native screen from the mounted medium through `startup.rs`'s own chain, the
+  tool prints the magnification under every frame, and
+  `every_v6_shot_magnifies_by_a_whole_number` fails the gate if a size drifts off
+  it. This cannot become one constant: Arthur's Apple II press is 560x384.
 - **Nothing about a frame is declared twice.** The release and serial come from
   the header of the bytes the medium mounted; the turn count is counted off the
   key script. A manifest that tries to state either is refused.

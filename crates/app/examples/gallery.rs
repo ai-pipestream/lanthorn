@@ -218,11 +218,15 @@ fn main() -> std::process::ExitCode {
                 }
             }
         };
+        if let Some(c) = face.cell_complaint(cell_w, cell_h) {
+            eprintln!("\ngallery: {c}");
+        }
         let frame = pty_stream::raster::render_with(&res, &|canvas, ch, px, py, cw, chh, fg| {
             face.draw(canvas, ch, px, py, cw, chh, fg)
         });
 
         let png = out.join(format!("{}.png", shot.id));
+        let native = provenance.native;
         let mut t = Taken {
             id: shot.id.clone(),
             png: png.clone(),
@@ -240,6 +244,9 @@ fn main() -> std::process::ExitCode {
             captured_bytes: cap.bytes.len(),
             width: frame.width(),
             height: frame.height(),
+            native,
+            magnification: native.and_then(|n| shot.magnification(n)),
+            unresolved_glyphs: face.unresolved(),
         };
         let labelled = gallery::label(&frame, &gallery::label_lines(&t));
         t.width = labelled.width();
@@ -247,11 +254,17 @@ fn main() -> std::process::ExitCode {
         match labelled.save(&png) {
             Ok(()) => {
                 println!(
-                    "{}x{} px  {}  {} keypress(es)",
+                    "{}x{} px  {}  {} keypress(es){}{}",
                     labelled.width(),
                     labelled.height(),
                     t.provenance.describe(),
-                    t.turns
+                    t.turns,
+                    t.scale_note().map(|n| format!("  {n}")).unwrap_or_default(),
+                    if t.unresolved_glyphs.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  NO GLYPH ANYWHERE FOR: {}", t.unresolved_glyphs.iter().collect::<String>())
+                    }
                 );
                 taken.push(t);
             }
@@ -296,8 +309,12 @@ gallery — regenerate the project gallery from examples/gallery.toml
   --out DIR         where the frames go (default: target/gallery)
   --only IDS        comma list of shot ids to regenerate
   --list            print the shots that would be taken, and stop
-  --font PATH       a TTF to draw the text with (default: the first system
-                    monospace face that loads, else the bitmap master)
+  --font PATH       a TTF to draw the text with (default: Fira Code Nerd Font
+                    Mono if it is installed, else the first candidate that
+                    loads, else the bitmap master). Any face works — a glyph it
+                    lacks falls back to the bitmap master — but a face whose
+                    cell is not 1:2 will say so, because that is what makes a
+                    half-block sample square
   --bitmap-font     force the harness's own Uni-VGA face
   --bin PATH        lanthorn binary (default: beside this example, or $LANTHORN_BIN)
   --timeout SECS    per-shot ceiling (default 90)

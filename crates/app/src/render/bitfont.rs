@@ -121,6 +121,18 @@ pub(crate) fn glyph_bits(glyph: char) -> Option<[u8; 8]> {
         .or_else(|| EXTRA_GLYPHS.iter().find(|&&(c, _)| c == glyph).map(|&(_, bits)| bits))
 }
 
+/// Whether either master in this module carries `glyph` — the 8×16 face or the
+/// 8×8 one [`blit_glyph`] falls back to.
+///
+/// [`blit_glyph`] paints a blank cell for anything it does not have, which is the
+/// right thing to DRAW and a terrible thing to be unable to ASK about: a caller
+/// that hands this module the glyphs a text face declined has no other way to
+/// learn that the fallback declined them too, and a missing glyph is silent
+/// either way (SQ-0963). The gallery tool asks, and names what fell through both.
+pub fn has_glyph(glyph: char) -> bool {
+    crate::render::vga16::glyph(glyph).is_some() || glyph_bits(glyph).is_some()
+}
+
 /// Read one bit from an 8×8 bitmap, clamping out-of-range `row`/`col` to the
 /// nearest edge pixel (so [`scale2x`]'s neighbour rule degrades to plain
 /// replication at the glyph's border instead of treating off-canvas space as

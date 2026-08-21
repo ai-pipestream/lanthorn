@@ -247,14 +247,67 @@ impl Shot {
     /// BACKEND, never by the manifest.
     ///
     /// `Picker::halfblocks()` assumes a 10x20 cell whatever the terminal
-    /// reported, so a half-block capture taken at 8x18 draws a geometry lanthorn
-    /// was not using and every proportion in the picture is wrong. Kitty asks
-    /// the terminal, so kitty gets the cell we answered `CSI 16 t` with.
+    /// reported, so a half-block capture taken at any other size draws a
+    /// geometry lanthorn was not using and every proportion in the picture is
+    /// wrong. Kitty asks the terminal, so kitty gets the cell we answered
+    /// `CSI 16 t` with — and what we answer is ours to choose well.
+    ///
+    /// BOTH CELLS ARE EXACTLY 1:2 (SQ-0963), and that is the point rather than a
+    /// coincidence. A half-block sample is `cell_width` wide by `cell_height / 2`
+    /// tall, so a square sample — equal resolution on both axes — wants a cell
+    /// of exactly 1:2, and anything else samples the artwork finer across than
+    /// down for no reason at all. The kitty cell was 8x18 and is now **8x16**:
+    /// 1:2, the historical VGA text cell, the cell `app::render::bitfont`'s
+    /// Uni-VGA master blits into 1:1 rather than resampling, and one of the ten
+    /// sizes the gallery's own face lands a whole-numbered cell on (see
+    /// [`FONT_CANDIDATES`]). `the_cell_is_square_for_half_block_samples` pins it.
     pub fn cell_px(&self) -> (u16, u16) {
         match self.backend {
-            Backend::Kitty => (8, 18),
+            Backend::Kitty => (8, 16),
             Backend::Halfblocks => (10, 20),
         }
+    }
+
+    /// The story pane's CONTENT rect in cells — the box the v6 composite is
+    /// magnified into — or `None` when this shot cannot answer.
+    ///
+    /// `compute_pane_layout` reserves one row for the help bar and nothing else
+    /// while the command band and the inventory dock are closed (`layout.rs`),
+    /// and `draw_framed` then insets the pane one cell on every side for its
+    /// border. So a full-width story pane's content is `COLS - 2` by `ROWS - 3`.
+    ///
+    /// `None` for a map shot, deliberately. A split pane's width is a percentage
+    /// of the frame resolved by ratatui, which is the app's arithmetic and not
+    /// this file's to restate — and the one map shot in the manifest is a v3
+    /// story with no pixel screen to magnify anyway.
+    pub fn pane_content_cells(&self) -> Option<(u32, u32)> {
+        if self.show_map {
+            return None;
+        }
+        let (cols, rows) = self.size_cells().ok()?;
+        Some((u32::from(cols).checked_sub(2)?, u32::from(rows).checked_sub(3)?))
+    }
+
+    /// How far the v6 composite is magnified in this shot: the aspect-preserving
+    /// fit of `native` into the pane's device box, exactly as `uniform_scale`
+    /// computes it (`v6_layout.rs`) — `min(box_w / native_w, box_h / native_h)`,
+    /// unrounded and unclamped.
+    ///
+    /// WHY IT WANTS TO BE A WHOLE NUMBER (SQ-0963). At any other value every edge
+    /// in the artwork is interpolated: the composite is resized once to
+    /// `round(native * s)` and the bands are 1:1 crops out of that, so `s` is the
+    /// only place softness can enter and a fractional `s` guarantees it. At an
+    /// integer `s` one art pixel lands on a whole number of device pixels on both
+    /// axes and the frame is exactly as crisp as the artwork is.
+    ///
+    /// This is a per-shot number and cannot be one constant: a Blorb press is
+    /// 640x400, the standard Macintosh plate 480x304.
+    pub fn magnification(&self, native: (u32, u32)) -> Option<f64> {
+        let (cc, cr) = self.pane_content_cells()?;
+        let (cw, ch) = self.cell_px();
+        let (bw, bh) = (cc * u32::from(cw), cr * u32::from(ch));
+        let (nw, nh) = (native.0.max(1), native.1.max(1));
+        Some((f64::from(bw) / f64::from(nw)).min(f64::from(bh) / f64::from(nh)))
     }
 
     /// The scripted keys.
@@ -311,6 +364,15 @@ pub struct Provenance {
     pub serial: String,
     /// The filesystem the mount reported, in prose, or "story file".
     pub medium: String,
+    /// The v6 native screen in zvm pixels — the size the art is magnified FROM.
+    /// `None` for every non-v6 story, which has no pixel screen to speak of.
+    ///
+    /// Derived like everything else here: this press's own picture space at this
+    /// press's own art scale. It is not one number for the corpus — a Blorb press
+    /// is 640x400, the standard Macintosh plate is 480x304, Arthur's Apple II
+    /// press is 560x384 — so the pane size that magnifies it by a whole number
+    /// is a per-shot answer and not a constant (SQ-0963).
+    pub native: Option<(u32, u32)>,
 }
 
 impl Provenance {
@@ -326,6 +388,7 @@ impl Provenance {
             release: u16::from_be_bytes([bytes[2], bytes[3]]),
             serial: String::from_utf8_lossy(&bytes[0x12..0x18]).into_owned(),
             medium: medium_name(image),
+            native: (bytes[0] == 6).then(|| native_screen(path, image)).flatten(),
         })
     }
 
@@ -333,6 +396,32 @@ impl Provenance {
     pub fn describe(&self) -> String {
         format!("v{} r{}/s{} off {}", self.version, self.release, self.serial, self.medium)
     }
+}
+
+/// The v6 native screen this press lays itself out on, in zvm pixels.
+///
+/// The chain is `startup.rs`'s and `session.rs`'s, written out rather than
+/// approximated: the picture space through `std_window → native_std_window →
+/// profile`, times the art scale that space is drawn at. CLAUDE.md is emphatic
+/// that a harness which skips a rung of it measures a screen the player never
+/// sees — Journey r77 and Arthur r63 are 560x384 presses that come out 640x400
+/// if `native_std_window` is left off — and this number is the DENOMINATOR of
+/// every magnification below, so getting it wrong would make each of them
+/// self-consistently wrong.
+fn native_screen(path: &Path, image: Option<app::hints::DiskImage>) -> Option<(u32, u32)> {
+    let profile = app::interpreter::InterpreterProfile::resolve(path, None, None, image);
+    let picts = app::graphics::PictSource::resolve(path, None);
+    let space = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
+    let art_scale = picts.art_scale();
+    // `session.rs`'s own rule: a declared picture space is drawn at the scale
+    // this machine drew it; absent one there is nothing to scale and the
+    // uniform doubling stands.
+    let (aw, ah) = space.unwrap_or((320, 200));
+    let (sx, sy) = match (space, art_scale) {
+        (Some(_), Some(s)) => s,
+        _ => (2, 2),
+    };
+    Some((u32::from(aw) * sx.max(1), u32::from(ah) * sy.max(1)))
 }
 
 fn medium_name(image: Option<app::hints::DiskImage>) -> String {
@@ -378,6 +467,28 @@ pub struct Taken {
     pub captured_bytes: usize,
     pub width: u32,
     pub height: u32,
+    /// The v6 native screen this press lays out on, and how far the pane
+    /// magnified it. `None` for a story with no pixel screen, and for the map
+    /// shot whose pane is a split this file does not restate.
+    pub native: Option<(u32, u32)>,
+    pub magnification: Option<f64>,
+    /// Characters neither the face nor the bitmap master could draw.
+    pub unresolved_glyphs: Vec<char>,
+}
+
+impl Taken {
+    /// `640x400 native, 2.000x` — or a complaint when the magnification is not a
+    /// whole number, since that is the one thing about it worth reading.
+    pub fn scale_note(&self) -> Option<String> {
+        let (n, m) = (self.native?, self.magnification?);
+        let whole = (m - m.round()).abs() < 1e-9 && m >= 1.0;
+        Some(format!(
+            "{}x{} native at {m:.3}x{}",
+            n.0,
+            n.1,
+            if whole { "" } else { " (NOT a whole number — every edge in the art is interpolated)" }
+        ))
+    }
 }
 
 /// Boot lanthorn for one shot and hand back the capture, having first refused
@@ -519,22 +630,55 @@ pub enum Face {
     /// [`app::render::bitfont`] — Uni-VGA 8x16, the face the v6 pixel composite
     /// itself draws with.
     Bitmap,
-    /// A TrueType face rasterised at the cell height.
-    Outline { name: String, font: Box<fontdue::Font>, px: f32 },
+    /// A TrueType face rasterised at the size its own metrics put in the cell.
+    Outline {
+        name: String,
+        font: Box<fontdue::Font>,
+        px: f32,
+        /// The cell this face's own metrics round to at `px`: `round(advance)`
+        /// by `round(line height)`. Equal to the shot's cell when the size was
+        /// chosen well, and worth printing when it is not.
+        natural: (u32, u32),
+        /// Every character neither this face nor the bitmap master could draw.
+        ///
+        /// The reason this quest exists is that a missing glyph is SILENT: the
+        /// map's arrowheads came out as `.notdef` boxes under Monaco and the run
+        /// reported nothing at all. A blank cell is quieter still, so the ones
+        /// that get this far are counted and named at the end of the run.
+        unresolved: std::cell::RefCell<BTreeSet<char>>,
+    },
 }
 
 impl Face {
-    /// Load a TTF and size it to the cell.
+    /// Load a TTF and size it to the cell FROM THE FACE'S OWN METRICS.
     ///
-    /// Sized by CELL rather than by the font's own metrics: every glyph in a
-    /// terminal occupies exactly one cell, so the only sane rasterisation here
-    /// is one that fills the box the layout already decided on.
+    /// Every glyph in a terminal occupies exactly one cell, so the rasterisation
+    /// that belongs here is the one whose natural line box IS the cell: `px =
+    /// cell_h / new_line_size(1px)`. That used to be `cell_h * 0.78`, a constant
+    /// that happens to be near the truth for some faces and not for others, and
+    /// which quietly stretched or shrank the type against the cell it sat in.
+    ///
+    /// For the default face at the two cells this tool captures at, the answer is
+    /// one of the sweet-spot sizes the quest names: 13px in an 8x16 cell, 16px in
+    /// a 10x20 one (SQ-0963). A face with no horizontal line metrics at all keeps
+    /// the old constant, because something has to be drawn.
     pub fn outline(path: &Path, cell_h: u16) -> Result<Face, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("font {}: {e}", path.display()))?;
         let font = fontdue::Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default())
             .map_err(|e| format!("font {}: {e}", path.display()))?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "font".into());
-        Ok(Face::Outline { name, font: Box::new(font), px: f32::from(cell_h) * 0.78 })
+        let per_px = font.horizontal_line_metrics(1.0).map(|m| m.new_line_size).filter(|v| *v > 0.0);
+        let px = match per_px {
+            Some(line) => (f32::from(cell_h) / line).round().max(1.0),
+            None => f32::from(cell_h) * 0.78,
+        };
+        // The advance is the same for every glyph in a monospace face, so `M`
+        // answers for all of them.
+        let natural = (
+            font.metrics('M', px).advance_width.round().max(1.0) as u32,
+            per_px.map_or(u32::from(cell_h), |line| (line * px).round().max(1.0) as u32),
+        );
+        Ok(Face::Outline { name, font: Box::new(font), px, natural, unresolved: Default::default() })
     }
 
     /// How the label should name this face — which is the whole reason a real
@@ -542,7 +686,35 @@ impl Face {
     pub fn describe(&self) -> String {
         match self {
             Face::Bitmap => "Uni-VGA 8x16 (the harness's own bitmap face)".to_string(),
-            Face::Outline { name, px, .. } => format!("{name} rasterised at {px:.0}px by the harness"),
+            Face::Outline { name, px, natural, .. } => {
+                format!("{name} rasterised at {px:.0}px ({}x{}) by the harness", natural.0, natural.1)
+            }
+        }
+    }
+
+    /// Whether this face's own cell at its chosen size IS the cell it is drawn
+    /// into. A complaint when it is not — never fatal, because a reader can still
+    /// judge layout from slightly wrong type, but printed, because the whole
+    /// reason a size is pinned is that nobody notices a drift by eye.
+    pub fn cell_complaint(&self, cell_w: u16, cell_h: u16) -> Option<String> {
+        match self {
+            Face::Bitmap => None,
+            Face::Outline { name, px, natural, .. } => (*natural != (u32::from(cell_w), u32::from(cell_h)))
+                .then(|| {
+                    format!(
+                        "{name} at {px:.0}px has a {}x{} cell, but this shot is captured at {cell_w}x{cell_h} — \
+                         the type will not sit square in it (SQ-0963 pins a face whose cell is exactly 1:2)",
+                        natural.0, natural.1
+                    )
+                }),
+        }
+    }
+
+    /// Characters no face in the chain could draw, in codepoint order.
+    pub fn unresolved(&self) -> Vec<char> {
+        match self {
+            Face::Bitmap => Vec::new(),
+            Face::Outline { unresolved, .. } => unresolved.borrow().iter().copied().collect(),
         }
     }
 
@@ -550,14 +722,30 @@ impl Face {
     pub fn draw(&self, canvas: &mut RgbaImage, ch: char, px: u32, py: u32, cw: u32, chh: u32, fg: Rgba<u8>) {
         match self {
             Face::Bitmap => app::render::bitfont::blit_glyph(canvas, ch, px, py, cw, chh, fg, None),
-            Face::Outline { font, px: size, .. } => {
+            Face::Outline { font, px: size, unresolved, .. } => {
                 // The half-block and box-drawing glyphs are the picture's
                 // STRUCTURE — rules, borders, and every pixel of a half-block
                 // frame. A text face either lacks them or draws them with gaps
                 // at the cell seams, so they stay with the bitmap master whose
                 // cells tile exactly.
-                if is_structural(ch) {
+                //
+                // And then the CAPABILITY question, which is the durable half
+                // (SQ-0963). The old rule was a RANGE — U+2500..=U+259F — so the
+                // map's arrowheads, which are Arrows and Geometric Shapes, went
+                // to fontdue, which drew `.notdef`. Widening the range would fix
+                // that one set of glyphs for that one face; asking the face
+                // whether it HAS the glyph fixes it for every face anyone passes
+                // to `--font`, including the ones nobody has thought of.
+                if is_structural(ch) || !font.has_glyph(ch) {
                     app::render::bitfont::blit_glyph(canvas, ch, px, py, cw, chh, fg, None);
+                    // The master is a short hand-authored list, not a font: it
+                    // covers font 3, the ZSCII table and the runes, and nothing
+                    // says it covers whatever the face just declined. Record what
+                    // fell through both, so the next silent gap is a printed line
+                    // rather than a blank cell somebody eventually notices.
+                    if !is_structural(ch) && !ch.is_whitespace() && !app::render::bitfont::has_glyph(ch) {
+                        unresolved.borrow_mut().insert(ch);
+                    }
                     return;
                 }
                 let (m, bitmap) = font.rasterize(ch, *size);
@@ -604,11 +792,47 @@ fn is_structural(ch: char) -> bool {
     matches!(ch, '\u{2500}'..='\u{259F}')
 }
 
-/// Monospace faces worth trying when `--font` was not given, in order.
+/// Monospace faces worth trying when `--font` was not given, in order. `~/`
+/// means the user's home directory; nothing else is expanded.
+///
+/// **Fira Code leads, and it is a measurement rather than a taste** (SQ-0963).
+/// A half-block sample is `cell_width` wide by `cell_height / 2` tall, so square
+/// samples want a cell of exactly 1:2, and a face's cell is `round(advance · px)`
+/// by `round(line · px)` — the two round at different rates, so what matters is
+/// how often the ROUNDED cell lands on 2.000 rather than what the em ratio says.
+/// Measured off the sfnt tables, over 6..24 px/em:
+///
+/// | face | advance/line (em) | ratio | rounded cells that hit 2.000 |
+/// |---|---|---|---|
+/// | Fira Code Nerd Font | 0.615 / 1.231 | **2.000** | 10 of 19 — 5x10, 6x12, 7x14, 8x16, 9x18, 10x20, 11x22, 13x26, 14x28, 15x30 |
+/// | 0xProto Nerd Font Mono | 0.620 / 1.200 | 1.935 | — |
+/// | Source Code Pro Nerd Font Mono | 0.600 / 1.257 | 2.095 | — |
+/// | JetBrains Mono Nerd Font Mono | 0.600 / 1.320 | 2.200 | 1 of 19, at 4x8 |
+/// | Monaco | 0.600 / 1.333 | 2.222 | — |
+/// | Iosevka Term Nerd Font Mono | 0.500 / 1.250 | 2.500 | — |
+///
+/// Those ten sizes are the historical terminal cells, and [`Shot::cell_px`]
+/// captures at two of them. JetBrains Mono — which this list led with, chosen on
+/// glyph coverage back when coverage was load-bearing — is 10% off at every size
+/// anyone would pick, so its shots sampled the artwork coarser down than across.
+///
+/// Coverage is no longer the deciding question, because [`Face::draw`] asks the
+/// face whether it HAS each glyph and falls back to the bitmap master when it
+/// does not. Worth knowing anyway: Fira Code does carry the map's arrowheads
+/// (`↑ ↓ ▲ ▼ ◀ ▶`, verified against its `cmap`) and does NOT carry the portal
+/// badges `⊙`/`⊗`, which JetBrains Mono did. Neither does the bitmap master, so
+/// a frame containing one is named in the run's output rather than silently
+/// losing it.
 ///
 /// Deliberately short and platform-obvious. `.ttc` collections are skipped —
 /// fontdue reads a single face — so this list is plain `.ttf` only.
 pub const FONT_CANDIDATES: &[&str] = &[
+    "~/Library/Fonts/FiraCodeNerdFontMono-Regular.ttf",
+    "/Library/Fonts/FiraCodeNerdFontMono-Regular.ttf",
+    "~/.local/share/fonts/FiraCodeNerdFontMono-Regular.ttf",
+    "/usr/share/fonts/truetype/firacode/FiraCodeNerdFontMono-Regular.ttf",
+    "/usr/share/fonts/TTF/FiraCodeNerdFontMono-Regular.ttf",
+    "/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf",
     "/System/Library/Fonts/Menlo.ttf",
     "/System/Library/Fonts/Monaco.ttf",
     "/System/Library/Fonts/Supplemental/Andale Mono.ttf",
@@ -617,15 +841,27 @@ pub const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
 ];
 
+/// A candidate's path with a leading `~/` resolved against `$HOME`.
+///
+/// Nerd Fonts install per-user on both macOS and Linux — `~/Library/Fonts` and
+/// `~/.local/share/fonts` — so a list of absolute paths could not name the face
+/// this tool is supposed to lead with.
+pub fn candidate_path(cand: &str) -> Option<PathBuf> {
+    match cand.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)),
+        None => Some(PathBuf::from(cand)),
+    }
+}
+
 /// The first candidate that loads, or the bitmap face.
 pub fn pick_face(explicit: Option<&Path>, cell_h: u16) -> Result<Face, String> {
     if let Some(p) = explicit {
         return Face::outline(p, cell_h);
     }
     for cand in FONT_CANDIDATES {
-        let p = Path::new(cand);
+        let Some(p) = candidate_path(cand) else { continue };
         if p.is_file() {
-            if let Ok(f) = Face::outline(p, cell_h) {
+            if let Ok(f) = Face::outline(&p, cell_h) {
                 return Ok(f);
             }
         }
@@ -721,7 +957,7 @@ pub fn label_lines(t: &Taken) -> Vec<String> {
     vec![
         "RENDER, NOT A SCREENSHOT - honest about layout, art placement and colour; the type is the harness's".to_string(),
         format!(
-            "{} | {} | {} | {}x{} cells at {}x{}px | {} | {} keypress(es) | seed {} | {} | lanthorn {}",
+            "{} | {} | {} | {}x{} cells at {}x{}px | {} | {} keypress(es) | seed {} | {}{} | lanthorn {}",
             t.id,
             t.provenance.describe(),
             t.face,
@@ -733,6 +969,11 @@ pub fn label_lines(t: &Taken) -> Vec<String> {
             t.turns,
             t.seed,
             t.png.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            // The magnification travels with the picture for the same reason the
+            // release does: it is the difference between a frame whose art is
+            // pixel-exact and one whose every edge was interpolated, and it is
+            // not recoverable by looking (SQ-0963).
+            t.scale_note().map(|s| format!(" | {s}")).unwrap_or_default(),
             buildinfo::LONG,
         ),
     ]
@@ -777,7 +1018,7 @@ pub fn contact_sheet(taken: &[Taken], failed: &[String]) -> String {
         let _ = writeln!(s, "<figure><img src=\"{}\" alt=\"{}\">", escape(&name), escape(&t.id));
         let _ = writeln!(
             s,
-            "<figcaption><code>{}</code> — {} — {} — {}x{} cells, {} — {} keypress(es), seed {}</figcaption></figure>",
+            "<figcaption><code>{}</code> — {} — {} — {}x{} cells, {} — {} keypress(es), seed {}{}{}</figcaption></figure>",
             escape(&t.id),
             escape(&t.provenance.describe()),
             escape(&t.face),
@@ -785,7 +1026,16 @@ pub fn contact_sheet(taken: &[Taken], failed: &[String]) -> String {
             t.rows,
             t.backend.as_str(),
             t.turns,
-            t.seed
+            t.seed,
+            t.scale_note().map(|n| format!(" — {}", escape(&n))).unwrap_or_default(),
+            if t.unresolved_glyphs.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " — <strong>no glyph anywhere for {}</strong>",
+                    escape(&t.unresolved_glyphs.iter().collect::<String>())
+                )
+            }
         );
     }
     s
@@ -824,6 +1074,27 @@ pub fn recipe_json(taken: &[Taken], manifest: &Path) -> String {
         let _ = writeln!(s, "      \"verdict\": {},", json_str(&t.verdict));
         let _ = writeln!(s, "      \"attempts\": {},", t.attempts);
         let _ = writeln!(s, "      \"captured_bytes\": {},", t.captured_bytes);
+        match t.native {
+            Some((w, h)) => {
+                let _ = writeln!(s, "      \"native_px\": [{w}, {h}],");
+            }
+            None => {
+                let _ = writeln!(s, "      \"native_px\": null,");
+            }
+        }
+        match t.magnification {
+            Some(m) => {
+                let _ = writeln!(s, "      \"magnification\": {m:.6},");
+            }
+            None => {
+                let _ = writeln!(s, "      \"magnification\": null,");
+            }
+        }
+        let _ = writeln!(
+            s,
+            "      \"unresolved_glyphs\": {},",
+            json_str(&t.unresolved_glyphs.iter().collect::<String>())
+        );
         let _ = writeln!(s, "      \"png_px\": [{}, {}]", t.width, t.height);
         let _ = writeln!(s, "    }}{}", if i + 1 == taken.len() { "" } else { "," });
     }
