@@ -158,18 +158,9 @@ pub fn fit_for_protocol(
     if target.width == 0 || target.height == 0 {
         return (img.clone(), target);
     }
-    let fs = picker.font_size();
-    let (fw, fh) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
-    let (sw, sh) = (img.width().max(1), img.height().max(1));
-    let (bw, bh) = (target.width as u32 * fw, target.height as u32 * fh);
-    // Which cell rect the protocol will report: the fit, rounded UP to whole cells.
-    let (cw, ch) = if upscale { (bw, bh) } else { (bw.min(sw), bh.min(sh)) };
-    let (aw, ah) = fit_proportionally(sw, sh, cw, ch);
-    let area = Size::new(aw.div_ceil(fw) as u16, ah.div_ceil(fh) as u16);
-    // Then the pixels inside it. The second fit is not redundant: the ceil above can
-    // add up to a cell on each axis, and the crate resamples into that whole box.
-    let (pw, ph) = (area.width as u32 * fw, area.height as u32 * fh);
-    let (tw, th) = fit_proportionally(sw, sh, pw, ph);
+    let g = fit_geometry(picker.font_size(), (img.width(), img.height()), target, upscale);
+    let (pw, ph) = g.boxed;
+    let (tw, th) = g.pic;
     let scaled = resize_directional(&img.to_rgba8(), tw, th);
     let out = if (tw, th) == (pw, ph) {
         scaled
@@ -178,7 +169,128 @@ pub fn fit_for_protocol(
         image::imageops::replace(&mut padded, &scaled, 0, 0);
         padded
     };
-    (image::DynamicImage::ImageRgba8(out), area)
+    (image::DynamicImage::ImageRgba8(out), g.cells)
+}
+
+/// Where an aspect-preserving fit lands, in cells and in pixels — the whole of
+/// [`fit_for_protocol`]'s geometry, kept apart from its resample so the half-blocks
+/// arm of [`fitted_protocol`] can reach the same cells by a different route (SQ-0979).
+///
+/// The two answers cannot be allowed to differ. `Protocol::size()` is what every
+/// caller centres against — [`GraphicsRender::render`]'s letterbox, the resource
+/// preview's, and the gallery's own `fitted_tile_rect` — so a cell rect that moved
+/// when the backend changed would be a layout change wearing a performance fix's
+/// clothes. `fitted_cells_match_the_prescale` pins them against each other.
+struct FitGeometry {
+    /// The cell rect the protocol will report.
+    cells: Size,
+    /// The fitted picture, in device pixels.
+    pic: (u32, u32),
+    /// `cells` in device pixels — what `pic` is padded out to, top-left.
+    boxed: (u32, u32),
+}
+
+fn fit_geometry(
+    fs: ratatui_image::FontSize,
+    src: (u32, u32),
+    target: Size,
+    upscale: bool,
+) -> FitGeometry {
+    let (fw, fh) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+    let (sw, sh) = (src.0.max(1), src.1.max(1));
+    let (bw, bh) = (target.width as u32 * fw, target.height as u32 * fh);
+    // Which cell rect the protocol will report: the fit, rounded UP to whole cells.
+    let (cw, ch) = if upscale { (bw, bh) } else { (bw.min(sw), bh.min(sh)) };
+    let (aw, ah) = fit_proportionally(sw, sh, cw, ch);
+    let cells = Size::new(aw.div_ceil(fw) as u16, ah.div_ceil(fh) as u16);
+    // Then the pixels inside it. The second fit is not redundant: the ceil above can
+    // add up to a cell on each axis, and the crate resamples into that whole box.
+    let boxed = (cells.width as u32 * fw, cells.height as u32 * fh);
+    FitGeometry { cells, pic: fit_proportionally(sw, sh, boxed.0, boxed.1), boxed }
+}
+
+/// The protocol a fitted picture goes on screen as: cover art, gallery tiles, the
+/// resource preview and the non-kitty graphics-window blit (SQ-0979).
+///
+/// One call in place of the [`fit_for_protocol`] + `new_protocol(.., Resize::Fit(None))`
+/// pair those four sites each wrote out, because on HALF-BLOCKS that pair resamples
+/// twice. `fit_for_protocol` pre-scales to the pane's device pixels, and
+/// `Halfblocks::encode` then takes whatever it is handed straight back down to
+/// `cols x 2·rows` samples — one per column, two per row, `font_size` thrown away. At
+/// a 20x11 gallery tile on a 10x20 font that is a 200x220 intermediate built to reach
+/// a 20x22 grid, and up-then-down through two filters is blurrier than one pass down.
+/// So half-blocks resamples ONCE, onto the sample grid itself, exactly as the v6
+/// composite has since SQ-0973.
+///
+/// **Only half-blocks.** Kitty, sixel and iTerm2 genuinely encode pixels, so the
+/// pre-scale is the right shape for them and is byte for byte where SQ-0829 left it —
+/// and `GraphicsRender::render` never reaches here under kitty at all, which places
+/// its own canvas. `only_halfblocks_leaves_the_fit_prescale_behind` is that claim.
+///
+/// The CELL RECT is the same either way: [`fit_geometry`] answers it once, and the
+/// half-blocks arm maps the picture onto its grid rather than choosing a new box. So
+/// nothing centred against `Protocol::size()` moves.
+///
+/// `None` when the protocol fails to build — every caller draws nothing, which is what
+/// each of them did with the `Err` this replaces.
+pub fn fitted_protocol(
+    picker: &Picker,
+    img: &image::DynamicImage,
+    target: Size,
+    upscale: bool,
+) -> Option<Protocol> {
+    if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks
+        && target.width > 0
+        && target.height > 0
+    {
+        return halfblocks_fitted_protocol(picker, img, target, upscale);
+    }
+    let (img, size) = fit_for_protocol(picker, img, target, upscale);
+    picker.new_protocol(img, size, Resize::Fit(None)).ok()
+}
+
+/// A fitted picture as half-blocks, resampled EXACTLY ONCE (SQ-0979).
+///
+/// The grid is `cells.width x 2·cells.height` samples, and the picture's own extent on
+/// it is the device-pixel fit scaled into that grid — `pic.0 · cols / boxed.0` across
+/// and `pic.1 · 2·rows / boxed.1` down. Those two ratios are not the same number: a
+/// cell is one sample wide and two tall whatever the font's aspect is, so the mapping
+/// is anisotropic and the picture's own aspect is carried by `pic`, which was fitted in
+/// square device pixels. The leftover — under a cell's worth on the axis the fit did
+/// not bind, so at most one column or two rows here — stays transparent padding laid
+/// down top-left, as [`fit_for_protocol`] leaves it, because `Halfblocks::encode`
+/// resolves alpha to black and that black margin is what the letterbox already showed.
+///
+/// [`resize_directional`] does the one resample, so SQ-0829's two guarantees hold on
+/// the grid that is actually drawn rather than on device pixels the backend discards:
+/// each axis filtered by the direction IT moves (and the two can differ here, where
+/// they never could in device space — a photograph reduced into a tile shrinks on both,
+/// while a small Scott room picture magnified to fill its window can still shrink
+/// vertically onto the sample grid), and a blending pass on associated colour so a
+/// cut-out edge is not averaged toward `(0,0,0)`.
+fn halfblocks_fitted_protocol(
+    picker: &Picker,
+    img: &image::DynamicImage,
+    target: Size,
+    upscale: bool,
+) -> Option<Protocol> {
+    use ratatui_image::protocol::halfblocks::Halfblocks;
+    let g = fit_geometry(picker.font_size(), (img.width(), img.height()), target, upscale);
+    let (gw, gh) = (u32::from(g.cells.width), u32::from(g.cells.height) * 2);
+    let map = |v: u32, from: u32, to: u32| {
+        ((f64::from(v) * f64::from(to) / f64::from(from.max(1))).round() as u32).clamp(1, to.max(1))
+    };
+    let (sx, sy) = (map(g.pic.0, g.boxed.0, gw), map(g.pic.1, g.boxed.1, gh));
+    let scaled = resize_directional(&img.to_rgba8(), sx, sy);
+    let grid = if (sx, sy) == (gw, gh) {
+        scaled
+    } else {
+        let mut padded = image::RgbaImage::new(gw, gh);
+        image::imageops::replace(&mut padded, &scaled, 0, 0);
+        padded
+    };
+    let hb = Halfblocks::new(image::DynamicImage::ImageRgba8(grid), g.cells).ok()?;
+    Some(Protocol::Halfblocks(hb))
 }
 
 /// Straight (unassociated) RGBA → premultiplied, for [`resize_directional`].
@@ -1096,11 +1208,10 @@ impl GraphicsRender {
             // resample, and it went through the crate's default Nearest in BOTH
             // directions. A canvas larger than its window (advent.blb's 1104-px
             // toolbar in a narrow pane) was minified by dropping columns (SQ-0829).
-            let (img, size) =
-                fit_for_protocol(picker, &img, Size::new(area.width, area.height), gw.upscale);
-            match picker.new_protocol(img, size, Resize::Fit(None)) {
-                Ok(p) => { self.cache.insert(gw.win, (gw.version, area.width, area.height, p)); }
-                Err(_) => return,
+            // Half-blocks then does it ONCE, onto its own sample grid (SQ-0979).
+            match fitted_protocol(picker, &img, Size::new(area.width, area.height), gw.upscale) {
+                Some(p) => { self.cache.insert(gw.win, (gw.version, area.width, area.height, p)); }
+                None => return,
             }
         }
         if let Some((_, _, _, proto)) = self.cache.get(&gw.win) {
@@ -3472,6 +3583,382 @@ mod resample_tests {
             super::resample_note(222, 254, 328, 378),
             "resample 222x254->328x378 x:nearest y:nearest"
         );
+    }
+
+    // ── SQ-0979: the four FITTED sites resample once under half-blocks too ──────
+    //
+    // `fit_for_protocol` + `new_protocol(.., Resize::Fit(None))` was written out at
+    // four call sites — Glulx graphics windows, the picker's cover panel, the gallery
+    // tiles and the resource preview — and on half-blocks that pair pre-scales to
+    // device pixels the backend immediately throws away. `fitted_protocol` is the one
+    // call all four now make; on every encoding backend it IS the pair.
+
+    /// A PHOTOGRAPH, which is what cover art and IFDB jackets are: smooth tonal ramps
+    /// with grain on top, no palette and no hard edges.
+    ///
+    /// It fails differently from `dithered_plate`, and that is why both are swept here.
+    /// A second resample costs pixel art its colours and its edges — the failure SQ-0824
+    /// measured — while what it costs a photograph is CONTRAST: the grain and the fine
+    /// tonal steps fuse into flatness, and nothing about the colour count says so.
+    fn photograph(w: u32, h: u32) -> RgbaImage {
+        let mut img = RgbaImage::new(w, h);
+        // A deterministic LCG, so the grain is the same on every run and on every
+        // machine — a quality bound measured against a random image is not a bound.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut noise = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) & 0xff) as i32 - 128
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (x as f64 / w as f64, y as f64 / h as f64);
+                // Two overlapping lobes and a sky ramp: the low-frequency content a
+                // jacket scan has, before the grain.
+                let r = 200.0 * (1.0 - fy) + 40.0 * ((fx * 9.0).sin() * 0.5 + 0.5);
+                let g = 120.0 + 90.0 * ((fx * 5.0 + fy * 3.0).cos() * 0.5 + 0.5);
+                let b = 60.0 + 160.0 * fy * (1.0 - 0.6 * fx);
+                let px = [r, g, b].map(|c| {
+                    (c + f64::from(noise()) * 0.10).round().clamp(0.0, 255.0) as u8
+                });
+                img.put_pixel(x, y, Rgba([px[0], px[1], px[2], 0xff]));
+            }
+        }
+        img
+    }
+
+    /// The fitted picture's extent inside the padded pixel image the OTHER path builds,
+    /// read off the padding rather than recomputed: [`fit_for_protocol`] lays the
+    /// picture down top-left and leaves the remainder fully transparent, so on an opaque
+    /// source the opaque region IS the fit. Independent of the half-blocks arm's own
+    /// arithmetic, which is the point — that arithmetic is what is under test.
+    fn opaque_extent(img: &RgbaImage) -> (u32, u32) {
+        let (w, h) = img.dimensions();
+        let cols = (0..w).filter(|&x| (0..h).any(|y| img.get_pixel(x, y).0[3] != 0)).count() as u32;
+        let rows = (0..h).filter(|&y| (0..w).any(|x| img.get_pixel(x, y).0[3] != 0)).count() as u32;
+        (cols.max(1), rows.max(1))
+    }
+
+    /// The composite the OLD pair put on screen at one of these sites, and the cell rect
+    /// it reported: the device-pixel pre-scale handed to the crate, which resamples it
+    /// back down to the sample grid.
+    fn fit_pair(
+        picker: &Picker,
+        img: &image::DynamicImage,
+        target: Size,
+        upscale: bool,
+    ) -> (Protocol, Size, (u32, u32)) {
+        let (pre, size) = super::fit_for_protocol(picker, img, target, upscale);
+        let extent = opaque_extent(&pre.to_rgba8());
+        let (pw, ph) = (pre.width(), pre.height());
+        let proto = picker.new_protocol(pre, size, Resize::Fit(None)).expect("the old pair encodes");
+        // The extent, carried into sample space: a cell is one sample wide and two tall.
+        let (gw, gh) = sample_grid(size);
+        let map = |v: u32, from: u32, to: u32| {
+            ((f64::from(v) * f64::from(to) / f64::from(from.max(1))).round() as u32).clamp(1, to)
+        };
+        (proto, size, (map(extent.0, pw, gw), map(extent.1, ph, gh)))
+    }
+
+    /// Half-blocks and the encoding backends put the picture in exactly the same CELLS.
+    ///
+    /// This is the "agree where they must" half. `Protocol::size()` is what every one of
+    /// the four sites centres against — `GraphicsRender::render`'s letterbox, the
+    /// resource preview's, and the gallery's own `fitted_tile_rect` — so a cell rect
+    /// that moved when the backend changed would be a layout change wearing a
+    /// performance fix's clothes. Swept over both `upscale` modes, three font sizes,
+    /// and sources on either side of their box.
+    #[test]
+    fn fitted_cells_match_the_prescale() {
+        // Aspects, not megapixels: the arithmetic is a ratio and a ceil, and a sweep of
+        // full-size jacket scans through a sixel ENCODER is minutes of test time for
+        // nothing. `1104x36` is advent.blb's toolbar (SQ-0829) and `24x15` a canvas
+        // small enough that `upscale` has somewhere to go.
+        let sources =
+            [(240u32, 279u32), (150, 200), (320, 200), (32, 32), (1104, 36), (24, 15)];
+        for (sw, sh) in sources {
+            let src = image::DynamicImage::ImageRgba8(dithered_plate(sw, sh));
+            for fs in [ratatui_image::FontSize::new(10, 20), ratatui_image::FontSize::new(8, 18)] {
+                let mk = |proto| {
+                    #[allow(deprecated)]
+                    let mut p = Picker::from_fontsize(fs);
+                    p.set_protocol_type(proto);
+                    p
+                };
+                let hb = mk(ratatui_image::picker::ProtocolType::Halfblocks);
+                let sx = mk(ratatui_image::picker::ProtocolType::Sixel);
+                for (cols, rows) in [(20u16, 11u16), (24, 20), (40, 30), (5, 3), (1, 1)] {
+                    for upscale in [false, true] {
+                        let target = Size::new(cols, rows);
+                        let want = super::fit_for_protocol(&hb, &src, target, upscale).1;
+                        let got = super::fitted_protocol(&hb, &src, target, upscale)
+                            .expect("half-blocks builds")
+                            .size();
+                        assert_eq!(
+                            got, want,
+                            "{sw}x{sh} into {cols}x{rows} at {}x{} font, upscale {upscale}: \
+                             half-blocks must report the cell rect the pre-scale landed on",
+                            fs.width, fs.height
+                        );
+                        assert!(
+                            got.width <= cols && got.height <= rows,
+                            "{sw}x{sh} into {cols}x{rows}: the box is still the bound, got {got:?}"
+                        );
+                        let enc = super::fitted_protocol(&sx, &src, target, upscale)
+                            .expect("sixel builds")
+                            .size();
+                        assert_eq!(
+                            enc, want,
+                            "{sw}x{sh} into {cols}x{rows}: and so does every backend that encodes"
+                        );
+                    }
+                }
+            }
+        }
+        // …and once at the size a real jacket arrives at, half-blocks only.
+        let big = image::DynamicImage::ImageRgba8(dithered_plate(1200, 1600));
+        let hb = Picker::halfblocks();
+        for (cols, rows) in [(20u16, 11u16), (24, 20)] {
+            let target = Size::new(cols, rows);
+            assert_eq!(
+                super::fitted_protocol(&hb, &big, target, false).expect("builds").size(),
+                super::fit_for_protocol(&hb, &big, target, false).1,
+                "a 1200x1600 jacket into {cols}x{rows}"
+            );
+        }
+    }
+
+    /// The regression this quest is about, pinned so it cannot come back quietly: what
+    /// half-blocks draws is ONE resample of the source onto its own sample grid, with
+    /// the padding [`fit_for_protocol`] would have left still where it was.
+    ///
+    /// The reference is built from the source and nothing else — `resize_directional`
+    /// once, onto the extent read out of the OTHER path's padded image. Restore the pair
+    /// (hand `fit_for_protocol`'s output to `new_protocol` in `fitted_protocol`) and the
+    /// rendered cells stop matching it, because Triangle-down-then-Triangle-down is not
+    /// the same picture as one pass down — as the RMS case below measures.
+    #[test]
+    fn a_fitted_halfblocks_picture_is_one_resample_onto_the_sample_grid() {
+        use ratatui_image::protocol::halfblocks::Halfblocks;
+        let picker = Picker::halfblocks();
+        for (label, src) in
+            [("photograph", photograph(640, 744)), ("pixel art", dithered_plate(320, 200))]
+        {
+            let dyn_src = image::DynamicImage::ImageRgba8(src.clone());
+            for (cols, rows, upscale) in
+                [(20u16, 11u16, false), (24, 20, false), (100, 40, true), (100, 40, false)]
+            {
+                let target = Size::new(cols, rows);
+                let (_, cells, (sx, sy)) = fit_pair(&picker, &dyn_src, target, upscale);
+                let (gw, gh) = sample_grid(cells);
+                let shipped = super::fitted_protocol(&picker, &dyn_src, target, upscale)
+                    .expect("half-blocks builds");
+                assert_eq!(shipped.size(), cells, "{label} {cols}x{rows}: the grid it reports");
+
+                let once = resize_directional(&src, sx, sy);
+                let grid = if (sx, sy) == (gw, gh) {
+                    once
+                } else {
+                    let mut padded = RgbaImage::new(gw, gh);
+                    image::imageops::replace(&mut padded, &once, 0, 0);
+                    padded
+                };
+                let reference = Protocol::Halfblocks(
+                    Halfblocks::new(image::DynamicImage::ImageRgba8(grid), cells)
+                        .expect("reference"),
+                );
+                let rect = Rect::new(0, 0, cells.width, cells.height);
+                let (mut a, mut b) = (Buffer::empty(rect), Buffer::empty(rect));
+                Image::new(&shipped).render(rect, &mut a);
+                Image::new(&reference).render(rect, &mut b);
+                assert_eq!(
+                    a, b,
+                    "{label} into {cols}x{rows} (upscale {upscale}): what reaches the screen \
+                     must BE a single {sx}x{sy} resample of the source on a {gw}x{gh} grid — \
+                     any pre-scale in between shows up here as different cells"
+                );
+            }
+        }
+    }
+
+    /// Quality, measured rather than claimed, and measured on both KINDS of content
+    /// because they fail differently.
+    ///
+    /// Judged over the picture's own sample extent (the padding is not picture) against
+    /// the per-axis single-resample ideal. Measured, RMS, one pass against the pair:
+    ///
+    /// | content | site | picture grid | one resample | the old pair |
+    /// |---|---|---|---|---|
+    /// | photograph 640x744 | gallery tile 20x11 | 19x22 | 0.480 | 2.249 |
+    /// | photograph 640x744 | cover panel 24x20 | 24x28 | 0.434 | 1.797 |
+    /// | photograph 640x744 | window 100x40, upscale | 69x80 | 0.579 | 2.554 |
+    /// | pixel art 320x200 | gallery tile 20x11 | 20x13 | 4.674 | 31.233 |
+    /// | pixel art 320x200 | cover panel 24x20 | 24x15 | 4.482 | 7.994 |
+    /// | pixel art 320x200 | window 100x40, upscale | 100x63 | 3.996 | 14.808 |
+    ///
+    /// The photograph's absolute numbers are small either way — there is no palette to
+    /// lose and no hard edge to ragged — and the pair still costs it four to five times
+    /// the error, which is the fine tonal detail and grain a second pass fuses. Pixel art
+    /// is where it is loud: a 16x reduction of a dithered plate through a device-pixel
+    /// intermediate scores 31.2 against 4.7, because the pre-scale quantizes the dither
+    /// onto an intermediate grid that has nothing to do with the one drawn, and the
+    /// second pass then averages THAT.
+    #[test]
+    fn one_resample_beats_the_pair_at_the_fitted_sites() {
+        let picker = Picker::halfblocks();
+        let crop = |img: &RgbaImage, w: u32, h: u32| {
+            image::imageops::crop_imm(img, 0, 0, w, h).to_image()
+        };
+        for (label, src) in
+            [("photograph", photograph(640, 744)), ("pixel art", dithered_plate(320, 200))]
+        {
+            let dyn_src = image::DynamicImage::ImageRgba8(src.clone());
+            for (cols, rows, upscale) in [(20u16, 11u16, false), (24, 20, false), (100, 40, true)] {
+                let target = Size::new(cols, rows);
+                let (pair, cells, (sx, sy)) = fit_pair(&picker, &dyn_src, target, upscale);
+                let shipped = super::fitted_protocol(&picker, &dyn_src, target, upscale)
+                    .expect("half-blocks builds");
+                let ideal = ideal(&src, sx, sy);
+                let once = rms(&crop(&screen_grid(&shipped, cells), sx, sy), &ideal);
+                let twice = rms(&crop(&screen_grid(&pair, cells), sx, sy), &ideal);
+                eprintln!(
+                    "{label} into {cols}x{rows} (upscale {upscale}) -> {sx}x{sy}: \
+                     once {once:.3}, twice {twice:.3}"
+                );
+                assert!(
+                    once < twice && once < 5.0,
+                    "{label} into {cols}x{rows} (upscale {upscale}), a {sx}x{sy} extent: one \
+                     resample scores an RMS of {once:.3} against the single-resample ideal \
+                     where the old pair scores {twice:.3}. The single pass must stay under \
+                     5.0 and must never be the WORSE of the two — see the table above."
+                );
+            }
+        }
+    }
+
+    /// SQ-0829's own specimen, on the grid half-blocks draws: advent.blb's 1104-px
+    /// toolbar in a narrow pane. The guarantee that quest exists for is that a canvas
+    /// LARGER than its window is minified by an area average and not by dropping
+    /// columns, and moving the resample off device pixels must not quietly hand it back.
+    ///
+    /// Column-dropping is measured here rather than assumed — Nearest onto the same grid
+    /// — because "we call `resize_directional`" is a claim about the source, and this is
+    /// a claim about the screen.
+    #[test]
+    fn a_toolbar_wider_than_its_pane_is_averaged_on_the_sample_grid_too() {
+        let picker = Picker::halfblocks();
+        let src = dithered_plate(1104, 36);
+        let dyn_src = image::DynamicImage::ImageRgba8(src.clone());
+        for (cols, rows) in [(40u16, 3u16), (80, 4)] {
+            let target = Size::new(cols, rows);
+            let proto = super::fitted_protocol(&picker, &dyn_src, target, false).expect("builds");
+            let cells = proto.size();
+            let (_, pair_cells, (sx, sy)) = fit_pair(&picker, &dyn_src, target, false);
+            assert_eq!(cells, pair_cells);
+            assert!(sx < 1104, "{cols}x{rows}: the point is a MINIFICATION, got {sx} columns");
+            let got = image::imageops::crop_imm(&screen_grid(&proto, cells), 0, 0, sx, sy).to_image();
+            let ideal = ideal(&src, sx, sy);
+            let dropped = image::imageops::resize(&src, sx, sy, image::imageops::FilterType::Nearest);
+            let (mine, near) = (rms(&got, &ideal), rms(&dropped, &ideal));
+            assert!(
+                mine * 2.0 < near,
+                "{cols}x{rows} -> {sx}x{sy}: the toolbar scores {mine:.2} against the area \
+                 average, column-dropping {near:.2} — SQ-0829's guarantee has to hold on \
+                 the grid that is drawn, not only on the device pixels that are not"
+            );
+        }
+    }
+
+    /// `upscale` is the one thing this path has that the v6 composite does not, and both
+    /// of its states must survive: `true` blows a small canvas up to fill its window
+    /// (a Scott room picture), `false` leaves it at native size for the caller to centre.
+    ///
+    /// The flag decides the CELL RECT and nothing else — the sample grid follows from the
+    /// rect — so the case pins that the two rects still differ, that each is the one the
+    /// pre-scale reached, and that the magnified one gained no colours it did not have.
+    /// Replication is what makes a blown-up room picture crisp, and it is the axis
+    /// direction on the SAMPLE grid that decides it, not the direction in device pixels:
+    /// 320x200 into a 100x40-cell window magnifies 3.1x across the screen while
+    /// SHRINKING onto the 100x64 grid that is drawn.
+    #[test]
+    fn an_upscaled_window_and_a_native_one_both_reach_their_own_grid() {
+        let picker = Picker::halfblocks();
+        let src = dithered_plate(320, 200);
+        let dyn_src = image::DynamicImage::ImageRgba8(src.clone());
+        let target = Size::new(100, 40);
+        let up = super::fitted_protocol(&picker, &dyn_src, target, true).expect("scaled");
+        let native = super::fitted_protocol(&picker, &dyn_src, target, false).expect("fitted");
+        assert_eq!(up.size(), super::fit_for_protocol(&picker, &dyn_src, target, true).1);
+        assert_eq!(native.size(), super::fit_for_protocol(&picker, &dyn_src, target, false).1);
+        assert!(
+            up.size().width > native.size().width && up.size().height > native.size().height,
+            "upscale must still fill the window ({:?}) where Fit leaves it native ({:?})",
+            up.size(),
+            native.size()
+        );
+        assert_eq!(up.size(), Size::new(100, 32), "aspect preserved: 320x200 into a 1000x800 box");
+
+        // A magnification on the sample grid — one big enough that both axes grow — is
+        // replication, and mints no colour. 32x20 cells is a 32x40 grid over a 320x200
+        // canvas, so take a small source to a big grid instead.
+        let tiny = image::DynamicImage::ImageRgba8(dithered_plate(24, 15));
+        let grown = super::fitted_protocol(&picker, &tiny, Size::new(100, 40), true).expect("grown");
+        let cells = grown.size();
+        // The picture's own extent on the grid; the strip past it is padding, which
+        // half-blocks resolves to black and which is not part of the picture.
+        let (_, pair_cells, (sx, sy)) = fit_pair(&picker, &tiny, Size::new(100, 40), true);
+        assert_eq!(cells, pair_cells);
+        assert!(sx > 24 && sy > 15, "the picture's grid {sx}x{sy} must actually magnify 24x15");
+        let on_screen = screen_grid(&grown, cells);
+        let mut seen = std::collections::HashSet::new();
+        for p in image::imageops::crop_imm(&on_screen, 0, 0, sx, sy).to_image().pixels() {
+            seen.insert([p.0[0], p.0[1], p.0[2]]);
+        }
+        let mut source_colours = std::collections::HashSet::new();
+        for p in tiny.to_rgba8().pixels() {
+            source_colours.insert([p.0[0], p.0[1], p.0[2]]);
+        }
+        assert!(
+            seen.len() <= source_colours.len(),
+            "a magnified window minted {} colours from {} — that is the blur replication \
+             exists to avoid",
+            seen.len(),
+            source_colours.len()
+        );
+    }
+
+    /// The blast radius, stated as a test: half-blocks takes the new arm and every
+    /// backend that actually encodes pixels is byte-for-byte where SQ-0829 left it.
+    ///
+    /// This is the "differ where they should" half. Sixel and iTerm2 ship encoded pixels
+    /// down the wire, so `Resize::Fit` plus a device-pixel pre-scale is the right shape
+    /// for them; kitty never reaches `GraphicsRender::render`'s fit at all, but the cover
+    /// and preview sites do build kitty protocols and those are unchanged too. The sixel
+    /// arm is compared as RENDERED BYTES, not merely as a cell rect — kitty's ids are
+    /// random, so only its rect can be pinned.
+    #[test]
+    fn only_halfblocks_leaves_the_fit_prescale_behind() {
+        let src = image::DynamicImage::ImageRgba8(dithered_plate(240, 320));
+        let target = Size::new(20, 10);
+        let mut sixel = kitty_picker(8, 16);
+        sixel.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+        for picker in [sixel, kitty_picker(8, 16)] {
+            let (pre, size) = super::fit_for_protocol(&picker, &src, target, false);
+            let want = picker.new_protocol(pre, size, Resize::Fit(None)).expect("the old pair");
+            let got = super::fitted_protocol(&picker, &src, target, false).expect("builds");
+            assert_eq!(
+                got.size(),
+                want.size(),
+                "{:?} still goes through fit_for_protocol + new_protocol, unchanged",
+                picker.protocol_type()
+            );
+            if picker.protocol_type() == ratatui_image::picker::ProtocolType::Sixel {
+                let rect = Rect::new(0, 0, want.size().width, want.size().height);
+                let (mut a, mut b) = (Buffer::empty(rect), Buffer::empty(rect));
+                Image::new(&got).render(rect, &mut a);
+                Image::new(&want).render(rect, &mut b);
+                assert_eq!(a, b, "sixel's encoded bytes are the pre-scale's, to the byte");
+            }
+        }
     }
 }
 

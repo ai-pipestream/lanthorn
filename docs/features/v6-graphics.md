@@ -836,6 +836,21 @@ rect on screen, and one filter chosen by direction rather than nearest-up follow
 by a smoothing pass down. The encoding backends keep the pre-scale, because for them
 it was never a workaround — the pixels they build are the pixels they ship.
 
+That argument was never about v6, and the same pair was still standing at the four
+places a picture is *fitted into a cell box*: Glulx graphics windows, the cover panel
+in the story browser, the gallery's cover-view tiles, and the resource preview. All
+four now make one call, and on half-blocks it resamples once onto the sample grid too.
+The win here is smaller and honestly so — a jacket scan into a twenty-cell tile
+pre-scaled to 190×220 device pixels, not to 50 MB — but it is paid per *tile* and on
+every scroll: a screenful of thirty-six covers rebuilt in 43 ms instead of 76, for 132
+MB of allocation instead of 211. The Glulx window is where it is dramatic, because
+that one *magnifies*: a 320×200 canvas filling a 100×40-cell window went up to
+1000×640 so the backend could take it down to 100×64, and skipping that is 23× faster
+for a tenth of the bytes. A picture already at native size in its window is a wash —
+marginally slower, in fact, and what the extra microseconds buy is a cut-out edge that
+no longer averages toward black. Every one of those sites lands on the same cells it
+did before; nothing on screen moves, it just gets there once.
+
 Shrinking is the same rule read backwards, and that is the trap. The instruction
 "take the source pixel nearest this destination pixel" *replicates* one on the way
 up and **drops** one on the way down. At a 60×24 pane Journey's plate is asked for
@@ -892,7 +907,7 @@ place lanthorn scaled a picture had quietly picked its own answer: Glulx's
 tiles, the resource preview and the non-Kitty graphics-window blit all deferred to
 the image crate's default filter, which is nearest — a decimation, at exactly the
 several-fold reductions a jacket scan into an info panel goes through. They now all
-call the same resampler (`resize_directional`, and `fit_for_protocol` for the ones
+call the same resampler (`resize_directional`, and `fitted_protocol` for the ones
 that fit into a cell box), so the answer to "what happens to this picture" is one
 answer and not six.
 

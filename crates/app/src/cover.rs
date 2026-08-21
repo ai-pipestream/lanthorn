@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use ratatui::layout::{Rect, Size};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
-use ratatui_image::Resize;
 
 /// Decode PNG/JPEG bytes into a `DynamicImage`. `None` on any decode failure.
 pub fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
@@ -151,13 +150,14 @@ impl CoverState {
             // Direction-aware + alpha-correct, then an identity `Fit` (SQ-0829): a
             // cover is a full-resolution jacket scan being reduced several-fold into
             // a panel, and the crate's default filter for `Fit(None)` is Nearest.
-            let (img, size) = crate::render::graphics::fit_for_protocol(
+            // On half-blocks that pre-scale is a device-pixel intermediate the
+            // backend throws away, so there the reduction is one pass (SQ-0979).
+            let built = crate::render::graphics::fitted_protocol(
                 picker,
                 img,
                 Size::new(area.width, area.height),
                 false,
-            );
-            let built = picker.new_protocol(img, size, Resize::Fit(None)).ok()?;
+            )?;
             self.proto = Some((path.to_path_buf(), area.width, area.height, built));
         }
         self.proto.as_ref().map(|(_, _, _, p)| p)
@@ -187,14 +187,16 @@ impl CoverState {
         }
         let img = self.decoded.get(path).and_then(|o| o.as_ref())?;
         // Same reduction as [`protocol`], only harder: a gallery tile is smaller
-        // still, so Nearest was discarding a larger share of every jacket (SQ-0829).
-        let (img, size) = crate::render::graphics::fit_for_protocol(
+        // still, so Nearest was discarding a larger share of every jacket (SQ-0829)
+        // — and this is the heaviest site in the app for it, one build per visible
+        // tile and a row of them on every scroll notch, which is why half-blocks
+        // stopped building a device-pixel intermediate per tile (SQ-0979).
+        let built = crate::render::graphics::fitted_protocol(
             picker,
             img,
             Size::new(area.width, area.height),
             false,
-        );
-        let built = picker.new_protocol(img, size, Resize::Fit(None)).ok()?;
+        )?;
         self.tiles.push_back((path.to_path_buf(), area.width, area.height, built));
         while self.tiles.len() > TILE_CAP {
             self.tiles.pop_front();
