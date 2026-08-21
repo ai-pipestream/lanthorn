@@ -373,6 +373,48 @@ whose expected picture can be stated exactly, asserting **colours at
 coordinates** — a PNG writer's obvious failure mode is emitting a plausible
 blank, and "a file appeared" accepts one.
 
+## The gallery: the same capture, meant to be looked at
+
+`pty_stream/gallery.rs` and `--example gallery` (SQ-0942) turn the harness into
+a picture-maker for the project page. One committed recipe,
+`crates/app/examples/gallery.toml`, names every frame — the medium, the key
+script, the pane size, the backend, the pinned seed and a caption — and one
+command regenerates the whole set into `target/gallery/`, with a proof-sheet
+`index.html` and a `gallery.json` recording what was actually captured.
+
+```sh
+cargo build -p app
+cargo run -p app --example gallery                  # the whole manifest
+cargo run -p app --example gallery -- --list        # what it would take
+cargo run -p app --example gallery -- --only journey-amiga
+```
+
+Four things are deliberate:
+
+- **The output is labelled a render inside its own pixels.** Every frame gets a
+  footer strip saying so, drawn in the bitmap face whatever the frame above it
+  used. An image gets separated from its page the first time somebody drags it
+  into a chat window, and the only claim that survives that trip is the one in
+  the pixels. This is the price of the next bullet.
+- **It draws with a real typeface** (`--font`, else the first system monospace
+  face that loads, else the bitmap master; `fontdue` is a dev-dependency).
+  `raster::render` keeps the bitmap face and the tests never pass the flag, so
+  the geometry oracle goes on looking as synthetic as it should — giving *that*
+  a real font would make it 90% convincing at a job it cannot do.
+- **Nothing about a frame is declared twice.** The release and serial come from
+  the header of the bytes the medium mounted; the turn count is counted off the
+  key script. A manifest that tries to state either is refused.
+- **Every shot carries a non-vacuity guard** (`expect`, `expect_art_cells`), and
+  a shot that fails it never becomes a picture. This is not ceremony: pointed at
+  a DOS floppy that lanthorn opens a browser for, the first draft captured
+  *Ballyhoo* off a neighbouring disk while the release, serial and medium in the
+  record all went on correctly describing the Zork Zero image the manifest
+  named — because those are read from the file and not from the frame.
+
+`tests/suites/gallery_manifest.rs` runs the whole validator over the committed
+recipe, so a manifest that has gone stale fails the gate rather than failing
+whoever is trying to cut a release. It needs no gitignored media.
+
 ## See also
 
 - [Interactive-fiction standards lanthorn implements](standards.md) (Z-Machine,

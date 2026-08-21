@@ -16,6 +16,8 @@
 #[path = "pty_stream/mod.rs"]
 mod pty_stream;
 
+#[path = "suites/gallery_manifest.rs"]
+mod gallery_manifest;
 #[path = "suites/pty_emitted_stream.rs"]
 mod pty_emitted_stream;
 #[path = "suites/pty_flank_alpha_seam.rs"]

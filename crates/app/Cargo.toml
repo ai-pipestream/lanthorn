@@ -57,6 +57,12 @@ font8x8 = "0.3"
 # binary must never gain it (`cargo tree -p app -e normal | grep -c qwertty`
 # must print 0).
 [dev-dependencies]
+# SQ-0942: a real typeface for the gallery tool (`--example gallery`), whose
+# output is meant to be LOOKED at. It is NOT used by the geometry oracle, which
+# keeps its deliberately-synthetic bitmap face — see
+# `tests/pty_stream/gallery.rs` for why giving that one a real font would be
+# actively harmful. TESTS ONLY, like the line below it.
+fontdue = "0.9"
 qwertty-term-vt = "0.4.0"
 
 # SQ-0586: fd-level stderr redirect. C libraries (libasound via rodio/cpal) write

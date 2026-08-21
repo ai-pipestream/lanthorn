@@ -28,6 +28,10 @@
 pub mod decode;
 #[cfg(unix)]
 pub mod driver;
+/// The gallery (SQ-0942): the same capture, drawn to be LOOKED at. Unix-gated
+/// with [`driver`], because a gallery of frames nobody captured is nothing.
+#[cfg(unix)]
+pub mod gallery;
 pub mod oracle;
 pub mod raster;
 
