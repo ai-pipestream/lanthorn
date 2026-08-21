@@ -788,6 +788,115 @@ mod raster {
         );
     }
 
+    /// A `c=2,r=1` pin placement of a solid colour at the home cell, with the
+    /// alpha the caller asks for. Pin-anchored rather than virtual because virtual
+    /// placements cannot overlap — a cell holds one placeholder — and overlap is
+    /// the whole subject below.
+    fn pinned(id: u32, rgba: [u8; 4]) -> String {
+        let (w, h) = (2 * CELL_W, CELL_H);
+        format!(
+            "\x1b[1;1H\x1b_Ga=T,i={id},f=32,t=d,s={w},v={h},c=2,r=1,z=0,m=0;{}\x1b\\",
+            b64(&rgba.repeat((w * h) as usize))
+        )
+    }
+
+    /// Two placements at the same z: the protocol says the LOWER id is underneath,
+    /// so the higher one's half-transparency composites onto it.
+    ///
+    /// Read off the protocol document rather than recalled: "If two images with the
+    /// same z-index overlap then the image with the lower id is considered to have
+    /// the lower z-index" (kitty graphics protocol, "Controlling displayed image
+    /// layout"). Half-transparent on top on purpose — an opaque winner would pass
+    /// for a rasteriser that simply drew the last placement it was handed, while a
+    /// blend can only come out at this value if the red really is UNDERNEATH.
+    #[test]
+    fn overlapping_placements_at_one_z_stack_by_image_id() {
+        let stream = format!("{}{}", pinned(10, [200, 0, 0, 255]), pinned(20, [0, 200, 0, 128]));
+        let canvas = draw(&stream);
+        // (0,200,0) at alpha 128 over (200,0,0): (200*127)/255 = 99, (200*128)/255 = 100.
+        assert_eq!(
+            px(&canvas, 0, 0),
+            [99, 100, 0, 255],
+            "image 20 must composite OVER image 10 — [200,0,0] is the lower id drawn last, \
+             which is the wrong order, and [29,31,33]-ish is image 20 blended onto bare screen"
+        );
+    }
+
+    /// The same bytes must draw the same picture.
+    ///
+    /// This is the case SQ-0968 needed and did not have. The draw list comes out of
+    /// `ImageStorage::placements`, a `HashMap` whose iteration order is re-seeded
+    /// per instance, so a sort on `z` alone leaves two same-z placements in a fresh
+    /// random order on every call — measured at roughly 6 orderings in 10 runs of
+    /// the identical stream, in ONE process. An instrument whose picture is a coin
+    /// flip can show a superseded placement on top and a live one blended into it,
+    /// which reads exactly like a defect the emitted bytes say is already gone.
+    ///
+    /// Four overlapping placements and eight renders: a broken sort passes only if
+    /// all eight happen to land on one of the 24 permutations, which is roughly one
+    /// run in 10^9. Not a probabilistic test in the direction that matters — the fix
+    /// makes it pass every time, and only the failure is chance.
+    #[test]
+    fn the_same_bytes_always_draw_the_same_picture() {
+        let stream: String = [
+            pinned(11, [200, 0, 0, 255]),
+            pinned(22, [0, 200, 0, 128]),
+            pinned(33, [0, 0, 200, 128]),
+            pinned(44, [200, 200, 0, 128]),
+        ]
+        .concat();
+        let first = draw(&stream);
+        for attempt in 1..8 {
+            let again = draw(&stream);
+            assert_eq!(
+                again.as_raw(),
+                first.as_raw(),
+                "render {attempt} of the identical stream drew a different picture — the \
+                 composite order is not a function of the bytes (SQ-0968)"
+            );
+        }
+        // Non-vacuity: the pixel under the stack has to be a BLEND of all four, or
+        // the four placements never overlapped and every render agreed trivially.
+        let stacked = px(&first, 0, 0);
+        assert_ne!(stacked, [200, 0, 0, 255], "the stack is not just its bottom image");
+        assert_ne!(stacked, DEFAULT_BG, "the stack drew something");
+    }
+
+    /// A placement the next frame replaced is not in the picture.
+    ///
+    /// The literal question SQ-0968 was filed on: frame 1 puts art on those cells,
+    /// frame 2 paints over them, and the picture must be frame 2's. It passes, and
+    /// pinning it is the point — the harness has no frame buffer to carry anything
+    /// forward, and this is the case that says so in one second instead of an
+    /// afternoon of hand-decoding APC payloads.
+    #[test]
+    fn art_the_next_frame_painted_over_is_not_in_the_picture() {
+        let mut s = gradient_frame();
+        // Non-vacuity first: frame 1 alone really does put the gradient there.
+        let (x0, y0) = (u32::from(ART_LEFT) * CELL_W, u32::from(ART_TOP) * CELL_H);
+        assert_eq!(px(&draw(&s), x0, y0), [20, 0, 0, 255], "frame 1 draws the art");
+
+        // Frame 2: the same cells, repainted as plain background.
+        for row in 0..ART_ROWS {
+            s.push_str(&format!(
+                "\x1b[{};{}H\x1b[48;2;5;60;90m{}\x1b[0m",
+                ART_TOP + row + 1,
+                ART_LEFT + 1,
+                " ".repeat(ART_COLS as usize)
+            ));
+        }
+        let canvas = draw(&s);
+        for dy in 0..u32::from(ART_ROWS) * CELL_H {
+            for dx in 0..u32::from(ART_COLS) * CELL_W {
+                assert_eq!(
+                    px(&canvas, x0 + dx, y0 + dy),
+                    [5, 60, 90, 255],
+                    "pixel ({dx},{dy}) of the repainted rect still carries frame 1's art"
+                );
+            }
+        }
+    }
+
     /// The before/after pair the whole feature is for: two rasters, side by side,
     /// each still readable at its own coordinates.
     #[test]

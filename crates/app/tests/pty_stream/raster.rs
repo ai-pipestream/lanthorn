@@ -52,6 +52,18 @@
 //! A cell with no explicit background is left as the screen's default fill
 //! rather than repainted, so a below-background placement can actually show
 //! through one.
+//!
+//! WITHIN a z the protocol still decides: "if two images with the same z-index
+//! overlap then the image with the lower id is considered to have the lower
+//! z-index" (kitty graphics protocol, "Controlling displayed image layout"), so
+//! the sort in [`render_with`] is `(z, image id, position)` and not `z` alone.
+//! There is no "the order the resolver reported" to fall back on — that order
+//! comes out of a `HashMap` and is re-randomised on every call, which for two
+//! overlapping placements made this picture a coin flip between the right answer
+//! and one where a superseded image lands on top and the newer one's transparency
+//! was blended into it. Same z AND same id is undefined upstream; the position
+//! tail of the key is there so the picture stays a function of the bytes anyway
+//! (SQ-0968).
 
 use app::render::bitfont::blit_glyph;
 use image::{Rgba, RgbaImage};
@@ -96,10 +108,14 @@ pub fn render_with(res: &Resolved, glyph: GlyphPainter<'_>) -> RgbaImage {
     let height = u32::from(res.rows) * res.cell_h;
     let mut canvas = RgbaImage::from_pixel(width.max(1), height.max(1), rgba(res.colors.default_bg()));
 
-    // Stable within a bucket, so two placements at the same z keep the order the
-    // resolver reported them in.
+    // z first, then the protocol's own tie-break, then position. The order the
+    // RESOLVER reported is not a fallback available to us: `resolve_placements`
+    // walks `ImageStorage::placements`, a `HashMap`, so its order is a fresh
+    // random permutation on every call — two renders of the SAME bytes in the same
+    // process disagreed on which of two overlapping placements won, which made
+    // this instrument's picture a coin flip and is the whole of SQ-0968.
     let mut draws: Vec<&Draw> = res.draws.iter().collect();
-    draws.sort_by_key(|d| d.z);
+    draws.sort_by_key(|d| (d.z, d.image_id, d.dest_y, d.dest_x, d.src_y, d.src_x));
 
     for d in draws.iter().filter(|d| d.z < BELOW_BACKGROUND) {
         composite(&mut canvas, d, res);
