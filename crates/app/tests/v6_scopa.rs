@@ -12,6 +12,8 @@
 mod v6_ega_transparency;
 #[path = "suites/v6_fmvpoker_hybrid.rs"]
 mod v6_fmvpoker_hybrid;
+#[path = "suites/v6_halfblocks_upscale.rs"]
+mod v6_halfblocks_upscale;
 #[path = "suites/v6_scopa_button_labels.rs"]
 mod v6_scopa_button_labels;
 #[path = "suites/v6_scopa_declined_colours.rs"]

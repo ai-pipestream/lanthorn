@@ -212,8 +212,10 @@ fn unassociate_alpha(img: &mut image::RgbaImage) {
 /// kept pure so it can be measured (SQ-0824).
 ///
 /// `Resize::Fit` only ever SHRINKS, so a pane bigger than the composite needs the
-/// magnification done here: Nearest, capped at [`MAX_V6_UPSCALE`], after which the
+/// magnification done here: Nearest, capped at `max_upscale`, after which the
 /// protocol's own (also Nearest) fit at most nudges the result onto the cell grid.
+/// The ceiling is the BACKEND's, not this function's — [`v6_upscale_cap`] answers
+/// it, and `None` means the backend has no encode to budget for (SQ-0964).
 ///
 /// A pane SMALLER than the composite needs no pre-scale at all, and that is the fix.
 /// The scale used to be clamped at 1.0, which turned this branch into a full identity
@@ -221,13 +223,22 @@ fn unassociate_alpha(img: &mut image::RgbaImage) {
 /// protocol's DEFAULT filter, Nearest, which drops whole rows and columns exactly
 /// where Journey's dithered foreground keeps its detail. Naming the area filter makes
 /// it one resample, from the best source there is, in the right direction.
-fn v6_fit_source(
+pub fn v6_fit_source(
     canvas: &image::RgbaImage,
     box_w: u32,
     box_h: u32,
     lock: Option<f32>,
+    max_upscale: Option<f64>,
 ) -> (image::RgbaImage, Resize) {
     let (cw, ch) = canvas.dimensions();
+    // The backend's ceiling on magnification, or none at all (SQ-0964). Whatever it
+    // allows, the BOX still decides how big the composite gets: every scale below is
+    // derived from `box_w`/`box_h` (the locked one via the same pane, see below), so
+    // lifting the ceiling lets the composite reach the pane and never past it.
+    let capped = |s: f64| match max_upscale {
+        Some(c) => s.min(c),
+        None => s,
+    };
     // SQ-0936: the LOCKED magnification, when the pane has one. The raster arm used
     // to compute its own free scale here and so never saw `v6_pixel_lock` at all —
     // which is not the "the setting does nothing in raster mode" caveat it looks
@@ -240,7 +251,7 @@ fn v6_fit_source(
     // its box and the protocol's `Fit` (which only ever shrinks) leaves it alone and
     // centres it.
     if let Some(s) = lock.filter(|s| s.is_finite() && *s > 0.0) {
-        let s = f64::from(s).min(MAX_V6_UPSCALE);
+        let s = capped(f64::from(s));
         let (tw, th) = (((cw as f64 * s) as u32).max(1), ((ch as f64 * s) as u32).max(1));
         // Nearest in BOTH directions here, unlike the free path below, and that is
         // the point rather than an oversight: a locked scale puts one art pixel on a
@@ -250,7 +261,7 @@ fn v6_fit_source(
         let scaled = image::imageops::resize(canvas, tw, th, image::imageops::FilterType::Nearest);
         return (scaled, Resize::Fit(None));
     }
-    let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).min(MAX_V6_UPSCALE);
+    let scale = capped((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64));
     if scale < 1.0 {
         return (canvas.clone(), Resize::Fit(Some(image::imageops::FilterType::Triangle)));
     }
@@ -580,7 +591,39 @@ impl V6ClickMap {
 /// SQ-0479 doubled the native canvas (320×200 → 640×400), so 2× here reaches the
 /// SAME 1280×800 output ceiling the old 4× cap gave over the 320×200 canvas — the
 /// encoded-pixel budget is unchanged, not quadrupled.
+///
+/// **It is a budget, so it only binds a backend that spends one** — see
+/// [`v6_upscale_cap`], which is what the cap is read through.
 const MAX_V6_UPSCALE: f64 = 2.0;
+
+/// How far this backend may magnify the v6 raster composite before the protocol
+/// fits it into the pane: [`MAX_V6_UPSCALE`], or **no ceiling at all** (SQ-0964).
+///
+/// The cap is a PNG-encode budget and nothing else. Kitty and iTerm2 ship the
+/// composite down the wire as encoded pixels every frame it changes, and sixel
+/// encodes one too, so every extra factor of magnification is bytes to build and
+/// bytes to write — there the ceiling earns its keep and stays exactly where it is.
+///
+/// Half-blocks encodes nothing. `ratatui-image` resolves the image straight into
+/// terminal cells at one pixel per column and two per row, so the budget it is
+/// protecting does not exist — while the COST is entirely real, because under
+/// `Resize::Fit` (which only ever shrinks) the pre-scale here is what decides how
+/// many CELLS the composite occupies. Capped at 2×, a 640×400 canvas reaches a
+/// fixed 1280×800 nominal pixels — a fixed number of cells — while shrinking the
+/// terminal font goes on giving the pane more of them. So the picture that should
+/// have grown sharper as the grid got finer visibly SHRANK instead, worst on the
+/// titles that fall through to the composite whatever the mode (scopa and fmvpoker,
+/// which publish no primary Buffer — SQ-0711).
+///
+/// Removing the ceiling does not remove a bound: the free scale is derived from the
+/// pane box and the locked one from the same pane's ladder (SQ-0945), so the
+/// composite still stops at the pane. It may simply climb the whole way there.
+pub fn v6_upscale_cap(picker: &Picker) -> Option<f64> {
+    match picker.protocol_type() {
+        ratatui_image::picker::ProtocolType::Halfblocks => None,
+        _ => Some(MAX_V6_UPSCALE),
+    }
+}
 
 /// A completed v6 raster encode (SQ-0469): the uploaded protocol plus the key it
 /// was built for (`gen` + pane cell size) and the native canvas extent (for the
@@ -1197,14 +1240,17 @@ impl GraphicsRender {
 
     /// Resize + encode a native v6 canvas into a terminal image protocol,
     /// upscaled (Nearest → crisp pixel art) to fill `area`'s device pixels with
-    /// aspect preserved, capped at [`MAX_V6_UPSCALE`]. Pure/self-contained so it
-    /// can run on a worker thread (SQ-0469). Returns `None` if the protocol
-    /// encode fails.
+    /// aspect preserved, capped at whatever this backend's [`v6_upscale_cap`] is.
+    /// Pure/self-contained so it can run on a worker thread (SQ-0469). Returns
+    /// `None` if the protocol encode fails.
+    ///
+    /// The backend is threaded no further than this: the `picker` is already the
+    /// thing that knows it, and is already here (SQ-0964).
     fn encode_v6(picker: &Picker, canvas: &image::RgbaImage, gen: u64, area: Rect, lock: Option<f32>) -> Option<V6Ready> {
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
-        let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock);
+        let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock, v6_upscale_cap(picker));
         let img = image::DynamicImage::ImageRgba8(img);
         match picker.new_protocol(img, Size::new(area.width, area.height), fit) {
             Ok(proto) => Some(V6Ready {
@@ -2722,6 +2768,13 @@ mod resample_tests {
     /// FALSIFY by restoring `.clamp(1.0, MAX_V6_UPSCALE)` and `Resize::Fit(None)` in
     /// `v6_fit_source`: the shrinking cases fail on their RMS bound, because the pane
     /// then gets an identity copy of the canvas followed by a Nearest shrink.
+    ///
+    /// SQ-0964: this measures the ENCODED backends, and now says so — the cap it fits
+    /// under belongs to kitty/sixel/iTerm2, and half-blocks has none. The panes swept
+    /// here all land at or under 2x on the limiting axis, so the two backends would
+    /// answer identically anyway; naming the cap is about what the case is claiming,
+    /// not about a number that moved. `halfblocks_climbs_past_the_encode_cap_and_kitty_does_not`
+    /// below is the other backend's case.
     #[test]
     fn the_raster_composite_takes_one_resample_in_the_right_direction() {
         use ratatui_image::FontSize;
@@ -2730,7 +2783,8 @@ mod resample_tests {
         let fs = FontSize::new(8, 18);
         for (cols, rows) in [(60u16, 24u16), (70, 30), (76, 28), (100, 40), (160, 60)] {
             let (box_w, box_h) = (cols as u32 * 8, rows as u32 * 18);
-            let (src, fit) = super::v6_fit_source(&canvas, box_w, box_h, None);
+            let (src, fit) =
+                super::v6_fit_source(&canvas, box_w, box_h, None, Some(super::MAX_V6_UPSCALE));
             let dyn_src = image::DynamicImage::ImageRgba8(src.clone());
             let cells = fit.size_for(&dyn_src, fs, ratatui::layout::Size::new(cols, rows));
             let got = fit.resize(&dyn_src, fs, cells, None).to_rgba8();
@@ -2763,6 +2817,154 @@ mod resample_tests {
                 );
             }
         }
+    }
+
+    // -- SQ-0964: the upscale cap is a budget, and half-blocks spends none ------
+
+    /// Who the encode budget is charged to. Kitty (and sixel, and iTerm2) build and
+    /// write encoded pixels for every composite; half-blocks resolves the image into
+    /// terminal cells and encodes nothing at all.
+    #[test]
+    fn only_an_encoding_backend_spends_the_upscale_budget() {
+        use ratatui_image::picker::Picker;
+        assert_eq!(
+            super::v6_upscale_cap(&Picker::halfblocks()),
+            None,
+            "half-blocks ships no encoded image, so there is no PNG budget for a cap to protect"
+        );
+        assert_eq!(
+            super::v6_upscale_cap(&super::kitty_picker(8, 18)),
+            Some(super::MAX_V6_UPSCALE),
+            "kitty re-encodes the whole composite every time it changes - its ceiling stands"
+        );
+    }
+
+    /// The fix itself: at one and the same pane, the two backends now magnify to
+    /// DIFFERENT sizes, and that difference is the whole of SQ-0964.
+    ///
+    /// The pane is 200x60 cells at half-blocks' own nominal 10x20 - the grid a small
+    /// terminal font gives you - so the box wants 3x out of a 640x400 composite where
+    /// the cap allowed 2x. Below the cap the two agree exactly, which is the other half
+    /// of the claim: nothing changed for a pane that never wanted the ceiling.
+    ///
+    /// FALSIFY by restoring the unconditional `.min(MAX_V6_UPSCALE)` in
+    /// `v6_fit_source`: the two sizes become equal, which is the reported symptom - a
+    /// finer grid that does not make the picture any bigger.
+    #[test]
+    fn halfblocks_climbs_past_the_encode_cap_and_kitty_does_not() {
+        let canvas = dithered_plate(640, 400);
+        // A box that wants 3x: 2000x1200 device pixels over a 640x400 composite.
+        let (box_w, box_h) = (2000u32, 1200u32);
+        let (free, _) = super::v6_fit_source(&canvas, box_w, box_h, None, None);
+        let (capped, _) =
+            super::v6_fit_source(&canvas, box_w, box_h, None, Some(super::MAX_V6_UPSCALE));
+        assert_eq!(capped.dimensions(), (1280, 800), "the encoded backends stop at 2x, as before");
+        assert_eq!(
+            free.dimensions(),
+            (1920, 1200),
+            "half-blocks takes the whole 3x the box offers - the picture grows with the grid"
+        );
+        assert_ne!(
+            free.dimensions(),
+            capped.dimensions(),
+            "the two backends must ANSWER DIFFERENTLY here; that difference is the fix"
+        );
+        // ...and the box is still the bound. Only the flat ceiling went.
+        assert!(
+            free.width() <= box_w && free.height() <= box_h,
+            "an uncapped magnification is still a fit: {:?} must sit inside {box_w}x{box_h}",
+            free.dimensions()
+        );
+        // Nearest, still: a 3x magnification replicates whole pixels and invents no
+        // colour, exactly as `magnification_invents_no_colours` demands of the ring.
+        let inks = |img: &RgbaImage| {
+            img.pixels().map(|p| p.0).collect::<std::collections::HashSet<_>>().len()
+        };
+        assert_eq!(
+            inks(&free),
+            inks(&canvas),
+            "uncapped magnification must stay nearest - a smoothing filter would show up as \
+             hundreds of blends nobody painted"
+        );
+        // A pane under the ceiling never noticed it, and still does not.
+        for (bw, bh) in [(1000u32, 800u32), (640, 400), (400, 300)] {
+            let (a, _) = super::v6_fit_source(&canvas, bw, bh, None, None);
+            let (b, _) = super::v6_fit_source(&canvas, bw, bh, None, Some(super::MAX_V6_UPSCALE));
+            assert_eq!(
+                a.dimensions(),
+                b.dimensions(),
+                "a {bw}x{bh} box wants less than {}x, so both backends must answer the same",
+                super::MAX_V6_UPSCALE
+            );
+        }
+    }
+
+    /// The reported symptom, measured the way the player meets it: the terminal stays
+    /// the same size and the FONT shrinks, so the pane gains cells. Half-blocks reports
+    /// a fixed nominal 10x20 whatever the real font is (that is what the protocol is -
+    /// one pixel per column, two per row), so more cells is more room, and the picture
+    /// should fill the pane's short axis at every grid size.
+    ///
+    /// Under the cap it stops at 40 rows and the pane goes on growing around it, which
+    /// is precisely "shrinking the font just makes the game window smaller".
+    #[test]
+    fn a_finer_cell_grid_grows_the_halfblocks_picture_and_the_capped_one_stalls() {
+        use ratatui::layout::Size;
+        use ratatui_image::FontSize;
+        let canvas = dithered_plate(640, 400);
+        let fs = FontSize::new(10, 20);
+        let cells_of = |cap: Option<f64>, cols: u16, rows: u16| {
+            let (box_w, box_h) = (u32::from(cols) * 10, u32::from(rows) * 20);
+            let (src, fit) = super::v6_fit_source(&canvas, box_w, box_h, None, cap);
+            fit.size_for(&image::DynamicImage::ImageRgba8(src), fs, Size::new(cols, rows))
+        };
+        let mut capped_rows = Vec::new();
+        for (cols, rows) in [(100u16, 30u16), (140, 42), (200, 60)] {
+            let free = cells_of(None, cols, rows);
+            let capped = cells_of(Some(super::MAX_V6_UPSCALE), cols, rows);
+            assert_eq!(
+                free.height, rows,
+                "{cols}x{rows}: uncapped, the composite fills the pane's short axis - a finer \
+                 grid is more picture, which is the point of shrinking the font"
+            );
+            capped_rows.push(capped.height);
+        }
+        assert_eq!(
+            capped_rows,
+            vec![30u16, 40, 40],
+            "capped, the composite stops at 40 rows and the pane grows around it: that stall \
+             IS the defect, and it is what the encoded backends still (deliberately) do"
+        );
+    }
+
+    /// SQ-0964 composes with SQ-0945's pixel lock rather than fighting it: with the lock
+    /// on, the ladder still governs - half-blocks may simply climb higher up it.
+    ///
+    /// The pane is 2000x1150 device pixels, which would freely take 2.875x. `art_scale`
+    /// (2, 2) puts the rungs on half-steps, so the lock quantizes down to 2.5x - and 2.5
+    /// unit pixels per art pixel of 2 unit pixels is 5 whole device pixels, which is the
+    /// entire point of the lock. Uncapped that rung is reached; capped, 2x is as far as
+    /// the composite gets and a whole rung is left on the table.
+    #[test]
+    fn the_pixel_lock_ladder_still_governs_when_the_cap_is_gone() {
+        use crate::render::v6_layout::locked_scale;
+        let canvas = dithered_plate(640, 400);
+        let (box_w, box_h) = (2000u32, 1150u32);
+        let s = locked_scale((640, 400), (box_w, box_h), (2, 2)).expect("the pane holds a rung").s;
+        assert_eq!(s, 2.5, "the free 2.875x quantizes down to the ladder's 2.5x");
+        let (free, _) = super::v6_fit_source(&canvas, box_w, box_h, Some(s), None);
+        let (capped, _) =
+            super::v6_fit_source(&canvas, box_w, box_h, Some(s), Some(super::MAX_V6_UPSCALE));
+        assert_eq!(
+            free.dimensions(),
+            (1600, 1000),
+            "half-blocks reaches the locked rung itself - 5 device pixels per art pixel"
+        );
+        assert_eq!(capped.dimensions(), (1280, 800), "the cap keeps the encoded backends at 2x");
+        assert!(
+            free.width() <= box_w && free.height() <= box_h,
+            "a locked scale is still a scale the pane can hold"
+        );
     }
 
     // ── SQ-0827: the seam where art ends and the canvas is clear ────────────────
@@ -3340,20 +3542,44 @@ mod tests {
         assert!(gr.v6_wants_build(7, Rect::new(0, 0, 5, 2)), "a resize wants a fresh build");
     }
 
+    /// A 32×32 native canvas in a huge pane encodes at [`MAX_V6_UPSCALE`], not at the
+    /// full device box: a 200×100-cell pane at 10×20 is 2000×2000 device pixels, which
+    /// would otherwise scale ~62×.
+    ///
+    /// **This asks the question of an ENCODING backend, and now says so** (SQ-0964).
+    /// It used to run on `Picker::halfblocks()` — the deterministic test picker,
+    /// reached for because it needs no terminal query rather than because half-blocks
+    /// was the subject. That is precisely the backend the cap no longer applies to, so
+    /// a case whose whole claim is "the cap engaged" has to name a backend that spends
+    /// the budget the cap protects. `kitty_picker` at the same 10×20 cell keeps every
+    /// number below unchanged, and the half-blocks half of the contrast is asserted
+    /// alongside rather than dropped.
     #[test]
-    fn v6_encode_caps_upscale_at_4x() {
-        // A 32×32 native canvas in a huge pane must encode at 4× (128×128), not
-        // the full device box. Halfblocks font is 10×20 px; a 200×100-cell pane
-        // is 2000×2000 device, which would otherwise scale ~62×.
-        let picker = Picker::halfblocks();
+    fn v6_encode_caps_upscale_on_an_encoding_backend() {
         let area = Rect::new(0, 0, 200, 100);
         let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
-        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
-        // The encoded protocol reports its device size; 4× of 32 = 128 px = at
-        // most ceil(128/20)=7 cells tall / ceil(128/10)=13 wide. Assert it is far
-        // smaller than the pane (the cap engaged), not the full 200×100.
+        let kitty = kitty_picker(10, 20);
+        let ready = GraphicsRender::encode_v6(&kitty, &canvas, 1, area, None).expect("encode");
+        // The encoded protocol reports its device size; 2× of 32 = 64 px = at most
+        // ceil(64/20)=4 cells tall / ceil(64/10)=7 wide. Assert it is far smaller than
+        // the pane (the cap engaged), not the full 200×100.
         let sz = ready.proto.size();
-        assert!(sz.width <= 14 && sz.height <= 8, "capped image is ~4× native, got {sz:?}");
+        assert!(sz.width <= 14 && sz.height <= 8, "capped image is ~2× native, got {sz:?}");
+        // …and the same canvas on half-blocks, which encodes nothing, reaches the pane.
+        let hb = Picker::halfblocks();
+        let hb_ready = GraphicsRender::encode_v6(&hb, &canvas, 1, area, None).expect("encode");
+        let hb_sz = hb_ready.proto.size();
+        assert!(
+            hb_sz.width > sz.width && hb_sz.height > sz.height,
+            "half-blocks spends no encode budget, so it takes the pane: {hb_sz:?} must beat \
+             the capped {sz:?} on both axes"
+        );
+        assert!(
+            hb_sz.width <= area.width && hb_sz.height <= area.height,
+            "…and stops AT the pane: {hb_sz:?} inside {}x{}",
+            area.width,
+            area.height
+        );
     }
 
     #[test]

@@ -802,6 +802,19 @@ and you get 1,636 — every one of them a blend nobody painted. That is why the
 scale caps out (`MAX_V6_UPSCALE`) rather than reaching for your pane's full
 device resolution, and why it has always been nearest.
 
+That cap is a *PNG-encode budget*, though, and so it only binds a backend that
+spends one. Kitty, sixel and iTerm2 build and ship encoded pixels for every frame
+the picture changes on, and every extra factor of magnification is bytes to make
+and bytes to write. **Half-blocks encodes nothing** — the image is resolved
+straight into terminal cells, one pixel per column and two per row — so it has no
+budget to protect and no ceiling any more. It used to have one, and the cost was
+plain: because the fit that follows only ever *shrinks*, the magnification is what
+decides how many cells the picture occupies, so a picture pinned at 2× kept a fixed
+number of cells while a smaller font kept handing the pane more of them. Shrinking
+the font made the game window smaller instead of the picture sharper. It now climbs
+as far as the pane allows — and where the v6 pixel lock is on, as far up the
+artwork'''s own integer ladder as the pane allows.
+
 Shrinking is the same rule read backwards, and that is the trap. The instruction
 "take the source pixel nearest this destination pixel" *replicates* one on the way
 up and **drops** one on the way down. At a 60×24 pane Journey's plate is asked for
