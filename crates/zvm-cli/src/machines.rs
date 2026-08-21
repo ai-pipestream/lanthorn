@@ -67,11 +67,17 @@ fn status(band: StatusBand) -> String {
 
 /// The cursor, as shape and colour — neither derivable from the other, and on
 /// two machines the colour is neither the page nor the ink.
+///
+/// `ReverseSpace` prints no colour because it has none to print: it is the pair on
+/// screen, reversed. No stored row carries it — `zvm::interpreter::period_look_for`
+/// substitutes it for a Version 6 story, and this table is the machines rather than
+/// any one story (SQ-0947).
 fn cursor(look: &PeriodLook) -> String {
     let shape = match look.cursor_shape {
         CursorShape::Bar => "bar",
         CursorShape::Block => "block",
         CursorShape::Underscore => "underscore",
+        CursorShape::ReverseSpace => return "reversed cell".to_string(),
     };
     format!("{shape} {}", hex(look.cursor_colour))
 }
