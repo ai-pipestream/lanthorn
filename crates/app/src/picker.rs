@@ -1051,26 +1051,49 @@ pub enum StorySource {
     /// Every story in one directory: the ordinary library launch.
     Library(PathBuf),
     /// Every story on one multi-disk release, reached by naming any one of its
-    /// volumes. `dir` is the directory they share, which is still where a
-    /// downloaded story would land and still what the browser's header names.
+    /// volumes — or on **one volume that holds several games** (SQ-0962), which
+    /// is the same list read off a `members` of one. `dir` is the directory they
+    /// share, which is still where a downloaded story would land and still what
+    /// the browser's header names.
     DiskSet { dir: PathBuf, members: Vec<PathBuf> },
 }
 
 impl StorySource {
     /// What `path` means as a launch argument: a directory is a library, a
-    /// volume of a multi-disk release is that release, and anything else is
-    /// neither.
+    /// volume of a multi-disk release is that release, a disk holding several
+    /// games is those games, and anything else is none of the above.
     ///
-    /// A set that offers **fewer than two games** is not one worth a menu, so it
-    /// reports `None` and the caller opens the file the way it always did: a
+    /// A source that offers **fewer than two games** is not one worth a menu, so
+    /// it reports `None` and the caller opens the file the way it always did: a
     /// player naming Zork Zero's `(360K) (Disk 2)` wants Zork Zero, not a
-    /// one-row browser. The set is still *recognised* — this is only about
-    /// whether it is worth presenting.
+    /// one-row browser, and so does one naming the DiskCopy *Lost Treasures*
+    /// `Disk 5 - Zork Zero`, whose whole content is one game. The set is still
+    /// *recognised* — this is only about whether it is worth presenting.
+    ///
+    /// # One disk is not one game (SQ-0962)
+    ///
+    /// This asked `disk_set::members` and stopped when the answer was `None`, so
+    /// a volume belonging to no multi-disk release was launched as **whatever
+    /// story the format's tiebreak preferred** however many it held. Pointed at
+    /// the DiskCopy *Lost Treasures* disk 1 — *Beyond Zork* and three copies of
+    /// *The Lurking Horror* — lanthorn started Beyond Zork and there was no way
+    /// to reach the other game; `InfocomMasterpieces.img` opened one of
+    /// thirty-three. It was never a missing feature: `meta.disk_entry` threads a
+    /// chosen story through the picker, the launch dialog and the save key, and
+    /// [`dedupe_within_a_volume`] exists specifically for a volume holding
+    /// several. The chooser was simply not reached, because "is this a set?" was
+    /// standing in for "is there a choice to make?" and they are different
+    /// questions — a compilation on a single disc is a shelf too.
+    ///
+    /// The mount that answers it is the cost, so it is asked only of files that
+    /// really are disk images, and only after the cheap name-only rule has
+    /// declined. Every loose story file still leaves here on the first line.
     pub fn of(path: &Path, data_base: &Path) -> Option<StorySource> {
         if path.is_dir() {
             return Some(StorySource::Library(path.to_path_buf()));
         }
-        let members = crate::disk_set::members(path)?;
+        let members = crate::disk_set::members(path)
+            .or_else(|| holds_several_games(path).then(|| vec![path.to_path_buf()]))?;
         let dir = path.parent()?.to_path_buf();
         let source = StorySource::DiskSet { dir, members };
         (source.scan(data_base).len() >= 2).then_some(source)
@@ -1094,13 +1117,31 @@ impl StorySource {
                 for m in members {
                     out.extend(resolve_entries(m, data_base));
                 }
-                dedupe_within_sets(&mut out, std::slice::from_ref(members));
+                // **Only across volumes**, because that is what the fold means:
+                // "a build an EARLIER volume already offered". A lone volume has
+                // no earlier one, and applying it anyway would fold the pair a
+                // hybrid disc keeps on purpose — Zork I is r88/840726 on both
+                // sides of *Masterpieces*, and telling the machines apart is
+                // `dedupe_within_a_volume`'s whole subtlety (SQ-0878/SQ-0962).
+                if members.len() > 1 {
+                    dedupe_within_sets(&mut out, std::slice::from_ref(members));
+                }
                 associate_hint_sidecars(&mut out);
                 sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
                 out
             }
         }
     }
+}
+
+/// Does `path` hold **two or more** launchable-looking stories of its own?
+///
+/// The mount, asked once, of a file that already looks like a disk image; a
+/// story file reads its bytes, fails `DiskImage::detect` and costs nothing more.
+/// It answers the question [`StorySource::of`] used to answer with "is it a
+/// volume of a set?", which was a different question (SQ-0962).
+fn holds_several_games(path: &Path) -> bool {
+    crate::hints::mounted_stories(path).is_some_and(|(_, stories)| stories.len() >= 2)
 }
 
 /// Second pass over a freshly-scanned list: attach each detected InvisiClues/
