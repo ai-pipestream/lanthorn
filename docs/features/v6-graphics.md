@@ -1559,6 +1559,21 @@ session-only switch that never touches your saved config:
   had no slack to reclaim; both are drawn by packing the game's rows onto consecutive
   terminal rows, so the click map inverts by row index in either, rather than
   inverting the pane linearly and landing a row off in the second.
+  The same seam runs through the **InvisiClues hint menu** Zork Zero and Shogun
+  share — the screen that says "(Or use mouse.)" and means it. Its topic list is a
+  grid printed into the ring's clear middle, drawn as glyphs, and a glyph is
+  wherever the renderer put it: the grid is the *game's* screen, so a pane wider
+  than the game centres it, and a click map that assumed the first topic sat on the
+  viewport's first column looked forty columns to its left at a 190-column pane.
+  The map asks the drawing where it put that column instead. Both of its origins are
+  native **pixels** now, not cell indices — Zork Zero's box begins at y=78 and prints
+  its first topic at y=79, so a row index rounds to a slot the text is not in and
+  clicking `GENERAL QUESTIONS` selected `THE JESTER`; Shogun's box happens to fall
+  the other way, which is exactly why one specimen is never enough. And a region's
+  rows govern the pane's whole width even where its columns do not: the flank beside
+  a menu row is tiled artwork, not on the letterbox grid at all, so inverting *its*
+  row proportionally reported a y from elsewhere on the screen and a click just left
+  of a topic landed several items away.
   And this holds at *every* pane shape, reclaimed layout or
   centred letterbox alike — a short, wide pane leaves no dead space to reclaim and
   used to hand the whole flank, border columns included, to one uploaded band, which

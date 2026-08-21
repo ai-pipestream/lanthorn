@@ -465,7 +465,18 @@ pub struct V6ClickMap {
 /// Nothing here knows which game it is looking at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackedText {
-    /// First terminal row, its row count, and the native text ROW drawn at `top`.
+    /// First terminal row, its row count, and the native PIXEL y of the TOP of
+    /// the text row drawn at `top` — a pixel rather than a row index for the same
+    /// reason `cols` carries one below: a story box does not begin on a multiple
+    /// of the cell.
+    ///
+    /// SQ-0951 measured what the row index cost. Zork Zero's InvisiClues box
+    /// starts at native y=78 and prints its first topic at y=79, so its rows are
+    /// drawn at 79..94, 95..110, … while row index `(79-1)/16 = 4`'s grid slot is
+    /// 64..79. Inverting through the index returned the middle of the SLOT (72),
+    /// which lands in the row ABOVE the one under the pointer — so clicking
+    /// GENERAL QUESTIONS selected THE JESTER, on every pane width, and only
+    /// Shogun's luckier phase (box at y=70, text at 71) hid it there.
     pub rows: (u16, u16, u16),
     /// First terminal column, its column count, and the native PIXEL x drawn at
     /// `left` — a pixel rather than a column index because a story box does not
@@ -477,9 +488,25 @@ pub struct PackedText {
 }
 
 impl PackedText {
-    fn holds(&self, col: u16, row: u16) -> bool {
+    /// Whether this region packs `row` — asked WITHOUT the column, because the
+    /// rows a region packs are the pane's row layout across its whole width.
+    ///
+    /// SQ-0951: a region that packs its columns too used to publish its row
+    /// mapping only inside them, so a click one column left of a topic — in the
+    /// ring's flank, which is a TILED band and not on the letterbox grid at all —
+    /// fell through to the proportional inverse and reported a native y from a
+    /// completely different part of the screen. At a 50x60 pane that turned a
+    /// click beside GLACIER into GENERAL QUESTIONS, thirteen items lower: "click
+    /// to the left of a selection and it misclicks several items lower". A
+    /// column-less region (a chrome text strip) has always behaved this way; this
+    /// is only the same rule reaching the regions that also pack columns.
+    fn holds_row(&self, row: u16) -> bool {
         let (top, count, _) = self.rows;
         row >= top && row < top.saturating_add(count)
+    }
+
+    fn holds(&self, col: u16, row: u16) -> bool {
+        self.holds_row(row)
             && self.cols.is_none_or(|(left, n, _)| col >= left && col < left.saturating_add(n))
     }
 }
@@ -508,7 +535,10 @@ impl V6ClickMap {
             return None;
         }
         // A PACKED region inverts by cell index, not by the letterbox — on whichever
-        // axes it packs. Its own cells are drawn, so they need no range check.
+        // axes it packs. Its own cells are drawn, so they need no range check. The
+        // two axes are asked SEPARATELY (SQ-0951): a region's rows govern the pane's
+        // whole width, its columns only the span it packs them into.
+        let row_packed = self.packed_text.iter().find(|p| p.holds_row(row));
         let packed = self.packed_text.iter().find(|p| p.holds(col, row));
         let gx = match packed.and_then(|p| p.cols) {
             // The clicked column's game pixel is that cell's HORIZONTAL middle, so
@@ -519,10 +549,14 @@ impl V6ClickMap {
             }
             None => (fx * self.native_w as f32).floor() as u32 + 1,
         };
-        let gy = match packed {
+        let gy = match row_packed {
             Some(p) => {
-                let (top, _, first_game) = p.rows;
-                (first_game as u32 + (row - top) as u32) * 16 + 8
+                // The clicked row's game pixel is that row's VERTICAL middle,
+                // counted in native pixels from the top of the row drawn first —
+                // the whole terminal row therefore selects the line the player
+                // sees on it, whatever sub-cell phase the region begins on.
+                let (top, _, native_y0) = p.rows;
+                u32::from(native_y0) + u32::from(row - top) * 16 + 8
             }
             None => {
                 let fy = (dy - self.img_y) / self.img_h;

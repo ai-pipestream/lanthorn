@@ -2189,11 +2189,19 @@ fn render_node(
                             // fallback stays because it is not about Journey — any plan can leave
                             // a text strip below the viewport, and packing is how every one of
                             // them is drawn.
+                            //
+                            // The third element is the native PIXEL top of the row drawn
+                            // at the strip's first terminal row — the run's own `y`, not
+                            // its row index times 16 (SQ-0951). They agree wherever the
+                            // game prints on the 16px grid, which Journey does; they do
+                            // not where it prints off it, and the index then names a slot
+                            // the text is not in.
                             let packed = |r: &Rect, runs: &[&crate::engine::PxText]| {
                                 let rows = runs.iter().map(|t| (t.y.max(1) - 1) / 16);
                                 let first = rows.clone().min()?;
                                 let last = rows.max()?;
-                                Some((r.y, r.height.min(last - first + 1), first))
+                                let first_top = runs.iter().map(|t| t.y.max(1) - 1).min()?;
+                                Some((r.y, r.height.min(last - first + 1), first_top))
                             };
                             let mut packed_text: Vec<crate::render::graphics::PackedText> = Vec::new();
                             if let Some(rows) = menu_strips
@@ -2228,10 +2236,39 @@ fn render_node(
                             // (`viewport`, `vp_native`), because a click map derived
                             // independently of the draw is a second implementation of the
                             // same geometry and will drift from it.
+                            //
+                            // SQ-0951: which is exactly what the COLUMN span had become.
+                            // A promoted story GRID — Zork Zero's and Shogun's InvisiClues
+                            // topic list — is not drawn by the in-box run packing at all;
+                            // `render_node` hands it to `draw_grid`, which places the
+                            // GAME's screen (`cols` wide) CENTRED in the pane rather than
+                            // flush to the viewport's left edge. At a 190x60 pane that is
+                            // a 58-column grid in a 138-column viewport, so every topic is
+                            // drawn forty columns right of where this map claimed it was,
+                            // and the player had to click far to the LEFT of a topic to
+                            // select it. Ask the drawing where it put the first column.
                             if viewport.width > 0 && viewport.height > 0 {
+                                let (left, cols) = match &story.node {
+                                    WinNode::Grid(g) => {
+                                        // `render_node` draws a game-managed grid FRAMELESS
+                                        // at its exact rect (SQ-0303), so resolve the span
+                                        // against that border preference and not the theme's.
+                                        let frameless = crate::engine::GridWindow {
+                                            cols: g.cols,
+                                            border: crate::engine::BorderPref::NoBorder,
+                                            ..Default::default()
+                                        };
+                                        crate::render::upper_window::grid_content_x_span(
+                                            &frameless, grid_colors, viewport,
+                                        )
+                                    }
+                                    // Prose wraps to the viewport, so its first column is
+                                    // the viewport's own.
+                                    _ => (viewport.x, viewport.width),
+                                };
                                 packed_text.push(crate::render::graphics::PackedText {
-                                    rows: (viewport.y, viewport.height, (vp_native.1 / v6::FONT_H) as u16),
-                                    cols: Some((viewport.x, viewport.width, vp_native.0 as u16)),
+                                    rows: (viewport.y, viewport.height, vp_native.1 as u16),
+                                    cols: Some((left, cols, vp_native.0 as u16)),
                                 });
                             }
                             gr.record_hybrid_click_map(area, click_scale, native, cell_px, packed_text);
