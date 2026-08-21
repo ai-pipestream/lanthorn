@@ -1642,7 +1642,11 @@ fn render_node(
                         // `honor_game_colours` gate as the pane flood above.
                         // The painted ground goes under the ring's art and glyphs
                         // and before the pages claim the rest (SQ-0706).
-                        v6::blit_paint_ground(&mut canvas, state.v6_paint.borrow().as_deref());
+                        v6::blit_paint_ground(
+                            &mut canvas,
+                            state.v6_paint.borrow().as_deref(),
+                            v6::TextLayer::SkipGlyphRows(&glyph_rows),
+                        );
                         // SQ-0883: the INK layer, frozen — art, glyph ink and painted
                         // ground, before any window's PAGE floods the rest. The border
                         // probe below reads THIS: a page is a colour a window was told
@@ -1653,7 +1657,13 @@ fn render_node(
                         // opaque is not painted.
                         let ink = canvas.clone();
                         if state.config.honor_game_colours {
-                            v6::fill_window_pages(&mut canvas, &ring_chrome, layout.story, &state.colors);
+                            v6::fill_window_pages(
+                                &mut canvas,
+                                &ring_chrome,
+                                layout.story,
+                                &state.colors,
+                                v6::TextLayer::SkipGlyphRows(&glyph_rows),
+                            );
                             // …and the story window's own page under the pixels the
                             // ring bands ship (SQ-0704, hybrid half). Raster flattens
                             // its whole canvas opaque before shipping; hybrid ships
@@ -3676,9 +3686,9 @@ pub fn build_v6_raster_canvas(
     // what is left, because a fill is the oldest thing on the screen: the game
     // filled its rectangle, then printed the label on top of it.
     let grounds = |c: &mut image::RgbaImage| {
-        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref());
+        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref(), v6::TextLayer::All);
         if honor {
-            v6::fill_window_pages(c, &layout.chrome, layout.story, &state.colors);
+            v6::fill_window_pages(c, &layout.chrome, layout.story, &state.colors, v6::TextLayer::All);
         } else {
             // SQ-0716: colours declined, but a window the game has PAINTED INTO still
             // gets its page — scopa's felt table is a full-screen `erase_window` in

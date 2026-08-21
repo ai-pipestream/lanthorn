@@ -545,13 +545,30 @@ fn boxes_overlap(a: &PositionedWindow, b: &PositionedWindow) -> bool {
 /// the host page governs everywhere, exactly as before — except for the windows
 /// [`fill_painted_window_pages`] carves back out, which are the game's own canvas
 /// rather than its colour preference.
+/// `text` is the same claim [`build_chrome_canvas`] was built with, and it governs
+/// this fill for the same reason (SQ-0948). A page is not artwork: on a row the
+/// ring draws with GLYPHS, the strip stamps the window's own background into its
+/// cells, so a page painted here is a second rendering of one ribbon — at the
+/// window's true native height instead of the strip's whole cells, and reaching
+/// whatever native columns the strip's cell boundary rounded away.
+///
+/// MEASURED on `stories/shogun-r322-s890706.z6` (release 322, IBM PC, six taps
+/// into play) at a 117x40 kitty terminal: the status window is `548x32` at native
+/// `(46, 0)` and the left flank band's last terminal cell inverts to native
+/// `44.5..50.1`, so four columns of that page sat inside the FLANK. The strip drew
+/// the ribbon 36 device px tall (two whole cells) and the band drew the same page
+/// 46 px tall (32 native rows), and the 10-pixel difference reached the screen as a
+/// 6x10 white block hanging below each end of the score bar — SQ-0948, and the same
+/// boundary SQ-0902/0903 fixed for the glyph strokes and their flood while leaving
+/// the page behind them untouched.
 pub fn fill_window_pages(
     canvas: &mut RgbaImage,
     chrome: &[&PositionedWindow],
     story: Option<&PositionedWindow>,
     colors: &ColorScheme,
+    text: TextLayer<'_>,
 ) {
-    fill_pages_where(canvas, chrome, story, colors, |_| true);
+    fill_pages_where(canvas, chrome, story, colors, text, |_| true);
 }
 
 /// SQ-0716: the half of [`fill_window_pages`] that survives `honor_game_colours
@@ -588,7 +605,11 @@ pub fn fill_painted_window_pages(
     paint: Option<&RgbaImage>,
 ) {
     let Some(paint) = paint else { return };
-    fill_pages_where(canvas, chrome, story, colors, |it| window_has_paint(it, paint));
+    // `TextLayer::All`: this path is the game's own CANVAS, not a presentation
+    // colour — the window it fills has the game's pixels in it, and no ring strip
+    // stamps that ground into cells. Nothing here has a second rendering to agree
+    // with, so there is no row to skip.
+    fill_pages_where(canvas, chrome, story, colors, TextLayer::All, |it| window_has_paint(it, paint));
 }
 
 /// Whether the game's painted ground has any pixel inside `it`'s native box.
@@ -606,6 +627,7 @@ fn fill_pages_where(
     chrome: &[&PositionedWindow],
     story: Option<&PositionedWindow>,
     colors: &ColorScheme,
+    text: TextLayer<'_>,
     keep: impl Fn(&PositionedWindow) -> bool,
 ) {
     for it in chrome {
@@ -633,6 +655,9 @@ fn fill_pages_where(
         let x1 = (x0 + it.w_px as u32).min(canvas.width());
         let y1 = (y0 + it.h_px as u32).min(canvas.height());
         for y in y0..y1 {
+            if text.skips_line(y) {
+                continue;
+            }
             for x in x0..x1 {
                 if canvas.get_pixel(x, y)[3] == 0 {
                     canvas.put_pixel(x, y, page);
@@ -866,10 +891,27 @@ fn blit_chrome_graphics(canvas: &mut RgbaImage, chrome: &[&PositionedWindow]) {
 /// been rasterized. So only pixels no layer has touched take paint, and the order
 /// is: chrome art and glyphs, then this ground beneath them, then the window pages
 /// filling whatever neither claimed.
-pub fn blit_paint_ground(canvas: &mut RgbaImage, paint: Option<&RgbaImage>) {
+/// `text` is the claim [`build_chrome_canvas`] was built with, and it governs this
+/// blit for the same reason (SQ-0948). A ground the game filled UNDER a status
+/// ribbon is not artwork either: the strip stamps that ribbon into whole cells, so a
+/// band carrying the fill draws it a second time at the window's own native height.
+///
+/// MEASURED on `stories/shogun-r322-s890706.z6` two turns into play (`cr`, then
+/// `look`) at a 117x40 kitty terminal. The game erases its `548x32` status window at
+/// native `(46, 0)`, which reaches the app as a painted rectangle; the ring's left
+/// flank band ends at native 50, so four columns of that fill sat inside its image
+/// and hung ten device pixels below the two-cell ribbon. It showed only on the LEFT
+/// because the paint surface is sized to the story window (548x368) while the fill is
+/// recorded in SCREEN coordinates, so the same rectangle is clipped at native 548 and
+/// never reaches the right flank at 590 — one white block, not two, which is why the
+/// page half of this fix appeared to cure one side and not the other.
+pub fn blit_paint_ground(canvas: &mut RgbaImage, paint: Option<&RgbaImage>, text: TextLayer<'_>) {
     let Some(src) = paint else { return };
     let (w, h) = (src.width().min(canvas.width()), src.height().min(canvas.height()));
     for y in 0..h {
+        if text.skips_line(y) {
+            continue;
+        }
         for x in 0..w {
             let p = *src.get_pixel(x, y);
             if p[3] > 0 && canvas.get_pixel(x, y)[3] == 0 {
@@ -1324,6 +1366,21 @@ impl TextLayer<'_> {
         match self {
             TextLayer::All => false,
             TextLayer::SkipGlyphRows(rows) => rows.contains(&native_top),
+        }
+    }
+
+    /// The same question asked of a native SCAN LINE rather than of a run.
+    ///
+    /// A skipped run owns the whole `FONT_H` cell under its top, so a caller that
+    /// walks pixels — [`fill_window_pages`] does — needs to know whether the line
+    /// it is on falls inside one. Kept beside [`skips`](TextLayer::skips) so the
+    /// two can never disagree about how tall a claimed row is.
+    fn skips_line(&self, y: u32) -> bool {
+        match self {
+            TextLayer::All => false,
+            TextLayer::SkipGlyphRows(rows) => {
+                rows.iter().any(|&top| (top as u32..top as u32 + FONT_H).contains(&y))
+            }
         }
     }
 }
@@ -2323,7 +2380,7 @@ mod tests {
         );
         // The ring's own order: the painted ground goes on after the chrome text
         // (SQ-0706), which is exactly why the skip cannot reach it.
-        blit_paint_ground(&mut canvas, Some(&paint));
+        blit_paint_ground(&mut canvas, Some(&paint), TextLayer::All);
         let op = |x: u32, y: u32| canvas.get_pixel(x, y)[3] >= 128;
 
         assert!(
@@ -3462,7 +3519,7 @@ mod tests {
         let chrome = [&art, &win];
         let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         assert_eq!(c.get_pixel(4, 12)[3], 0, "precondition: the window's lower half is unpainted");
-        fill_window_pages(&mut c, &chrome, None, &colors());
+        fill_window_pages(&mut c, &chrome, None, &colors(), TextLayer::All);
         assert_eq!(*c.get_pixel(4, 12), Rgba([0, 0, 255, 255]), "an unpainted pixel takes the window's own page");
         assert_eq!(*c.get_pixel(4, 4), art_color, "artwork is never repainted");
     }
@@ -3473,7 +3530,7 @@ mod tests {
         let chrome = [&win];
         let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
         let before = c.as_raw().clone();
-        fill_window_pages(&mut c, &chrome, None, &colors());
+        fill_window_pages(&mut c, &chrome, None, &colors(), TextLayer::All);
         assert_eq!(*c.as_raw(), before, "a window the game gave no colour is left exactly as before");
     }
 
@@ -3489,7 +3546,7 @@ mod tests {
         };
         let chrome = [&full];
         let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
-        fill_window_pages(&mut c, &chrome, Some(&story), &colors());
+        fill_window_pages(&mut c, &chrome, Some(&story), &colors(), TextLayer::All);
         assert_eq!(c.get_pixel(8, 8)[3], 0, "the story box stays clear for the transcript");
         assert_eq!(c.get_pixel(0, 0)[3], 0, "and the covering window is skipped whole, not clipped");
     }
@@ -3501,7 +3558,7 @@ mod tests {
         let win = page_grid(16, 16, Some(1u32 << 24)); // Standard(0)
         let chrome = [&win];
         let mut c = build_chrome_canvas(&chrome, (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All);
-        fill_window_pages(&mut c, &chrome, None, &colors());
+        fill_window_pages(&mut c, &chrome, None, &colors(), TextLayer::All);
         assert_eq!(c.get_pixel(4, 4)[3], 0, "an inherited colour leaves the window's page to the host");
     }
 
