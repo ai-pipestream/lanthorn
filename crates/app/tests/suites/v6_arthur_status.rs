@@ -9,8 +9,22 @@
 //!
 //! HYBRID mode (SQ-0500): the status row decomposes into its own terminal-CELL
 //! strip (crisp reverse bar) while the graphics panel above stays the pixel ring.
-//! The bar reads solid across the FULL pane width (SQ-0504) — the game paints its
-//! runs only from col ~4 to ~75, but a pure reverse-video row fills edge to edge.
+//! The bar reads solid — no unreversed gap anywhere INSIDE it (SQ-0504), including
+//! the lone hole before the date the original SQ-0499 report was about.
+//!
+//! **It is solid across its own WINDOW and not across the pane** (SQ-0949). Arthur's
+//! status window is native `28..612` of 640, and the 28 native columns it leaves at
+//! each edge are where his poles stand. Both reference machines show the ribbon inset
+//! with the frame's rule running past it, unbroken from the panel's foot to the
+//! bottom of the screen: `machine-screenshots/dos-arthur.png` (the EGA press at the
+//! Churchyard, "Merlin disappears as suddenly as he came") puts the white ribbon at
+//! native **28..610** and the grey rule beside it at native **6.5..8.7**;
+//! `machine-screenshots/mac-arthur.jpg` is the same frame with the black ribbon inset
+//! and the green poles at a constant x above and below it. Reading SQ-0504's "a pure
+//! reverse-video row fills edge to edge" as "fills the PANE" flooded the strip's
+//! ground straight over both poles and cut each flank into a piece above the bar and
+//! a piece below it — the step the SQ-0949 report describes as the side strip not
+//! lining up with the panel above it.
 //!
 //! Skip-if-missing pattern per the other gitignored-story smokes.
 //!
@@ -91,10 +105,26 @@ fn arthur_status_reaches_the_model() {
     assert!(reversed, "status bar is reverse-video");
 }
 
-/// (SQ-0500 + SQ-0499 + SQ-0504) HYBRID: the status row renders as terminal CELLS
-/// — the "St Anne's Day, Compline" date is real buffer text — and its reverse bar
-/// spans the FULL pane width (no unreversed gap anywhere on the row). The graphics
-/// panel above the status row stays the pixel ring (half-block image cells).
+/// A cell the hybrid RING drew rather than the status strip: a kitty virtual
+/// placeholder, a half-block the image encoder emitted, or any cell carrying a
+/// background the ring painted. Used to say what stands BESIDE the ribbon — see the
+/// module header: the answer must be the frame's poles, not bare theme backdrop.
+fn is_ring_art(c: &ratatui::buffer::Cell) -> bool {
+    let g = c.symbol().chars().next().unwrap_or(' ');
+    g == '\u{10eeee}'
+        || ('\u{2580}'..='\u{259f}').contains(&g)
+        || c.bg != ratatui::style::Color::Reset
+}
+
+/// (SQ-0500 + SQ-0499 + SQ-0504, bounded by SQ-0949) HYBRID: the status row renders
+/// as terminal CELLS — the "St Anne's Day, Compline" date is real buffer text — and
+/// its reverse bar is solid with no unreversed gap INSIDE it, while the columns
+/// outside it belong to the ring's flank art. The graphics panel above the status
+/// row stays the pixel ring (half-block image cells).
+///
+/// FALSIFY by dropping the `row_spans` clause from `ChromeRowOracle::blocked`: the
+/// bar floods the whole pane again and `beside` comes back empty at both ends,
+/// which is the pole the report says the ribbon paints over.
 #[test]
 fn arthur_hybrid_status_row_is_solid_terminal_bar() {
     let Some(session) = arthur_at_status() else { return };
@@ -116,17 +146,42 @@ fn arthur_hybrid_status_row_is_solid_terminal_bar() {
         .find(|&y| row_text(y).contains("Anne"))
         .expect("status date renders as terminal cells");
 
-    // The reverse bar spans the FULL pane width (SQ-0504): the game paints its
-    // status runs only from col ~4 to ~75, but the bar reads edge to edge — every
-    // cell on the row is reverse-video, including the leading/trailing cells the
-    // game left bare and the lone gap before the date (old SQ-0499 hole).
-    let holes: Vec<u16> = (0..area.width)
+    // The bar is SOLID over its own span: every cell between its first and its last
+    // reverse-video cell is reverse-video too, including the lone gap before the date
+    // that was the original SQ-0499 hole.
+    let rev: Vec<u16> = (0..area.width)
+        .filter(|&x| buf.cell((x, status_y)).unwrap().modifier.contains(Modifier::REVERSED))
+        .collect();
+    assert!(!rev.is_empty(), "the status row carries a reverse bar\nrow: {:?}", row_text(status_y));
+    let (first, last) = (rev[0], *rev.last().unwrap());
+    let holes: Vec<u16> = (first..=last)
         .filter(|&x| !buf.cell((x, status_y)).unwrap().modifier.contains(Modifier::REVERSED))
         .collect();
     assert!(
         holes.is_empty(),
-        "the reverse status bar spans the full pane [0,{}) with no unreversed gap; holes at {holes:?}\nrow: {:?}",
+        "the reverse status bar is solid over [{first},{last}] with no unreversed gap; holes at \
+         {holes:?}\nrow: {:?}",
+        row_text(status_y)
+    );
+
+    // …and what stands beside it is the frame, not backdrop. Arthur's status window
+    // is native 28..612 of 640, so at any pane there are columns at each edge the
+    // ribbon must not have taken — that is where his poles are (see the module
+    // header, and the DOS press capture it names).
+    let beside: Vec<u16> = (0..area.width).filter(|&x| x < first || x > last).collect();
+    assert!(
+        !beside.is_empty(),
+        "the ribbon reaches as far as its window and no further, so the flank keeps \
+         columns at both edges of the status row; it took the whole pane [0,{})\nrow: {:?}",
         area.width,
+        row_text(status_y)
+    );
+    let bare: Vec<u16> =
+        beside.iter().copied().filter(|&x| !is_ring_art(buf.cell((x, status_y)).unwrap())).collect();
+    assert!(
+        bare.is_empty(),
+        "every column the ribbon left is the flank's own art — the poles run through \
+         this row unbroken; bare cells at {bare:?}\nrow: {:?}",
         row_text(status_y)
     );
 
@@ -398,7 +453,8 @@ fn arthur_map_does_not_move_the_header_art() {
 /// and left 95 and 100 clean, which is exactly how it was reported.
 ///
 /// Sweeps every width across two full periods of that fraction and requires the bar
-/// to be real cells, solid edge to edge (SQ-0504), at all of them.
+/// to be real cells, solid over its own window's span (SQ-0504/SQ-0949), with the
+/// frame's poles standing in the columns it leaves, at all of them.
 #[test]
 fn arthur_status_bar_is_terminal_cells_at_every_pane_width() {
     let Some(session) = arthur_showing_map(true) else { return };
@@ -419,12 +475,33 @@ fn arthur_status_bar_is_terminal_cells_at_every_pane_width() {
             broken.push((cols, format!("location text broken up: {row:?}")));
             continue;
         }
-        // SQ-0504: a pure reverse-video row reads solid across the whole pane.
-        let holes: Vec<u16> = (0..area.width)
+        // SQ-0504, bounded by SQ-0949: a pure reverse-video row reads solid over its
+        // own window's span, and the columns outside it are the flank's pole art.
+        let rev: Vec<u16> = (0..area.width)
+            .filter(|&x| buf.cell((x, status_y)).unwrap().modifier.contains(Modifier::REVERSED))
+            .collect();
+        let Some((&first, &last)) = rev.first().zip(rev.last()) else {
+            broken.push((cols, format!("no reverse bar on the status row: {row:?}")));
+            continue;
+        };
+        let holes: Vec<u16> = (first..=last)
             .filter(|&x| !buf.cell((x, status_y)).unwrap().modifier.contains(Modifier::REVERSED))
             .collect();
         if !holes.is_empty() {
             broken.push((cols, format!("unreversed gaps at {holes:?} in {row:?}")));
+            continue;
+        }
+        // On THIS frame the flank may legitimately be absent — `map` grows win0 to
+        // 584x192 and Arthur's side borders are GRID windows, so the graphics-only
+        // canvas is empty beside it and no flank is carved at all. The invariant that
+        // holds either way is that the ribbon never takes a column the flank owns; the
+        // pole itself is asserted on the gameplay frame, below.
+        let bare: Vec<u16> = (0..area.width)
+            .filter(|&x| x < first || x > last)
+            .filter(|&x| !is_ring_art(buf.cell((x, status_y)).unwrap()))
+            .collect();
+        if !bare.is_empty() {
+            broken.push((cols, format!("bare cells beside the ribbon at {bare:?} in {row:?}")));
         }
     }
     assert!(broken.is_empty(), "the status bar must be crisp cells at every width; failures: {broken:#?}");

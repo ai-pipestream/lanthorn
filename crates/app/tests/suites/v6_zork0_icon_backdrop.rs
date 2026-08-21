@@ -165,7 +165,13 @@ fn zork0_room_icons_rest_on_the_banner_windows_own_white_page() {
     assert!(!strokes.is_empty(), "the icons paint real ink into the strip below the banner art");
 
     let mut after = before.clone();
-    app::render::v6_layout::fill_window_pages(&mut after, &layout.chrome, layout.story, &state.colors);
+    app::render::v6_layout::fill_window_pages(
+        &mut after,
+        &layout.chrome,
+        layout.story,
+        &state.colors,
+        app::render::v6_layout::TextLayer::All,
+    );
 
     // (1) Every hole now reads the BANNER WINDOW's own page: opaque white
     // (ZMSD §8.3.1's true-colour equivalent of Standard 9), never black.
@@ -280,7 +286,13 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
         app::render::v6_layout::TextLayer::All,
     );
     let mut after = before.clone();
-    app::render::v6_layout::fill_window_pages(&mut after, &layout.chrome, layout.story, &state.colors);
+    app::render::v6_layout::fill_window_pages(
+        &mut after,
+        &layout.chrome,
+        layout.story,
+        &state.colors,
+        app::render::v6_layout::TextLayer::All,
+    );
     assert_eq!(before.as_raw(), after.as_raw(), "declined colours leave the composite byte-identical");
 
     // And the icons' ground is still the transparency the caller's page resolves.
@@ -349,6 +361,7 @@ fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
         &layout.chrome,
         layout.story,
         &state.colors,
+        app::render::v6_layout::TextLayer::All,
     );
     let clear: Vec<(u32, u32)> = (68..78)
         .flat_map(|y| (276..321).map(move |x| (x, y)))

@@ -29,3 +29,5 @@ mod v6_prose_freeze;
 mod v6_raster_text_loss;
 #[path = "suites/v6_side_border_tiling.rs"]
 mod v6_side_border_tiling;
+#[path = "suites/v6_status_window_edges.rs"]
+mod v6_status_window_edges;
