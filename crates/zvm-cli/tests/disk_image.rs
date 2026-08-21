@@ -315,7 +315,11 @@ fn story_name_picks_one_off_the_disk() {
 fn a_real_dos_compilation_lists_six_games_and_story_opens_one() {
     let Some(image) = story_path("floppy2.ima") else { return };
     let err = stderr_of(&run(&image, &[], ""));
-    assert!(err.contains("holds 6 stories"), "the whole disk is offered:\n{err}");
+    // Twenty, not six: `floppy2` is one volume of `floppy1`…`floppy5`, and since
+    // SQ-0961 the menu is the RELEASE's rather than the platter's — the same
+    // twenty rows the browser has listed for this set since SQ-0844. The named
+    // volume's own six still come first, which is why the indices below hold.
+    assert!(err.contains("holds 20 stories"), "the whole release is offered:\n{err}");
     let gold = "1) The Hitchhiker's Guide to the Galaxy  (v5 r31 s871119)  HITCHHIK.DAT";
     assert!(err.contains(gold), "the Solid Gold release:\n{err}");
     let rest = "4) Ballyhoo  (v3 r97 s851218)  BALLYHOO.DAT";
@@ -343,7 +347,11 @@ fn a_real_dos_compilation_lists_six_games_and_story_opens_one() {
 fn a_real_atari_st_compilation_names_its_games_by_directory() {
     let Some(image) = story_path("Infocom Compilation 9 (19xx)(-).st") else { return };
     let err = stderr_of(&run(&image, &[], ""));
-    assert!(err.contains("holds 4 stories"), "four games, and no saved game among them:\n{err}");
+    // Thirty-three: the nine-volume ST shelf, whose duplicate builds fold to 33
+    // games exactly as `disk_set_rows` pins them for the browser (SQ-0961). This
+    // volume's own four are still the first four rows, and the claim under test
+    // is what they are CALLED.
+    assert!(err.contains("holds 33 stories"), "the whole shelf is offered:\n{err}");
     for line in [
         "1) The Hitchhiker's Guide to the Galaxy  (v3 r56 s841221)  HITCHHIK/STORY.DAT",
         "2) Bureaucracy  (v4 r86 s870212)  BUREAUCR.ACY/STORY.DAT",
@@ -389,7 +397,9 @@ fn a_real_apple_iigs_compilation_mounts_through_the_shared_table() {
         return;
     };
     let err = stderr_of(&run(&image, &[], ""));
-    assert!(err.contains("holds 3 stories"), "the whole disk is offered:\n{err}");
+    // Thirty across the seven-volume press (SQ-0961); this volume's own three
+    // lead, and they are what this case is about.
+    assert!(err.contains("holds 30 stories"), "the whole release is offered:\n{err}");
     for line in [
         "1) Hollywood Hijinx  (v3 r37 s861215)  HOLLYWOOD",
         "2) Cutthroats  (v3 r23 s840809)  CUTTTHROAT",
@@ -430,7 +440,9 @@ fn a_high_ascii_serial_does_not_hide_a_game_from_the_menu() {
         return;
     };
     let err = stderr_of(&run(&image, &[], ""));
-    assert!(err.contains("holds 5 stories"), "all five are offered:\n{err}");
+    // Thirty across the press (SQ-0961); volume 6's own five lead it, and the
+    // fifth of those is the one this case exists for.
+    assert!(err.contains("holds 30 stories"), "the whole release is offered:\n{err}");
     for line in [
         "1) Sherlock: The Riddle of the Crown Jewels  (v5 r21 s871214)  SHERLOCK",
         "2) Border Zone  (v5 r9 s871008)  BORDERZONE",
@@ -1020,7 +1032,10 @@ fn every_build_on_the_compilation_discs_has_a_canonical_title() {
 fn a_real_compilation_disc_names_its_games_from_the_table() {
     let Some(image) = disc_path("treasures", "LostTreasures1.iso") else { return };
     let err = stderr_of(&run(&image, &[], ""));
-    assert!(err.contains("holds 40 stories"), "the whole disc is offered:\n{err}");
+    // Sixty: `LostTreasures1.iso` and `LostTreasures2.iso` are two volumes of one
+    // release, and since SQ-0961 naming either offers both. Disc 1's own forty
+    // lead, so every index below is disc 1's own.
+    assert!(err.contains("holds 60 stories"), "both discs are offered:\n{err}");
     for line in [
         "1) Ballyhoo  (v3 r97 s851218)  MAC/BALLYHOO",
         "2) Beyond Zork: The Coconut of Quendor  (v5 r57 s871221)  MAC/BEYOND ZORK",

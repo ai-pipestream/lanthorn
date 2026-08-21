@@ -75,6 +75,8 @@ mod wizard_sniffer;
 
 #[path = "suites/palette_lock_discipline.rs"]
 mod palette_lock_discipline;
+#[path = "suites/release_enumeration.rs"]
+mod release_enumeration;
 #[path = "suites/font3_shipped_font.rs"]
 mod font3_shipped_font;
 #[path = "suites/native_disk_font.rs"]

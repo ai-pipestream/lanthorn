@@ -155,8 +155,9 @@ pub fn looks_like_image(raw: &[u8]) -> bool {
     DiskImage::detect(raw).is_some()
 }
 
-/// Mount the image at `path`, whose bytes are `raw`, and return every story on
-/// it — including the one the release keeps on **no single volume** (SQ-0874).
+/// Mount the image at `path`, whose bytes are `raw`, and return every story the
+/// **release** offers — including the one it keeps on no single volume
+/// (SQ-0874) and the ones its other volumes carry whole (SQ-0961).
 ///
 /// Identified by content: a release disk's filenames prove nothing — AmigaDOS
 /// has no extensions and every Atari ST story is called `STORY.DAT` — so
@@ -164,24 +165,25 @@ pub fn looks_like_image(raw: &[u8]) -> bool {
 /// original *Zork Zero* floppy carries.
 ///
 /// `path` is here for the set and nothing else. It is a **name**, so it decides
-/// which files are siblings and never what is on them; and the siblings are read
-/// only when this volume has no story of its own, so the single-disk path costs
-/// exactly the one read it always did.
+/// which files are siblings and never what is on them.
+///
+/// **How far to look is not this file's decision** (SQ-0961). It used to be, by
+/// omission: the mount answered for one platter and the menu showed what the
+/// mount had, so `zvm-cli` on *Lost Treasures* disk 1 offered six games where
+/// lanthorn offered thirty. Two front-ends with two ideas of what a release is
+/// disagree eventually — the argument `cli_host::disk_set`'s module doc makes
+/// about the mount, now made about the enumeration too, and by the same seam.
 pub fn story_candidates(path: &Path, raw: Vec<u8>) -> Result<Vec<Candidate>, String> {
     let disk = cli_host::disk_set::mount_at(path, raw)
         .map_err(|e| format!("Error: cannot mount the disk image: {e}"))?;
     let mounted = disk.file_count();
-    let found: Vec<Candidate> = disk
-        .stories()
+    let found: Vec<Candidate> = cli_host::disk_set::stories_across_the_release(path, &disk)
         .into_iter()
-        .map(|s| {
-            // SQ-0930: the story's OWN half of the platter, not the image's
-            // format. `image_for` is the same call `app::hints::read_story_file`
-            // has made since SQ-0876, and its absence here is why a PC build on
-            // the Masterpieces disc reported the Macintosh.
-            let image = Some(disk.image_for(&s.name));
-            Candidate { name: s.name, bytes: s.bytes, image }
-        })
+        // SQ-0930: `image` is the story's OWN half of the platter, not the
+        // image's format — the same call `app::hints::read_story_file` has made
+        // since SQ-0876, and its absence here is why a PC build on the
+        // Masterpieces disc reported the Macintosh.
+        .map(|r| Candidate { name: r.name, bytes: r.bytes, image: Some(r.image) })
         .collect();
     if found.is_empty() {
         let files = if mounted == 1 { "file" } else { "files" };
@@ -332,6 +334,46 @@ mod tests {
                 blorb::medium::MountedDisk::mount(raw).expect("what we claim, we can mount");
             assert_eq!(mounted.format(), detected);
         }
+    }
+
+    /// **The menu is the release's, not the platter's** (SQ-0961), on both
+    /// presses of *The Lost Treasures of Infocom* in `treasures/`.
+    ///
+    /// Six volumes on the Amiga press and five on the Macintosh DiskCopy one;
+    /// twenty games either way, and the DiskCopy disk 1 offers twenty-two
+    /// candidates because it stores *The Lurking Horror* three times over. The
+    /// figure asserted is therefore the count of distinct BUILDS, which is the
+    /// count of games. Measured 2026-08-21.
+    ///
+    /// `treasures/` is gitignored, so an absent fixture is a skip; the guard
+    /// below is what keeps that from being a silent pass.
+    ///
+    /// FALSIFICATION: build `found` from `disk.stories()` again and the Amiga
+    /// press offers six games and the Macintosh one four — the reported symptom
+    /// exactly, against the browser's twenty.
+    #[test]
+    fn the_menu_lists_the_whole_release() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../treasures");
+        let presses = [
+            "Lost Treasures of Infocom, The_Disk3.adf",
+            "The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
+        ];
+        let mut ran = 0;
+        for name in presses {
+            let path = dir.join(name);
+            let Ok(raw) = std::fs::read(&path) else { continue };
+            ran += 1;
+            let cands = story_candidates(&path, raw).expect("the press mounts");
+            let mut builds: Vec<(u8, u16, String)> =
+                cands.iter().filter_map(Candidate::build).collect();
+            builds.sort();
+            builds.dedup();
+            assert_eq!(builds.len(), 20, "{name}: {} games", builds.len());
+        }
+        assert!(
+            ran > 0 || !presses.iter().any(|n| dir.join(n).exists()),
+            "a press is present but no menu was built",
+        );
     }
 
     /// The other half: an ordinary story file is not a disk, and is not claimed.

@@ -491,6 +491,14 @@ of disks, and it works out which files belong together from their names — file
 in one directory, sharing a disk-image extension, with identical names except
 for one run of digits that counts 1, 2, 3…
 
+With one deliberate loosening, because a real shelf broke the rule. The Macintosh
+DiskCopy press of *Lost Treasures* names each volume after the games on it —
+`The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42`, then
+`Disk 2 - Hitchhiker's, Infidel, Planetfall…` — so the five names match up to
+`Disk N` and agree on nothing after it. Everything past the number is ignored
+when the number is introduced by a word that says it *is* a disk number, and only
+then: `Ultima 1`, `Ultima 2 - Revenge`, `Ultima 3` stay three games.
+
 That list of extensions is read off the same format table as everything else,
 which paid off the moment lanthorn learned to mount 5.25" Apple II disks:
 `shogun_s1.dsk`…`s5` and `zork_zero_1.dsk`…`_4` had been sitting there refused

@@ -1599,9 +1599,12 @@ fn main() {
             None => None,
         };
         // The medium's own `Sound/` directory, when the story came off a disk.
+        // Through the set seam, not `MountedDisk::mount`: the platter alone is
+        // never the right question about a release, and a paged Apple II or
+        // Commodore volume does not even mount on its own (SQ-0961).
         let disk: HashMap<u16, Vec<u8>> = match std::fs::read(&story_path)
             .ok()
-            .and_then(|raw| blorb::medium::MountedDisk::mount(raw).ok())
+            .and_then(|raw| cli_host::disk_set::mount_at(&story_path, raw).ok())
         {
             Some(d) => {
                 let files = d.contents();
