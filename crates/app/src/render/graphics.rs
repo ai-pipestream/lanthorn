@@ -87,7 +87,11 @@ fn scaled_to_native(sp: u32, np: u32, sp_max: u32) -> u32 {
 ///
 /// An axis that does not move is a bit-exact identity, so the common uniform case still
 /// costs one resize.
-pub(crate) fn resize_directional(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
+///
+/// `pub` because it is also the ORACLE for SQ-0973: "the half-blocks composite is one
+/// resample of the native canvas" is a claim an integration test has to be able to
+/// state, and one application of this function to the canvas is what states it.
+pub fn resize_directional(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
     use image::imageops::FilterType;
     let pick = |t: u32, s: u32| if t < s { FilterType::Triangle } else { FilterType::Nearest };
     let (sw, sh) = src.dimensions();
@@ -623,6 +627,95 @@ pub fn v6_upscale_cap(picker: &Picker) -> Option<f64> {
         ratatui_image::picker::ProtocolType::Halfblocks => None,
         _ => Some(MAX_V6_UPSCALE),
     }
+}
+
+/// The cell rect the v6 composite occupies under HALF-BLOCKS, without building a
+/// pixel of it (SQ-0973).
+///
+/// Same answer [`v6_fit_source`] and the protocol's own `Fit` arrive at together —
+/// the composite fitted into the pane's device box at the magnification the pane (or
+/// the lock) allows, then rounded up onto the cell grid — reached by arithmetic instead
+/// of by a 52 MB intermediate. `v6_halfblocks_grid_matches_the_protocol` pins the two
+/// against each other over a pane sweep, in every branch, so the mirror cannot drift.
+///
+/// No upscale ceiling appears here because half-blocks has none: [`v6_upscale_cap`]
+/// answers `None` for it, and this function is reachable only from that arm.
+pub fn v6_halfblocks_grid(
+    canvas: (u32, u32),
+    box_w: u32,
+    box_h: u32,
+    fs: ratatui_image::FontSize,
+    lock: Option<f32>,
+) -> Size {
+    let (cw, ch) = (canvas.0.max(1), canvas.1.max(1));
+    let (fw, fh) = (u32::from(fs.width.max(1)), u32::from(fs.height.max(1)));
+    // What `v6_fit_source` hands over: the canvas at the pane's (or the lock's)
+    // magnification, truncated exactly as it truncates, and the canvas untouched where
+    // it declines to pre-scale at all.
+    let (tw, th) = match lock.filter(|s| s.is_finite() && *s > 0.0) {
+        // The artwork's own integer ladder (SQ-0945/0936).
+        Some(s) => {
+            let s = f64::from(s);
+            (((cw as f64 * s) as u32).max(1), ((ch as f64 * s) as u32).max(1))
+        }
+        None => {
+            let s = (box_w as f64 / cw as f64).min(box_h as f64 / ch as f64);
+            if s < 1.0 {
+                (cw, ch)
+            } else {
+                (((cw as f64 * s) as u32).max(cw), ((ch as f64 * s) as u32).max(ch))
+            }
+        }
+    };
+    // Then what `Resize::Fit` does to it, which is the crate's own
+    // `fit_area_proportionally(tw, th, min(box_w, tw), min(box_h, th))` — the shrink the
+    // pre-scale deliberately leaves to the protocol, and the ONLY thing standing between
+    // an over-large locked rung and a composite that overruns its pane. It ROUNDS where
+    // the magnification above truncates, and it is an exact identity whenever the
+    // pre-scale already fits.
+    let ratio = (f64::from(tw.min(box_w)) / f64::from(tw)).min(f64::from(th.min(box_h)) / f64::from(th));
+    let (tw, th) = (
+        ((f64::from(tw) * ratio).round() as u32).max(1),
+        ((f64::from(th) * ratio).round() as u32).max(1),
+    );
+    Size::new(tw.div_ceil(fw).max(1) as u16, th.div_ceil(fh).max(1) as u16)
+}
+
+/// The v6 composite as half-blocks, resampled EXACTLY ONCE (SQ-0973).
+///
+/// The encoding backends need [`v6_fit_source`]'s pre-scale because `Resize::Fit`
+/// never grows: hand it the bare canvas and `needs_resize_pixels`' `min(box, image)`
+/// collapses the composite to a native-sized cell footprint. Half-blocks needs none
+/// of it, because half-blocks does not encode pixels at all — `Halfblocks::encode`
+/// throws away `font_size` and resamples whatever it is given to exactly
+/// `width x 2·height` samples, one per column and two per row. The pre-scale was
+/// therefore magnifying the canvas to device pixels the backend was about to discard:
+/// a 640x400 canvas in a 458x144-cell pane went up to 4580x2862 RGBA (52 MB, Nearest)
+/// so that the crate could take it straight back down to 458x288 (Triangle). Two
+/// resamples in opposite directions to land BELOW where the canvas started, and
+/// Nearest-up-then-Triangle-down is the blur that combination always is.
+///
+/// So resample once, onto the sample grid itself, through [`resize_directional`] —
+/// which picks its filter per axis by the direction that axis moves, and associates
+/// alpha before it blends (SQ-0824/0827). The crate's own `resize_exact` then runs at
+/// a 1:1 ratio, which is a bit-exact identity, so that filter choice is what reaches
+/// the screen rather than being overwritten by the crate's unconditional Triangle.
+///
+/// This is half-blocks ONLY. Sixel, iTerm2 and kitty keep [`v6_fit_source`] exactly
+/// as it was: they ship encoded pixels down the wire, the cap is a real budget for
+/// them, and `Fit` plus a pre-scale is the right shape.
+fn v6_halfblocks_protocol(
+    canvas: &image::RgbaImage,
+    box_w: u32,
+    box_h: u32,
+    fs: ratatui_image::FontSize,
+    lock: Option<f32>,
+) -> Option<Protocol> {
+    use ratatui_image::protocol::halfblocks::Halfblocks;
+    let cells = v6_halfblocks_grid(canvas.dimensions(), box_w, box_h, fs, lock);
+    let grid = resize_directional(canvas, u32::from(cells.width), u32::from(cells.height) * 2);
+    let hb = Halfblocks::new(image::DynamicImage::ImageRgba8(grid), cells).ok()?;
+    Some(Protocol::Halfblocks(hb))
 }
 
 /// A completed v6 raster encode (SQ-0469): the uploaded protocol plus the key it
@@ -1246,24 +1339,30 @@ impl GraphicsRender {
     ///
     /// The backend is threaded no further than this: the `picker` is already the
     /// thing that knows it, and is already here (SQ-0964).
+    ///
+    /// Half-blocks takes its own arm (SQ-0973) and lands on the same cell rect by a
+    /// single resample — see [`v6_halfblocks_protocol`] for why the pre-scale every
+    /// other backend needs is pure waste there.
     fn encode_v6(picker: &Picker, canvas: &image::RgbaImage, gen: u64, area: Rect, lock: Option<f32>) -> Option<V6Ready> {
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
-        let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock, v6_upscale_cap(picker));
-        let img = image::DynamicImage::ImageRgba8(img);
-        match picker.new_protocol(img, Size::new(area.width, area.height), fit) {
-            Ok(proto) => Some(V6Ready {
-                gen,
-                area_w: area.width,
-                area_h: area.height,
-                proto,
-                native_w: canvas.width() as u16,
-                native_h: canvas.height() as u16,
-                placed_id: None,
-            }),
-            Err(_) => None,
-        }
+        let proto = if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+            v6_halfblocks_protocol(canvas, box_w, box_h, fs, lock)?
+        } else {
+            let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock, v6_upscale_cap(picker));
+            let img = image::DynamicImage::ImageRgba8(img);
+            picker.new_protocol(img, Size::new(area.width, area.height), fit).ok()?
+        };
+        Some(V6Ready {
+            gen,
+            area_w: area.width,
+            area_h: area.height,
+            proto,
+            native_w: canvas.width() as u16,
+            native_h: canvas.height() as u16,
+            placed_id: None,
+        })
     }
 
     /// Whether the caller should (re)build the native v6 canvas and spawn an
@@ -2508,7 +2607,10 @@ fn parse_placement_row(symbol: &str) -> Option<PlacementRow<'_>> {
 /// the body of `resize_directional`: every minifying case fails on its RMS bound.
 #[cfg(test)]
 mod resample_tests {
-    use super::resize_directional;
+    // SQ-0973's cases below drive the shipped half-blocks composite end to end, so this
+    // module now needs the render types (`Picker`, `Protocol`, `Buffer`, …) alongside
+    // the resampler it was written for.
+    use super::*;
     use image::{Rgba, RgbaImage};
 
     /// A plate in the shape of the artwork this quest is about: a four-ink palette laid
@@ -2965,6 +3067,282 @@ mod resample_tests {
             free.width() <= box_w && free.height() <= box_h,
             "a locked scale is still a scale the pane can hold"
         );
+    }
+
+    // -- SQ-0973: half-blocks resamples ONCE, and the pre-scale is gone ---------
+
+    /// The sample grid a cell rect stands for: half-blocks resolves one sample per
+    /// COLUMN and two per ROW, and `font_size` never enters into it.
+    fn sample_grid(cells: Size) -> (u32, u32) {
+        (u32::from(cells.width), u32::from(cells.height) * 2)
+    }
+
+    /// What a half-blocks composite actually puts ON SCREEN, read back out of the
+    /// terminal buffer: two samples per cell, the upper half and the lower half, in the
+    /// grid order they occupy. This is the only honest place to measure a backend that
+    /// resolves into cells rather than encoding pixels — and it needs no guess about
+    /// which branch of the crate's `needs_resize` a call took.
+    fn screen_grid(proto: &Protocol, cells: Size) -> RgbaImage {
+        let rect = Rect::new(0, 0, cells.width, cells.height);
+        let mut buf = Buffer::empty(rect);
+        Image::new(proto).render(rect, &mut buf);
+        let (gw, gh) = sample_grid(cells);
+        let mut out = RgbaImage::new(gw, gh);
+        for y in 0..cells.height {
+            for x in 0..cells.width {
+                let cell = buf.cell((x, y)).expect("a cell");
+                // `pick_side` swaps the halves and flips the glyph when the lower is the
+                // brighter of the two; the glyph says which way round they are.
+                let (upper, lower) =
+                    if cell.symbol() == "\u{2584}" { (cell.bg, cell.fg) } else { (cell.fg, cell.bg) };
+                for (half, colour) in [(0u32, upper), (1, lower)] {
+                    let Color::Rgb(r, g, b) = colour else { panic!("half-blocks emits Rgb cells") };
+                    out.put_pixel(u32::from(x), u32::from(y) * 2 + half, Rgba([r, g, b, 255]));
+                }
+            }
+        }
+        out
+    }
+
+    /// The composite the OLD path put on screen: pre-scale to the pane's device pixels,
+    /// then hand that to the crate, which resamples it back down to the sample grid.
+    fn double_resampled(canvas: &RgbaImage, picker: &Picker, cols: u16, rows: u16) -> (RgbaImage, Size) {
+        let fs = picker.font_size();
+        let (box_w, box_h) =
+            (u32::from(cols) * u32::from(fs.width), u32::from(rows) * u32::from(fs.height));
+        let (pre, fit) = super::v6_fit_source(canvas, box_w, box_h, None, super::v6_upscale_cap(picker));
+        let proto = picker
+            .new_protocol(image::DynamicImage::ImageRgba8(pre), Size::new(cols, rows), fit)
+            .expect("the old path encodes");
+        let cells = proto.size();
+        (screen_grid(&proto, cells), cells)
+    }
+
+    /// Nothing on screen moved: [`super::v6_halfblocks_grid`] is the cell rect the old
+    /// pre-scale-then-`Fit` pair landed on, in every branch it has — free magnification,
+    /// free shrink, and a locked rung — over a pane sweep and two font sizes.
+    ///
+    /// This is the "agree where they must" half of SQ-0973. The composite's relationship
+    /// to the pane is what the click map (`V6ClickMap`, built from `proto.size()`) and the
+    /// letterbox centring in `redraw_v6` are both derived from, so a cell rect that moved
+    /// would be a geometry change wearing a performance fix's clothes.
+    #[test]
+    fn v6_halfblocks_grid_matches_the_protocol() {
+        use ratatui_image::FontSize;
+        let canvas = dithered_plate(640, 400);
+        for fs in [FontSize::new(10, 20), FontSize::new(8, 18)] {
+            for (cols, rows) in
+                [(458u16, 144u16), (200, 60), (100, 40), (240, 80), (60, 24), (40, 10), (20, 4)]
+            {
+                let (box_w, box_h) =
+                    (u32::from(cols) * u32::from(fs.width), u32::from(rows) * u32::from(fs.height));
+                for lock in [None, Some(2.5f32), Some(1.0)] {
+                    let (pre, fit) = super::v6_fit_source(&canvas, box_w, box_h, lock, None);
+                    let want =
+                        fit.size_for(&image::DynamicImage::ImageRgba8(pre), fs, Size::new(cols, rows));
+                    let got = super::v6_halfblocks_grid(canvas.dimensions(), box_w, box_h, fs, lock);
+                    assert_eq!(
+                        got, want,
+                        "{cols}x{rows} at {}x{} font, lock {lock:?}: the arithmetic must land on \
+                         the cell rect the pre-scale-then-Fit pair landed on, or the composite \
+                         has quietly changed size and the click map with it",
+                        fs.width, fs.height
+                    );
+                    assert!(
+                        got.width <= cols && got.height <= rows,
+                        "{cols}x{rows}: the pane is still the bound, got {got:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The regression this quest is about, pinned so it cannot come back quietly: the
+    /// half-blocks composite is ONE resample from the native canvas onto the sample
+    /// grid, and the crate's own `resize_exact` on top of it is a bit-exact identity.
+    ///
+    /// The pin is the reference image — `resize_directional(canvas, w, 2h)` and nothing
+    /// else. Restore the pre-scale (hand `v6_fit_source`'s output to `new_protocol` on
+    /// the half-blocks arm of `encode_v6`) and the rendered cells stop matching it,
+    /// because Nearest-up-then-Triangle-down is not the same picture as one Triangle
+    /// down — as the RMS half below measures.
+    #[test]
+    fn the_halfblocks_composite_is_one_resample_onto_the_sample_grid() {
+        use ratatui_image::protocol::halfblocks::Halfblocks;
+        let picker = Picker::halfblocks();
+        let fs = picker.font_size();
+        let canvas = dithered_plate(640, 400);
+        // The pane the defect was reported at, plus a magnifying one and a coarse one.
+        for (cols, rows) in [(458u16, 144u16), (200, 60), (60, 24)] {
+            let area = Rect::new(0, 0, cols, rows);
+            let (box_w, box_h) =
+                (u32::from(cols) * u32::from(fs.width), u32::from(rows) * u32::from(fs.height));
+            let cells = super::v6_halfblocks_grid(canvas.dimensions(), box_w, box_h, fs, None);
+            let (gw, gh) = sample_grid(cells);
+
+            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+            assert_eq!(ready.proto.size(), cells, "{cols}x{rows}: the protocol reports the grid");
+
+            // One resample, straight from the canvas — then the crate, whose resample
+            // at 1:1 cannot change a pixel.
+            let once = resize_directional(&canvas, gw, gh);
+            let reference = Protocol::Halfblocks(
+                Halfblocks::new(image::DynamicImage::ImageRgba8(once), cells).expect("reference"),
+            );
+            let rect = Rect::new(0, 0, cells.width, cells.height);
+            let (mut a, mut b) = (Buffer::empty(rect), Buffer::empty(rect));
+            Image::new(&ready.proto).render(rect, &mut a);
+            Image::new(&reference).render(rect, &mut b);
+            assert_eq!(
+                a, b,
+                "{cols}x{rows}: the shipped composite must BE a single {gw}x{gh} resample of \
+                 the canvas — any pre-scale in between shows up here as different cells"
+            );
+        }
+    }
+
+    /// …and the reason the filter choice survives: `Halfblocks::encode` resamples
+    /// whatever it is given to `width x 2·height` with Triangle, unconditionally and
+    /// ignoring `font_size` — so handing it exactly that size makes its resample a
+    /// 1:1 identity, and what reaches the screen is [`resize_directional`]'s answer
+    /// rather than the crate's.
+    #[test]
+    fn the_crates_own_resample_is_an_identity_on_the_sample_grid() {
+        use ratatui_image::protocol::halfblocks::Halfblocks;
+        let cells = Size::new(97, 31);
+        let (gw, gh) = sample_grid(cells);
+        let grid = dithered_plate(gw, gh);
+        let rect = Rect::new(0, 0, cells.width, cells.height);
+
+        let proto = Protocol::Halfblocks(
+            Halfblocks::new(image::DynamicImage::ImageRgba8(grid.clone()), cells).expect("encode"),
+        );
+        let mut buf = Buffer::empty(rect);
+        Image::new(&proto).render(rect, &mut buf);
+
+        // Every cell's two halves must be the two grid rows above and below it, exactly.
+        // (`pick_side` may swap fg/bg and flip the glyph; the PAIR is what is pinned.)
+        for y in 0..cells.height {
+            for x in 0..cells.width {
+                let cell = buf.cell((x, y)).expect("a cell");
+                let px = |row: u32| {
+                    let p = grid.get_pixel(u32::from(x), row).0;
+                    Color::Rgb(p[0], p[1], p[2])
+                };
+                let (upper, lower) = (px(u32::from(y) * 2), px(u32::from(y) * 2 + 1));
+                let got = if cell.symbol() == "\u{2584}" {
+                    (cell.bg, cell.fg)
+                } else {
+                    (cell.fg, cell.bg)
+                };
+                assert_eq!(
+                    got,
+                    (upper, lower),
+                    "cell ({x},{y}) must carry grid rows {} and {} untouched — a resample at \
+                     1:1 has to be an identity, or the second pass is still there",
+                    u32::from(y) * 2,
+                    u32::from(y) * 2 + 1
+                );
+            }
+        }
+    }
+
+    /// Quality, measured rather than claimed — and measured on what reaches the screen,
+    /// through [`screen_grid`], because half-blocks has no encoded image to compare.
+    ///
+    /// The pair is never better than the single pass, and how much worse it is depends
+    /// entirely on whether its magnification happened to be an integer. Measured against
+    /// the per-axis single-resample ideal on a 640x400 dithered plate:
+    ///
+    /// | pane | sample grid | one resample | the old pair |
+    /// |---|---|---|---|
+    /// | 458x144 (the reported one) | 458x288 | 2.472 | 3.615 |
+    /// | 200x60 | 192x120 | 3.884 | 4.006 |
+    /// | 60x24 | 60x38 | 4.056 | 16.372 |
+    ///
+    /// 200x60 is the honest middle: the pre-scale there is an exact 3x Nearest
+    /// replication, which composes cleanly with the shrink that follows it, so the pair
+    /// lands almost where one pass does and the win is purely the 8.79 MB it built to
+    /// get there. 458x144 magnifies by 7.16x, an integer ratio it is not, so every edge
+    /// is quantized onto a ragged replication grid before being averaged — and 60x24
+    /// never magnified at all: the pair is a 0.94x Triangle followed by a 0.1x Triangle
+    /// over a transparent pad row, which is the blur those numbers say it is.
+    #[test]
+    fn one_resample_beats_the_pair_against_the_ideal() {
+        let picker = Picker::halfblocks();
+        let canvas = dithered_plate(640, 400);
+        for (cols, rows) in [(458u16, 144u16), (200, 60), (60, 24)] {
+            let area = Rect::new(0, 0, cols, rows);
+            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+            let cells = ready.proto.size();
+            let (gw, gh) = sample_grid(cells);
+            let ideal = ideal(&canvas, gw, gh);
+
+            let once = rms(&screen_grid(&ready.proto, cells), &ideal);
+            let (old, old_cells) = double_resampled(&canvas, &picker, cols, rows);
+            assert_eq!(old_cells, cells, "{cols}x{rows}: the same cell rect, either way");
+            let twice = rms(&old, &ideal);
+            eprintln!("{cols}x{rows} -> {gw}x{gh}: once {once:.3}, twice {twice:.3}");
+            assert!(
+                once < 4.5 && once < twice,
+                "{cols}x{rows} -> a {gw}x{gh} sample grid: one resample scores an RMS of \
+                 {once:.3} against the single-resample ideal where the old pair scores \
+                 {twice:.3}. The single pass must stay under 4.5 and must never be the \
+                 WORSE of the two — see the table above for what was measured."
+            );
+        }
+        // …and at the pane the defect was reported at, by a margin worth having.
+        let area = Rect::new(0, 0, 458, 144);
+        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+        let cells = ready.proto.size();
+        let ideal = ideal(&canvas, sample_grid(cells).0, sample_grid(cells).1);
+        let once = rms(&screen_grid(&ready.proto, cells), &ideal);
+        let twice = rms(&double_resampled(&canvas, &picker, 458, 144).0, &ideal);
+        assert!(
+            once * 1.3 < twice,
+            "458x144: {once:.3} against {twice:.3} — a 7.16x pre-scale is not an integer \
+             ratio, so dropping it has to buy more than a rounding difference"
+        );
+    }
+
+    /// The blast radius, stated as a test: half-blocks takes the new arm and every
+    /// backend that actually encodes pixels is byte-for-byte where SQ-0964 left it.
+    ///
+    /// This is the "differ where they should" half. Kitty's composite is still the
+    /// capped pre-scale handed to `new_protocol` under `Resize::Fit`, because kitty
+    /// ships those pixels down the wire and the cap is a budget it genuinely spends.
+    #[test]
+    fn only_halfblocks_leaves_the_prescale_behind() {
+        let area = Rect::new(0, 0, 200, 60);
+        let canvas = dithered_plate(640, 400);
+        for picker in [kitty_picker(10, 20), {
+            let mut p = Picker::halfblocks();
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+            p
+        }] {
+            let fs = picker.font_size();
+            let (box_w, box_h) =
+                (u32::from(area.width) * u32::from(fs.width), u32::from(area.height) * u32::from(fs.height));
+            let (img, fit) =
+                super::v6_fit_source(&canvas, box_w, box_h, None, super::v6_upscale_cap(&picker));
+            let want = picker
+                .new_protocol(image::DynamicImage::ImageRgba8(img), Size::new(area.width, area.height), fit)
+                .expect("encode")
+                .size();
+            let got = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+            assert_eq!(
+                got.proto.size(),
+                want,
+                "{:?} still goes through v6_fit_source + new_protocol, unchanged",
+                picker.protocol_type()
+            );
+            assert_eq!(
+                want,
+                Size::new(128, 40),
+                "{:?}: and that is still the 2x cap, 1280x800 device pixels",
+                picker.protocol_type()
+            );
+        }
     }
 
     // ── SQ-0827: the seam where art ends and the canvas is clear ────────────────
