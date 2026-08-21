@@ -368,6 +368,30 @@ smear it is on the glass. A rasteriser that drew each image once into its
 bounding box would render a clean, plausible, wrong picture of exactly the
 defect worth seeing.
 
+**The picture is a function of the bytes, and that had to be made true**
+(SQ-0968). Draws are sorted by `(z, image id, position)`, not by `z` alone: the
+protocol settles a tie itself — "if two images with the same z-index overlap then
+the image with the lower id is considered to have the lower z-index" — and there
+is no resolver order to fall back on, because `resolve_placements` walks a
+`HashMap` and hands back a fresh random permutation on every call. Sorting on `z`
+alone therefore made two overlapping same-z placements a coin flip: measured at
+six orderings in ten renders of one stream inside a single process, with the
+losing half putting a superseded image on top and blending the live one's
+transparency into it — which is exactly what a stale placement looks like.
+`the_same_bytes_always_draw_the_same_picture` is the guard.
+
+**What SQ-0968 reported, and what it turned out to be.** It was filed as "`--png`
+composites a band's transparency onto stale content and showed a block the
+emitted bytes prove was gone", off the SQ-0948 Shogun frame. That does not
+reproduce: captured on `stories/shogun-r322-s890706.z6` (release 322, serial
+890706, IBM PC) at 117x40 with 8x18 cells, two turns in (`cr` off the boot menu,
+then `look`), the band's own texels under the reported block read `[0,0,0,0]` and
+the picture draws the terminal default there; with the SQ-0948 fix reverse-applied
+and nothing else changed, the same texels read opaque white and the picture draws
+the block. The instrument tracked the bytes in both directions — the third
+left-flank band the lane eventually found really was still carrying the fill. The
+ordering defect above is what the audit did turn up, and it is a different one.
+
 The tests are in `tests/pty_oracle.rs`'s `raster` module: hand-authored streams
 whose expected picture can be stated exactly, asserting **colours at
 coordinates** — a PNG writer's obvious failure mode is emitting a plausible
