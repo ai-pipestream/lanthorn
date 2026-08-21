@@ -218,32 +218,40 @@ fn a_banner_glyph_sits_in_the_picture_not_in_a_box() {
         let cell = buf.cell((col, row)).expect("the glyph's cell is inside the pane");
         assert_eq!(cell.symbol(), "B", "the located cell is the label's first letter");
 
-        // The nearest cell on this row that is still ART — a half-block `▀` — gives
-        // the ground the picture actually has there.
-        let art_bg = (0..buf.area.width)
-            .filter(|&x| buf.cell((x, row)).is_some_and(|c| c.symbol() == "▀"))
-            .min_by_key(|&x| x.abs_diff(col))
-            .and_then(|x| buf.cell((x, row)))
-            .map(|c| (c.fg, c.bg));
-        let Some((art_fg, art_lower)) = art_bg else {
-            panic!("honor={honor}: the banner row carries no art cell to compare against")
-        };
-
         let rgb = |c: Color| match c {
             Color::Rgb(r, g, b) => Some([i32::from(r), i32::from(g), i32::from(b)]),
             _ => None,
         };
-        let (Some(glyph), Some(a), Some(b)) = (rgb(cell.bg), rgb(art_fg), rgb(art_lower)) else {
-            panic!("honor={honor}: the ring should be painting true colour on both counts")
+        // The ribbon this label sits on, measured LOCALLY: the median background
+        // of twelve columns past the label, out where nothing the label does can
+        // reach. Median because one stray cell should not become the reference.
+        //
+        // This used to sample "the nearest cell on this row still showing a `▀`",
+        // and that reference stopped meaning anything once the rasterised ghost
+        // left the band (SQ-0944): a `▀` is what the encoder emits when a cell's
+        // two halves DIFFER, so clean uniform ribbon comes out as a SPACE and the
+        // nearest two-tone cell became the pillar, thirty columns away and much
+        // darker. A cleaner picture has fewer two-tone cells — the reference has
+        // to be the ribbon itself, not the nearest cell that happens to be dithery.
+        let tail = col + "Banquet".len() as u16;
+        let mut ribbon = [0i32; 3];
+        for ch in 0..3 {
+            let mut v: Vec<i32> = (tail + 6..tail + 18)
+                .filter_map(|x| buf.cell((x, row)).and_then(|c| rgb(c.bg)))
+                .map(|p| p[ch])
+                .collect();
+            assert!(!v.is_empty(), "honor={honor}: no ribbon beyond the label to measure against");
+            v.sort_unstable();
+            ribbon[ch] = v[v.len() / 2];
+        }
+        let Some(glyph) = rgb(cell.bg) else {
+            panic!("honor={honor}: the ring should be painting the glyph's ground in true colour")
         };
-        // The picture's own two samples bracket the ground the glyph was given —
-        // it is the mean of a cell of the same ribbon, so it cannot be far outside
-        // the range those samples span.
         let dist = |p: [i32; 3], q: [i32; 3]| (0..3).map(|i| (p[i] - q[i]).abs()).max().unwrap_or(0);
         assert!(
-            dist(glyph, a).min(dist(glyph, b)) <= 24,
+            dist(glyph, ribbon) <= 24,
             "honor={honor}: the glyph's background {glyph:?} must be the art behind it \
-             (neighbouring art cell samples {a:?}/{b:?}), not a box of some other colour"
+             (the ribbon it sits on reads {ribbon:?}), not a box of some other colour"
         );
     }
 }
@@ -334,6 +342,109 @@ fn no_rasterised_ghost_of_the_label_survives_past_its_glyphs() {
     }
 }
 
+/// …and no ghost survives on the row ABOVE the glyphs either (SQ-0944).
+///
+/// A separate case from the one above because it is a separate defect, and the
+/// column test could not see it: the rasterised banner is two terminal rows tall
+/// at this frame, so stamping the glyphs covered its lower half and left the
+/// upper half showing one row up.
+///
+/// It survived the row skip through a fall-through in `build_chrome_canvas`. The
+/// `continue` that says "this grid is drawn from its RUNS" was gated on the runs
+/// that survived the skip, so a grid that lost every run — which is exactly what
+/// the ring asks for here — fell through to the cell-grid painter, which places
+/// a row at `oy + row * FONT_H`. Zork Zero's runs are at native 10 and 26, so
+/// the skip set never matched the cell grid's 0 and 16 and the banner was
+/// painted straight back in, a text row above where the glyphs land.
+#[test]
+fn no_rasterised_ghost_of_the_label_survives_above_its_glyphs() {
+    for honor in [true, false] {
+        let Some((buf, viewport)) = frame(honor, None) else { return };
+        let rows = ring_rows_above(&buf, viewport);
+        let hit = rows.iter().enumerate().find_map(|(y, r)| {
+            let chars: Vec<char> = r.chars().collect();
+            chars
+                .windows("Banquet Hall".len())
+                .position(|w| w.iter().collect::<String>() == "Banquet Hall")
+                .map(|x| (y as u16, x as u16))
+        });
+        let Some((row, col)) = hit else { panic!("honor={honor}: the banner label is not on the screen") };
+        assert!(row > 0, "honor={honor}: the label is on the top ring row, so there is no row above to measure");
+
+        let rgb = |c: Color| match c {
+            Color::Rgb(r, g, b) => Some([i32::from(r), i32::from(g), i32::from(b)]),
+            _ => None,
+        };
+        // The same local-median reference the column case uses, taken on the row
+        // being measured: clean ribbon well past anything the label can reach.
+        let tail = col + "Banquet Hall".len() as u16;
+        let above = row - 1;
+        let mut ribbon = [0i32; 3];
+        for ch in 0..3 {
+            let mut v: Vec<i32> = (tail + 6..tail + 18)
+                .filter_map(|x| buf.cell((x, above)).and_then(|c| rgb(c.bg)))
+                .map(|p| p[ch])
+                .collect();
+            assert!(!v.is_empty(), "honor={honor}: no ribbon above the label to measure against");
+            v.sort_unstable();
+            ribbon[ch] = v[v.len() / 2];
+        }
+        for x in col..tail {
+            let Some(bg) = buf.cell((x, above)).and_then(|c| rgb(c.bg)) else { continue };
+            let d = (0..3).map(|i| (bg[i] - ribbon[i]).abs()).max().unwrap_or(0);
+            assert!(
+                d <= 40,
+                "honor={honor}: column {x} of row {above} sits directly above the label's glyphs \
+                 and must be clean ribbon {ribbon:?}, but reads {bg:?} ({d} off) — the cell-grid \
+                 fall-through has painted the banner back into the band"
+            );
+        }
+    }
+}
+
+/// A hole in the frame art reaches a half-block screen as the PAGE, not as the
+/// encoder's black (SQ-0944).
+///
+/// The ring's bands ship with alpha, and half-blocks has none: `to_rgb8()` leaves
+/// a transparent pixel at RGB 0,0,0. Zork Zero's pillars stand a few columns in
+/// from the screen edge, so the columns outside them are canvas hole — and they
+/// arrived black, where kitty shows the white page the story window declared.
+///
+/// The reference is taken from the frame itself, inside the story viewport, so
+/// this measures "the gutter matches the page" rather than "the gutter is white",
+/// and it holds with game colours declined too.
+#[test]
+fn the_frames_outer_gutter_is_the_page_under_halfblocks() {
+    for honor in [true, false] {
+        let Some((buf, viewport)) = frame(honor, None) else { return };
+        assert!(viewport.x >= 4, "honor={honor}: the flank should be several columns wide, got {} (wrong frame?)", viewport.x);
+        let rgb = |c: Color| match c {
+            Color::Rgb(r, g, b) => Some([i32::from(r), i32::from(g), i32::from(b)]),
+            _ => None,
+        };
+        // Two cells of the same ring row, on either side of the pillar, and the
+        // difference between them is the whole point. The INNER one is canvas the
+        // game's own page floods (`fill_story_page_clear`) — opaque, so no encoder
+        // ever had to guess at it, which makes it a reference this change cannot
+        // move. The OUTER one is canvas nothing claimed, and is the pixel whose
+        // colour half-blocks was picking. The transcript's own cells are no use
+        // here: they carry the THEME's background, not a true colour.
+        let row = viewport.y + viewport.height / 2;
+        let page = buf
+            .cell((viewport.x - 1, row))
+            .and_then(|c| rgb(c.bg))
+            .expect("the ring's innermost column is page the game flooded, in true colour");
+        let gutter = buf.cell((0, row)).and_then(|c| rgb(c.bg)).expect("the outermost ring column");
+        let d = (0..3).map(|i| (gutter[i] - page[i]).abs()).max().unwrap_or(0);
+        assert!(
+            d <= 8,
+            "honor={honor}: the column outside the pillar is canvas hole and must resolve to the \
+             page {page:?}, but reads {gutter:?} ({d} off) — the half-block encoder has picked \
+             black for it"
+        );
+    }
+}
+
 /// CI has no `stories/`, so every case above returns early there and this file
 /// would pass without measuring anything. Count one real decision and say so.
 #[test]
@@ -348,3 +459,5 @@ fn the_smokes_were_not_vacuous() {
         "the fixture is present but nothing rendered — this suite was vacuous"
     );
 }
+
+

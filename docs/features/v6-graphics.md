@@ -1030,7 +1030,18 @@ session-only switch that never touches your saved config:
   characters, so the image is the cell's content and printing a glyph into a
   covered cell deletes the image instead of layering over it — and truncates the
   rest of that row's run. Sixel and iTerm2 have no Z index at all. The capability
-  is therefore asked of the picker that negotiated rather than configured. A pure
+  is therefore asked of the picker that negotiated rather than configured.
+  Two things follow that are easy to miss and both were reported from a real
+  screen. The rasterised copy of that text has to leave the band, or the crisp
+  glyph lands beside a blurred twin of itself — the banner's runs sit at native
+  rows 10 and 26, a text row off the cell grid's 0 and 16, so a canvas that
+  re-derives their position from the grid paints them back one row up. And the
+  frame art's **holes** have to be filled before the band is encoded: a
+  half-block cell has no alpha, so a transparent pixel arrives as black, which
+  put a black gutter down either side of Zork Zero's pillars where kitty shows
+  the white page the story declared. Those holes now resolve to the same page
+  the raster composite has flattened onto since it shipped, so the two modes
+  agree about the same frame. A pure
   reverse-video row (a status/menu bar) fills **edge to edge across the full pane
   width**, so a bar the game drew as separate runs with bare cells between and
   around them reads as one solid block. A **rule** — three or more abutting

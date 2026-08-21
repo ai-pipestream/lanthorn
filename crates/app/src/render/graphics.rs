@@ -751,6 +751,22 @@ pub struct GraphicsRender {
     /// too, but there is no reason to hold 618 KB longer than the width of one
     /// placement.
     deletes_after_place: String,
+    /// The ground this frame's chrome bands are flattened onto before they are
+    /// encoded, or `None` to ship their alpha as they always have (SQ-0944).
+    ///
+    /// The ring's bands are the third surface in this renderer to ship alpha to a
+    /// compositor, after the raster composite (`flatten_onto_page`, SQ-0510) and
+    /// the inline story floats (`inline_image::flatten_onto`, SQ-0704), and both
+    /// of those record the same rule: whoever composites must not be left to pick
+    /// the colour for us. Half-blocks picks BLACK, so Zork Zero's pillars arrived
+    /// with a black gutter down either side where kitty shows the story page.
+    ///
+    /// A frame property rather than an argument on all three band entry points:
+    /// the answer cannot differ between two bands of one frame, and reset by
+    /// [`Self::begin_band_log`] so it can never outlive the frame that set it. It
+    /// rides each band's hash, so a frame that changes the ground re-encodes
+    /// rather than placing a band flattened onto the old one.
+    band_ground: Option<image::Rgba<u8>>,
     /// Machine-readable record of the protocol traffic this frame produced
     /// (SQ-0590) — see [`GraphicsOp`]. `band_log` above is the human dump for
     /// `/dump-windows`; this is the same events in a form a test can assert on,
@@ -1404,6 +1420,22 @@ impl GraphicsRender {
         self.band_log.clear();
         self.band_mags.clear();
         self.ops.clear();
+        self.band_ground = None;
+    }
+
+    /// Declare the ground this frame's chrome bands resolve their transparency
+    /// onto — see [`Self::band_ground`]. `None` ships the alpha.
+    pub fn set_band_ground(&mut self, ground: Option<image::Rgba<u8>>) {
+        self.band_ground = ground;
+    }
+
+    /// Hand a finished band image to the encoder, resolving its transparency
+    /// first when this frame named a ground (SQ-0944).
+    fn seal_band(&self, mut img: image::RgbaImage) -> image::DynamicImage {
+        if let Some(page) = self.band_ground {
+            crate::render::inline_image::flatten_onto(&mut img, page);
+        }
+        image::DynamicImage::ImageRgba8(img)
     }
 
     /// Record what magnification one band drew at (SQ-0898) — see [`Self::band_mags`].
@@ -1587,6 +1619,7 @@ impl GraphicsRender {
             // Fully in the letterbox margin — no native pixels feed it.
             0u8.hash(&mut h);
         }
+        self.band_ground.map(|p| p.0).hash(&mut h);
         scale.s.to_bits().hash(&mut h);
         (scale.off_x, scale.off_y).hash(&mut h);
         (cw, ch).hash(&mut h);
@@ -1617,7 +1650,7 @@ impl GraphicsRender {
                 }
                 band_img
             };
-            let img = image::DynamicImage::ImageRgba8(band_img);
+            let img = self.seal_band(band_img);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
                     self.band_encodes += 1;
@@ -1765,6 +1798,7 @@ impl GraphicsRender {
                 chrome_canvas.get_pixel(nx, ny).0.hash(&mut h);
             }
         }
+        self.band_ground.map(|p| p.0).hash(&mut h);
         (bw, bh).hash(&mut h);
         let hash = h.finish();
         let key = (slot as u8, band.x, band.y, band.width, band.height);
@@ -1788,7 +1822,7 @@ impl GraphicsRender {
                 }
             }
             let stretched = resize_directional(&src, bw, bh);
-            let img = image::DynamicImage::ImageRgba8(stretched);
+            let img = self.seal_band(stretched);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
                     self.band_encodes += 1;
@@ -1919,6 +1953,7 @@ impl GraphicsRender {
         (src.width(), src.height()).hash(&mut h);
         src.as_raw().hash(&mut h);
         (bw, bh).hash(&mut h);
+        self.band_ground.map(|p| p.0).hash(&mut h);
         (dx, dy, dw, dh).hash(&mut h);
         let hash = h.finish();
         let key = (slot as u8, band.x, band.y, band.width, band.height);
@@ -1935,7 +1970,7 @@ impl GraphicsRender {
                 image::imageops::replace(&mut band_img, &scaled, dx as i64, dy as i64);
                 band_img
             };
-            let img = image::DynamicImage::ImageRgba8(scaled);
+            let img = self.seal_band(scaled);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => {
                     self.band_encodes += 1;
@@ -3311,6 +3346,94 @@ mod tests {
         // retain_chrome_bands drops any band not in the live set.
         gr.retain_chrome_bands(&std::collections::HashSet::new());
         assert!(gr.chrome_bands.is_empty(), "empty live set clears the band cache");
+    }
+
+    /// A transparent band pixel reaches a half-block screen as the PAGE, not as
+    /// the encoder's black (SQ-0944).
+    ///
+    /// `ratatui-image`'s primitive half-block encoder calls `to_rgb8()`, so a
+    /// fully transparent pixel arrives at RGB 0,0,0 — and `pick_side` then
+    /// collapses the two equal halves to a SPACE, which is why the symptom on
+    /// screen is space cells on a black background rather than anything that
+    /// looks like an image. That is the black gutter that ran down both sides of
+    /// Zork Zero's pillars where kitty shows the white page the story declared.
+    ///
+    /// Asserted on the CELLS the band wrote, because that is the whole distance
+    /// between the two backends: the same image, the same call, and only the
+    /// encoder in between.
+    #[test]
+    fn a_declared_ground_replaces_the_encoders_black_under_halfblocks() {
+        use crate::render::v6_layout::uniform_scale;
+        let picker = Picker::halfblocks();
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let pane = Rect::new(0, 0, 4, 2);
+        let native = (pane.width as u32 * cw, pane.height as u32 * ch);
+        // A canvas that is entirely hole — the frame art leaves exactly this
+        // beside a flank, and it is the only thing the ground can be read off.
+        let chrome = image::RgbaImage::from_pixel(native.0, native.1, image::Rgba([0, 0, 0, 0]));
+        let scale = uniform_scale(
+            (native.0 as u16, native.1 as u16),
+            (pane.width as u32 * cw, pane.height as u32 * ch),
+        );
+        let band = Rect::new(pane.x, pane.y, pane.width, 1);
+        let page = image::Rgba([255, 255, 255, 255]);
+
+        let cells_of = |ground: Option<image::Rgba<u8>>| -> Vec<(ratatui::style::Color, ratatui::style::Color)> {
+            let mut gr = GraphicsRender::default();
+            gr.set_band_ground(ground);
+            let mut buf = Buffer::empty(pane);
+            gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+            (band.x..band.right()).map(|x| {
+                let c = buf.cell((x, band.y)).expect("in the pane");
+                (c.fg, c.bg)
+            }).collect()
+        };
+
+        let black = ratatui::style::Color::Rgb(0, 0, 0);
+        let white = ratatui::style::Color::Rgb(255, 255, 255);
+        assert!(
+            cells_of(None).iter().all(|&(fg, bg)| fg == black && bg == black),
+            "with no ground declared the encoder picks black, which is the defect",
+        );
+        assert!(
+            cells_of(Some(page)).iter().all(|&(fg, bg)| fg == white && bg == white),
+            "and a declared ground reaches the screen instead of it",
+        );
+    }
+
+    /// …and the ground rides the band's freshness hash, so a frame that changes
+    /// it re-encodes rather than placing a band flattened onto the old one.
+    #[test]
+    fn a_changed_ground_re_encodes_the_band() {
+        use crate::render::v6_layout::uniform_scale;
+        let picker = Picker::halfblocks();
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let pane = Rect::new(0, 0, 4, 2);
+        let native = (pane.width as u32 * cw, pane.height as u32 * ch);
+        let chrome = image::RgbaImage::from_pixel(native.0, native.1, image::Rgba([0, 0, 0, 0]));
+        let scale = uniform_scale(
+            (native.0 as u16, native.1 as u16),
+            (pane.width as u32 * cw, pane.height as u32 * ch),
+        );
+        let band = Rect::new(pane.x, pane.y, pane.width, 1);
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+        let mut gr = GraphicsRender::default();
+        let mut buf = Buffer::empty(pane);
+
+        gr.set_band_ground(Some(image::Rgba([255, 255, 255, 255])));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let hash0 = gr.chrome_bands.get(&key).expect("cached").0;
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_eq!(gr.chrome_bands.get(&key).unwrap().0, hash0, "same ground, same pixels: a cache hit");
+
+        gr.set_band_ground(Some(image::Rgba([0, 0, 128, 255])));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_ne!(
+            gr.chrome_bands.get(&key).unwrap().0, hash0,
+            "a changed ground is a changed band — the cache must not serve the old flatten",
+        );
     }
 
     #[test]

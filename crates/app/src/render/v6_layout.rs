@@ -1385,9 +1385,23 @@ pub fn build_chrome_canvas(
             // why that matters: 90% of what its carve used to remove lay outside
             // any run's glyph span, in `fill_explicit_bg_rows`' full-window flood.
             // Skipping only the glyphs would have left it behind.
-            let px_texts: Vec<&PxText> =
-                g.px_texts.iter().filter(|t| !text.skips(t.y.max(1) - 1)).collect();
-            if !px_texts.is_empty() {
+            //
+            // Asked of `g.px_texts`, not of the filtered list (SQ-0944): a grid
+            // that carries pixel runs is drawn from its RUNS, and whether any of
+            // them survived the skip does not change that. Gating the `continue`
+            // on the survivors let a grid whose runs the ring took ALL of fall
+            // through to the cell-grid painter below, which redraws the same
+            // characters at `oy + row * FONT_H` — positions a set keyed on the
+            // runs' own tops can never match. Zork Zero's banner is the case:
+            // runs at native 10 and 26, both skipped, both painted straight back
+            // in at 0 and 16, a text row above where the ring's glyphs land. That
+            // is the ghost the half-block capture showed beside crisp letters.
+            if !g.px_texts.is_empty() {
+                let px_texts: Vec<&PxText> =
+                    g.px_texts.iter().filter(|t| !text.skips(t.y.max(1) - 1)).collect();
+                if px_texts.is_empty() {
+                    continue;
+                }
                 // The run colour rule itself now lives in `chrome_run_ink`, which the
                 // glyph loop below calls and so does the cell path that draws these
                 // same runs as terminal glyphs (SQ-0944).
@@ -2191,6 +2205,73 @@ mod tests {
         assert!(
             (ART_END..native.0 as u32).any(|x| op(x, FONT_H + 4)),
             "the row BELOW it is not a glyph row and is imaged as always",
+        );
+    }
+
+    /// A grid whose runs the ring took ALL of paints NOTHING — it does not fall
+    /// back to its cell grid and redraw the same characters (SQ-0944).
+    ///
+    /// The `continue` used to be gated on the runs that SURVIVED the skip, so a
+    /// grid that lost every run fell through to the cell-grid painter below,
+    /// which places a row at `oy + row * FONT_H`. A skip set keyed on the runs'
+    /// own tops can never match those, so the text came back — cell-quantised,
+    /// a text row off where the ring's glyphs land.
+    ///
+    /// Zork Zero's banner is the frame that showed it: runs at native 10 and 26,
+    /// both handed to the ring under half-blocks, both painted straight back in
+    /// at 0 and 16, so a crisp "Banquet Hall" arrived with a blurred copy of
+    /// itself sitting one row above. The rows here are the same shape — 10 is
+    /// not a multiple of `FONT_H`, which is the whole reason the two painters
+    /// disagree about where the row is.
+    #[test]
+    fn a_grid_whose_runs_are_all_skipped_does_not_fall_back_to_its_cell_grid() {
+        let native = (640u16, 400u16);
+        let cell = |ch: char| GridCell { ch, style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 };
+        let status = PositionedWindow {
+            x: 0, y: 0, w: 12, h: 2, x_px: 0, y_px: 0, w_px: 640, h_px: 32,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                fill: None,
+                cols: 12, rows: 2, active_rows: 2, cursor: (0, 0),
+                cursor_active: false, border: BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false,
+                // The SAME text in both representations, as a v6 status window
+                // carries it: the runs say where it really is, the cell grid says
+                // where it would be if rows were 16 pixels apart.
+                cells: "Banquet Hall".chars().chain("Moves:     1".chars()).map(cell).collect(),
+                px_texts: vec![
+                    PxText { y: 11, x: 1, text: "Banquet Hall".into(), style: 0, fg: 0x0300_0000, bg: 0 },
+                    PxText { y: 27, x: 1, text: "Moves:     1".into(), style: 0, fg: 0x0300_0000, bg: 0 },
+                ],
+            }),
+        };
+        let chrome: Vec<&PositionedWindow> = vec![&status];
+        let skip: std::collections::HashSet<u16> = [10u16, 26].into_iter().collect();
+        let canvas = build_chrome_canvas(
+            &chrome, native, Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]),
+            &colors(), TextLayer::SkipGlyphRows(&skip),
+        );
+
+        let painted = canvas.pixels().filter(|p| p[3] > 0).count();
+        assert_eq!(
+            painted, 0,
+            "every run was skipped, so this grid owes the canvas no pixels at all — \
+             {painted} were painted, which is the cell grid drawing the banner again",
+        );
+
+        // …and the skip is still the only reason. Ask for the same canvas with
+        // nothing skipped: the runs appear, and they appear at the RUNS' rows.
+        // Native 32..42 is the discriminating span — inside run 2 (26..42) and
+        // past the cell grid's second and last row (16..32) — so ink there can
+        // only have come from the run painter.
+        let all = build_chrome_canvas(
+            &chrome, native, Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]),
+            &colors(), TextLayer::All,
+        );
+        assert!(
+            (32..42).any(|y| (0..native.0 as u32).any(|x| all.get_pixel(x, y)[3] > 0)),
+            "the runs really are paintable, and only the run painter reaches native 32..42 — \
+             so the empty canvas above is the skip doing its job, not an inert fixture",
         );
     }
 

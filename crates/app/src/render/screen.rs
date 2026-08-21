@@ -1909,6 +1909,27 @@ fn render_node(
                         };
                         {
                             let mut gr = state.graphics_render.borrow_mut();
+                            // SQ-0944: on a backend that resolves an image's alpha to
+                            // BLACK, the ring's bands stop shipping alpha and resolve it
+                            // here instead, onto the same page the raster composite has
+                            // flattened onto since SQ-0510 — so half-blocks shows the
+                            // story's own page in the gaps the frame art leaves, exactly
+                            // as kitty does, rather than the encoder's black.
+                            //
+                            // Set on `gr` rather than carried into the three band entry
+                            // points because the answer cannot differ between two bands of
+                            // one frame; `begin_band_log` clears it, so it cannot outlive
+                            // this one. Set HERE, after `clear_text_columns`, because the
+                            // carves that punch holes in this canvas must all have run:
+                            // flattening earlier would be undone by the next carve, and
+                            // the flanks' own `v6_border::recognize` reads the canvas's
+                            // TRANSPARENCY to tell a pillar from its ground — which is
+                            // why the flatten lands on each band's finished image and
+                            // never on the canvas they are all cut from.
+                            gr.set_band_ground(
+                                backend_flattens_alpha_to_black(picker)
+                                    .then(|| v6_composite_page(layout.story, default_bg, state)),
+                            );
                             // An Art strip with no art behind it is skipped below and never
                             // drawn, so its key must NOT be claimed here: a live key nothing
                             // re-places keeps a cached upload the terminal is no longer being
@@ -3502,6 +3523,39 @@ pub fn v6_host_pair(state: &AppState) -> (image::Rgba<u8>, image::Rgba<u8>) {
     )
 }
 
+/// The colour a v6 composite resolves its still-transparent pixels onto: the
+/// story window's own declared page when the player is honouring game colours,
+/// else the host pair's background.
+///
+/// ONE rule, asked by both composites (SQ-0944). Raster has flattened onto this
+/// since SQ-0510; hybrid needs the same answer the moment a backend that cannot
+/// carry alpha starts shipping the ring bands, and a second derivation of "the
+/// page" is exactly how the two modes come to disagree about the same frame.
+pub(crate) fn v6_composite_page(
+    story: Option<&crate::engine::PositionedWindow>,
+    default_bg: image::Rgba<u8>,
+    state: &AppState,
+) -> image::Rgba<u8> {
+    v6_game_page(story, state).unwrap_or(default_bg)
+}
+
+/// The story window's own declared page, or `None` when the game set none or the
+/// player has declined game colours.
+///
+/// Gated on the LIVE honor config: a mid-game `/set-game-colours off` leaves the
+/// recorded pair in the model, and a composite must fall back to the host pair
+/// rather than keep resolving onto the game's page.
+pub(crate) fn v6_game_page(
+    story: Option<&crate::engine::PositionedWindow>,
+    state: &AppState,
+) -> Option<image::Rgba<u8>> {
+    state
+        .config
+        .honor_game_colours
+        .then(|| crate::render::v6_layout::story_bg_rgba(story, &state.colors))
+        .flatten()
+}
+
 /// The MACHINE's own page alone, as an opaque colour, or `None` when this frame
 /// has no machine pair (SQ-0848).
 ///
@@ -3561,8 +3615,8 @@ pub fn build_v6_raster_canvas(
     // recorded pair in the model, and the composite must fall back to the host
     // pair rather than keep painting the game's page/ink.
     let honor = state.config.honor_game_colours;
-    let game_page = if honor { v6::story_bg_rgba(layout.story, &state.colors) } else { None };
     let game_ink = if honor { v6::story_fg_rgba(layout.story, &state.colors) } else { None };
+    let game_page = v6_game_page(layout.story, state);
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
     // Raster has no cells to draw text with, so it needs every run imaged: the
@@ -6702,6 +6756,28 @@ fn band_tiles(band: Rect, tile_cols: u16) -> Vec<Rect> {
 /// reasons, and present on the one where it is not optional. That is why this is a
 /// predicate and not a config key: there is nothing left for a player to choose.
 fn backend_layers_glyphs_over_art(picker: &ratatui_image::picker::Picker) -> bool {
+    matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Halfblocks)
+}
+
+/// Whether this backend resolves an image's TRANSPARENCY to black (SQ-0944).
+///
+/// A different question from [`backend_layers_glyphs_over_art`], with the same
+/// answer today and no reason to stay that way, so it is asked separately.
+///
+/// Half-blocks is the one that provably does: `ratatui-image`'s primitive
+/// encoder calls `to_rgb8()`, which drops alpha and leaves a fully transparent
+/// pixel at RGB 0,0,0 — and `pick_side` then collapses the two equal halves to a
+/// SPACE, so the region reaches the screen as space cells on a black background.
+/// That is the black gutter down both sides of Zork Zero's pillars, which under
+/// kitty is the white page the story window declared.
+///
+/// Kitty and iTerm2 keep the alpha and composite it themselves (both ship the
+/// pixels with an alpha channel — RGBA and PNG respectively), so their bands must
+/// go on shipping it: flattening for them would paint the letterbox margin the
+/// game's page instead of the terminal's own ground. Sixel hands `to_rgba8()` to
+/// its encoder and has not been measured here; it keeps today's behaviour until
+/// it is.
+fn backend_flattens_alpha_to_black(picker: &ratatui_image::picker::Picker) -> bool {
     matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Halfblocks)
 }
 
