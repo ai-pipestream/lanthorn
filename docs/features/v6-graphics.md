@@ -641,21 +641,39 @@ store. Both are lost the moment something paints a page underneath, and *Zork
 Zero* asks for one — it sets black-on-white at boot and does so for every video
 card alike, because the story file cannot see which archive you loaded. So
 lanthorn tells a game drawing two-colour artwork that the interpreter has no
-colours to offer, which is true, and the game stops asking. Your theme owns the
-page, the stencil reveals it, and the artwork comes out in your colours. It
-applies to that story only — it never touches your saved settings, so opening a
-`.cg1` once does not quietly strip the colours from everything else you play.
+colours to offer, and the game stops asking. Your theme owns the page, the
+stencil reveals it, and the artwork comes out in your colours. It applies to that
+story only — it never touches your saved settings, so opening a `.cg1` once does
+not quietly strip the colours from everything else you play. (Two colours is not
+*no* choice, strictly: *Zork Zero*'s own in-game `color` command on a CGA machine
+offers a swap of the two states and nothing else. What the display genuinely
+cannot do is give a story the arbitrary colours §8.3 lets it name, and that is
+all this is claiming.)
 
-**Unless the machine has colours of its own to state.** That rule reasons from
-the artwork because on a PC there is nothing else to reason from: a `.CG1` names
-no machine, and the monochrome flag is the only evidence there is. A Macintosh
-disk is not that case — the volume names the machine, Infocom's own Mac
-interpreter names its colours, and the *same* interpreter picked the monochrome
-`Pic.data` **for** that white page, in one decision. So on a Mac the guess stands
-down in front of the fact and the machine keeps its black-on-white, which is what
-it took to stop the status banner's location and score coming out grey on the
-game's own white plate. Same bytes, two machines, two answers: hand that archive
-to the IBM PC profile and the stencil rule fires on it unchanged.
+**Unless the machine's own screen already is that two-colour display.** A
+Macintosh's is: the volume names the machine, Infocom's own Mac interpreter names
+its white page under black ink, and the *same* interpreter picked the monochrome
+`Pic.data` **for** that page, in one decision. So on a Mac the rule stands down
+and the machine keeps its black-on-white, which is what it took to stop the
+status banner's location and score coming out grey on the game's own white plate.
+An IBM PC's screen is not: CGA is one of four cards the same machine could be
+showing, and the machine states **blue** under white where a CGA screen is
+**black** under light grey — `machine-screenshots/dos-zorkzero-cga.png`, the
+Banquet Hall in CGA mode, is 48.3% pure black, the exact inverse of the white
+page the story asked for. One channel separates the two machines, and that
+channel is the whole test: the Mac states its two-colour page once, the PC states
+a different one, and nothing in the rule mentions either by name.
+
+That distinction is newer than it looks. While lanthorn had *no* colours to state
+for an IBM PC, "does this launch name a machine?" stood in for it perfectly well;
+once the DOS medium started supplying the PC's own blue-under-white, the stand-in
+began answering yes for exactly the launches CGA art comes from — the 360K *Zork
+Zero* press serves its `.cg1` off disk 1 with no `--pictures` at all — and the
+white page came back and painted the plate out. On the frame that reported it,
+declining the story's page takes the border art from 1,115 distinguishable cells
+to 1,672: the light line work was disappearing into the white it was standing on,
+which is what it does on a real CGA machine too if you use that `color` command
+to swap the ground.
 
 Neither is *adaptive*, which matters more than it sounds. A picture that carries
 no palette normally means "draw me with whatever palette is current" (below), and

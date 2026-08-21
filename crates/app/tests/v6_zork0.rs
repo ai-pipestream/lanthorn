@@ -12,6 +12,8 @@
 mod honor_colours_artwork_pin;
 #[path = "suites/v6_band_tiling.rs"]
 mod v6_band_tiling;
+#[path = "suites/v6_cga_stencil_page.rs"]
+mod v6_cga_stencil_page;
 #[path = "suites/v6_ega_dither_blend.rs"]
 mod v6_ega_dither_blend;
 #[path = "suites/v6_float_machine_page.rs"]
