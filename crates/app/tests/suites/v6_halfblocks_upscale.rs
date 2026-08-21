@@ -43,16 +43,37 @@
 //! FALSIFY by restoring the unconditional `.min(MAX_V6_UPSCALE)` in `v6_fit_source`:
 //! `a_fine_grid_reaches_the_pane_under_halfblocks` fails on both titles with the
 //! reported symptom — the composite stalls at 40 rows while the pane has 60.
+//!
+//! ## SQ-0973: and then it is resampled once
+//!
+//! Lifting the ceiling made the pre-scale's cost visible: at 458x144 it Nearest-magnified
+//! the 640x400 canvas to 4580x2862 (50 MB, 155 ms) so that `Halfblocks::encode` could
+//! Triangle it straight back down to 458x288 — a sample grid NARROWER than the artwork.
+//! Half-blocks never wanted device pixels; it resolves one sample per column and two per
+//! row and throws `font_size` away. So it now resamples once, onto that grid: 0.50 MB and
+//! 2.3 ms, the same cell rect, and a picture that has been through one filter instead of
+//! two in opposite directions. The last two cases here are that claim on both titles.
+//!
+//! FALSIFY by routing half-blocks back through `v6_fit_source` + `new_protocol` in
+//! `GraphicsRender::encode_v6`: `the_halfblocks_composite_is_one_resample_of_the_canvas`
+//! fails on both, with the double-resampled cells against the single-resample reference.
 
 use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::interpreter::InterpreterProfile;
-use app::render::graphics::{kitty_picker, v6_fit_source, v6_upscale_cap};
+use app::render::graphics::{
+    kitty_picker, resize_directional, v6_fit_source, v6_halfblocks_grid, v6_upscale_cap,
+};
 use app::session::{GameSession, InputKind};
-use ratatui::layout::Size;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Rect, Size};
+use ratatui::widgets::Widget;
 use ratatui_image::picker::Picker;
+use ratatui_image::protocol::halfblocks::Halfblocks;
+use ratatui_image::protocol::Protocol;
+use ratatui_image::Image;
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -142,11 +163,25 @@ fn composite(s: &GameSession) -> (image::RgbaImage, (u16, u16)) {
 
 /// How many CELLS of a `cols x rows` pane the composite reaches on a backend with
 /// this upscale ceiling — the protocol's own `Fit` arithmetic, not a restatement of
-/// it, so what is measured is what the pane gets.
-fn reach(canvas: &image::RgbaImage, cap: Option<f64>, fs: ratatui_image::FontSize, cols: u16, rows: u16) -> Size {
+/// it, so what is measured is what the pane gets. `lock` is the pixel-lock
+/// magnification when the pane has one (SQ-0945), `None` otherwise.
+fn reach(
+    canvas: &image::RgbaImage,
+    cap: Option<f64>,
+    fs: ratatui_image::FontSize,
+    cols: u16,
+    rows: u16,
+    lock: Option<f32>,
+) -> Size {
     let (box_w, box_h) = (u32::from(cols) * u32::from(fs.width), u32::from(rows) * u32::from(fs.height));
-    let (src, fit) = v6_fit_source(canvas, box_w, box_h, None, cap);
+    let (src, fit) = v6_fit_source(canvas, box_w, box_h, lock, cap);
     fit.size_for(&image::DynamicImage::ImageRgba8(src), fs, Size::new(cols, rows))
+}
+
+/// The half-block sample grid a cell rect stands for: one sample per COLUMN and two
+/// per ROW. `font_size` never appears — `Halfblocks::encode` throws it away.
+fn sample_grid(cells: Size) -> (u32, u32) {
+    (u32::from(cells.width), u32::from(cells.height) * 2)
 }
 
 /// The premise, and the non-vacuity guard for everything below: both titles compose a
@@ -196,8 +231,8 @@ fn a_fine_grid_reaches_the_pane_under_halfblocks() {
         let Some(s) = boot(spec) else { continue };
         any_present = true;
         let (canvas, _) = composite(&s);
-        let free = reach(&canvas, v6_upscale_cap(&hb), fs, 200, 60);
-        let capped = reach(&canvas, Some(2.0), fs, 200, 60);
+        let free = reach(&canvas, v6_upscale_cap(&hb), fs, 200, 60, None);
+        let capped = reach(&canvas, Some(2.0), fs, 200, 60, None);
         assert_eq!(
             free.height, 60,
             "{}: half-blocks must fill the pane's short axis at a 200x60 grid — it reached \
@@ -241,8 +276,8 @@ fn the_kitty_composite_is_unchanged() {
             spec.title
         );
         for (cols, rows) in [(60u16, 24u16), (100, 40), (166, 44), (240, 80)] {
-            let got = reach(&canvas, v6_upscale_cap(&kitty), fs, cols, rows);
-            let capped = reach(&canvas, Some(2.0), fs, cols, rows);
+            let got = reach(&canvas, v6_upscale_cap(&kitty), fs, cols, rows, None);
+            let capped = reach(&canvas, Some(2.0), fs, cols, rows, None);
             assert_eq!(
                 got, capped,
                 "{}: at {cols}x{rows} kitty must answer exactly as the flat 2x cap always did",
@@ -251,6 +286,126 @@ fn the_kitty_composite_is_unchanged() {
             assert!(
                 got.width <= cols && got.height <= rows,
                 "{}: at {cols}x{rows} the composite reached {got:?} — the pane is still the bound",
+                spec.title
+            );
+        }
+        seen += 1;
+    }
+    assert!(!any_present || seen > 0, "a present fixture must have been measured");
+}
+
+// ── SQ-0973: one resample, not two in opposite directions ──────────────────────
+
+/// Nothing the player sees moved. On both titles, at every pane in the sweep and with
+/// the pixel lock both off and on, the cell rect the composite occupies is exactly the
+/// one the pre-scale-then-`Fit` pair landed on.
+///
+/// This is the constraint the speed-up had to be bought inside. `redraw_v6` letterboxes
+/// the composite by `proto.size()` and `V6ClickMap` is built from that same rect, so a
+/// cell rect that shifted would move the picture AND misdirect every click on it — a
+/// geometry change wearing a performance fix's clothes.
+#[test]
+fn the_halfblocks_cell_rect_does_not_move() {
+    let _g = standard_palette();
+    let hb = Picker::halfblocks();
+    let fs = hb.font_size();
+    let (mut any_present, mut seen) = (false, 0usize);
+    for spec in &SPECIMENS {
+        let Some(s) = boot(spec) else { continue };
+        any_present = true;
+        let (canvas, _) = composite(&s);
+        for (cols, rows) in [(458u16, 144u16), (200, 60), (100, 40), (240, 80), (60, 24)] {
+            let (box_w, box_h) =
+                (u32::from(cols) * u32::from(fs.width), u32::from(rows) * u32::from(fs.height));
+            for lock in [None, Some(2.0f32), Some(1.5)] {
+                let want = reach(&canvas, v6_upscale_cap(&hb), fs, cols, rows, lock);
+                let got = v6_halfblocks_grid(canvas.dimensions(), box_w, box_h, fs, lock);
+                assert_eq!(
+                    got, want,
+                    "{}: at {cols}x{rows} with lock {lock:?} the composite must still occupy \
+                     {want:?} — it now reaches that rect by arithmetic instead of by building \
+                     a device-pixel image, and the rect itself is not up for renegotiation",
+                    spec.title
+                );
+                assert!(
+                    got.width <= cols && got.height <= rows,
+                    "{}: at {cols}x{rows} the pane is still the bound, got {got:?}",
+                    spec.title
+                );
+            }
+        }
+        seen += 1;
+    }
+    assert!(!any_present || seen > 0, "a present fixture must have been measured");
+}
+
+/// The fix itself, on the frames it was reported against: the composite the shipped
+/// render path puts on screen IS one [`resize_directional`] of the native canvas onto
+/// the half-block sample grid — no device-pixel intermediate anywhere in between.
+///
+/// Driven end to end through `GraphicsRender`, so what is compared is the buffer the
+/// terminal would be handed. The reference is built the only way a single resample can
+/// be built, and that is the pin: restore the pre-scale and the cells stop matching,
+/// because Nearest-up-to-4580x2862-then-Triangle-down-to-458x288 is a different picture
+/// from one Triangle down.
+///
+/// The two panes are chosen to make the absurdity of the old shape visible from both
+/// sides. At 458x144 the device box (4580x2862) magnifies the canvas 7.16x while the
+/// sample grid (458x288) minifies it — the pre-scale built 50 MB on the way to a grid
+/// smaller than the artwork. At 200x60 the box magnifies 3x and the grid still minifies
+/// to 192x120.
+#[test]
+fn the_halfblocks_composite_is_one_resample_of_the_canvas() {
+    let _g = standard_palette();
+    let hb = Picker::halfblocks();
+    let fs = hb.font_size();
+    let (mut any_present, mut seen) = (false, 0usize);
+    for spec in &SPECIMENS {
+        let Some(s) = boot(spec) else { continue };
+        any_present = true;
+        let (canvas, _) = composite(&s);
+        for (cols, rows) in [(458u16, 144u16), (200, 60)] {
+            let area = Rect::new(0, 0, cols, rows);
+            let (box_w, box_h) =
+                (u32::from(cols) * u32::from(fs.width), u32::from(rows) * u32::from(fs.height));
+            let cells = v6_halfblocks_grid(canvas.dimensions(), box_w, box_h, fs, None);
+            let (gw, gh) = sample_grid(cells);
+            eprintln!(
+                "{}: {cols}x{rows} -> device box {box_w}x{box_h}, sample grid {gw}x{gh} \
+                 ({:.2} MB against {:.2} MB)",
+                spec.title,
+                f64::from(gw) * f64::from(gh) * 4.0 / 1_048_576.0,
+                f64::from(box_w) * f64::from(box_h) * 4.0 / 1_048_576.0,
+            );
+
+            // The shipped path. With no last-ready composite the encode is synchronous
+            // (SQ-0578), so the frame is on the buffer when `redraw_v6` returns.
+            let mut gr = app::render::graphics::GraphicsRender::default();
+            gr.spawn_v6_encode(&hb, canvas.clone(), 1, area, None);
+            let mut got = Buffer::empty(area);
+            gr.redraw_v6(&hb, area, &mut got);
+
+            // One resample of the canvas, placed where `redraw_v6` letterboxes it.
+            let once = resize_directional(&canvas, gw, gh);
+            let proto = Protocol::Halfblocks(
+                Halfblocks::new(image::DynamicImage::ImageRgba8(once), cells)
+                    .expect("the reference encodes"),
+            );
+            let (w, h) = (cells.width.min(cols), cells.height.min(rows));
+            let dest = Rect::new((cols - w) / 2, (rows - h) / 2, w, h);
+            let mut want = Buffer::empty(area);
+            Image::new(&proto).render(dest, &mut want);
+
+            assert_ne!(
+                want, Buffer::empty(area),
+                "{}: the reference has to have drawn something at {cols}x{rows}",
+                spec.title
+            );
+            assert_eq!(
+                got, want,
+                "{}: at {cols}x{rows} the composite on screen must BE one {gw}x{gh} resample \
+                 of the 640x400 canvas. Any pre-scale between the two shows up here as \
+                 different cells — that is what this case is for",
                 spec.title
             );
         }

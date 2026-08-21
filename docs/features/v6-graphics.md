@@ -821,6 +821,21 @@ the font made the game window smaller instead of the picture sharper. It now cli
 as far as the pane allows — and where the v6 pixel lock is on, as far up the
 artwork'''s own integer ladder as the pane allows.
 
+Lifting that ceiling then made something else visible, and it is worth spelling out
+because it reads like a contradiction. The pre-scale exists to work around an API:
+`Resize::Fit` never grows, so a pane bigger than the composite gets nothing at all
+unless the picture is magnified *before* it is handed over. But half-blocks does not
+want device pixels — it resolves whatever it is given to exactly one sample per
+column and two per row, and throws the font size away — so on a 458×144 pane the
+pre-scale was magnifying a 640×400 canvas to 4580×2862 (50 MB of nearest-neighbour,
+155 ms) purely so the crate could take it straight back down to 458×288. Two
+resamples in opposite directions, to land on a grid *narrower* than the artwork
+started. Half-blocks therefore skips the pre-scale entirely now and resamples once,
+straight onto the sample grid: 0.50 MB and 2.3 ms for the same frame, the same cell
+rect on screen, and one filter chosen by direction rather than nearest-up followed
+by a smoothing pass down. The encoding backends keep the pre-scale, because for them
+it was never a workaround — the pixels they build are the pixels they ship.
+
 Shrinking is the same rule read backwards, and that is the trap. The instruction
 "take the source pixel nearest this destination pixel" *replicates* one on the way
 up and **drops** one on the way down. At a 60×24 pane Journey's plate is asked for
