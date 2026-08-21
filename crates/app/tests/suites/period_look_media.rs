@@ -17,9 +17,17 @@
 //! owner changes. v7 and v8 decline outright, never having run on one of these
 //! machines at all.
 //!
+//! **And the CARET moves with the Version too** (SQ-0947). The Amiga's orange
+//! block and the IBM PC's underscore were measured on v1–v5 captures, and both
+//! machines' v6 interpreters draw the pair on screen reversed instead — so a look
+//! off a v6 disk is no longer the stored row, and the case that used to compare it
+//! with one now compares it with the machine's answer for that Version.
+//!
 //! `stories/` is gitignored (CLAUDE.md), so every case skips vacuously when the
 //! disks are absent — and each one asserts it saw at least one specimen first, so
-//! a skip cannot pass for a pass.
+//! a skip cannot pass for a pass. Watch the SKIP notes when adding a specimen: a
+//! release whose story is on none of its disks individually loads as nothing, and
+//! a present fixture then skips exactly like an absent one.
 
 use std::path::{Path, PathBuf};
 
@@ -85,6 +93,22 @@ const SPECIMENS: &[Specimen] = &[
         zversion: 6,
         dressed: true,
     },
+    // SQ-0947: the same game on the other machine whose v6 caret was reported
+    // wrong, so both halves of the report are driven off real media here.
+    //
+    // Zork Zero release 393 / serial 890714 on a DOS floppy — the row
+    // `real_media_releases.rs` pins as "Zork Zero (DOS)", and a different press
+    // from the Amiga's release 366 above (CLAUDE.md: a disk image is a different
+    // release). It is `floppy5.ima` because that is *The Lost Treasures of
+    // Infocom*'s fifth disk; the retail 360K set is in `stories/` too and is
+    // deliberately NOT used, because its Disk 1 holds the boot files and no story
+    // at all, so it would skip exactly like a fixture that is not there.
+    Specimen {
+        file: "floppy5.ima",
+        machine: InterpreterProfile::IbmPc,
+        zversion: 6,
+        dressed: true,
+    },
 ];
 
 /// The story's Version byte, straight off whatever the disk yielded, or `None`
@@ -125,7 +149,16 @@ fn the_medium_names_the_machine_and_the_version_decides_whether_it_dresses() {
             s.file
         );
         if let Some(look) = look {
-            assert_eq!(Some(look), profile.period_look(), "{} got another machine's screen", s.file);
+            // Against the machine's answer FOR THIS VERSION, not against the stored
+            // row. The two diverge on purpose — the IBM PC's white moves with the
+            // palette (SQ-0939) and two machines' carets move at v6 (SQ-0947) — so
+            // comparing with the row would pin the drift rather than the screen.
+            assert_eq!(
+                Some(look),
+                zvm::interpreter::period_look_for(profile.row_number(), Some(zversion)),
+                "{} got another machine's screen",
+                s.file
+            );
         }
     }
     // A fixture that is ABSENT is a clean skip (CLAUDE.md: `stories/` is
@@ -164,6 +197,81 @@ fn either_switch_declines_and_only_the_broad_one_is_the_master() {
     }
     let any_present = SPECIMENS.iter().filter(|s| s.dressed).any(|s| dir.join(s.file).is_file());
     assert!(!any_present || seen > 0, "disks are present but none was read");
+}
+
+/// SQ-0947: the caret a **Version 6** launch off a release disk gets is the pair
+/// on screen reversed, on the two machines whose v6 interpreter drew one that way.
+///
+/// Reported by eye against the retail games: "amiga zork-zero is wrong color --
+/// orange, dos v6 games should be reversed space". Both were stored measurements
+/// applied a version too far — the Amiga's fixed `#FF7E1C` block and the IBM PC's
+/// underscore come from v3 captures (`amiga-spellbreaker.png`,
+/// `dos-hitchhiker.png`), and three v6 frames in `machine-screenshots/` disagree
+/// with them: `amiga-zorkzero.png` draws a black 8x15 block after `[MORE]` on Zork
+/// Zero's own grey page, `amiga-shogun.png` a white 8x16 one after the `>` on
+/// Shogun's dark page, and `dos-arthur.png` a solid white 18x36 cell after `>exam`
+/// on EGA blue.
+///
+/// The unit cases pin the rule against the table. What this one adds is that the
+/// disks in `stories/` actually reach it: a real Amiga floppy and a real DOS floppy
+/// of the same game, through `InterpreterProfile::resolve` and `app::period`.
+///
+/// The same shelf's v3 and v5 disks are asserted alongside, because a fix that
+/// simply stopped drawing the machine's caret would pass the v6 half and silently
+/// undo SQ-0873 everywhere else.
+#[test]
+fn the_version_six_caret_off_a_release_disk_is_the_pair_reversed() {
+    use zvm::interpreter::CursorShape;
+
+    let dir = stories_dir();
+    let mut seen = 0;
+    let mut reversing = 0;
+    for s in SPECIMENS {
+        let path = dir.join(s.file);
+        let Some(zversion) = zversion_of(&path) else {
+            eprintln!("SKIP: gitignored disk missing at {}", path.display());
+            continue;
+        };
+        seen += 1;
+        let profile = InterpreterProfile::resolve(&path, None, None, None);
+        let look = app::period::resolve(profile, true, true, true, Some(zversion))
+            .expect("every specimen here is dressed");
+
+        let v6_reversing_machine = zversion == 6
+            && matches!(profile, InterpreterProfile::Amiga | InterpreterProfile::IbmPc);
+        if v6_reversing_machine {
+            reversing += 1;
+            assert_eq!(
+                look.cursor_shape,
+                CursorShape::ReverseSpace,
+                "{}: v6 on {profile:?} reverses the live pair",
+                s.file
+            );
+            assert_ne!(
+                look.cursor_colour,
+                (0xFF, 0x7E, 0x1C),
+                "{}: and never the v3 interpreter's orange",
+                s.file
+            );
+        } else {
+            // The rest of the shelf keeps the caret its own capture measured.
+            assert_eq!(
+                look.cursor_shape,
+                profile.period_look().expect("measured").cursor_shape,
+                "{}: v{zversion} on {profile:?} keeps its measured caret",
+                s.file
+            );
+        }
+    }
+    // Non-vacuity, twice over: the suite must have read a disk at all, and — when
+    // the v6 disks are here — must have exercised the branch this case exists for.
+    let any_present = SPECIMENS.iter().any(|s| dir.join(s.file).is_file());
+    assert!(!any_present || seen > 0, "disks are present but none was read");
+    let v6_present = SPECIMENS.iter().any(|s| s.zversion == 6 && dir.join(s.file).is_file());
+    assert!(
+        !v6_present || reversing > 0,
+        "a v6 disk is here and the branch this case exists for never ran",
+    );
 }
 
 /// An ordinary story file is not a machine, so it is not dressed as one — the

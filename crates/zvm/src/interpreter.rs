@@ -341,6 +341,34 @@ pub enum CursorShape {
     /// One scanline on the cell's bottom row — 8x1 on both Commodores
     /// (`c64-hitchhiker.png`, `c128-trinity.png`).
     Underscore,
+    /// A full cell in the reverse of **whatever pair is on screen** — the caret
+    /// the Version 6 interpreters draw on the Amiga and the IBM PC (SQ-0947).
+    ///
+    /// The one shape here that states no colour, and it is a claim about the
+    /// interpreter rather than about the machine's palette. The other three name a
+    /// [`PeriodLook::cursor_colour`] because the caret was that colour whatever the
+    /// story did; this one tracks the story, so no RGB can be stored for it.
+    ///
+    /// **Two Amiga captures of two v6 games settle that it tracks**, which one
+    /// could not: `amiga-zorkzero.png` draws the caret BLACK, an 8x15 block after
+    /// `[MORE]` on Zork Zero's own grey `#A3A0A3` page, and `amiga-shogun.png`
+    /// draws it WHITE, an 8x16 block after the `>` on Shogun's dark `#3A3C3A`. Two
+    /// pairs, two carets, each the reverse of the pair beside it — and neither is
+    /// the `#FF7E1C` orange the same machine's v3 interpreter draws (exactly 128
+    /// pixels of it, one 8x16 cell, in both `amiga-spellbreaker.png` and
+    /// `amiga-lurking.png`).
+    ///
+    /// `dos-arthur.png` is the IBM PC's, and it changes SHAPE rather than colour:
+    /// a solid white 18x36 cell after `>exam` on the EGA blue page, where the same
+    /// machine's v3 interpreter draws [`Self::Underscore`] across the bottom
+    /// quarter of the cell (`dos-hitchhiker.png`).
+    ///
+    /// **The Macintosh is the control and does NOT change** — `mac-zorkzero.jpg`
+    /// and `mac-shogun.jpg` draw the same [`Self::Bar`] its v3 capture does, which
+    /// is why this is applied per machine in [`period_look_for`] rather than to
+    /// every row at Version 6. Machines with no v6 capture decline, as everywhere
+    /// else in this table.
+    ReverseSpace,
 }
 
 /// How a machine's own interpreter set the status line apart from the story
@@ -450,6 +478,11 @@ pub struct PeriodLook {
     pub cursor_shape: CursorShape,
     /// The input cursor's colour, which on two of five machines is **neither the
     /// page nor the ink** — the Amiga's orange and the Commodore 64's black.
+    ///
+    /// Says nothing under [`CursorShape::ReverseSpace`], which is a caret with no
+    /// colour to state; [`period_look_for`] parks the ink here so a consumer that
+    /// reads the field without the shape gets the pair's own reverse rather than
+    /// the previous generation's orange.
     pub cursor_colour: (u8, u8, u8),
 }
 
@@ -868,6 +901,17 @@ pub fn machine(number: u8) -> Option<&'static MachineProfile> {
 /// its look from its pair would overwrite a measured blue screen with a grey one.
 /// So the derivation is gated on the machine resolving numbers through its own
 /// palette, which is exactly the case where the two are one fact.
+///
+/// # The caret moved with the interpreter generation too (SQ-0947)
+///
+/// The same argument the palette makes, made by the cursor. Every stored
+/// `cursor_shape` here was measured on a v1–v5 capture, and on two machines the v6
+/// interpreter draws a different caret: the Amiga swaps its fixed `#FF7E1C` orange
+/// block for the pair's own reverse, and the IBM PC swaps its underscore for a full
+/// reversed cell. Both become [`CursorShape::ReverseSpace`], whose docs carry the
+/// captures. The Macintosh is the control — its v6 frames draw the same bar its v3
+/// one does — and every machine with no v6 capture declines rather than guessing,
+/// which is this table's rule everywhere else.
 pub fn period_look_for(number: u8, zversion: Option<u8>) -> Option<PeriodLook> {
     let m = machine(number)?;
     let mut look = m.period_look?;
@@ -884,6 +928,13 @@ pub fn period_look_for(number: u8, zversion: Option<u8>) -> Option<PeriodLook> {
         if let Some(rgb) = resolve(fg) {
             look.ink = rgb;
         }
+    }
+    // After the pair, so the ink parked in `cursor_colour` is the one this VERSION
+    // resolves — the IBM PC's v6 white is `#FFFFFF` through YZIP, not XZIP's
+    // `#AAAAAA`.
+    if zversion == Some(6) && matches!(number, AMIGA_INTERPRETER_NUMBER | IBM_PC_INTERPRETER_NUMBER) {
+        look.cursor_shape = CursorShape::ReverseSpace;
+        look.cursor_colour = look.ink;
     }
     Some(look)
 }
@@ -1138,6 +1189,72 @@ mod tests {
         }
         // An unmodelled number is not dressed as anything.
         assert_eq!(palette_for(200, Some(6)), Palette::Standard);
+    }
+
+    /// The caret moved with the interpreter generation on exactly two machines
+    /// (SQ-0947), and this is the case that falsifies the reported symptom.
+    ///
+    /// Reported by eye: "amiga zork-zero is wrong color -- orange, dos v6 games
+    /// should be reversed space". Both halves are stored measurements applied a
+    /// version too far — the Amiga's `#FF7E1C` block and the IBM PC's underscore
+    /// are v1–v5 captures, and `machine-screenshots/` has three v6 frames that
+    /// disagree with them (`amiga-zorkzero.png`, `amiga-shogun.png`,
+    /// `dos-arthur.png`; see [`CursorShape::ReverseSpace`]).
+    ///
+    /// The Macintosh is asserted alongside because it is the CONTROL: its own v6
+    /// frames draw the same bar its v3 one does, so a rule that changed every
+    /// machine at Version 6 would be wrong about it, and a rule that changed none
+    /// would be wrong about the other two.
+    #[test]
+    fn the_caret_the_version_six_interpreters_draw_is_the_pair_reversed() {
+        let caret = |n, v| period_look_for(n, Some(v)).expect("measured").cursor_shape;
+        let orange = machine(AMIGA_INTERPRETER_NUMBER).expect("modelled").period_look.unwrap();
+        assert_eq!(orange.cursor_colour, (0xFF, 0x7E, 0x1C), "the stored v3 measurement");
+
+        for (n, stored) in [
+            (AMIGA_INTERPRETER_NUMBER, CursorShape::Block),
+            (IBM_PC_INTERPRETER_NUMBER, CursorShape::Underscore),
+        ] {
+            assert_eq!(caret(n, 6), CursorShape::ReverseSpace, "machine {n} at v6");
+            for v in 1..=5 {
+                assert_eq!(caret(n, v), stored, "machine {n} at v{v} keeps its capture");
+            }
+            // …and the colour goes with it, so a reader that takes the field
+            // without the shape gets the pair's reverse, never the old orange.
+            let v6 = period_look_for(n, Some(6)).expect("measured");
+            assert_eq!(v6.cursor_colour, v6.ink, "machine {n}: the ink, this version's");
+        }
+
+        // The IBM PC's v6 ink is YZIP's white, which is what makes the ordering
+        // inside `period_look_for` load-bearing: the caret takes the pair AFTER the
+        // palette has resolved it, so this is #FFFFFF and not XZIP's #AAAAAA.
+        let dos6 = period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(6)).expect("measured");
+        assert_eq!(dos6.cursor_colour, (0xFF, 0xFF, 0xFF), "EGA 15, not EGA 7");
+        // …where a v3 story leaves the field alone, so the underscore keeps the
+        // grey `dos-hitchhiker.png` was censused for.
+        assert_eq!(
+            period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(3)).expect("measured").cursor_colour,
+            machine(IBM_PC_INTERPRETER_NUMBER).expect("modelled").period_look.unwrap().cursor_colour,
+        );
+
+        // The control: mac-zorkzero.jpg and mac-shogun.jpg draw a bar, so the
+        // Macintosh does not move — and neither does a machine with no v6 capture.
+        for n in [
+            MACINTOSH_INTERPRETER_NUMBER,
+            APPLE_IIGS_INTERPRETER_NUMBER,
+            ATARI_ST_INTERPRETER_NUMBER,
+            COMMODORE_64_INTERPRETER_NUMBER,
+            COMMODORE_128_INTERPRETER_NUMBER,
+        ] {
+            let stored = machine(n).expect("modelled").period_look.expect("measured");
+            for v in 1..=6 {
+                assert_eq!(
+                    period_look_for(n, Some(v)),
+                    Some(stored),
+                    "machine {n} has no v6 capture to move it",
+                );
+            }
+        }
     }
 
     /// Declines are declines, and the ones here are for want of a capture rather

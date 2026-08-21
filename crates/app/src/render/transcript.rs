@@ -88,6 +88,14 @@ pub(crate) fn cursor_style(text_style: Style, game_input: Option<Style>) -> Styl
 /// the pair either. [`crate::period`] holds the shapes and what a cell grid can
 /// and cannot say about them; with no period look in force this is exactly the
 /// behaviour it always had.
+///
+/// **And a look need not state a caret.** The Amiga's and the IBM PC's Version 6
+/// interpreters draw the pair on screen reversed — no fixed colour, so nothing to
+/// hold in the machine table — and `crate::period` answers `None` for them
+/// (SQ-0947). That falls through to the structural arms below, which reverse the
+/// live style and are therefore already the machine's caret. Before this, an Amiga
+/// v6 launch drew the fixed `#FF7E1C` orange block its *v3* interpreter used, and a
+/// DOS v6 one drew its v3 underscore.
 fn draw_caret(
     cell: &mut ratatui::buffer::Cell,
     over_text: bool,
@@ -95,18 +103,26 @@ fn draw_caret(
     text_style: Style,
     game_input: Option<Style>,
 ) {
-    match (look, over_text) {
-        (Some(l), true) => {
-            cell.set_style(crate::period::caret_over_text(&l));
+    // `None` is both "no period look" and "a look with no caret of its own", and
+    // the structural fallback is the right answer to both.
+    let stated = look.and_then(|l| {
+        if over_text {
+            crate::period::caret_over_text(&l).map(|s| (None, s))
+        } else {
+            crate::period::caret_cell(&l).map(|(g, s)| (Some(g), s))
         }
-        (Some(l), false) => {
-            let (glyph, style) = crate::period::caret_cell(&l);
-            cell.set_symbol(glyph).set_style(style);
+    });
+    match stated {
+        Some((glyph, style)) => {
+            if let Some(glyph) = glyph {
+                cell.set_symbol(glyph);
+            }
+            cell.set_style(style);
         }
-        (None, true) => {
+        None if over_text => {
             cell.set_style(cursor_style(text_style, game_input));
         }
-        (None, false) => {
+        None => {
             cell.set_symbol(" ").set_style(cursor_style(text_style, game_input));
         }
     }
@@ -4750,6 +4766,67 @@ mod tests {
                 !cell.modifier.contains(Modifier::REVERSED),
                 "interpreter {number}: the shape is stated outright, not by reversing the theme"
             );
+        }
+    }
+
+    /// SQ-0947, the reported symptom: an Amiga **v6** launch drew the `#FF7E1C`
+    /// orange block its own *v3* interpreter uses, and a DOS v6 one drew its v3
+    /// underscore. Both are stored measurements applied a version too far.
+    ///
+    /// The machine table answers `ReverseSpace` for these two at v6 — the caret is
+    /// the pair on screen, reversed, which is what `amiga-zorkzero.png`,
+    /// `amiga-shogun.png` and `dos-arthur.png` show — and this pins the consequence
+    /// here: the look states no caret, so the structural one draws, and the
+    /// structural one IS that reversal.
+    ///
+    /// Driven through `crate::period::resolve` rather than off a table row, because
+    /// the version is the whole variable and a row cannot carry it.
+    ///
+    /// Both `honor_game_colours` modes, per CLAUDE.md — and the `game_input`
+    /// argument with them, since that is the value the caret actually reverses.
+    #[test]
+    fn the_version_six_caret_reverses_the_live_pair_instead_of_the_v3_measurement() {
+        let machine = minimal_machine();
+        let orange = ratatui::style::Color::Rgb(0xFF, 0x7E, 0x1C);
+        for profile in [crate::interpreter::InterpreterProfile::Amiga, crate::interpreter::InterpreterProfile::IbmPc] {
+            let look = crate::period::resolve(profile, true, true, true, Some(6))
+                .expect("a measured machine at a version it shipped for");
+            assert_eq!(
+                look.cursor_shape,
+                zvm::interpreter::CursorShape::ReverseSpace,
+                "{profile:?} at v6",
+            );
+            for honor in [true, false] {
+                for game_input in [None, Some(Style::new().fg(Color::Black).bg(Color::Gray))] {
+                    let mut state = AppState::default();
+                    state.config.command_bar = true;
+                    state.config.honor_game_colours = honor;
+                    state.input.set("hi", true);
+                    state.focus = Focus::Game;
+                    state.period_look = Some(look);
+
+                    let area = Rect::new(0, 0, 40, 5);
+                    let mut buf = Buffer::empty(area);
+                    render_transcript(
+                        &crate::session::status_model_from_machine(&machine),
+                        None,
+                        &state,
+                        area,
+                        &mut buf,
+                        game_input,
+                    );
+
+                    let cell = buf.cell((4, 4)).expect("cursor cell should exist");
+                    let where_ = format!("{profile:?}, honor={honor}, game_input={}", game_input.is_some());
+                    assert_eq!(cell.symbol(), " ", "{where_}: a reversed SPACE, not a shape glyph");
+                    assert!(
+                        cell.modifier.contains(Modifier::REVERSED),
+                        "{where_}: reversed, so the caret follows whatever pair is on screen",
+                    );
+                    assert_ne!(cell.fg, orange, "{where_}: the v3 orange is not a v6 caret");
+                    assert_ne!(cell.bg, orange, "{where_}: the v3 orange is not a v6 caret");
+                }
+            }
         }
     }
 

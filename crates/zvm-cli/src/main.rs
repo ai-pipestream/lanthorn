@@ -1580,6 +1580,11 @@ fn main() {
                 CursorShape::Block => cli_host::cursor_steady_block(),
                 CursorShape::Underscore => cli_host::cursor_steady_underline(),
                 CursorShape::Bar => cli_host::cursor_steady_bar(),
+                // Unreachable behind the `version() <= 4` gate above — the reversed
+                // cell is a Version 6 caret, and this front-end plays no v6 story.
+                // It is also what a terminal draws when nobody states a shape, so
+                // saying nothing IS saying it (SQ-0947).
+                CursorShape::ReverseSpace => "",
             }
         );
         let _ = io::stdout().flush();

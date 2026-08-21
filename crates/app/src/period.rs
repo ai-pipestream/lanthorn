@@ -73,6 +73,17 @@
 //! occupies the same part of the cell — `▏` and `▁`. That is the honest analogue,
 //! and it is named here rather than in a comment at the draw site so the loss is
 //! recorded once.
+//!
+//! # The one thing a look may decline to say
+//!
+//! **A caret need not have a colour.** The Amiga's and the IBM PC's Version 6
+//! interpreters draw it as the pair ON SCREEN reversed, which follows every colour
+//! the story sets — `amiga-zorkzero.png` draws it black on Zork Zero's grey page
+//! and `amiga-shogun.png` white on Shogun's dark one, one machine and two answers.
+//! No RGB can stand for that, so [`caret_cell`] and [`caret_over_text`] answer
+//! `None` and the host's structural caret draws instead: it reverses the live
+//! style, which is exactly the machine's behaviour rather than an approximation of
+//! it. Everything else in a look is still stated outright (SQ-0947).
 
 use ratatui::style::{Color, Modifier, Style};
 use zvm::interpreter::{CursorShape, PeriodLook, StatusBand};
@@ -196,12 +207,20 @@ fn reversed(s: Style) -> Style {
 ///   the Apple II's and the Amiga's do.
 /// - [`CursorShape::Underscore`] → `▁`, the bottom eighth, which is where both
 ///   Commodores put their single scanline.
-pub fn caret_cell(look: &PeriodLook) -> (&'static str, Style) {
+///
+/// **`None` for [`CursorShape::ReverseSpace`]**, the caret the Amiga's and the IBM
+/// PC's Version 6 interpreters draw (SQ-0947). It is the pair ON SCREEN reversed,
+/// which changes with every colour the story sets, so there is no cell to state
+/// here — and the host's own structural caret is already exactly that reversal.
+/// Answering `None` hands the draw back to it rather than freezing one pair's
+/// answer into a machine constant.
+pub fn caret_cell(look: &PeriodLook) -> Option<(&'static str, Style)> {
     let colour = rgb(look.cursor_colour);
     match look.cursor_shape {
-        CursorShape::Bar => ("▏", Style::new().fg(colour).bg(rgb(look.page))),
-        CursorShape::Block => (" ", Style::new().fg(rgb(look.page)).bg(colour)),
-        CursorShape::Underscore => ("▁", Style::new().fg(colour).bg(rgb(look.page))),
+        CursorShape::Bar => Some(("▏", Style::new().fg(colour).bg(rgb(look.page)))),
+        CursorShape::Block => Some((" ", Style::new().fg(rgb(look.page)).bg(colour))),
+        CursorShape::Underscore => Some(("▁", Style::new().fg(colour).bg(rgb(look.page)))),
+        CursorShape::ReverseSpace => None,
     }
 }
 
@@ -215,13 +234,16 @@ pub fn caret_cell(look: &PeriodLook) -> (&'static str, Style) {
 /// underscore machine underlines it in the cursor's colour and the other two
 /// swap the pair. The shape is expressible only where the cell is empty; see
 /// [`caret_cell`].
-pub fn caret_over_text(look: &PeriodLook) -> Style {
+///
+/// `None` for [`CursorShape::ReverseSpace`], for the reason [`caret_cell`] gives.
+pub fn caret_over_text(look: &PeriodLook) -> Option<Style> {
     let colour = rgb(look.cursor_colour);
     match look.cursor_shape {
         CursorShape::Underscore => {
-            Style::new().fg(colour).bg(rgb(look.page)).add_modifier(Modifier::UNDERLINED)
+            Some(Style::new().fg(colour).bg(rgb(look.page)).add_modifier(Modifier::UNDERLINED))
         }
-        CursorShape::Bar | CursorShape::Block => Style::new().fg(rgb(look.page)).bg(colour),
+        CursorShape::Bar | CursorShape::Block => Some(Style::new().fg(rgb(look.page)).bg(colour)),
+        CursorShape::ReverseSpace => None,
     }
 }
 
@@ -458,16 +480,45 @@ mod tests {
         let mac = look_of(zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER);
         let amiga = look_of(zvm::interpreter::AMIGA_INTERPRETER_NUMBER);
         let c128 = look_of(zvm::interpreter::COMMODORE_128_INTERPRETER_NUMBER);
-        assert_eq!(caret_cell(&mac).0, "▏");
-        assert_eq!(caret_cell(&amiga).0, " ");
-        assert_eq!(caret_cell(&c128).0, "▁");
+        assert_eq!(caret_cell(&mac).expect("the Mac states one").0, "▏");
+        assert_eq!(caret_cell(&amiga).expect("the Amiga states one").0, " ");
+        assert_eq!(caret_cell(&c128).expect("the C128 states one").0, "▁");
 
         // The Amiga's orange is in neither channel of its body pair, which is the
         // case that would break if the caret were built by reversing the body.
-        let cell = caret_cell(&amiga).1;
+        let cell = caret_cell(&amiga).expect("the Amiga states one").1;
         assert_eq!(cell.bg, Some(rgb(amiga.cursor_colour)));
         assert_ne!(cell.bg, Some(rgb(amiga.page)));
         assert_ne!(cell.bg, Some(rgb(amiga.ink)));
+    }
+
+    /// …and a look may state NO caret, which is not the same as stating a dull
+    /// one (SQ-0947).
+    ///
+    /// The Amiga's and the IBM PC's Version 6 interpreters draw the pair on screen
+    /// reversed, so the caret has no colour of its own to hold — two Amiga v6
+    /// captures show it black on one game's grey page and white on another's dark
+    /// one. `None` is how that is said, and it hands the draw to the host's
+    /// structural caret, which is already that reversal.
+    #[test]
+    fn a_version_six_look_states_no_caret_because_its_caret_is_the_live_pair() {
+        for profile in [InterpreterProfile::Amiga, InterpreterProfile::IbmPc] {
+            let v6 = resolve(profile, true, true, true, Some(6)).expect("a measured machine");
+            assert!(caret_cell(&v6).is_none(), "{profile:?} v6 states no cell");
+            assert!(caret_over_text(&v6).is_none(), "{profile:?} v6 states no style");
+
+            // …while every version the stored capture speaks for still does, so
+            // this cannot quietly undo SQ-0873.
+            for v in 1..=5 {
+                let look = resolve(profile, true, true, true, Some(v)).expect("a measured machine");
+                assert!(caret_cell(&look).is_some(), "{profile:?} v{v} keeps its measured caret");
+                assert!(caret_over_text(&look).is_some(), "{profile:?} v{v}");
+            }
+        }
+        // The Macintosh is the control: its v6 frames draw the same bar its v3 one
+        // does, so it states a caret on every version.
+        let mac = resolve(InterpreterProfile::Macintosh, true, true, true, Some(6)).expect("measured");
+        assert_eq!(caret_cell(&mac).expect("the Mac states one").0, "▏");
     }
 
     /// SQ-0847's rule, reused: a machine default fills what nobody claimed and
@@ -565,12 +616,12 @@ mod tests {
     #[test]
     fn a_caret_over_text_keeps_the_text_readable() {
         let c64 = look_of(zvm::interpreter::COMMODORE_64_INTERPRETER_NUMBER);
-        let over = caret_over_text(&c64);
+        let over = caret_over_text(&c64).expect("the C64 states one");
         assert!(over.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(over.fg, Some(rgb(c64.cursor_colour)));
 
         let mac = look_of(zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER);
-        let over = caret_over_text(&mac);
+        let over = caret_over_text(&mac).expect("the Mac states one");
         assert!(!over.add_modifier.contains(Modifier::UNDERLINED), "a bar cannot go under a glyph");
         assert_eq!(over.bg, Some(rgb(mac.cursor_colour)));
     }

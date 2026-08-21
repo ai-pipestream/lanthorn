@@ -1417,6 +1417,21 @@ believe). Three cannot move at all: the Mac Plus is 1-bit, the C128's VDC is RGB
 and the Apple II is monochrome — though "monochrome" there means the *white*
 monitor, and green and amber were as common.
 
+**The caret in that table is the v1–v5 one, and on two machines Version 6 moved
+it.** Infocom's later interpreters draw the caret as the pair *on screen*
+reversed — it follows whatever colour the story has set rather than having one of
+its own — and the captures show it twice over on one machine:
+`amiga-zorkzero.png` draws a black block after `[MORE]` on *Zork Zero*'s grey
+page, and `amiga-shogun.png` a white one after the `>` on *Shogun*'s dark page.
+Neither is the `#FF7E1C` orange the same machine's Version 3 interpreter draws.
+`dos-arthur.png` says the same about the IBM PC, and changes shape rather than
+colour: a solid white cell after `>exam` where its v3 capture draws an
+underscore. So the Amiga and the IBM PC get lanthorn's ordinary reverse-video
+caret on a v6 story — which is not a fallback here but the exact behaviour — and
+every other machine keeps the caret its own capture measured. The Macintosh is
+the control that makes this per-machine rather than per-version:
+`mac-zorkzero.jpg` and `mac-shogun.jpg` draw the same 1px bar its v3 frame does.
+
 **A period look is a property of the interpreter build as much as of the
 machine.** Two Commodore 64 captures three years apart disagree on all four
 decisions: the 1984 *Hitchhiker's* is white on a grey page with a status band of
@@ -1439,8 +1454,13 @@ plain reverse. The table has one row per machine and takes the later press.
   over you would be arguing. It does not work the other way — `period_look` is the
   narrow key precisely so that declining the *presentation* never costs a v5+
   story the colours it asked for.
-- **Never for v5 and up.** There the pair on screen is a fact the story can read,
-  and the profile already supplies it out of Infocom's source.
+- **Never for v7 and v8.** No Infocom machine ever shipped an interpreter for
+  them, so there is no period screen to have measured. Everything from v1 to v6
+  *is* dressed: the machine's measured RGB and the `$2C`/`$2D` numbers a v5+ story
+  reads are two spellings of one row, so painting the first while answering the
+  second is not a lie about the screen — it is the screen. (The **status line** is
+  the one part that still stops at v4, because that is where the game gains
+  `set_colour` and starts naming that row's colours itself.)
 
 ### What a terminal cannot say
 
