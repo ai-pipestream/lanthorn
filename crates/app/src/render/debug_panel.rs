@@ -247,32 +247,49 @@ fn draw_callstack(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugP
     }
 }
 
+/// Draw `text`, whose first character belongs at logical column `col` of a row
+/// scrolled left by `hscroll`, clipped into `content`. Chars, not bytes — the
+/// hex dump's character column carries the story's own ZSCII, which reaches
+/// well past ASCII (`ä`, `»`) through the §3.8.5 translation table.
+fn draw_hscrolled(
+    buf: &mut Buffer, content: Rect, y: u16, col: usize, hscroll: usize, text: &str, style: Style,
+) {
+    let skip = hscroll.saturating_sub(col);
+    // Byte offset of the first still-visible char; `None` = the scroll has run
+    // past the whole string, so there is nothing on this row to draw.
+    let Some((byte, _)) = text.char_indices().nth(skip) else { return };
+    let x = content.x.saturating_add(col.saturating_sub(hscroll).min(u16::MAX as usize) as u16);
+    draw_str_clipped(buf, x, y, &text[byte..], style, content);
+}
+
 /// Draw the Memory section: an address line always occupies the top content
 /// row so the jump affordance is discoverable — it shows the current address
 /// (with a `press : to jump` hint) when idle, and becomes the edit field with
 /// a `_` cursor while `mem_input` is editing. The hex dump fills the rows
-/// below it. Memory is pre-windowed by its addr, so it never applies a scroll
-/// offset.
+/// below it. Memory is pre-windowed by its addr, so it never applies a
+/// *vertical* scroll offset; `mem_hscroll` pans it sideways (SQ-0965), and the
+/// address line stays put because it is a control, not part of the dump.
 fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState, body: Style) {
     let (line, style) = match &panel.mem_input {
         Some(input) => (format!("jump: {input}_"), state.colors.theme.get("panel.border:active").style),
         None => (format!("addr: 0x{:06x}  (: jump — hex, gNN, localN, sp)", panel.mem_addr), body),
     };
     draw_str_clipped(buf, content.x, content.y, &line, style, content);
-    // The jumped-to entry's decoded text, captioning the dump below it. The hex
-    // row's char column reads one ZSCII code per byte, which is noise over the
-    // packed Z-characters of a dictionary key or an object short name — this
-    // caption is the only readable confirmation that the jump landed on the
-    // entry the Dictionary/Objects tab named (SQ-0448). Absent (and costing no
-    // row) when the target holds no Z-string.
-    let mut top = content.y + 1;
-    if let Some(text) = panel.mem_annotation() {
-        draw_str_clipped(buf, content.x, top, text, state.colors.theme.get("debug.zstring").style, content);
-        top += 1;
-    }
-    let height = content.height.saturating_sub(top - content.y);
+    let top = content.y + 1;
+    let height = content.height.saturating_sub(1);
+    // Past the hex and its char column, each row carries the story's own text
+    // for its bytes: the char column reads one ZSCII code per byte, which is
+    // noise over the packed Z-characters of a dictionary key or an object short
+    // name (SQ-0448/SQ-0969). Both columns are drawn — the horizontal scroll is
+    // what makes the far one reachable — and a row the engine cannot anchor to a
+    // string start gets nothing here rather than a plausible wrong decode.
+    let ztext = state.colors.theme.get("debug.zstring").style;
     for (row, hex) in panel.snapshot.memory.iter().take(height as usize).enumerate() {
-        draw_str_clipped(buf, content.x, top + row as u16, hex, body, content);
+        let y = top + row as u16;
+        draw_hscrolled(buf, content, y, 0, panel.mem_hscroll, hex, body);
+        if let Some(Some(z)) = panel.snapshot.memory_zstrings.get(row) {
+            draw_hscrolled(buf, content, y, panel.snapshot.memory_zcol, panel.mem_hscroll, z, ztext);
+        }
     }
 }
 
@@ -479,9 +496,13 @@ mod tests {
         assert!(text.contains("Stack"));
     }
 
-    /// The Memory tab, jumped to `addr`, drawn into an 80x24 buffer.
-    fn memory_view_at(addr: u32) -> (crate::state::AppState, Buffer) {
-        struct Dict;
+    /// The Memory tab, jumped to `addr` and panned right by `hscroll`, drawn
+    /// into an 80x24 buffer (window 2's content starts at (41, 13) and is 38
+    /// columns wide). `hex_pad` sets how wide the mock's hex rows are, so a case
+    /// can put the decoded-text column either inside that pane or out past its
+    /// right edge — which is where a real 72-column row puts it.
+    fn memory_view(addr: u32, hscroll: usize, hex_pad: usize) -> (crate::state::AppState, Buffer) {
+        struct Dict(usize);
         impl crate::engine::Debugger for Dict {
             fn pc(&self) -> u32 { 0 }
             fn disassemble(&self, _a: u32, _n: usize) -> Vec<String> { Vec::new() }
@@ -497,20 +518,22 @@ mod tests {
             fn object_tree_lines(&self) -> Vec<String> { Vec::new() }
             fn dictionary_lines(&self) -> Vec<String> { Vec::new() }
             fn memory_hex(&self, a: u32, r: usize) -> Vec<String> {
-                (0..r).map(|i| format!("{:06x}  ..", a + i as u32 * 16)).collect()
+                (0..r).map(|i| format!("{:06x}  {}", a + i as u32 * 16, ".".repeat(self.0))).collect()
             }
             fn memory_len(&self) -> u32 { 0x10000 }
             fn object_detail(&self, _o: u16) -> Vec<String> { Vec::new() }
             fn frame_locals(&self, _i: usize) -> Vec<String> { Vec::new() }
             fn var_value(&self, _v: u8) -> Option<u16> { None }
-            fn zstring_at(&self, addr: u32) -> Option<String> {
-                (addr == 0x2005).then(|| "dict word: \"lantern\"".to_string())
+            // One entry, whose text belongs to the 0x2000 row and to no other.
+            fn memory_zstrings(&self, a: u32, r: usize) -> Vec<Option<String>> {
+                (0..r).map(|i| (a + i as u32 * 16 == 0x2000).then(|| "lantern".to_string())).collect()
             }
         }
         let mut state = crate::state::AppState::default();
         state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
         let mut panel = crate::debug_panel::DebugPanelState::new(0);
-        panel.goto_memory(addr, &Dict);
+        panel.goto_memory(addr, &Dict(hex_pad));
+        panel.mem_hscroll = hscroll;
         state.debug = Some(panel);
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -519,31 +542,70 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_view_captions_a_jumped_to_entry_with_its_decoded_z_string() {
-        // SQ-0448: the hex row's char column reads one ZSCII code per byte, which
-        // is noise over packed Z-characters, so this caption is the only readable
-        // confirmation the jump landed on the entry the Dictionary tab named.
-        let (state, buf) = memory_view_at(0x2005);
-        assert!(buf_text(&buf).contains("dict word: \"lantern\""));
+    fn the_memory_view_draws_the_story_text_beside_the_bytes_that_produced_it() {
+        // SQ-0969: the hex row's char column reads one ZSCII code per byte, which
+        // is noise over packed Z-characters. The decode belongs on the entry's
+        // OWN row — a caption above the dump only restated the Dictionary tab
+        // you clicked from, and never said which row it meant.
+        let (state, buf) = memory_view(0x2005, 0, 2);
+        // Content starts at (41, 13): row 0 is the `addr:` line, so the 0x2000
+        // row is drawn at y = 14, and the decode sits two columns past a
+        // 10-column hex row — x = 41 + 12.
+        let row = row_text(&buf, 14);
+        assert!(row.contains("002000"), "the entry's row: {row:?}");
+        assert!(row.contains("lantern"), "…carries its own decoded text: {row:?}");
+        assert!(!row_text(&buf, 15).contains("lantern"), "and the next row does not");
 
-        // Themed, never hard-coded: the caption's cells carry `debug.zstring`.
-        // Window 2 (right-bottom) content starts at (41, 13); row 0 is the
-        // `addr:` line, so the caption is row 1.
+        // Themed, never hard-coded: the column's cells carry `debug.zstring`.
         let want = state.colors.theme.get("debug.zstring").style;
-        let cell = buf.cell((41, 14)).expect("caption cell");
-        assert_eq!(Some(cell.fg), want.fg, "caption takes its colour from debug.zstring");
+        let cell = buf.cell((53, 14)).expect("first cell of the Z-text column");
+        assert_eq!(cell.symbol(), "l", "the column starts two past the hex row");
+        assert_eq!(Some(cell.fg), want.fg, "the column takes its colour from debug.zstring");
         assert_eq!(cell.modifier, want.add_modifier, "…and its modifiers");
     }
 
     #[test]
-    fn the_caption_pushes_the_hex_down_a_row_and_costs_nothing_without_one() {
-        // With a caption the dump starts one row lower; with none it sits right
-        // under the `addr:` line, so a jump to plain data loses no hex row.
-        let (_, with) = memory_view_at(0x2005);
-        assert!(row_text(&with, 15).contains("002000"), "hex starts below the caption");
-        let (_, without) = memory_view_at(0x3000);
-        assert!(!buf_text(&without).contains("dict word"), "no caption for plain data");
-        assert!(row_text(&without, 14).contains("003000"), "and the hex reclaims the row");
+    fn a_row_no_table_accounts_for_keeps_its_char_column_and_shows_no_decode() {
+        // The dump also starts directly under the `addr:` line: with the caption
+        // gone, no jump costs a row of hex.
+        let (_, buf) = memory_view(0x3000, 0, 2);
+        assert!(!buf_text(&buf).contains("lantern"), "no decode without an anchor");
+        assert!(row_text(&buf, 14).contains("003000"), "and the hex owns the row");
+    }
+
+    /// FALSIFY by pinning `hscroll` to 0 inside `draw_hscrolled`: the panned
+    /// case comes back with the address column still at the pane's left edge and
+    /// no "lantern" anywhere on screen — the originally reported symptom, a
+    /// Memory row cut off on the right with no way to see the rest of it.
+    #[test]
+    fn panning_brings_the_decoded_column_into_a_pane_far_too_narrow_for_it() {
+        // SQ-0965: a real row is 72 columns before the decode even starts, and
+        // window 2 is 38 wide — so unpanned the column is simply not on screen,
+        // and the horizontal scroll is the only thing that can reach it.
+        let (_, unpanned) = memory_view(0x2005, 0, 64);
+        assert!(!buf_text(&unpanned).contains("lantern"), "72 columns out is off-pane");
+        let (_, panned) = memory_view(0x2005, 74, 64);
+        let row = win2_row(&panned, 14);
+        assert!(row.starts_with("lantern"),
+            "panned to the column, it reads from the pane's left edge: {row:?}");
+    }
+
+    #[test]
+    fn panning_slides_the_hex_left_by_exactly_the_scroll_offset() {
+        // The address itself scrolls out of view — the dump is one wide row, not
+        // a fixed address gutter with a scrolling remainder.
+        let (_, buf) = memory_view(0x2005, 8, 64);
+        let row = win2_row(&buf, 14);
+        assert!(!row.contains("002000"), "the address has scrolled off: {row:?}");
+        assert!(row.starts_with("...."), "the hex body starts at the left edge: {row:?}");
+        // …while the `addr:` control line above it stays put.
+        assert!(win2_row(&buf, 13).contains("0x002000"), "the address line does not pan");
+    }
+
+    /// The drawn text of window 2's content on row `y` — the 80x24 layout puts
+    /// its left edge at x = 41 (see `memory_view`).
+    fn win2_row(buf: &Buffer, y: u16) -> String {
+        row_text(buf, y).chars().skip(41).collect()
     }
 
     /// The drawn text of one buffer row.

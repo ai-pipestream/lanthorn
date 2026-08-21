@@ -237,6 +237,26 @@ pub fn short_name(mem: &Memory, obj: u16) -> String {
     s
 }
 
+/// The byte span `[start, end)` of object `obj`'s short-name Z-text.
+///
+/// ZMSD §12.4: a property table opens with a one-byte count of the Z-text
+/// *words* its short name occupies, and the text itself follows immediately —
+/// so the span is known without decoding a single character. `None` when `obj`
+/// is unaddressable or its name is empty (count 0).
+///
+/// Lets a caller that already holds a memory address ask "is this inside a
+/// short name, and where did that name start?" — a Z-string can only be decoded
+/// from its start (§3.2: the alphabet shift and abbreviation state carry across
+/// words, so there is no resync point mid-string).
+pub fn short_name_span(mem: &Memory, obj: u16) -> Option<(u32, u32)> {
+    if !addressable(mem, obj) {
+        return None;
+    }
+    let ptbl = prop_table_addr(mem, obj);
+    let name_words = mem.read_byte(ptbl) as u32;
+    (name_words > 0).then(|| (ptbl + 1, ptbl + 1 + name_words * 2))
+}
+
 // ── Property walking ──────────────────────────────────────────────────────────
 
 /// Returns the address of the first property entry (just after the name).
@@ -687,6 +707,24 @@ mod tests {
         let m = Memory::new(buf).unwrap();
         let name = short_name(&m, 2);
         assert!(name.starts_with("east"), "got: {:?}", name);
+    }
+
+    #[test]
+    fn short_name_span_is_the_bytes_short_name_actually_decodes() {
+        // The span must be the name's own Z-text and nothing else: it starts one
+        // byte past the property table (§12.4's length field) and covers exactly
+        // the words that field counts. Round-trip it through the decoder — the
+        // span's end must be where decoding from its start stops.
+        let buf = build_v3_story();
+        let m = Memory::new(buf).unwrap();
+        for obj in [1u16, 2] {
+            let (start, end) = short_name_span(&m, obj).expect("both objects are named");
+            assert!(end > start && (end - start) % 2 == 0, "whole 2-byte words only");
+            let (text, decoded_end) = decode_string(&m, start);
+            assert_eq!(decoded_end, end, "object {obj}'s declared span ends where its text does");
+            assert_eq!(text, short_name(&m, obj), "…and holds exactly its short name");
+        }
+        assert_eq!(short_name_span(&m, 0), None, "object 0 is the null object");
     }
 
     // ── v3 property tests ─────────────────────────────────────────────────────

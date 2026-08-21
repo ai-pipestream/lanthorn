@@ -14,7 +14,7 @@ pub(crate) const A2: &[u8; 26] = b"\x00\n0123456789.,!?_#'\"/\\-:()";
 pub mod cp437;
 
 pub mod decode;
-pub use decode::decode_string;
+pub use decode::{decode_string, decode_string_words};
 
 pub mod encode;
 pub use encode::{encode_word, encode_word_mem};

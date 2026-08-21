@@ -112,16 +112,25 @@ built-in debugger that follows the running story instruction by instruction.
   on the PC, and `r` cycles the disassembly render mode (Full → Basic → Raw). In
   the Memory tab, `:` or `/` opens an address box that also accepts a variable
   token (`sp`, `g44`, `local10`).
-- **Decoded story text over the hex.** Land the Memory view on a dictionary entry
-  or an object entry — by clicking its `@0x……` link in the Dictionary or Objects
-  tab, or by typing the address — and the dump is captioned with the entry's
-  actual text: `dict word: "lantern"`, `object 27 name: "brass lantern"`. The hex
-  row's own character column can't show you this: it reads one byte as one
-  character, while a dictionary key and an object's short name are Z-encoded —
-  three characters packed into every 16-bit word — so that column is noise over
-  exactly the entries you jump to, and the caption is what confirms you landed on
-  the one you meant. Style it with `debug.zstring`; it appears only when there's
-  text there, so a jump to plain data costs you no row of hex.
+- **Decoded story text beside the hex.** Past the usual character column, each
+  Memory row carries the story's own words for its bytes — `lantern` sitting
+  beside the sixteen bytes that encode it. The character column can't show you
+  this: it reads one byte as one character, while a dictionary key and an
+  object's short name are Z-encoded, three characters packed into every 16-bit
+  word, so that column is noise over exactly the entries the Dictionary and
+  Objects tabs let you jump to. Style the column with `debug.zstring`.
+
+  It only ever fills in rows it can vouch for. Z-text has no resync point — the
+  decoder carries an alphabet shift and a half-finished abbreviation across word
+  boundaries — so text decoded from a row boundary part-way into a string is
+  *wrong*, not merely shifted, and reads perfectly plausibly. Rows the story's
+  own tables anchor (dictionary keys, object short names) get their real text;
+  every other row is left blank rather than guessed at.
+- **Horizontal scrolling in the Memory view.** A hex row is 72 columns before its
+  decoded text even begins, and no inspector window is that wide. `h` and `l` pan
+  the dump sideways (the arrows are the section cycler, so panning takes the
+  vi keys, the same trade the animation view makes), clamped to the widest row.
+  The `addr:` line above stays put — it's a control, not part of the dump.
 - **Execution coverage.** Once a line's address runs it turns blue and stays
   blue for the rest of the session, so you build up a map of what has actually
   executed; a `|` gutter bar additionally marks just the lines the *last* command

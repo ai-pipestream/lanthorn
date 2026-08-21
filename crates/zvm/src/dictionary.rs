@@ -125,6 +125,14 @@ impl Dictionary {
         result
     }
 
+    /// Bytes of each entry taken up by its encoded key: 4 in v1–3 (ZMSD §13.3),
+    /// 6 in v4+ (§13.4). The rest of the entry — `entry_length` is a byte the
+    /// *game* chose, and §13.2 gives only a minimum — is game-defined data, not
+    /// Z-text, so a caller mapping addresses to strings must stop here.
+    pub fn key_len(&self) -> u8 {
+        self.key_len
+    }
+
     /// Look up `word` in the dictionary. Returns the entry's byte address, or
     /// 0 if not found. Encodes `word` with `encode_word` (which truncates to
     /// the key length) and compares against stored keys.
