@@ -574,6 +574,48 @@ pub(crate) fn dispatch_slash_outcome(
                 TranscriptKind::Meta,
             );
         }
+        SlashOutcome::SetV6PixelLock(arg) => {
+            // SQ-0945: the runtime switch for SQ-0936's magnification ladder.
+            // Per-game, not global: the ladder's step is derived from the
+            // artwork's own density, so whether locking is worth its wider margin
+            // is a question about this story's press rather than about lanthorn.
+            use app::slash::V6PixelLockArg;
+            let want = match arg {
+                V6PixelLockArg::On => Some(true),
+                V6PixelLockArg::Off => Some(false),
+                V6PixelLockArg::Auto => None,
+                V6PixelLockArg::Toggle => Some(!state.config.v6_pixel_lock),
+            };
+            match app::styles::write_per_game_v6_pixel_lock(game_dir, want) {
+                Ok(()) => {
+                    // Live from the next frame: the render reads this field afresh
+                    // every draw, so there is nothing to relayout by hand. `auto`
+                    // falls back to the global default captured at boot, which is
+                    // the value the sidecar overrode and the only place it survives.
+                    state.config.v6_pixel_lock = want.unwrap_or(state.v6_pixel_lock_base);
+                    // A per-game choice must never reach the user's global
+                    // config.toml — pin it while it is in force, and release the
+                    // pin on `auto`, when nothing is overriding the key any more.
+                    match want {
+                        Some(v) => state.config.one_run.pin(app::config::keys::V6_PIXEL_LOCK, v),
+                        None => state.config.one_run.release(app::config::keys::V6_PIXEL_LOCK),
+                    }
+                    let label = match want {
+                        Some(true) => "on",
+                        Some(false) => "off",
+                        None => "auto",
+                    };
+                    state.push_transcript_internal(
+                        &format!(
+                            "v6 pixel lock: {label} (v6_pixel_lock = {})",
+                            state.config.v6_pixel_lock
+                        ),
+                        TranscriptKind::Meta,
+                    );
+                }
+                Err(e) => state.set_status(format!("set-v6-pixel-lock failed: {e}")),
+            }
+        }
         SlashOutcome::Trace(arg) => {
             match arg {
                 None => {
@@ -794,6 +836,60 @@ mod debug_dispatch_tests {
             dir, "IFIDTEST", dir, &[], dir,
             Rect::default(), Rect::default(), false,
         )
+    }
+
+    /// Drive `dispatch_slash_outcome` against a real per-game directory — the
+    /// sidecar writers need one — for outcomes that touch only `state` + `game_dir`.
+    fn dispatch_in(state: &mut AppState, outcome: SlashOutcome, dir: &std::path::Path) {
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        dispatch_slash_outcome(
+            outcome, state, &mut mapper, &mut engine, &mut style_watcher,
+            dir, "IFIDTEST", dir, &[], dir,
+            Rect::default(), Rect::default(), false,
+        );
+    }
+
+    /// SQ-0945: the runtime switch for SQ-0936's magnification ladder. On/off/toggle
+    /// all land in THIS game's `config.toml` sidecar and take effect on the next
+    /// frame; `auto` clears the key (absent = inherit) and puts the live value back
+    /// to the global default boot captured. The pin is what keeps a per-game answer
+    /// out of the user's global config — see the config-side case for the bleed.
+    #[test]
+    fn set_v6_pixel_lock_persists_per_game_and_auto_falls_back_to_the_global() {
+        use app::config::keys;
+        use app::slash::V6PixelLockArg;
+        let dir = std::env::temp_dir().join(format!("bm-sq0945-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = AppState::default();
+        // The global says off, and that is what boot recorded as the base.
+        state.config.v6_pixel_lock = false;
+        state.v6_pixel_lock_base = false;
+
+        dispatch_in(&mut state, SlashOutcome::SetV6PixelLock(V6PixelLockArg::On), &dir);
+        assert!(state.config.v6_pixel_lock, "on applies live");
+        assert_eq!(app::styles::read_per_game_v6_pixel_lock(&dir), Some(true), "and is written down");
+        assert!(state.config.one_run.holds(keys::V6_PIXEL_LOCK), "a per-game value is pinned");
+
+        // Bare toggles whatever is in force, and persists the result.
+        dispatch_in(&mut state, SlashOutcome::SetV6PixelLock(V6PixelLockArg::Toggle), &dir);
+        assert!(!state.config.v6_pixel_lock, "toggle flips it");
+        assert_eq!(
+            app::styles::read_per_game_v6_pixel_lock(&dir), Some(false),
+            "an explicit off is a choice, not an absence — it has to be written"
+        );
+
+        // `auto` clears the override and falls back to the global base.
+        state.v6_pixel_lock_base = true;
+        dispatch_in(&mut state, SlashOutcome::SetV6PixelLock(V6PixelLockArg::Auto), &dir);
+        assert_eq!(app::styles::read_per_game_v6_pixel_lock(&dir), None, "the key is gone");
+        assert!(state.config.v6_pixel_lock, "and the live value is the global one again");
+        assert!(!state.config.one_run.holds(keys::V6_PIXEL_LOCK), "nothing overrides it now");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

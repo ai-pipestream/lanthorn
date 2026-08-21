@@ -507,6 +507,17 @@ pub(crate) fn boot_story(
     // SQ-0304: per-game map-panel visibility. `Some(false)` → start with the map
     // hidden (captured here before `cfg` is moved into the engine build below).
     let start_map_hidden = app::styles::read_per_game_show_map(&game_dir) == Some(false);
+    // SQ-0945: per-game v6 pixel lock. Which rung of the magnification ladder looks
+    // right is a fact about this story's press, so the sidecar wins over the global
+    // key — and, exactly like the honor override above, it is PINNED so this one
+    // game's choice can never be written back into the user's global config.toml by
+    // a later settings-screen save (`OneRunOverrides`). Editing the row itself
+    // releases the pin, which is what a deliberate global edit looks like.
+    let v6_pixel_lock_base = cfg.v6_pixel_lock;
+    if let Some(v) = app::styles::read_per_game_v6_pixel_lock(&game_dir) {
+        cfg.v6_pixel_lock = v;
+        cfg.one_run.pin(app::config::keys::V6_PIXEL_LOCK, v);
+    }
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
     // ZMSD §8.3.3 (SQ-0532/A-F2): publish OUR default page + ink in header bytes
     // $2C/$2D, as the nearest §8.3.1 standard colour numbers, so a game that asks
@@ -954,6 +965,9 @@ pub(crate) fn boot_story(
     // SQ-0318: remember the global honor base so reload_style can recompute the
     // per-game > garglk > global precedence (and `auto` can fall back here).
     state.honor_game_colours_base = honor_game_colours_base;
+    // SQ-0945: and the global v6 pixel-lock default, so `set-v6-pixel-lock auto` can
+    // put the live key back to it after clearing this game's sidecar override.
+    state.v6_pixel_lock_base = v6_pixel_lock_base;
     // SQ-0855: and whether a flag put it there, which the base alone cannot say —
     // the post-IFID `reload_style` below re-reads both per-story sources from disk
     // and would otherwise let either of them overrule the flag.
