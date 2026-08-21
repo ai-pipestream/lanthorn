@@ -80,6 +80,18 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // ── 1. Parse args + load config ───────────────────────────────────────────
 
     let cli = Cli::parse();
+
+    // `--machines` is a question about the machine table, not a launch (SQ-0960).
+    // Answered here — before the config is read, before a template is seeded and
+    // before a story is required — for the reason clap answers `--help` there:
+    // it describes the program, so demanding a story to see it would be the wrong
+    // question. `zvm-cli --machines` prints this same string, from `zvm` itself,
+    // because a reporter kept in one front-end is a reporter the other copies.
+    if cli.machines {
+        print!("{}", zvm::machines::table());
+        std::process::exit(0);
+    }
+
     let mut cfg = resolve(&cli);
 
     // Auto-seed a fresh style.toml (SQ-0309, Task 6b) on every startup — before the

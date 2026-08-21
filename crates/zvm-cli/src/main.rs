@@ -29,7 +29,6 @@ use zvm::memory::Memory;
 
 mod screen;
 mod auxiliary; // "aux" is a reserved filename on Windows — module renamed accordingly
-mod machines;
 mod media;
 
 // ── sound ──────────────────────────────────────────────────────────────────────
@@ -1364,7 +1363,7 @@ fn main() {
     // program rather than a story, so demanding a story file to see it would be
     // the wrong question. Printed before anything reads a terminal.
     if argv.iter().any(|a| a == "--machines") {
-        print!("{}", machines::table());
+        print!("{}", zvm::machines::table());
         return;
     }
     let args = match parse_args(&argv) {

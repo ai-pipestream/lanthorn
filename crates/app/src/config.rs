@@ -342,6 +342,20 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", requires = "story", verbatim_doc_comment)]
     pub pictures: Option<PathBuf>,
 
+    /// Print the ZMSD §11.1.3 machine table and exit.
+    ///
+    /// What every interpreter number carries — the page and ink it reports in
+    /// `$2C`/`$2D`, the palette those colour numbers resolve through, the §8.3
+    /// screen rules, and the screen its own interpreter drew — followed by the
+    /// rows a story's VERSION moves, because a machine is not a screen: Infocom
+    /// shipped two IBM interpreters and they disagree about white.
+    ///
+    /// The table `--interpreter` selects a row of, so you can pick a number
+    /// knowing what it does. Answered before anything else, exactly as `--help`
+    /// is: it describes the program rather than a story, so it needs none.
+    #[arg(long)]
+    pub machines: bool,
+
     /// Debug trace sections to enable from boot: comma list of screen,map,hostio,v6
     /// (or `all`/`none`). Output goes to <user_dir>/trace.log. (trace feature)
     #[arg(long, value_name = "LIST")]
@@ -2221,6 +2235,7 @@ mod tests {
             interpreter_number,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         }
@@ -2303,6 +2318,7 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -2328,6 +2344,7 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -2353,6 +2370,7 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -2942,6 +2960,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -2965,6 +2984,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -2998,6 +3018,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -3023,6 +3044,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -3049,6 +3071,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -3110,6 +3133,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -3164,6 +3188,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -3206,6 +3231,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -3393,6 +3419,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         });
@@ -3446,6 +3473,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         });
@@ -3497,6 +3525,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            machines: false,
             trace: None,
             debug: false,
         };
@@ -3583,6 +3612,50 @@ use_defaults = false
         assert!(help.contains("--interpreter <N>"), "help offers --interpreter: {help}");
         assert!(!help.contains("--interpreter-number"), "and never the old name: {help}");
         assert!(help.contains("--no-game-colours"), "help offers --no-game-colours: {help}");
+    }
+
+    /// SQ-0960: `lanthorn --machines` answers without a story, and answers with
+    /// the table `zvm` holds rather than one the TUI keeps of its own.
+    ///
+    /// Two halves, and the second is the one that matters. Every other flag here
+    /// is an instruction ABOUT a story, so clap requires one; this describes the
+    /// program, so `startup::resolve_launch` prints and exits before the story
+    /// argument is ever looked for. And the string it prints is
+    /// [`zvm::machines::table`] verbatim — asserted against
+    /// `zvm::interpreter::MACHINES` here rather than against a copy of the
+    /// expected output, because a literal pasted out of a passing run is exactly
+    /// as wrong as the code it was pasted from.
+    #[test]
+    fn the_machines_flag_needs_no_story_and_prints_the_table_zvm_holds() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["lanthorn", "--machines"]).expect("no story required");
+        assert!(cli.machines, "the flag is set");
+        assert!(cli.story.is_none(), "and asks about no story in particular");
+        // It is still a flag, so it composes with one.
+        let with = Cli::try_parse_from(["lanthorn", "--machines", "g.z5"]).unwrap();
+        assert_eq!(with.story.as_deref(), Some(std::path::Path::new("g.z5")));
+
+        // The table itself: a row per modelled machine, from the table.
+        let t = zvm::machines::table();
+        for m in zvm::interpreter::MACHINES {
+            assert!(
+                t.lines().any(|l| l.trim_start().starts_with(&format!("{}  ", m.number))
+                    && l.contains(m.name)),
+                "{} ({}) has no row in what --machines prints:\n{t}",
+                m.name,
+                m.number,
+            );
+        }
+        // …and the Version-dependent half, which is the part a per-machine row
+        // cannot state: the IBM PC's graphics mode moves with the story's
+        // Version, and lanthorn is the front-end that plays the Version 6 stories
+        // it moves for.
+        assert!(t.contains("EGA (XZIP)") && t.contains("EGA (YZIP)"), "both IBM modes named:\n{t}");
+        assert!(t.contains("CGA card"), "and the card that is neither:\n{t}");
+
+        // The help a user reads offers it.
+        let help = <Cli as clap::CommandFactory>::command().render_long_help().to_string();
+        assert!(help.contains("--machines"), "help offers --machines: {help}");
     }
 
     /// SQ-0855: `--no-game-colours` is an instruction for one launch, exactly as

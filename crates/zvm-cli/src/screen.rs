@@ -1146,8 +1146,12 @@ mod colour_tests {
     #[test]
     fn style_wrap_emits_colour_sgr() {
         // Pins an exact RGB for a Standard colour, which the process-wide
-        // palette decides — see `machines::PALETTE`.
-        let _g = crate::machines::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+        // palette decides. No lock, because this binary's TEST build has no
+        // writer to race with: the one `set_palette` call is on the boot path,
+        // and printing the machine table stopped touching the global when it
+        // moved to `zvm::machines` (SQ-0960). §8.3.1's own table is what resolves
+        // here. The moment a case in this crate sets the palette, every reader
+        // like this one needs a lock again — SQ-0904/0958.
         // standard fg=red(3)->31, bg=blue(6)->44
         let a = TextAttrs { style: 0, fg: ZColour::Standard(3), bg: ZColour::Standard(6) };
         assert_eq!(style_wrap("x", a, true), "\x1b[31;44mx\x1b[0m");
@@ -1183,8 +1187,12 @@ mod page_bg_tests {
     #[test]
     fn zcolour_rgb_standard_and_true() {
         // Pins an exact RGB for a Standard colour, which the process-wide
-        // palette decides — see `machines::PALETTE`.
-        let _g = crate::machines::PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+        // palette decides. No lock, because this binary's TEST build has no
+        // writer to race with: the one `set_palette` call is on the boot path,
+        // and printing the machine table stopped touching the global when it
+        // moved to `zvm::machines` (SQ-0960). §8.3.1's own table is what resolves
+        // here. The moment a case in this crate sets the palette, every reader
+        // like this one needs a lock again — SQ-0904/0958.
         // 2..=9 are scheme-relative in push_colour_sgr (bare ANSI code, no RGB
         // source) — no invented palette here either.
         assert_eq!(super::zcolour_rgb(ZColour::Standard(3)), None);
