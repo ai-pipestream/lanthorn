@@ -27,6 +27,44 @@
 /// links this crate.
 pub static V6_PALETTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Take [`V6_PALETTE_LOCK`] **and** state the palette, in one call that cannot do
+/// one without the other.
+///
+/// The lock alone only ever protected the WRITERS. `palette_lock_discipline` fails a
+/// suite that calls `zvm::screen::set_palette` without taking the lock, because a
+/// write is a call and a call is visible in source. The other half is a suite that
+/// merely READS — one that asserts a resolved colour without installing a palette of
+/// its own, and so believes whatever the last suite in its group binary happened to
+/// leave behind. That is an ABSENCE, invisible both to the source check and to the
+/// gate: `cargo nextest run` gives every test its own process, where the inherited
+/// palette is always the default and the suite is always right. MEASURED on main
+/// (SQ-0958): `v6_shogun_gameplay` asserted §8.3.1 white while its sibling
+/// `v6_shogun_title_header` booted THE SAME STORY under `InterpreterProfile::IbmPc`
+/// and installed the IBM YZIP table, so two of its cases read `Rgb(173, 173, 173)`
+/// under `cargo test` — which is what CI runs, so main was red and the local gate
+/// green.
+///
+/// Hence the pairing here rather than two habits kept in step by hand: a suite that
+/// wants the lock must name a palette to get it, and a suite that names a palette
+/// gets the lock whether it thought about the race or not. The user's rule is
+/// **"no test should be written that makes an assumption about a palette it did not
+/// write"**, and `Palette::Standard` is as much an assumption as any other — a suite
+/// that means the default still has to say so.
+///
+/// ```ignore
+/// let _g = app::v6_palette(zvm::screen::Palette::Standard); // held for the case
+/// ```
+///
+/// The guard must outlive every boot, render and colour assertion in the case: the
+/// palette is process-global, so dropping it early lets a sibling install a machine's
+/// table between the render and the assertion about it.
+#[must_use = "the palette is only guaranteed for as long as the guard is held"]
+pub fn v6_palette(p: zvm::screen::Palette) -> std::sync::MutexGuard<'static, ()> {
+    let guard = V6_PALETTE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    zvm::screen::set_palette(p);
+    guard
+}
+
 pub mod anim;
 pub mod archive;
 pub mod assets;

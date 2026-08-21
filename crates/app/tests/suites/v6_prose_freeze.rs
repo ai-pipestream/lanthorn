@@ -83,6 +83,21 @@ fn win0_runs(session: &GameSession) -> Vec<(u16, u16, String)> {
         .unwrap_or_default()
 }
 
+/// The palette this suite's colours resolve through, **stated rather than inherited**
+/// (SQ-0958).
+///
+/// Every story these cases drive is a bare file that names no machine — or, for the
+/// disk images, a machine whose table IS §8.3.1's — so the colour numbers behind
+/// every pixel asserted below resolve through the standard table. Until now nothing
+/// here said so, and the suite believed whatever the last suite in its group binary
+/// left behind. See [`app::v6_palette`], which is why this both names a palette and
+/// takes the shared lock; hold the guard for the whole case, because the two frames
+/// a repaint case compares are only comparable if the palette did not move between
+/// them.
+fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+    app::v6_palette(zvm::screen::Palette::Standard)
+}
+
 /// Shogun's title header freezes at the pixel columns the game declared.
 ///
 /// Falsified by making `ZWindow::retire_streamed` a no-op: "Shogun's title header
@@ -90,6 +105,7 @@ fn win0_runs(session: &GameSession) -> Vec<(u16, u16, String)> {
 /// 0 carries 0 painted run(s)".
 #[test]
 fn shogun_title_header_freezes_where_it_was_painted() {
+    let _g = standard_palette();
     let Some(mut session) = boot("shogun-r322-s890706.z6") else { return };
     let result = match session.pending_input() {
         InputKind::Char => session.submit_char(13),
@@ -177,6 +193,7 @@ fn shogun_title_header_freezes_where_it_was_painted() {
 /// both colour modes (the text is the game's own, not a palette preference).
 #[test]
 fn shogun_frozen_header_reaches_the_composite() {
+    let _g = standard_palette();
     let Some(mut session) = boot("shogun-r322-s890706.z6") else { return };
     match session.pending_input() {
         InputKind::Char => session.submit_char(13),
@@ -255,6 +272,7 @@ fn shogun_frozen_header_reaches_the_composite() {
 /// the game gave it (at col 0, want ~25)".
 #[test]
 fn shogun_frozen_header_stays_centred_in_every_render_path() {
+    let _g = standard_palette();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -447,6 +465,7 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
 /// row 21)".
 #[test]
 fn shogun_resumed_prompt_lands_beside_the_menu() {
+    let _g = standard_palette();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -636,6 +655,7 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
 /// had deliberately dropped.
 #[test]
 fn a_story_window_flush_under_its_chrome_keeps_the_pane_top() {
+    let _g = standard_palette();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -707,6 +727,7 @@ fn a_story_window_flush_under_its_chrome_keeps_the_pane_top() {
 /// which is exactly how the regression got through the first time.
 #[test]
 fn a_window_that_still_covers_its_prose_freezes_nothing() {
+    let _g = standard_palette();
     for name in [
         "zork0-r393-s890714.z6",
         "arthur-r74-s890714.z6",
