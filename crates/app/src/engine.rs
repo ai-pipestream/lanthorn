@@ -539,19 +539,29 @@ pub trait Debugger {
     /// never pops. Lets the Memory jump box dereference a variable to an address.
     fn var_value(&self, var: u8) -> Option<u16>;
 
-    /// The readable text the story's own tables place at byte address `addr`,
-    /// labelled with the table that named it — e.g. `dict word: "lantern"` or
-    /// `object 27 name: "brass lantern"`. `None` when nothing at `addr` is a
-    /// string the tables account for.
+    /// The story's own encoded text, laid out row-for-row against the window
+    /// [`memory_hex`](Self::memory_hex) formats for the same `addr`/`rows`.
+    ///
+    /// Element *i* is the text that row *i*'s bytes produced; `None` means no
+    /// string the story's tables account for covers that row, and the caller
+    /// must fall back to the raw character column rather than guess.
     ///
     /// The Memory view's char column maps one byte to one ZSCII code, but a
     /// dictionary key and an object short name are Z-encoded — three 5-bit
-    /// Z-characters packed per 16-bit word — so that column shows noise over
-    /// exactly the entries the Objects/Dictionary tabs let you jump to, and a
-    /// jump has nothing readable to confirm it landed on the entry it named
-    /// (SQ-0448). Default `None`: engines with no Z-text (Glulx, Scott).
-    fn zstring_at(&self, _addr: u32) -> Option<String> {
-        None
+    /// Z-characters packed per 16-bit word (ZMSD §3.2) — so that column shows
+    /// noise over exactly the entries the Objects/Dictionary tabs let you jump
+    /// to (SQ-0448/SQ-0969). Nothing can be decoded per byte, and nothing can be
+    /// decoded from an arbitrary row boundary either: the decoder carries an
+    /// alphabet shift and a pending abbreviation across words, so a decode
+    /// started mid-string is wrong rather than offset, and looks plausible. So
+    /// an implementation must anchor every row it fills in to a string START
+    /// address it actually knows, and leave the rest `None`.
+    ///
+    /// A short (or empty) vec is fine and means "no text for the rows past its
+    /// end" — the default is empty, which is what engines with no Z-text
+    /// (Glulx, Scott) want and costs the render site no special-casing.
+    fn memory_zstrings(&self, _addr: u32, _rows: usize) -> Vec<Option<String>> {
+        Vec::new()
     }
 
     /// This engine's per-window inspector tab layout, or `None` to use the

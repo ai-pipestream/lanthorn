@@ -4949,42 +4949,102 @@ impl Debugger for GameSession {
         }
     }
 
-    /// Recognise the two entries the inspector can jump to, because those are
-    /// the two whose text the byte-per-ZSCII char column cannot show:
+    /// Decode the story's own Z-text over the same window `memory_hex` dumps,
+    /// crediting each row with the text its own bytes produced.
     ///
-    /// - a **dictionary entry** — the entries follow the dictionary header
-    ///   immediately (ZMSD §13.5) at `base + i * entry_length`, and that stride
-    ///   is a byte the *game* chose (§13.2 gives only a minimum), so an entry is
-    ///   very often at an odd address; the key is a plain Z-string filling the
-    ///   entry's first 4 bytes in v1–3 (§13.3) or 6 in v4+ (§13.4);
-    /// - an **object entry** — its short name is not at the entry at all but in
-    ///   the property table it points at, after the one-byte text-length field
-    ///   (ZMSD §12.4, the same layout in every version).
+    /// Two tables account for essentially every Z-string whose START address is
+    /// knowable from the story's structure alone — which is the only kind that
+    /// may be shown, since a decode begun anywhere else is wrong rather than
+    /// offset (see [`Debugger::memory_zstrings`]):
     ///
-    /// Neither address is word-aligned in general; only *packed* string
-    /// addresses are. `decode_string` reads 2-byte words forward from wherever
-    /// it is pointed until the word with the end bit set, so a plain byte
-    /// address is all it ever wanted.
+    /// - **dictionary keys** — entries follow the dictionary header immediately
+    ///   (ZMSD §13.5) at `base + i * entry_length`, a stride the *game* chose
+    ///   (§13.2 gives only a minimum), so entries are very often at odd
+    ///   addresses. The key fills the entry's first 4 bytes in v1–3 (§13.3) or 6
+    ///   in v4+ (§13.4) and the rest of the entry is game data, not text. The
+    ///   whole span is arithmetic — no scan, no decode, so a window nowhere near
+    ///   the dictionary costs two comparisons.
+    /// - **object short names** — not in the object entry at all but at the head
+    ///   of the property table it points at, one byte past a count of the name's
+    ///   Z-text words (§12.4, the same layout in every version). That count
+    ///   gives the span without decoding, so the scan over objects is three
+    ///   reads each and only names that overlap the window are decoded.
     ///
-    /// Resolved through the same two address maps the disassembly annotator
-    /// builds its `[obj#N]` / `[word]` tags from — object first, exactly as
-    /// `annotate_refs` prefers it — so a caption here and a tag there can never
-    /// disagree about what lives at an address.
+    /// Everything else — the abbreviation table's own strings, `print` literals
+    /// inline in code, packed high strings — is deliberately left `None`. Their
+    /// starts are only knowable by following a reference, and a plausible wrong
+    /// decode is worse here than an honest blank.
     ///
     /// The decode is zvm's own and inherits its version coverage: the v3+ text
     /// rules (Z-chars 1–3 abbreviations, 4/5 one-shot shifts). A v1/v2 story,
     /// where 2/3 shift and 4/5 shift-*lock* (ZMSD §3.2.2–3), is read through
     /// those v3+ rules here exactly as it is everywhere else in the interpreter;
-    /// a debug caption is not the place to diverge from what the VM prints.
-    fn zstring_at(&self, addr: u32) -> Option<String> {
-        let out = match self.object_addr_map().get(&addr) {
-            Some(&n) => {
-                let name = zvm::objects::short_name(&self.machine.mem, n);
-                let name = name.trim().to_string();
-                (!name.is_empty()).then(|| format!("object {n} name: \"{name}\""))
+    /// a debug column is not the place to diverge from what the VM prints.
+    fn memory_zstrings(&self, addr: u32, rows: usize) -> Vec<Option<String>> {
+        let mem = &self.machine.mem;
+        let len = mem.len() as u32;
+        let start = addr.min(len);
+        // Exactly the rows `memory_hex` emits, so the two vectors index alike:
+        // it stops at the end of memory rather than padding.
+        let n = rows.min(((len - start) as usize).div_ceil(16));
+        let mut out: Vec<Option<String>> = vec![None; n];
+        if n == 0 {
+            return out;
+        }
+        let end = start + (n as u32 * 16).min(len - start);
+
+        // Every string span [s, e) that overlaps the window, from the two tables.
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        let d = zvm::dictionary::load(mem);
+        if d.count > 0 && d.entry_length > 0 {
+            let elen = d.entry_length as u32;
+            let klen = d.key_len() as u32;
+            if end > d.base {
+                // Index range by arithmetic: the entry holding `start` (0 when
+                // the window opens before the table) through the one holding
+                // `end - 1`, clamped to the real entry count.
+                let lo = start.saturating_sub(d.base) / elen;
+                let hi = ((end - 1 - d.base) / elen).min(d.count as u32 - 1);
+                for i in lo..=hi {
+                    let s = d.base + i * elen;
+                    spans.push((s, s + klen));
+                }
             }
-            None => self.dict_addr_map().get(&addr).map(|w| format!("dict word: \"{w}\"")),
-        };
+        }
+        for obj in 1..=zvm::location::max_object_number(mem) {
+            if let Some(span) = zvm::objects::short_name_span(mem, obj) {
+                spans.push(span);
+            }
+        }
+
+        for (s, e) in spans {
+            if s >= end || e <= start {
+                continue; // no overlap with the window
+            }
+            let (frags, _) = zvm::text::decode::decode_string_words(mem, s);
+            for (k, frag) in frags.iter().enumerate() {
+                let word = s + 2 * k as u32;
+                if word >= e {
+                    break; // past the span the table declared; not this string's
+                }
+                // A word straddles a row boundary whenever its string starts on
+                // an odd address, so credit it to the row holding its LAST byte
+                // — the byte whose arrival completed it.
+                let last = word + 1;
+                if last < start || last >= end {
+                    continue;
+                }
+                out[((last - start) / 16) as usize]
+                    .get_or_insert_with(String::new)
+                    .push_str(frag);
+            }
+        }
+        // Deliberately untrimmed: a space at the end of a row is as often the
+        // gap inside a name whose next word starts the next row ("brave " /
+        // "adventurer") as it is padding, and the two are indistinguishable
+        // here. A row that produced nothing visible at all (a lone shift word)
+        // still reads as `Some("")` — we know those bytes are text, and that is
+        // a different statement from `None`.
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
@@ -7878,14 +7938,30 @@ mod debugger_impl_tests {
         assert!(hex[0].starts_with("000000"));
     }
 
-    // ── Z-string annotation for the Memory view (SQ-0448) ──────────────────
+    // ── The Memory view's decoded-Z-text column (SQ-0448 / SQ-0969) ─────────
 
     #[test]
-    fn every_dictionary_row_the_inspector_lists_annotates_at_the_address_it_links() {
+    fn the_z_text_column_indexes_row_for_row_with_the_hex_dump() {
+        // The two vectors are read by index at the same row, so a disagreement
+        // about how many rows a window has would caption the wrong bytes — the
+        // exact failure the column exists to prevent.
+        let Some(s) = zvm_session() else { return };
+        let d = s.debugger().expect("z-machine debugger");
+        for (addr, rows) in [(0u32, 4usize), (0x100, 40), (d.memory_len() - 8, 4)] {
+            assert_eq!(
+                d.memory_hex(addr, rows).len(),
+                d.memory_zstrings(addr, rows).len(),
+                "hex and Z-text row counts must agree at 0x{addr:06x} x{rows}",
+            );
+        }
+    }
+
+    #[test]
+    fn every_dictionary_row_the_inspector_lists_decodes_on_the_row_it_links_to() {
         // The real-game half: the Dictionary tab prints `@0x…… word` rows whose
-        // address is what a click jumps the Memory view to, so the annotation at
-        // that address must reproduce that row's own word — that round trip is
-        // the confirmation SQ-0448 exists to give.
+        // address is what a click jumps the Memory view to, so the Z-text column
+        // on the row that jump lands on must contain that row's own word — that
+        // round trip is the confirmation SQ-0448/SQ-0969 exists to give.
         let Some(s) = zvm_session() else { return };
         let d = s.debugger().expect("z-machine debugger");
         let rows = d.dictionary_lines();
@@ -7894,47 +7970,87 @@ mod debugger_impl_tests {
         for row in rows.iter().take(40) {
             let addr = u32::from_str_radix(&row[3..9], 16).expect("`@0x……` row prefix");
             let word = row[10..].trim();
-            assert_eq!(
-                d.zstring_at(addr).as_deref(),
-                Some(format!("dict word: \"{word}\"").as_str()),
-                "row {row:?} must annotate as its own word",
+            // The jump aligns down to the 16-byte grid; a key can also straddle
+            // that boundary, so take the landing row and the one after it.
+            let text: String = d.memory_zstrings(addr & !0xF, 2).into_iter().flatten().collect();
+            assert!(
+                text.contains(word),
+                "row {row:?} must decode into its own landing row, got {text:?}",
             );
             odd += (addr % 2) as usize;
         }
         // Non-vacuity: minizork's entry_length is odd, so half these addresses
         // are odd — the case a decoder that assumed word alignment would get
-        // wrong, and the reason the annotation decodes from the address the row
-        // links rather than from a rounded one.
+        // wrong, and the reason each key is decoded from the address the table
+        // puts it at rather than from a rounded one.
         assert!(odd > 0, "at least one of the checked entries is at an ODD address");
     }
 
+    /// FALSIFY by decoding each row from its own boundary instead of from a
+    /// known string start: every row of the header comes back `Some(…)` full of
+    /// plausible-looking text and this fails on "the header is not a string at
+    /// all" — which is precisely the wrong answer the anchoring exists to
+    /// refuse.
     #[test]
-    fn an_address_no_table_accounts_for_annotates_with_nothing() {
+    fn rows_no_table_accounts_for_decode_to_nothing_at_all() {
+        // The header is not text, and no table claims it — so the column stays
+        // empty there and the char column is all the view offers. Decoding
+        // anyway would produce confident nonsense.
         let Some(s) = zvm_session() else { return };
         let d = s.debugger().expect("z-machine debugger");
-        let entry = u32::from_str_radix(&d.dictionary_lines()[0][3..9], 16).expect("first entry");
-        assert_eq!(
-            d.zstring_at(entry + 1), None,
-            "one byte into an entry is the middle of a Z-string; decoding there \
-             would produce confident nonsense, so it annotates with nothing",
+        assert!(
+            d.memory_zstrings(0, 4).iter().all(|z| z.is_none()),
+            "the header is not a string at all",
         );
-        assert_eq!(d.zstring_at(0), None, "the header is not a string at all");
     }
 
+    /// FALSIFY by crediting a whole string to the first row it touches (replace
+    /// the per-word `word + 1` with the span's own start): every containment
+    /// check still passes — a concatenation cannot see the difference — and the
+    /// `split` guard is the one that fails, on "at least one split across two
+    /// rows by its own bytes".
     #[test]
-    fn a_real_object_entry_annotates_with_the_name_the_object_tree_prints() {
+    fn real_object_names_decode_across_exactly_the_rows_that_hold_them() {
         let Some(s) = zvm_session() else { return };
         let d = s.debugger().expect("z-machine debugger");
         let mem = &s.machine.mem;
-        // Object 1 exists in every real story; take its name from zvm directly
-        // and require the annotation at its entry address to agree.
-        let name = zvm::objects::short_name(mem, 1);
-        assert!(!name.is_empty(), "minizork's object 1 has a short name");
-        let addr = zvm::objects::object_entry_addr(mem, 1);
-        assert_eq!(
-            d.zstring_at(addr).as_deref(),
-            Some(format!("object 1 name: \"{}\"", name.trim()).as_str()),
-        );
+        let mut checked = 0;
+        let mut shifted = 0;
+        let mut long_word = 0;
+        let mut split = 0;
+        for obj in 1..=zvm::location::max_object_number(mem).min(60) {
+            let name = zvm::objects::short_name(mem, obj);
+            let name = name.trim();
+            let Some((start, end)) = zvm::objects::short_name_span(mem, obj) else { continue };
+            if name.is_empty() {
+                continue;
+            }
+            // The rows the name's own bytes fall on, from the aligned row the
+            // Memory view would land on.
+            let base = start & !0xF;
+            let rows = ((end - base) as usize).div_ceil(16);
+            let per_row = d.memory_zstrings(base, rows);
+            let text: String = per_row.iter().flatten().map(String::as_str).collect::<String>();
+            assert!(
+                text.contains(name),
+                "object {obj}'s name {name:?} must appear across its own rows, got {text:?}",
+            );
+            // Genuinely split, not merely present: a name whose bytes cross a
+            // 16-byte boundary must have no single row holding all of it. That
+            // per-word attribution IS the column; crediting a whole string to
+            // its first row reads identically to any check that concatenates.
+            split += (rows > 1 && !per_row.iter().flatten().any(|t| t.contains(name))) as usize;
+            checked += 1;
+            shifted += name.chars().any(|c| c.is_ascii_uppercase()) as usize;
+            // Only an abbreviation (§3.3) can make one 2-byte word produce more
+            // than three characters, so a name longer than its own span allows
+            // proves the expansion survived being attributed per row.
+            long_word += (name.chars().count() > ((end - start) / 2 * 3) as usize) as usize;
+        }
+        assert!(checked >= 10, "minizork has plenty of named objects (checked {checked})");
+        assert!(shifted > 0, "…at least one needing an alphabet shift mid-string");
+        assert!(long_word > 0, "…at least one expanding an abbreviation");
+        assert!(split > 0, "…and at least one split across two rows by its own bytes");
     }
 
     // ── Runtime-confirmation fold (SQ-0418, Task 9) ────────────────────────

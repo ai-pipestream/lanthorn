@@ -312,9 +312,9 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("debug.disasm_rd", Section::Debug, Kind::Style, Some("text"), Delta { fg: Some(Color::Yellow), glyph: Some(" ".to_string()), ..Delta::EMPTY }),
     row("debug.disasm_soft", Section::Debug, Kind::Style, Some("muted"), Delta { fg: Some(Color::Red), glyph: Some(" ".to_string()), ..Delta::EMPTY }),
     row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: true, glyph: Some(" ".to_string()), ..Delta::EMPTY }),
-    // The Memory view's decoded-Z-string caption (SQ-0448): story text, not a
-    // disassembly tier, so it takes `accent` and italics to read as a gloss on
-    // the dump rather than as another row of it.
+    // The Memory view's decoded-Z-text column (SQ-0448/SQ-0969): story text, not
+    // a disassembly tier, so it takes `accent` and italics to read as a gloss on
+    // the dump rather than as more of it.
     row("debug.zstring", Section::Debug, Kind::Style, Some("accent"), Delta { italic: true, ..Delta::EMPTY }),
     // ── §2c dialog.* (modal surface: background + own frame + title/buttons/shadow) ──
     row("dialog.background", Section::Dialog, Kind::Style, Some("chrome"), Delta::EMPTY),

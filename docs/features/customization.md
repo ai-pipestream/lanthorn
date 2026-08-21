@@ -121,10 +121,10 @@ still reach in and override any single selector by name.
   - **`disasm_data`** — bytes shown as `.byte`, not decoded as code at all
     (muted; it's not a risk level).
 
-  - **`zstring`** — the Memory view's caption naming the decoded dictionary word
-    or object short name at the address you jumped to. Story text rather than a
-    confidence tier, so it takes `accent` and italics by default, to read as a
-    gloss on the hex dump instead of another row of it.
+  - **`zstring`** — the Memory view's decoded-text column: the story's own words
+    printed beside the bytes that encode them, row for row. Story text rather
+    than a confidence tier, so it takes `accent` and italics by default, to read
+    as a gloss on the hex dump instead of more of it.
 
   Each tier carries both a line style and a gutter **`glyph`** (e.g.
   `disasm_executed`'s `|` mark; the others default to a blank space — set

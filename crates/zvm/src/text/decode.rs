@@ -15,16 +15,79 @@ use super::{A0, A1, A2};
 /// Custom alphabet tables (header word 0x34, v5+) override the default A0/A1/A2
 /// glyphs when present; otherwise the default table is used.
 pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
-    decode_string_at_depth(mem, addr, 0)
+    let mut out = String::new();
+    let end = decode_into(mem, addr, 0, &mut out);
+    (out, end)
 }
 
-/// `decode_string` with an abbreviation-nesting depth. ZMSD §3.3: "an
-/// abbreviation string must not itself use abbreviations" — so at depth ≥ 1
-/// (i.e. while already expanding an abbreviation) further abbreviation
-/// Z-chars are NOT expanded. Without this rule a crafted story whose
-/// abbreviation table points an abbreviation at itself recurses until the
+/// Decode a Z-encoded string at `addr`, keeping the output split by the source
+/// **word** that produced it.
+///
+/// Returns `(fragments, address_past_end)`, where `fragments[k]` is the text
+/// completed while consuming the 2-byte word at `addr + 2*k`. The whole string
+/// is `fragments.concat()` — which is precisely what [`decode_string`] returns.
+///
+/// Three 5-bit Z-characters ride in every word (§3.2), so no output character
+/// ever sits under one *byte*, and a fragment is usually 0–3 characters. It can
+/// also be arbitrarily long: the word carrying an abbreviation's index Z-char
+/// (§3.3) is credited with the whole expansion. A character assembled from
+/// Z-chars spanning two words — one past an alphabet shift (§3.2.3), or the two
+/// Z-chars of a 10-bit ZSCII escape (§3.4) — is credited to the word holding its
+/// LAST Z-char, the one that completed it.
+///
+/// This exists because the decoder is a state machine with no resync point: the
+/// alphabet shift and a pending abbreviation both carry across words, so
+/// restarting the decode part-way into a string produces text that is wrong
+/// rather than merely offset. Attributing a whole-string decode after the fact
+/// is the only honest way to say which bytes produced which text.
+pub fn decode_string_words(mem: &Memory, addr: u32) -> (Vec<String>, u32) {
+    let mut out: Vec<String> = Vec::new();
+    let end = decode_into(mem, addr, 0, &mut out);
+    (out, end)
+}
+
+/// Where one decode's output goes: either a single flat string, or one fragment
+/// per source word.
+///
+/// The point is that `decode_string` — the VM's own text path, run for every
+/// `print` — keeps its ONE allocation, while `decode_string_words` gets per-word
+/// attribution out of the very same state machine. A shared implementation that
+/// always built the per-word vector and joined it would put a `Vec` and a
+/// `String` per word on the hot path to serve a debug view.
+trait Sink {
+    /// Called once with the string's word count before any `emit`.
+    fn prepare(&mut self, _words: usize) {}
+    /// Append `text`, produced while consuming source word `word`.
+    fn emit(&mut self, word: usize, text: &str);
+}
+
+impl Sink for String {
+    fn emit(&mut self, _word: usize, text: &str) {
+        self.push_str(text);
+    }
+}
+
+impl Sink for Vec<String> {
+    fn prepare(&mut self, words: usize) {
+        self.resize(words, String::new());
+    }
+    /// Clamped to the last word: the two Z-chars of a 10-bit escape (§3.4) can
+    /// be missing off the end of a malformed string, which leaves the caller's
+    /// index past the collected Z-chars.
+    fn emit(&mut self, word: usize, text: &str) {
+        if let Some(last) = self.len().checked_sub(1) {
+            self[word.min(last)].push_str(text);
+        }
+    }
+}
+
+/// The decoder proper, writing into `out`; returns the address past the string's
+/// end. ZMSD §3.3: "an abbreviation string must not itself use abbreviations" —
+/// so at `depth` ≥ 1 (i.e. while already expanding an abbreviation) further
+/// abbreviation Z-chars are NOT expanded. Without this rule a crafted story
+/// whose abbreviation table points an abbreviation at itself recurses until the
 /// process aborts with a stack overflow.
-fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
+fn decode_into<S: Sink>(mem: &Memory, addr: u32, depth: u8, out: &mut S) -> u32 {
     // Collect all Z-chars first, recording where the string ends.
     let mut zchars: Vec<u8> = Vec::new();
     let mut pos = addr;
@@ -45,7 +108,11 @@ fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
     }
 
     let end_addr = pos;
-    let mut result = String::new();
+    // Every `emit` below credits the source word holding the Z-char that
+    // COMPLETED the character — `(i - 1) / 3`, since `i` has already advanced
+    // past that Z-char in all four branches. A flat sink ignores the index.
+    out.prepare(zchars.len() / 3);
+    let word_of = |i: usize| i.saturating_sub(1) / 3;
     let mut i = 0;
     let mut alphabet: u8 = 0; // 0=A0, 1=A1, 2=A2
     let mut abbrev_pending: u8 = 0; // non-zero: waiting for abbrev index char
@@ -79,15 +146,18 @@ fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
             let entry_addr = abbrev_base + 2 * index;
             let word_addr = mem.read_word(entry_addr) as u32;
             let byte_addr = word_addr * 2;
-            let (abbrev_str, _) = decode_string_at_depth(mem, byte_addr, depth + 1);
-            result.push_str(&abbrev_str);
+            // An expansion is arbitrarily long but belongs entirely to the word
+            // carrying its index Z-char, so it is decoded flat and emitted whole.
+            let mut expansion = String::new();
+            decode_into(mem, byte_addr, depth + 1, &mut expansion);
+            out.emit(word_of(i), &expansion);
             // alphabet stays A0 after abbreviation
             continue;
         }
 
         match zc {
             0 => {
-                result.push(' ');
+                out.emit(word_of(i), " ");
                 // space; any pending shift is consumed
                 alphabet = 0;
             }
@@ -113,7 +183,7 @@ fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
                     // Consult the story's custom Unicode table first (ZMSD §3.8.5.4);
                     // fall back to the default ZSCII table.
                     let ch = mem.unicode_char(zscii).unwrap_or_else(|| zscii_to_char(zscii));
-                    result.push(ch);
+                    out.emit(word_of(i), ch.encode_utf8(&mut [0u8; 4]));
                     alphabet = 0;
                 } else {
                     // Normal lookup: Z-char 6 → table index 0.
@@ -129,7 +199,8 @@ fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
                             // sentence gap, in an alphabet slot).
                             let row = alphabet as u32;
                             let zscii = mem.read_byte(tbl + row * 26 + idx as u32) as u16;
-                            result.push(mem.unicode_char(zscii).unwrap_or_else(|| zscii_to_char(zscii)));
+                            let ch = mem.unicode_char(zscii).unwrap_or_else(|| zscii_to_char(zscii));
+                            out.emit(word_of(i), ch.encode_utf8(&mut [0u8; 4]));
                         }
                         _ => {
                             let ch = match alphabet {
@@ -137,7 +208,7 @@ fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
                                 1 => A1[idx],
                                 _ => A2[idx],
                             };
-                            result.push(ch as char);
+                            out.emit(word_of(i), (ch as char).encode_utf8(&mut [0u8; 4]));
                         }
                     }
                     alphabet = 0;
@@ -146,7 +217,7 @@ fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
         }
     }
 
-    (result, end_addr)
+    end_addr
 }
 
 /// Default Unicode translation table for ZSCII 155–223 (ZMSD §3.8.5).
@@ -257,6 +328,68 @@ mod tests {
         let (s, end) = decode_string(&m, 0x100);
         assert_eq!(s, "0");
         assert_eq!(end, 0x102);
+    }
+
+    /// A three-word string at 0x0100 exercising both things that make a
+    /// Z-string undecodable from anywhere but its start, and returns the
+    /// fragments plus the whole decode.
+    ///
+    /// - word 0 `[6, 7, 4]` — 'a', 'b', then Z-char 4: a shift to A1 that
+    ///   produces nothing and takes effect on the NEXT word's first Z-char.
+    /// - word 1 `[6, 1, 0]` — Z-char 6 under that shift is 'A'; then Z-char 1
+    ///   opens abbreviation set 1 and Z-char 0 indexes it — entry 0, which this
+    ///   fixture points at "abc".
+    /// - word 2 `[5, 8, 5]` (end bit) — shift to A2, Z-char 8 = A2 index 2 =
+    ///   '0', and a trailing shift with nothing after it.
+    fn shift_and_abbrev_fixture() -> (Vec<String>, String) {
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+        // Abbreviation string "abc" at byte 0x0080, and set-1 entry 0 (at the
+        // 0x0040 table base) holding its WORD address, 0x0040.
+        m.write_word(0x0080, 0x8000 | (6 << 10) | (7 << 5) | 8);
+        m.write_word(0x0040, 0x0040);
+        m.write_word(0x0100, (6 << 10) | (7 << 5) | 4);
+        m.write_word(0x0102, (6 << 10) | (1 << 5)); // [6, 1, 0]
+        m.write_word(0x0104, 0x8000 | (5 << 10) | (8 << 5) | 5);
+        let (frags, end) = decode_string_words(&m, 0x0100);
+        assert_eq!(end, 0x0106);
+        let (whole, _) = decode_string(&m, 0x0100);
+        (frags, whole)
+    }
+
+    #[test]
+    fn decode_string_words_splits_the_output_by_the_word_that_produced_it() {
+        let (frags, whole) = shift_and_abbrev_fixture();
+        assert_eq!(frags.len(), 3, "one fragment per source word");
+        assert_eq!(frags[0], "ab", "the shift Z-char itself prints nothing");
+        assert_eq!(
+            frags[1], "Aabc",
+            "the shifted 'A' is credited to the word that COMPLETED it, not the \
+             one that shifted; and the whole abbreviation expansion lands on the \
+             word carrying its index Z-char",
+        );
+        assert_eq!(frags[2], "0");
+        assert_eq!(frags.concat(), whole, "and the fragments rebuild decode_string exactly");
+        assert_eq!(whole, "abAabc0");
+    }
+
+    #[test]
+    fn a_decode_started_mid_string_is_wrong_rather_than_merely_offset() {
+        // Why the fragments exist at all: the decoder carries the alphabet shift
+        // across the word boundary, so restarting at word 1 loses it and prints
+        // a lowercase 'a' where the string says 'A' — text that looks entirely
+        // plausible and is not what those bytes mean.
+        let (frags, _) = shift_and_abbrev_fixture();
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+        m.write_word(0x0080, 0x8000 | (6 << 10) | (7 << 5) | 8);
+        m.write_word(0x0040, 0x0040);
+        m.write_word(0x0102, (6 << 10) | (1 << 5)); // [6, 1, 0]
+        m.write_word(0x0104, 0x8000 | (5 << 10) | (8 << 5) | 5);
+        let (restarted, _) = decode_string(&m, 0x0102);
+        assert_eq!(restarted, "aabc0");
+        assert_eq!(frags[1..].concat(), "Aabc0");
+        assert_ne!(restarted, frags[1..].concat(), "same bytes, different text");
     }
 
     #[test]

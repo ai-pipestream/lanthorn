@@ -86,6 +86,19 @@ pub struct DebugSnapshot {
     pub stack: Vec<String>,
     pub eval_stack: Vec<String>,
     pub memory: Vec<String>,
+    /// The story's own decoded text for each `memory` row, index-aligned with
+    /// it. `None` (or an index past the end) means no string the engine can
+    /// vouch for covers that row, and the hex row's raw character column is all
+    /// there is to show — never a guess (SQ-0969).
+    pub memory_zstrings: Vec<Option<String>>,
+    /// Column at which [`memory_zstrings`](Self::memory_zstrings) is drawn: two
+    /// past the widest `memory` row in the window. Derived when the window is
+    /// loaded rather than pinned to a constant, so an engine whose `memory_hex`
+    /// formats rows to a different width needs no agreement with the renderer.
+    pub memory_zcol: usize,
+    /// Width of the widest Memory row including its decoded-text column — the
+    /// bound the horizontal scroll clamps against (SQ-0965).
+    pub memory_width: usize,
     /// Instruction start-PCs executed during the last command turn (execution-
     /// coverage marking — a `|` gutter is drawn beside these disasm lines).
     pub executed: std::collections::HashSet<u32>,
@@ -171,14 +184,13 @@ pub struct DebugPanelState {
     /// when not editing; `Some` while the Memory tab's `:`/`/`-opened input
     /// line is active.
     pub mem_input: Option<String>,
-    /// The **exact** address the Memory view was last jumped to, paired with
-    /// the decoded Z-string the story's tables place there (`None` when the
-    /// target holds no such string). Exact, not `mem_addr`: a jump aligns the
-    /// view down to the 16-byte row grid, and a dictionary entry (`base +
-    /// i * entry_length`) or an object short name (after a one-byte length
-    /// field) lands wherever the game's own tables put it — usually not on a
-    /// multiple of 16, and often not even on an even byte. (SQ-0448)
-    pub mem_zstring: Option<(u32, String)>,
+    /// Horizontal scroll offset, in columns, for the Memory dump (SQ-0965). A
+    /// hex row is 72 columns before its decoded-text column even starts, which
+    /// no debug window is ever wide enough for. Clamped in `reload_memory`
+    /// against the loaded window's widest row, so it can never sit past the
+    /// content; the exact right edge would need the pane width, which this
+    /// model does not have (and `less -S` scrolls the same way).
+    pub mem_hscroll: usize,
     /// Object numbers currently expanded inline in the Objects tree.
     pub expanded_objects: std::collections::HashSet<u16>,
     /// Frame indices currently expanded inline in the Call Stack. Reset each
@@ -224,7 +236,7 @@ impl DebugPanelState {
             disasm_mode: DisasmMode::Full,
             mem_addr: 0,
             mem_input: None,
-            mem_zstring: None,
+            mem_hscroll: 0,
             expanded_objects: std::collections::HashSet::new(),
             expanded_frames: std::collections::HashSet::new(),
             viewport: 1,
@@ -301,7 +313,7 @@ impl DebugPanelState {
         self.expanded_frames.clear();
         self.snapshot.frame_details = std::collections::HashMap::new();
         self.snapshot.eval_stack = dbg.eval_stack_lines();
-        self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+        self.reload_memory(dbg);
         self.snapshot.executed = dbg.executed_pcs();
         self.snapshot.executed_ever = dbg.ever_executed_pcs();
         self.snapshot.object_details = self.expanded_objects.iter()
@@ -345,6 +357,29 @@ impl DebugPanelState {
         let (text, prov) = self.load_disasm(dbg, self.disasm_addr);
         self.snapshot.disasm = text;
         self.snapshot.disasm_prov = prov;
+    }
+
+    /// Load the Memory window at `mem_addr`: the hex rows, the decoded Z-text
+    /// beside them, and the two widths the renderer and the horizontal scroll
+    /// both read. One helper because the four things must stay in lockstep —
+    /// a hex row and a decode from different windows would caption the wrong
+    /// bytes, which is the exact failure this column exists to avoid.
+    fn reload_memory(&mut self, dbg: &dyn Debugger) {
+        self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+        self.snapshot.memory_zstrings = dbg.memory_zstrings(self.mem_addr, MEM_WINDOW);
+        let hex_w = self.snapshot.memory.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        // Two spaces of gutter, and only when there is something to put there:
+        // an engine with no Z-text (Glulx, Scott) leaves the rows their own width.
+        let zwidest = self.snapshot.memory_zstrings.iter().flatten()
+            .map(|z| z.chars().count()).max();
+        self.snapshot.memory_zcol = hex_w + 2;
+        self.snapshot.memory_width = match zwidest {
+            Some(w) => self.snapshot.memory_zcol + w,
+            None => hex_w,
+        };
+        // A narrower window than the one that set it must not leave the view
+        // scrolled off the end of the content.
+        self.mem_hscroll = self.mem_hscroll.min(self.snapshot.memory_width.saturating_sub(1));
     }
 
     /// Label for the live disassembly mode (for the hint bar `r:` entry).
@@ -391,6 +426,19 @@ impl DebugPanelState {
                     DisasmMode::Raw => DisasmMode::Full,
                 };
                 self.reload_disasm(dbg);
+            }
+            // Pan the hex dump sideways (SQ-0965). `h`/`l` rather than the
+            // arrows because Left/Right are the panel's section cycler, and
+            // `handle_key` sees no modifiers to hang a Shift-arrow on — the same
+            // trade the Anim context already makes, where plain arrows step the
+            // playback and hjkl pan the map (SQ-0416). Memory-only, so `h`/`l`
+            // stay available to global dispatch in every other tab, and only
+            // reachable when the address box is closed (it swallows letters).
+            KeyCode::Char('h') if self.active_section(self.focus) == Section::Memory => {
+                self.step_memory_h(false);
+            }
+            KeyCode::Char('l') if self.active_section(self.focus) == Section::Memory => {
+                self.step_memory_h(true);
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp
             | KeyCode::Home | KeyCode::End => {
@@ -441,8 +489,7 @@ impl DebugPanelState {
                     // Align down to the 16-byte row grid so the jump doesn't
                     // shift every row off the hex dump's column alignment.
                     self.mem_addr = addr.min(dbg.memory_len()) & !0xF;
-                    self.mem_zstring = dbg.zstring_at(addr).map(|s| (addr, s));
-                    self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+                    self.reload_memory(dbg);
                 }
             }
             KeyCode::Esc => {
@@ -484,7 +531,21 @@ impl DebugPanelState {
         } else {
             self.mem_addr = self.mem_addr.saturating_sub(delta);
         }
-        self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+        self.reload_memory(dbg);
+    }
+
+    /// Scroll the Memory dump sideways by one step (SQ-0965). Clamped to the
+    /// loaded window's widest row, so it can never run off into blank columns.
+    fn step_memory_h(&mut self, right: bool) {
+        /// Columns per step: two hex bytes plus their spaces, so a step lands on
+        /// a byte boundary and eight of them clear the 48-column hex field.
+        const STEP: usize = 6;
+        let max = self.snapshot.memory_width.saturating_sub(1);
+        self.mem_hscroll = if right {
+            (self.mem_hscroll + STEP).min(max)
+        } else {
+            self.mem_hscroll.saturating_sub(STEP)
+        };
     }
 
     fn scroll_list(&mut self, window: usize, section: Section, down: bool) {
@@ -576,20 +637,7 @@ impl DebugPanelState {
         // Align down to the 16-byte row grid so the jump keeps the hex dump's
         // column alignment (scroll then advances by whole 16-byte rows).
         self.mem_addr = addr.min(dbg.memory_len()) & !0xF;
-        // Decode from the UNALIGNED address — the entry the caller named starts
-        // there, not on the row boundary the view snapped to.
-        self.mem_zstring = dbg.zstring_at(addr).map(|s| (addr, s));
-        self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
-    }
-
-    /// The decoded Z-string to show above the hex dump, or `None`.
-    ///
-    /// Live only while the view still sits on the row the jump landed on: the
-    /// annotation names *those* bytes, so once a scroll has moved the entry the
-    /// label would be captioning a dump that no longer contains it.
-    pub fn mem_annotation(&self) -> Option<&str> {
-        let (addr, text) = self.mem_zstring.as_ref()?;
-        (self.mem_addr == addr & !0xF).then_some(text.as_str())
+        self.reload_memory(dbg);
     }
 
     /// Focus the Objects window/tab, expand object `n`, and scroll it into
@@ -1262,19 +1310,26 @@ mod tests {
         fn globals_lines(&self) -> Vec<String> { (0..240).map(|i| format!("g{i:02x}")).collect() }
         fn object_tree_lines(&self) -> Vec<String> { vec!["[1] thing".into()] }
         fn dictionary_lines(&self) -> Vec<String> { vec!["word".into()] }
+        // The real row shape: a 6-digit address, 48 columns of hex and a
+        // 16-column char column — 72 columns before the decoded-text column can
+        // even start, which is what makes the horizontal scroll load-bearing at
+        // any pane width the inspector actually gets (SQ-0965).
         fn memory_hex(&self, a: u32, r: usize) -> Vec<String> {
-            (0..r).map(|i| format!("{:06x}", a + i as u32 * 16)).collect()
+            (0..r)
+                .map(|i| format!("{:06x}  {:<48}{}", a + i as u32 * 16, "00 ".repeat(16), ".".repeat(16)))
+                .collect()
         }
         fn memory_len(&self) -> u32 { 0x10000 }
         fn object_detail(&self, _obj: u16) -> Vec<String> { vec!["attrs: (none)".into()] }
         fn frame_locals(&self, _idx: usize) -> Vec<String> { vec![format!("local0 = 0x0001  (1)")] }
         // Deterministic, distinct-per-var value so deref jumps are testable.
         fn var_value(&self, var: u8) -> Option<u16> { Some(0x1000 + var as u16 * 0x10) }
-        // One "dictionary entry", deliberately at an ODD address inside a row —
-        // exactly the shape a real entry (`base + i * entry_length`) takes, and
-        // the one the row-aligned `mem_addr` cannot be asked for.
-        fn zstring_at(&self, addr: u32) -> Option<String> {
-            (addr == 0x2005).then(|| "dict word: \"lantern\"".to_string())
+        // One "dictionary entry" whose text lands on the 0x2000 row and nowhere
+        // else — the shape a real entry (`base + i * entry_length`) takes: it
+        // starts at an odd address inside the row, so the row-aligned `mem_addr`
+        // could never have been asked about it directly.
+        fn memory_zstrings(&self, a: u32, r: usize) -> Vec<Option<String>> {
+            (0..r).map(|i| (a + i as u32 * 16 == 0x2000).then(|| "lantern".to_string())).collect()
         }
     }
 
@@ -1849,50 +1904,133 @@ mod tests {
         assert_eq!(p.handle_key(KeyCode::Enter, &MockDbg), DebugKey::Consumed);
         assert_eq!(p.mem_addr, 0x2000);
         assert!(p.mem_input.is_none());
-        assert_eq!(p.snapshot.memory[0], format!("{:06x}", 0x2000));
+        assert!(p.snapshot.memory[0].starts_with(&format!("{:06x}", 0x2000)));
+    }
+
+    /// The decoded text beside memory row `row` of the loaded window.
+    fn zrow(p: &DebugPanelState, row: usize) -> Option<&str> {
+        p.snapshot.memory_zstrings.get(row)?.as_deref()
     }
 
     #[test]
-    fn a_jump_decodes_the_z_string_at_the_exact_address_not_the_aligned_row() {
-        // SQ-0448: the view snaps down to the 16-byte grid, but the entry starts
-        // at the address the caller named. Decoding from `mem_addr` would ask
-        // about 0x2000 — the middle of whatever precedes the entry — and get
-        // nothing, or worse, something.
+    fn a_jump_decodes_onto_the_row_the_entry_lives_on_not_a_caption_above_it() {
+        // SQ-0969: the view snaps down to the 16-byte grid, and the entry starts
+        // somewhere inside that row. The text belongs beside its own bytes — a
+        // caption over the dump only restated the tab you clicked from.
         let mut p = memory_focused_panel();
         p.goto_memory(0x2005, &MockDbg);
         assert_eq!(p.mem_addr, 0x2000, "the dump still starts on the row boundary");
-        assert_eq!(p.mem_annotation(), Some("dict word: \"lantern\""));
+        assert_eq!(zrow(&p, 0), Some("lantern"), "the entry's own row carries its text");
+        assert_eq!(zrow(&p, 1), None, "and the row after it claims nothing");
     }
 
     #[test]
-    fn a_jump_to_an_address_with_no_z_string_captions_nothing() {
+    fn a_row_no_table_accounts_for_shows_no_decode_at_all() {
+        // The whole point: an unanchored row falls back to the hex row's own
+        // char column rather than a plausible-looking wrong decode.
         let mut p = memory_focused_panel();
         p.goto_memory(0x2005, &MockDbg);
         p.goto_memory(0x3000, &MockDbg);
-        assert_eq!(p.mem_annotation(), None, "and the previous jump's caption does not linger");
+        assert!(
+            p.snapshot.memory_zstrings.iter().all(|z| z.is_none()),
+            "and the previous jump's text does not linger",
+        );
     }
 
     #[test]
-    fn the_caption_goes_away_once_a_scroll_moves_the_entry_off_its_row() {
-        // The caption names the bytes on screen; scroll them away and it would
-        // be labelling a dump that no longer holds the entry.
+    fn the_decode_travels_with_its_row_when_the_dump_scrolls() {
+        // Scrolling moves the window, so the entry's text moves up a row with
+        // the bytes that produced it — it is never left labelling a row that no
+        // longer holds it.
         let mut p = memory_focused_panel();
         p.goto_memory(0x2005, &MockDbg);
         p.scroll_active(2, true, &MockDbg);
         assert_eq!(p.mem_addr, 0x2010);
-        assert_eq!(p.mem_annotation(), None);
+        assert_eq!(zrow(&p, 0), None, "0x2010 is not the entry's row");
         p.scroll_active(2, false, &MockDbg);
-        assert_eq!(p.mem_annotation(), Some("dict word: \"lantern\""), "and comes back on return");
+        assert_eq!(zrow(&p, 0), Some("lantern"), "and comes back on return");
     }
 
     #[test]
-    fn the_memory_input_box_captions_its_jump_too() {
+    fn the_memory_input_box_loads_the_decode_for_its_jump_too() {
         let mut p = memory_focused_panel();
         p.handle_key(KeyCode::Char(':'), &MockDbg);
         for c in "2005".chars() { p.handle_key(KeyCode::Char(c), &MockDbg); }
         p.handle_key(KeyCode::Enter, &MockDbg);
         assert_eq!(p.mem_addr, 0x2000);
-        assert_eq!(p.mem_annotation(), Some("dict word: \"lantern\""));
+        assert_eq!(zrow(&p, 0), Some("lantern"));
+    }
+
+    // ── Horizontal scrolling (SQ-0965) ─────────────────────────────────────
+
+    #[test]
+    fn h_and_l_pan_the_hex_dump_and_clamp_at_both_ends() {
+        // MockDbg's rows are the real 72 columns wide, plus a 2-column gutter
+        // and "lantern" — 81 in all, so the far column is unreachable at any
+        // width the inspector gets without this.
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        assert_eq!(p.snapshot.memory_zcol, 74, "hex row width + a 2-column gutter");
+        assert_eq!(p.snapshot.memory_width, 81, "…and the widest row reaches past it");
+
+        assert_eq!(p.mem_hscroll, 0);
+        assert_eq!(p.handle_key(KeyCode::Char('l'), &MockDbg), DebugKey::Consumed);
+        assert_eq!(p.mem_hscroll, 6, "one step is two hex bytes and their spaces");
+        p.handle_key(KeyCode::Char('h'), &MockDbg);
+        assert_eq!(p.mem_hscroll, 0);
+        p.handle_key(KeyCode::Char('h'), &MockDbg);
+        assert_eq!(p.mem_hscroll, 0, "and cannot go negative");
+
+        for _ in 0..40 { p.handle_key(KeyCode::Char('l'), &MockDbg); }
+        assert_eq!(p.mem_hscroll, 80, "clamped to the widest row, never past it");
+    }
+
+    #[test]
+    fn panning_the_dump_reaches_the_decoded_text_column() {
+        // Non-vacuity for the clamp above: the scroll must actually be able to
+        // put the Z-text column at the left edge of the pane.
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        while p.mem_hscroll < p.snapshot.memory_zcol {
+            p.handle_key(KeyCode::Char('l'), &MockDbg);
+        }
+        assert!(p.mem_hscroll >= 74 && p.mem_hscroll < p.snapshot.memory_width);
+    }
+
+    #[test]
+    fn a_narrower_window_pulls_the_scroll_back_onto_the_content() {
+        // Jumping to a region with no decoded text shortens the longest row from
+        // 81 to 72; a scroll left at 80 would be looking at nothing.
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        for _ in 0..40 { p.handle_key(KeyCode::Char('l'), &MockDbg); }
+        assert_eq!(p.mem_hscroll, 80);
+        p.goto_memory(0x3000, &MockDbg);
+        assert_eq!(p.snapshot.memory_width, 72, "no Z-text column here");
+        assert_eq!(p.mem_hscroll, 71, "so the scroll is pulled back onto the hex");
+    }
+
+    #[test]
+    fn h_and_l_are_ignored_outside_the_memory_tab() {
+        // They must fall through to global dispatch everywhere else — the panel
+        // does not own two plain letters across the whole inspector.
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 0; // Disassembly
+        assert_eq!(p.handle_key(KeyCode::Char('l'), &MockDbg), DebugKey::Ignored);
+        assert_eq!(p.handle_key(KeyCode::Char('h'), &MockDbg), DebugKey::Ignored);
+        assert_eq!(p.mem_hscroll, 0);
+    }
+
+    #[test]
+    fn typing_h_into_the_memory_address_box_does_not_pan_the_dump() {
+        // The address box takes alphanumerics (`sp`, `g44`, `local10`), so it
+        // must swallow `h` and `l` while it is open.
+        let mut p = memory_focused_panel();
+        p.handle_key(KeyCode::Char(':'), &MockDbg);
+        p.handle_key(KeyCode::Char('l'), &MockDbg);
+        p.handle_key(KeyCode::Char('h'), &MockDbg);
+        assert_eq!(p.mem_input.as_deref(), Some("lh"));
+        assert_eq!(p.mem_hscroll, 0, "the dump did not move");
     }
 
     #[test]
@@ -2091,7 +2229,7 @@ mod tests {
         assert_eq!(p.focus, 2);
         assert_eq!(p.tab[2], 2);
         assert_eq!(p.mem_addr, 0x300);
-        assert_eq!(p.snapshot.memory[0], format!("{:06x}", 0x300));
+        assert!(p.snapshot.memory[0].starts_with(&format!("{:06x}", 0x300)));
     }
 
     #[test]
