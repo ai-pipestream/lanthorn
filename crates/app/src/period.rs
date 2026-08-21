@@ -20,10 +20,12 @@
 //! `$2C`/`$2D` — and its [`PeriodLook`], the RGB those numbers were on that
 //! machine. They are two spellings of one fact, so a launch that paints the second
 //! and answers the first is telling the story exactly what is on its screen. The
-//! IBM PC states 6 under 9 and measures `#0000AA` under `#AAAAAA`; 6 IS EGA blue.
+//! IBM PC states 6 under 9 and its screen IS those two numbers through EGA — so
+//! that row stores no RGB at all, and resolving 6 is the whole of the answer
+//! (SQ-0983).
 //!
 //! Before this, only v1–v4 read the RGB and v5+ resolved the number through the
-//! app's own theme, so the same DOS machine showed `#0000AA` to a v3 story and the
+//! app's own theme, so the same DOS machine showed EGA's blue to a v3 story and the
 //! theme's `#006BB5` to a v6 one — and Shogun, which never names a colour until it
 //! leaves InvisiClues, sat on the player's theme for the whole game and turned blue
 //! on the way out of a menu (SQ-0935).
@@ -336,8 +338,12 @@ pub fn apply_to_theme(theme: &mut Theme, look: &PeriodLook, zversion: Option<u8>
 mod tests {
     use super::*;
 
+    /// Asked of `period_look_for` rather than read off the row, because one row
+    /// stores no pair at all — the IBM PC's screen is its own palette resolving the
+    /// pair it reports (SQ-0983). `None` is the v1–v5 answer, which is every
+    /// machine this helper is used for.
     fn look_of(n: u8) -> PeriodLook {
-        zvm::interpreter::machine(n).expect("modelled").period_look.expect("measured")
+        zvm::interpreter::period_look_for(n, None).expect("measured")
     }
 
     /// The machine's screen is the machine's screen, v1 to v6 — and v7/v8 decline

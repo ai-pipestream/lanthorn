@@ -8851,10 +8851,11 @@ mod tests {
     /// reason to name its page: the screen it prints on is already blue.
     ///
     /// **The shade is the machine's, not the theme's** (SQ-0935/SQ-0939). The IBM
-    /// PC row measures `#0000AA` — EGA palette entry 1, which is what colour number
-    /// 6 IS on that machine. Resolving the number through the app's ColorScheme
-    /// instead gave `#006BB5`, so the same machine showed one blue to a v3 story and
-    /// another to a v6 one.
+    /// PC row resolves colour 6 through EGA — palette entry 1, `#0000AD` once the
+    /// Z-machine's 15-bit space has been through it — which is what that number IS
+    /// on that machine. Resolving it through the app's ColorScheme instead gave
+    /// `#006BB5`, so the same machine showed one blue to a v3 story and another to a
+    /// v6 one.
     ///
     /// **Not version-gated**, which is the change: the machine's screen applies to
     /// every version an Infocom interpreter shipped for. `app::period` holds the

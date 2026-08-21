@@ -1095,13 +1095,13 @@ Amiga floppy or anywhere else.
   story — is named in that block's legend for the same reason: a reader comparing
   two EGA rows would otherwise conclude EGA is all there is.
 
-  One number in that block is worth knowing about before it surprises you. The
-  measured block records the IBM PC's page as `#0000AA`, the adapter's own byte,
-  and the Version block prints `#0000AD` — because a colour number reaches a
-  story through the Z-machine's 15-bit colour space, where `0xAA` truncates to
-  21/31 and comes back bit-replicated as `0xAD`. Three parts in 255, and the
-  Version block is the one that matches your screen: `period_look_for` is what
-  lanthorn actually asks.
+  One number in those blocks is worth knowing about before it surprises you. The
+  IBM PC's page prints as `#0000AD` where the adapter's own byte is `#0000AA` —
+  because a colour number reaches a story through the Z-machine's 15-bit colour
+  space, where `0xAA` truncates to 21/31 and comes back bit-replicated as `0xAD`.
+  Three parts in 255, an artifact of the colour space rather than an error in
+  either value, and `#0000AD` is what your screen gets. Both blocks print it,
+  because both ask `period_look_for` — the same question lanthorn asks.
 
   In a terminal, note that a machine's page is what the story is *told*, not
   something painted over your theme. Where a game names no colour, `zvm-cli` and
@@ -1462,7 +1462,7 @@ from the others.**
 | 3 | Macintosh | `#FFFFFF` / `#000000` | no ground at all — **rules** | 1px bar, between glyphs |
 | 4 | Amiga | `#074BA1` / `#FFFFFF` | full-width reverse — measured per run | block, `#FF7E1C` |
 | 5 | Atari ST | `#FFFFFF` / `#000000` | full-width reverse | block |
-| 6 | IBM PC | `#0000AA` / `#AAAAAA` | full-width reverse — measured per run | underscore |
+| 6 | IBM PC | `#0000AD` / `#ADADAD` — *resolved, see below* | full-width reverse — measured per run | underscore |
 | 7 | Commodore 128 | `#000000` / `#55FFFF` | full-width reverse | underscore |
 | 8 | Commodore 64 | `#000000` / `#FFFFFF` | full-width reverse | underscore |
 
@@ -1498,6 +1498,17 @@ and the IBM PC's pair is its adapter's own digital entries rather than
 `dos-hitchhiker.png`'s scaled `#0F009E` — a blue carrying `0x0F` of red that no
 entry on that card has.
 
+**And one row is not stored at all.** The IBM PC's screen *is* its own palette
+rendering the pair it reports in `$2C`/`$2D`, so lanthorn resolves it rather than
+keeping a second copy — the page a v1–v4 story is painted on and the colour a
+later one gets from `@set_colour(6)` are then one lookup, and cannot come out as
+two blues three parts apart where two windows meet. The adapter's own entries are
+EGA 1 `#0000AA` and EGA 7 `#AAAAAA`, and that is still the truth about the
+hardware; the table above shows them as a *story* gets them, through the 15-bit
+colour space described under **One machine table, two front-ends** in the
+Z-machine section above. The row could not have held a constant in any case,
+because that ink depends on the story's Version — see the caret note below.
+
 **The caret in that table is the v1–v5 one, and on two machines Version 6 moved
 it.** Infocom's later interpreters draw the caret as the pair *on screen*
 reversed — it follows whatever colour the story has set rather than having one of
@@ -1514,7 +1525,9 @@ the control that makes this per-machine rather than per-version:
 `mac-zorkzero.jpg` and `mac-shogun.jpg` draw the same 1px bar its v3 frame does.
 (Version 6 moves the IBM PC's *ink* as well as its caret: its Version 6
 interpreter renders white as a true `#FFFFFF`, where the v1–v5 one draws the
-`#AAAAAA` the table above records.)
+`#ADADAD` the table above records. That is the other half of why the row stores
+no pair — one constant cannot be two colours, so the ink is resolved for the
+Version in hand.)
 
 **A period look is a property of the interpreter build as much as of the
 machine.** Two Commodore 64 captures three years apart disagree on all four

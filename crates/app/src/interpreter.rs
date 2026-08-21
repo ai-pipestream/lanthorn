@@ -782,8 +782,14 @@ impl InterpreterProfile {
     /// Answering here is not the same as applying it. Colour arrives with Version
     /// 5, so a period look belongs only to a v1–v4 story — the gate is
     /// [`crate::period::resolve`], and this knob only says what the machine has.
+    ///
+    /// **The v1–v5 answer**, because a machine on its own has no Version to ask
+    /// about. That matters on one row: the IBM PC's body pair is its own palette
+    /// resolving the pair it reports, and Infocom's two IBM interpreters disagree
+    /// about white — so the screen a story actually gets comes from
+    /// [`crate::period::resolve`], which knows the Version (SQ-0939/SQ-0983).
     pub fn period_look(self) -> Option<zvm::interpreter::PeriodLook> {
-        self.machine()?.period_look
+        zvm::interpreter::period_look_for(self.row_number(), None)
     }
 
     /// The palette the story's colour NUMBERS resolve through.
