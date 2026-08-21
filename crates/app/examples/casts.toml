@@ -1,0 +1,131 @@
+# The lanthorn casts (SQ-0943) — the RECIPE for the project page's moving images.
+#
+# `cargo run -p app --example cast` records every entry below from the real
+# binaries into `target/casts/`. The `.cast` files are output and are not
+# committed; this file is.
+#
+# EVERY RECORDING ANSWERS AS A TERMINAL WITH NO KITTY GRAPHICS. The asciinema
+# player renders cells and SGR and drops kitty's APC escapes, so a kitty
+# recording replays with no artwork at all and lanthorn looks like it draws
+# nothing. Unanswered, `ratatui-image` falls back to half-blocks — the same v6
+# pixel path resolved into `▀` with a foreground and a background — which is
+# glyphs and colour and replays exactly. The tool refuses any recording that
+# emits APC graphics anyway.
+#
+# HALF-BLOCK FRAMES ARE HEAVY: every cell can carry two 24-bit colours. Prefer a
+# short cast of one or two moments over a play session for the graphical titles;
+# `max_bytes` is the backstop. The text titles and the CLI clients have no such
+# constraint.
+#
+# `expect` is required for the same reason it is in `gallery.toml`: a cast of a
+# browser, a boot prompt or the wrong story off a shared disk looks exactly like
+# a good one until somebody plays it.
+
+# ── The differentiator ───────────────────────────────────────────────────────
+
+[[casts]]
+id = "zork-map"
+title = "lanthorn — the automapper drawing Zork I as you walk"
+caption = """
+The map pane builds itself from nothing but the game's own output, one room at a \
+time, as the player moves. This is the project's differentiator and it only makes \
+sense in motion — a still of a finished map could have come from anywhere."""
+program = "lanthorn"
+media = "stories/zork1-r88-s840726.z3"
+size = "140x40"
+show_map = true
+keys = "wait:2500,text:n,cr,wait:1200,text:n,cr,wait:1200,text:up,cr,wait:1200,text:take egg,cr,wait:1200,text:down,cr,wait:1200,text:s,cr,wait:1200,text:s,cr,wait:1200,text:e,cr,wait:1500"
+expect = ["West of House", "Forest Path", "Up a Tree"]
+
+# ── The showpiece: fidelity, in about four seconds ───────────────────────────
+
+[[casts]]
+id = "machines"
+title = "zvm-cli --machines — every machine zvm models, in its own colours"
+caption = """
+The ZMSD 11.1.3 machine table: every machine modelled, its palette, period look, \
+status band and cursor shape, printed in the ACTUAL colours, with the provenance \
+line saying the values were observed from emulator captures. The whole fidelity \
+argument, with no TUI chrome between the viewer and it."""
+program = "zvm-cli"
+args = ["--machines"]
+size = "120x50"
+keys = "wait:2500"
+expect = ["machine profiles", "Amiga", "Macintosh"]
+
+[[casts]]
+id = "period-look"
+title = "zvm-cli --period-look — Zork I off an Amiga floppy, on the Amiga's own page"
+caption = """
+A Version 3 game read straight off its Amiga release disk and dressed as that \
+machine dressed it: the Amiga's blue page, its ink, its block cursor. A bare \
+terminal, no interpreter chrome, and the claim is the whole screen."""
+program = "zvm-cli"
+media = "stories/Zork I - The Great Underground Empire.adf"
+args = ["--period-look", "{media}"]
+size = "100x30"
+keys = "wait:3000,text:open mailbox,cr,wait:1200,text:read leaflet,cr,wait:1200,text:n,cr,wait:1500"
+expect = ["West of House", "mailbox"]
+
+[[casts]]
+id = "pin-bottom"
+title = "zvm-cli --pin bottom — a frozen status line with real scrollback"
+caption = """
+The status line pinned to the bottom of the screen, with the transcript scrolling \
+above it in the terminal's own scrollback. Terminal-native behaviour that only \
+exists in a recording of an actual terminal — a screenshot of it is just a \
+screenshot."""
+program = "zvm-cli"
+media = "stories/zork1-r88-s840726.z3"
+args = ["--pin", "bottom", "{media}"]
+size = "100x30"
+keys = "wait:3000,text:open mailbox,cr,wait:1000,text:read leaflet,cr,wait:1000,text:n,cr,wait:1000,text:n,cr,wait:1000,text:up a tree,cr,wait:1500"
+expect = ["West of House", "leaflet"]
+
+# ── One cast per engine ──────────────────────────────────────────────────────
+#
+# Three binaries, three engines, three games. The CLI clients are text-only by
+# design, so a cast captures them COMPLETELY — small files, selectable text, and
+# an answer to "I want to play over ssh, in a pipe, in tmux, without a
+# full-screen app".
+
+[[casts]]
+id = "glulx-cli"
+title = "gvm-cli — Glulx in a bare terminal"
+caption = "The Glulx engine with no TUI around it, playing a modern Inform 7 story."
+program = "gvm-cli"
+media = "stories/Coloratura.gblorb.blorb"
+args = ["{media}"]
+size = "100x30"
+keys = "wait:3500,cr,wait:1500,text:look,cr,wait:1500"
+expect = ["Coloratura"]
+
+[[casts]]
+id = "scott-cli"
+title = "scott-cli — Scott Adams, charmingly minimal"
+caption = """
+The third engine, and the one that makes the range concrete faster than a sentence \
+does: a 1978 two-word parser, complete, in a terminal."""
+program = "scott-cli"
+media = "stories/adv01.dat"
+args = ["{media}"]
+size = "100x30"
+keys = "wait:2500,text:look,cr,wait:1200,text:go north,cr,wait:1200,text:look,cr,wait:1500"
+expect = ["I'm in a"]
+
+# ── The artwork, at half-block resolution ────────────────────────────────────
+
+[[casts]]
+id = "journey-halfblocks"
+title = "lanthorn — Journey's Version 6 artwork on a terminal with no graphics"
+caption = """
+The v6 pixel path still runs on a terminal that has no image protocol; it simply \
+resolves into `▀` cells with two colours each. Coarse — two vertical samples per \
+cell — but the picture is there, and it replays in any asciinema player. For what \
+it actually looks like under kitty, the page wants a screen recording."""
+program = "lanthorn"
+media = "stories/journey-r83-s890706.z6"
+size = "117x40"
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+expect = ["The Party", "Individual Commands"]
+max_bytes = 4194304

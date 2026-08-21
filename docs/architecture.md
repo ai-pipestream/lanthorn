@@ -415,6 +415,47 @@ Four things are deliberate:
 recipe, so a manifest that has gone stale fails the gate rather than failing
 whoever is trying to cut a release. It needs no gitignored media.
 
+## Casts: the same capture, as a moving image
+
+`pty_stream/cast.rs` and `--example cast` (SQ-0943) serialise a capture as an
+[asciinema v2](https://docs.asciinema.org/manual/asciicast/v2/) file. It is a
+small tool because the harness already collects exactly the right data: a
+`Flush` is a timestamped byte range from the real binary under a real pty, and a
+v2 cast is a header line followed by `[seconds, "o", data]` events. Same shape as
+the gallery — one committed recipe (`crates/app/examples/casts.toml`), output
+under `target/casts/`, a required guard per entry.
+
+```sh
+cargo build --workspace
+cargo run -p app --example cast              # the whole manifest
+cargo run -p app --example cast -- --list
+asciinema play target/casts/machines.cast
+```
+
+**These recordings deliberately do NOT answer the kitty capability query.** The
+asciinema player renders cells and SGR and drops kitty's APC graphics, so a
+kitty recording replays with no artwork at all and lanthorn looks like it draws
+nothing. Left unanswered, `ratatui-image` falls back to half-blocks — the same
+v6 *pixel* path resolved into `▀` with a foreground and a background, which is
+glyphs and 24-bit SGR and replays exactly. Measured on a Journey recording:
+1,624 `▀`, 1,499 `▄`, 3,649 truecolour foreground and 3,689 truecolour
+background sequences, none in iTerm2's colon-separated form (the one gap in the
+player). The tool refuses any recording that emits real graphics commands
+anyway, and every file says in its own header why there is no kitty artwork in
+it.
+
+`Spec::answer_kitty` is what selects that, and `Spec::argv` is what lets the same
+driver record `zvm-cli`, `gvm-cli` and `scott-cli` — the CLI clients are
+text-only by design, so a cast captures them *completely*.
+
+One driver bug fell out of building this, and it is worth knowing about: sending
+a keystroke used to reset the same clock the flush grouping read, so the app's
+reply — a few milliseconds after the key — always looked like a continuation of
+the previous burst however many seconds earlier it was, and **every run
+collapsed into one flush at `at: 0`**. Invisible to the decoder, which only
+wants the grouping for attribution; fatal to a recorder, for which those
+timestamps *are* the recording. Reads and keystrokes now keep separate clocks.
+
 ## See also
 
 - [Interactive-fiction standards lanthorn implements](standards.md) (Z-Machine,

@@ -143,6 +143,29 @@ pub struct Spec {
     pub defer_queries: Vec<&'static str>,
     /// How late [`Spec::defer_queries`] are answered.
     pub defer_by: Duration,
+    /// Answer the kitty capability query (default `true`).
+    ///
+    /// Turning it off is a DIFFERENT TERMINAL, not a broken one: `ratatui-image`
+    /// treats half-blocks as its universal fallback, so lanthorn still runs the
+    /// whole v6 pixel path and simply resolves it into `▀` cells. That is a real
+    /// thing lanthorn does on a real terminal without graphics — and it is the
+    /// only Version 6 output an asciinema cast can carry, because the player
+    /// renders cells and SGR and drops kitty's APC escapes on the floor
+    /// (SQ-0943).
+    ///
+    /// Every measuring caller wants this left alone. [`Negotiation`] still
+    /// reports what happened, so a capture that turned it off cannot be mistaken
+    /// for one that tried for kitty and lost.
+    pub answer_kitty: bool,
+    /// Run this exact argument list instead of lanthorn's own
+    /// `<story> --user-dir … --no-sound`.
+    ///
+    /// For the CLI clients (`zvm-cli`, `gvm-cli`, `scott-cli`), which take
+    /// neither a `--user-dir` nor a map pane, and one of which — `zvm-cli
+    /// --machines` — takes no story at all. When this is set, [`Spec::story`] is
+    /// only a label and [`Spec::hide_map`] is not acted on, because there is no
+    /// per-game sidecar to write for a program that has no per-game anything.
+    pub argv: Option<Vec<String>>,
 }
 
 impl Spec {
@@ -163,6 +186,8 @@ impl Spec {
             extra_args: Vec::new(),
             defer_queries: Vec::new(),
             defer_by: Duration::ZERO,
+            answer_kitty: true,
+            argv: None,
         }
     }
 }
@@ -170,6 +195,15 @@ impl Spec {
 /// One burst of output: bytes that arrived without a [`Spec::quiet`] gap between
 /// them. lanthorn writes a frame in one go, so a burst is a frame in practice —
 /// and grouping by silence needs no cooperation from the app.
+///
+/// The gap is measured between READS, not between "the last thing that happened".
+/// Sending a keystroke used to reset the same clock the grouping read, so the
+/// app's reply — which arrives a few milliseconds after the key — always looked
+/// like a continuation of whatever burst came before it, however many seconds
+/// earlier that was. Every run therefore collapsed into ONE flush at `at: 0`.
+/// Invisible to the decoder, which only wants the grouping for attribution, and
+/// fatal to the cast recorder (SQ-0943), for which these timestamps ARE the
+/// recording.
 #[derive(Clone, Debug)]
 pub struct Flush {
     pub at: Duration,
@@ -299,11 +333,20 @@ fn open_pty(spec: &Spec) -> std::io::Result<Pty> {
 fn spawn(spec: &Spec, pty: &Pty) -> std::io::Result<Child> {
     let slave_fd: RawFd = pty.slave.as_raw_fd();
     let mut cmd = Command::new(&spec.bin);
-    cmd.arg(&spec.story)
-        .arg("--user-dir")
-        .arg(&spec.user_dir)
-        .arg("--no-sound")
-        .args(&spec.extra_args);
+    match &spec.argv {
+        // A CLI client's whole command line, verbatim: it has no `--user-dir`
+        // and no map pane to hide, so nothing of lanthorn's shape applies.
+        Some(argv) => {
+            cmd.args(argv);
+        }
+        None => {
+            cmd.arg(&spec.story)
+                .arg("--user-dir")
+                .arg(&spec.user_dir)
+                .arg("--no-sound")
+                .args(&spec.extra_args);
+        }
+    }
     cmd.stdin(Stdio::from(pty.slave.try_clone()?))
         .stdout(Stdio::from(pty.slave.try_clone()?))
         .stderr(Stdio::from(pty.slave.try_clone()?));
@@ -339,6 +382,9 @@ fn spawn(spec: &Spec, pty: &Pty) -> std::io::Result<Child> {
 /// DSR, so an unanswered one costs a timeout and a wrong backend — which is what
 /// [`Negotiation`] exists to catch.
 struct Responder {
+    /// Whether to answer the kitty capability query at all — see
+    /// [`Spec::answer_kitty`].
+    answer_kitty: bool,
     cell_w: u16,
     cell_h: u16,
     cols: u16,
@@ -352,12 +398,7 @@ struct Responder {
 impl Responder {
     fn replies(&self) -> Vec<(&'static str, &'static [u8], String)> {
         let (w, h) = (self.cell_w, self.cell_h);
-        vec![
-            (
-                "kitty graphics support",
-                b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\".as_slice(),
-                "\x1b_Gi=31;OK\x1b\\".to_string(),
-            ),
+        let mut v = vec![
             // Kitty's own DA1: no `4`, because kitty does not do sixel. Claiming
             // sixel here would let a fallback path look like a success.
             ("primary device attributes", b"\x1b[c".as_slice(), "\x1b[?62;c".to_string()),
@@ -383,7 +424,20 @@ impl Responder {
             // Last, because every probe ends with it and the reply is the app's
             // signal that the whole batch is answered.
             ("device status report", b"\x1b[5n".as_slice(), "\x1b[0n".to_string()),
-        ]
+        ];
+        if self.answer_kitty {
+            // First, because it is the first thing the app asks and a burst's
+            // replies go back in the order its questions arrived.
+            v.insert(
+                0,
+                (
+                    "kitty graphics support",
+                    b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\".as_slice(),
+                    "\x1b_Gi=31;OK\x1b\\".to_string(),
+                ),
+            );
+        }
+        v
     }
 
     /// Scan everything captured so far for queries we have not yet answered, and
@@ -434,7 +488,7 @@ fn count_subslices(hay: &[u8], needle: &[u8]) -> usize {
 /// Boot lanthorn under a pty, drive `spec.keys`, and return every byte it wrote.
 pub fn run(spec: Spec) -> std::io::Result<Capture> {
     std::fs::create_dir_all(&spec.user_dir)?;
-    if spec.hide_map {
+    if spec.hide_map && spec.argv.is_none() {
         // The story pane only gets the whole frame when the map is hidden, and
         // the per-game sidecar sets that BEFORE the first frame — toggling it with
         // a keystroke would put the transition in the capture we are measuring.
@@ -459,6 +513,7 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
     let mut answered: Vec<Answered> = Vec::new();
     let mut responder =
         Responder {
+            answer_kitty: spec.answer_kitty,
             cell_w: spec.cell_w,
             cell_h: spec.cell_h,
             cols: spec.cols,
@@ -469,6 +524,10 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
     let mut keys = spec.keys.clone().into_iter();
     let mut pending_wait: Option<Duration> = None;
     let mut last_byte = Instant::now();
+    // Read timing, kept apart from the key pacing above: `last_byte` moves when
+    // we TYPE, which is what "has the app gone quiet enough for the next key"
+    // wants and what burst grouping must not see. See [`Flush`].
+    let mut last_read = Instant::now();
     let mut file = unsafe { std::fs::File::from_raw_fd(libc::dup(master.as_raw_fd())) };
     let mut timed_out = false;
     // Replies held back by `spec.defer_queries`, each with the instant it is due.
@@ -499,7 +558,8 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
                     Ok(0) => break,
                     Ok(n) => {
                         let now = Instant::now();
-                        let gap = now.duration_since(last_byte);
+                        let gap = now.duration_since(last_read);
+                        last_read = now;
                         last_byte = now;
                         let offset = bytes.len();
                         match flushes.last_mut() {
@@ -587,9 +647,16 @@ pub fn sibling_lanthorn() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("LANTHORN_BIN") {
         return Some(PathBuf::from(p));
     }
+    sibling_binary("lanthorn")
+}
+
+/// Any workspace binary cargo built beside this one — `zvm-cli`, `gvm-cli`,
+/// `scott-cli` (SQ-0943). Same trick as [`sibling_lanthorn`], which is now one
+/// call of it.
+pub fn sibling_binary(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    [dir.join("lanthorn"), dir.parent()?.join("lanthorn")].into_iter().find(|cand| cand.is_file())
+    [dir.join(name), dir.parent()?.join(name)].into_iter().find(|cand| cand.is_file())
 }
 
 /// The repo's `stories/` directory, from this crate's manifest.

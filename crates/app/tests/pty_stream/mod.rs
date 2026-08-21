@@ -25,6 +25,10 @@
 // and neither should have to name the other's parts to keep the build quiet.
 #![allow(dead_code)]
 
+/// asciinema casts (SQ-0943): the same capture, serialised as timing plus
+/// bytes. Unix-gated with [`driver`], whose `Capture` it is a view of.
+#[cfg(unix)]
+pub mod cast;
 pub mod decode;
 #[cfg(unix)]
 pub mod driver;
