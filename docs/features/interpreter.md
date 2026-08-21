@@ -639,15 +639,35 @@ does better by putting the games in it. Both front-ends reach every story on
 every image, and — because the save key is the story's own release and serial —
 `--story 4` and the browser row land in the same directory.
 
-**And the browser goes one further: it reads the whole set** (SQ-0844). These
-collections were pressed as sets — seven Apple II volumes, nine Atari ST
-floppies, `floppy1.ima` through `floppy5.ima` — and a set is one shelf of games
-rather than a pile of disks. lanthorn works out which files belong together from
-their names alone: one directory, one disk-image extension, identical but for a
-run of digits counting 1, 2, 3…. Name any single volume and the browser opens on
-the entire release, which is what finally makes *Lost Treasures* volume 1 useful
-— it is the GS/OS launcher with no game on it, so `lanthorn "…(Disk 1 of 7).2mg"`
-used to be an error message and now lists all thirty games.
+**And both front-ends read the whole set** (SQ-0844, SQ-0961). These collections
+were pressed as sets — seven Apple II volumes, nine Atari ST floppies,
+`floppy1.ima` through `floppy5.ima` — and a set is one shelf of games rather than
+a pile of disks. lanthorn works out which files belong together from their names
+alone: one directory, one disk-image extension, identical but for a run of digits
+counting 1, 2, 3…. Name any single volume and the browser opens on the entire
+release, which is what finally makes *Lost Treasures* volume 1 useful — it is the
+GS/OS launcher with no game on it, so `lanthorn "…(Disk 1 of 7).2mg"` used to be
+an error message and now lists all thirty games.
+
+The menu above learned the same thing later, and the gap was visible: point
+`zvm-cli` at the Amiga *Lost Treasures* disk 1 and it offered the six games on
+that platter while lanthorn, pointed at the same file, listed all twenty. Nothing
+was wrong with the CLI's mount — it asked a narrower question, because there was
+no wider one to ask. There is now, one function beside the mount, and both
+front-ends ask it. The CLI's menu lists the release; a build that two volumes
+both carry is listed once, so the three-floppy DOS *Zork Zero* still opens
+straight into its one game without a menu at all.
+
+That fix needed a second one first, and it is a nice reminder that a naming rule
+is only ever as good as the shelf it was written against. The Macintosh DiskCopy
+press of *Lost Treasures* spells its volumes
+`The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42` — the
+number in the middle, and **every volume naming its own games after it**, so the
+five stems agree on nothing at all past `Disk N`. "Identical but for a run of
+digits" grouped none of them. The suffix is now dropped from the comparison, but
+only when the number is introduced by a word that says it is a disk number, which
+is what keeps `Ultima 1`, `Ultima 2 - Revenge`, `Ultima 3` three games rather than
+one release.
 
 That also settles the overlap these sets carry. `Infocom Compilation 5` and
 `Compilation 8` both hold *Trinity* release 11, serial 860509 — one stored flat

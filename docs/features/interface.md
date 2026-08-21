@@ -491,6 +491,14 @@ of disks, and it works out which files belong together from their names — file
 in one directory, sharing a disk-image extension, with identical names except
 for one run of digits that counts 1, 2, 3…
 
+With one deliberate loosening, because a real shelf broke the rule. The Macintosh
+DiskCopy press of *Lost Treasures* names each volume after the games on it —
+`The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42`, then
+`Disk 2 - Hitchhiker's, Infidel, Planetfall…` — so the five names match up to
+`Disk N` and agree on nothing after it. Everything past the number is ignored
+when the number is introduced by a word that says it *is* a disk number, and only
+then: `Ultima 1`, `Ultima 2 - Revenge`, `Ultima 3` stay three games.
+
 That list of extensions is read off the same format table as everything else,
 which paid off the moment lanthorn learned to mount 5.25" Apple II disks:
 `shogun_s1.dsk`…`s5` and `zork_zero_1.dsk`…`_4` had been sitting there refused
@@ -503,6 +511,17 @@ one image happens to hold. `lanthorn "Lost Treasures … (Disk 1 of 7).2mg"` ope
 all thirty — and that one used to be an error, because the Apple II press puts a
 launcher on disk 1 and no story at all. Once you're in, it behaves like any
 library: pick a game, play it, `/quit-to-library` comes back to the same shelf.
+
+**And one disk is not one game.** A compilation pressed onto a single disc is a
+shelf too, and naming one used to start whatever story the disc's own tiebreak
+preferred — `lanthorn InfocomMasterpieces.img` opened one of thirty-three, with
+no way to reach the rest. The browser had every part it needed for this already;
+what it was missing is that "does this disk belong to a set?" and "is there a
+choice to make here?" are different questions. Now a disk holding two or more
+games gets the browser whether or not it has siblings. A disk holding **one**
+still opens straight into it — a single-title floppy, and the DiskCopy *Lost
+Treasures* volume whose whole content is *Zork Zero*, want the game and not a
+one-row list.
 
 **And a game the set carries twice is listed once.** These collections overlap:
 `Infocom Compilation 5` stores its games as flat files and `Compilation 8` in

@@ -40,6 +40,38 @@
 //! and are none of them greater than [`MAX_INDEX`]. Exactly one digit run may
 //! qualify; a stem where two of them do forms no set at all.
 //!
+//! # …and the volume that names its own games (SQ-0961)
+//!
+//! "Identical except at one digit run" describes every set above and cannot
+//! describe this one, a DiskCopy 4.2 press of *The Lost Treasures of Infocom*:
+//!
+//! ```text
+//! The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42
+//! The Lost Treasures of Infocom - Disk 2 - Hitchhiker's, Infidel, Planetfall, …
+//! The Lost Treasures of Infocom - Disk 3 - Ballyhoo, Deadline, Moonmist, …
+//! The Lost Treasures of Infocom - Disk 4 - Enchanter, Sorcerer, Spellbreaker, …
+//! The Lost Treasures of Infocom - Disk 5 - Zork Zero.dc42
+//! ```
+//!
+//! The index is in the middle and there is **no common suffix at all**, because
+//! each volume lists the games it carries. The tail is not noise a rule should
+//! tolerate; it is different information on every platter, and a prefix-plus-
+//! index-plus-suffix rule groups none of them.
+//!
+//! So the suffix is dropped from the key — **but only when the digit run is
+//! introduced by a word that says it is a disk number** ([`DISK_WORDS`]). That
+//! qualifier is the whole safety of it. Prefix alone would fold `Ultima 1.dsk`,
+//! `Ultima 2 - Revenge.dsk`, `Ultima 3.dsk` into one release, which is the
+//! false positive this module exists to refuse; `Disk 1 - …`, `Disk 2 - …` says
+//! in so many words what the number means. Nothing already recognised changes:
+//! a set with a common suffix agrees on it whether or not the key carries it.
+//!
+//! It does not loosen the numbering test either. Zork Zero's DOS presses spell
+//! their volumes `(360K) (Disk 1)` and `(720K) (Disk 1)`, and the capacity sits
+//! in the *prefix*, so they stay the two separate sets they are — while the
+//! `{360, 720}` run itself is introduced by no disk word and is keyed, and
+//! refused, exactly as before.
+//!
 //! # What it refuses, and why each one matters
 //!
 //! Recognition is deliberately conservative, because the two failure modes are
@@ -188,6 +220,32 @@ fn parts(path: &Path) -> Option<(Vec<Token>, String)> {
     Some((tokens(stem), ext))
 }
 
+/// The words a release spells immediately before a volume's number.
+///
+/// Deliberately three, and deliberately the three that mean *this number is
+/// which platter*. See the module docs for what the qualifier is holding back:
+/// it is the only thing separating "the volume names its own games after the
+/// index" from "these are sequels".
+///
+/// `part` is **not** among them, and the corpus says why: `v1 part1.img`,
+/// `v1 part2.img`, `v2 part1.img` is the ambiguous stem that
+/// `an_ambiguous_stem_forms_no_set` refuses, and admitting the word would give
+/// its second run a prefix key and resolve the ambiguity by guessing.
+const DISK_WORDS: [&str; 3] = ["disk", "disc", "side"];
+
+/// Does the text immediately before the digit run at `pos` say the number is a
+/// **disk number** (SQ-0961)?
+///
+/// Trailing separators are ignored, so `- Disk `, `_Disk` and `(Disk ` all
+/// qualify and `journey_s` does not.
+fn introduced_by_a_disk_word(toks: &[Token], pos: usize) -> bool {
+    let Some(Token::Text(before)) = pos.checked_sub(1).and_then(|i| toks.get(i)) else {
+        return false;
+    };
+    let word = before.trim_end_matches(|c: char| !c.is_ascii_alphanumeric()).to_ascii_lowercase();
+    DISK_WORDS.iter().any(|w| word.ends_with(w))
+}
+
 /// Do these index values describe a run of **disks**?
 ///
 /// Distinct, reaching `1`, and none above [`MAX_INDEX`]. See the module docs for
@@ -243,13 +301,21 @@ pub fn group_indexed(files: &[PathBuf]) -> Vec<Vec<(u64, PathBuf)>> {
         let Some((toks, ext)) = parts(path) else { continue };
         for (pos, tok) in toks.iter().enumerate() {
             let Some(value) = tok.value() else { continue };
-            let mut holed = toks.clone();
-            // The hole must not be confusable with any literal text.
-            holed[pos] = Token::Text("\u{0}".to_string());
-            buckets
-                .entry((ext.clone(), pos, holed))
-                .or_default()
-                .push((value, (*path).clone()));
+            let shape = if introduced_by_a_disk_word(&toks, pos) {
+                // The prefix alone (SQ-0961): a volume that names its own games
+                // after the index shares no suffix with its siblings. Safe here
+                // and nowhere else — see the module docs.
+                toks[..pos].to_vec()
+            } else {
+                let mut holed = toks.clone();
+                // The hole must not be confusable with any literal text.
+                holed[pos] = Token::Text("\u{0}".to_string());
+                holed
+            };
+            // The two shapes can never collide: a holed key always runs past
+            // `pos` and a prefix key always stops at it, so they differ in
+            // length before they differ in anything else.
+            buckets.entry((ext.clone(), pos, shape)).or_default().push((value, (*path).clone()));
         }
     }
 
@@ -421,6 +487,98 @@ fn story_elsewhere_in_the_release(path: &Path) -> Option<blorb::medium::MountedD
         }
     }
     found
+}
+
+/// One story a path can reach, and the volume it is actually stored on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reachable {
+    /// The volume holding it: the one that was named, or a sibling of it.
+    pub volume: PathBuf,
+    /// How that volume spells it — [`blorb::medium::DiskStory::name`].
+    pub name: String,
+    /// The story image, byte-exact off the disk.
+    pub bytes: Vec<u8>,
+    /// The medium THIS story came off, which on a hybrid disc is not the
+    /// volume's own format — [`blorb::medium::MountedDisk::image_for`].
+    pub image: blorb::medium::DiskImage,
+}
+
+/// **Every story `path` can reach across its release**, in disk order (SQ-0961).
+///
+/// The story-side answer to the question `app::assets::volumes` already answers
+/// for artwork, and it exists for the same reason: without one, each front-end
+/// decides for itself how far to look and they disagree. They did. `zvm-cli`
+/// pointed at `treasures/Lost Treasures of Infocom, The_Disk1.adf` offered the
+/// six games on **that platter** — Enchanter, Sorcerer, Spellbreaker and Zork
+/// I–III — while lanthorn, pointed at the same file, listed all twenty across
+/// the six-volume release. Nothing was wrong with the CLI's mount; it simply
+/// asked a narrower question, because there was no wider one to ask.
+///
+/// `disk` is what [`mount_at`] returned for `path`, so the named volume costs no
+/// second read and the caller keeps the mount for its own diagnostics. Its
+/// stories come first, whole and in the order it reported them: **a compilation
+/// volume's own menu does not move because the release around it is now
+/// visible.** The siblings follow in disk order.
+///
+/// **A build already offered by an earlier volume is dropped**, keyed on release
+/// and serial — the same identity [`crate::storage::disk_story_key`] names a save
+/// directory with, so two rows that would share a save directory are one game
+/// here too. That is not tidiness: SQ-0941's widening means the 360K *Zork Zero*
+/// press answers `ZORK0.ZIP` from Disk 1 *and* from Disk 2, and without the fold
+/// a three-floppy single-game release would grow a menu.
+///
+/// Duplicates **within** one volume are left exactly as they are. The DiskCopy
+/// *Lost Treasures* Disk 1 stores *The Lurking Horror* three times over —
+/// `Lurking Horror`, `Trash/Lurking Horror`, `Trash/The Lurking Horror` — and
+/// the CLI has always shown all of them, told apart by the only thing that tells
+/// them apart, which is the name. Folding a platter's own list is a separate
+/// question from reaching the platters beside it.
+pub fn stories_across_the_release(path: &Path, disk: &blorb::medium::MountedDisk) -> Vec<Reachable> {
+    let mut out: Vec<Reachable> = disk
+        .stories()
+        .into_iter()
+        .map(|s| Reachable {
+            volume: path.to_path_buf(),
+            image: disk.image_for(&s.name),
+            name: s.name,
+            bytes: s.bytes,
+        })
+        .collect();
+    let Some(members) = members_indexed(path) else { return out };
+    // What the named volume already offers, so a sibling repeating it adds no row.
+    let mut seen: Vec<(u16, String)> = out.iter().filter_map(|r| build_of(&r.bytes)).collect();
+    for (_, m) in members {
+        if m == path {
+            continue;
+        }
+        // Plainly, not across the set: a story the release PAGES across its
+        // volumes was already reassembled above from whichever volume was named,
+        // so the only thing left to look for is a story a sibling holds on its
+        // own — the same argument `story_elsewhere_in_the_release` makes.
+        let Ok(raw) = std::fs::read(&m) else { continue };
+        let Ok(sibling) = blorb::medium::MountedDisk::mount(raw) else { continue };
+        for s in sibling.stories() {
+            match build_of(&s.bytes) {
+                Some(b) if seen.contains(&b) => continue,
+                Some(b) => seen.push(b),
+                None => {}
+            }
+            out.push(Reachable {
+                volume: m.clone(),
+                image: sibling.image_for(&s.name),
+                name: s.name,
+                bytes: s.bytes,
+            });
+        }
+    }
+    out
+}
+
+/// The release and serial a story's header carries, or `None` when it has no
+/// Z-machine header to read — the identity the cross-volume fold is keyed on.
+fn build_of(bytes: &[u8]) -> Option<(u16, String)> {
+    let b = crate::storage::DiskBuild::of(bytes)?;
+    Some((b.release, b.serial))
 }
 
 #[cfg(test)]
@@ -597,6 +755,39 @@ mod tests {
                 set.iter().map(|p| p.to_string_lossy().contains("360K")).collect();
             assert!(caps.iter().all(|c| *c == caps[0]), "a set mixed the two capacities");
         }
+    }
+
+    /// **A volume that names its own games after the index is still a set**
+    /// (SQ-0961) — the DiskCopy 4.2 press of *The Lost Treasures of Infocom*,
+    /// whose five stems agree on nothing after `Disk N`.
+    ///
+    /// FALSIFICATION: drop the [`introduced_by_a_disk_word`] branch from
+    /// `group_indexed` and this reports no set at all, which is exactly what
+    /// `app::disk_set::members` answered for this press before the fix.
+    #[test]
+    fn a_volume_that_names_its_own_games_is_still_a_set() {
+        let g = group(&paths(&[
+            "The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
+            "The Lost Treasures of Infocom - Disk 2 - Hitchhiker's, Infidel, Planetfall.dc42",
+            "The Lost Treasures of Infocom - Disk 3 - Ballyhoo, Deadline, Moonmist.dc42",
+            "The Lost Treasures of Infocom - Disk 4 - Enchanter, Sorcerer, Zork I.dc42",
+            "The Lost Treasures of Infocom - Disk 5 - Zork Zero.dc42",
+        ]));
+        assert_eq!(g.len(), 1, "{:?}", g.iter().map(|x| names_of(x)).collect::<Vec<_>>());
+        assert_eq!(g[0].len(), 5);
+        assert!(names_of(&g[0])[0].contains("Disk 1"), "and in disk order");
+    }
+
+    /// …and the qualifier is what keeps that from swallowing a shelf of sequels,
+    /// which is the same shape with no word saying the number is a platter.
+    #[test]
+    fn sequels_that_subtitle_themselves_are_not_a_set() {
+        let g = group(&paths(&[
+            "Ultima 1.dsk",
+            "Ultima 2 - Revenge of the Enchantress.dsk",
+            "Ultima 3 - Exodus.dsk",
+        ]));
+        assert!(g.is_empty(), "{:?}", g.iter().map(|x| names_of(x)).collect::<Vec<_>>());
     }
 
     /// A run of years is not a run of disks, however tidily it varies.
