@@ -1420,33 +1420,50 @@ on by default (`period_look`, in the F2 settings screen right below
 `honor_game_colours`), and it applies only where a machine is actually named —
 off a release disk, or when you set `interpreter_number` yourself.
 
-**Five machines, and not one of the three decisions follows from the others.**
+**Nine machines across seven rows, and not one of the three decisions follows
+from the others.**
 
 | # | machine | page / ink | status line | cursor |
 |---|---|---|---|---|
 | 2, 9, 10 | Apple II | `#000000` / `#FFFFFF` | full-width reverse | block |
 | 3 | Macintosh | `#FFFFFF` / `#000000` | no ground at all — **rules** | 1px bar, between glyphs |
-| 4 | Amiga | `#074BA1` / `#FFFFFF` | reverse **behind each run**, page showing between | block, `#FF7E1C` |
+| 4 | Amiga | `#074BA1` / `#FFFFFF` | full-width reverse — measured per run | block, `#FF7E1C` |
+| 5 | Atari ST | `#FFFFFF` / `#000000` | full-width reverse | block |
+| 6 | IBM PC | `#0000AA` / `#AAAAAA` | full-width reverse — measured per run | underscore |
 | 7 | Commodore 128 | `#000000` / `#55FFFF` | full-width reverse | underscore |
 | 8 | Commodore 64 | `#000000` / `#FFFFFF` | full-width reverse | underscore |
 
-Two of them have a cursor colour that is neither their page nor their ink — the
-Amiga's orange, and the 1984 Commodore 64's black — so it cannot be built out of
-the pair. Four different status behaviours across five machines, so that cannot
-be computed either. And the Amiga's is not a *band*: on `amiga-spellbreaker.png`
-the reversal sits behind "Council Chamber" and behind "Score: 0/0" with 376
-pixels of plain blue page between them.
+One caret in that column is a colour that is neither its machine's page nor its
+ink — the Amiga's orange — so the cursor cannot be built out of the pair. Neither
+can the status line: the Macintosh sets its row apart with no ground at all where
+every other machine here reverses the body pair, and the captures are wider still
+than the table, the 1984 Commodore 64 drawing a band of grey on black that is
+neither the body pair nor its reverse.
+
+**And two of these machines do not reverse the whole row.** On
+`amiga-spellbreaker.png` the reversal sits behind "Council Chamber" and behind
+"Score: 0/0" with 376 pixels of plain blue page between them, and
+`dos-hitchhiker.png` runs 611 pixels of page through the middle of its own.
+lanthorn draws both bands whole, on the user's ruling: a band broken into pieces
+reads as damage in a terminal where it read as design on a 1989 monitor. The
+column above is what lanthorn draws — the measurement keeps its own record, in
+`StatusBand::PerRun`, which no row now uses.
 
 **These are observations, not sources, and that is a real difference.** Every
 other value on this page is quoted at its constant out of Infocom's own
 interpreter — `st/stx1.s`, `zboot.asm`, `mac/xzip.lst`. These were measured off
-emulator captures in `machine-screenshots/`, row by row, and recorded as what the
-emulator drew. Two of them are values a palette choice could move (the Amiga's
-`#074BA1` is almost certainly Workbench's register `$05A`, which bit-replicates
-to `#0055AA`; the Commodore 64's greys depend on which VIC-II palette you
-believe). Three cannot move at all: the Mac Plus is 1-bit, the C128's VDC is RGBI,
-and the Apple II is monochrome — though "monochrome" there means the *white*
-monitor, and green and amber were as common.
+emulator captures in `machine-screenshots/`, row by row. Two of them are values a
+palette choice could move (the Amiga's `#074BA1` is almost certainly Workbench's
+register `$05A`, which bit-replicates to `#0055AA`; the Commodore 64's greys
+depend on which VIC-II palette you believe). Three cannot move at all: the Mac
+Plus is 1-bit, the C128's VDC is RGBI, and the Apple II is monochrome — though
+"monochrome" there means the *white* monitor, and green and amber were as common.
+And two are the capture corrected back to the colour the machine actually names,
+because the emulator dimmed it: the Atari ST's page is plain white rather than
+`st-zork1.png`'s `#EBEBEB`, which is a scanline filter and not a shade the ST has,
+and the IBM PC's pair is its adapter's own digital entries rather than
+`dos-hitchhiker.png`'s scaled `#0F009E` — a blue carrying `0x0F` of red that no
+entry on that card has.
 
 **The caret in that table is the v1–v5 one, and on two machines Version 6 moved
 it.** Infocom's later interpreters draw the caret as the pair *on screen*
@@ -1462,6 +1479,9 @@ caret on a v6 story — which is not a fallback here but the exact behaviour —
 every other machine keeps the caret its own capture measured. The Macintosh is
 the control that makes this per-machine rather than per-version:
 `mac-zorkzero.jpg` and `mac-shogun.jpg` draw the same 1px bar its v3 frame does.
+(Version 6 moves the IBM PC's *ink* as well as its caret: its Version 6
+interpreter renders white as a true `#FFFFFF`, where the v1–v5 one draws the
+`#AAAAAA` the table above records.)
 
 **A period look is a property of the interpreter build as much as of the
 machine.** Two Commodore 64 captures three years apart disagree on all four
