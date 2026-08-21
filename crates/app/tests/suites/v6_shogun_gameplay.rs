@@ -33,12 +33,7 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
-/// `zvm::screen::set_palette` is process-global, so no two cases here may boot at
-/// once, and no case here may run beside a sibling suite that installs a machine's
-/// table (SQ-0904/SQ-0905).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
-/// Take the shared lock and install the palette this suite assumes.
+/// The palette this suite assumes, stated rather than inherited.
 ///
 /// **Palette: `Standard`, set rather than assumed** (SQ-0958). Every colour these
 /// cases assert is a z-colour resolved through the process-global palette, and until
@@ -58,9 +53,7 @@ static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 /// Shogun's bare story file names no machine, so its colour numbers resolve through
 /// ZMSD §8.3.1's own table — which is what every assertion below was written against.
 fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
-    let guard = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
-    zvm::screen::set_palette(zvm::screen::Palette::Standard);
-    guard
+    app::v6_palette(zvm::screen::Palette::Standard)
 }
 
 /// All control chars (except newline) in `s` — must always be empty for

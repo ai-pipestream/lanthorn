@@ -205,13 +205,30 @@ fn shogun_title_shows_its_prose(honor: bool) {
     );
 }
 
+/// The palette this suite's colours resolve through, **stated rather than inherited**
+/// (SQ-0958).
+///
+/// Every story these cases drive is a bare file that names no machine — or, for the
+/// disk images, a machine whose table IS §8.3.1's — so the colour numbers behind
+/// every pixel asserted below resolve through the standard table. Until now nothing
+/// here said so, and the suite believed whatever the last suite in its group binary
+/// left behind. See [`app::v6_palette`], which is why this both names a palette and
+/// takes the shared lock; hold the guard for the whole case, because the two frames
+/// a repaint case compares are only comparable if the palette did not move between
+/// them.
+fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+    app::v6_palette(zvm::screen::Palette::Standard)
+}
+
 #[test]
 fn shogun_title_shows_its_prose_honoring_game_colours() {
+    let _g = standard_palette();
     shogun_title_shows_its_prose(true);
 }
 
 #[test]
 fn shogun_title_shows_its_prose_theme_only() {
+    let _g = standard_palette();
     shogun_title_shows_its_prose(false);
 }
 
@@ -233,11 +250,13 @@ fn shogun_title_top_anchors_its_cleared_screen(honor: bool) {
 
 #[test]
 fn shogun_title_top_anchors_its_cleared_screen_honoring_game_colours() {
+    let _g = standard_palette();
     shogun_title_top_anchors_its_cleared_screen(true);
 }
 
 #[test]
 fn shogun_title_top_anchors_its_cleared_screen_theme_only() {
+    let _g = standard_palette();
     shogun_title_top_anchors_its_cleared_screen(false);
 }
 
@@ -309,11 +328,13 @@ fn advent_help_bar_reaches_the_composite(honor: bool) {
 
 #[test]
 fn advent_help_bar_reaches_the_composite_honoring_game_colours() {
+    let _g = standard_palette();
     advent_help_bar_reaches_the_composite(true);
 }
 
 #[test]
 fn advent_help_bar_reaches_the_composite_theme_only() {
+    let _g = standard_palette();
     advent_help_bar_reaches_the_composite(false);
 }
 
@@ -389,11 +410,13 @@ fn fmvpoker_text_reaches_the_composite(honor: bool) {
 
 #[test]
 fn fmvpoker_text_reaches_the_composite_honoring_game_colours() {
+    let _g = standard_palette();
     fmvpoker_text_reaches_the_composite(true);
 }
 
 #[test]
 fn fmvpoker_text_reaches_the_composite_theme_only() {
+    let _g = standard_palette();
     fmvpoker_text_reaches_the_composite(false);
 }
 
@@ -439,10 +462,12 @@ fn journey_text_panel_survives_the_menu_fill(honor: bool) {
 
 #[test]
 fn journey_text_panel_survives_the_menu_fill_honoring_game_colours() {
+    let _g = standard_palette();
     journey_text_panel_survives_the_menu_fill(true);
 }
 
 #[test]
 fn journey_text_panel_survives_the_menu_fill_theme_only() {
+    let _g = standard_palette();
     journey_text_panel_survives_the_menu_fill(false);
 }
