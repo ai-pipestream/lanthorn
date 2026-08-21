@@ -529,6 +529,16 @@ learned to read the whole release. A set with two or more games gets the browser
 instead and keeps each disk's art on that disk; see
 [Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws).
 
+**And any disk of that one-game set opens the game**, not just the one the story
+happens to sit on. This is the same DOS press from the other side: disk 1 is
+where Infocom put `INSTALL.EXE`, so it is the disk you reach for first, and it
+was the one that could not work — `lanthorn "…(360K) (Disk 1).ima"` failed with
+"no story file on this disk image" while disk 2 played perfectly. A volume with
+no story of its own now looks to its release's other volumes before giving up,
+and takes the game off whichever one has it. Strictly one game, though: a shelf
+of thirty is a browser's job, so *Lost Treasures* disk 1 still opens the menu
+rather than picking a game for you.
+
 Recognition is cautious on purpose, since wrongly merging two collections is
 worse than not spotting one. `adv01.dat` … `adv13.dat` are thirteen separate
 Scott Adams games and stay that way — they aren't disk images. Zork Zero's 360K

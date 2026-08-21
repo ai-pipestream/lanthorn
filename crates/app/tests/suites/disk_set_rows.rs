@@ -320,6 +320,79 @@ fn a_set_offering_one_game_still_opens_that_game() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// **And the other volumes of that one-game set open it too** (SQ-0941).
+///
+/// The DOS press keeps the story whole on one floppy and puts the installer and
+/// the artwork on the others — so `(360K) (Disk 1)`, the disk with `INSTALL.EXE`
+/// on it and the disk a player naturally opens first, was the one that could not
+/// work. Measured on the three volumes of *Zork Zero* release 393 / serial
+/// 890714 (three independent FAT12 filesystems, not one container paged across
+/// them):
+///
+/// | volume | files | before |
+/// | --- | --- | --- |
+/// | Disk 1 | `INSTALL.EXE`, `EZR.EXE`, `IZORK0.RUN`, `ZORK0.CG1` | no story |
+/// | Disk 2 | `ZORK0.ZIP`, `ZORKZERO.EXE` | the game |
+/// | Disk 3 | `ZORK0.EG1` | no story |
+///
+/// The 720K press of the same build is the mirror: two volumes, the story on
+/// disk 1 and CGA's plates alone on disk 2.
+///
+/// FALSIFICATION: drop `story_elsewhere_in_the_release` from
+/// `cli_host::disk_set::mount_at` and every volume but the story's own fails
+/// with `no story file on the disk image … (4 files on ZORK0 1; is this the boot
+/// disk?)`.
+#[test]
+fn every_volume_of_a_one_game_set_opens_its_game() {
+    // (the volume to name, whether the story is physically on it)
+    const PRESSES: &[(&str, bool)] = &[
+        ("(360K) (Disk 1)", false),
+        ("(360K) (Disk 2)", true),
+        ("(360K) (Disk 3)", false),
+        ("(720K) (Disk 1)", true),
+        ("(720K) (Disk 2)", false),
+    ];
+    let mut ran = 0;
+    let mut off_a_sibling = 0;
+    for (press, carries_it) in PRESSES {
+        let path = stories_dir().join(format!(
+            "Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) {press} [!].ima"
+        ));
+        if !path.is_file() {
+            continue;
+        }
+        ran += 1;
+        // The premise, checked rather than assumed: only the story's own volume
+        // answers when the set is not consulted.
+        let raw = std::fs::read(&path).expect("the volume reads");
+        let alone = blorb::medium::MountedDisk::mount(raw).expect("it mounts");
+        assert_eq!(
+            !alone.stories().is_empty(),
+            *carries_it,
+            "{press}: the premise moved — which volume physically carries the story",
+        );
+        if !carries_it {
+            off_a_sibling += 1;
+        }
+
+        let (loaded, image) =
+            app::hints::load_mounted_story(&path).unwrap_or_else(|e| panic!("{press}: {e}"));
+        let bytes = loaded.bytes();
+        assert_eq!(bytes[0], 6, "{press}: Zork Zero is a Version 6 story");
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 393, "{press}: release");
+        assert_eq!(&bytes[0x12..0x18], b"890714", "{press}: serial");
+        // The medium comes from the mount that answered, and on a DOS press
+        // every volume is the same FAT12 filesystem either way.
+        assert_eq!(image, Some(blorb::medium::DiskImage::Fat12Dos), "{press}: medium");
+    }
+    // `ran == 0` is the gitignored-media skip; anything else must have exercised
+    // at least one volume that does NOT carry the story, or nothing was proved.
+    assert!(
+        off_a_sibling > 0 || ran == 0,
+        "every volume that ran already carried the story — nothing was proved",
+    );
+}
+
 // ── Dedupe: the same build twice is one row ──────────────────────────────────
 
 /// **The measured duplication.** Trinity, Lurking Horror, Moonmist, Stationfall,
