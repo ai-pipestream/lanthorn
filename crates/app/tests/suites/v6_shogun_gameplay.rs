@@ -16,6 +16,9 @@
 //! DECLINED, which is exactly why three colour-driven render regressions
 //! shipped unseen. The theme-only `false` path is covered by the paired cases
 //! in `v6_game_colour_regression.rs`.)
+//!
+//! **Palette: `Standard`, set rather than assumed** (SQ-0958) — see
+//! [`standard_palette`] for what reading an inherited one cost here.
 
 use std::path::PathBuf;
 
@@ -30,6 +33,36 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
+/// `zvm::screen::set_palette` is process-global, so no two cases here may boot at
+/// once, and no case here may run beside a sibling suite that installs a machine's
+/// table (SQ-0904/SQ-0905).
+static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
+
+/// Take the shared lock and install the palette this suite assumes.
+///
+/// **Palette: `Standard`, set rather than assumed** (SQ-0958). Every colour these
+/// cases assert is a z-colour resolved through the process-global palette, and until
+/// now the suite neither set one nor took the lock: it read whatever the last suite
+/// in the `v6_shogun` group binary happened to leave behind. Six of its siblings —
+/// `v6_shogun_room_art`, `_title_header`, `_menu_ground`, `_prompt_style`,
+/// `_status_alignment`, `_credit_replay` — boot a machine press and install that
+/// machine's table. The one that bit is `v6_shogun_title_header`, which boots THIS
+/// VERY STORY FILE (`shogun-r322-s890706.z6`) under `InterpreterProfile::IbmPc` and
+/// so installs the IBM YZIP table: under `cargo test` (one process, parallel threads)
+/// two cases here read EGA white, `Rgb(173, 173, 173)`, where §8.3.1's white is
+/// `#FFFFFF` — `shogun_hybrid_status_band_floods_game_background` every run measured
+/// and `shogun_raster_status_band_floods_game_white` about one in three. That is the
+/// READER half of SQ-0905, which `palette_lock_discipline` cannot see because it is
+/// an absence, not a call.
+///
+/// Shogun's bare story file names no machine, so its colour numbers resolve through
+/// ZMSD §8.3.1's own table — which is what every assertion below was written against.
+fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+    let guard = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    zvm::screen::set_palette(zvm::screen::Palette::Standard);
+    guard
+}
+
 /// All control chars (except newline) in `s` — must always be empty for
 /// anything the renderer will touch.
 fn ctrl_chars(s: &str) -> Vec<char> {
@@ -38,6 +71,7 @@ fn ctrl_chars(s: &str) -> Vec<char> {
 
 #[test]
 fn shogun_boots_plays_and_emits_no_control_chars() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -137,6 +171,7 @@ fn shogun_boots_plays_and_emits_no_control_chars() {
 /// left in a narrowed column, the picture pinned near the right edge.
 #[test]
 fn shogun_opening_is_a_right_margin_float() {
+    let _g = standard_palette();
     use app::inline_image::ImageAlign;
     use app::session::TranscriptElem;
 
@@ -220,6 +255,7 @@ fn shogun_opening_is_a_right_margin_float() {
 /// cleared" report).
 #[test]
 fn shogun_boot_menu_items_paint_horizontally_and_splash_clears() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -276,6 +312,7 @@ fn shogun_boot_menu_items_paint_horizontally_and_splash_clears() {
 /// down to native row 21 — travels with that box, three rows up.
 #[test]
 fn shogun_frameless_boot_menu_paints_items_and_caret() {
+    let _g = standard_palette();
     use ratatui::style::Modifier;
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
@@ -360,6 +397,7 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
 /// composite paints in raster mode, gaps between the words included.
 #[test]
 fn shogun_hybrid_boot_menu_is_one_coherent_ring_screen_with_a_solid_selection_bar() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -478,6 +516,7 @@ fn shogun_hybrid_boot_menu_is_one_coherent_ring_screen_with_a_solid_selection_ba
 /// carries a space with the band's background style (not a leftover/default cell).
 #[test]
 fn shogun_frameless_status_band_fills_row_background() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -539,6 +578,7 @@ fn shogun_frameless_status_band_fills_row_background() {
 /// only behind the glyphs. Pins that the band reads as one solid white panel.
 #[test]
 fn shogun_hybrid_status_band_floods_game_background() {
+    let _g = standard_palette();
     use ratatui::style::Color;
 
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
@@ -633,6 +673,7 @@ fn shogun_hybrid_status_band_floods_game_background() {
 /// text-less float tail to the real prompt row.
 #[test]
 fn shogun_input_caret_sits_on_the_prompt_row_beside_a_tall_float() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -722,6 +763,7 @@ fn shogun_input_caret_sits_on_the_prompt_row_beside_a_tall_float() {
 /// structure and the two lines arrive adjacent at any pane size.
 #[test]
 fn shogun_hybrid_status_band_rows_stay_adjacent_at_a_large_pane() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -784,6 +826,7 @@ fn shogun_hybrid_status_band_rows_stay_adjacent_at_a_large_pane() {
 /// for the scrollbar → 75), top row 3, extended to row 40).
 #[test]
 fn shogun_hybrid_tall_pane_frame_reclaim() {
+    let _g = standard_palette();
     use ratatui::layout::Rect;
     use ratatui::style::Color;
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
@@ -842,6 +885,7 @@ fn shogun_hybrid_tall_pane_frame_reclaim() {
 /// run into the left 40 columns.
 #[test]
 fn shogun_frameless_status_band_anchors_left_center_right() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -909,6 +953,7 @@ fn shogun_frameless_status_band_anchors_left_center_right() {
 /// pixel in a bare gap between two band runs on native row 0.
 #[test]
 fn shogun_raster_status_band_floods_game_white() {
+    let _g = standard_palette();
     use app::engine::{PxText, WinNode};
     use app::render::v6_layout as v6;
     use image::Rgba;
@@ -999,6 +1044,7 @@ fn shogun_raster_status_band_floods_game_white() {
 /// into the synthesized bitmap faces, instead of drawing everything roman.
 #[test]
 fn shogun_prose_emphasis_reaches_the_raster_faces() {
+    let _g = standard_palette();
     use app::render::v6_layout as v6;
 
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
@@ -1106,6 +1152,7 @@ fn shogun_prose_emphasis_reaches_the_raster_faces() {
 /// against the left's `8x35 at (0,2)`, and the case reports the row spans differing.
 #[test]
 fn shogun_ornament_columns_are_one_strip_and_span_the_same_rows() {
+    let _g = standard_palette();
     let story_path = stories_dir().join("shogun-r322-s890706.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
