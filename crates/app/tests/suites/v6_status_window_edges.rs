@@ -255,3 +255,93 @@ fn shoguns_chrome_canvas_keeps_the_status_page_off_the_ring() {
          measuring a canvas that never had one"
     );
 }
+
+// ── SQ-0949: a ribbon reaches as far as its own window and no further ────────
+
+/// Arthur's poles run through the status row unbroken, and the ribbon stops short of
+/// them — at every pane, in both colour modes.
+///
+/// The pole is native columns 6..10 (left) and 630..634 (right) of 640; the status
+/// window is native 28..612. So the flank keeps its columns on the ribbon's row, and
+/// the band that draws them is ONE piece spanning the rows above and below it rather
+/// than two with the ribbon between.
+///
+/// FALSIFY by dropping the `row_spans` clause from `ChromeRowOracle::blocked`: the
+/// ribbon takes the whole pane, the flank's cells on that row become the strip's
+/// ground, and the assertion below reports the row as bare at both edges.
+#[test]
+fn arthurs_poles_run_through_the_status_row_unbroken() {
+    let _g = app::v6_palette(InterpreterProfile::IbmPc.palette());
+    let Some(session) = boot("arthur-r74-s890714.z6", 13, 12) else { return };
+    let model = session.screen();
+    let Some((sx, sy, sw, sh)) = status_window(&model, "Churchyard") else {
+        panic!(
+            "twelve taps in, Arthur is at the Churchyard and his status window carries its \
+             name — the frame this case is about"
+        )
+    };
+    assert_eq!(
+        (sx, sy, sw, sh),
+        (28, 192, 584, 16),
+        "the specimen is the status window at native (28,192) 584x16 — 91% of the \
+         screen, so it reads as a BAR, and 28 native columns short of each edge, which \
+         is where the poles are"
+    );
+
+    let mut checked = 0usize;
+    for honor in [true, false] {
+        for (cols, rows) in [(115u16, 37u16), (98, 37), (143, 47), (80, 25)] {
+            let (area, buf) = render(&model, honor, cols, rows);
+            let row_text = |y: u16| -> String {
+                (0..area.width)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+                    .collect()
+            };
+            let Some(status_y) = (0..area.height).find(|&y| row_text(y).contains("Anne")) else {
+                panic!("{cols}x{rows} honor={honor}: the status date must reach the cell layer")
+            };
+            let where_ = format!("{cols}x{rows} honor={honor}");
+
+            // The frame's own columns on the ribbon's row still belong to the ring.
+            let band_cols: Vec<u16> = (0..area.width)
+                .filter(|&x| is_band_cell(buf.cell((x, status_y)).unwrap()))
+                .collect();
+            assert!(
+                band_cols.first().is_some_and(|&c| c == 0),
+                "{where_}: the ribbon stops at its window, so the pane's first column on \
+                 the status row is still the flank's band\nrow: {:?}",
+                row_text(status_y)
+            );
+            assert!(
+                band_cols.last().is_some_and(|&c| c + 1 == area.width),
+                "{where_}: …and so is its last\nrow: {:?}",
+                row_text(status_y)
+            );
+
+            // …and the pole is CONTINUOUS across the seam: the same column carries the
+            // ring's band on the row above the ribbon, on the ribbon's own row, and on
+            // the row below. That is the step the report describes.
+            for y in [status_y - 1, status_y, status_y + 1] {
+                assert!(
+                    is_band_cell(buf.cell((0, y)).unwrap()),
+                    "{where_}: column 0 must be the flank's band on rows {}..={} — the pole \
+                     runs from the panel's foot to the bottom of the screen without the \
+                     ribbon cutting it in two\nrow {y}: {:?}",
+                    status_y - 1,
+                    status_y + 1,
+                    row_text(y)
+                );
+            }
+
+            // The ribbon itself is intact: the room name survived the strip's narrower
+            // rect rather than being dropped with the padding cell in front of it.
+            assert!(
+                row_text(status_y).contains("Churchyard"),
+                "{where_}: the location must still read as one word\nrow: {:?}",
+                row_text(status_y)
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 8, "every pane and colour mode was measured");
+}

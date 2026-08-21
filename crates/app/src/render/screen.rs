@@ -1128,6 +1128,26 @@ fn render_node(
                         )
                         .into_keys()
                         .collect();
+                        // …and how far the chrome text on each native row can REACH: the
+                        // native columns its own windows span (SQ-0949). A ribbon is as
+                        // wide as its window and no wider, and the flank veto has to know
+                        // that — Arthur's status window is 584 of 640 native columns, so it
+                        // reads as a bar and still stops 28 columns short of each edge,
+                        // which is exactly where his poles stand.
+                        let row_spans: std::collections::HashMap<u16, (u16, u16)> = {
+                            let mut m: std::collections::HashMap<u16, (u16, u16)> = Default::default();
+                            for pw in &layout.chrome {
+                                let WinNode::Grid(g) = &pw.node else { continue };
+                                let span = (pw.x_px, pw.x_px.saturating_add(pw.w_px));
+                                for t in &g.px_texts {
+                                    let row = (t.y.max(1) - 1) / 16;
+                                    let e = m.entry(row).or_insert(span);
+                                    e.0 = e.0.min(span.0);
+                                    e.1 = e.1.max(span.1);
+                                }
+                            }
+                            m
+                        };
                         // SQ-0894: the ring is carved by what the chrome CONTAINS, not as
                         // the story viewport's complement, so each flank is one column over
                         // every contiguous row of art it may own.
@@ -1141,6 +1161,7 @@ fn render_node(
                             gfx: &gfx,
                             runs: &chrome_runs,
                             bar_rows: &bar_rows,
+                            row_spans: &row_spans,
                         };
                         let bands = content_ring_bands(area, viewport, menu.is_some(), &row_oracle);
                         // SQ-0505: in the Menu plan the bottom band IS the command
@@ -6092,6 +6113,9 @@ struct ChromeRowOracle<'a, 'b> {
     /// screen and the game either asked for reverse video or the window is a status
     /// STRIP. SQ-0515's own rule, reused rather than restated (SQ-0894).
     bar_rows: &'a std::collections::HashSet<u16>,
+    /// The native `[x0, x1)` columns the chrome WINDOWS contributing runs to each
+    /// native text row span between them — a ribbon's own reach (SQ-0949).
+    row_spans: &'a std::collections::HashMap<u16, (u16, u16)>,
 }
 
 impl<'b> ChromeRowOracle<'_, 'b> {
@@ -6197,24 +6221,63 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     /// A row whose runs sit OVER art is not text at all (`class` says `Art`) and has
     /// never blocked anything; that stays true.
     ///
-    /// A BAR blocks whatever its glyphs do. `full_width_flood_rows` (SQ-0515) is the
+    /// A BAR blocks whatever its glyphs do, **as far as its own WINDOW reaches and no
+    /// further** (SQ-0515, bounded by SQ-0949). `full_width_flood_rows` is the
     /// existing, derived answer to "is this row a ribbon the game draws edge to edge
     /// or a block of text standing in the middle of the screen", and the distinction
     /// it already makes is exactly the one a flank needs: Arthur's status window is
     /// 584 of 640 native columns and reads as one solid ribbon whose glyphs stop well
-    /// short of both ends, so it reaches the poles even though its text does not;
-    /// Shogun's credits are a 432-column block and reach nothing. Without this clause
-    /// Arthur's ribbon comes back holed at both ends
-    /// (`arthur_hybrid_status_row_is_solid_terminal_bar` measured the holes at cells
-    /// 0..3 and 76..79 of an 80-column pane), which is the first of the three
-    /// regressions the earlier attempt at this relaxation hit.
+    /// short of both ends, so it reaches past them even though its text does not;
+    /// Shogun's credits are a 432-column block and reach nothing.
+    ///
+    /// SQ-0949 is the other end of that sentence. Read as "a bar owns the whole row",
+    /// the clause gave Arthur's ribbon the pane's full width — flooding the strip's
+    /// ground straight across both poles and cutting each flank into a piece above the
+    /// bar and a piece below it, which is the step the report describes as the side
+    /// strip not lining up with the panel above it. The bar's window is native
+    /// `28..612` of 640 and stops there on the machine: measured on
+    /// `machine-screenshots/dos-arthur.png` (the EGA press at the Churchyard, "Merlin
+    /// disappears"), the white ribbon spans native **28..610** and the grey pole rule
+    /// stands beside it at native **6.5..8.7**, unbroken from the panel's foot to the
+    /// screen's; `machine-screenshots/mac-arthur.jpg` shows the same frame with the
+    /// black ribbon inset and the green poles running past both of its ends.
+    ///
+    /// So the reach is the window's span quantized INWARD — the cells a strip's ground
+    /// can honestly claim, `ceil` on the left and `floor` on the right, the same
+    /// rounding the viewport takes. That keeps the ribbon solid wherever its window
+    /// really is edge to edge and hands the sub-cell remainder back to the flank,
+    /// which is where the artwork is.
     fn blocked(&self, row: u16, cols: (u16, u16)) -> bool {
         match self.class(row) {
-            RowClass::Text(rr) => rr
-                .iter()
-                .any(|t| self.bar_rows.contains(&((t.y.max(1) - 1) / 16)) || self.reaches(t, cols)),
+            RowClass::Text(rr) => rr.iter().any(|t| {
+                let native_row = (t.y.max(1) - 1) / 16;
+                // A BAR reaches as far as its own WINDOW and no further (SQ-0949) —
+                // and only a bar takes this branch. A row of ordinary chrome text is
+                // still judged by where its GLYPHS stand: the window a run sits in
+                // says nothing about a block of credits centred inside it, and
+                // Shogun's own status band is 548 of 640 native columns, under the
+                // bar threshold, with its first glyph straddling the flank's last
+                // cell — measured on `James Clavell's Shogun.adf` (release 295) at a
+                // 70-column pane, judging that row by its window instead lost the
+                // `E` of `Erasmus:` to the flank.
+                if self.bar_rows.contains(&native_row) {
+                    return self.row_spans.get(&native_row).is_none_or(|&s| self.span_reaches(s, cols));
+                }
+                self.reaches(t, cols)
+            }),
             _ => false,
         }
+    }
+
+    /// Does a native `[x0, x1)` span, quantized inward to whole pane cells, stand in
+    /// `cols`? See [`blocked`](Self::blocked) — this is a bar's reach, as against
+    /// [`reaches`](Self::reaches), which is one run's glyphs.
+    fn span_reaches(&self, native: (u16, u16), cols: (u16, u16)) -> bool {
+        let cw = self.cell_px.0.max(1) as f32;
+        let dev = |n: u16| (self.pane.x as f32 * cw + self.scale.off_x as f32 + n as f32 * self.scale.s) / cw;
+        let c0 = dev(native.0).ceil() as i32;
+        let c1 = dev(native.1).floor() as i32;
+        c1 > cols.0 as i32 && c0 < cols.1 as i32
     }
 
     /// SQ-0508's bridge, asked of the whole pane rather than of one band: an EMPTY
@@ -7224,9 +7287,20 @@ fn draw_chrome_text_strip(
             claimed.iter().any(|&(j, (lo, hi), word)| word && j != i && c >= lo && c < hi)
         };
         for (i, ((t, rule), &(col, end))) in row_runs.iter().zip(&spans).enumerate() {
-            if col < rect.x as i32 || col >= rect.right() as i32 {
+            if col >= rect.right() as i32 || end <= rect.x as i32 {
                 continue;
             }
+            // SQ-0949: a run that STARTS left of the strip is clipped, not dropped.
+            //
+            // The strip no longer always spans the pane — a ribbon reaches as far as
+            // its own window and the flank keeps the sub-cell remainder beside it
+            // (`ChromeRowOracle::blocked`) — so a run positioned through the scale can
+            // begin one column outside a strip it is otherwise entirely inside.
+            // Arthur's status band is the case: its window opens at native 28, which
+            // is column 5.03 at a 115-column pane, and the whole `Churchyard` fragment
+            // was thrown away for the sake of the padding cell in front of it.
+            let clip = (rect.x as i32 - col).max(0) as usize;
+            let col = col + clip as i32;
             let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
             let max_w = rect.right() as usize - col as usize;
             if max_w == 0 {
@@ -7238,7 +7312,7 @@ fn draw_chrome_text_strip(
                 continue;
             }
             // Untrusted game text (SQ-0639).
-            let text = crate::render::blank_control_chars(&t.text);
+            let text: String = crate::render::blank_control_chars(&t.text).chars().skip(clip).collect();
             if t.text.trim().is_empty() {
                 for (k, ch) in text.chars().take(max_w).enumerate() {
                     let c = col + k as i32;
@@ -7249,7 +7323,7 @@ fn draw_chrome_text_strip(
             } else if text.chars().count() == 1 && over_word(i, col) {
                 continue;
             } else {
-                buf.set_stringn(col as u16, *row as u16, text.as_ref(), max_w, style);
+                buf.set_stringn(col as u16, *row as u16, text.as_str(), max_w, style);
             }
         }
     }
