@@ -765,6 +765,111 @@ fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
     assert!(!any || seen > 0, "a CGA volume is on disk but no frame was rendered");
 }
 
+/// **The pair is settled BEFORE the story loads, and nothing re-derives it**
+/// (SQ-0956, the user's own requirement: *"setup our colors before the story is
+/// loaded, then we shouldn't have a bunch of different paths when the story is
+/// actually running"*).
+///
+/// Two halves, and the first is an ORDERING that source alone can state. In
+/// `startup.rs` the host pair is bound sixty lines before the archive that decides
+/// it exists — `host_default_colours` at the top, `picts` further down — so a
+/// change made where the binding *reads* would keep the EGA pair and the bare-`.z6`
+/// pins would not notice, because there is no archive there and the answer is the
+/// same either way. The card's pair is therefore assigned after `picts` and before
+/// `GameSession::new_with_art_scale`, which is the call that runs the story to its
+/// first prompt. This case reads the file and asserts that order.
+///
+/// The second half is a COUNT: `PictSource::two_colour_card_screen` is the only
+/// thing that decides the pair, and it has exactly two callers — `startup.rs` at
+/// boot and `reset.rs` on an `@restart`, both of which rebuild the session. Nothing
+/// in `render/`, nothing per-frame, nothing the running game can reach. The runtime
+/// poller that DOES write `$2C`/`$2D` (`loop_tick::poll_zvm_default_colours`)
+/// returns early on any launch with a licensed machine, and a launch that reaches
+/// the card is licensed by construction — so it has already returned.
+///
+/// A source-level case for the same reason `palette_lock_discipline` is one: the
+/// hazard is an ABSENCE (a caller that should not exist, an assignment that moved
+/// back up), and no frame can be rendered that shows it.
+#[test]
+fn the_cards_pair_is_settled_before_the_story_loads() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let startup = std::fs::read_to_string(root.join("crates/app/src/startup.rs"))
+        .expect("startup.rs is in the tree");
+    let at = |needle: &str| {
+        startup.find(needle).unwrap_or_else(|| panic!("startup.rs no longer contains {needle:?}"))
+    };
+    let picts = at("let mut picts = ");
+    let decide = at("picts.two_colour_card_screen(&cfg)");
+    let assign = at("host_default_colours = Some(pair)");
+    let boot = at("GameSession::new_with_art_scale(");
+    assert!(
+        picts < decide,
+        "the archive must exist before it can name a card — the decision moved above `picts`",
+    );
+    assert!(
+        assign < boot,
+        "the pair must be in hand before the constructor runs the story to its first prompt",
+    );
+    assert!(decide < assign && assign < boot, "…and in that order");
+
+    // The whole workspace, so a third caller anywhere fails this rather than
+    // quietly re-deriving the pair while a game runs.
+    let mut callers: Vec<String> = Vec::new();
+    let mut stack = vec![root.join("crates")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                for line in text.lines() {
+                    // The definition, its doc comment and this very case are not
+                    // calls; a call is the method on a value.
+                    if line.contains(".two_colour_card_screen(") && !line.trim_start().starts_with("//") {
+                        callers.push(format!("{}: {}", path.display(), line.trim()));
+                    }
+                }
+            }
+        }
+    }
+    let production: Vec<&String> =
+        callers.iter().filter(|c| !c.contains("/tests/")).collect();
+    assert_eq!(
+        production.len(),
+        2,
+        "the pair is decided in ONE function with exactly two callers — boot and \
+         restart, both of which rebuild the session. Found:\n{}",
+        callers.join("\n"),
+    );
+    assert!(
+        production.iter().any(|c| c.contains("startup.rs"))
+            && production.iter().any(|c| c.contains("reset.rs")),
+        "…and they are `startup.rs` and `reset.rs`. Found:\n{}",
+        callers.join("\n"),
+    );
+
+    // And the runtime poller stands down for a licensed machine, which every
+    // launch showing a card is.
+    let loop_tick = std::fs::read_to_string(root.join("crates/app/src/loop_tick.rs"))
+        .expect("loop_tick.rs is in the tree");
+    let poller = loop_tick
+        .split("pub(crate) fn poll_zvm_default_colours")
+        .nth(1)
+        .expect("the poller is still there");
+    let body = &poller[..poller.find("\n}\n").expect("its end")];
+    assert!(
+        body.contains("state.config.machine_default_colours().is_some()")
+            && body.contains("return"),
+        "the only runtime writer of $2C/$2D must still stand down for a licensed \
+         machine, or a CGA launch's pair would be overwritten mid-run",
+    );
+}
+
 /// **The `color` command, which is the regression this quest was reopened for**
 /// (SQ-0956, and SQ-0957's mechanism).
 ///

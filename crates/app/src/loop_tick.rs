@@ -180,6 +180,17 @@ pub(crate) fn poll_zvm_default_colours(session: &mut dyn Engine, state: &AppStat
     // The Amiga profile reports the Amiga's default page and ink, which is the
     // whole point of claiming to be one; letting a style reload overwrite them
     // with the user's terminal colours would undo it on the next tick.
+    //
+    // SQ-0956: which is also what keeps a two-colour CARD's pair out of this
+    // poller's reach, and it is worth saying rather than leaving to be noticed.
+    // `startup.rs` decides that pair ONCE, from the archive, before the session
+    // constructor runs the story — `PictSource::two_colour_card_screen`, whose only
+    // other caller is the `@restart` rebuild — and a launch that reaches it is a
+    // licensed one BY CONSTRUCTION, since the card's pair comes through
+    // `machine_two_colour_colours` and that is gated on the same licence. So the
+    // line below has already returned by the time any CGA launch gets here, and the
+    // header keeps the card's black under white for the whole run. Anyone loosening
+    // this guard has to give the card its own.
     if state.config.machine_default_colours().is_some() {
         return;
     }
