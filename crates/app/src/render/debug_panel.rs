@@ -207,6 +207,9 @@ fn draw_objects(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPan
                 let Some(line) = det.get(*di) else { continue };
                 let indented = format!("    {line}");
                 draw_str_clipped(buf, content.x, y, &indented, body, content);
+                // The `entry @0x……` line underlines like any other address link
+                // (SQ-0975); the 4-col indent offsets the line text.
+                underline_clickables(buf, content.x + 4, y, line, body, Section::Objects, content);
             }
         }
     }
@@ -967,6 +970,36 @@ mod tests {
         let cell = buf.cell((content.x + 2, content.y)).unwrap(); // past "▼ "
         assert_eq!(cell.symbol(), "[");
         assert!(!cell.style().add_modifier.contains(Modifier::UNDERLINED), "tree line must not be underlined");
+    }
+
+    /// SQ-0975: the expanded detail's `entry @0x……` is a real link — the only
+    /// route to the §12.3 entry now the tree row points at the property table —
+    /// so it draws underlined like every other address link.
+    #[test]
+    fn an_expanded_objects_detail_underlines_its_entry_address_link() {
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.tab[1] = crate::debug_panel::locate_section(crate::debug_panel::Section::Objects).1;
+        panel.snapshot.objects = vec!["@0x000340 [1] lamp".into()];
+        panel.expanded_objects = std::collections::HashSet::from([1u16]);
+        panel.snapshot.object_details.insert(1, vec!["entry @0x000110".into()]);
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let [_, top, _] = crate::debug_panel::window_rects(area);
+        let content = Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), top.height.saturating_sub(2));
+        // Detail row (y + 1) draws under a 4-column indent; "entry " is 6 more.
+        let x = content.x + 4 + 6;
+        let cell = buf.cell((x, content.y + 1)).unwrap();
+        assert_eq!(cell.symbol(), "@", "the entry link starts here");
+        assert!(
+            cell.style().add_modifier.contains(Modifier::UNDERLINED),
+            "the entry address underlines like the link it is",
+        );
     }
 
     #[test]
