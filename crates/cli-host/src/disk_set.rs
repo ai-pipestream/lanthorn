@@ -331,7 +331,59 @@ pub fn members_indexed(path: &Path) -> Option<Vec<(u64, PathBuf)>> {
 /// so an ordinary floppy and every volume of a compilation cost exactly the one
 /// read they always did — which is what keeps a library scan from reading seven
 /// 800 KB floppies per row.
+///
+/// # And when the release keeps the story on a volume of its own (SQ-0941)
+///
+/// `mount_set` answers for a story the release *pages* across its volumes, which
+/// is the Apple II and Commodore case above. It cannot answer for a release
+/// whose volumes are independent filesystems holding distinct files, because
+/// there is no container spanning them to reassemble — and that is the DOS
+/// press, where the story sits whole on one floppy and the others carry the
+/// installer and the artwork. Measured on the 360K *Zork Zero* (release 393 /
+/// serial 890714), three separate FAT12 volumes:
+///
+/// | volume | files | opened |
+/// | --- | --- | --- |
+/// | Disk 1 | `INSTALL.EXE`, `EZR.EXE`, `IZORK0.RUN`, `ZORK0.CG1` | nothing |
+/// | Disk 2 | `ZORK0.ZIP`, `ZORKZERO.EXE` | the game |
+/// | Disk 3 | `ZORK0.EG1` | nothing |
+///
+/// **Disk 1 is the disk a player opens** — it is the one with the installer on
+/// it — and it was the one that could not work. So a volume with no story of its
+/// own now asks [`members_indexed`] for its release's other volumes and takes
+/// the story off whichever one has it. The set is already known here and the
+/// siblings are already reachable; this is the same question asked one call site
+/// later.
+///
+/// **Only when the release carries exactly one game**, which is
+/// `app::assets::volumes`'s threshold and is here for the same reason: widening
+/// across *The Lost Treasures of Infocom* would hand whoever opened its launcher
+/// disk one of thirty unrelated games. A shelf is a browser's job, not a
+/// mount's, and the count stops at the second story rather than mounting the
+/// rest of the set.
+///
+/// The siblings are mounted **plainly**, not across the set, and that is exact
+/// rather than thrifty: a story the release pages across its volumes was already
+/// found above, from whichever volume was named, so the only thing left to look
+/// for is a story a sibling holds on its own.
 pub fn mount_at(
+    path: &Path,
+    raw: Vec<u8>,
+) -> Result<blorb::medium::MountedDisk, blorb::medium::MountError> {
+    let disk = mount_one(path, raw)?;
+    if !disk.stories().is_empty() {
+        return Ok(disk);
+    }
+    // Nothing here and nothing paged across the set: the release's other volumes
+    // are the last place to look, and the mount this volume gave is what we keep
+    // when they have nothing either — so an error message still describes the
+    // disk the player named.
+    Ok(story_elsewhere_in_the_release(path).unwrap_or(disk))
+}
+
+/// [`mount_at`] without the widening: one named volume, opened with its set's
+/// other volumes offered to the container that spans them.
+fn mount_one(
     path: &Path,
     raw: Vec<u8>,
 ) -> Result<blorb::medium::MountedDisk, blorb::medium::MountError> {
@@ -343,6 +395,32 @@ pub fn mount_at(
             .filter_map(|m| std::fs::read(m).ok())
             .collect()
     })
+}
+
+/// The volume of `path`'s release that carries the one story the release holds,
+/// or `None` when it is in no set, when no sibling has a story, or when the set
+/// turns out to be a shelf of several (SQ-0941).
+///
+/// [`members_indexed`] is in disk order, so the volume that answers is the
+/// lowest-numbered one that has a story — but the single-game rule makes that a
+/// property rather than a preference: there is only ever one to find.
+fn story_elsewhere_in_the_release(path: &Path) -> Option<blorb::medium::MountedDisk> {
+    let mut found: Option<blorb::medium::MountedDisk> = None;
+    for (_, m) in members_indexed(path)? {
+        if m == path {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&m) else { continue };
+        let Ok(disk) = blorb::medium::MountedDisk::mount(raw) else { continue };
+        match disk.stories().len() {
+            0 => {}
+            1 if found.is_none() => found = Some(disk),
+            // A second game: this is a compilation, and no volume of it speaks
+            // for another. Refused whole rather than resolved by picking one.
+            _ => return None,
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -611,5 +689,167 @@ mod tests {
         }
         // …and on its own it is still nothing, digit run notwithstanding.
         assert!(group(&paths(&[RAW])).is_empty());
+    }
+
+    // ── Opening from a volume that carries no story (SQ-0941) ────────────────
+    //
+    // The real case is the DOS *Zork Zero* press, whose three volumes are three
+    // independent FAT12 filesystems — see [`mount_at`] for the measurement. The
+    // media are gitignored, so the shape is reproduced here on synthetic
+    // AmigaDOS floppies, which is the cheapest image this crate can mount.
+
+    /// AmigaDOS block size.
+    const BSIZE: usize = 512;
+    /// Blocks on a DD floppy.
+    const DD_BLOCKS: usize = 1760;
+
+    /// The smallest AmigaDOS (FFS) image `blorb` will mount and list: a
+    /// bootblock, then one header block per file naming its data blocks in the
+    /// reverse-order table at `BSIZE-204`. Files are small enough never to need
+    /// an extension block, and the reader finds headers by scanning, so no root
+    /// block is needed.
+    fn floppy(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut image = vec![0u8; DD_BLOCKS * BSIZE];
+        image[0..3].copy_from_slice(b"DOS");
+        image[3] = 1; // FFS: a data block is its raw payload
+        let mut next = 881;
+        let put32 = |image: &mut Vec<u8>, block: usize, off: usize, v: u32| {
+            let at = block * BSIZE + off;
+            image[at..at + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        for (name, data) in files {
+            let header = next;
+            next += 1;
+            put32(&mut image, header, 0, 2); // T_HEADER
+            put32(&mut image, header, 4, header as u32);
+            put32(&mut image, header, BSIZE - 4, 0xFFFF_FFFD); // ST_FILE
+            put32(&mut image, header, BSIZE - 188, data.len() as u32);
+            let at = header * BSIZE + BSIZE - 80;
+            image[at] = name.len() as u8;
+            image[at + 1..at + 1 + name.len()].copy_from_slice(name.as_bytes());
+            for (i, chunk) in data.chunks(BSIZE).enumerate() {
+                let db = next;
+                next += 1;
+                let at = db * BSIZE;
+                image[at..at + chunk.len()].copy_from_slice(chunk);
+                put32(&mut image, header, BSIZE - 204 - 4 * i, db as u32);
+            }
+            put32(&mut image, header, 8, data.len().div_ceil(BSIZE) as u32);
+        }
+        image
+    }
+
+    /// A Version 3 story, only as far as `blorb`'s own sniff looks: header
+    /// fields consistent enough for `blorb::adf::looks_like_zcode`, with the
+    /// release word carrying `release` so two of these can be told apart.
+    fn zcode(release: u16) -> Vec<u8> {
+        let mut b = vec![0u8; 0x400];
+        b[0x00] = 3;
+        b[0x02..0x04].copy_from_slice(&release.to_be_bytes());
+        let mut word = |o: usize, v: u16| b[o..o + 2].copy_from_slice(&v.to_be_bytes());
+        word(0x04, 0x0400); // high memory
+        word(0x06, 0x0040); // initial PC
+        word(0x08, 0x0300); // dictionary
+        word(0x0a, 0x0100); // objects
+        word(0x0c, 0x0200); // globals
+        word(0x0e, 0x0280); // static memory base
+        word(0x18, 0x0060); // abbreviations
+        word(0x1a, 0x0200); // declared length, in v3's two-byte units
+        b[0x12..0x18].copy_from_slice(b"890714");
+        b
+    }
+
+    /// One synthetic volume of a press: the filename it is written under, and
+    /// the files on it.
+    type Platter<'a> = (&'a str, Vec<(&'a str, Vec<u8>)>);
+
+    /// A directory of its own, so `members_indexed`'s `read_dir` sees exactly
+    /// the volumes a case put there.
+    fn press(tag: &str, volumes: &[Platter<'_>]) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("lanthorn-sq0941-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, files) in volumes {
+            std::fs::write(dir.join(name), floppy(files)).unwrap();
+        }
+        dir
+    }
+
+    fn opened(path: &Path) -> Vec<String> {
+        let raw = std::fs::read(path).expect("the volume reads");
+        let disk = mount_at(path, raw).expect("the volume mounts");
+        disk.stories().into_iter().map(|s| s.name).collect()
+    }
+
+    /// **The defect.** Disk 1 of a DOS press carries the installer and one art
+    /// rendition; the story is whole on disk 2. Naming disk 1 — the disk a
+    /// player opens — must reach the game, not fail silently.
+    ///
+    /// FALSIFICATION: drop the `story_elsewhere_in_the_release` arm from
+    /// `mount_at` and disk 1 and disk 3 both report no story at all, which is
+    /// the symptom as measured on the 360K *Zork Zero* (r393/s890714).
+    #[test]
+    fn a_volume_with_no_story_opens_its_releases_only_game() {
+        let dir = press("one-game", &[
+            ("zork0_1.adf", vec![("Install", b"not a story".to_vec())]),
+            ("zork0_2.adf", vec![("Story.data", zcode(393))]),
+            ("zork0_3.adf", vec![("Art.eg1", b"not a story either".to_vec())]),
+        ]);
+        assert_eq!(opened(&dir.join("zork0_2.adf")), ["Story.data"], "the story's own disk");
+        assert_eq!(opened(&dir.join("zork0_1.adf")), ["Story.data"], "the installer disk");
+        assert_eq!(opened(&dir.join("zork0_3.adf")), ["Story.data"], "the artwork disk");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The guard.** A launcher disk on a *compilation* must stay a launcher
+    /// disk: the release holds several games and no volume of it speaks for
+    /// another, whether the second game is on the same sibling or on a later
+    /// one. Reaching for one would hand whoever opened *The Lost Treasures of
+    /// Infocom*'s disk 1 whichever of thirty games the scan happened to find
+    /// first; that shelf is the browser's to present.
+    #[test]
+    fn a_launcher_disk_on_a_shelf_reaches_for_nothing() {
+        let two_on_one = press("shelf-one-disk", &[
+            ("ltoi1.adf", vec![("Launcher", b"not a story".to_vec())]),
+            ("ltoi2.adf", vec![("Zork.I", zcode(88)), ("Zork.II", zcode(48))]),
+        ]);
+        assert!(opened(&two_on_one.join("ltoi1.adf")).is_empty(), "two games on one sibling");
+        let _ = std::fs::remove_dir_all(&two_on_one);
+
+        let one_each = press("shelf-two-disks", &[
+            ("shelf1.adf", vec![("Launcher", b"not a story".to_vec())]),
+            ("shelf2.adf", vec![("Zork.I", zcode(88))]),
+            ("shelf3.adf", vec![("Zork.II", zcode(48))]),
+        ]);
+        assert!(opened(&one_each.join("shelf1.adf")).is_empty(), "one game per sibling");
+        let _ = std::fs::remove_dir_all(&one_each);
+    }
+
+    /// **What does not move.** A volume that carries a game of its own answers
+    /// with it and never consults a sibling, and a lone disk with nothing on it
+    /// still has nothing on it — which is the message `zvm-cli` and the TUI both
+    /// print, and it must go on describing the disk the player named.
+    #[test]
+    fn a_volume_that_has_a_game_and_a_disk_that_is_in_no_set_are_unchanged() {
+        let dir = press("own-game", &[
+            ("press1.adf", vec![("Story.data", zcode(88))]),
+            ("press2.adf", vec![("Story.data", zcode(48))]),
+        ]);
+        // Two games, so nothing is widened anyway — but each volume answering
+        // with its OWN build is the property that says the sibling was never
+        // preferred to it.
+        for (vol, release) in [("press1.adf", 88u16), ("press2.adf", 48)] {
+            let path = dir.join(vol);
+            let raw = std::fs::read(&path).unwrap();
+            let disk = mount_at(&path, raw).unwrap();
+            let story = disk.story().expect("its own game");
+            assert_eq!(u16::from_be_bytes([story.bytes[2], story.bytes[3]]), release, "{vol}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let lone = press("lone", &[("boot.adf", vec![("Startup-Sequence", b"echo".to_vec())])]);
+        assert!(opened(&lone.join("boot.adf")).is_empty(), "a boot disk in no set");
+        let _ = std::fs::remove_dir_all(&lone);
     }
 }
