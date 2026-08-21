@@ -135,7 +135,6 @@ fn overpaint_lead_cells(s: &mut String) {
 mod protocol {
     use super::*;
     use crate::pty_stream::oracle::{self, Origin};
-    use crate::pty_stream::driver;
 
     /// The baseline: a run with its lead cell intact is an image, and the oracle
     /// says where. Without this direction the next test would pass for a
@@ -316,7 +315,7 @@ mod emitter {
     use app::engine::GraphicsWindow;
     use app::render::graphics::{GraphicsRender, kitty_picker};
 
-    use crate::pty_stream::{self, driver, oracle};
+    use crate::pty_stream::{self, oracle};
 
     const COLS: u16 = 40;
     const ROWS: u16 = 12;
@@ -549,7 +548,7 @@ mod emitter {
 /// and fails both z-order tests in opposite directions.
 mod raster {
     use super::*;
-    use crate::pty_stream::{driver, oracle, raster};
+    use crate::pty_stream::{oracle, raster};
 
     /// The screen's fill where nothing was written: `qwertty-term-vt`'s default
     /// palette entry 0, which is Ghostty's `Name::Black` — NOT pure black. Every

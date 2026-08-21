@@ -153,7 +153,14 @@ fn a_lone_volume_of_one_game_still_opens_it() {
     }
 
     let _ = std::fs::remove_dir_all(&base);
-    assert!(ran > 0, "no single-game fixture was reachable — this case would pass vacuously");
+    // Same shape as the case above: a fixture that IS present must have run, but a
+    // shelf that is absent skips vacuously. `stories/` and `treasures/` are
+    // gitignored, so on CI none of the three exist and this case has nothing to say.
+    let any = disk5.exists()
+        || ["Zork I - The Great Underground Empire.adf", "Zork Zero Disk.image"]
+            .iter()
+            .any(|n| repo_root().join("stories").join(n).exists());
+    assert!(ran > 0 || !any, "a fixture is present, none ran");
 }
 
 /// A **hybrid disc** keeps one row per machine for a build both sides carry.
