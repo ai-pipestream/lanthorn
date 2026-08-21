@@ -539,6 +539,21 @@ pub trait Debugger {
     /// never pops. Lets the Memory jump box dereference a variable to an address.
     fn var_value(&self, var: u8) -> Option<u16>;
 
+    /// The readable text the story's own tables place at byte address `addr`,
+    /// labelled with the table that named it — e.g. `dict word: "lantern"` or
+    /// `object 27 name: "brass lantern"`. `None` when nothing at `addr` is a
+    /// string the tables account for.
+    ///
+    /// The Memory view's char column maps one byte to one ZSCII code, but a
+    /// dictionary key and an object short name are Z-encoded — three 5-bit
+    /// Z-characters packed per 16-bit word — so that column shows noise over
+    /// exactly the entries the Objects/Dictionary tabs let you jump to, and a
+    /// jump has nothing readable to confirm it landed on the entry it named
+    /// (SQ-0448). Default `None`: engines with no Z-text (Glulx, Scott).
+    fn zstring_at(&self, _addr: u32) -> Option<String> {
+        None
+    }
+
     /// This engine's per-window inspector tab layout, or `None` to use the
     /// panel's default [`WINDOW_TABS`](crate::debug_panel::WINDOW_TABS). Each
     /// inner slice lists one window's tabs, in order; any [`Section`] not listed

@@ -171,6 +171,14 @@ pub struct DebugPanelState {
     /// when not editing; `Some` while the Memory tab's `:`/`/`-opened input
     /// line is active.
     pub mem_input: Option<String>,
+    /// The **exact** address the Memory view was last jumped to, paired with
+    /// the decoded Z-string the story's tables place there (`None` when the
+    /// target holds no such string). Exact, not `mem_addr`: a jump aligns the
+    /// view down to the 16-byte row grid, and a dictionary entry (`base +
+    /// i * entry_length`) or an object short name (after a one-byte length
+    /// field) lands wherever the game's own tables put it — usually not on a
+    /// multiple of 16, and often not even on an even byte. (SQ-0448)
+    pub mem_zstring: Option<(u32, String)>,
     /// Object numbers currently expanded inline in the Objects tree.
     pub expanded_objects: std::collections::HashSet<u16>,
     /// Frame indices currently expanded inline in the Call Stack. Reset each
@@ -216,6 +224,7 @@ impl DebugPanelState {
             disasm_mode: DisasmMode::Full,
             mem_addr: 0,
             mem_input: None,
+            mem_zstring: None,
             expanded_objects: std::collections::HashSet::new(),
             expanded_frames: std::collections::HashSet::new(),
             viewport: 1,
@@ -432,6 +441,7 @@ impl DebugPanelState {
                     // Align down to the 16-byte row grid so the jump doesn't
                     // shift every row off the hex dump's column alignment.
                     self.mem_addr = addr.min(dbg.memory_len()) & !0xF;
+                    self.mem_zstring = dbg.zstring_at(addr).map(|s| (addr, s));
                     self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
                 }
             }
@@ -566,7 +576,20 @@ impl DebugPanelState {
         // Align down to the 16-byte row grid so the jump keeps the hex dump's
         // column alignment (scroll then advances by whole 16-byte rows).
         self.mem_addr = addr.min(dbg.memory_len()) & !0xF;
+        // Decode from the UNALIGNED address — the entry the caller named starts
+        // there, not on the row boundary the view snapped to.
+        self.mem_zstring = dbg.zstring_at(addr).map(|s| (addr, s));
         self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+    }
+
+    /// The decoded Z-string to show above the hex dump, or `None`.
+    ///
+    /// Live only while the view still sits on the row the jump landed on: the
+    /// annotation names *those* bytes, so once a scroll has moved the entry the
+    /// label would be captioning a dump that no longer contains it.
+    pub fn mem_annotation(&self) -> Option<&str> {
+        let (addr, text) = self.mem_zstring.as_ref()?;
+        (self.mem_addr == addr & !0xF).then_some(text.as_str())
     }
 
     /// Focus the Objects window/tab, expand object `n`, and scroll it into
@@ -1247,6 +1270,12 @@ mod tests {
         fn frame_locals(&self, _idx: usize) -> Vec<String> { vec![format!("local0 = 0x0001  (1)")] }
         // Deterministic, distinct-per-var value so deref jumps are testable.
         fn var_value(&self, var: u8) -> Option<u16> { Some(0x1000 + var as u16 * 0x10) }
+        // One "dictionary entry", deliberately at an ODD address inside a row —
+        // exactly the shape a real entry (`base + i * entry_length`) takes, and
+        // the one the row-aligned `mem_addr` cannot be asked for.
+        fn zstring_at(&self, addr: u32) -> Option<String> {
+            (addr == 0x2005).then(|| "dict word: \"lantern\"".to_string())
+        }
     }
 
     #[test]
@@ -1821,6 +1850,49 @@ mod tests {
         assert_eq!(p.mem_addr, 0x2000);
         assert!(p.mem_input.is_none());
         assert_eq!(p.snapshot.memory[0], format!("{:06x}", 0x2000));
+    }
+
+    #[test]
+    fn a_jump_decodes_the_z_string_at_the_exact_address_not_the_aligned_row() {
+        // SQ-0448: the view snaps down to the 16-byte grid, but the entry starts
+        // at the address the caller named. Decoding from `mem_addr` would ask
+        // about 0x2000 — the middle of whatever precedes the entry — and get
+        // nothing, or worse, something.
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        assert_eq!(p.mem_addr, 0x2000, "the dump still starts on the row boundary");
+        assert_eq!(p.mem_annotation(), Some("dict word: \"lantern\""));
+    }
+
+    #[test]
+    fn a_jump_to_an_address_with_no_z_string_captions_nothing() {
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        p.goto_memory(0x3000, &MockDbg);
+        assert_eq!(p.mem_annotation(), None, "and the previous jump's caption does not linger");
+    }
+
+    #[test]
+    fn the_caption_goes_away_once_a_scroll_moves_the_entry_off_its_row() {
+        // The caption names the bytes on screen; scroll them away and it would
+        // be labelling a dump that no longer holds the entry.
+        let mut p = memory_focused_panel();
+        p.goto_memory(0x2005, &MockDbg);
+        p.scroll_active(2, true, &MockDbg);
+        assert_eq!(p.mem_addr, 0x2010);
+        assert_eq!(p.mem_annotation(), None);
+        p.scroll_active(2, false, &MockDbg);
+        assert_eq!(p.mem_annotation(), Some("dict word: \"lantern\""), "and comes back on return");
+    }
+
+    #[test]
+    fn the_memory_input_box_captions_its_jump_too() {
+        let mut p = memory_focused_panel();
+        p.handle_key(KeyCode::Char(':'), &MockDbg);
+        for c in "2005".chars() { p.handle_key(KeyCode::Char(c), &MockDbg); }
+        p.handle_key(KeyCode::Enter, &MockDbg);
+        assert_eq!(p.mem_addr, 0x2000);
+        assert_eq!(p.mem_annotation(), Some("dict word: \"lantern\""));
     }
 
     #[test]
