@@ -236,22 +236,31 @@ fn every_decoded_sound_is_a_playable_aiff() {
 #[test]
 fn the_pitch_model_reproduces_both_blorbs() {
     let sherlock = stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf");
-    let cases: Vec<(PathBuf, PathBuf, u16)> = [
-        lurking().map(|d| (d, stories_dir().join("Lurking.blb"), 17u16)),
-        sherlock.is_file().then(|| (sherlock.clone(), stories_dir().join("Sherlock.blb"), 13u16)),
+    // Disk, Blorb, the effect excluded as anomalous, and how many shared effects must
+    // then agree EXACTLY — carried per case rather than as one total keyed on how many
+    // cases happened to be present (SQ-0971). The two fixtures are independently
+    // gitignored: `treasures/` holds Lurking's disc and `stories/` Sherlock's floppy,
+    // so a checkout with only one of them is the ordinary state of a git worktree, and
+    // a total keyed on `cases.len() == 2` charged a Sherlock-only run with Lurking's
+    // thirteen. Thirteen and fourteen, which is the 27 the doc above names.
+    let cases: Vec<(PathBuf, PathBuf, u16, usize)> = [
+        lurking().map(|d| (d, stories_dir().join("Lurking.blb"), 17u16, 13usize)),
+        sherlock.is_file().then(|| (sherlock.clone(), stories_dir().join("Sherlock.blb"), 13u16, 14usize)),
     ]
     .into_iter()
     .flatten()
-    .filter(|(_, b, _)| b.is_file())
+    .filter(|(_, b, _, _)| b.is_file())
     .collect();
     if cases.is_empty() {
         eprintln!("SKIP: gitignored Amiga sound floppies or their Blorbs absent");
         return;
     }
-    let (mut agreed, mut bent) = (0, 0);
-    for (disk, blb, anomaly) in &cases {
+    let mut bent = 0;
+    for (disk, blb, anomaly, want_agreed) in &cases {
+        let name = disk.file_name().unwrap().to_string_lossy().into_owned();
         let sounds = app::native_sound::from_medium(disk);
         let rendered = blorb_sounds(blb).expect("the Blorb parses");
+        let mut agreed = 0;
         for (effect, s) in &sounds {
             let Some(r) = rendered.get(&u32::from(*effect)) else { continue };
             if effect == anomaly {
@@ -259,19 +268,19 @@ fn the_pitch_model_reproduces_both_blorbs() {
             }
             assert_eq!(
                 s.rate, r.rate,
-                "{}: effect {effect} decodes to {} Hz against the Blorb's {}",
-                disk.file_name().unwrap().to_string_lossy(),
-                s.rate,
-                r.rate,
+                "{name}: effect {effect} decodes to {} Hz against the Blorb's {}",
+                s.rate, r.rate,
             );
             agreed += 1;
         }
+        // Counted as well as compared, so a fixture that stopped offering effects
+        // cannot pass by having nothing left to disagree about.
+        assert_eq!(agreed, *want_agreed, "{name}: every shared effect but the anomaly");
     }
-    assert_eq!(agreed, if cases.len() == 2 { 27 } else { 13 }, "every shared effect but the two anomalies");
 
     // Non-vacuity: the model must actually BEND things, or it is the old one wearing
     // a new name. Nine of the twenty-nine, and the three that share one recording.
-    if let Some((disk, _, _)) = cases.iter().find(|(d, _, _)| d.to_string_lossy().contains("Sherlock")) {
+    if let Some((disk, _, _, _)) = cases.iter().find(|(d, _, _, _)| d.to_string_lossy().contains("Sherlock")) {
         let s = app::native_sound::from_medium(disk);
         assert_eq!(
             (s[&11].rate, s[&12].rate, s[&13].rate),

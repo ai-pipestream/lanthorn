@@ -276,7 +276,7 @@ fn a_restore_replaces_the_screen_layers_it_found(honor: bool) {
 /// takes the shared lock; hold the guard for the whole case, because the two frames
 /// a repaint case compares are only comparable if the palette did not move between
 /// them.
-fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+fn standard_palette() -> app::V6PaletteGuard {
     app::v6_palette(zvm::screen::Palette::Standard)
 }
 

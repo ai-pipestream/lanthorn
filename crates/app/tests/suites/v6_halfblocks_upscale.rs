@@ -99,7 +99,7 @@ const SPECIMENS: [Specimen; 2] = [
 /// (SQ-0958). Both stories are bare files that name no machine, so their colour
 /// numbers resolve through ZMSD 8.3.1's own table — which is the ground every canvas
 /// measured below is painted in. Hold the guard for the whole case.
-fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+fn standard_palette() -> app::V6PaletteGuard {
     app::v6_palette(zvm::screen::Palette::Standard)
 }
 

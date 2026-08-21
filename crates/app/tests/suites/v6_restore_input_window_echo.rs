@@ -246,7 +246,7 @@ fn a_restore_mid_bet_still_echoes_typed_digits(honor: bool, resize: bool) {
 /// one of them happened to leave `Standard` there, and not at all once a sibling boots
 /// a machine press. See [`app::v6_palette`], which is why this both names a palette
 /// and takes the shared lock. Hold the guard for the whole case.
-fn standard_palette() -> std::sync::MutexGuard<'static, ()> {
+fn standard_palette() -> app::V6PaletteGuard {
     app::v6_palette(zvm::screen::Palette::Standard)
 }
 
