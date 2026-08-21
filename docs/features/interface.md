@@ -130,7 +130,12 @@ built-in debugger that follows the running story instruction by instruction.
   decoded text even begins, and no inspector window is that wide. `h` and `l` pan
   the dump sideways (the arrows are the section cycler, so panning takes the
   vi keys, the same trade the animation view makes), clamped to the widest row.
-  The `addr:` line above stays put — it's a control, not part of the dump.
+  The `addr:` line above stays put — it's a control, not part of the dump. A
+  scrollbar along the bottom of the pane shows how far along the row you are and
+  how much is still out to the right — the same themed bar every other
+  scrollable surface uses (`scrollbar` and `scrollbar_track`). It appears only
+  when a row really is wider than the pane, and costs the dump no row when
+  everything already fits.
 - **Execution coverage.** Once a line's address runs it turns blue and stays
   blue for the rest of the session, so you build up a map of what has actually
   executed; a `|` gutter bar additionally marks just the lines the *last* command

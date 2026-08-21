@@ -269,6 +269,10 @@ fn draw_hscrolled(
 /// below it. Memory is pre-windowed by its addr, so it never applies a
 /// *vertical* scroll offset; `mem_hscroll` pans it sideways (SQ-0965), and the
 /// address line stays put because it is a control, not part of the dump.
+///
+/// When a row is wider than the pane, a horizontal scrollbar takes the bottom
+/// content row (SQ-0974) — the shared `scroll` idiom, so the pan advertises
+/// itself the way every other scrollable surface in the app does.
 fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState, body: Style) {
     let (line, style) = match &panel.mem_input {
         Some(input) => (format!("jump: {input}_"), state.colors.theme.get("panel.border:active").style),
@@ -276,7 +280,18 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
     };
     draw_str_clipped(buf, content.x, content.y, &line, style, content);
     let top = content.y + 1;
-    let height = content.height.saturating_sub(1);
+    let mut height = content.height.saturating_sub(1);
+    // The pan (SQ-0965) was undiscoverable without a bar to show it existed
+    // (SQ-0974): the Memory dump was the one scrollable surface in the app with
+    // no scrollbar. It costs the dump its bottom row, so it appears only when
+    // the content really is wider than the pane — and only when a dump row
+    // survives giving one up.
+    let hbar = crate::render::scroll::needs_scrollbar(
+        panel.snapshot.memory_width, content.width as usize,
+    ) && height >= 2;
+    if hbar {
+        height -= 1;
+    }
     // Past the hex and its char column, each row carries the story's own text
     // for its bytes: the char column reads one ZSCII code per byte, which is
     // noise over the packed Z-characters of a dictionary key or an object short
@@ -290,6 +305,17 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
         if let Some(Some(z)) = panel.snapshot.memory_zstrings.get(row) {
             draw_hscrolled(buf, content, y, panel.snapshot.memory_zcol, panel.mem_hscroll, z, ztext);
         }
+    }
+    if hbar {
+        let bar = Rect::new(content.x, content.bottom() - 1, content.width, 1);
+        crate::render::scroll::draw_hscrollbar(
+            buf,
+            bar,
+            panel.snapshot.memory_width,
+            content.width as usize,
+            panel.mem_hscroll,
+            crate::render::scroll::ScrollbarLook::from_theme(&state.colors.theme),
+        );
     }
 }
 
@@ -606,6 +632,82 @@ mod tests {
     /// its left edge at x = 41 (see `memory_view`).
     fn win2_row(buf: &Buffer, y: u16) -> String {
         row_text(buf, y).chars().skip(41).collect()
+    }
+
+    /// Window 2's content rect in the 80x24 layout `memory_view` draws into.
+    fn win2_content() -> Rect {
+        crate::debug_panel::window_content(Rect::new(0, 0, 80, 24), 2)
+            .expect("window 2 holds content at 80x24")
+    }
+
+    /// SQ-0974: the pan existed but advertised nothing. A row wider than the
+    /// pane now gets a horizontal scrollbar on the bottom content row — and a
+    /// row that fits must not lose a row to one.
+    ///
+    /// FALSIFY by dropping the `draw_hscrollbar` call in `draw_memory`: the
+    /// overflowing case comes back with a bare bottom row and no painted track
+    /// anywhere — the originally reported symptom, a surface you can pan with
+    /// no visible way to know it.
+    #[test]
+    fn a_row_wider_than_the_pane_gets_a_scrollbar_and_a_row_that_fits_does_not() {
+        let content = win2_content();
+        let bar_y = content.bottom() - 1;
+        let bar_bgs = |buf: &Buffer| -> Vec<ratatui::style::Color> {
+            (content.x..content.right()).map(|x| buf.cell((x, bar_y)).unwrap().bg).collect()
+        };
+
+        // 72-column rows in a 38-column pane: the bar is warranted.
+        let (state, wide) = memory_view(0x2005, 0, 64);
+        let theme = &state.colors.theme;
+        let thumb = theme.get("scrollbar").style.fg.expect("scrollbar selector resolves a fill");
+        let track = theme.get("scrollbar_track").style.fg.expect("scrollbar_track resolves a fill");
+        let bgs = bar_bgs(&wide);
+        assert!(bgs.contains(&thumb), "the thumb is painted: {bgs:?}");
+        assert!(bgs.contains(&track), "the track is painted: {bgs:?}");
+        assert!(
+            bgs.iter().all(|c| *c == thumb || *c == track),
+            "the whole bottom row is the bar, themed end to end: {bgs:?}",
+        );
+        // Themed, never hard-coded: the cells carry the SELECTORS' colours, and
+        // the bar steals the row from the dump rather than overprinting it.
+        assert!(!win2_row(&wide, bar_y).trim().contains("00"), "no hex under the bar");
+
+        // 10-column rows in the same pane: nothing overflows, so the bottom row
+        // stays a dump row.
+        let (_, narrow) = memory_view(0x2005, 0, 2);
+        assert!(
+            bar_bgs(&narrow).iter().all(|c| *c != thumb && *c != track),
+            "a pane the content fits keeps its bottom row",
+        );
+        assert!(
+            win2_row(&narrow, bar_y).contains(':') || win2_row(&narrow, bar_y).contains("00"),
+            "…and that row still carries the dump: {:?}", win2_row(&narrow, bar_y),
+        );
+    }
+
+    /// The bar reports where the pan actually is: hard left unpanned, hard right
+    /// once `h`/`l` have run the row out.
+    #[test]
+    fn the_memory_scrollbar_thumb_tracks_the_pan_at_both_ends() {
+        let content = win2_content();
+        let bar_y = content.bottom() - 1;
+        let (state, _) = memory_view(0x2005, 0, 64);
+        let thumb = state.colors.theme.get("scrollbar").style.fg.expect("scrollbar fill");
+        let thumb_cols = |hscroll: usize| -> Vec<u16> {
+            let (_, buf) = memory_view(0x2005, hscroll, 64);
+            (content.x..content.right())
+                .filter(|&x| buf.cell((x, bar_y)).unwrap().bg == thumb)
+                .collect()
+        };
+        let left = thumb_cols(0);
+        let right = thumb_cols(state.debug.as_ref().unwrap().snapshot.memory_width - 1);
+        assert_eq!(left.first(), Some(&content.x), "unpanned, the thumb sits at the left edge");
+        assert_eq!(
+            right.last(),
+            Some(&(content.right() - 1)),
+            "panned to the end, it reaches the right edge",
+        );
+        assert!(left.last() < right.first(), "the thumb moved: {left:?} then {right:?}");
     }
 
     /// The drawn text of one buffer row.

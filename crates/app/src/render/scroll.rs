@@ -1,5 +1,6 @@
-//! Shared vertical-scrollbar drawing. The single place the ratatui `Scrollbar`
-//! idiom lives; every linearly-scrollable surface calls [`draw_scrollbar`].
+//! Shared scrollbar drawing. The single place the ratatui `Scrollbar` idiom
+//! lives; every linearly-scrollable surface calls [`draw_scrollbar`] (vertical,
+//! right edge) or [`draw_hscrollbar`] (horizontal, bottom edge).
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -7,8 +8,9 @@ use ratatui::{
     widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget},
 };
 
-/// True when `total` rows do not fit in `viewport` rows (so a scrollbar — and a
-/// reserved 1-column gutter — are warranted).
+/// True when `total` units do not fit in `viewport` units (so a scrollbar — and
+/// a reserved 1-cell gutter — are warranted). Orientation-agnostic: rows for the
+/// vertical bar, columns for the horizontal one.
 pub fn needs_scrollbar(total: usize, viewport: usize) -> bool {
     total > viewport
 }
@@ -85,6 +87,42 @@ pub fn draw_scrollbar(
     position: usize,
     look: ScrollbarLook,
 ) {
+    draw_bar(buf, area, ScrollbarOrientation::VerticalRight, total, viewport, position, look);
+}
+
+/// Draw a themed HORIZONTAL scrollbar along the bottom edge of `area`, for a
+/// surface that pans sideways rather than scrolling down (the debug inspector's
+/// Memory dump, SQ-0974). Same contract as [`draw_scrollbar`] with columns in
+/// place of rows: no-op when the content fits, `position` is the leftmost
+/// visible column.
+///
+/// The same [`ScrollbarLook`] — so the `scrollbar` / `scrollbar_track`
+/// selectors dress every bar in the app, whichever way it runs. A caller whose
+/// `position` may exceed `total - viewport` (the Memory pan clamps against the
+/// widest row, not the pane) simply pins the thumb at the far end: ratatui
+/// clamps the position into the track rather than drawing off it.
+pub fn draw_hscrollbar(
+    buf: &mut Buffer,
+    area: Rect,
+    total: usize,
+    viewport: usize,
+    position: usize,
+    look: ScrollbarLook,
+) {
+    draw_bar(buf, area, ScrollbarOrientation::HorizontalBottom, total, viewport, position, look);
+}
+
+/// The one `Scrollbar` invocation both orientations share: background-only
+/// thumb and track (SQ-0782), no arrow heads, position clamped by ratatui.
+fn draw_bar(
+    buf: &mut Buffer,
+    area: Rect,
+    orientation: ScrollbarOrientation,
+    total: usize,
+    viewport: usize,
+    position: usize,
+    look: ScrollbarLook,
+) {
     if !needs_scrollbar(total, viewport) || area.height == 0 || area.width == 0 {
         return;
     }
@@ -93,7 +131,7 @@ pub fn draw_scrollbar(
         .viewport_content_length(viewport)
         .position(position);
     StatefulWidget::render(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        Scrollbar::new(orientation)
             .begin_symbol(None)
             .end_symbol(None)
             .thumb_symbol(" ")
@@ -159,6 +197,75 @@ mod tests {
         }
         assert!(thumb > 0, "the thumb is painted");
         assert!(track > 0, "the track is painted");
+    }
+
+    /// SQ-0974: the horizontal bar is the same idiom turned on its side — it
+    /// paints the BOTTOM row of its area, and stays away entirely when the
+    /// content fits.
+    #[test]
+    fn draw_hscrollbar_noop_when_fits_and_paints_the_bottom_row_when_overflowing() {
+        let area = Rect::new(0, 0, 10, 3);
+        let mut b1 = Buffer::empty(area);
+        draw_hscrollbar(&mut b1, area, 10, 10, 0, look());
+        let bottom_plain = (0..area.width)
+            .all(|x| b1.cell((x, area.bottom() - 1)).unwrap().bg == Color::Reset);
+        assert!(bottom_plain, "no scrollbar when the content fits");
+
+        let mut b2 = Buffer::empty(area);
+        draw_hscrollbar(&mut b2, area, 100, 10, 0, look());
+        let painted = (0..area.width)
+            .any(|x| b2.cell((x, area.bottom() - 1)).unwrap().bg == Color::Cyan);
+        assert!(painted, "the thumb is painted on the bottom row");
+        // …and only the bottom row: rows above it are untouched.
+        for y in 0..area.bottom() - 1 {
+            for x in 0..area.width {
+                assert_eq!(b2.cell((x, y)).unwrap().bg, Color::Reset, "row {y} must be clear");
+            }
+        }
+    }
+
+    /// The whole track is background fill (no `█`, no `│`), exactly as the
+    /// vertical bar has been since SQ-0782.
+    #[test]
+    fn draw_hscrollbar_paints_backgrounds_and_writes_no_glyphs() {
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buf = Buffer::empty(area);
+        draw_hscrollbar(&mut buf, area, 120, 12, 0, look());
+        let (mut thumb, mut track) = (0, 0);
+        for x in 0..area.width {
+            let cell = buf.cell((x, 0)).unwrap();
+            assert_eq!(cell.symbol(), " ", "column {x} must carry no glyph");
+            match cell.bg {
+                Color::Cyan => thumb += 1,
+                Color::DarkGray => track += 1,
+                other => panic!("column {x} painted with {other:?}"),
+            }
+        }
+        assert!(thumb > 0, "the thumb is painted");
+        assert!(track > 0, "the track is painted");
+    }
+
+    /// The thumb tracks `position`: hard left at 0, hard right at the end of the
+    /// range — and an over-range position (the Memory pan clamps to the widest
+    /// row, not the pane) pins there rather than vanishing.
+    #[test]
+    fn draw_hscrollbar_thumb_tracks_position_at_both_ends() {
+        let area = Rect::new(0, 0, 20, 1);
+        let thumb_cols = |pos: usize| -> Vec<u16> {
+            let mut buf = Buffer::empty(area);
+            draw_hscrollbar(&mut buf, area, 100, 20, pos, look());
+            (0..area.width).filter(|&x| buf.cell((x, 0)).unwrap().bg == Color::Cyan).collect()
+        };
+        let left = thumb_cols(0);
+        let right = thumb_cols(80);
+        assert_eq!(left.first(), Some(&0), "at position 0 the thumb starts at the left edge");
+        assert_eq!(
+            right.last(),
+            Some(&(area.width - 1)),
+            "at the end of the range the thumb reaches the right edge",
+        );
+        assert!(left.last() < right.first(), "the thumb actually moved: {left:?} then {right:?}");
+        assert_eq!(thumb_cols(999), right, "an over-range position pins at the far end");
     }
 
     #[test]

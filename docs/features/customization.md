@@ -192,7 +192,10 @@ switches that make lanthorn feel like yours without opening the whole registry.
   `scrollbar_fade_ms` (default 300) how long it takes to fade away, `0` for a
   clean pop. Its two colours are yours as well: `scrollbar` paints the thumb and
   `scrollbar_track` the channel it runs in, both as background fills rather than
-  glyphs, so nothing crowds the prose beside them.
+  glyphs, so nothing crowds the prose beside them. Those two selectors dress
+  every bar in the app, whichever way it runs — including the horizontal one
+  under the debug inspector's Memory dump, which pans sideways rather than
+  scrolling down and takes the same thumb and channel colours.
 - **Transcript text styling** — color each transcript category independently via
   bare selectors — `transcript`, `transcript_input`, `transcript_meta`,
   `transcript_warning`, `transcript_system`, `transcript_crash` (`fg`/`bg`/
