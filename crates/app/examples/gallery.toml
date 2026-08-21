@@ -1,0 +1,254 @@
+# The lanthorn gallery (SQ-0942) — the RECIPE for the project page's stills.
+#
+# `cargo run -p app --example gallery` regenerates every frame below from the
+# real binary, into `target/gallery/`. The pictures are output and are not
+# committed; this file is, because it is the thing that gets them back.
+#
+# What a shot may NOT say here: the release, the serial, or the turn count. The
+# first two are read out of the header of the bytes the medium actually mounted,
+# and the third is counted off `keys`. A hand-written provenance line is a second
+# copy of the truth, and this repository has been bitten by one.
+#
+# `expect` is required, and it is the field that keeps the rest honest. Every
+# number a shot records — release, serial, medium — comes from the FILE, so all
+# of them go on being correct while the frame shows something else entirely. The
+# first draft of this manifest pointed a Zork Zero shot at a DOS floppy that
+# lanthorn opens a browser for, and two blank keypresses picked *Ballyhoo* off a
+# neighbouring disk under a caption about Zork Zero's border art. `expect` names
+# something that must be on the resolved screen, and it caught that.
+#
+# `backend` chooses the cell size too (kitty 8x18, half-blocks 10x20), because
+# the half-block picker uses its own 10x20 font whatever the terminal reports and
+# a capture at any other cell size draws a geometry lanthorn was not using.
+#
+# The media directories (`stories/`, `treasures/`, `masterpieces/`) are
+# gitignored, so this cannot run anywhere they are absent. A missing medium is a
+# reported failure rather than a silent skip.
+
+# ── Journey: the picture region that is its own window ───────────────────────
+#
+# The pair that taught this repository that a disk image is a different BUILD.
+# The bare story is release 83; the Amiga floppy is release 30, and the two
+# narrate through different windows. Both are here for that reason.
+
+[[shots]]
+id = "journey-blorb"
+title = "Journey"
+press = "story file with the Blorb archive beside it"
+media = "stories/journey-r83-s890706.z6"
+caption = """
+Journey's illustration is not a picture pasted over the text: it is a window the \
+game reserves and paints into, with the prose and the party menu laid out around \
+it. lanthorn keeps the art as kitty graphics and the text as terminal cells, so \
+the two share a boundary without either being resampled."""
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+size = "117x40"
+expect = ["The Party", "Individual Commands"]
+expect_art_cells = 600
+
+[[shots]]
+id = "journey-amiga"
+title = "Journey"
+press = "Amiga release floppy (.adf)"
+media = "stories/Journey - The Quest Begins.adf"
+caption = """
+The same game off its own Amiga release disk — a different build from the story \
+file above, with the Amiga's palette and its own idea of which window the \
+narration goes through. lanthorn reads the medium and dresses the screen as that \
+machine did."""
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+size = "117x40"
+expect = ["The Party", "Individual Commands"]
+
+# ── Zork Zero: three presses of one game ─────────────────────────────────────
+#
+# Three media, three builds. This is the row the /media page is for.
+
+[[shots]]
+id = "zork0-blorb"
+title = "Zork Zero"
+press = "story file with the Blorb archive beside it"
+media = "stories/zork0-r393-s890714.z6"
+caption = """
+Zork Zero frames every scene in a decorated border that is genuine artwork on all \
+four sides, with a compass rose and a heraldic banner across the top. The flanks \
+are the one thing hybrid mode rasterises on purpose: their pixels are not \
+anything the game printed as a character."""
+keys = "wait:3000,text:look,cr,wait:2000"
+size = "117x40"
+expect = ["Zork Zero", "Banquet Hall"]
+expect_art_cells = 1500
+
+[[shots]]
+id = "zork0-amiga"
+title = "Zork Zero"
+press = "Amiga release floppy (.adf)"
+media = "stories/Zork Zero - The Revenge of Megaboz.adf"
+caption = """
+The Amiga pressing, which is release 366 where the story file is 393 and lays its \
+story window out somewhere else. Nothing was configured to get this: the mount \
+reported an Amiga floppy and the profile followed."""
+keys = "wait:3000,text:look,cr,wait:2000"
+size = "117x40"
+expect = ["Zork Zero", "Banquet Hall"]
+expect_art_cells = 1500
+
+[[shots]]
+id = "zork0-macintosh"
+title = "Zork Zero"
+press = "Macintosh release floppy (.image, HFS)"
+media = "stories/Zork Zero Disk.image"
+caption = """
+The Macintosh disk, and by a distance the outlier of the three: October 1988, \
+where both the others are 1989. Read it beside the Blorb frame — same scene, same \
+art, a build nearly a year older and a machine profile of its own."""
+keys = "wait:3000,text:look,cr,wait:2000"
+size = "117x40"
+expect = ["Zork Zero", "Banquet Hall"]
+expect_art_cells = 1500
+
+[[shots]]
+id = "zork0-dos"
+title = "Zork Zero"
+press = "DOS 720K release floppy (.ima, FAT12)"
+media = "stories/Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) (720K) (Disk 1) [!].ima"
+caption = """
+The PC pressing, with its EGA plates. The same release as the story file, and a \
+different machine's page and palette — which is the whole of the difference \
+between these two frames."""
+keys = "wait:3000,text:look,cr,wait:2000"
+size = "117x40"
+expect = ["Zork Zero", "Banquet Hall"]
+expect_art_cells = 1500
+
+# ── Arthur: the tiled flank ──────────────────────────────────────────────────
+#
+# Arthur opens on "Would you like to restore a saved position?" and draws nothing
+# else until it is answered — which is why this shot begins by answering it. A
+# capture that does not is a still of a boot prompt, and looks identical at 6
+# keypresses and at 40.
+#
+# There are TWO `n`s, and the first one is not for the game. lanthorn raises a
+# "loaded resources from Arthur.blb" notice on the first frame and the next key
+# dismisses it rather than reaching the story, so a single `n` answers nothing
+# and every `cr` after it re-prompts. Measured 2026-08-20.
+#
+# NOT HERE, and for a reason worth writing down: Arthur's Apple II press
+# (`Arthur Quest 4 Excalibur.2mg`, release 63). It reaches the gameplay frame
+# only sometimes — the story is paged out of five opaque segments by block, and
+# where the keys land relative to that paging is wall-clock luck. `expect` caught
+# it every time it did not, which is the system working; a shot that needs luck is
+# still a poor gallery row. The stills it does produce are worth having by hand.
+
+[[shots]]
+id = "arthur-blorb"
+title = "Arthur: The Quest for Excalibur"
+press = "story file with the Blorb archive beside it"
+media = "stories/arthur-r74-s890714.z6"
+caption = """
+Arthur reserves a band across the top and tiles a decorated flank into the margin \
+on either side of the illustration. Those flanks are pixels the game painted, so \
+they stay pictures; the status band beneath them, and the italics in the prose, are \
+characters the game printed, so they stay characters. Deciding that per strip is \
+what hybrid mode is for."""
+keys = "wait:4000,text:n,wait:2500,text:n,wait:4000,cr,wait:2500,cr,wait:2500,cr,wait:2500,cr,wait:2500,cr,wait:3000"
+size = "117x40"
+expect = ["Churchyard", "St Anne's Day"]
+expect_art_cells = 800
+
+# ── The full-frame composites ────────────────────────────────────────────────
+#
+# Both deal randomly, so both are pinned to a seed. An unpinned frame regenerates
+# differently every release for no reason: a first comparison of two fmvpoker
+# frames showed 37,097 differing pixels, and every one of them was a card deal.
+
+[[shots]]
+id = "scopa"
+title = "Scopa"
+press = "story file with the Blorb archive beside it"
+media = "stories/scopa.z6"
+caption = """
+A modern Version 6 game that draws its whole screen as one composite — a card table \
+rather than a page with a picture on it. The deal is pinned to a seed so this frame \
+is the same frame every release."""
+keys = "wait:2500,cr,wait:1500,cr,wait:1500"
+size = "117x40"
+seed = 12345
+expect = ["scopa"]
+expect_art_cells = 3000
+
+[[shots]]
+id = "fmvpoker"
+title = "FMV Poker"
+press = "story file with the Blorb archive beside it"
+media = "stories/fmvpoker.z6"
+caption = """
+The other full-frame composite in the corpus, and the one that proved the seed \
+matters: two captures of it differ by tens of thousands of pixels and not one of \
+them is a rendering difference."""
+keys = "wait:2500,cr,wait:1500,cr,wait:1500"
+size = "117x40"
+seed = 12345
+expect = ["fmvpoker.z6"]
+expect_art_cells = 3000
+
+# ── Pane sizes ───────────────────────────────────────────────────────────────
+#
+# The same game, the same release, the same turn — three terminals. Layout
+# changes character between them, which is a thing a single frame cannot show.
+
+[[shots]]
+id = "journey-narrow"
+title = "Journey"
+press = "story file, in a small terminal"
+media = "stories/journey-r83-s890706.z6"
+caption = """
+The same frame in a 96x28 terminal. v6 art is scaled by pixel and text placed by \
+cell, so a smaller pane is a different composition rather than the same one \
+shrunk."""
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+size = "96x28"
+expect = ["The Party", "Individual Commands"]
+
+[[shots]]
+id = "journey-wide"
+title = "Journey"
+press = "story file, in a large terminal"
+media = "stories/journey-r83-s890706.z6"
+caption = "And in a 160x50 terminal, where the art has room to be looked at."
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+size = "160x50"
+expect = ["The Party", "Individual Commands"]
+
+# ── The fallback everyone can see ────────────────────────────────────────────
+
+[[shots]]
+id = "journey-halfblocks"
+title = "Journey"
+press = "story file, drawn without a graphics protocol"
+media = "stories/journey-r83-s890706.z6"
+caption = """
+The same frame on a terminal with no image protocol at all. lanthorn still runs the \
+pixel path and resolves it into half-block cells — two vertical samples per cell, \
+so honest but coarse. It is also the only Version 6 output an asciinema cast can \
+carry, which is why it earns a row."""
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+size = "117x40"
+backend = "halfblocks"
+expect = ["The Party", "Individual Commands", "▀"]
+
+# ── The automapper ───────────────────────────────────────────────────────────
+
+[[shots]]
+id = "zork1-map"
+title = "Zork I"
+press = "story file, with the map pane open"
+media = "stories/zork1-r88-s840726.z3"
+caption = """
+The map pane, drawn from nothing but the game's own output as the player walks. \
+This is the one frame in the gallery that is about lanthorn rather than about a \
+game."""
+keys = "wait:2000,text:n,cr,wait:700,text:n,cr,wait:700,text:up,cr,wait:700,text:take egg,cr,wait:700,text:down,cr,wait:900"
+size = "140x40"
+show_map = true
+expect = ["Forest Path", "Up a Tree", "West of House"]

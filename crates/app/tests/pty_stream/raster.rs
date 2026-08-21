@@ -77,6 +77,21 @@ const PLACEHOLDER: char = '\u{10EEEE}';
 /// the stream was resolved under, so art lands where the arithmetic that placed
 /// it says it does.
 pub fn render(res: &Resolved) -> RgbaImage {
+    render_with(res, &|canvas, ch, px, py, cw, chh, fg| blit_glyph(canvas, ch, px, py, cw, chh, fg, None))
+}
+
+/// How one glyph gets drawn into its cell: canvas, char, cell origin, cell size,
+/// foreground.
+///
+/// The indirection exists for exactly one caller — the gallery tool (SQ-0942),
+/// which draws with a real outline face because its output is meant to be looked
+/// at. [`render`] keeps the bitmap master, so every test and every geometry
+/// question is answered by the same deliberately-synthetic picture it always
+/// was.
+pub type GlyphPainter<'a> = &'a dyn Fn(&mut RgbaImage, char, u32, u32, u32, u32, Rgba<u8>);
+
+/// [`render`], with the glyph painter supplied.
+pub fn render_with(res: &Resolved, glyph: GlyphPainter<'_>) -> RgbaImage {
     let width = u32::from(res.cols) * res.cell_w;
     let height = u32::from(res.rows) * res.cell_h;
     let mut canvas = RgbaImage::from_pixel(width.max(1), height.max(1), rgba(res.colors.default_bg()));
@@ -93,7 +108,7 @@ pub fn render(res: &Resolved) -> RgbaImage {
     for d in draws.iter().filter(|d| (BELOW_BACKGROUND..0).contains(&d.z)) {
         composite(&mut canvas, d, res);
     }
-    paint_glyphs(&mut canvas, res);
+    paint_glyphs(&mut canvas, res, glyph);
     for d in draws.iter().filter(|d| d.z >= 0) {
         composite(&mut canvas, d, res);
     }
@@ -142,7 +157,7 @@ fn paint_backgrounds(canvas: &mut RgbaImage, res: &Resolved) {
 /// Blit every printable glyph over whatever is already there. Transparent
 /// background (`None`): the cell fill and any under-text art have already been
 /// drawn, and text must not erase them.
-fn paint_glyphs(canvas: &mut RgbaImage, res: &Resolved) {
+fn paint_glyphs(canvas: &mut RgbaImage, res: &Resolved, glyph: GlyphPainter<'_>) {
     for row in 0..res.rows {
         for col in 0..res.cols {
             let cell = res.cell(row, col);
@@ -151,7 +166,7 @@ fn paint_glyphs(canvas: &mut RgbaImage, res: &Resolved) {
             }
             let px = u32::from(col) * res.cell_w;
             let py = u32::from(row) * res.cell_h;
-            blit_glyph(canvas, cell.ch, px, py, res.cell_w, res.cell_h, rgba(cell_fg(&res.colors, cell)), None);
+            glyph(canvas, cell.ch, px, py, res.cell_w, res.cell_h, rgba(cell_fg(&res.colors, cell)));
         }
     }
 }

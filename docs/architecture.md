@@ -373,6 +373,89 @@ whose expected picture can be stated exactly, asserting **colours at
 coordinates** — a PNG writer's obvious failure mode is emitting a plausible
 blank, and "a file appeared" accepts one.
 
+## The gallery: the same capture, meant to be looked at
+
+`pty_stream/gallery.rs` and `--example gallery` (SQ-0942) turn the harness into
+a picture-maker for the project page. One committed recipe,
+`crates/app/examples/gallery.toml`, names every frame — the medium, the key
+script, the pane size, the backend, the pinned seed and a caption — and one
+command regenerates the whole set into `target/gallery/`, with a proof-sheet
+`index.html` and a `gallery.json` recording what was actually captured.
+
+```sh
+cargo build -p app
+cargo run -p app --example gallery                  # the whole manifest
+cargo run -p app --example gallery -- --list        # what it would take
+cargo run -p app --example gallery -- --only journey-amiga
+```
+
+Four things are deliberate:
+
+- **The output is labelled a render inside its own pixels.** Every frame gets a
+  footer strip saying so, drawn in the bitmap face whatever the frame above it
+  used. An image gets separated from its page the first time somebody drags it
+  into a chat window, and the only claim that survives that trip is the one in
+  the pixels. This is the price of the next bullet.
+- **It draws with a real typeface** (`--font`, else the first system monospace
+  face that loads, else the bitmap master; `fontdue` is a dev-dependency).
+  `raster::render` keeps the bitmap face and the tests never pass the flag, so
+  the geometry oracle goes on looking as synthetic as it should — giving *that*
+  a real font would make it 90% convincing at a job it cannot do.
+- **Nothing about a frame is declared twice.** The release and serial come from
+  the header of the bytes the medium mounted; the turn count is counted off the
+  key script. A manifest that tries to state either is refused.
+- **Every shot carries a non-vacuity guard** (`expect`, `expect_art_cells`), and
+  a shot that fails it never becomes a picture. This is not ceremony: pointed at
+  a DOS floppy that lanthorn opens a browser for, the first draft captured
+  *Ballyhoo* off a neighbouring disk while the release, serial and medium in the
+  record all went on correctly describing the Zork Zero image the manifest
+  named — because those are read from the file and not from the frame.
+
+`tests/suites/gallery_manifest.rs` runs the whole validator over the committed
+recipe, so a manifest that has gone stale fails the gate rather than failing
+whoever is trying to cut a release. It needs no gitignored media.
+
+## Casts: the same capture, as a moving image
+
+`pty_stream/cast.rs` and `--example cast` (SQ-0943) serialise a capture as an
+[asciinema v2](https://docs.asciinema.org/manual/asciicast/v2/) file. It is a
+small tool because the harness already collects exactly the right data: a
+`Flush` is a timestamped byte range from the real binary under a real pty, and a
+v2 cast is a header line followed by `[seconds, "o", data]` events. Same shape as
+the gallery — one committed recipe (`crates/app/examples/casts.toml`), output
+under `target/casts/`, a required guard per entry.
+
+```sh
+cargo build --workspace
+cargo run -p app --example cast              # the whole manifest
+cargo run -p app --example cast -- --list
+asciinema play target/casts/machines.cast
+```
+
+**These recordings deliberately do NOT answer the kitty capability query.** The
+asciinema player renders cells and SGR and drops kitty's APC graphics, so a
+kitty recording replays with no artwork at all and lanthorn looks like it draws
+nothing. Left unanswered, `ratatui-image` falls back to half-blocks — the same
+v6 *pixel* path resolved into `▀` with a foreground and a background, which is
+glyphs and 24-bit SGR and replays exactly. Measured on a Journey recording:
+1,624 `▀`, 1,499 `▄`, 3,649 truecolour foreground and 3,689 truecolour
+background sequences, none in iTerm2's colon-separated form (the one gap in the
+player). The tool refuses any recording that emits real graphics commands
+anyway, and every file says in its own header why there is no kitty artwork in
+it.
+
+`Spec::answer_kitty` is what selects that, and `Spec::argv` is what lets the same
+driver record `zvm-cli`, `gvm-cli` and `scott-cli` — the CLI clients are
+text-only by design, so a cast captures them *completely*.
+
+One driver bug fell out of building this, and it is worth knowing about: sending
+a keystroke used to reset the same clock the flush grouping read, so the app's
+reply — a few milliseconds after the key — always looked like a continuation of
+the previous burst however many seconds earlier it was, and **every run
+collapsed into one flush at `at: 0`**. Invisible to the decoder, which only
+wants the grouping for attribution; fatal to a recorder, for which those
+timestamps *are* the recording. Reads and keystrokes now keep separate clocks.
+
 ## See also
 
 - [Interactive-fiction standards lanthorn implements](standards.md) (Z-Machine,
