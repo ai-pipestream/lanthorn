@@ -75,6 +75,19 @@ pub struct CoverState {
 }
 
 impl CoverState {
+    /// SQ-0988: the terminal's CELL changed size, so every built protocol was
+    /// fitted against the wrong aspect ratio. The decoded IMAGES are unaffected —
+    /// they are pixels, not geometry — so only the rasters go, and the next draw
+    /// rebuilds them from the images already in hand.
+    ///
+    /// Both caches are keyed `(path, cols, rows)`, which is exactly the key a
+    /// font-size change cannot move: the browser can keep the same cell rect
+    /// while every cell in it becomes a different box in pixels.
+    pub fn invalidate_cell_geometry(&mut self) {
+        self.proto = None;
+        self.tiles.clear();
+    }
+
     /// True when `path` has already been decoded (`Some` or `None`) — skip the
     /// re-read/decode. A cached `None` (coverless story) still counts.
     pub fn has(&self, path: &Path) -> bool {
@@ -652,5 +665,65 @@ mod tests {
         assert!(!should_request_cover(false, true, past, debounce));
         // Boundary: exactly at the debounce is enough (>=).
         assert!(should_request_cover(false, false, debounce, debounce));
+    }
+
+    /// SQ-0988: a cover is aspect-fitted against the terminal's CELL, so the same
+    /// rect on the same image lands differently once the cell changes shape.
+    ///
+    /// 4x7 and 4x9 are FiraCode at 6 px and 7 px — real cells of 1.750 and 2.250
+    /// from a face whose design ratio is 2.002, because the width and the height
+    /// round at different rates. If these two fits were equal there would be
+    /// nothing for the browser's resize hook to invalidate.
+    #[test]
+    fn the_same_area_fits_a_different_cover_rect_once_the_cell_changes_shape() {
+        #[allow(deprecated)]
+        fn picker(w: u16, h: u16) -> Picker {
+            Picker::from_fontsize(ratatui_image::FontSize::new(w, h))
+        }
+        let path = Path::new("/cover.png");
+        let mut state = CoverState::default();
+        state.insert(
+            path.to_path_buf(),
+            Some(image::DynamicImage::ImageRgba8(image::RgbaImage::new(600, 800))),
+        );
+        let area = Rect::new(0, 0, 30, 20);
+        let tall = state.fitted_tile_rect(&picker(4, 7), path, area);
+        let taller = state.fitted_tile_rect(&picker(4, 9), path, area);
+        assert_ne!(
+            (tall.width, tall.height),
+            (taller.width, taller.height),
+            "a 600x800 cover in 30x20 cells fits {}x{} at a 1.750 cell and {}x{} at a 2.250 one",
+            tall.width,
+            tall.height,
+            taller.width,
+            taller.height
+        );
+    }
+
+    /// And the built rasters are keyed in CELLS, which a font change does not
+    /// move — so they have to be dropped explicitly. The decoded IMAGE stays:
+    /// it is pixels, not geometry, and re-reading it from disk would be the
+    /// browser stuttering for no reason.
+    #[test]
+    fn invalidating_the_cell_geometry_drops_the_rasters_and_keeps_the_decoded_image() {
+        let path = Path::new("/cover.png");
+        let mut state = CoverState::default();
+        state.insert(
+            path.to_path_buf(),
+            Some(image::DynamicImage::ImageRgba8(image::RgbaImage::new(60, 80))),
+        );
+        #[allow(deprecated)]
+        let picker = Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
+        let area = Rect::new(0, 0, 6, 4);
+        assert!(state.protocol(&picker, path, area, false).is_some(), "the fixture must build a raster");
+        assert!(state.tile_protocol(&picker, path, area).is_some(), "…and a gallery tile");
+
+        state.invalidate_cell_geometry();
+        assert!(state.has(path), "the decode survives — only the geometry was wrong");
+        assert_eq!(
+            (state.proto.is_some(), state.tiles.len()),
+            (false, 0),
+            "every raster was fitted to the old cell and must be rebuilt"
+        );
     }
 }

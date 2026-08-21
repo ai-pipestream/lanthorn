@@ -36,9 +36,13 @@ WezTerm and everything else.
 
 ### A font-size change mid-session is not noticed
 
-lanthorn asks the terminal for its cell size once, at startup, and holds that
-answer for the session. Change the font size while a story is open and every
-graphics fit keeps using the old cell.
+**Fixed on macOS and Linux; still open on Windows.**
+
+lanthorn asks the terminal for its cell size at startup, with a query that writes
+an escape and reads the reply — genuinely delicate to repeat once the app is in
+raw mode and owns the keyboard. So the answer used to be held for the whole
+session: change the font size while a story was open and every graphics fit kept
+using the launch cell.
 
 The absolute size does not matter — the geometry multiplies and divides by it, so
 a uniform error cancels. What survives is the *aspect ratio*, and that genuinely
@@ -47,12 +51,18 @@ moves between adjacent font sizes: a cell is `round(advance x px)` by
 whose design ratio is exactly 1:2 produces real cells ranging from 1.75 to 2.25.
 The visible result is artwork that looks slightly stretched until you relaunch.
 
-This affects all three platforms, but Windows has the least room to fix it: on
-macOS and Linux the cell can be re-derived from a `TIOCGWINSZ` syscall on every
-resize, with no terminal round-trip. Windows has no such fallback, so a fix there
-needs either the console API or a re-issued terminal query.
+On macOS and Linux the cell is now re-derived from a `TIOCGWINSZ` syscall on
+every resize — one ioctl, no escape written, nothing for the input loop to race
+with — and everything fitted against the old cell is thrown away when it moves.
+Changing your terminal's font size is a resize, so this happens on the same
+keystroke that causes it.
 
-**Workaround:** restart lanthorn after changing your terminal font size.
+Windows has no such fallback: the ioctl does not exist and the console API
+reports no per-cell pixel geometry, so the launch value stands for the session
+there and a fix needs a re-issued terminal query.
+
+**Workaround (Windows only):** restart lanthorn after changing your terminal font
+size.
 
 ### Without a terminal that answers, the cell size is a guess
 

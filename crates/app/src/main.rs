@@ -1969,6 +1969,22 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             loop_tick::settle_picture_pacing(&mut state, &mut *session);
         }
 
+        // SQ-0988: a resize may have changed the CELL, not only the grid. The
+        // terminal's cell size was measured once, at launch, by a stdio query no
+        // one can safely repeat with the app in raw mode — so a font-size change
+        // left every fit running on the launch aspect ratio until restart, and
+        // the art looked stretched. `TIOCGWINSZ` re-derives it with no round
+        // trip; when it moves, everything fitted against the old cell goes.
+        //
+        // This sits AHEAD of the three `Event::Resize` arms below (each of which
+        // `continue`s after clearing), so it runs once per resize whichever arm
+        // that resize belongs to.
+        if matches!(&event, Event::Resize(_, _))
+            && state.game_picker.as_mut().is_some_and(picker_ui::refresh_cell_size)
+        {
+            state.graphics_render.borrow_mut().invalidate_cell_geometry();
+        }
+
         // If more input is already queued behind this event, defer the next
         // redraw so the whole burst collapses into a single frame. Cleared at
         // the draw gate once the queue empties (poll(ZERO) == false).

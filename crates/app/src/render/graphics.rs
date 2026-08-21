@@ -1442,6 +1442,15 @@ impl GraphicsRender {
         &self.pending_deletes
     }
 
+    /// What each cache keyed on cell geometry is currently holding, for SQ-0988:
+    /// `(non-kitty window protocols, chrome bands, kitty window uploads,
+    /// a raster composite?)`. One accessor rather than four because the whole
+    /// question is which of them survive an invalidation and which must not.
+    #[cfg(test)]
+    fn cell_keyed_cache_sizes(&self) -> (usize, usize, usize, bool) {
+        (self.cache.len(), self.chrome_bands.len(), self.kitty_wins.len(), self.v6.is_some())
+    }
+
     /// Resize + encode a native v6 canvas into a terminal image protocol,
     /// upscaled (Nearest → crisp pixel art) to fill `area`'s device pixels with
     /// aspect preserved, capped at whatever this backend's [`v6_upscale_cap`] is.
@@ -1541,6 +1550,56 @@ impl GraphicsRender {
             self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Raster });
         }
         self.v6_job = None;
+    }
+
+    /// SQ-0988: the terminal's CELL changed size. Throw away everything fitted
+    /// against the old one.
+    ///
+    /// A resize normally changes the cell GRID, and every cache here is keyed on
+    /// a rect in cells, so a resize invalidates them by not matching. A font-size
+    /// change is the case that slips through: the pane can keep the same
+    /// `width × height` in cells while every one of those cells becomes a
+    /// different box in pixels, and a cache keyed in cells sees no change at all.
+    ///
+    /// What that leaves behind, cache by cache:
+    ///
+    /// * `cache` — the non-kitty per-window protocol, keyed `(version, cols,
+    ///   rows)`. STALE: the protocol holds an image encoded for the old device
+    ///   box, and nothing about the window changed to dislodge it.
+    /// * `v6` — the raster composite, keyed `(gen, area_w, area_h)` in cells, so
+    ///   [`Self::v6_wants_build`] answers "already have it" and the pane keeps
+    ///   showing a picture resampled to the old pixel size. STALE, and the most
+    ///   visible of the two.
+    ///
+    /// And three that are already safe — checked, not assumed, because two of
+    /// them share the suspect key shape and only one of the three is safe for
+    /// the same reason:
+    ///
+    /// * `chrome_bands` — the key IS in cells, but the freshness HASH mixes in
+    ///   `(bw, bh)` in device pixels, so a font change makes every band miss and
+    ///   re-encode on its own.
+    /// * `chrome_scaled` — keyed on the scaled dimensions, likewise device
+    ///   pixels.
+    /// * `kitty_wins` — keyed `(version, w, h)` in cells, exactly like `cache`,
+    ///   and nonetheless immune: [`Self::render_kitty_virtual`] transmits the
+    ///   canvas at its NATIVE size with an explicit `r×c` grid and lets the
+    ///   terminal scale it to the cell rect (SQ-0520). It never reads
+    ///   `picker.font_size()` at all, so there is nothing in that cache fitted
+    ///   to a cell, and re-uploading would spend a full canvas to arrive at the
+    ///   same pixels.
+    ///
+    /// The two device-pixel caches are dropped anyway even though they would
+    /// re-encode by themselves: they are cheap to rebuild, and a ring whose
+    /// bands survived a font change while the composite behind them did not is a
+    /// seam waiting to happen. `kitty_wins` is deliberately KEPT.
+    ///
+    /// Every drop frees its upload in the terminal rather than merely forgetting
+    /// it (SQ-0753), which is why this delegates instead of clearing the maps.
+    pub fn invalidate_cell_geometry(&mut self) {
+        self.cache.clear();
+        self.invalidate_v6();
+        self.invalidate_chrome_bands();
+        self.chrome_scaled = None;
     }
 
     /// Poll the background v6 encode: if it finished, install its protocol as the
@@ -5207,6 +5266,142 @@ mod tests {
                 "a 16-colour 640x400 frame must cost under a twentieth of its raw upload: \
                  {} bytes against {raw_b64}",
                 transmit.len()
+            );
+        }
+    }
+
+    /// SQ-0988: the terminal's cell size is measured once at launch, so a font
+    /// change mid-session leaves every fit running on the launch cell.
+    ///
+    /// The absolute size does not matter — geometry multiplies by `fw`/`fh` to
+    /// reach a device box and divides by them again, so a uniform scale error
+    /// cancels. The ASPECT RATIO is what survives, and it genuinely moves between
+    /// adjacent font sizes: a cell is `round(advance_em · px)` by
+    /// `round(line_em · px)`, and the two round at different rates.
+    mod cell_size_change {
+        use super::*;
+
+        /// A kitty picker at a stated cell size, the way the app's other headless
+        /// paths already build one.
+        fn kitty(w: u16, h: u16) -> Picker {
+            #[allow(deprecated)]
+            let mut p = Picker::from_fontsize(ratatui_image::FontSize::new(w, h));
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+            p
+        }
+
+        /// The claim the whole quest rests on, in arithmetic: the SAME cell rect
+        /// at a different cell SHAPE fits a different box.
+        ///
+        /// 4x7 and 4x9 are FiraCode at 6 px and 7 px — a face whose design ratio
+        /// is 2.002, yielding real cells of 1.750 and 2.250. Two adjacent font
+        /// sizes, one keystroke apart.
+        #[test]
+        fn the_same_cell_rect_at_a_different_cell_shape_fits_a_different_box() {
+            let target = Size::new(80, 25);
+            let src = (640u32, 400u32);
+            let tall = fit_geometry(ratatui_image::FontSize::new(4, 7), src, target, false);
+            let taller = fit_geometry(ratatui_image::FontSize::new(4, 9), src, target, false);
+            assert_ne!(
+                (tall.cells.width, tall.cells.height),
+                (taller.cells.width, taller.cells.height),
+                "80x25 cells fits {}x{} at a 1.750 cell and {}x{} at a 2.250 one — were these \
+                 equal there would be nothing to fix",
+                tall.cells.width,
+                tall.cells.height,
+                taller.cells.width,
+                taller.cells.height
+            );
+        }
+
+        /// And the raster composite is encoded FOR the cell it was built against:
+        /// two pickers, one area, two different pictures.
+        #[test]
+        fn the_raster_composite_is_encoded_for_the_cell_it_was_built_against() {
+            let canvas = image::RgbaImage::from_fn(320, 200, |x, y| {
+                image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255])
+            });
+            let area = Rect::new(0, 0, 80, 25);
+            let a = GraphicsRender::encode_v6(&kitty(4, 7), &canvas, 1, area, None)
+                .expect("a kitty encode of a real canvas");
+            let b = GraphicsRender::encode_v6(&kitty(4, 9), &canvas, 1, area, None)
+                .expect("a kitty encode of a real canvas");
+            assert_ne!(
+                (a.proto.size().width, a.proto.size().height),
+                (b.proto.size().width, b.proto.size().height),
+                "the composite is fitted to the cell, so it cannot be the same picture at both"
+            );
+        }
+
+        /// …and yet the key that decides whether to rebuild it cannot see the
+        /// difference. The defect, stated as a test.
+        #[test]
+        fn the_composite_survives_a_font_change_until_the_caches_are_told() {
+            let canvas = image::RgbaImage::from_pixel(320, 200, image::Rgba([10, 20, 30, 255]));
+            let area = Rect::new(0, 0, 80, 25);
+            let mut gr = GraphicsRender::default();
+            assert!(gr.v6_wants_build(1, area), "nothing is built yet");
+            gr.spawn_v6_encode(&kitty(4, 7), canvas, 1, area, None);
+            assert!(!gr.v6_wants_build(1, area), "the first encode installs a composite");
+
+            // The pane is still 80x25 cells; only the cells changed shape. Nothing
+            // in the key moved, so the composite fitted to a 1.750 cell is what the
+            // pane would go on drawing at 2.250.
+            assert!(
+                !gr.v6_wants_build(1, area),
+                "the key is (gen, cols, rows) and a font change moves none of the three — \
+                 which is precisely why the invalidation below has to be explicit"
+            );
+
+            gr.invalidate_cell_geometry();
+            assert!(gr.v6_wants_build(1, area), "once the cell moved, the composite must be rebuilt");
+        }
+
+        /// Which caches the invalidation drops, and — just as load-bearing — which
+        /// it must NOT.
+        ///
+        /// `kitty_wins` shares `cache`'s key shape and is nonetheless immune: a
+        /// virtual placement sends the canvas at native size and names an `r×c`
+        /// grid, so the terminal rescales to the new cell rect on its own.
+        /// Dropping it would re-upload a whole canvas to arrive at the same
+        /// pixels, which on a v6 window is megabytes for nothing.
+        #[test]
+        fn invalidating_drops_what_was_fitted_to_the_cell_and_keeps_what_was_not() {
+            let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([7, 7, 7, 255]));
+            let gw =
+                GraphicsWindow { win: 7, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
+            let area = Rect::new(0, 0, 20, 4);
+            let mut gr = GraphicsRender::default();
+
+            // A kitty window upload…
+            let mut buf = Buffer::empty(area);
+            gr.render(&kitty(8, 18), &gw, area, Style::default(), &mut buf);
+            // …a non-kitty window protocol, on a second window…
+            let gw2 = GraphicsWindow { win: 8, ..gw.clone() };
+            let mut sixel = kitty(8, 18);
+            sixel.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+            let mut buf2 = Buffer::empty(area);
+            gr.render(&sixel, &gw2, area, Style::default(), &mut buf2);
+            // …and a raster composite.
+            gr.spawn_v6_encode(&kitty(8, 18), (*gw.canvas).clone(), 1, area, None);
+
+            let (cache, _bands, kitty_wins, v6) = gr.cell_keyed_cache_sizes();
+            assert_eq!(
+                (cache, kitty_wins, v6),
+                (1, 1, true),
+                "the fixture must actually populate all three, or the assertions below pass \
+                 vacuously"
+            );
+
+            gr.invalidate_cell_geometry();
+            let (cache, bands, kitty_wins, v6) = gr.cell_keyed_cache_sizes();
+            assert_eq!(cache, 0, "the non-kitty window protocol was encoded at the old device box");
+            assert_eq!(bands, 0, "chrome bands go with it, so the ring cannot outlive the composite");
+            assert!(!v6, "the raster composite was resampled to the old device box");
+            assert_eq!(
+                kitty_wins, 1,
+                "a virtual placement is scaled to its r×c grid BY THE TERMINAL, so its upload is \
+                 still correct — re-sending it would spend a whole canvas for nothing"
             );
         }
     }
