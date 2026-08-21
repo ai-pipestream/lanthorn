@@ -201,6 +201,10 @@ pub struct Answered {
 
 /// Everything the run produced.
 pub struct Capture {
+    /// Every byte the app emitted, in order — the WIRE stream, which is what
+    /// [`Flush`]'s offsets index and what any bandwidth reading must be taken
+    /// from. Since SQ-0976 that is not the same thing as the stream a terminal
+    /// interprets: see [`Capture::terminal_bytes`].
     pub bytes: Vec<u8>,
     pub flushes: Vec<Flush>,
     pub answered: Vec<Answered>,
@@ -217,6 +221,20 @@ impl Capture {
         let answered_kitty = self.answered.iter().any(|a| a.query == "kitty graphics support");
         let apc = count_subslices(&self.bytes, b"\x1b_G");
         Negotiation { answered_kitty, apc_commands: apc }
+    }
+
+    /// The same stream with the kitty protocol's `o=z` undone — what to hand
+    /// [`super::oracle::resolve`], and the only form it can read (SQ-0976).
+    ///
+    /// The oracle's terminal core links no zlib, so a compressed transmit is
+    /// dropped outright and every placement naming it vanishes. Undoing the
+    /// compression is a transport rewrite that changes no image and no geometry;
+    /// see [`super::inflate`] for why it belongs here and not in the emitter.
+    ///
+    /// [`Self::bytes`] is deliberately NOT this: `flushes` index it, and the wire
+    /// size is the measurement SQ-0976 exists to move.
+    pub fn terminal_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        super::inflate::kitty_inflate(&self.bytes)
     }
 }
 

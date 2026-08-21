@@ -181,7 +181,9 @@ fn main() -> std::process::ExitCode {
     // the same screen, and a second `resolve` on a multi-megabyte capture is the
     // most expensive thing this program does.
     let res = pty_stream::oracle::resolve(
-        &cap.bytes,
+        // SQ-0976: the oracle's terminal core links no zlib, so it must be handed
+        // the stream with `o=z` undone or it drops every image.
+        &cap.terminal_bytes(),
         cap.spec.cols,
         cap.spec.rows,
         u32::from(cap.spec.cell_w),

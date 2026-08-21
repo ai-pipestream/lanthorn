@@ -2423,22 +2423,73 @@ fn kitty_b64(data: &[u8]) -> String {
     out
 }
 
+/// Deflate a transmit payload for the kitty protocol's `o=z`.
+///
+/// RFC 1950 (zlib), which is the ONLY compression the protocol defines. Level 6
+/// (`Compression::default()`) rather than 1 or 9 — measured on real v6 canvases
+/// in SQ-0976, where the three levels are not close:
+///
+/// | canvas (turns)                | b64 raw | L1 b64 | L6 b64 | L9 b64 | L1 / L6 / L9 ms |
+/// |-------------------------------|--------:|-------:|-------:|-------:|-----------------|
+/// | Zork Zero r393 win 7, 640x400 | 1365336 |  35068 |   6580 |   6024 | 0.40 / 1.43 / 2.40 |
+/// | Shogun r322 win 7, 640x400    | 1365336 |  20276 |   6532 |   6040 | 0.27 / 1.77 / 3.30 |
+/// | Journey r83 win 3, 232x304    |  376152 |  27168 |  10884 |  10016 | 0.35 / 1.88 / 5.34 |
+/// | Zork Zero r393 win 1, 640x78  |  266240 |   3180 |    960 |    964 | 0.05 / 0.26 / 0.37 |
+///
+/// L1 leaves three to five times as much on the wire for a millisecond saved;
+/// L9 buys 5–8% more for two to four times L6's cost, and on one canvas it is
+/// *larger*. Sixteen-colour flat artwork is what deflate is best at, and 1.4–3.3
+/// ms on the render worker is nothing beside 1.37 MB of base64.
+///
+/// Writing into a `Vec` has no failure mode; the `expect` documents that rather
+/// than inventing a fallback path no test could reach.
+fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut enc = flate2::write::ZlibEncoder::new(
+        Vec::with_capacity(raw.len() / 32 + 64),
+        flate2::Compression::default(),
+    );
+    enc.write_all(raw).expect("a zlib encoder writing into a Vec cannot fail");
+    enc.finish().expect("a zlib encoder writing into a Vec cannot fail")
+}
+
 /// The kitty transmit sequence for `canvas` as image `id`: a VIRTUAL placement
 /// (`U=1`) declaring an explicit `r×c` grid, so the terminal scales the image
-/// to exactly the placeholder rect (SQ-0520). RGBA chunked per the protocol's
-/// 4096-encoded-byte limit. (No tmux passthrough — matches the app's existing
-/// kitty support, which targets direct terminals.)
+/// to exactly the placeholder rect (SQ-0520). RGBA, zlib-compressed, chunked per
+/// the protocol's 4096-encoded-byte limit. (No tmux passthrough — matches the
+/// app's existing kitty support, which targets direct terminals.)
+///
+/// **`o=z` is the payload's encoding and nothing else** (SQ-0976). Per the kitty
+/// graphics protocol: *"the payload is now compressed using deflate (this occurs
+/// prior to base64 encoding)"*, so `f=32` still names the format the terminal
+/// finds after inflating, and `s=`/`v=` still name the **uncompressed** image's
+/// pixel dimensions — the terminal sizes its buffer from `s*v*4` and the inflated
+/// payload must be exactly that long. The `S` key is not involved: the spec
+/// requires it only for PNG-plus-compression, where the decompressed length is
+/// not implied by the geometry.
+///
+/// Chunking therefore applies to the COMPRESSED stream, because it is the thing
+/// being base64-encoded — *"the pixel data must first be base64 encoded then
+/// chunked up into chunks no larger than 4096 bytes"*. 3072 compressed bytes make
+/// exactly 4096 base64 characters and satisfy "all chunks except the last must
+/// have a size that is a multiple of 4"; continuation chunks carry only `m` and
+/// `q`, as the spec demands, so `o=z` is stated once on the first chunk and
+/// governs the reassembled whole.
+///
+/// The upload cache above this (`canvas_hash`, SQ-0564) is untouched: it is keyed
+/// on the canvas's own pixels, which is upstream of how they are encoded.
 fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u16) -> String {
     use std::fmt::Write as _;
     let (w, h) = (canvas.width(), canvas.height());
-    let bytes = canvas.as_raw();
-    let chunks: Vec<&[u8]> = bytes.chunks(3072).collect();
+    let payload = zlib_deflate(canvas.as_raw());
+    let chunks: Vec<&[u8]> = payload.chunks(3072).collect();
     let n = chunks.len();
-    let mut out = String::with_capacity(bytes.len() / 3 * 4 + n * 24);
+    let mut out = String::with_capacity(payload.len() / 3 * 4 + n * 24);
     for (i, chunk) in chunks.into_iter().enumerate() {
         let more = u8::from(i + 1 < n);
         if i == 0 {
-            write!(out, "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},r={rows},c={cols},m={more};").unwrap();
+            write!(out, "\x1b_Gq=2,i={id},a=T,U=1,f=32,o=z,t=d,s={w},v={h},r={rows},c={cols},m={more};")
+                .unwrap();
         } else {
             write!(out, "\x1b_Gq=2,m={more};").unwrap();
         }
@@ -4141,7 +4192,7 @@ mod tests {
         gr.render(&picker, &gw, area, Style::default(), &mut buf);
         let first = buf.cell((0, 0)).unwrap().symbol().to_string();
         assert!(first.contains(",r=2,c=138,"), "transmit declares the explicit cell grid");
-        assert!(first.contains("a=T,U=1,f=32"), "virtual placement transmit present");
+        assert!(first.contains("a=T,U=1,f=32,o=z"), "virtual placement transmit present");
         assert!(first.contains('\u{10EEEE}'), "placeholder run present");
         assert!(!first.contains("a=d"), "first transmit deletes nothing");
         assert!(buf.cell((0, 1)).unwrap().symbol().contains('\u{10EEEE}'), "second row placed");
@@ -5047,5 +5098,116 @@ mod tests {
             carried.contains(&format!("a=d,d=I,i={id}")),
             "the delete must be IN the frame's cells, or it is never written: {carried:?}"
         );
+    }
+
+    /// SQ-0976: what the terminal is handed for a kitty window upload.
+    ///
+    /// The claim under test is not "we wrote `o=z`" — that is a substring — but
+    /// that the bytes behind it are a well-formed zlib stream of EXACTLY the
+    /// canvas, reassembled from the chunks in the order they were emitted. A
+    /// transmit that compresses each chunk separately, or that chunks the raw
+    /// bytes and compresses after, or that declares the compressed length in `s`
+    /// and `v`, all still contain `o=z` and all draw nothing.
+    mod compressed_upload {
+        use super::*;
+
+        /// Standard-alphabet base64, decoded. The emitter hand-rolls the encoder
+        /// (`kitty_b64`) rather than take a dependency, so the check has to be
+        /// able to undo it independently — a shared codec proves nothing about
+        /// either half.
+        fn unb64(s: &str) -> Vec<u8> {
+            const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut acc = 0u32;
+            let mut bits = 0u32;
+            let mut out = Vec::new();
+            for c in s.bytes().filter(|&c| c != b'=') {
+                let v = T.iter().position(|&t| t == c).unwrap_or_else(|| panic!("base64 alphabet: {c:?}"));
+                acc = (acc << 6) | v as u32;
+                bits += 6;
+                if bits >= 8 {
+                    bits -= 8;
+                    out.push((acc >> bits) as u8);
+                }
+            }
+            out
+        }
+
+        /// Split a transmit into `(first chunk's control keys, every payload
+        /// concatenated in emission order)`.
+        fn parse(transmit: &str) -> (String, Vec<u8>) {
+            let mut keys = String::new();
+            let mut payload = Vec::new();
+            for (i, cmd) in transmit.split("\x1b_G").skip(1).enumerate() {
+                let body = cmd.strip_suffix("\x1b\\").expect("every APC command is ST-terminated");
+                let (params, b64) = body.split_once(';').expect("every transmit chunk has a payload");
+                if i == 0 {
+                    keys = params.to_string();
+                } else {
+                    assert!(
+                        params.split(',').all(|kv| kv.starts_with("m=") || kv.starts_with("q=")),
+                        "a continuation chunk may carry only `m` and `q`: {params}"
+                    );
+                }
+                assert!(b64.len() <= 4096, "chunk of {} base64 bytes exceeds the protocol's 4096", b64.len());
+                let last = params.contains("m=0");
+                assert!(last || b64.len() % 4 == 0, "every chunk but the last must be a multiple of 4");
+                payload.extend_from_slice(&unb64(b64));
+            }
+            (keys, payload)
+        }
+
+        /// A canvas whose pixels are not all one colour, or a codec bug that
+        /// dropped everything after the first chunk would still round-trip.
+        fn canvas(w: u32, h: u32) -> image::RgbaImage {
+            image::RgbaImage::from_fn(w, h, |x, y| {
+                image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x * 7 + y * 13) % 239) as u8, 255])
+            })
+        }
+
+        #[test]
+        fn the_transmit_declares_o_z_and_the_canvas_own_uncompressed_dimensions() {
+            let img = canvas(640, 400);
+            let (keys, _) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 25, 80));
+            assert!(keys.contains(",o=z"), "the payload is compressed and must say so: {keys}");
+            assert!(keys.contains(",f=32"), "`o=z` is the encoding; `f` is still the format: {keys}");
+            // s/v name the image, not the payload. 640x400 is 1,024,000 raw bytes
+            // and a few thousand compressed, so a transmit that confused the two
+            // would be caught here and nowhere else.
+            assert!(keys.contains(",s=640,v=400,"), "s/v are the UNCOMPRESSED pixel dimensions: {keys}");
+            assert!(keys.contains(",r=25,c=80,"), "the explicit placeholder grid survives (SQ-0520)");
+            assert!(!keys.contains("S="), "`S` is for PNG-plus-compression only, and this is f=32");
+        }
+
+        #[test]
+        fn inflating_the_reassembled_payload_reproduces_the_canvas_byte_for_byte() {
+            for (w, h) in [(640u32, 400u32), (232, 304), (1104, 36), (1, 1)] {
+                let img = canvas(w, h);
+                let (_, payload) = parse(&kitty_transmit_virtual(&img, 7, 2, 8));
+                let mut raw = Vec::new();
+                std::io::copy(&mut flate2::read::ZlibDecoder::new(&payload[..]), &mut raw)
+                    .unwrap_or_else(|e| panic!("{w}x{h}: the payload must be one zlib stream: {e}"));
+                assert_eq!(raw.len(), (w * h * 4) as usize, "{w}x{h}: kitty sizes its buffer from s*v*4");
+                assert_eq!(&raw, img.as_raw(), "{w}x{h}: the inflated payload is the canvas");
+            }
+        }
+
+        /// The point of the exercise, kept as a number so a regression that
+        /// silently stops compressing is a failure rather than a slow terminal.
+        #[test]
+        fn a_flat_artwork_canvas_costs_a_fraction_of_its_raw_upload() {
+            // Sixteen colours in horizontal bands — the shape of every v6 frame.
+            let img = image::RgbaImage::from_fn(640, 400, |_x, y| {
+                let c = ((y / 25) * 17) as u8;
+                image::Rgba([c, c / 2, 255 - c, 255])
+            });
+            let transmit = kitty_transmit_virtual(&img, 7, 25, 80);
+            let raw_b64 = 1024000usize.div_ceil(3) * 4;
+            assert!(
+                transmit.len() * 20 < raw_b64,
+                "a 16-colour 640x400 frame must cost under a twentieth of its raw upload: \
+                 {} bytes against {raw_b64}",
+                transmit.len()
+            );
+        }
     }
 }

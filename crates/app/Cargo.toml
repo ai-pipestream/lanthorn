@@ -47,6 +47,10 @@ roxmltree = "0.21"
 ureq = "3.3"
 hyperrat = "0.1.3"
 font8x8 = "0.3"
+# SQ-0976: zlib for the kitty graphics protocol's `o=z` payload compression.
+# Already in the graph three times over (png, ureq, zip), so naming it here
+# compiles nothing new.
+flate2 = "1"
 
 # SQ-0764: a SECOND opinion on the bytes lanthorn emits. The pty harness
 # (SQ-0762) decodes the stream with our own hand-rolled decoder, which is

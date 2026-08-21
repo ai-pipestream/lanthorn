@@ -2570,6 +2570,34 @@ None of this is visible. With the flicker fixed, this is purely how much goes do
 the wire; on a local terminal you would never notice, and over ssh it is the
 difference between a boot animation that feels snappy and one that does not.
 
+## Graphics-window uploads are compressed
+
+The kitty graphics protocol accepts a zlib-deflated payload (`o=z`); the
+compression happens before base64, `f=32` still names the format the terminal
+finds after inflating, and `s`/`v` still name the *uncompressed* image's pixel
+dimensions. Sixteen-colour artwork is what deflate is best at, so this is not a
+marginal saving. Measured on real canvases at level 6:
+
+| canvas | raw base64 | compressed | |
+|---|---:|---:|---|
+| Zork Zero r393 window 7, 640×400 | 1,365,336 B | 6,580 B | **207×** |
+| Shogun r322 window 7, 640×400 | 1,365,336 B | 6,532 B | **209×** |
+| Journey r83 window 3, 232×304 | 376,152 B | 10,884 B | **34.6×** |
+
+Level 6 rather than 1 or 9: level 1 leaves three to five times as much on the
+wire to save about a millisecond, and level 9 buys 5–8% more for two to four
+times level 6's cost — and on one canvas it came out *larger*. The 1.4–3.3 ms
+this spends lands on the render worker, which is nothing beside a megabyte of
+base64.
+
+**What this reaches is graphics *windows*** — Glulx's clickable toolbars, Scott
+room pictures, and any v6 graphics window drawn as an image rather than as cells.
+Measured on advent.blb under a pty, the whole capture went from ~314 KB to 54 KB.
+The v6 chrome ring's bands and the full-pane raster composite are uploaded by
+`ratatui-image` instead and are **not** compressed today; a Zork Zero raster
+session emits 2.82 MB per frame that would deflate to 31.5 KB, which is the
+larger prize and needs the change one layer down.
+
 ## `/dump-windows` reports the last frame the *game* drew
 
 When a v6 layout looks wrong, `/dump-windows` is how you say what you saw: one

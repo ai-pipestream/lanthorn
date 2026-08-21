@@ -370,8 +370,15 @@ mod emitter {
     }
 
     /// Resolve everything written so far the way a terminal would.
+    ///
+    /// The emitter compresses its uploads (`o=z`, SQ-0976) and the oracle's
+    /// terminal core links no zlib, so the bytes go through the same transport
+    /// rewrite a captured stream does — without it every case below reads a
+    /// screen with no art on it at all.
     fn resolve(sink: &Sink) -> oracle::Resolved {
-        oracle::resolve(&sink.0.borrow(), COLS, ROWS, u32::from(CELL_W), u32::from(CELL_H), Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)))
+        let bytes = sink.0.borrow();
+        let bytes = pty_stream::inflate::kitty_inflate(&bytes);
+        oracle::resolve(&bytes, COLS, ROWS, u32::from(CELL_W), u32::from(CELL_H), Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)))
     }
 
     /// Draw the art, and nothing else.
@@ -981,7 +988,9 @@ mod real_capture {
         let cap = driver::run(spec).expect("the pty harness should boot lanthorn");
         let term = pty_stream::decode_capture(&cap);
         let res = oracle::resolve(
-            &cap.bytes,
+            // SQ-0976: the oracle's terminal core links no zlib, so it must be
+            // handed the stream with `o=z` undone or it drops every image.
+            &cap.terminal_bytes(),
             cap.spec.cols,
             cap.spec.rows,
             u32::from(cap.spec.cell_w),

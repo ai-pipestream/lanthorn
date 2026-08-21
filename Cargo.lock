@@ -122,6 +122,7 @@ dependencies = [
  "clap",
  "cli-host",
  "crossterm",
+ "flate2",
  "font8x8",
  "fontdue",
  "gvm",
