@@ -91,6 +91,64 @@ pub fn kitty_inflate(stream: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Owned(out)
 }
 
+/// One kitty TRANSMIT read off a capture, with its payload resolved (SQ-0993).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transmit {
+    /// Byte offset of this transmit's first chunk in the stream it was read from,
+    /// so a caller can say whether it came before or after some event (a
+    /// [`super::driver::Resized`], say).
+    pub at: usize,
+    /// The first chunk's `key=value,…` control block, verbatim.
+    pub params: String,
+    /// The control block said `o=z`.
+    pub compressed: bool,
+    /// Base64 characters this transmit occupied ON THE WIRE, across every chunk —
+    /// the bandwidth measurement, and the thing compression is supposed to move.
+    pub wire_b64: usize,
+    /// The payload the terminal would end up with: un-base64'd, and inflated when
+    /// `compressed`. `None` when an `o=z` payload is not a valid zlib stream —
+    /// which is a transmit that draws NOTHING on a real terminal, so it must be a
+    /// visible failure rather than a silently skipped one.
+    pub raw: Option<Vec<u8>>,
+}
+
+impl Transmit {
+    /// One control key's value.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.params.split(',').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+    }
+}
+
+/// Every kitty transmit in `stream`, payloads resolved (SQ-0993).
+///
+/// The decoder in [`super::decode`] deliberately keeps only a payload LENGTH — it
+/// models a screen, not an image store — so nothing could ask the question this
+/// exists for: does the payload actually inflate, and does what comes out match
+/// the `s`/`v` the transmit declared? A transmit that says `o=z` and carries
+/// something else is indistinguishable from a correct one until a terminal tries
+/// to inflate it and draws nothing, which is exactly the silent failure SQ-0991
+/// shipped without a test for.
+///
+/// Only `a=T`/`a=t` are returned: a place, a delete and a query carry no pixels.
+pub fn transmits(stream: &[u8]) -> Vec<Transmit> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(rel) = find(&stream[i..], b"\x1b_G") {
+        let at = i + rel;
+        let Some((params, payload, next)) = take_transmit(stream, at) else { break };
+        i = next;
+        let action = params.split(',').find_map(|kv| kv.strip_prefix("a="));
+        if !matches!(action, Some("T") | Some("t")) {
+            continue;
+        }
+        let compressed = params.split(',').any(|kv| kv == "o=z");
+        let bytes = unb64(&payload);
+        let raw = if compressed { inflate(&bytes) } else { Some(bytes) };
+        out.push(Transmit { at, params, compressed, wire_b64: payload.len(), raw });
+    }
+    out
+}
+
 /// One transmit starting at `at` (which must index an `ESC _ G`), as its first
 /// command's parameters, every chunk's base64 concatenated, and the offset just
 /// past the last chunk consumed.
