@@ -206,7 +206,12 @@ switches that make lanthorn feel like yours without opening the whole registry.
   paint every `grue` red). The meta/warning gutter glyphs are now the `glyph`
   attribute directly on `transcript_meta` / `transcript_warning` (e.g.
   `transcript_meta = { parent = "muted", glyph = "▏" }`) rather than a separate
-  symbol override. On top of all that, the game's own **`set_text_style`**
+  symbol override. `/dump-terminal`'s report rides the same transcript styling,
+  with two selectors of its own: `terminal_dump_heading` for its section headings
+  and `terminal_dump_assumed` — parented on `alert` — for every line carrying a
+  value lanthorn **guessed** rather than measured, or one it could not reach at
+  all. That colour difference is the command's whole point, so it is worth
+  keeping loud. On top of all that, the game's own **`set_text_style`**
   emphasis (bold / italic / reverse-video) is rendered per-span — a bold word
   inside a sentence shows just that word bold — layered over the category/rule
   colors and preserved across save/reload.
@@ -252,6 +257,7 @@ switches that make lanthorn feel like yours without opening the whole registry.
   [keymap.global]
   "ctrl+d" = "dump-windows"
   "ctrl+g" = "dump-cells"
+  "ctrl+t" = "dump-terminal"
   ```
 - **The story browser's keys are bindable too** — the screen you get when
   lanthorn is pointed at a directory used to be the one surface whose keys were

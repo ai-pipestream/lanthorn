@@ -343,6 +343,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("room_dock.header", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     row("room_dock.header:pinned", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
     row("story_info_title", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    // ── `/dump-terminal` (SQ-0994). Its whole point is telling a MEASURED value
+    // from an ASSUMED one, so the two get different looks: a heading to find the
+    // section by, and `terminal_dump_assumed` on every line carrying a number
+    // lanthorn guessed or could not reach. Ordinary values stay on
+    // `transcript_meta` with the rest of the dump family.
+    row("terminal_dump_heading", Section::Elements, Kind::Style, Some("heading"), mods(true, false, false, false)),
+    row("terminal_dump_assumed", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     row("story_info_value", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("story_info_blurb", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
     row("story_info_link", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
@@ -599,6 +606,8 @@ mod tests {
         "room_dock.header",
         "room_dock.header:pinned",
         "story_info_title",
+        "terminal_dump_heading",
+        "terminal_dump_assumed",
         "story_info_value",
         "story_info_blurb",
         "story_info_link",

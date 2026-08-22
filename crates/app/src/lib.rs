@@ -340,6 +340,7 @@ pub mod story_info;
 pub mod styles;
 pub mod symbols;
 pub mod term_colors;
+pub mod terminal_dump;
 pub mod text_field;
 pub mod textwidth;
 pub mod theme;

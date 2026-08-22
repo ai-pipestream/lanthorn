@@ -575,7 +575,7 @@ fn panel_border(theme: &app::theme::resolve::Theme, focused: bool) -> Style {
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<app::terminal_dump::CountingWriter<std::io::Stdout>>>,
     engine: &dyn Engine,
     mapper: &Mapper,
     state: &AppState,

@@ -80,6 +80,12 @@ pub enum SlashOutcome {
     /// colours and attributes — to `~/.lanthorn/dump-cells.log` as plain text
     /// (SQ-0761). Handled in `slash_dispatch`.
     DumpCells,
+    /// Diagnostic: what lanthorn detected about this TERMINAL — protocol, cell
+    /// size and whether it was measured or guessed, capabilities, whether kitty
+    /// uploads are compressed — plus the render state and byte counts that
+    /// explain the traffic (SQ-0994). Printed to the transcript and mirrored to
+    /// `~/.lanthorn/dump-terminal.log`. Handled in `slash_dispatch`.
+    DumpTerminal,
     /// Toggle the Z-machine debug inspector tiled pane. Handled in `slash_dispatch`
     /// (needs AppState + the engine's debugger capability).
     ToggleDebug,
@@ -513,6 +519,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "dump-cells", category: Category::Help, context: Context::Global,
         usage: "dump-cells", description: "write the last frame's cells — glyphs, colours and attributes — to ~/.lanthorn/dump-cells.log",
         dispatch: |_| SlashOutcome::DumpCells },
+    CommandSpec { name: "dump-terminal", category: Category::Help, context: Context::Global,
+        usage: "dump-terminal", description: "dump this terminal's detected protocol, cell size, capabilities and traffic — here and to ~/.lanthorn/dump-terminal.log",
+        dispatch: |_| SlashOutcome::DumpTerminal },
     CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
         usage: "debug", description: "toggle the Z-machine debug inspector pane",
         dispatch: |_| SlashOutcome::ToggleDebug },
@@ -974,12 +983,15 @@ mod tests {
         // SQ-0692 added `toggle-room-dock`; `toggle-inspector` kept its name and
         // now flips the SAME dock to its diagnostics body.
         // SQ-0761 added `dump-cells`, the cell-buffer half of `dump-windows`.
+        // SQ-0994 added `dump-terminal`, the terminal-and-traffic half of the same
+        // family: what was detected about the terminal, and which of those numbers
+        // lanthorn measured rather than guessed.
         // SQ-0796 added the 16-command Library group — the pre-game story
         // browser's own keys, which used to be hardcoded match arms outside the
         // registry entirely.
         // SQ-0439 retired `peel-layer` and `merge-layer` for the one verb they
         // always were, `move-region` — two entries out, one in.
-        assert_eq!(COMMANDS.len(), 78, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 79, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of
@@ -1035,6 +1047,18 @@ mod tests {
     fn dump_windows_command_parses() {
         assert!(find_command("dump-windows").is_some());
         assert!(matches!(parse("dump-windows", '/'), SlashOutcome::DumpWindows));
+    }
+
+    /// SQ-0994. The description names BOTH destinations, because the on-screen
+    /// copy of a v6 pane cannot be selected (SQ-0756) and the file is what a bug
+    /// report actually carries — a command that writes a log the user is never
+    /// told about is a log nobody reads.
+    #[test]
+    fn dump_terminal_command_parses_and_names_its_log() {
+        let spec = find_command("dump-terminal").expect("dump-terminal is registered");
+        assert!(matches!(parse("dump-terminal", '/'), SlashOutcome::DumpTerminal));
+        assert!(spec.description.contains("dump-terminal.log"), "{}", spec.description);
+        assert_eq!(spec.category, Category::Help);
     }
 
     #[test]

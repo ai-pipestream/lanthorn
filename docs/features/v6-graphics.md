@@ -2863,6 +2863,92 @@ modal ever opens:
 A bound-key capture moves neither the render-path history nor the band-upload
 count; the palette route moves both.
 
+## `/dump-terminal` separates what lanthorn *measured* from what it *guessed*
+
+The other two dumps describe the frame. This one describes the **terminal it is
+being drawn on**, and its organising principle is a distinction nothing else in
+the app makes: several numbers the whole graphics path is computed from are
+guesses that look exactly like measurements.
+
+The cell size is the one that bites. `ratatui-image` asks the terminal with
+`CSI 16 t`; when nobody answers it falls back to the tty's `TIOCGWINSZ` pixel
+geometry, and when that answers nothing either it uses a hardcoded 10x20 the crate
+itself calls "completely arbitrary" — and on Windows there is no ioctl to fall
+back to at all. `cell 10x20` and `cell 10x20 (ASSUMED)` mean entirely different
+things, and every device box downstream is derived from whichever one you have.
+So the report names the source outright, and colours a guess differently from a
+measurement:
+
+```
+  cell size: 9x20 px — DERIVED (from the tty's TIOCGWINSZ pixel geometry)
+  cell aspect: 2.222 (height/width), +0.222 from the 2.000 that makes a half-block sample square
+    CSI 16 t answered: 8x18 px
+    TIOCGWINSZ says now: 9x20 px
+```
+
+That capture was taken after a font-size change, which is exactly when the two
+disagree: the cell in force is the ioctl's, the `CSI 16 t` answer is the one the
+terminal gave at launch, and calling the first "measured" would be the conflation
+this command exists to end. The **signed** distance from 2.000 is there because
+the sign says which of Ghostty's `adjust-cell-height` / `adjust-cell-width` to
+reach for — real cells swing 1.75 to 2.25 even for a face whose design ratio is
+exactly 2.002, because a cell is `round(advance·px)` by `round(line·px)` and the
+two round at different rates.
+
+An empty capability list gets the same treatment, because it is three different
+facts: the terminal was asked and refused, `--image-protocol halfblocks` built a
+picker that asks nothing, or `--no-images` built no picker at all. And the
+question the command was written for:
+
+```
+  kitty transmission compression (o=z):
+    ratatui-image uploads (v6 chrome bands, the raster composite, cover + inline art): COMPRESSED — the terminal answered the o=z probe
+    graphics-window uploads (lanthorn's own transmit): COMPRESSED — unconditionally; that path states o=z whatever the probe said
+```
+
+Two lines because there are two encoders, and only one of them asks. Compression
+fails silently in both directions — a terminal that cannot inflate simply draws
+nothing, and a quiet reversion to raw looks like nothing at all — which is why
+having it stated anywhere at all is the point.
+
+Then the render state and the byte counts that explain each other:
+
+```
+render
+  story pane: 115x61 cells = 7,015 cell(s)
+  v6 mode: hybrid
+  picture takeover: none — the hybrid ring drew the last frame
+  native screen: 640x400 game pixels, art_scale 2x2
+  magnification: 1.617x, pixel lock off (free scaling)
+  recent render paths (oldest first): raster x2 · hybrid-ring x6
+traffic
+  bytes written to the terminal: 210,012 in 10 frame flush(es) since launch
+  last drawn frame: 44,014 bytes
+  graphics ops on the last recorded frame: 1 upload(s), 0 reuse(s), 1 placement(s), 0 drop(s)
+  placeholder cells under those placements: 840
+  chrome-band / composite uploads since launch: 3
+```
+
+Those numbers cost the frame path nothing. The bytes are counted at the writer —
+one add per `write`, one per `flush`, never looking at a byte — and every other
+figure is read from something the render already tracked for its own reasons. The
+graphics-op counts come from the render's own log rather than from the wire for
+the same reason: finding `\x1b_G` in the stream would mean scanning every byte of
+every frame. Anything that would have needed a new counter on the frame path is
+reported as **unavailable**, with the reason, rather than instrumented into
+existence.
+
+Like its two siblings the report is appended to a file —
+**`~/.lanthorn/dump-terminal.log`**, timestamped, path named in the transcript —
+and this is the one you actually want in a bug report. It also takes a Ctrl
+binding, and for a sharper reason than the others: reaching it through the palette
+is itself traffic, so bytes-per-frame taken that way describes the palette's frame.
+
+```toml
+[keymap.global]
+"ctrl+t" = "dump-terminal"
+```
+
 ## Not yet there
 - **Proportional fonts** — status and chrome text currently use fixed-width
   metrics; the v6 titles' proportional font tables aren't honored yet.

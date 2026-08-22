@@ -551,6 +551,13 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     // this one reports the CELLS — the modal is drawn over them, so its frame is
     // not a stale answer but a different picture entirely.
     "dump-cells",
+    // SQ-0994, and the rationale bites hardest here: `/dump-terminal` REPORTS the
+    // traffic counters, and reaching it through the palette is itself traffic —
+    // a modal drops a v6 pane off the pixel path, and coming back re-uploads every
+    // chrome band. Bytes-per-frame taken that way describes the palette's frame.
+    // Like its two siblings it has no default binding; this only lets a Ctrl one
+    // the user writes actually fire past a story waiting on a keypress.
+    "dump-terminal",
 ];
 
 /// Default groups for the hotkey dialog (title, authored leader-key + full command-string).

@@ -24,6 +24,8 @@ mod gallery_manifest;
 mod pty_emitted_stream;
 #[path = "suites/pty_flank_alpha_seam.rs"]
 mod pty_flank_alpha_seam;
+#[path = "suites/pty_kitty_compression.rs"]
+mod pty_kitty_compression;
 #[path = "suites/pty_oracle.rs"]
 mod pty_oracle;
 #[path = "suites/pty_query_replies.rs"]

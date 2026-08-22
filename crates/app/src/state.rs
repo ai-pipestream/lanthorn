@@ -2501,6 +2501,20 @@ pub struct AppState {
     /// far up — i.e. whether the graphics canvas still has art down there at all.
     pub v6_ring_plan: std::cell::Cell<&'static str>,
     pub v6_ring_clip: std::cell::Cell<Option<(u16, u16)>>,
+    /// WHICH `picture_takeover_reason` arm decided the last hybrid frame's route,
+    /// or `None` for "no takeover — the ring drew it" (SQ-0994).
+    ///
+    /// Published by the hybrid branch of `render_story_pane`, which already
+    /// computes it to make the routing decision — a `Cell` store of an
+    /// `Option<&'static str>` it was about to discard, so this costs the frame
+    /// path nothing. `/dump-terminal` cannot recompute it: the arms are over a
+    /// frame's positioned windows, and by the time a command runs the live frame
+    /// is the palette's.
+    ///
+    /// Meaningless in RASTER mode, where the hatch is never reached; the report
+    /// says "not evaluated" there rather than reading a stale answer, which is
+    /// why the mode is checked beside it.
+    pub v6_takeover_reason: std::cell::Cell<Option<&'static str>>,
     /// Last v6 raster story metrics (SQ-0469), cached so a frame that skips the
     /// canvas rebuild (unchanged generation) can still republish the scroll/pager
     /// geometry the render arm returns. Valid across skipped frames because every
@@ -2855,6 +2869,15 @@ pub struct AppState {
 
     /// The in-game graphics Picker (None when images are disabled or unbuilt).
     pub game_picker: Option<ratatui_image::picker::Picker>,
+    /// Bytes and frame flushes the ratatui backend has written to the terminal,
+    /// for `/dump-terminal` (SQ-0994). `None` in every headless harness, which
+    /// builds no terminal at all — and the report says "unavailable" rather than
+    /// printing a zero, because a zero reads as "this session emitted nothing".
+    ///
+    /// The counters live inside the backend's writer and are read from here, so
+    /// the two share one `Arc`. See [`crate::terminal_dump::CountingWriter`] for
+    /// why this adds nothing to the frame path.
+    pub term_traffic: Option<crate::terminal_dump::TrafficHandle>,
     /// The terminal's own default fg/bg, probed once at startup (SQ-0510). Seeds
     /// the v6 raster canvas's default ink/page when the theme leaves them at
     /// "terminal default"; each field is `None` when the terminal didn't answer.
@@ -2967,6 +2990,7 @@ impl Default for AppState {
             v6_save_log: std::cell::RefCell::new(Vec::new()),
             v6_ring_plan: std::cell::Cell::new("—"),
             v6_ring_clip: std::cell::Cell::new(None),
+            v6_takeover_reason: std::cell::Cell::new(None),
             v6_raster_metrics: std::cell::Cell::new(None),
             text_margin_applied: std::cell::Cell::new(0),
             selection_text: std::cell::RefCell::new(None),
@@ -3027,6 +3051,7 @@ impl Default for AppState {
             glulx_timer_next_fire: None,
             picture_pace_next: None,
             game_picker: None,
+            term_traffic: None,
             term_default_colors: crate::term_colors::TermDefaultColors::default(),
             query_sweep: crate::query_sweep::QuerySweep::default(),
             graphics_render: std::cell::RefCell::new(Default::default()),

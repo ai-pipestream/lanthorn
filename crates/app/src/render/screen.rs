@@ -819,7 +819,18 @@ fn render_node(
                 // is what SQ-0750 asks for and what the composite structurally cannot
                 // do — it rasterises every character on the screen.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
-                    if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, layout.story_gfx, native)) {
+                    // WHICH arm decided this frame's route, published for
+                    // `/dump-terminal` (SQ-0994). The routing test already computes
+                    // it and used to throw it away, so a `Cell` store costs the
+                    // frame path nothing — and the command cannot recompute it,
+                    // because by the time a command runs the live frame is the
+                    // palette's. `None` with no story window at all: that is a
+                    // fall-through the hatch never got to judge.
+                    let takeover = layout
+                        .story
+                        .and_then(|s| picture_takeover_reason(s, &layout.chrome, layout.story_gfx, native));
+                    state.v6_takeover_reason.set(takeover);
+                    if let Some(story) = layout.story.filter(|_| takeover.is_none()) {
                         // The op log's frame boundary (SQ-0590) opens HERE, not at
                         // the band draw further down: the two calls below are the
                         // frame's first protocol traffic, and starting the log after
@@ -4809,15 +4820,6 @@ enum BottomPlan {
 /// Retiring this arm needs the canvas reading on the ring path first.
 ///
 /// `picture_takeover_arms_across_the_corpus` pins the census these verdicts rest on.
-fn picture_takeover(
-    story: &crate::engine::PositionedWindow,
-    chrome: &[&crate::engine::PositionedWindow],
-    story_gfx: Option<&crate::engine::PositionedWindow>,
-    native: (u16, u16),
-) -> bool {
-    picture_takeover_reason(story, chrome, story_gfx, native).is_some()
-}
-
 /// WHICH hatch fires, for instruments and tests (SQ-0897).
 ///
 /// Retiring these one at a time needs a way to say "this frame is here because of
@@ -4972,7 +4974,7 @@ fn art_encloses_screen(
 /// window 0 is a transcript that happens to have plates drawn on it; fmvpoker's is
 /// a picture frame that happens to have text positioned in it — its own art
 /// encloses it on all four sides and it covers the whole screen. That is the same
-/// test [`picture_takeover`]'s enclosure arm asks, reused rather than restated so
+/// test [`picture_takeover_reason`]'s enclosure arm asks, reused rather than restated so
 /// the two cannot drift apart, and it fires for fmvpoker alone.
 ///
 /// It also extends a rule this codebase already made: SQ-0711/SQ-0716 ruled that a
@@ -4984,7 +4986,7 @@ fn art_encloses_screen(
 /// title read as a canvas until the fill test excluded it — and a plate is a
 /// picture a game NARRATES OVER (Arthur's illustrated screens, Journey's title),
 /// while a frame with a hole in the middle is a picture a game POSITIONS TEXT
-/// INSIDE. [`picture_takeover`] takes either, because for its purposes — hybrid has
+/// INSIDE. [`picture_takeover_reason`] takes either, because for its purposes — hybrid has
 /// no ring to draw — the two are the same.
 pub fn story_window_is_a_canvas(
     layout: &crate::render::v6_layout::V6Layout<'_>,
@@ -10768,7 +10770,7 @@ mod tests {
     /// Native 320x200. A chrome FRAME (win 7) painted only in the 20px border, so
     /// the ring has real content and `story_clear_native` finds nothing overlapping
     /// window 0. Window 0 is (40,40,240,120) — inset from every screen edge, so
-    /// `story_covers_screen` is false and none of `picture_takeover`'s arms fire.
+    /// `story_covers_screen` is false and none of `picture_takeover_reason`'s arms fire.
     /// Inside it, a `win == 0` Graphics plate covering the LEFT HALF of the window.
     ///
     /// Before this quest the viewport was the raw window box: the transcript opened
@@ -10860,7 +10862,7 @@ mod tests {
         );
 
         // Non-vacuity: this frame must actually reach the ring. If a future change to
-        // `picture_takeover` diverts it, every number below would describe a screen
+        // `picture_takeover_reason` diverts it, every number below would describe a screen
         // the ring never drew.
         let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
         assert_eq!(path, "hybrid-ring", "plate={with_plate} honor={honor} {side:?}: the fixture is a RING frame");

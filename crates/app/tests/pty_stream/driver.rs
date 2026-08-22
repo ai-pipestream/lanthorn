@@ -27,6 +27,21 @@ pub enum Key {
     Bytes(Vec<u8>),
     /// Let the app settle (or animate) for a while before the next key.
     Wait(Duration),
+    /// Resize the pty — cells AND the pixel geometry a cell size is derived from
+    /// — with `TIOCSWINSZ` on the master (SQ-0993).
+    ///
+    /// **This is the only input that changes the CELL SIZE mid-run,** and without
+    /// it SQ-0992's property is not observable end to end: the harness sized the
+    /// terminal once at [`open_pty`] and never again, so "a font-size change keeps
+    /// the capability and therefore keeps compressing" could only be argued from
+    /// the source. The kernel raises `SIGWINCH` on the foreground process group
+    /// for free, so nothing has to be typed at the app — this is a real resize,
+    /// arriving the way a real one does.
+    ///
+    /// Changing `cell_w`/`cell_h` while holding `cols`/`rows` is a FONT-SIZE
+    /// change: same grid, different pixels per cell, which is precisely what
+    /// `refresh_cell_size` re-derives from.
+    Resize { cols: u16, rows: u16, cell_w: u16, cell_h: u16 },
 }
 
 /// An `OSC <n>;rgb:rrrr/gggg/bbbb` reply, in the doubled-hex form terminals use.
@@ -46,6 +61,16 @@ impl Key {
         }
         if let Some(s) = t.strip_prefix("text:") {
             return Ok(Key::Bytes(s.as_bytes().to_vec()));
+        }
+        // `resize:COLSxROWS@CELLWxCELLH` — the whole winsize, because a pty's
+        // cell size IS its pixel geometry over its grid and naming half of it
+        // would leave the other half to be guessed.
+        if let Some(spec) = t.strip_prefix("resize:") {
+            let (grid, cell) = spec.split_once('@').ok_or_else(|| format!("bad resize `{t}` (want COLSxROWS@CWxCH)"))?;
+            let (c, r) = grid.split_once('x').ok_or_else(|| format!("bad resize grid in `{t}`"))?;
+            let (cw, ch) = cell.split_once('x').ok_or_else(|| format!("bad resize cell in `{t}`"))?;
+            let n = |v: &str| v.parse::<u16>().map_err(|_| format!("bad number in resize `{t}`"));
+            return Ok(Key::Resize { cols: n(c)?, rows: n(r)?, cell_w: n(cw)?, cell_h: n(ch)? });
         }
         if let Some(c) = t.strip_prefix("ctrl+") {
             let ch = c.chars().next().ok_or_else(|| format!("bad ctrl key `{t}`"))?;
@@ -191,6 +216,19 @@ pub struct Flush {
     pub len: usize,
 }
 
+/// One mid-run pty resize, and the point in the stream it split (SQ-0993).
+#[derive(Clone, Copy, Debug)]
+pub struct Resized {
+    pub at: Duration,
+    /// Bytes captured before the resize was issued — so a transmit at or past
+    /// this offset is one the app emitted knowing about the new cell size.
+    pub offset: usize,
+    pub cols: u16,
+    pub rows: u16,
+    pub cell_w: u16,
+    pub cell_h: u16,
+}
+
 /// Which terminal query was asked, and what we answered.
 #[derive(Clone, Debug)]
 pub struct Answered {
@@ -208,6 +246,14 @@ pub struct Capture {
     pub bytes: Vec<u8>,
     pub flushes: Vec<Flush>,
     pub answered: Vec<Answered>,
+    /// Where each [`Key::Resize`] landed: the length of [`Self::bytes`] at the
+    /// moment the `TIOCSWINSZ` was issued, with the new winsize (SQ-0993).
+    ///
+    /// Without this, "the transmits AFTER the font change are still compressed"
+    /// cannot be stated — every transmit in the capture looks alike, and a run
+    /// that stopped compressing halfway would still pass an "all of them are
+    /// compressed" check as long as the tail were empty.
+    pub resizes: Vec<Resized>,
     pub spec: Spec,
     pub duration: Duration,
     pub timed_out: bool,
@@ -306,15 +352,7 @@ fn open_pty(spec: &Spec) -> std::io::Result<Pty> {
         // Size the terminal, in cells AND in pixels: a v6 title asks the host how
         // big the screen is, and a pixel size of zero is not a size a real
         // terminal ever reports.
-        let ws = libc::winsize {
-            ws_row: spec.rows,
-            ws_col: spec.cols,
-            ws_xpixel: spec.cols.saturating_mul(spec.cell_w),
-            ws_ypixel: spec.rows.saturating_mul(spec.cell_h),
-        };
-        if libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) != 0 {
-            return Err(errno());
-        }
+        set_winsize(master.as_raw_fd(), spec.cols, spec.rows, spec.cell_w, spec.cell_h)?;
 
         // Local echo off before the child starts: the app turns raw mode on a few
         // milliseconds in, and anything we type before then would otherwise come
@@ -326,6 +364,26 @@ fn open_pty(spec: &Spec) -> std::io::Result<Pty> {
         }
         Ok(Pty { master, slave })
     }
+}
+
+/// `TIOCSWINSZ` on a pty master, in cells and in pixels.
+///
+/// Shared by [`open_pty`] and [`Key::Resize`] so the initial size and every later
+/// one are set the same way — and so a resize cannot forget the PIXEL half, which
+/// is the half a cell size is derived from and the whole point of SQ-0993's
+/// mid-run resize.
+fn set_winsize(fd: RawFd, cols: u16, rows: u16, cell_w: u16, cell_h: u16) -> std::io::Result<()> {
+    let ws = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: cols.saturating_mul(cell_w),
+        ws_ypixel: rows.saturating_mul(cell_h),
+    };
+    // SAFETY: one initialised winsize on a pty master fd the caller owns.
+    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) } != 0 {
+        return Err(errno());
+    }
+    Ok(())
 }
 
 fn spawn(spec: &Spec, pty: &Pty) -> std::io::Result<Child> {
@@ -524,6 +582,7 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
     let mut bytes: Vec<u8> = Vec::with_capacity(1 << 20);
     let mut flushes: Vec<Flush> = Vec::new();
     let mut answered: Vec<Answered> = Vec::new();
+    let mut resizes: Vec<Resized> = Vec::new();
     let mut responder =
         Responder {
             answer_kitty: spec.answer_kitty,
@@ -614,6 +673,24 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
                         last_byte = Instant::now();
                     }
                     Some(Key::Wait(d)) => pending_wait = Some(d),
+                    Some(Key::Resize { cols, rows, cell_w, cell_h }) => {
+                        // The kernel signals the child for us — no keystroke, no
+                        // escape, exactly as a real window resize arrives (SQ-0993).
+                        set_winsize(master.as_raw_fd(), cols, rows, cell_w, cell_h)?;
+                        resizes.push(Resized {
+                            at: start.elapsed(),
+                            offset: bytes.len(),
+                            cols,
+                            rows,
+                            cell_w,
+                            cell_h,
+                        });
+                        responder.cols = cols;
+                        responder.rows = rows;
+                        responder.cell_w = cell_w;
+                        responder.cell_h = cell_h;
+                        last_byte = Instant::now();
+                    }
                     // Keys exhausted: give the app a longer silence to finish
                     // whatever the last one started, then stop — but never while a
                     // deferred reply is still owed, or the run would end before the
@@ -628,7 +705,7 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
 
     let _ = child.kill();
     let _ = child.wait();
-    Ok(Capture { bytes, flushes, answered, spec, duration: start.elapsed(), timed_out })
+    Ok(Capture { bytes, flushes, answered, resizes, spec, duration: start.elapsed(), timed_out })
 }
 
 fn poll_readable(fd: RawFd, timeout: Duration) -> std::io::Result<bool> {

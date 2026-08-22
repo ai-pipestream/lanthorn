@@ -29,6 +29,7 @@ fn capture(bytes: &[u8], flushes: &[(f64, usize, usize)]) -> Capture {
             .map(|&(at, offset, len)| Flush { at: Duration::from_secs_f64(at), offset, len })
             .collect(),
         answered: Vec::new(),
+        resizes: Vec::new(),
         spec,
         duration: Duration::from_secs(1),
         timed_out: false,

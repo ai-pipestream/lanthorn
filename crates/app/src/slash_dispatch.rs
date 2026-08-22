@@ -212,6 +212,42 @@ pub(crate) fn dispatch_slash_outcome(
             };
             state.push_transcript_internal(&msg, TranscriptKind::Meta);
         }
+        SlashOutcome::DumpTerminal => {
+            // What was DETECTED about this terminal, what lanthorn GUESSED, and the
+            // traffic those two together explain (SQ-0994). Everything below is read
+            // from state something already tracked for its own reasons; nothing here
+            // instruments the frame path.
+            let snap = terminal_snapshot(state, session, story_rect);
+            for line in app::terminal_dump::dump_lines(&snap) {
+                let style = match line.kind {
+                    app::terminal_dump::DumpKind::Heading => Some("terminal_dump_heading"),
+                    app::terminal_dump::DumpKind::Assumed => Some("terminal_dump_assumed"),
+                    app::terminal_dump::DumpKind::Value => None,
+                };
+                match style {
+                    Some(sel) => state.push_transcript_internal_styled(
+                        &line.text,
+                        TranscriptKind::Meta,
+                        state.colors.theme.get(sel).style,
+                    ),
+                    None => state.push_transcript_internal(&line.text, TranscriptKind::Meta),
+                }
+            }
+            // …and the same report to a file, for the reason `/dump-windows` writes
+            // one (SQ-0756): a v6 pane is drawn out of kitty placeholder glyphs and a
+            // terminal selection over the transcript takes them with it, so the
+            // on-screen copy is exactly the thing that cannot be pasted into a bug
+            // report. This is the report most likely to be wanted in one.
+            let text = app::terminal_dump::dump_text(&snap);
+            let msg = match app::export::append_terminal_dump(&state.config.user_dir, &text) {
+                Ok(p) => format!(
+                    "  [report appended to {} — copy it from there, not off the screen]",
+                    crate::abbreviate_home(&p)
+                ),
+                Err(e) => format!("  [dump log failed: {e}]"),
+            };
+            state.push_transcript_internal(&msg, TranscriptKind::Meta);
+        }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {
             let history = state.notifications.history().to_vec();
@@ -645,6 +681,177 @@ pub(crate) fn dispatch_slash_outcome(
         }
     }
     false
+}
+
+/// Gather everything `/dump-terminal` reports (SQ-0994).
+///
+/// The one place that can: the live `Picker` (protocol, cell size, capability
+/// list), a `TIOCGWINSZ` ioctl, the render's published v6 facts, and the byte
+/// counters hanging off the ratatui backend. Everything downstream — the
+/// transcript, the log mirror, the tests — reads only the returned snapshot, so
+/// the report itself stays a pure function and can be asserted with no terminal
+/// at all.
+///
+/// Costs one ioctl, plus one `Engine::screen()` on a v6 session and none
+/// otherwise — both at command time. Nothing here is sampled per frame.
+fn terminal_snapshot(
+    state: &AppState,
+    session: &dyn Engine,
+    story_rect: Rect,
+) -> app::terminal_dump::TerminalSnapshot {
+    use app::terminal_dump::{CellSource, OpCounts, Probe, RenderFacts, TerminalSnapshot, TrafficStats};
+    use ratatui_image::picker::{Capability, ProtocolType};
+
+    let picker = state.game_picker.as_ref();
+    let protocol = picker.map(|p| {
+        match p.protocol_type() {
+            ProtocolType::Halfblocks => "halfblocks",
+            ProtocolType::Sixel => "sixel",
+            ProtocolType::Kitty => "kitty",
+            ProtocolType::Iterm2 => "iterm2",
+        }
+        .to_string()
+    });
+    // `Auto` is detection; anything else was named on the command line, and the
+    // report must not let a forced answer read as a detected one.
+    let forced_protocol = match state.config.image_protocol {
+        app::config::ImageProtocol::Auto => None,
+        app::config::ImageProtocol::Halfblocks => Some("halfblocks".to_string()),
+        app::config::ImageProtocol::Kitty => Some("kitty".to_string()),
+        app::config::ImageProtocol::Sixel => Some("sixel".to_string()),
+        app::config::ImageProtocol::Iterm2 => Some("iterm2".to_string()),
+    };
+    // An empty capability list is three different facts. Only
+    // `build_cover_picker`'s `Auto`/named arms run `Picker::from_query_stdio`;
+    // `halfblocks()` asks nothing, and `--no-images` builds no picker at all.
+    // Read off the CONFIG rather than off `picker.is_none()`, because a picker is
+    // also absent when a forced protocol's query failed — which is a terminal that
+    // was asked and could not answer, the opposite of never having been asked.
+    let probe = if !state.config.images {
+        Probe::NotAskedImagesOff
+    } else if state.config.image_protocol == app::config::ImageProtocol::Halfblocks {
+        Probe::NotAskedHalfblocksForced
+    } else {
+        Probe::Asked
+    };
+
+    let no_caps: Vec<Capability> = Vec::new();
+    let caps: &[Capability] = picker.map_or(&no_caps, |p| p.capabilities());
+    let capabilities: Vec<String> = caps
+        .iter()
+        .map(|c| match c {
+            Capability::Kitty => "Kitty — the kitty graphics protocol".to_string(),
+            Capability::Sixel => "Sixel".to_string(),
+            Capability::RectangularOps => "RectangularOps".to_string(),
+            Capability::KittyCompression => {
+                "KittyCompression — the terminal can inflate an o=z transmission".to_string()
+            }
+            Capability::CellSize(Some((w, h))) => format!("CellSize({w}x{h} px, from CSI 16 t)"),
+            Capability::CellSize(None) => "CellSize (answered, but named no size)".to_string(),
+            Capability::TextSizingProtocol => "TextSizingProtocol".to_string(),
+            Capability::Background(r, g, b) => format!("Background(rgb({r},{g},{b}))"),
+        })
+        .collect();
+    let kitty_compression = caps.contains(&Capability::KittyCompression);
+
+    let cell = picker.map(|p| {
+        let f = p.font_size();
+        (f.width, f.height)
+    });
+    // What `CSI 16 t` said, if it said anything — the direct measurement.
+    let reported_cell = caps.iter().find_map(|c| match c {
+        Capability::CellSize(Some((w, h))) => Some((*w, *h)),
+        _ => None,
+    });
+    // …and what the tty says right NOW. Asked live rather than remembered,
+    // because `refresh_cell_size` re-derives from exactly this on every resize
+    // (SQ-0988) — so a remembered boot-time answer could be stale in a way the
+    // live one cannot.
+    let ioctl_cell = crate::picker_ui::terminal_cell_size().map(|f| (f.width, f.height));
+    // Ordered by directness: the CSI answer if it is still the value in force,
+    // then the ioctl, then the crate's hardcoded 10x20 — which is the one that
+    // has to be called a guess, because it is one.
+    let cell_source = match cell {
+        None => CellSource::None,
+        Some(c) if reported_cell == Some(c) => CellSource::Measured,
+        Some(c) if ioctl_cell == Some(c) => CellSource::Derived,
+        Some((10, 20)) => CellSource::Assumed,
+        Some(_) => CellSource::Unexplained,
+    };
+
+    // The v6 facts, and only for a session that has them. `v6_path_log` is
+    // written by the pixel path and by nothing else, so an empty one means there
+    // is no v6 geometry to report — and the engine is not asked for its window
+    // tree at all, which keeps a Glulx or v3 dump down to the terminal half.
+    let render = if state.v6_path_log.borrow().is_empty() {
+        None
+    } else {
+        match session.screen().root {
+            app::engine::WinNode::Layered(items) => {
+                let native = app::render::v6_layout::native_extent(&items);
+                let hybrid = state.config.v6_render == app::config::V6RenderMode::Hybrid;
+                Some(RenderFacts {
+                    mode: if hybrid { "hybrid" } else { "raster" },
+                    takeover: state.v6_takeover_reason.get(),
+                    // The hatch is a hybrid-mode test; in raster the cell holds
+                    // whatever some earlier hybrid frame left, which is not a verdict
+                    // about this session.
+                    takeover_evaluated: hybrid,
+                    native,
+                    art_scale: state.v6_art_scale,
+                    magnification: state.v6_image_scale.get(),
+                    pixel_lock: state.config.v6_pixel_lock,
+                    pixel_lock_fell_back: state.v6_scale_lock_fallback.get(),
+                    paths: state
+                        .v6_path_log
+                        .borrow()
+                        .iter()
+                        .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
+                        .collect(),
+                })
+            }
+            _ => None,
+        }
+    };
+
+    // The APC command count, taken from the render's own op log rather than off
+    // the wire: the ops ARE the commands, and reading them is free, where finding
+    // `\x1b_G` in the stream would mean scanning every byte of every frame.
+    let gr = state.graphics_render.borrow();
+    let mut ops = OpCounts::default();
+    for op in gr.ops() {
+        use app::render::graphics::GraphicsOp;
+        match op {
+            GraphicsOp::Upload { .. } => ops.uploads += 1,
+            GraphicsOp::Reuse { .. } => ops.reuses += 1,
+            GraphicsOp::Place { at: (_, _, w, h), .. } => {
+                ops.places += 1;
+                ops.placed_cells += u64::from(*w) * u64::from(*h);
+            }
+            GraphicsOp::Drop { .. } => ops.drops += 1,
+        }
+    }
+
+    TerminalSnapshot {
+        protocol,
+        forced_protocol,
+        probe,
+        cell,
+        cell_source,
+        reported_cell,
+        ioctl_cell,
+        capabilities,
+        kitty_compression,
+        pane_cells: (story_rect.width, story_rect.height),
+        render,
+        traffic: state.term_traffic.as_ref().map(|t| TrafficStats {
+            total_bytes: t.total_bytes(),
+            flushes: t.flushes(),
+            last_flush_bytes: t.last_flush_bytes(),
+        }),
+        band_encodes: gr.band_encodes,
+        ops,
+    }
 }
 
 /// Write a named Save State via the slash `/save <name>` path (SQ-0648).
@@ -1198,6 +1405,114 @@ mod debug_dispatch_tests {
         assert_eq!(
             *state.v6_path_log.borrow(), paths_before,
             "taking a dump must add no render path to the history"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-0994: the `DumpTerminal` arm ─────────────────────────────────────
+    //
+    // The report itself is pinned by `terminal_dump`'s own unit tests, which
+    // need no terminal at all. What is only testable HERE is the arm: that the
+    // snapshot it gathers actually reflects the state handed to it, and that
+    // the file half of "here and to ~/.lanthorn/dump-terminal.log" is real.
+
+    fn dispatch_dump_terminal(state: &mut AppState, dir: &std::path::Path, pane: Rect) {
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let should_break = dispatch_slash_outcome(
+            SlashOutcome::DumpTerminal,
+            state, &mut mapper, &mut engine, &mut style_watcher,
+            dir, "IFIDTEST", dir, &[], dir,
+            Rect::default(), pane, true,
+        );
+        assert!(!should_break, "a diagnostic dump never breaks the run loop");
+    }
+
+    /// The command's own promise: the same report on screen AND in the log it
+    /// names. `/dump-windows` writes a file because a v6 pane's placeholder
+    /// glyphs make the on-screen copy unpastable (SQ-0756); this one writes it
+    /// because the capability list and the byte counts are precisely what goes
+    /// into a bug report, and a file is easier to attach than scrollback.
+    ///
+    /// FALSIFY by dropping the `append_terminal_dump` call: the transcript loses
+    /// the path line and `dump-terminal.log` never appears.
+    #[test]
+    fn dump_terminal_reports_the_live_picker_and_names_its_log() {
+        let dir = temp_dir("dumpterm-arm");
+        let log = app::export::terminal_dump_path(&dir);
+        let _ = std::fs::remove_file(&log);
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        // A picker that was never asked anything — `--image-protocol halfblocks`
+        // builds exactly this, and its empty capability list is the "nobody
+        // asked" kind of empty rather than the "the terminal said no" kind.
+        state.config.image_protocol = app::config::ImageProtocol::Halfblocks;
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        let traffic: app::terminal_dump::TrafficHandle = Default::default();
+        state.term_traffic = Some(std::sync::Arc::clone(&traffic));
+
+        dispatch_dump_terminal(&mut state, &dir, Rect::new(0, 0, 115, 61));
+
+        let text = state.transcript.join("\n");
+        assert!(text.contains("graphics protocol: halfblocks"), "the live picker's protocol: {text}");
+        assert!(
+            text.contains("FORCED by --image-protocol halfblocks"),
+            "a forced protocol is not a detected one: {text}"
+        );
+        assert!(
+            text.contains("capabilities: NOT ASKED"),
+            "an empty list under a forced half-blocks picker is the not-asked kind: {text}"
+        );
+        assert!(text.contains("115x61 cells = 7,015"), "the story pane it was handed: {text}");
+
+        // The log path is surfaced, and the file it names really holds the report.
+        assert!(
+            text.contains(&format!("report appended to {}", crate::abbreviate_home(&log))),
+            "the transcript names the copyable log: {text}"
+        );
+        let written = std::fs::read_to_string(&log).expect("the log the transcript names exists");
+        assert!(written.contains("=== /dump-terminal "), "stamped like every other dump: {written}");
+        assert!(written.contains("graphics protocol: halfblocks"), "and carries the report: {written}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The counters are the writer's, not a fresh sample — a report that read
+    /// zero while the session had emitted megabytes would be worse than no
+    /// report. And with no writer at all the arm must say so rather than print a
+    /// zero, which is the same measured-versus-assumed rule the whole command is
+    /// built on.
+    #[test]
+    fn dump_terminal_reads_the_writer_counters_and_disclaims_their_absence() {
+        let dir = temp_dir("dumpterm-traffic");
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+
+        let traffic: app::terminal_dump::TrafficHandle = Default::default();
+        {
+            use std::io::Write as _;
+            let mut w = app::terminal_dump::CountingWriter::new(Vec::new(), std::sync::Arc::clone(&traffic));
+            w.write_all(&vec![b'x'; 4096]).unwrap();
+            w.flush().unwrap();
+        }
+        state.term_traffic = Some(std::sync::Arc::clone(&traffic));
+        dispatch_dump_terminal(&mut state, &dir, Rect::new(0, 0, 80, 24));
+        let text = state.transcript.join("\n");
+        assert!(text.contains("4,096 in 1 frame flush(es)"), "the writer's own totals: {text}");
+        assert!(text.contains("last drawn frame: 4,096 bytes"), "{text}");
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.term_traffic = None;
+        dispatch_dump_terminal(&mut state, &dir, Rect::new(0, 0, 80, 24));
+        let text = state.transcript.join("\n");
+        assert!(
+            text.contains("bytes written: unavailable"),
+            "no writer means no counts, and saying so beats printing a zero: {text}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

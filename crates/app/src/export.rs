@@ -72,6 +72,35 @@ pub fn append_window_dump(user_dir: &Path, lines: &[String]) -> io::Result<PathB
     Ok(target)
 }
 
+/// The `/dump-terminal` log, under the lanthorn home: `<user_dir>/dump-terminal.log`.
+pub fn terminal_dump_path(user_dir: &Path) -> PathBuf {
+    user_dir.join("dump-terminal.log")
+}
+
+/// Append one `/dump-terminal` report to that log, stamped, and return the path
+/// (SQ-0994).
+///
+/// Its own file rather than a section of the window dump: this one describes the
+/// TERMINAL and the traffic it is being sent, which is what somebody attaches to
+/// a bug report, and burying it under a hundred lines of window geometry would
+/// make it harder to find, not easier. Appends for the reason
+/// [`append_window_dump`] does — the interesting comparison is one report against
+/// another taken a few frames later.
+pub fn append_terminal_dump(user_dir: &Path, lines: &[String]) -> io::Result<PathBuf> {
+    use std::io::Write;
+    let target = terminal_dump_path(user_dir);
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&target)?;
+    writeln!(f, "=== /dump-terminal {} ===", jiff::Timestamp::now())?;
+    for line in lines {
+        writeln!(f, "{line}")?;
+    }
+    writeln!(f)?;
+    Ok(target)
+}
+
 /// The `/dump-cells` log, under the lanthorn home: `<user_dir>/dump-cells.log`.
 pub fn cell_dump_path(user_dir: &Path) -> PathBuf {
     user_dir.join("dump-cells.log")
