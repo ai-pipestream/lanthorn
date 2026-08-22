@@ -741,6 +741,31 @@ pub fn v6_upscale_cap(picker: &Picker) -> Option<f64> {
     }
 }
 
+/// Whether this terminal may be sent a DEFLATED kitty transmission (SQ-0997).
+///
+/// `o=z` is not a hint a terminal may ignore. One that cannot inflate refuses the
+/// transmission outright: the image is never stored, and every placement naming
+/// it draws nothing — so a graphics window simply has no picture in it, with no
+/// error, no fallback, and nothing on screen to suggest anything went wrong.
+///
+/// That is why SQ-0991 made `ratatui-image` probe before compressing. Lanthorn's
+/// OWN transmit — [`kitty_transmit_virtual`], which SQ-0976 taught to compress
+/// before the capability existed — stated `o=z` whatever the probe said, so on
+/// such a terminal every graphics-window image (Glulx toolbars, Scott room
+/// pictures, v6 graphics windows) vanished silently while the chrome ring beside
+/// them, encoded by the crate, drew fine. Two encoders, one wire, one answer.
+///
+/// The picker is the thing that knows, exactly as it is for [`v6_upscale_cap`].
+/// An EMPTY capability list means raw, and it has to: that is what
+/// `Picker::halfblocks()`, the deprecated `from_fontsize`, the default picker
+/// returned when a query fails, tmux without passthrough and the terminal
+/// blacklist all leave behind, and none of them is evidence that this terminal
+/// can inflate anything. Fail safe — a raw upload is merely slower, an
+/// uninflatable one is invisible.
+pub fn kitty_compression(picker: &Picker) -> bool {
+    picker.capabilities().contains(&ratatui_image::picker::Capability::KittyCompression)
+}
+
 /// The cell rect the v6 composite occupies under HALF-BLOCKS, without building a
 /// pixel of it (SQ-0973).
 ///
@@ -1209,7 +1234,7 @@ impl GraphicsRender {
         // (Ghostty/macOS 2×), the image covered only part of the window and
         // mouse clicks mapped to the wrong game pixels. (SQ-0520)
         if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty {
-            self.render_kitty_virtual(gw, area, buf);
+            self.render_kitty_virtual(gw, area, kitty_compression(picker), buf);
             return;
         }
         let fresh = matches!(self.cache.get(&gw.win),
@@ -1382,7 +1407,13 @@ impl GraphicsRender {
     /// the version each time, and the release hashes equal to what is already
     /// uploaded (SQ-0564's insight, kept; SQ-0564's LRU of alternative uploads is
     /// gone, because an id you might place is an id in the cells).
-    fn render_kitty_virtual(&mut self, gw: &GraphicsWindow, area: Rect, buf: &mut Buffer) {
+    fn render_kitty_virtual(
+        &mut self,
+        gw: &GraphicsWindow,
+        area: Rect,
+        compress: bool,
+        buf: &mut Buffer,
+    ) {
         // A resize invalidates this window's upload: the placement's r×c grid is
         // baked into the transmission, so what the terminal holds cannot be
         // re-placed at the new size. Start the window over — and DELETE the upload
@@ -1423,7 +1454,7 @@ impl GraphicsRender {
                 });
             } else {
                 entry.pending_transmit =
-                    Some(kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width));
+                    Some(kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width, compress));
                 entry.uploaded = Some(hash);
                 self.note_op(GraphicsOp::Upload {
                     target: GraphicsTarget::Window(gw.win),
@@ -2534,9 +2565,17 @@ fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
 
 /// The kitty transmit sequence for `canvas` as image `id`: a VIRTUAL placement
 /// (`U=1`) declaring an explicit `r×c` grid, so the terminal scales the image
-/// to exactly the placeholder rect (SQ-0520). RGBA, zlib-compressed, chunked per
-/// the protocol's 4096-encoded-byte limit. (No tmux passthrough — matches the
-/// app's existing kitty support, which targets direct terminals.)
+/// to exactly the placeholder rect (SQ-0520). RGBA, chunked per the protocol's
+/// 4096-encoded-byte limit, and zlib-compressed when `compress` says the terminal
+/// can inflate it. (No tmux passthrough — matches the app's existing kitty
+/// support, which targets direct terminals.)
+///
+/// **`compress` is a capability, not a preference** (SQ-0997). It comes from
+/// [`kitty_compression`], and this function stated `o=z` unconditionally until it
+/// did: a terminal that answers the kitty query but not the `o=z` one refuses a
+/// deflated transmission, stores no image, and draws nothing for every placement
+/// naming it — with no error and nothing on screen to explain the missing picture.
+/// See [`kitty_compression`] for why an unasked terminal counts as "cannot".
 ///
 /// **`o=z` is the payload's encoding and nothing else** (SQ-0976). Per the kitty
 /// graphics protocol: *"the payload is now compressed using deflate (this occurs
@@ -2565,10 +2604,25 @@ fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
 /// duplicate placements. A named one is replaced in the map. The placeholder cells
 /// still encode placement 0, which resolves to "the first virtual placement of
 /// this image" and therefore to the only one.
-fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u16) -> String {
+fn kitty_transmit_virtual(
+    canvas: &image::RgbaImage,
+    id: u32,
+    rows: u16,
+    cols: u16,
+    compress: bool,
+) -> String {
     use std::fmt::Write as _;
     let (w, h) = (canvas.width(), canvas.height());
-    let payload = zlib_deflate(canvas.as_raw());
+    let deflated;
+    // SQ-0997: `compress` is [`kitty_compression`]'s answer for the picker in
+    // force. Raw when it is false — the geometry keys are untouched either way,
+    // because `o=z` describes the payload's encoding and nothing about the image.
+    let (payload, encoding): (&[u8], &str) = if compress {
+        deflated = zlib_deflate(canvas.as_raw());
+        (&deflated, "o=z,")
+    } else {
+        (canvas.as_raw(), "")
+    };
     let chunks: Vec<&[u8]> = payload.chunks(3072).collect();
     let n = chunks.len();
     let mut out = String::with_capacity(payload.len() / 3 * 4 + n * 24);
@@ -2577,7 +2631,7 @@ fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u
         if i == 0 {
             write!(
                 out,
-                "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,o=z,t=d,\
+                "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,{encoding}t=d,\
                  s={w},v={h},r={rows},c={cols},m={more};"
             )
             .unwrap();
@@ -4283,7 +4337,9 @@ mod tests {
         gr.render(&picker, &gw, area, Style::default(), &mut buf);
         let first = buf.cell((0, 0)).unwrap().symbol().to_string();
         assert!(first.contains(",r=2,c=138,"), "transmit declares the explicit cell grid");
-        assert!(first.contains("a=T,U=1,f=32,o=z"), "virtual placement transmit present");
+        // No `o=z`: `from_fontsize` asks the terminal nothing, so its capability
+        // list is empty and the transmit must go out raw (SQ-0997).
+        assert!(first.contains("a=T,U=1,f=32,t=d"), "virtual placement transmit present");
         assert!(first.contains(",p=1,"), "and names the placement it owns (SQ-0995)");
         assert!(first.contains('\u{10EEEE}'), "placeholder run present");
         assert!(!first.contains("a=d"), "first transmit deletes nothing");
@@ -5268,7 +5324,7 @@ mod tests {
         #[test]
         fn the_transmit_declares_o_z_and_the_canvas_own_uncompressed_dimensions() {
             let img = canvas(640, 400);
-            let (keys, _) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 25, 80));
+            let (keys, _) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 25, 80, true));
             assert!(keys.contains(",o=z"), "the payload is compressed and must say so: {keys}");
             assert!(keys.contains(",f=32"), "`o=z` is the encoding; `f` is still the format: {keys}");
             // s/v name the image, not the payload. 640x400 is 1,024,000 raw bytes
@@ -5283,7 +5339,7 @@ mod tests {
         fn inflating_the_reassembled_payload_reproduces_the_canvas_byte_for_byte() {
             for (w, h) in [(640u32, 400u32), (232, 304), (1104, 36), (1, 1)] {
                 let img = canvas(w, h);
-                let (_, payload) = parse(&kitty_transmit_virtual(&img, 7, 2, 8));
+                let (_, payload) = parse(&kitty_transmit_virtual(&img, 7, 2, 8, true));
                 let mut raw = Vec::new();
                 std::io::copy(&mut flate2::read::ZlibDecoder::new(&payload[..]), &mut raw)
                     .unwrap_or_else(|e| panic!("{w}x{h}: the payload must be one zlib stream: {e}"));
@@ -5301,7 +5357,7 @@ mod tests {
                 let c = ((y / 25) * 17) as u8;
                 image::Rgba([c, c / 2, 255 - c, 255])
             });
-            let transmit = kitty_transmit_virtual(&img, 7, 25, 80);
+            let transmit = kitty_transmit_virtual(&img, 7, 25, 80, true);
             let raw_b64 = 1024000usize.div_ceil(3) * 4;
             assert!(
                 transmit.len() * 20 < raw_b64,
@@ -5310,6 +5366,63 @@ mod tests {
                 transmit.len()
             );
         }
+
+        /// SQ-0997: a terminal that did not answer the `o=z` probe is sent the
+        /// pixels RAW, and the transmission is otherwise the same command.
+        ///
+        /// The claim is not "we omitted `o=z`" but that the bytes behind the
+        /// omission are the canvas itself: a transmit that dropped the key while
+        /// still deflating the payload contains no `o=z` just the same, and a real
+        /// terminal would read `s*v*4` bytes of image out of a few thousand bytes
+        /// of zlib and store nothing. Every geometry key is unchanged, because
+        /// `o=z` describes the payload's encoding and nothing about the image.
+        #[test]
+        fn a_terminal_that_cannot_inflate_is_sent_the_canvas_raw() {
+            let img = canvas(232, 304);
+            let (keys, payload) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 19, 29, false));
+            assert!(!keys.contains("o=z"), "nothing may claim to be compressed: {keys}");
+            assert!(keys.contains(",f=32"), "the format is still RGBA: {keys}");
+            assert!(keys.contains(",s=232,v=304,"), "the pixel dimensions do not move: {keys}");
+            assert!(keys.contains(",r=19,c=29,"), "nor does the explicit placeholder grid: {keys}");
+            assert_eq!(payload, *img.as_raw(), "the payload IS the canvas, undeflated");
+        }
+    }
+
+    /// SQ-0997: the graphics-window encoder asks the picker whether this terminal
+    /// can inflate, exactly as `ratatui-image` has since SQ-0991.
+    ///
+    /// A capability list can only be filled by `Picker::from_query_stdio`, which
+    /// needs a terminal — so every picker a headless test can build reports "no",
+    /// and "no" is the answer that matters: an `o=z` transmission such a terminal
+    /// cannot inflate is REFUSED, the image is never stored, and every placeholder
+    /// cell naming it draws nothing at all. The window is simply empty, silently.
+    ///
+    /// FALSIFY by restoring the unconditional `o=z` in `kitty_transmit_virtual`:
+    /// this fails on the first assertion, with the frame claiming a compression
+    /// nobody agreed to.
+    #[test]
+    fn a_graphics_window_transmit_is_raw_when_the_picker_knows_of_no_compression() {
+        let img = image::RgbaImage::from_fn(64, 36, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 241) as u8, 0x40, 255])
+        });
+        let gw = GraphicsWindow { win: 4, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
+        let picker = kitty_picker(8, 18);
+        assert!(
+            !kitty_compression(&picker),
+            "an unqueried picker carries no capabilities, so it cannot promise inflation"
+        );
+
+        let area = Rect::new(0, 0, 8, 2);
+        let mut gr = GraphicsRender::default();
+        let mut buf = Buffer::empty(area);
+        gr.render(&picker, &gw, area, Style::default(), &mut buf);
+
+        let first = buf.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(first.contains("a=T,U=1,f=32,t=d"), "the transmit is there and states no encoding: {first:?}");
+        assert!(
+            !first.contains("o=z"),
+            "the terminal never said it could inflate, so the transmit must not say it did: {first:?}"
+        );
     }
 
     /// SQ-0988: the terminal's cell size is measured once at launch, so a font

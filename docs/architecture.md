@@ -221,8 +221,9 @@ Five parts, and the split matters for Windows:
 | `tests/pty_stream/mod.rs` | The report — protocol verdict, uploads, placement rects, a background map, and the finding. |
 
 **Compressed uploads have to be undone for the oracle, and only for it.** A
-graphics-window upload is transmitted zlib-compressed (`o=z`), which is a
-transport encoding sitting at exactly the level base64 sits at. Our own decoder
+graphics-window upload is transmitted zlib-compressed (`o=z`) whenever the
+terminal answered the compression probe — which the pty harness does — and that
+is a transport encoding sitting at exactly the level base64 sits at. Our own decoder
 never noticed — it counts payload bytes and does not decode pixels — but the
 oracle's terminal core deliberately links no codecs at all: its image decoder is
 a seam and the byte-stream entry point wires the null one, so a compressed

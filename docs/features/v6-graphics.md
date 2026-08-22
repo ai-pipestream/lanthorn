@@ -2596,6 +2596,16 @@ Measured on advent.blb under a pty, the whole capture went from ~314 KB to 54 KB
 Compressing the image is only half that path's bill, though — see *A graphics
 window's image id never moves* below for the other half, which was larger.
 
+**And it asks the terminal first, on both paths** (SQ-0997). This one did not,
+for a while: SQ-0976 taught it `o=z` before `Capability::KittyCompression`
+existed, so it stated `o=z` whatever the probe said — and on a terminal that
+speaks kitty graphics but cannot inflate, that is not a slow upload but an absent
+one. The transmission is refused, the image is never stored, and every
+placeholder cell naming it draws nothing: no error, no fallback, just windows
+with no pictures in them, while the chrome ring beside them (which *did* ask)
+drew perfectly. Both encoders now read the same answer, and an empty capability
+list means raw — see the paragraph on what *cannot* ask, below.
+
 The v6 chrome ring's bands and the full-pane raster composite go through
 `ratatui-image`, which is a layer down and was the larger prize — the ring alone
 was emitting more than the windows ever did. It compresses too now (SQ-0991),
@@ -2903,7 +2913,7 @@ question the command was written for:
 ```
   kitty transmission compression (o=z):
     ratatui-image uploads (v6 chrome bands, the raster composite, cover + inline art): COMPRESSED — the terminal answered the o=z probe
-    graphics-window uploads (lanthorn's own transmit): COMPRESSED — unconditionally; that path states o=z whatever the probe said
+    graphics-window uploads (lanthorn's own transmit — Glulx toolbars, Scott room pictures, v6 graphics windows): COMPRESSED — the same o=z probe governs both encoders
 ```
 
 Two lines because there are two encoders, and only one of them asks. Compression
