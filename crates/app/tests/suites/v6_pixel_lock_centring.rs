@@ -42,12 +42,20 @@
 //!   journey-r83-s890706.z6                    83      40    menu       the report
 //!   Journey - The Quest Begins.adf            30      40    menu       the other build
 //!   zork0-r393-s890714.z6                    393       6    frame      control
-//!   arthur-r74-s890714.z6                     74      12    extend     control
+//!   arthur-r74-s890714.z6                     74      12    frame      control
 //!   shogun-r322-s890706.z6                   322       2    frame      control
 //! ```
 //!
 //! The controls are not decoration. A fix that centres Journey by moving Zork Zero or
 //! Arthur is not a fix, and all three were already margin-symmetric before it.
+//!
+//! Arthur's plan reads `frame` and used to read `extend`, and the change is the guard
+//! working rather than drift: at twelve taps the harness has fed the parser blank
+//! lines, and Arthur answers those in the boxed window 3 across the bottom of the
+//! screen — *"I beg your pardon?"*. That box arrives by `print_form`, which was a
+//! no-op stub until SQ-1006, so the frame genuinely had no bottom strip before and
+//! genuinely has one now. The margins agree either way, which is what this case is
+//! about.
 
 use std::path::PathBuf;
 
@@ -83,7 +91,7 @@ const CORPUS: &[Specimen] = &[
     Specimen { file: "journey-r83-s890706.z6", keys: 13, taps: 40, release: 83, fills: true, plan: "menu" },
     Specimen { file: "Journey - The Quest Begins.adf", keys: 13, taps: 40, release: 30, fills: true, plan: "menu" },
     Specimen { file: "zork0-r393-s890714.z6", keys: 13, taps: 6, release: 393, fills: false, plan: "frame" },
-    Specimen { file: "arthur-r74-s890714.z6", keys: b'n', taps: 12, release: 74, fills: true, plan: "extend" },
+    Specimen { file: "arthur-r74-s890714.z6", keys: b'n', taps: 12, release: 74, fills: true, plan: "frame" },
     Specimen { file: "shogun-r322-s890706.z6", keys: 13, taps: 2, release: 322, fills: true, plan: "frame" },
 ];
 

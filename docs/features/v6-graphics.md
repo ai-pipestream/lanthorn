@@ -2086,6 +2086,33 @@ game's own screen has `>look.` on one row. Games that reposition between reprint
 the Mysterious Adventures re-asking `Resume play on a game ?`, Journey's and
 fmvpoker's menu repaints — keep their line breaks, because their cursor says so.
 
+## A message in a box takes the long way round
+
+Some of what a v6 game says to you it does not say in the story window at all.
+Ask Arthur for a hint while you are simply standing in the churchyard and it
+answers *"If only you had a crystal ball...."* in a box across the bottom of the
+screen; type something it cannot parse and *"I beg your pardon?"* arrives the
+same way. Neither line is narration, and neither joins the scrollback — a box is
+paint, sitting in its own window at its own pixels, the way a status line does.
+
+Getting it there is a two-step the Z-machine reserves for exactly this. The game
+first sends the sentence to **output stream 3**, which swallows text into a
+memory table instead of printing it, and hands the interpreter a *width* to
+justify against — "as if it were in the window with that number", which for
+Arthur is the story window's 584 pixels. Closing the stream leaves the sentence
+in the table already broken into lines, and the total width it came to in the
+header, so the game can read back how tall a box it needs before it opens one.
+Arthur does precisely that: it counts the lines, lays a window out that many rows
+high across the foot of the screen, erases it, colours it, and only then prints
+the table into it with **`print_form`**.
+
+Both halves have to be right or you see nothing. lanthorn used to close the
+stream with the plain layout — one count and the text after it — where a width
+calls for the formatted one, a run of per-line records ending in a zero word; and
+`print_form` was a stub that printed none of them. The visible result was a box
+Arthur had carefully sized for **six** lines, because it had walked the wrong
+layout as if it were the right one, and then left completely empty.
+
 ## A window the game drew a frame around is a canvas, not a page
 
 The story window is a transcript in every Infocom v6 title: text streams into it,

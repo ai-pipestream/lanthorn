@@ -3443,11 +3443,53 @@ impl Machine {
                 self.mouse_window = win;
                 StepResult::Continue
             }
+            // EXT:0x1A print_form(formatted-table) — ZMSD §15: "Prints a formatted
+            // table of the kind written to output stream 3 when formatting is on.
+            // This is an elaborated version of print_table to cope with fonts,
+            // pixels and other impedimenta. It is a sequence of lines, terminated
+            // with a zero word. Each line is a word containing the number of
+            // characters, followed by that many bytes which hold the characters
+            // concerned." `StreamState::pop_stream3` writes exactly that layout
+            // whenever `output_stream 3` was given a v6 width operand.
+            //
+            // This is how Infocom's v6 games put a message in a box: Arthur r54's
+            // in-play HINT captures "If only you had a crystal ball...." to a table
+            // with `output_stream 3, table, 0`, lays window 3 out across the bottom
+            // of the screen, and prints the table there with `print_form`. As a
+            // no-op stub the message reached neither the screen nor the transcript
+            // and the box drew empty (SQ-1006).
+            //
+            // The lines print through `print_text`, so they route by the CURRENT
+            // window exactly as any other print does — painted into a window's grid
+            // when it is not a flowing-prose window (Arthur's window 3), streamed to
+            // the host transcript when it is.
             0x1A => {
-                // print_form — no-op in Phase 0 (a different lane; left untouched).
-                // Stub; SQ-0457 tracks a real implementation (would consume the
-                // formatted-text table stream-3 close now produces — see
-                // `wrap_stream3_text` in screen.rs).
+                let mut at = ops.first().copied().unwrap_or(0) as u32;
+                let mut first = true;
+                loop {
+                    let count = self.mem.read_word(at);
+                    at += 2;
+                    if count == 0 {
+                        break;
+                    }
+                    // A newline BETWEEN lines, not after the last one: the table's
+                    // final line ends wherever it ends, and a trailing break would
+                    // scroll a boxed message off its own window.
+                    if !first {
+                        self.print_text("\n");
+                    }
+                    first = false;
+                    let mut line = String::with_capacity(count as usize);
+                    for _ in 0..count {
+                        let zscii = self.mem.read_byte(at) as u16;
+                        at += 1;
+                        // ZSCII 0 has no printed form (ZMSD §3.8), as in print_char.
+                        if zscii != 0 {
+                            line.push(self.print_char_to_unicode(zscii));
+                        }
+                    }
+                    self.print_text(&line);
+                }
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -10455,9 +10497,7 @@ pub(crate) mod tests {
         m.exec_var(0x13, &[3, 0x0100, 2], None, None); // output_stream 3 -> table, width=window 2
         m.print_text("AAAA BBBB");
         m.exec_var(0x13, &[0xFFFD], None, None); // output_stream -3 (close)
-        assert_eq!(m.mem.read_word(0x0100), 9, "byte count unchanged (space -> newline)");
-        let bytes: Vec<u8> = (0..9).map(|i| m.mem.read_byte(0x0100 + 2 + i)).collect();
-        assert_eq!(bytes, b"AAAA\rBBBB", "wraps at the window-2 width");
+        assert_eq!(formatted_lines(&m, 0x0100), ["AAAA", "BBBB"], "wraps at the window-2 width");
     }
 
     #[test]
@@ -10469,8 +10509,101 @@ pub(crate) mod tests {
         m.exec_var(0x13, &[3, 0x0100, 0xFFD8], None, None); // width = -40 (0xFFD8)
         m.print_text("AAAA BBBB");
         m.exec_var(0x13, &[0xFFFD], None, None);
-        let bytes: Vec<u8> = (0..9).map(|i| m.mem.read_byte(0x0100 + 2 + i)).collect();
-        assert_eq!(bytes, b"AAAA\rBBBB", "negative operand wraps to -width pixels, no window lookup");
+        assert_eq!(
+            formatted_lines(&m, 0x0100),
+            ["AAAA", "BBBB"],
+            "negative operand wraps to -width pixels, no window lookup"
+        );
+    }
+
+    /// Read a formatted-text table back as its lines — ZMSD §15 `print_form`:
+    /// "a sequence of lines, terminated with a zero word. Each line is a word
+    /// containing the number of characters, followed by that many bytes which
+    /// hold the characters concerned."
+    fn formatted_lines(m: &Machine, table: u32) -> Vec<String> {
+        let mut at = table;
+        let mut lines = Vec::new();
+        loop {
+            let count = m.mem.read_word(at);
+            at += 2;
+            if count == 0 {
+                return lines;
+            }
+            let bytes: Vec<u8> = (0..count as u32).map(|i| m.mem.read_byte(at + i)).collect();
+            at += count as u32;
+            lines.push(String::from_utf8_lossy(&bytes).into_owned());
+        }
+    }
+
+    /// **SQ-1006.** `print_form` reads back exactly what a width-formatted
+    /// `output_stream 3` wrote, one line per record, with the breaks as
+    /// newlines — a round trip through the two halves of ZMSD §15's
+    /// `output_stream`/`print_form` pair.
+    ///
+    /// Printed into a v6 window that is NOT wrap+scroll (window 2 here, the
+    /// paint regime Arthur's boxes use), so the runs land in the window's own
+    /// paint list, at that window's pixels, rather than in the host transcript.
+    #[test]
+    fn v6_print_form_round_trips_a_width_formatted_stream3_table() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 0, 0, 100, 40); // window 2, x_size=40px = 5 chars
+        m.exec_var(0x13, &[3, 0x0100, 2], None, None);
+        m.print_text("AAAA BBBB");
+        m.exec_var(0x13, &[0xFFFD], None, None);
+        assert_eq!(formatted_lines(&m, 0x0100), ["AAAA", "BBBB"], "the table it will read");
+
+        m.exec_ext(0x1A, &[0x0100], None, None); // print_form(table), window 2 current
+
+        let w = &m.screen.v6.as_ref().unwrap().windows[2];
+        let painted: Vec<&str> = w.texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(painted, ["AAAA", "BBBB"], "both lines painted into the window");
+        assert!(
+            w.texts[1].y > w.texts[0].y,
+            "the second line is a row below the first, not appended to it: {:?} vs {:?}",
+            (w.texts[0].x, w.texts[0].y),
+            (w.texts[1].x, w.texts[1].y)
+        );
+    }
+
+    /// A one-line table prints its line and stops at the terminator — and adds
+    /// NO trailing newline, so a boxed message does not push itself up its own
+    /// window. (§15 print_form: the table "is a sequence of lines, terminated
+    /// with a zero word"; the terminator ends the table, it is not a line.)
+    #[test]
+    fn v6_print_form_stops_at_the_zero_word_and_adds_no_trailing_newline() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 0, 0, 100, 400);
+        // table: [6]"Score:" [0] — then junk past the terminator that must not print.
+        m.mem.write_word(0x0100, 6);
+        for (i, b) in b"Score:".iter().enumerate() {
+            m.mem.write_byte(0x0102 + i as u32, *b);
+        }
+        m.mem.write_word(0x0108, 0);
+        m.mem.write_word(0x010A, 4);
+        for (i, b) in b"junk".iter().enumerate() {
+            m.mem.write_byte(0x010C + i as u32, *b);
+        }
+        let before = m.screen.v6.as_ref().unwrap().windows[2].y_cursor;
+        m.exec_ext(0x1A, &[0x0100], None, None);
+
+        let w = &m.screen.v6.as_ref().unwrap().windows[2];
+        let painted: Vec<&str> = w.texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(painted, ["Score:"], "nothing past the zero word is printed");
+        assert_eq!(w.y_cursor, before, "no newline after the last line");
+    }
+
+    /// An empty formatted table — a zero word and nothing else — prints
+    /// nothing at all rather than a blank line.
+    #[test]
+    fn v6_print_form_of_an_empty_table_prints_nothing() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 0, 0, 100, 400);
+        m.mem.write_word(0x0100, 0);
+        m.exec_ext(0x1A, &[0x0100], None, None);
+        assert!(
+            m.screen.v6.as_ref().unwrap().windows[2].texts.is_empty(),
+            "an empty table paints nothing"
+        );
     }
 
     #[test]

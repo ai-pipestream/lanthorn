@@ -1339,30 +1339,59 @@ impl StreamState {
     /// Deselect (pop) stream 3: write accumulated bytes into memory, update
     /// the length word, and return.
     ///
-    /// The table layout: word at `table_addr` = byte count; bytes follow from
-    /// `table_addr + 2`. When a v6 width was given, the text is word-wrapped
-    /// to that width first (ZMSD §15 `output_stream`, quoted on
-    /// `Stream3Frame::width_px`) — "Then the table will contain not ordinary
-    /// text but formatted text: see print_form." Wrapping happens here, at
-    /// close, on the whole accumulated buffer (splitting on ASCII spaces)
-    /// rather than incrementally per printed word the way Frotz's
-    /// `memory_word` does it; nothing yet consumes the formatted-text table
-    /// (`print_form` is a stub — SQ-0457), so a faithful approximation is
-    /// enough to make the header math and stored bytes sane.
+    /// **Two layouts, and the width operand chooses between them.**
+    ///
+    /// Plain (no width): ZMSD §7.1.2.1 — "When the stream is deselected, the
+    /// initial word of the table holds the number of characters printed and
+    /// subsequent bytes hold those characters."
+    ///
+    /// Formatted (a v6 width was given): ZMSD §15 `output_stream` — "Then the
+    /// table will contain not ordinary text but formatted text: see
+    /// print_form", and §15 `print_form` says what that is: "It is a sequence
+    /// of lines, terminated with a zero word. Each line is a word containing
+    /// the number of characters, followed by that many bytes which hold the
+    /// characters concerned."
+    ///
+    /// So a width does not merely insert newlines into the plain layout — it
+    /// changes the layout, and the reader is [`Machine`]'s `print_form`
+    /// (EXT:0x1A) rather than the game's own byte walk. Arthur release 54 is
+    /// the game that proves it: its box messages are `output_stream 3, table,
+    /// 0` (justify to window 0) followed by `print_form table` into window 3,
+    /// and against the plain layout the whole box came out empty (SQ-1006).
+    ///
+    /// The wrap itself happens here, at close, on the whole accumulated buffer
+    /// (splitting on ASCII spaces) rather than incrementally per printed word
+    /// the way Frotz's `memory_word` does it.
     pub fn pop_stream3(&mut self, mem: &mut Memory) {
         if let Some(frame) = self.stream3_stack.pop() {
-            let (bytes, total_width) = match frame.width_px {
-                Some(w) => wrap_stream3_text(&frame.buf, w),
+            let total_width = match frame.width_px {
+                Some(w) => {
+                    let (bytes, total_width) = wrap_stream3_text(&frame.buf, w);
+                    // One (count word, bytes) record per line, then a zero word.
+                    // `wrap_stream3_text` marks the breaks with ZSCII 13 (§7.1.2.2.1),
+                    // which is how the lines are recovered — the separator itself is
+                    // not stored, because a line's count covers its characters only.
+                    let mut at = frame.table_addr;
+                    for line in bytes.split(|&b| b == 13) {
+                        mem.write_word(at, line.len() as u16);
+                        at += 2;
+                        for &b in line {
+                            mem.write_byte(at, b);
+                            at += 1;
+                        }
+                    }
+                    mem.write_word(at, 0);
+                    total_width
+                }
                 None => {
-                    let w = frame.buf.len() as u32 * V6_FONT_WIDTH as u32;
-                    (frame.buf, w)
+                    let n = frame.buf.len() as u16;
+                    mem.write_word(frame.table_addr, n);
+                    for (i, &b) in frame.buf.iter().enumerate() {
+                        mem.write_byte(frame.table_addr + 2 + i as u32, b);
+                    }
+                    frame.buf.len() as u32 * V6_FONT_WIDTH as u32
                 }
             };
-            let n = bytes.len() as u16;
-            mem.write_word(frame.table_addr, n);
-            for (i, &b) in bytes.iter().enumerate() {
-                mem.write_byte(frame.table_addr + 2 + i as u32, b);
-            }
             // ZMSD §7.1.2.1: in v6, deselecting stream 3 stores "the total
             // width of printing (in units)" in header word $30. Infocom games
             // MEASURE string widths this way — Shogun prints its status
@@ -3095,13 +3124,36 @@ mod tests {
     // (if negative). Then the table will contain not ordinary text but
     // formatted text: see print_form."
 
+    /// Read a formatted-text table back as its lines — ZMSD §15 `print_form`:
+    /// "a sequence of lines, terminated with a zero word. Each line is a word
+    /// containing the number of characters, followed by that many bytes which
+    /// hold the characters concerned."
+    fn read_formatted(mem: &Memory, table_addr: u32) -> Vec<String> {
+        let mut at = table_addr;
+        let mut lines = Vec::new();
+        loop {
+            let count = mem.read_word(at);
+            at += 2;
+            if count == 0 {
+                return lines;
+            }
+            let bytes: Vec<u8> = (0..count as u32).map(|i| mem.read_byte(at + i)).collect();
+            at += count as u32;
+            lines.push(String::from_utf8_lossy(&bytes).into_owned());
+        }
+    }
+
     #[test]
     fn stream3_width_wraps_overflowing_word_onto_new_line() {
         // "AAAA BBBB" at a 40px box (V6_FONT_WIDTH=8 -> 5 chars) doesn't fit
-        // "AAAA BBBB" (72px) on one line; the wrap point replaces the space
-        // with ZSCII 13 and drops it from the width tally (Frotz
+        // "AAAA BBBB" (72px) on one line; the wrap point starts a new LINE of
+        // the formatted table and drops the space from the width tally (Frotz
         // redirect.c:memory_word skips the leading space of the overflowing
         // word).
+        //
+        // A width operand also changes the LAYOUT, not just where the breaks
+        // fall — ZMSD §15 `output_stream`: "Then the table will contain not
+        // ordinary text but formatted text: see print_form" (SQ-1006).
         let buf = sample_story(6);
         let table_addr: u32 = 0x0050;
         let mut mem = Memory::new(buf).unwrap();
@@ -3111,19 +3163,16 @@ mod tests {
         ss.write_stream3_bytes(b"AAAA BBBB");
         ss.pop_stream3(&mut mem);
 
-        let n = mem.read_word(table_addr);
-        assert_eq!(n, 9, "byte count unchanged: the space becomes a newline byte");
-        let bytes: Vec<u8> = (0..n).map(|i| mem.read_byte(table_addr + 2 + i as u32)).collect();
-        assert_eq!(bytes, b"AAAA\rBBBB", "wrap point replaces the space with ZSCII 13");
-        // Total width = 4 chars + 4 chars (the newline isn't printable width).
+        assert_eq!(read_formatted(&mem, table_addr), ["AAAA", "BBBB"], "one record per line");
+        // Total width = 4 chars + 4 chars (the dropped space isn't printable width).
         assert_eq!(mem.read_word(0x30), 8 * V6_FONT_WIDTH, "header $30 excludes the wrap newline");
     }
 
     #[test]
     fn stream3_width_no_wrap_when_text_fits() {
-        // Text that fits within the box on one line is untouched, and the
-        // total width matches the simple char-count case (no formatting
-        // actually needed).
+        // Text that fits within the box is one line — but still a formatted
+        // table with a terminating zero word, because the width operand is what
+        // selects that layout (ZMSD §15 `output_stream`), not the wrapping.
         let buf = sample_story(6);
         let table_addr: u32 = 0x0050;
         let mut mem = Memory::new(buf).unwrap();
@@ -3133,8 +3182,30 @@ mod tests {
         ss.write_stream3_bytes(b"Score:");
         ss.pop_stream3(&mut mem);
 
-        assert_eq!(mem.read_word(table_addr), 6);
+        assert_eq!(read_formatted(&mem, table_addr), ["Score:"]);
+        assert_eq!(mem.read_word(table_addr), 6, "the one line's own character count");
         assert_eq!(mem.read_word(0x30), 6 * V6_FONT_WIDTH);
+    }
+
+    /// The other half of the pair: NO width operand keeps the plain layout of
+    /// ZMSD §7.1.2.1 — "the initial word of the table holds the number of
+    /// characters printed and subsequent bytes hold those characters" — with no
+    /// terminating zero word. Pinned beside the formatted cases so a future
+    /// change cannot quietly give every table the same shape.
+    #[test]
+    fn stream3_without_a_width_keeps_the_plain_layout() {
+        let buf = sample_story(6);
+        let table_addr: u32 = 0x0050;
+        let mut mem = Memory::new(buf).unwrap();
+        let mut ss = StreamState::new();
+
+        ss.push_stream3(table_addr, None);
+        ss.write_stream3_bytes(b"AAAA BBBB");
+        ss.pop_stream3(&mut mem);
+
+        assert_eq!(mem.read_word(table_addr), 9, "word 0 is the whole character count");
+        let bytes: Vec<u8> = (0..9).map(|i| mem.read_byte(table_addr + 2 + i)).collect();
+        assert_eq!(bytes, b"AAAA BBBB", "unformatted: the text verbatim, no line records");
     }
 
     /// SQ-0679: when the HOST widens the grid, the columns that appear continue
