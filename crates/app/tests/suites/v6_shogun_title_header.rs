@@ -28,7 +28,6 @@
 //! fix that moves it has broken something.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -38,10 +37,6 @@ use app::state::TranscriptKind;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, so the releases must not boot side
-/// by side.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga release, still on its release floppy — r295/890321, and the build the
 /// report is about. `InterpreterProfile::resolve` reads the medium, so this is a
@@ -86,7 +81,7 @@ fn boot_release(file: &str, profile: InterpreterProfile) -> Option<GameSession> 
             return None;
         }
     };
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&story_path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -172,7 +167,7 @@ fn pane_rows(state: &app::state::AppState, model: &app::engine::ScreenModel, pan
 /// > is up at row 2. The game printed it, then moved window 0 out from under it.`
 #[test]
 fn shogun_shows_its_centred_title_above_the_boot_menu_on_both_releases() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, profile) in
         [(AMIGA_RELEASE, InterpreterProfile::Amiga), (PC_RELEASE, InterpreterProfile::IbmPc)]
     {
@@ -266,7 +261,7 @@ fn shogun_shows_its_centred_title_above_the_boot_menu_on_both_releases() {
 /// window 0 to a box that still covers eight of them.
 #[test]
 fn the_split_hands_shoguns_header_over_to_paint() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, profile) in
         [(AMIGA_RELEASE, InterpreterProfile::Amiga), (PC_RELEASE, InterpreterProfile::IbmPc)]
     {

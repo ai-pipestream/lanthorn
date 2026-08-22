@@ -92,6 +92,11 @@
 //! The DOS press is gitignored commercial media, so every case skips vacuously
 //! without it and [`the_press_was_actually_read`] is what stops the file quietly
 //! passing on a machine that has none of it.
+//!
+//! **Palette**: every case here asserts a resolved colour, so its
+//! `app::v6_palette_at_boot` guard is also its SQ-0958 statement of the palette it
+//! read through — not `Standard`, but whatever the volume's own archive installs,
+//! named per press in `PRESSES` and set from inside the boot below.
 
 use std::path::PathBuf;
 
@@ -104,12 +109,6 @@ use app::state::AppState;
 use image::RgbaImage;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, and the boot below sets it
-/// (SQ-0904/SQ-0905). Every case here also asserts a resolved colour, so the same
-/// guard is its SQ-0958 statement of the palette it read through: not `Standard`
-/// but whatever the volume's own archive installs, named per press in `PRESSES`.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 const RELEASE: u16 = 393;
 const SERIAL: &[u8] = b"890714";
@@ -212,7 +211,7 @@ fn boot(file: &str, user_honours: bool) -> Option<Booted> {
     let named_art_std_window = over.std_window();
     let (profile, source) =
         InterpreterProfile::resolve_with_source(&path, None, over.flavour(), None);
-    zvm::screen::set_palette(zvm::interpreter::palette_for(
+    app::v6_set_palette(zvm::interpreter::palette_for(
         profile.row_number(),
         bytes.first().copied(),
     ));
@@ -235,7 +234,7 @@ fn boot(file: &str, user_honours: bool) -> Option<Booted> {
     let honoured = user_honours && !picts.declines_game_colours(cfg.machine_default_colours());
     let card_screen = picts.two_colour_card_screen(&cfg);
     if let Some((palette, _)) = card_screen {
-        zvm::screen::set_palette(palette);
+        app::v6_set_palette(palette);
     }
     let reported = card_screen.map(|(_, pair)| pair).or_else(|| cfg.machine_default_colours());
     eprintln!(
@@ -481,7 +480,7 @@ fn hybrid_art_ground(b: &mut Booted) -> (ratatui::style::Color, usize) {
 /// and the media guard reads no colour at all.
 #[test]
 fn the_games_own_color_command_moves_the_plates_transparent_holes() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = PRESSES.iter().any(|p| present(p.file));
     let mut seen = 0usize;
     for p in PRESSES {
@@ -575,7 +574,7 @@ fn the_games_own_color_command_moves_the_plates_transparent_holes() {
 /// canvas), so it gets its own pin rather than being assumed to follow raster.
 #[test]
 fn the_hybrid_frame_resolves_the_new_ground_too() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = PRESSES.iter().any(|p| present(p.file));
     let mut seen = 0usize;
     for p in PRESSES {
@@ -625,7 +624,7 @@ fn the_hybrid_frame_resolves_the_new_ground_too() {
 /// is what a COLOURLESS interpreter shows. Both presses below take this shape.
 #[test]
 fn with_colours_declined_the_command_offers_only_a_swap_and_the_ground_stands_still() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = present(CGA_360) || present(EGA_360);
     let mut seen = 0usize;
     for p in PRESSES.iter().filter(|p| p.file == CGA_360 || p.file == EGA_360) {
@@ -678,7 +677,7 @@ fn with_colours_declined_the_command_offers_only_a_swap_and_the_ground_stands_st
 /// every real-game test into a silent skip).
 #[test]
 fn the_press_was_actually_read() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut seen = 0usize;
     for p in PRESSES {
         if !present(p.file) {

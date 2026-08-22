@@ -35,7 +35,6 @@
 //! CI. Both `honor_game_colours` modes, per the project's colour-render convention.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -43,10 +42,6 @@ use app::interpreter::InterpreterProfile;
 use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, so these cases serialise against each
-/// other exactly as the other Journey suites do.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The Amiga floppy, and the build it must be.
 const FIXTURE: &str = "Journey - The Quest Begins.adf";
@@ -89,7 +84,7 @@ fn journey_floppy_at_menu() -> Option<GameSession> {
     assert_eq!(&String::from_utf8_lossy(&bytes[0x12..0x18]), SERIAL, "{FIXTURE}: serial");
 
     let profile = InterpreterProfile::resolve(&path, None, None, None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -170,7 +165,7 @@ fn resamples(state: &app::state::AppState) -> Vec<(u32, u32, u32, u32, String, S
 /// observable on the real artwork rather than on a synthetic plate.
 #[test]
 fn every_hybrid_band_resamples_in_the_direction_it_moves() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = journey_floppy_at_menu() else { return };
     let model = session.screen();
     let mut seen = 0usize;
@@ -205,7 +200,7 @@ fn every_hybrid_band_resamples_in_the_direction_it_moves() {
 /// that never leaves the magnifying regime, which is the regime that was always fine.
 #[test]
 fn the_sweep_puts_the_plate_on_both_sides_of_its_native_size() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = journey_floppy_at_menu() else { return };
     let model = session.screen();
     let (mut shrank, mut grew) = (Vec::new(), Vec::new());
@@ -246,7 +241,7 @@ fn the_sweep_puts_the_plate_on_both_sides_of_its_native_size() {
 /// exposes.
 #[test]
 fn the_raster_composite_shrinks_below_its_canvas_at_a_small_pane() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(session) = journey_floppy_at_menu() else { return };
     let model = session.screen();
     let (mut shrank, mut grew) = (0usize, 0usize);

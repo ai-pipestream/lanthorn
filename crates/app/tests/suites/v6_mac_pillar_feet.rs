@@ -50,9 +50,6 @@ use std::path::PathBuf;
 const RELEASE: u16 = 296;
 const SERIAL: &[u8] = b"881019";
 
-/// `zvm::screen::set_palette` is process-global, so no two cases boot at once.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
 fn mac_disk() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/Zork Zero Disk.image");
     if !path.exists() {
@@ -80,7 +77,7 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
     };
     let named = over.std_window();
     let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let dims = picts.all_pict_dims();
     let std_window =
@@ -271,7 +268,7 @@ fn desired_heights(s: &GameSession, panes: &[(u16, u16)]) -> Vec<u32> {
 /// itself, and the assertion fails with bare shaft running past the foot.
 #[test]
 fn the_macintosh_pillar_puts_its_foot_on_the_bottom_row() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -338,7 +335,7 @@ fn the_macintosh_pillar_puts_its_foot_on_the_bottom_row() {
 /// stops matching the others.
 #[test]
 fn the_bands_are_evenly_spaced_and_the_pane_decides_how_many() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -460,7 +457,7 @@ fn crop(gfx: &image::RgbaImage, x0: u32, x1: u32, h: u32) -> image::RgbaImage {
 /// says WHICH part moved.
 #[test]
 fn the_colour_pillars_on_the_same_disk_keep_bocfels_composition() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }

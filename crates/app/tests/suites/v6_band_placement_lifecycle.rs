@@ -32,7 +32,6 @@
 //! Kitty cell metrics (8×18) and pane (138×68) are the user's own, from the dump.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -42,11 +41,8 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-/// `zvm::screen::set_palette` is process-global, so profile-booting cases serialise.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
-fn palette_lock() -> MutexGuard<'static, ()> {
-    PALETTE.lock().unwrap_or_else(|e| e.into_inner())
+fn palette_lock() -> app::V6PaletteGuard {
+    app::v6_palette_at_boot()
 }
 
 /// The user's terminal: 140×71 with nothing else docked, so a 138×68 story pane.
@@ -70,7 +66,7 @@ fn journey(profile: InterpreterProfile) -> Option<GameSession> {
             return None;
         }
     };
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());

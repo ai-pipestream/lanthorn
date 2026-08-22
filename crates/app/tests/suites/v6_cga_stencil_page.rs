@@ -97,10 +97,6 @@ use app::state::AppState;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-/// `zvm::screen::set_palette` is process-global, and the harness below sets it
-/// (SQ-0904/SQ-0905).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
 const RELEASE: u16 = 393;
 const SERIAL: &[u8] = b"890714";
 
@@ -245,7 +241,7 @@ fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
     let over = PictureOverride::resolve_with_session(&path, &dir, None);
     let named_art_std_window = over.std_window();
     let (profile, source) = InterpreterProfile::resolve_with_source(&path, None, over.flavour(), None);
-    zvm::screen::set_palette(zvm::interpreter::palette_for(
+    app::v6_set_palette(zvm::interpreter::palette_for(
         profile.row_number(),
         bytes.first().copied(),
     ));
@@ -272,7 +268,7 @@ fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
         Card::Blind => None,
     };
     if let Some((palette, _)) = card_screen {
-        zvm::screen::set_palette(palette);
+        app::v6_set_palette(palette);
     }
     let reported =
         card_screen.map(|(_, pair)| pair).or_else(|| cfg.machine_default_colours());
@@ -430,7 +426,7 @@ fn art_detail(f: &Frame) -> ArtDetail {
 /// serve the plate each specimen claims.
 #[test]
 fn the_press_was_actually_read() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = PRESS.iter().any(|(f, _)| present(f));
     let mut seen = 0usize;
     for (file, two_colour) in PRESS {
@@ -472,7 +468,7 @@ fn the_press_was_actually_read() {
 /// gate it turns on is asserted here, because this is the file that would break it.
 #[test]
 fn a_cga_volume_reports_the_cards_pair_and_an_ega_volume_the_machines() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = PRESS.iter().any(|(f, _)| present(f));
     let mut seen = 0usize;
     for (file, two_colour) in PRESS {
@@ -573,7 +569,7 @@ fn the_cards_pair_is_the_machines_with_one_channel_moved() {
 /// proves nothing and says so.
 #[test]
 fn the_storys_white_page_does_not_reach_a_cga_frame() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = present(CGA_DISK) || present(CGA_DISK_720);
     let mut seen = 0usize;
     for file in [CGA_DISK, CGA_DISK_720] {
@@ -688,7 +684,7 @@ fn the_storys_white_page_does_not_reach_a_cga_frame() {
 /// here is that nothing in it has a hue at all.
 #[test]
 fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = present(CGA_DISK) || present(CGA_DISK_720);
     let mut seen = 0usize;
     for file in [CGA_DISK, CGA_DISK_720] {
@@ -705,7 +701,7 @@ fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
             let app::engine::WinNode::Layered(items) = &f.model.root else {
                 panic!("v6 builds a Layered root")
             };
-            zvm::screen::set_palette(f.palette);
+            app::v6_set_palette(f.palette);
             let native = app::render::v6_layout::native_extent(items);
             let layout = app::render::v6_layout::classify_windows(items);
             let (canvas, _) =
@@ -898,13 +894,13 @@ fn the_cards_pair_is_settled_before_the_story_loads() {
 /// offer it. Nothing here claims it looks good.
 #[test]
 fn a_story_colour_change_moves_the_ground_the_plate_stands_on() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = present(CGA_DISK) || present(CGA_DISK_720);
     let mut seen = 0usize;
     for file in [CGA_DISK, CGA_DISK_720] {
         let Some(mut f) = frame(file, Card::Read) else { continue };
         seen += 1;
-        zvm::screen::set_palette(f.palette);
+        app::v6_set_palette(f.palette);
         let ground = |f: &Frame| {
             let app::engine::WinNode::Layered(items) = &f.model.root else {
                 panic!("v6 builds a Layered root")
@@ -972,7 +968,7 @@ fn a_story_colour_change_moves_the_ground_the_plate_stands_on() {
 /// read on it.
 #[test]
 fn the_colour_renditions_keep_the_white_page_they_asked_for() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let any = present(EGA_DISK) || present(MCGA_DISK_720);
     let mut seen = 0usize;
     for file in [EGA_DISK, MCGA_DISK_720] {

@@ -54,7 +54,6 @@
 //! missing fixture skips vacuously — loudly, on stderr.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::interpreter::InterpreterProfile;
 use app::graphics::PictSource;
@@ -64,11 +63,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use zvm::screen::ZColour;
-
-/// `zvm::screen::set_palette` is process-global (the profile's colour numbers
-/// resolve through it), so a case that boots one profile must not run beside a
-/// case that boots the other.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -134,7 +128,7 @@ fn boot(f: &Floppy, profile: InterpreterProfile, honor: bool) -> Option<GameSess
         ctx(f, profile, honor)
     );
 
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     // `startup.rs`'s own chain, `native_std_window` included — this suite boots disk
@@ -213,7 +207,7 @@ fn painted_foregrounds(s: &GameSession) -> std::collections::BTreeSet<String> {
 /// every window adopts window 3's ink and this fails immediately.
 #[test]
 fn a_colour_set_outside_window_0_never_lands_on_an_amiga() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&JOURNEY, InterpreterProfile::Amiga, true) else { return };
     let who = ctx(&JOURNEY, InterpreterProfile::Amiga, true);
 
@@ -264,7 +258,7 @@ fn a_colour_set_outside_window_0_never_lands_on_an_amiga() {
 /// and the sharing rule is gone, while window 0 alone still shows the colour.
 #[test]
 fn a_colour_set_from_window_0_moves_the_pen_for_every_window() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&ZORK_ZERO, InterpreterProfile::Amiga, true) else { return };
     let who = ctx(&ZORK_ZERO, InterpreterProfile::Amiga, true);
     let pairs = window_pairs(&s);
@@ -292,7 +286,7 @@ fn a_colour_set_from_window_0_moves_the_pen_for_every_window() {
 /// out, in `amiga/yzip3.c`.)
 #[test]
 fn a_label_drawn_over_artwork_stays_over_the_artwork() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&ZORK_ZERO, InterpreterProfile::Amiga, true) else { return };
     let who = ctx(&ZORK_ZERO, InterpreterProfile::Amiga, true);
     let v6 = s.machine.screen.v6.as_ref().unwrap();
@@ -319,7 +313,7 @@ fn a_label_drawn_over_artwork_stays_over_the_artwork() {
 /// it. Arthur release 54 makes none, on either profile.
 #[test]
 fn a_title_that_never_sets_a_colour_is_untouched() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&ARTHUR, InterpreterProfile::Amiga, true) else { return };
     let who = ctx(&ARTHUR, InterpreterProfile::Amiga, true);
     for (i, (fg, bg)) in window_pairs(&s).iter().enumerate() {
@@ -339,7 +333,7 @@ fn a_title_that_never_sets_a_colour_is_untouched() {
 /// having quietly adopted window 3's ink.
 #[test]
 fn the_ibm_pc_profile_keeps_one_pair_per_window() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&JOURNEY, InterpreterProfile::IbmPc, true) else { return };
     let who = ctx(&JOURNEY, InterpreterProfile::IbmPc, true);
     let pairs = window_pairs(&s);
@@ -369,7 +363,7 @@ fn the_ibm_pc_profile_keeps_one_pair_per_window() {
 /// profile: a shared pen is still a game colour.
 #[test]
 fn with_game_colours_off_the_theme_owns_the_screen_on_both_profiles() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for profile in [InterpreterProfile::IbmPc, InterpreterProfile::Amiga] {
         let Some(s) = boot(&JOURNEY, profile, false) else { return };
         let who = ctx(&JOURNEY, profile, false);
@@ -471,7 +465,7 @@ fn amiga_pair_rgb() -> (String, String) {
 /// the user's symptom, verbatim.
 #[test]
 fn journey_renders_white_on_the_machines_dark_grey_on_the_amiga_floppy() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&JOURNEY, InterpreterProfile::Amiga, true) else { return };
     let who = ctx(&JOURNEY, InterpreterProfile::Amiga, true);
     let (white, grey) = amiga_pair_rgb();
@@ -509,7 +503,7 @@ fn journey_renders_white_on_the_machines_dark_grey_on_the_amiga_floppy() {
 /// exactly as it was before this quest existed — and never in the Amiga's grey.
 #[test]
 fn the_ibm_pc_profile_renders_in_the_host_theme_exactly_as_before() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&JOURNEY, InterpreterProfile::IbmPc, true) else { return };
     let who = ctx(&JOURNEY, InterpreterProfile::IbmPc, true);
     let (_, grey) = amiga_pair_rgb();
@@ -536,7 +530,7 @@ fn the_ibm_pc_profile_renders_in_the_host_theme_exactly_as_before() {
 /// pair at all.
 #[test]
 fn with_game_colours_off_the_amiga_page_never_reaches_the_cells() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&JOURNEY, InterpreterProfile::Amiga, false) else { return };
     let who = ctx(&JOURNEY, InterpreterProfile::Amiga, false);
     let (_, grey) = amiga_pair_rgb();
@@ -680,7 +674,7 @@ fn row_styles(area: Rect, buf: &Buffer, needle: &str) -> Option<Vec<(String, Str
 /// `ColorScheme::resolve_story_style` and only the notice row fails, on its ink.
 #[test]
 fn arthurs_notices_are_the_machines_white_on_the_machines_dark_grey() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((s, lines)) = arthur_at_the_church(true) else { return };
     let who = ctx(&ARTHUR, InterpreterProfile::Amiga, true);
     let (white, grey) = amiga_pair_rgb();
@@ -725,7 +719,7 @@ fn arthurs_notices_are_the_machines_white_on_the_machines_dark_grey() {
 /// INTERPRETER paints with is still a game colour.
 #[test]
 fn with_game_colours_off_arthurs_notice_keeps_the_themes_own_system_style() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((s, lines)) = arthur_at_the_church(false) else { return };
     let who = ctx(&ARTHUR, InterpreterProfile::Amiga, false);
     let (_, grey) = amiga_pair_rgb();
@@ -826,7 +820,7 @@ fn span_look(area: Rect, buf: &Buffer, needle: &str) -> Vec<(String, String, Str
 /// machine's grey while the committed span stays `Rgb(255, 255, 255)`.
 #[test]
 fn the_amigas_typed_echo_stands_on_the_same_pair_as_its_committed_one() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((s, lines)) = arthur_at_the_church(true) else { return };
     let who = ctx(&ARTHUR, InterpreterProfile::Amiga, true);
     let (white, grey) = amiga_pair_rgb();
@@ -872,7 +866,7 @@ fn the_amigas_typed_echo_stands_on_the_same_pair_as_its_committed_one() {
 /// — the SQ-0532 wave-6 path, unmoved by SQ-0847.
 #[test]
 fn a_game_that_named_its_own_pair_still_types_in_that_pair() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(s) = boot(&ZORK_ZERO, InterpreterProfile::Amiga, true) else { return };
     let who = ctx(&ZORK_ZERO, InterpreterProfile::Amiga, true);
     let pairs = window_pairs(&s);
@@ -928,7 +922,7 @@ fn a_game_that_named_its_own_pair_still_types_in_that_pair() {
 /// story background, so nothing about them may move.
 #[test]
 fn chrome_inherits_the_page_the_game_dressed() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for (f, to_menu) in [(&ZORK_ZERO, true), (&ARTHUR, false), (&JOURNEY, false)] {
         let Some(mut s) = boot(f, InterpreterProfile::Amiga, true) else { continue };

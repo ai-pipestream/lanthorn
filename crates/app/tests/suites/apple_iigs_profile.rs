@@ -93,14 +93,9 @@
 //! when the media are absent.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use app::interpreter::InterpreterProfile;
 use app::session::{GameSession, InputKind};
-
-/// `zvm::screen::set_palette` is process-global, so no two cases here may boot
-/// at once. Same guard, same reason, as `real_media_releases.rs`.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The standalone Apple IIgs press of *Beyond Zork* — a GS/OS disk whose story
 /// is the whole file `BZ.DAT`.
@@ -163,7 +158,7 @@ fn boot(path: &Path, honor: bool, interpreter_override: Option<u8>) -> Option<Ga
         path.display()
     );
     let profile = InterpreterProfile::resolve(path, interpreter_override, None, None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let s = GameSession::new_with_art_scale(
         loaded.bytes().to_vec(),
         honor,
@@ -338,7 +333,7 @@ fn the_shipped_apple_interpreter_still_detects_the_machine_at_boot() {
 /// The smallest statement of the change, on the real media.
 #[test]
 fn a_prodos_volume_tells_its_story_it_is_an_apple_iigs() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for name in ALL_DISKS {
         let Some(path) = disk(name) else { continue };
@@ -391,7 +386,7 @@ fn a_prodos_volume_tells_its_story_it_is_an_apple_iigs() {
 /// exists to close.
 #[test]
 fn beyond_zork_off_a_prodos_volume_is_never_asked_whether_it_is_a_vt220() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for name in [BEYOND_ZORK_DISK, LOST_TREASURES_2] {
         let Some(path) = disk(name) else { continue };
@@ -479,7 +474,7 @@ fn beyond_zork_off_a_prodos_volume_is_never_asked_whether_it_is_a_vt220() {
 /// produces with no question at all. Nothing in the render path moved.
 #[test]
 fn the_apple_frame_is_the_one_a_vt220_owner_already_had_to_ask_for() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(path) = disk(BEYOND_ZORK_DISK) else { return };
 
     let mut gs = boot(&path, true, None).expect("boots");
@@ -507,7 +502,7 @@ fn the_apple_frame_is_the_one_a_vt220_owner_already_had_to_ask_for() {
 /// entirely v3.
 #[test]
 fn a_version_3_story_on_a_prodos_volume_is_unmoved_by_the_number() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some(path) = disk(V3_DISK) else { return };
 
     let (loaded, _) = app::hints::load_mounted_story(&path).expect("mounts");

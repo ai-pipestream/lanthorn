@@ -38,7 +38,6 @@
 //! `stories/` is gitignored, so every case skips vacuously.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -48,10 +47,6 @@ use app::session::{GameSession, InputKind, TranscriptElem};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, so no two renditions may boot at
-/// once (the same lock `v6_shogun_menu_ground` takes, for the same reason).
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// The five-volume 5.25-inch ProDOS press, named by the exact build it carries.
 const APPLE: (&str, u16, &str) = ("shogun_s1.dsk", 311, "890510");
@@ -89,7 +84,7 @@ fn boot(press: (&str, u16, &str)) -> Option<(GameSession, Vec<TranscriptElem>)> 
     );
     assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), serial, "{file}: serial");
     let profile = InterpreterProfile::resolve(&path, None, None, None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px =
@@ -285,7 +280,7 @@ fn text_below(buf: &Buffer, row: u16, vp: (u16, u16, u16, u16)) -> bool {
 /// should say so instead of the ones after it quietly measuring some other screen.
 #[test]
 fn the_apple_press_reserves_a_margin_on_window_0_and_paints_it_from_window_6() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((s, _)) = boot(APPLE) else { return };
     let story = story_box(&s).expect("the Bridge scene is a layered v6 frame");
     assert_eq!(
@@ -329,7 +324,7 @@ fn the_apple_press_reserves_a_margin_on_window_0_and_paints_it_from_window_6() {
 /// `ev.window != 0`.
 #[test]
 fn both_presses_anchor_the_ship_as_a_right_margin_float_in_the_prose() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for (press, size) in [(APPLE, (312, 348)), (AMIGA, (320, 370))] {
         let Some((_, elems)) = boot(press) else { continue };
@@ -366,7 +361,7 @@ fn both_presses_anchor_the_ship_as_a_right_margin_float_in_the_prose() {
 /// two mechanisms are not left fighting over the same columns.
 #[test]
 fn the_ship_leaves_the_chrome_canvas_entirely() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((mut s, _)) = boot(APPLE) else { return };
     for t in 0..4 {
         let inside = chrome_pixels_inside_story(&s).expect("layered v6 frame");
@@ -395,7 +390,7 @@ fn the_ship_leaves_the_chrome_canvas_entirely() {
 /// Measured on the rendered pane, which is the only place the answer is visible.
 #[test]
 fn the_ship_scrolls_up_with_the_prose_and_the_text_runs_past_its_bottom() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for press in [APPLE, AMIGA] {
         let mut rings = 0;
@@ -497,7 +492,7 @@ fn the_ship_scrolls_up_with_the_prose_and_the_text_runs_past_its_bottom() {
 /// fails the moment any picture is painted onto a chrome window again.
 #[test]
 fn the_rule_above_the_prose_stays_whole_on_every_turn() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let Some((mut s, _)) = boot(APPLE) else { return };
     for t in 0..4 {
         let model = s.screen();
@@ -547,7 +542,7 @@ fn the_rule_above_the_prose_stays_whole_on_every_turn() {
 /// case that keeps it that way.
 #[test]
 fn the_window_0_presses_are_untouched() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for press in [AMIGA, IBM] {
         let Some((s, elems)) = boot(press) else { continue };

@@ -42,7 +42,6 @@
 //! modes, per the project's colour-render convention.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use app::engine::{Engine, PxText, WinNode};
 use app::graphics::PictSource;
@@ -51,9 +50,6 @@ use app::session::{GameSession, InputKind};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-
-/// `zvm::screen::set_palette` is process-global, so no two cases here may boot at once.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
 
 /// A rect as `/dump-windows` records it: `(x, y, w, h)`.
 type Quad = (u16, u16, u16, u16);
@@ -92,7 +88,7 @@ fn boot(file: &str) -> Option<GameSession> {
         }
     };
     let profile = InterpreterProfile::resolve(&path, None, None, None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -219,7 +215,7 @@ fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
 /// 115x61 and `11 rows` at 157x61, and release 83 with `8`/`9` for its 6.
 #[test]
 fn the_menu_band_is_its_own_height_bottom_anchored_and_the_story_takes_the_rest() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, release) in RELEASES {
         let Some(mut session) = boot(file) else { return };
         let transcript = session.take_transcript();
@@ -297,7 +293,7 @@ fn the_menu_band_is_its_own_height_bottom_anchored_and_the_story_takes_the_rest(
 /// on the pane's last row 67`, the `└` and `┘` having been drawn on row 64.
 #[test]
 fn the_menus_last_game_row_lands_on_the_panes_last_row() {
-    let _g: MutexGuard<()> = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, release) in RELEASES {
         let Some(mut session) = boot(file) else { return };
         let transcript = session.take_transcript();

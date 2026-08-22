@@ -56,10 +56,6 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-/// `zvm::screen::set_palette` is process-global (an Amiga medium loads the Amiga
-/// palette), so no two cases here may boot at once.
-static PALETTE: &std::sync::Mutex<()> = &app::V6_PALETTE_LOCK;
-
 /// The kitty-ish font cell the sweep runs at. `Picker::halfblocks()` reports a 1x2
 /// cell — a layout regime that reproduces no scale defect at all (the SQ-0548
 /// lesson) — so this is a plausible real one, and it is the cell the user's own
@@ -119,7 +115,7 @@ fn boot(file: &str, release: u16, serial: &str, turns: usize) -> Option<GameSess
     assert_eq!(got, serial, "{file}: this suite's numbers were measured on serial {serial}");
 
     let profile = InterpreterProfile::resolve(&path, None, None, None);
-    zvm::screen::set_palette(profile.palette());
+    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
@@ -229,7 +225,7 @@ fn native_of(model: &app::engine::ScreenModel) -> (u16, u16) {
 /// ```
 #[test]
 fn journeys_menu_survives_a_pane_with_no_vertical_slack() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, release, serial) in JOURNEYS {
         let Some(session) = boot(file, *release, serial, 40) else { return };
         let model = session.screen();
@@ -285,7 +281,7 @@ fn journeys_menu_survives_a_pane_with_no_vertical_slack() {
 /// a regression, and it would land here before it landed on a user's screen.
 #[test]
 fn the_other_v6_titles_keep_their_plans_at_the_same_panes() {
-    let _g = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = app::v6_palette_at_boot();
     for (file, release, serial, want) in UNMOVED {
         let Some(session) = boot(file, *release, serial, 12) else { return };
         let model = session.screen();
