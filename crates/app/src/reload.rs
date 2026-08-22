@@ -164,6 +164,16 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     // must take the page back from the machine on the very next reload), and
     // `honor_game_colours` was recomputed a few lines above. `crate::period` holds
     // the gate and the composition rules.
+    // SQ-0917: the render path's copy of the machine's Version 6 cell. Recomputed
+    // here for the same reason `period_look` is — the profile is a config value the
+    // settings screen can change under a running session — and from the SAME knob
+    // the session was constructed with, so the renderer divides by the number the
+    // engine multiplied by. They disagreeing is every run landing in the wrong
+    // column, silently, because both answers look plausible.
+    state.v6_cell = {
+        let (w, h) = state.config.interpreter_profile.v6_font_cell();
+        zvm::screen::V6Cell::new(w, h)
+    };
     state.period_look = crate::period::resolve(
         state.config.interpreter_profile,
         state.config.period_look,

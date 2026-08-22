@@ -139,6 +139,7 @@ fn frame_at(file: &str, pictures: Option<&str>, honor: bool, pane: Rect) -> Opti
         honoured.then(|| profile.default_colours()).flatten(),
         None,
         None,
+        None,
     )
     .expect("Zork Zero should load and boot without a ZError");
     assert!(!session.quit && session.machine.fault_trace.is_none(), "{file} booted cleanly");

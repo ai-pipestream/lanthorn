@@ -534,6 +534,7 @@ fn zork_zeros_ega_rendition_boots_the_geometry_its_mcga_one_does() {
         let dims = picts.all_pict_dims();
         let mut s = GameSession::new_with_art_scale(
             bytes.clone(), false, false, None, false, dims, std_window, art_scale, None, None, None,
+            None,
         )
         .expect("Zork Zero boots");
         s.set_pict_source(Some(picts));

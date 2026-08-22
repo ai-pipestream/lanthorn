@@ -150,6 +150,7 @@ fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", s.file));
     session.set_pict_source(Some(picts));

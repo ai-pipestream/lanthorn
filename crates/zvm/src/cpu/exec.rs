@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Cell, V6Windows, GRID_CELL_CAP, V6_FONT_HEIGHT, V6_FONT_WIDTH};
+use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Cell, V6Windows, GRID_CELL_CAP};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -469,6 +469,10 @@ enum SaveDest {
 /// Shared by [`Machine::with_output`] (boot) and [`Machine::restart`] (@restart
 /// re-boot) so both land in byte-identical initial state.
 fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
+    // SQ-0917: the DEFAULT cell, and it has to be — this runs while the `Machine`
+    // is being built, so no host has had the chance to declare a profile's own.
+    // `Machine::set_v6_cell` re-seeds everything below when one arrives.
+    let cell = V6Cell::DEFAULT;
     let mut state = State::new(mem.initial_pc());
     let mut screen = ScreenState::default();
     if mem.version() == 6 {
@@ -490,7 +494,7 @@ fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
             w.x_cursor = 1;
             w.font_number = 1;
             w.font_size =
-                (crate::screen::V6_FONT_HEIGHT << 8) | crate::screen::V6_FONT_WIDTH;
+                (cell.h << 8) | cell.w;
             // frotz restart_screen: attribute 8 (buffered) everywhere...
             w.attributes = 8;
         }
@@ -503,8 +507,8 @@ fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
         // get_wind_prop before ever calling window_size) and window 0 also gets
         // the full screen HEIGHT; window 1 stays at height 0. Reseeded with the
         // real screen size by `set_screen_dims` when the host reports it.
-        let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * crate::screen::V6_FONT_WIDTH;
-        let height = crate::screen::DEFAULT_SCREEN_ROWS as u16 * crate::screen::V6_FONT_HEIGHT;
+        let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * cell.w;
+        let height = crate::screen::DEFAULT_SCREEN_ROWS as u16 * cell.h;
         v6.windows[0].x_size = width;
         v6.windows[0].y_size = height;
         v6.windows[1].x_size = width;
@@ -734,12 +738,79 @@ impl Machine {
     ///
     /// For v4/v5/v7/v8 a LIVE upper window follows the new WIDTH — see
     /// [`Machine::refit_upper_window_width`].
+    /// Declare the Version 6 character cell this session runs on (SQ-0917).
+    ///
+    /// Call this BEFORE [`Machine::set_screen_dims`] and before the boot run: the
+    /// story reads `$26`/`$27` and lays its windows out from them, so a cell that
+    /// arrives afterwards is a cell the game has already disagreed with.
+    ///
+    /// # Why a setter and not a public field
+    ///
+    /// Two pieces of state are derived from the cell at construction and would
+    /// otherwise keep the default forever:
+    ///
+    /// * every window's **font size** (property 13, `(height << 8) | width` —
+    ///   ZMSD §8.8.3.2), which `boot_state_and_screen` seeds and `set_screen_dims`
+    ///   does not touch. A story asking `@get_wind_prop 13` on a Macintosh would
+    ///   have been told 8x16 while the header said 7x15;
+    /// * the header itself, so a caller that sets the cell and never resizes still
+    ///   tells the story the truth.
+    ///
+    /// Window PIXEL sizes are deliberately left alone: they are a screen the host
+    /// has not reported yet, and `set_screen_dims` owns them.
+    pub fn set_v6_cell(&mut self, cell: crate::screen::V6Cell) {
+        self.v6_cell = cell;
+        if let Some(v6) = self.screen.v6.as_mut() {
+            for w in v6.windows.iter_mut() {
+                w.font_size = (cell.h << 8) | cell.w;
+            }
+        }
+        if self.mem.version() == 6 {
+            // Restate the header on the cell that is now current. The screen is
+            // whatever `$22`/`$24` already say — this changes the CELL, not the
+            // window, so the character grid is re-divided rather than re-invented.
+            let (w, h) = (self.mem.read_word(0x22), self.mem.read_word(0x24));
+            crate::screen::write_screen_dims_px(&mut self.mem, w, h, cell);
+        }
+    }
+
+    /// Report a **Version 6** screen the way Version 6 means it: in pixels, with
+    /// the character grid derived (SQ-0917).
+    ///
+    /// [`Machine::set_screen_dims`] takes a character grid and multiplies back up,
+    /// which is exact only while the cell divides the screen. A v6 host has the
+    /// pixels in hand — an archive's standard window, times the art scale — and
+    /// turning them into a grid on the way in only to have them reconstituted on
+    /// the way out loses whatever the cell does not divide. On the Macintosh that
+    /// is real: 640 px on a 7-wide cell round-trips to **637**, and 480 to 483.
+    ///
+    /// No-op below v6, where the screen genuinely is a character grid.
+    pub fn set_v6_screen_px(&mut self, width_px: u16, height_px: u16) {
+        if self.mem.version() != 6 {
+            return;
+        }
+        let cell = self.v6_cell;
+        crate::screen::write_screen_dims_px(&mut self.mem, width_px, height_px, cell);
+        if let Some(v6) = self.screen.v6.as_mut() {
+            // frotz `restart_screen`: windows 0 and 1 take the new screen WIDTH so a
+            // story reading `get_wind_prop` before sizing anything sees the real
+            // screen; window 0 also takes its height (ZMSD §8.8.3.3, "Window 0
+            // occupies the whole screen") and window 1 keeps its zero height until a
+            // `split_window`. These are PIXELS, so they take the pixels as given.
+            let (w, h) = (width_px.max(1), height_px.max(1));
+            v6.windows[0].x_size = w;
+            v6.windows[0].y_size = h;
+            v6.windows[1].x_size = w;
+        }
+    }
+
     pub fn set_screen_dims(&mut self, rows: u8, cols: u8) {
-        crate::screen::write_screen_dims(&mut self.mem, rows, cols, self.v6_cell);
+        let cell = self.v6_cell;
+        crate::screen::write_screen_dims(&mut self.mem, rows, cols, cell);
         if self.mem.version() == 6 {
             if let Some(v6) = self.screen.v6.as_mut() {
-                let width = cols.max(1) as u16 * crate::screen::V6_FONT_WIDTH;
-                let height = rows.max(1) as u16 * crate::screen::V6_FONT_HEIGHT;
+                let width = cols.max(1) as u16 * cell.w;
+                let height = rows.max(1) as u16 * cell.h;
                 v6.windows[0].x_size = width;
                 v6.windows[0].y_size = height;
                 v6.windows[1].x_size = width;
@@ -2732,9 +2803,9 @@ impl Machine {
                     v6.erase_screen_rect(top, left, cell.h as i32, width, cell);
                     // Cell-grid mirror: blank from the cursor cell rightward.
                     let w = &mut v6.windows[cur.min(7)];
-                    let row = (w.y_cursor.max(1) - 1) / crate::screen::V6_FONT_HEIGHT + 1;
-                    let start = (w.x_cursor.max(1) - 1) / crate::screen::V6_FONT_WIDTH + 1;
-                    let cells = (width.max(0) as u16).div_ceil(crate::screen::V6_FONT_WIDTH);
+                    let row = (w.y_cursor.max(1) - 1) / cell.h + 1;
+                    let start = (w.x_cursor.max(1) - 1) / cell.w + 1;
+                    let cells = (width.max(0) as u16).div_ceil(cell.w);
                     for c in start..(start + cells).min(w.grid.cols + 1) {
                         w.grid.put(row, c, ' ', 0, w.fg, w.bg);
                     }
@@ -3201,8 +3272,8 @@ impl Machine {
                             w.y_cursor = 1;
                             w.x_cursor = w.left_margin + 1;
                         }
-                        let rows = (y / V6_FONT_HEIGHT).clamp(1, GRID_CELL_CAP);
-                        let cols = (x / V6_FONT_WIDTH).clamp(1, GRID_CELL_CAP);
+                        let rows = (y / cell.h).clamp(1, GRID_CELL_CAP);
+                        let cols = (x / cell.w).clamp(1, GRID_CELL_CAP);
                         w.grid.resize(rows, cols);
                     }
                 }
@@ -3863,6 +3934,7 @@ impl Machine {
     /// clicking a label did nothing while the blank row below it worked. Nearest
     /// gives line 5, which lands the row inside that band exactly.
     fn v6_take_declared_indent(&mut self, s: &str) -> (usize, usize) {
+        let cell = self.v6_cell;
         let Some((win, col, row)) = self.v6_declared_x.take() else { return (0, 0) };
         let Some(v6) = self.screen.v6.as_ref() else { return (0, 0) };
         if win != v6.current || s.starts_with('\n') {
@@ -3871,9 +3943,9 @@ impl Machine {
         let w = &v6.windows[(win as usize).min(7)];
         // 1-based pixel column, relative to the window's own left margin.
         (
-            usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / V6_FONT_WIDTH),
+            usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / cell.w),
             usize::from(
-                row.saturating_sub(1).saturating_add(V6_FONT_HEIGHT / 2) / V6_FONT_HEIGHT,
+                row.saturating_sub(1).saturating_add(cell.h / 2) / cell.h,
             ),
         )
     }
@@ -3894,7 +3966,7 @@ impl Machine {
     fn v6_advance_prose_cursor(&mut self, s: &str, shadow: bool) {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
         let cell = self.v6_cell;
-        let fw = V6_FONT_WIDTH;
+        let fw = cell.w;
         // The style/colours this text is going out in, for the SQ-0697 shadow
         // below — read before the window borrow.
         let (style, fg, bg) = (self.screen.text_style, self.screen.current_fg, self.screen.current_bg);
@@ -4099,8 +4171,8 @@ impl Machine {
                 // a fixed pixel cursor every turn).
                 let mut finished: Vec<crate::screen::V6Text> = Vec::new();
                 if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
-                    let fw = crate::screen::V6_FONT_WIDTH;
-                    let fh = crate::screen::V6_FONT_HEIGHT;
+                    let fw = cell.w;
+                    let fh = cell.h;
                     let cols = w.grid.cols.max(1);
                     let (fg, bg) = (w.fg, w.bg);
                     let bound = screen_h.max(w.grid.rows) * fh; // px bound
@@ -11440,8 +11512,8 @@ pub(crate) mod tests {
         // Window 0's height used to boot at 0.
         let m = v6_exec_machine();
         let v6 = m.screen.v6.as_ref().unwrap();
-        let full_w = crate::screen::DEFAULT_SCREEN_COLS as u16 * V6_FONT_WIDTH;
-        let full_h = crate::screen::DEFAULT_SCREEN_ROWS as u16 * V6_FONT_HEIGHT;
+        let full_w = crate::screen::DEFAULT_SCREEN_COLS as u16 * crate::screen::V6_FONT_WIDTH;
+        let full_h = crate::screen::DEFAULT_SCREEN_ROWS as u16 * crate::screen::V6_FONT_HEIGHT;
         assert_eq!(v6.windows[0].x_size, full_w, "window 0 is as wide as the screen");
         assert_eq!(v6.windows[0].y_size, full_h, "window 0 is as tall as the screen");
         assert_eq!(v6.windows[1].x_size, full_w, "window 1 is as wide as the screen");
@@ -11455,8 +11527,8 @@ pub(crate) mod tests {
         let mut m = v6_exec_machine();
         m.set_screen_dims(25, 80);
         let v6 = m.screen.v6.as_ref().unwrap();
-        assert_eq!(v6.windows[0].x_size, 80 * V6_FONT_WIDTH);
-        assert_eq!(v6.windows[0].y_size, 25 * V6_FONT_HEIGHT);
+        assert_eq!(v6.windows[0].x_size, 80 * crate::screen::V6_FONT_WIDTH);
+        assert_eq!(v6.windows[0].y_size, 25 * crate::screen::V6_FONT_HEIGHT);
         assert_eq!(v6.windows[1].y_size, 0, "window 1 stays unsplit");
     }
 
@@ -11501,7 +11573,7 @@ pub(crate) mod tests {
         let v6 = m.screen.v6.as_ref().unwrap();
         assert_eq!(v6.current, 0, "-1 selects window 0");
         assert_eq!(v6.windows[1].y_size, 0, "-1 unsplits: window 1 collapses to zero height");
-        assert_eq!(v6.windows[0].y_size, 25 * V6_FONT_HEIGHT, "-1 gives window 0 the screen");
+        assert_eq!(v6.windows[0].y_size, 25 * crate::screen::V6_FONT_HEIGHT, "-1 gives window 0 the screen");
         assert_eq!(v6.windows[2].y_cursor, 1, "-1 is a full per-window erase: cursors home");
         assert_eq!(
             m.screen.current_bg,

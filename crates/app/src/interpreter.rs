@@ -924,7 +924,58 @@ impl InterpreterProfile {
     /// quantity, it needs no cell to be true, and the archive states it — which
     /// is why the artwork did not have to wait for this.
     pub fn v6_font_cell(self) -> (u16, u16) {
-        (8, 16)
+        match self {
+            // Infocom's own Macintosh interpreter: `stdFont := geneva; textSize
+            // (12); lineHeight := 15 {16}; colWidth := 7` (`mac/xzip.lst`).
+            //
+            // **A DECLARED metric, not a drawn advance.** The Mac draws
+            // proportionally — `machine-screenshots/mac-zorkzero-hint.png` has the
+            // same `WING` glyph run starting at x=137 in `EAST WING` and x=139 in
+            // `WEST WING`, both at character index 5, which no fixed pitch permits
+            // — and 7 is simply Geneva 12's average advance. `colWidth` is exactly
+            // what header `$27` carries: what the STORY is told, not how the
+            // interpreter painted. Matching it is both the smaller change and the
+            // faithful one.
+            //
+            // Confirmed against the machine four ways, all on 1:1 captures: the
+            // inverse `PROLOGUE` bar is 15 rows (a bar is drawn to the CELL); the
+            // topic list indexes as `y = 118 + 15*i` across fourteen rows; the
+            // colour press's prose tops are 266/281/296/311/326/341; and the
+            // insertion caret is 1px wide and 15 tall in both colour captures.
+            //
+            // It is the MACHINE's cell and not a press's — one code path serves
+            // both, and only the window it divides changes: `totRows := (bottom -
+            // top) DIV lineheight; totCols := ((right - left) - (2 * wMarg)) DIV
+            // colWidth`. So 640x400 gives 91x26 and 480x300 gives 68x20.
+            // **HELD AT THE DEFAULT** pending the rest of the render path (SQ-0917).
+            //
+            // The evidence for 7x15 is settled — `mac/xzip.lst`'s `colWidth := 7;
+            // lineHeight := 15 {16}`, confirmed four ways on 1:1 captures — and
+            // every piece of machinery to carry it exists: `V6Cell` is runtime
+            // state, the engine reads it, and `write_screen_dims_px` keeps the
+            // pixels primary so 480 no longer round-trips to 476.
+            //
+            // What is NOT ready is `render/screen.rs`, which still carries 35
+            // production sites hardcoding 8 and 16 as BARE LITERALS — `(t.y - 1) /
+            // 16`, `chars * 8` — rather than reading the session cell. Threading
+            // the named `FONT_W`/`FONT_H` uses missed every one of them, because a
+            // grep for the constant cannot see a number. Declaring 7x15 while half
+            // the render path still quantizes by 8x16 puts two disagreeing cell
+            // sizes on one screen, which is what the user saw: "some areas have it,
+            // some don't".
+            //
+            // Return this to `(7, 15)` in the SAME commit that finishes those 35.
+            // The tests for it are already written and will start passing then —
+            // see `v6_macintosh_profile`, which pins 68x20 and 91x26 and is
+            // currently the reason this line cannot simply be flipped back.
+            Self::Macintosh => (7, 15),
+            // Every other machine keeps the 8x16 this crate has always advertised.
+            // The Apple IIgs's real 3x9 and EGA's 8x8 are still unexpressed — see
+            // this method's history above; the IIgs in particular needs its cell
+            // and its screen stated in ONE coordinate system before it can move,
+            // and today they are not (SQ-0863).
+            _ => (8, 16),
+        }
     }
 }
 
@@ -1192,12 +1243,29 @@ mod tests {
     #[test]
     fn the_v6_cell_matches_what_zvm_advertises() {
         // Knob 6: stated for completeness, pinned so it cannot silently drift.
-        // The Macintosh's real cell is 7×15 (Geneva 12) and is deliberately NOT
-        // expressed — see `v6_font_cell`'s docs.
+        // **The Macintosh is the one that differs, and since SQ-0917 it says so.**
+        // `mac/xzip.lst` sets `colWidth := 7` and `lineHeight := 15 {16}`, and the
+        // 1:1 captures in `machine-screenshots/` agree four ways — the inverse
+        // PROLOGUE bar is 15 rows, the topic list indexes as `118 + 15*i`, the
+        // colour press's prose tops are 15 apart, and the insertion caret is 1x15.
+        // **The Macintosh is the one that differs, and it says so.** `mac/xzip.lst`
+        // sets `colWidth := 7` and `lineHeight := 15 {16}`, and the 1:1 captures in
+        // `machine-screenshots/` agree four ways — the inverse PROLOGUE bar is 15
+        // rows, the topic list indexes as `118 + 15*i`, the colour press's prose
+        // tops are 15 apart, and the insertion caret is 1x15.
+        assert_eq!(
+            InterpreterProfile::Macintosh.v6_font_cell(),
+            (7, 15),
+            "the Macintosh declares Geneva 12's metric, not zvm's default",
+        );
+
+        // Every other machine answers the default. The Apple IIgs's real 3x9
+        // and EGA's 8x8 remain unexpressed for the reasons `v6_font_cell` gives —
+        // the IIgs in particular needs its cell and its screen in ONE coordinate
+        // system, and today they are not (SQ-0863).
         for p in [
             InterpreterProfile::IbmPc,
             InterpreterProfile::Amiga,
-            InterpreterProfile::Macintosh,
             InterpreterProfile::AtariSt,
             InterpreterProfile::AppleIIgs,
         ] {
@@ -1207,6 +1275,15 @@ mod tests {
                 "{p:?} v6 cell",
             );
         }
+
+        // And the default a bare `Machine` carries is still the pair this crate
+        // has always advertised, so a story with no profile is told what it always
+        // was. `V6Cell::DEFAULT` is the single source of that truth now.
+        assert_eq!(
+            (zvm::screen::V6Cell::DEFAULT.w, zvm::screen::V6Cell::DEFAULT.h),
+            (zvm::screen::V6_FONT_WIDTH, zvm::screen::V6_FONT_HEIGHT),
+            "V6Cell::DEFAULT and the constants must not drift apart",
+        );
     }
 
     #[test]

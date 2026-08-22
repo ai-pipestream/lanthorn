@@ -256,6 +256,7 @@ fn boot(file: &str, user_honours: bool) -> Option<Booted> {
         honoured.then_some(reported).flatten(),
         None,
         None,
+        None,
     )
     .expect("Zork Zero boots off the DOS press");
     assert!(!session.quit && session.machine.fault_trace.is_none(), "{file} booted cleanly");

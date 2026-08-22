@@ -272,6 +272,7 @@ fn scout(
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .map_err(|e| format!("boot: {e:?}"))?;
     s.set_pict_source(Some(picts));

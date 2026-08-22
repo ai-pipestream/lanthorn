@@ -749,7 +749,7 @@ pub(crate) fn boot_story(
             // to that rule told the story it was a DECSystem-20 off the one disk
             // that says otherwise. See `Config::advertised_interpreter_number`.
             let interpreter_number = cfg.advertised_interpreter_number();
-            let mut s = match GameSession::new_with_art_scale(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, v6_art_scale, host_default_colours, host_screen, Some(random_seed)) {
+            let mut s = match GameSession::new_with_art_scale(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, v6_art_scale, host_default_colours, host_screen, Some(random_seed), Some(cfg.interpreter_profile.v6_font_cell())) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;

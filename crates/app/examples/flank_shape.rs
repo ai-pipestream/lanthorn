@@ -148,6 +148,7 @@ fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, 
         profile_.default_colours(),
         None,
         None,
+        None,
     )
     .map_err(|e| format!("boot: {e:?}"))?;
     s.set_pict_source(Some(picts));

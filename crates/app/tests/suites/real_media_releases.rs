@@ -623,6 +623,7 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", ctx(m)));
     assert!(!s.quit, "{}: quit during boot", ctx(m));

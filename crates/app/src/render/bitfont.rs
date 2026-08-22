@@ -313,13 +313,31 @@ pub fn blit_glyph_styled(
     // chain stays as the fallback for what it doesn't carry — the quadrant blocks,
     // the APL quad, the runes — so `tall` and `short` are never both `Some`.
     //
-    // `ch >= 16` because a taller face is only an improvement in a cell that can
-    // show its rows. Sample sixteen rows into eight and half of them are simply
-    // discarded, which is worse than an 8x8 master doubled — a thinner, more
-    // broken glyph, not a smaller one. No production call site asks for a short
-    // cell (they are all `v6_layout`'s FONT_W x FONT_H), but `blit_glyph` is public
-    // and its own sample-sheet test renders square cells at 1x.
-    let tall = (ch >= 16)
+    // A taller face is only an improvement in a cell that can show its rows.
+    // Sample sixteen rows into eight and half of them are simply discarded, which
+    // is worse than an 8x8 master doubled — a thinner, more broken glyph, not a
+    // smaller one. So there is a floor, and `blit_glyph` is public enough to need
+    // one: its own sample-sheet test renders square cells at 1x.
+    //
+    // **The floor was `ch >= 16` and that was a latent assumption, not a rule**
+    // (SQ-0917). It read "16 is the only cell any production call site asks for",
+    // which was true while every v6 machine shared one cell and stopped being true
+    // the moment the Macintosh declared its own 7x15. At `ch == 15` the old guard
+    // sent the Macintosh silently back to the 8x8 chain — and that chain has NO
+    // descender below the baseline (see `crate::render::vga16`'s header, which is
+    // the defect SQ-0932 introduced this face to fix). The symptom on screen is
+    // clipped tails on `g`, `j`, `p`, `q` and `y` in raster, on one machine.
+    //
+    // 15 is in fact the ideal case rather than a marginal one: `dy * 16 / 15` maps
+    // rows 0..=14 one-for-one and reaches row 15 never, and **no glyph in the table
+    // inks row 15** — so the Macintosh cell samples the face losslessly. `y`'s tail
+    // lives in rows 12..=14 and arrives whole.
+    //
+    // 12 is the floor because three quarters of the source rows survive there,
+    // which comfortably covers a descender sitting in the bottom quarter. Below it
+    // the resample starts skipping source rows outright and the 8x8 master — drawn
+    // to be legible at its own size — is the better source.
+    let tall = (ch >= 12)
         .then(|| crate::render::vga16::glyph(glyph).map(|b| synthesize_face16(b, style)))
         .flatten();
     let short =
@@ -368,6 +386,51 @@ mod tests {
         assert!(bits.is_some(), "{c:?} (U+{:04X}) has no glyph", c as u32);
         if c != ' ' {
             assert_ne!(bits.unwrap(), [0u8; 8], "{c:?} (U+{:04X}) resolves to a blank glyph", c as u32);
+        }
+    }
+
+    /// **A descender still descends in a cell that is not 16 tall** (SQ-0917).
+    ///
+    /// The 8x16 face is chosen over the 8x8 master by a height floor, and that
+    /// floor used to be `ch >= 16` — which read as a quality rule and was really
+    /// an assumption that 16 is the only cell in play. The Macintosh declares
+    /// 7x15, fell under it, and silently got the 8x8 chain: a face with **no
+    /// descender below the baseline at all**, so `g`, `j`, `p`, `q` and `y` came
+    /// out with their tails clipped in raster on that one machine.
+    ///
+    /// # The property, and the one this case first got wrong
+    ///
+    /// "There is ink low in the cell" does NOT distinguish the two faces: stretch
+    /// an 8-row glyph over 15 rows and it inks the bottom of the cell too. The
+    /// first version of this case asserted exactly that and passed with the bug
+    /// restored, which is the whole reason to falsify a test rather than trust a
+    /// green one.
+    ///
+    /// The property that separates them is RELATIVE — a descender hangs below a
+    /// letter that has none. In the 16-row face `x` inks rows 5..=11 and `y` inks
+    /// 5..=14, so `y` reaches three rows lower. In the 8x8 master both sit inside
+    /// the same band, so they end together however the cell is scaled.
+    ///
+    /// Falsified by restoring `ch >= 16`, which fails here at 7x15.
+    #[test]
+    fn a_descender_still_descends_at_the_macintoshs_fifteen_row_cell() {
+        let fg = Rgba([255, 0, 0, 255]);
+        let lowest = |g: char, cw: u32, ch: u32| -> Option<u32> {
+            let mut c = RgbaImage::from_pixel(cw, ch, Rgba([0, 0, 0, 255]));
+            blit_glyph(&mut c, g, 0, 0, cw, ch, fg, None);
+            (0..ch).rev().find(|&y| (0..cw).any(|x| *c.get_pixel(x, y) == fg))
+        };
+        for (cw, ch) in [(7u32, 15u32), (8, 16)] {
+            let x = lowest('x', cw, ch).expect("`x` inks something");
+            let y = lowest('y', cw, ch).expect("`y` inks something");
+            assert!(
+                y >= x + 2,
+                "{cw}x{ch}: `y` bottoms out at row {y} against `x` at {x} — a depth of {}, \
+                 where the 8x16 face gives 3. A depth of ONE is the 8x8 fallback stretched: \
+                 its tail clears the baseline by a single duplicated scanline, which is why \
+                 `y > x` alone does not tell the two faces apart.",
+                y - x,
+            );
         }
     }
 
@@ -779,5 +842,6 @@ mod tests {
         canvas.save(&out_path).expect("write bitfont sample PNG");
     }
 }
+
 
 

@@ -132,6 +132,7 @@ fn boot(spec: &Specimen) -> Option<GameSession> {
     );
     let mut s = GameSession::new_with_art_scale(
         bytes, true, false, None, false, dims, v6_screen_px, art_scale, None, None, None,
+        None,
     )
     .expect("a valid v6 story");
     s.set_pict_source(Some(picts));

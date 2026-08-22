@@ -116,6 +116,7 @@ fn boot(path: &Path, honor: bool, interpreter_override: Option<u8>) -> Option<Ga
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", path.display()));
     assert!(!s.quit, "{}: quit during boot", path.display());

@@ -93,6 +93,7 @@ fn boot(name: &str, keys: u8, taps: usize) -> Option<GameSession> {
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .expect("the story should boot without a ZError");
     session.set_pict_source(Some(picts));

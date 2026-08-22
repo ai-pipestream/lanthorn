@@ -143,6 +143,7 @@ fn frame_driven(file: &str, honor: bool, drive: bool) -> Option<Frame> {
         honoured.then(|| profile.default_colours()).flatten(),
         None,
         None,
+        None,
     )
     .expect("Zork Zero should load and boot without a ZError");
     assert!(!session.quit && session.machine.fault_trace.is_none(), "{file} booted cleanly");

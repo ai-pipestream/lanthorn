@@ -142,6 +142,7 @@ pub(crate) fn reset_game(
                 // unpinned one deals a fresh one — which is what restarting a
                 // randomised game is FOR.
                 Some(state.config.effective_random_seed()),
+                None,
             )
             .map_err(|e| format!("{e:?}"))
             .map(|mut new_session| {

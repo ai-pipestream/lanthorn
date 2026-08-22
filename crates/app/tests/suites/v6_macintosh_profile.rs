@@ -140,6 +140,9 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
         default_colours,
         None,
         None,
+        // SQ-0917: the machine's own cell, so this whole suite exercises the 7x15
+        // the Macintosh declares rather than zvm's default.
+        Some(profile.v6_font_cell()),
     )
     .expect("Zork Zero boots off the Macintosh disk");
     assert!(!session.quit, "quit during boot");
@@ -307,8 +310,13 @@ fn the_archive_in_hand_picks_which_macintosh_screen_the_game_is_told_about() {
     assert_eq!(colour.art_scale, Some((2, 2)), "wx := 2*GFXAM_X — doubled, as on the Amiga");
     assert_eq!(colour.session.machine.mem.read_word(0x22), 640, "screen width, header $22");
     assert_eq!(colour.session.machine.mem.read_word(0x24), 400, "screen height, header $24");
-    assert_eq!(colour.session.machine.mem.read_byte(0x21), 80, "columns");
-    assert_eq!(colour.session.machine.mem.read_byte(0x20), 25, "rows");
+    // The grid is a QUOTIENT of that window, on the Macintosh's own 7x15 cell —
+    // `totCols := ((right - left) - (2 * wMarg)) DIV colWidth` with `colWidth := 7`,
+    // and `totRows := (bottom - top) DIV lineheight` with `lineheight := 15`.
+    assert_eq!(colour.session.machine.mem.read_byte(0x21), 91, "columns, 640/7");
+    assert_eq!(colour.session.machine.mem.read_byte(0x20), 26, "rows, 400/15");
+    assert_eq!(colour.session.machine.mem.read_byte(0x27), 7, "$27 = font WIDTH in v6");
+    assert_eq!(colour.session.machine.mem.read_byte(0x26), 15, "$26 = font HEIGHT in v6");
 
     let mono = launch(Some("Pic.data"), true, None);
     assert!(mono.monochrome, "--pictures Pic.data selects the two-colour archive");
@@ -322,22 +330,36 @@ fn the_archive_in_hand_picks_which_macintosh_screen_the_game_is_told_about() {
             &std::env::temp_dir(),
             Some("Pic.data"),
         ),
-            None,
+        None,
     );
     assert_eq!(mounted.native_std_window(), Some((480, 300)), "the archive's own picture space");
     assert_eq!(mounted.art_scale(), Some((1, 1)));
     assert_eq!(mono.std_window, Some((480, 300)), "GFXMAC_X/GFXMAC_Y — '1.5 x Amiga sizes'");
     assert_eq!(mono.art_scale, Some((1, 1)), "IF ge.mono OR myTiny THEN scale 1x for display");
     assert_eq!(mono.session.machine.mem.read_word(0x22), 480, "screen width, header $22");
-    assert_eq!(mono.session.machine.mem.read_byte(0x21), 60, "columns");
-    // 300 is not a whole number of 16-pixel v6 cells — a real Mac fitted 20 rows
-    // of its own 15-pixel Geneva into exactly 300, and lanthorn's cell is fixed
-    // at 8×16 (see `InterpreterProfile::v6_font_cell`). The screen is rounded to
-    // the NEAREST cell, 19 rows, so the game's screen contains its own 300-pixel
-    // artwork with four pixels to spare; rounding down would have handed it a
-    // 288-pixel screen and clipped the bottom twelve pixels off the plate.
-    assert_eq!(mono.session.machine.mem.read_word(0x24), 304, "screen height, header $24");
-    assert_eq!(mono.session.machine.mem.read_byte(0x20), 19, "rows");
+
+    // **The pixel screen is now exact on BOTH axes**, which is the half of SQ-0917
+    // that did land: `write_screen_dims_px` carries the window verbatim instead of
+    // deriving it from the character grid, so 300 is 300. It used to read 304 —
+    // the screen rounded up to a whole 16-pixel cell so Zork Zero's own 300-pixel
+    // plate was never clipped — and that compensation is gone with the round trip
+    // that caused it.
+    assert_eq!(mono.session.machine.mem.read_word(0x24), 300, "screen height, header $24 — exact");
+    // 300 divides EXACTLY by the Macintosh's 15-pixel cell — 20 rows, which is what
+    // a real Mac fitted Geneva into. 480 does not divide by 7: it is 68 columns with
+    // four pixels over, and the grid TRUNCATES because a partial cell at the edge is
+    // not a character. Those four pixels stay in `$22`, which is the window and not
+    // the grid — the round trip that used to lose them gave `68 * 7 = 476`.
+    assert_eq!(mono.session.machine.mem.read_byte(0x20), 20, "rows, 300/15 exact");
+    assert_eq!(mono.session.machine.mem.read_byte(0x21), 68, "columns, 480/7 truncated");
+    assert_eq!(
+        u16::from(mono.session.machine.mem.read_byte(0x21))
+            * u16::from(mono.session.machine.mem.read_byte(0x27)),
+        476,
+        "the grid times the cell is 476 — exactly why $22 may not be derived from it",
+    );
+    assert_eq!(mono.session.machine.mem.read_byte(0x27), 7, "$27 = font WIDTH in v6");
+    assert_eq!(mono.session.machine.mem.read_byte(0x26), 15, "$26 = font HEIGHT in v6");
     assert!(
         mono.session.machine.mem.read_word(0x24) >= 300,
         "the screen must contain the 480×300 plate, never clip it"
@@ -348,6 +370,49 @@ fn the_archive_in_hand_picks_which_macintosh_screen_the_game_is_told_about() {
         (colour.session.machine.mem.read_word(0x22), colour.session.machine.mem.read_word(0x24)),
         (mono.session.machine.mem.read_word(0x22), mono.session.machine.mem.read_word(0x24)),
     );
+}
+
+/// **Window property 13 carries the same cell the header does** (SQ-0917).
+///
+/// ZMSD §8.8.3.2 property 13 is a window's font size, packed `(height << 8) |
+/// width`, and a story may ask for it with `@get_wind_prop` instead of reading
+/// `$26`/`$27`. Two channels, one fact — so they have to agree.
+///
+/// This is the case that made `Machine::set_v6_cell` a setter rather than a public
+/// field. `boot_state_and_screen` seeds every window's `font_size` while the
+/// `Machine` is being built, when no profile has been declared yet, and
+/// `set_screen_dims` never touches it afterwards. A cell assigned to a bare field
+/// would have left a Macintosh story reading **8x16 from property 13 while the
+/// header said 7x15** — a disagreement no existing case could see, because
+/// nothing in the corpus asked property 13 of a machine whose cell was not the
+/// default.
+///
+/// Falsified by making `set_v6_cell` assign `self.v6_cell` and nothing else,
+/// which fails here naming both numbers.
+#[test]
+fn window_font_size_agrees_with_the_header_cell() {
+    let _g = app::v6_palette_at_boot();
+    if mac_disk().is_none() {
+        return;
+    }
+    for (label, l) in [("colour", launch(None, true, None)), ("mono", launch(Some("Pic.data"), true, None))] {
+        let mem = &l.session.machine.mem;
+        let (w, h) = (mem.read_byte(0x27), mem.read_byte(0x26));
+        // Deliberately NOT `(7, 15)`: the invariant is that the two channels agree,
+        // whatever the cell is, so this case keeps working while `v6_font_cell`'s
+        // Macintosh arm is held at the default (SQ-0917) and needs no edit when it
+        // moves. Pinning the literal here would make this a second test of the
+        // profile rather than a test of the agreement.
+        assert!(w > 0 && h > 0, "{label}: the header states a cell at all");
+        let packed = (u16::from(h) << 8) | u16::from(w);
+        let v6 = l.session.machine.screen.v6.as_ref().expect("a v6 story has a window table");
+        for (i, win) in v6.windows.iter().enumerate() {
+            assert_eq!(
+                win.font_size, packed,
+                "{label}: window {i} property 13 must be the header's cell, not zvm's default",
+            );
+        }
+    }
 }
 
 /// The monochrome plate lands 1:1 on that screen, and the colour plate lands

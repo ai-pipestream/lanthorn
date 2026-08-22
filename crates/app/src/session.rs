@@ -845,7 +845,7 @@ impl GameSession {
     /// [`Self::new_with_art_scale`] — but every caller of *this* function gets
     /// the rule exactly as it has always been.
     pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>) -> Result<GameSession, ZError> {
-        Self::new_with_art_scale(story, honor_game_colours, sound_available, interpreter_number, trace_from_boot, picture_dims, v6_screen_px, None, default_colours, host_screen, None)
+        Self::new_with_art_scale(story, honor_game_colours, sound_available, interpreter_number, trace_from_boot, picture_dims, v6_screen_px, None, default_colours, host_screen, None, None)
     }
 
     /// [`Self::new_with_trace`] with the art scale supplied rather than assumed
@@ -865,7 +865,7 @@ impl GameSession {
     /// the first prompt is one turn too late to change the game the player is
     /// handed. `None` — every caller but the launcher — leaves zvm's own fixed
     /// default, so a test's sequence stays the reproducible one it has always been.
-    pub fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>, random_seed: Option<u32>) -> Result<GameSession, ZError> {
+    pub fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>, random_seed: Option<u32>, v6_cell: Option<(u16, u16)>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
@@ -876,6 +876,16 @@ impl GameSession {
         }
         if let Some((bg, fg)) = default_colours {
             machine.set_default_colours(bg, fg);
+        }
+        // SQ-0917: the machine's Version 6 cell, BEFORE the screen is sized and
+        // before the boot run — the story reads `$26`/`$27` and lays its windows
+        // out from them, so a cell that arrives later is one the game has already
+        // disagreed with. `None` keeps zvm's 8x16 default, which is every profile
+        // but the Macintosh.
+        if machine.mem.version() == 6 {
+            if let Some((w, h)) = v6_cell {
+                machine.set_v6_cell(zvm::screen::V6Cell::new(w, h));
+            }
         }
         // v6 (SQ-0479): the game lays out on the 640×400 UNIT screen, so
         // `picture_data` must report the doubled (unit-space) picture sizes —
@@ -936,22 +946,21 @@ impl GameSession {
             };
             let w = art_w.saturating_mul(screen_scale.0.max(1) as u16);
             let h = art_h.saturating_mul(screen_scale.1.max(1) as u16);
-            // Round to the NEAREST whole cell rather than truncating. Every
-            // screen but the Macintosh's is an exact multiple of the 8×16 cell,
-            // so this changes nothing for them; 300 is 18.75 rows, and rounding
-            // down would tell the game its screen is 288 pixels tall and clip
-            // the bottom twelve pixels off its own artwork.
-            let cells = |px: u16, cell: u16| {
-                let cell = u32::from(cell.max(1));
-                ((u32::from(px) + cell / 2) / cell).clamp(1, 255) as u8
-            };
-            // SQ-0917: the cell this session declares, not the 8x16 constant. Still
-            // 8x16 for every profile today — `InterpreterProfile::v6_font_cell` is
-            // what moves next, and this is the site that carries it to the story.
-            let v6_cell = machine.v6_cell;
-            let cols = cells(w, v6_cell.w);
-            let rows = cells(h, v6_cell.h);
-            machine.set_screen_dims(rows, cols);
+            // SQ-0917: hand the machine the PIXELS, and let it derive the grid.
+            //
+            // This used to round the screen to the nearest whole CELL and declare
+            // that instead, which was a workaround for the round trip on the other
+            // side: `set_screen_dims` took a grid and multiplied it back into
+            // `$22`/`$24`, so anything the cell did not divide was lost, and
+            // rounding down would have told Zork Zero its 300-pixel Macintosh plate
+            // sat on a 288-pixel screen. `set_v6_screen_px` carries the pixels
+            // verbatim, so there is nothing to round and nothing to compensate for
+            // — the screen IS the archive's, and the character grid is a quotient
+            // of it exactly as `mac/xzip.lst` computes `totRows`/`totCols`.
+            //
+            // The rounding had to go rather than stay harmlessly: at the
+            // Macintosh's 7-wide cell it turned 640 into 637 and 480 into 483.
+            machine.set_v6_screen_px(w, h);
         } else if let Some((r, c)) = host_screen {
             // SQ-0680: seed the REAL host pane before boot, so a v4/v5 status
             // routine that lays itself out once at boot (Zork 1) bakes in field

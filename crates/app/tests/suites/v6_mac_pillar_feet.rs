@@ -95,6 +95,7 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
         honor.then(|| profile.default_colours()).flatten(),
         None,
         None,
+        None,
     )
     .expect("Zork Zero boots off the Macintosh disk");
     s.set_pict_source(Some(picts));

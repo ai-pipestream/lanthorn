@@ -102,6 +102,7 @@ fn boot(press: (&str, u16, &str)) -> Option<(GameSession, Vec<TranscriptElem>)> 
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
     s.set_pict_source(Some(picts));

@@ -2264,21 +2264,9 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8, cell: V6Cell) {
     let rows = rows.max(1);
     let cols = cols.max(1);
     if version == 6 {
-        mem.write_byte(0x20, rows);
-        mem.write_byte(0x21, cols);
-        // ZMSD §8.4.3: word $22 = screen width in units, word $24 = screen
-        // height in units. v6 units are pixels, so width = cols·8 (640) and
-        // height = rows·16 (400) — the ·16 is why a non-square cell needs this
-        // path (a square cell made $24 latently correct).
-        mem.write_word(0x22, cols as u16 * cell.w); // screen width, pixels
-        mem.write_word(0x24, rows as u16 * cell.h); // screen height, pixels
-        // ZMSD §11.1 header table (verified against the spec): byte $26 = "Font
-        // width in V5, or font HEIGHT in V6"; byte $27 = "Font height in V5, or
-        // font WIDTH in V6" — the famous V5↔V6 swap (§8.1.1: "in Version 6 the
-        // width and height are stored the other way round"). So in V6:
-        // $26 = HEIGHT (16), $27 = WIDTH (8). Latent while square; load-bearing now.
-        mem.write_byte(0x26, cell.h as u8);
-        mem.write_byte(0x27, cell.w as u8);
+        // A character grid is not a v6 screen, so recover the pixels this grid
+        // stands for and go through the pixel path — see `write_screen_dims_px`.
+        write_screen_dims_px(mem, cols as u16 * cell.w, rows as u16 * cell.h, cell);
         return;
     }
     mem.write_byte(0x20, rows);
@@ -2289,6 +2277,64 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8, cell: V6Cell) {
         mem.write_byte(0x26, 1); // font width in units
         mem.write_byte(0x27, 1); // font height in units
     }
+}
+
+/// The Version 6 screen, stated the way Version 6 means it: **in pixels, with the
+/// character grid derived** (SQ-0917).
+///
+/// # Why the direction matters
+///
+/// [`write_screen_dims`] takes a character grid and multiplies back up, which is
+/// exact only when the cell divides the screen. It always did while the cell was
+/// 8x16 and every v6 screen was a multiple of it. It stops being exact the moment
+/// a profile declares its own: the black-and-white Macintosh window is 480 px
+/// wide, `480 / 7` is 68 columns, and `68 * 7` is **476** — four pixels the story
+/// would never be told about, on the axis its hint banner is laid out along.
+///
+/// Infocom's own Macintosh interpreter states the direction outright, in
+/// `mac/xzip.lst`:
+///
+/// ```text
+///   totRows := (bottom - top) {DIV lineheight};
+///   totCols := ((right - left) - (2 * wMarg)) {DIV colWidth};
+/// ```
+///
+/// The window is the truth and the grid is a quotient of it. So `$22`/`$24` carry
+/// the pixels verbatim and `$20`/`$21` carry what fits, which is what a story
+/// reading either one expects to find.
+///
+/// # The grid TRUNCATES where the pixels round
+///
+/// `$20`/`$21` answer "how many whole characters fit", so a partial cell at the
+/// edge is not one — `480 / 7 = 68`, not 69. That is the opposite of the caller's
+/// rounding when it turns an art canvas into a screen (`session.rs` rounds a
+/// 300-pixel plate to the NEAREST whole cell so a game is not told its own
+/// artwork is clipped), and both are right: one is asking what the screen IS, the
+/// other what fits ON it.
+pub fn write_screen_dims_px(mem: &mut Memory, width_px: u16, height_px: u16, cell: V6Cell) {
+    if mem.version() != 6 {
+        return;
+    }
+    let (w, h) = (width_px.max(1), height_px.max(1));
+    // Whole characters only, and at least one: a screen narrower than a cell is
+    // degenerate, but a zero in $20/$21 makes a size-sensitive story abort.
+    let cols = (w / cell.w.max(1)).clamp(1, 255) as u8;
+    let rows = (h / cell.h.max(1)).clamp(1, 255) as u8;
+    mem.write_byte(0x20, rows);
+    mem.write_byte(0x21, cols);
+    // ZMSD §8.4.3: word $22 = screen width in units, word $24 = screen height in
+    // units, and v6 units are pixels — so these are the window itself, not the
+    // grid multiplied back up.
+    mem.write_word(0x22, w);
+    mem.write_word(0x24, h);
+    // ZMSD §11.1 header table (verified against the spec): byte $26 = "Font width
+    // in V5, or font HEIGHT in V6"; byte $27 = "Font height in V5, or font WIDTH
+    // in V6" — the famous V5<->V6 swap (§8.1.1: "in Version 6 the width and
+    // height are stored the other way round"). So in V6: $26 = HEIGHT, $27 =
+    // WIDTH. Latent while the cell was square; load-bearing since SQ-0479, and
+    // per-machine since SQ-0917.
+    mem.write_byte(0x26, cell.h as u8);
+    mem.write_byte(0x27, cell.w as u8);
 }
 
 // ---------------------------------------------------------------------------

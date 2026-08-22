@@ -134,6 +134,7 @@ fn boot() -> Option<GameSession> {
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .unwrap_or_else(|e| panic!("{FIXTURE}: should boot without a ZError: {e:?}"));
     s.set_pict_source(Some(picts));

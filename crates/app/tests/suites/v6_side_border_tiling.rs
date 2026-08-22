@@ -192,6 +192,7 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
         profile.default_colours(),
         None,
         None,
+        None,
     )
     .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
     assert!(!s.quit, "{file}: quit during boot");
@@ -243,6 +244,7 @@ fn boot_named(story: &str, archive: &str, release: (u16, &str)) -> Option<GameSe
         v6_screen_px,
         v6_art_scale,
         profile.default_colours(),
+        None,
         None,
         None,
     )

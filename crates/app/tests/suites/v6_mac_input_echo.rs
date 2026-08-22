@@ -113,6 +113,7 @@ fn mac_at_prompt(pictures: Option<&str>, honor_game_colours: bool) -> Option<AtP
         honoured.then(|| profile.default_colours()).flatten(),
         None,
         None,
+        None,
     )
     .expect("Zork Zero boots off the Macintosh disk");
     session.set_pict_source(Some(picts));
