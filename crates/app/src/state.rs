@@ -2441,6 +2441,18 @@ pub struct AppState {
     /// degrades rather than blocks, and a notification that fires on every frame of
     /// a small terminal would be worse than the softness it warns about.
     pub v6_scale_lock_fallback: std::cell::Cell<bool>,
+    /// This frame asked for `v6_pixel_lock` on a backend that has no rung to snap
+    /// to, so the lock was inert (SQ-0978).
+    ///
+    /// Distinct from [`Self::v6_scale_lock_fallback`], and the distinction is the
+    /// whole point: that flag means *the pane is too small*, which a player can fix
+    /// by resizing. This one means *half-blocks resolves the picture into cells and
+    /// has no device pixel to put an art pixel a whole number of*, which no pane
+    /// size changes. Reporting the second as the first would send a reader hunting
+    /// for a bigger terminal. See `crate::render::graphics::v6_pixel_lock_applies`.
+    ///
+    /// Published by both v6 arms, hybrid and raster, because both consult the lock.
+    pub v6_scale_lock_inapplicable: std::cell::Cell<bool>,
     /// The page the v6 story window declared for the CURRENT frame, published by
     /// the render's Layered arm alongside the pane flood that paints it (SQ-0704).
     ///
@@ -2998,6 +3010,7 @@ impl Default for AppState {
             v6_hybrid_ring: std::cell::Cell::new(false),
             v6_art_scale: (crate::session::V6_ART_SCALE, crate::session::V6_ART_SCALE),
             v6_scale_lock_fallback: std::cell::Cell::new(false),
+            v6_scale_lock_inapplicable: std::cell::Cell::new(false),
             v6_story_page: std::cell::Cell::new(None),
             v6_page_pair: std::cell::Cell::new(None),
             v6_paint: std::cell::RefCell::new(None),

@@ -1074,6 +1074,15 @@ pub struct Config {
     ///
     /// A pane too small for even the smallest rung falls back to free scaling
     /// rather than blocking.
+    ///
+    /// **It is a device-pixel guarantee, so it only binds a backend that has
+    /// device pixels** (SQ-0978). Kitty, iTerm2 and sixel put the composite on the
+    /// screen at the pane's real resolution. Half-blocks resolves it into CELLS —
+    /// one sample per column, two per row — and the font size the rung was counted
+    /// in is `Picker::halfblocks`'s hardcoded 10x20, so there is nothing there for
+    /// an art pixel to land a whole number of. The lock is inert on that backend
+    /// and `/dump-terminal` reports it as inert; see
+    /// `crate::render::graphics::v6_pixel_lock_applies` for the measurement.
     #[serde(default)]
     pub v6_pixel_lock: bool,
     /// Keymap overrides: command_name → key-spec string(s).

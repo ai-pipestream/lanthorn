@@ -895,11 +895,19 @@ fn render_node(
                         // of its own frame and open a gap. A pane too small for even
                         // the smallest rung falls back to free scaling and says so as
                         // a diagnostic, never on the game screen.
+                        //
+                        // SQ-0978: and the ladder is quantized in DEVICE pixels, which
+                        // is a unit half-blocks does not have — see
+                        // `crate::render::graphics::v6_pixel_lock_applies` for the
+                        // measurement. The lock is inert on that backend, reported as
+                        // inert, and never dressed up as a snap that happened.
+                        let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
+                        state.v6_scale_lock_inapplicable.set(state.config.v6_pixel_lock && !lock_applies);
                         let (scale_center, lock_fallback) = v6::fitted_scale(
                             native,
                             pane_dev,
                             state.v6_art_scale,
-                            state.config.v6_pixel_lock,
+                            state.config.v6_pixel_lock && lock_applies,
                         );
                         state.v6_scale_lock_fallback.set(lock_fallback);
                         // Publish the letterbox factor — the magnification the ART
@@ -2841,9 +2849,13 @@ fn render_node(
                         u32::from(area.width) * u32::from(fs.width.max(1)),
                         u32::from(area.height) * u32::from(fs.height.max(1)),
                     );
-                    let lock = state
-                        .config
-                        .v6_pixel_lock
+                    // SQ-0978: including the backend gate. Half-blocks resolves the
+                    // composite into cells and never sees a device pixel, so a rung
+                    // quantized in them is a number the picker invented — the raster
+                    // arm asks the same question the ring does, of the same picker.
+                    let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
+                    state.v6_scale_lock_inapplicable.set(state.config.v6_pixel_lock && !lock_applies);
+                    let lock = (state.config.v6_pixel_lock && lock_applies)
                         .then(|| v6::locked_scale(native, pane_dev, state.v6_art_scale))
                         .flatten()
                         .map(|sc| sc.s);

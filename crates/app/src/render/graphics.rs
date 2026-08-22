@@ -741,6 +741,63 @@ pub fn v6_upscale_cap(picker: &Picker) -> Option<f64> {
     }
 }
 
+/// Whether the v6 magnification LOCK has a rung on this backend to snap to at all
+/// (SQ-0978).
+///
+/// `v6_pixel_lock` promises **one art pixel on a whole number of device pixels**, and
+/// [`crate::render::v6_layout::locked_scale`] delivers it by quantizing the letterbox
+/// factor `s` in device pixels — `pane_dev = cells x picker.font_size()`. That is exact
+/// for every backend that ships pixels: kitty, iTerm2 and sixel each put the composite
+/// on the screen at the device resolution the pane really has.
+///
+/// Half-blocks does not have one. `Picker::halfblocks()` — and `from_query_stdio`'s
+/// default when a terminal answers no cell size — hardcodes `FontSize::new(10, 20)`
+/// whatever the real font is, and the encoder then **throws the font size away**:
+/// `Halfblocks::encode` resamples whatever it is handed to exactly `width x 2·height`
+/// SAMPLES, one per column and two per row. So the grid the picture actually resolves
+/// onto is a property of the CELL grid, and the device pixels `s` was quantized in are
+/// a number the picker invented.
+///
+/// The honest analogue would be to quantize onto that sample grid instead — one art
+/// pixel on a whole number of half-block samples, which is `cols` and `2·rows` and no
+/// font size at all. **It was measured and it buys nothing**, and the reason is that
+/// half-blocks does not magnify: a 640x400 canvas has more unit pixels than a terminal
+/// has samples until the pane reaches 640x200 CELLS, so the composite is minified at
+/// every size anyone runs, and [`resize_directional`] minifies through `Triangle`.
+/// Measured on a 640x400 canvas of 2x2 art pixels in hard black/white stripes:
+///
+/// ```text
+///   sample grid   ratio   samples that are a PURE art-pixel colour
+///   640x400        1:1    640 / 640     (Nearest — the target is not below the source)
+///   458x288       1.4:1     50 / 458
+///   320x200         2:1      0 / 320    ← an EXACT rung: one art pixel per sample
+///   160x100         4:1      0 / 160
+/// ```
+///
+/// The 320x200 row is the whole finding. It is the honest ladder's own rung — one art
+/// pixel onto exactly one sample — and Triangle still lands every sample on a 25/75
+/// blend of two art pixels, because a separable Triangle at ratio 2 has support 2 in
+/// source space and reaches across the art pixel's edge. The rung delivers nothing.
+///
+/// And below that rung there is nothing to reach for either, because free scaling is
+/// never worse: at `s >= 10` nominal device pixels the sample grid is at or above the
+/// canvas, `resize_directional` picks `Nearest`, and the art comes out pure ALREADY —
+/// while the lock could only move `s` DOWN, off that plateau and into Triangle. Below
+/// it every `s` blends, rung or no rung. So on half-blocks the lock has no reachable
+/// pane size at which it improves a frame, and a measured 17-20% of linear resolution
+/// to lose where it acts: at a 120x40 pane a 640x400 canvas free-scales to 120x38
+/// cells and the old device-pixel rung cut it to 96x30.
+///
+/// So the lock is INERT here, and `/dump-terminal` says so in those words rather than
+/// reporting a snap that did not happen. Not a ceiling — SQ-0964 removed the one
+/// half-blocks used to carry and nothing here puts it back; the free scale still climbs
+/// the whole way to the pane.
+///
+/// The picker is the thing that knows, exactly as it is for [`v6_upscale_cap`].
+pub fn v6_pixel_lock_applies(picker: &Picker) -> bool {
+    picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks
+}
+
 /// Whether this terminal may be sent a DEFLATED kitty transmission (SQ-0997).
 ///
 /// `o=z` is not a hint a terminal may ignore. One that cannot inflate refuses the
