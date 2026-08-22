@@ -354,8 +354,16 @@ pub enum CursorShape {
     /// over a cell — the Macintosh insertion caret.
     ///
     /// Measured on three captures across two Mac models: `mac-zork1.jpg` (Mac Plus,
-    /// 16 rows) and `mac-arthur.jpg` / `mac-zorkzero.jpg` (colour, 13 rows). A scan
-    /// for isolated tall thin runs finds exactly one candidate per frame.
+    /// 16 rows — a JPEG, so that count is soft) and `mac-arthur.png` /
+    /// `mac-zorkzero.png` (colour press, **15 rows**). A scan for isolated 1px-wide
+    /// vertical runs finds exactly one candidate per frame — x=41 and x=99
+    /// respectively, both 15 tall.
+    ///
+    /// Those two used to be JPEGs and used to read 13 rows; the PNGs that replaced
+    /// them are 1:1 and read 15, which is one full `lineHeight` (SQ-0917). The
+    /// caret is exactly one cell tall, and it is a fourth independent confirmation
+    /// of that cell after the inverse PROLOGUE bar, the topic-row pitch and the
+    /// colour prose.
     Bar,
     /// A solid block filling the cell, or nearly: 7x14 of a 7x16 cell on the Apple
     /// II (`appleiie-planetfall.png`), a full 8x16 on the Amiga
@@ -386,7 +394,7 @@ pub enum CursorShape {
     /// machine's v3 interpreter draws [`Self::Underscore`] across the bottom
     /// quarter of the cell (`dos-hitchhiker.png`).
     ///
-    /// **The Macintosh is the control and does NOT change** — `mac-zorkzero.jpg`
+    /// **The Macintosh is the control and does NOT change** — `mac-zorkzero.png`
     /// and `mac-shogun.jpg` draw the same [`Self::Bar`] its v3 capture does, which
     /// is why this is applied per machine in [`period_look_for`] rather than to
     /// every row at Version 6. Machines with no v6 capture decline, as everywhere
@@ -1367,7 +1375,7 @@ mod tests {
         assert_eq!(dos3.cursor_colour, dos3.ink, "the underscore is drawn in the ink");
         assert_ne!(dos3.cursor_colour, dos6.cursor_colour, "…and the two whites differ");
 
-        // The control: mac-zorkzero.jpg and mac-shogun.jpg draw a bar, so the
+        // The control: mac-zorkzero.png and mac-shogun.jpg draw a bar, so the
         // Macintosh does not move — and neither does a machine with no v6 capture.
         for n in [
             MACINTOSH_INTERPRETER_NUMBER,

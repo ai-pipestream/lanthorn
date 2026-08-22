@@ -216,8 +216,8 @@ ink is colour 7, and sampling the frame by region settles it — status text
 (160,160,160) over 1850 px, left pillar art (160,160,160) over 1570 px. The SAME
 shade for the ink and the artwork, because the card has two colours and everything
 on the screen is one of them. The table now says #AAAAAA, and the Macintosh's mono
-plate — whose white really is white, see mac-zorkzero-bw.jpg, 31.6% #FFFFFF inside
-the game window — moved to a table of its own rather than sharing this one.
+plate — whose white really is white, see mac-zorkzero-game.png, 77.2% #FFFFFF and
+22.8% #000000 inside the 480x300 game window and NOTHING else — moved to a table of its own rather than sharing this one.
 
 
 THE FOUR SQ-0917 FONT-METRIC CAPTURES (2026-08-22)
@@ -371,9 +371,15 @@ AND THE COLOUR MACINTOSH PRESS, WHICH CLOSES THE PAIR (2026-08-22)
   mac-zorkzero.png   Zork Zero, COLOUR press, at the Banquet Hall. 652x424.
   mac-arthur.png     Arthur, COLOUR press. 652x423.
 
-Both are window captures rather than whole desktops, and both supersede the
-same-named .jpg beside them for every purpose except colour — the JPEGs remain
-only because they were cited before these existed. Measure from the PNGs.
+Both are window captures rather than whole desktops. `mac-journey.png` joined
+them the same day. Together with the mono pair they SUPERSEDED four JPEGs of the
+same game and press, which were deleted rather than left as traps — a lossy file
+that cannot be measured from, sitting beside a PNG that can, gets measured from.
+
+Three JPEGs remain, because nothing supersedes them: `mac-shogun.jpg` (colour
+press), `mac-shogun-bw.jpg` (mono press) and `mac-zork1.jpg` (Version 3). They
+are still only good for colour and gross layout. If a PNG of any of them ever
+arrives, delete the JPEG in the same commit.
 
 The question these answer is whether 7x15 is the b/w press's cell or the
 MACHINE's. It is the machine's, and `mac/xzip.lst` says so in one statement:

@@ -385,11 +385,11 @@ pub const EGA_PALETTE: [Rgb; 16] = [
 /// | capture                                  | page      | lit state |
 /// |------------------------------------------|-----------|-----------|
 /// | `machine-screenshots/dos-zorkzero-cga.png` | `#000000` | `#A0A0A0` |
-/// | `machine-screenshots/mac-zorkzero-bw.jpg`  | `#FFFFFF` | `#000000` (ink) |
+/// | `machine-screenshots/mac-zorkzero-game.png` | `#FFFFFF` | `#000000` (ink) |
 ///
-/// The Macintosh's plate is black ink on a real white page — 31.6% of that frame
-/// is `#FFFFFF`, and the pillars are dithered black against it — so it keeps the
-/// white it always had, in [`MAC_MONO_PALETTE`]. The IBM's is the other polarity
+/// The Macintosh's plate is black ink on a real white page — 77.2% of the game
+/// window is `#FFFFFF` against 22.8% `#000000`, and the pillars are dithered black
+/// against it — so it keeps the white it always had, in [`MAC_MONO_PALETTE`]. The IBM's is the other polarity
 /// and its lit state is **light grey**: `#A0A0A0` is a DOS emulator's rendering of
 /// EGA entry 7, `#AAAAAA`, the same value `dos-hitchhiker.png` measures for its ink
 /// and the value `zvm::interpreter`'s IBM PC row already records. A colour NUMBER,
@@ -478,10 +478,11 @@ pub const CGA_PALETTE: [Rgb; 16] = [
 ///
 /// Same `EF_MONO` flag, same byte-per-pixel packing, same `{0, 2, 3}` indices — and
 /// a different lit state, which is the whole reason this is a second constant.
-/// `machine-screenshots/mac-zorkzero-bw.jpg` (Zork Zero at the Banquet Hall on a
-/// Macintosh, 640x480) censuses **31.6% `#FFFFFF`** inside the game window with the
-/// pillars dithered black against it; the frame's `#333333` plurality is the
-/// desktop OUTSIDE the window and belongs to the Finder, not to the plate. That
+/// `machine-screenshots/mac-zorkzero-game.png` (Zork Zero at the Banquet Hall on a
+/// compact Macintosh — a 512x342 screen inside a 20px emulator border) censuses
+/// **77.2% `#FFFFFF`** against **22.8% `#000000`** inside the 480x300 game window,
+/// those two and nothing else, because the capture is 1-bit. The pillars are
+/// dithered black against that white. That
 /// white is the same one `mac/xzip.lst` states for the machine's own page
 /// (`SetColor := (zWHITE*256) + zBLACK`), so the archive and the interpreter agree,
 /// exactly as SQ-0838 found them agreeing about the window size.
@@ -2453,9 +2454,10 @@ mod tests {
     }
 
     /// SQ-0956. The Macintosh's mono plate is the OTHER two-colour table, and the
-    /// reason there are two: `machine-screenshots/mac-zorkzero-bw.jpg` is 31.6%
-    /// `#FFFFFF` inside the game window with the pillars dithered black on it, so
-    /// its white is a real white and the card's is not.
+    /// reason there are two: `machine-screenshots/mac-zorkzero-game.png` is 77.2%
+    /// `#FFFFFF` against 22.8% `#000000` inside the game window — a 1-bit capture,
+    /// so those are the only two values in it — with the pillars dithered black on
+    /// that white. Its white is a real white and the card's is not.
     ///
     /// The two tables must stay interchangeable at every index a caller can index,
     /// because `hardware_palette` hands one or the other to the same decoder.

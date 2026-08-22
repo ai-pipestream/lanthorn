@@ -32,7 +32,7 @@
 //! press at the Churchyard, "Merlin disappears as suddenly as he came" — puts the
 //! white ribbon at native 28..610 and the grey pole rule beside it at native
 //! 6.5..8.7, unbroken from the panel's foot to the bottom of the screen.
-//! `machine-screenshots/mac-arthur.jpg` is the same moment with the black ribbon
+//! `machine-screenshots/mac-arthur.png` is the same moment with the black ribbon
 //! inset and the green poles at one constant x above and below it.
 //!
 //! Both stories are gitignored, so every case here skips cleanly when absent.

@@ -1522,7 +1522,7 @@ underscore. So the Amiga and the IBM PC get lanthorn's ordinary reverse-video
 caret on a v6 story — which is not a fallback here but the exact behaviour — and
 every other machine keeps the caret its own capture measured. The Macintosh is
 the control that makes this per-machine rather than per-version:
-`mac-zorkzero.jpg` and `mac-shogun.jpg` draw the same 1px bar its v3 frame does.
+`mac-zorkzero.png` and `mac-shogun.jpg` draw the same 1px bar its v3 frame does.
 (Version 6 moves the IBM PC's *ink* as well as its caret: its Version 6
 interpreter renders white as a true `#FFFFFF`, where the v1–v5 one draws the
 `#ADADAD` the table above records. That is the other half of why the row stores

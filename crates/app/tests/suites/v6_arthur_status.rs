@@ -19,7 +19,7 @@
 //! bottom of the screen: `machine-screenshots/dos-arthur.png` (the EGA press at the
 //! Churchyard, "Merlin disappears as suddenly as he came") puts the white ribbon at
 //! native **28..610** and the grey rule beside it at native **6.5..8.7**;
-//! `machine-screenshots/mac-arthur.jpg` is the same frame with the black ribbon inset
+//! `machine-screenshots/mac-arthur.png` is the same frame with the black ribbon inset
 //! and the green poles at a constant x above and below it. Reading SQ-0504's "a pure
 //! reverse-video row fills edge to edge" as "fills the PANE" flooded the strip's
 //! ground straight over both poles and cut each flank into a piece above the bar and

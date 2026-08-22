@@ -31,9 +31,11 @@
 //! censuses backwards (SQ-0933): even rows 39,252 black / 7,135 grey, odd rows
 //! 38,391 / 6,968 — they agree, so the whole-frame number is the honest one.
 //!
-//! `machine-screenshots/mac-zorkzero-bw.jpg` — the OTHER two-colour archive, and
-//! the control that keeps this from being "two colours means dark": 31.6%
-//! `#FFFFFF` inside the game window with the pillars dithered black on it. Same
+//! `machine-screenshots/mac-zorkzero-game.png` — the OTHER two-colour archive, and
+//! the control that keeps this from being "two colours means dark": 77.2%
+//! `#FFFFFF` against 22.8% `#000000` inside the 480x300 game window — a 1-bit
+//! capture, so those are its only two values — with the pillars dithered black
+//! on that white. Same
 //! `EF_MONO` flag, opposite polarity, a real white. That is why
 //! `blorb::infocom_pics` now carries two tables instead of one.
 //!

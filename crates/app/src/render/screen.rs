@@ -6362,7 +6362,7 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     /// `machine-screenshots/dos-arthur.png` (the EGA press at the Churchyard, "Merlin
     /// disappears"), the white ribbon spans native **28..610** and the grey pole rule
     /// stands beside it at native **6.5..8.7**, unbroken from the panel's foot to the
-    /// screen's; `machine-screenshots/mac-arthur.jpg` shows the same frame with the
+    /// screen's; `machine-screenshots/mac-arthur.png` shows the same frame with the
     /// black ribbon inset and the green poles running past both of its ends.
     ///
     /// So the reach is the window's span quantized INWARD — the cells a strip's ground
