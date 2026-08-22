@@ -12,6 +12,8 @@
 mod v6_advent_help_bar;
 #[path = "suites/v6_advent_status.rs"]
 mod v6_advent_status;
+#[path = "suites/v6_arthur_hint_page.rs"]
+mod v6_arthur_hint_page;
 #[path = "suites/v6_arthur_intro_plates.rs"]
 mod v6_arthur_intro_plates;
 #[path = "suites/v6_arthur_status.rs"]

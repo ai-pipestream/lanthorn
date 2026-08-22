@@ -2721,7 +2721,32 @@ fn render_node(
                     // chrome ring is dropped for this screen — a coherent full-pane
                     // menu. Only when there ARE painted runs; a pure-graphics
                     // no-story frame still falls through to the raster composite.
-                    let status_style = state.colors.theme.get("upper_window").style;
+                    // …on the MACHINE's own page, not the host theme's (SQ-1004).
+                    //
+                    // This screen is the game's whole page and it names no colour: all
+                    // seventy-eight of Arthur's runs carry `fg = bg = 0`, so every cell
+                    // they stamp resolves through THIS style, while the cells around
+                    // them keep whatever `render_story_pane_frame`'s opening flood put
+                    // down — which is the machine's page whenever §8.3's Amiga number
+                    // publishes one. Two different grounds on one row: measured on
+                    // `Arthur - The Quest for Excalibur.adf` (release 54 / serial
+                    // 890606) at a 100x34 pane, `KING LOT` came out `White` on the
+                    // theme's `Black` for its eight columns and `Rgb(66, 66, 66)` — the
+                    // Amiga page — for the ninety-two beside it. Every line of the hint
+                    // menu was its own island.
+                    //
+                    // RASTER got this right and is why the split is visible at all: it
+                    // resolves the same pair through `v6_host_pair`, whose top layer is
+                    // that machine pair (SQ-0740), and composes a canvas that censuses
+                    // to exactly two colours — 242,239 px of page and 13,761 of ink,
+                    // nothing else. `v6_machine_page` is that function's terminal-cell
+                    // counterpart, so the two modes now draw one screen.
+                    //
+                    // A run that names its own colours still wins: `v6_run_style`
+                    // overrides each channel a run carries. And `v6_page_pair` is `None`
+                    // whenever colours are declined or the profile publishes no pair, so
+                    // every other frame keeps the bare theme exactly as before.
+                    let status_style = v6_machine_page(state, state.colors.theme.get("upper_window").style);
                     let runs: Vec<&crate::engine::PxText> = layout
                         .chrome
                         .iter()
