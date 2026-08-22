@@ -1707,7 +1707,12 @@ fn draw_connector_arrows(
 
 /// Arrow glyph for a compass Direction (used by secondary markers). Up/Down never
 /// appear here (they are not collapsed into compass secondaries).
-fn arrow_for_direction(
+///
+/// The one resolver for "what glyph names this direction", shared by the map badge
+/// and by `map_dump`'s PORTALS legend. The dump used to carry its own hard-coded
+/// `PORTAL_IN`/`PORTAL_OUT` constants beside this, so `/export-map` printed ⊙/⊗
+/// whatever the player's `map.portal_icons` preset said (SQ-0989).
+pub(crate) fn arrow_for_direction(
     dir: Direction,
     arrows: &crate::symbols::Arrows,
     portal: &crate::symbols::PortalGlyphs,
@@ -1806,24 +1811,6 @@ fn dir_bit(from: (i32, i32), to: (i32, i32)) -> u8 {
 }
 
 // ── Portal badges ─────────────────────────────────────────────────────────────
-
-/// Portal direction glyphs. Named so a font that renders a variant better is a one-line swap.
-const PORTAL_UP: &str = "↑";
-const PORTAL_DOWN: &str = "↓";
-const PORTAL_IN: &str = "⊙";
-const PORTAL_OUT: &str = "⊗";
-const PORTAL_UNKNOWN: &str = "?";
-
-/// Glyph for a non-planar (portal) direction. Shared by the map badge and the dump legend.
-pub(crate) fn portal_glyph(dir: Direction) -> &'static str {
-    match dir {
-        Direction::Up => PORTAL_UP,
-        Direction::Down => PORTAL_DOWN,
-        Direction::In => PORTAL_IN,
-        Direction::Out => PORTAL_OUT,
-        _ => PORTAL_UNKNOWN,
-    }
-}
 
 /// Draw a stub connector label in the top-right gutter cell outside the origin box.
 /// `off_x`/`off_y` translate the origin's virtual rect into screen space.
@@ -2098,7 +2085,7 @@ fn draw_portal_icons(
 
         // A cross-layer portal is drawn in every view: it marks a way OFF this layer, which the
         // border icons below never expressed. Its glyph is the direction of travel (SQ-0223), so
-        // the badge reads as the move the player makes — ↑/↓ stairs, ⊙/⊗ a doorway.
+        // the badge reads as the move the player makes — ↑/↓ stairs, ◉/◎ a doorway.
         for &dir in layers {
             place(dir, None, dir_glyph(dir), buf);
         }
@@ -2146,7 +2133,7 @@ fn draw_portal_icons(
             // the free interior cell nearest the room it leads to (SQ-0351) rather than on a fixed
             // column. The old placements — far-right column with numbers on, centred with them off
             // — ignored the partner entirely and silently overwrote the last letter of a long name
-            // (Zork's `◀  House ⊙▶`: "House" centres as "  House  " and the badge took column 9).
+            // (Zork's `◀  House ◉▶`: "House" centres as "  House  " and the badge took column 9).
             //
             // Up/Down (slots 0/2) still show their glyph on the connector's border anchor instead
             // (see `render_lane_connectors`), so only the mid slot draws here.
@@ -4750,11 +4737,13 @@ mod tests {
 
     #[test]
     fn portal_glyphs_map_directions() {
-        assert_eq!(portal_glyph(Direction::Up), "↑");
-        assert_eq!(portal_glyph(Direction::Down), "↓");
-        assert_eq!(portal_glyph(Direction::In), "⊙");
-        assert_eq!(portal_glyph(Direction::Out), "⊗");
-        assert_eq!(portal_glyph(Direction::Unknown), "?");
+        let s = crate::symbols::SymbolSet::default();
+        let g = |d| arrow_for_direction(d, &s.arrows, &s.portal);
+        assert_eq!(g(Direction::Up), '↑');
+        assert_eq!(g(Direction::Down), '↓');
+        assert_eq!(g(Direction::In), '◉');
+        assert_eq!(g(Direction::Out), '◎');
+        assert_eq!(g(Direction::Unknown), '?');
     }
 
     #[test]
@@ -4781,7 +4770,7 @@ mod tests {
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
         // Box of room 1 is at screen (0,0); right interior column is col 9 (BOX_W-2).
         // In (non-spatial) still gets the mid-slot interior icon.
-        assert_eq!(sym(9, 2), "⊙", "in icon in middle-right interior (row 2)");
+        assert_eq!(sym(9, 2), "◉", "in icon in middle-right interior (row 2)");
         // Up/Down no longer draw an interior icon — they show their glyph on the connector's
         // border anchor instead (top/bottom centre of the box, col 5 = BOX_W/2).
         assert_ne!(sym(9, 1), "↑", "up icon leaves the upper-right interior");
@@ -4794,7 +4783,7 @@ mod tests {
     fn portal_mid_slot_in_beats_out() {
         // Room 1 has BOTH an In portal (→ room 2) and an Out portal (→ room 3).
         // The mid-slot precedence rule is In ▸ Out ▸ Unknown, so the middle-right interior
-        // cell (col 9, row 2 of a box at screen (0,0)) must show ⊙ (In), not ⊗ (Out).
+        // cell (col 9, row 2 of a box at screen (0,0)) must show ◉ (In), not ◎ (Out).
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
@@ -4813,7 +4802,7 @@ mod tests {
         render_map(&rm, &state, area, &mut buf);
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
         // col 9 = BOX_W - 2 = 11 - 2 = 9; row 2 = mid slot
-        assert_eq!(sym(9, 2), "⊙", "In beats Out in mid slot: expected ⊙, got '{}'", sym(9, 2));
+        assert_eq!(sym(9, 2), "◉", "In beats Out in mid slot: expected ◉, got '{}'", sym(9, 2));
     }
 
     #[test]
@@ -6018,7 +6007,7 @@ mod tests {
             let row3: String = (1u16..=9).map(|x| sym(x, 3)).collect();
             assert!(!row3.contains("#1"), "numbers off: #id must be absent from row 3; got '{row3}'");
             // Pulled south, and with row 3 empty it takes the centre column.
-            assert_eq!(sym(5, 3), "⊗", "numbers off: badge centres on row 3; row3='{row3}'");
+            assert_eq!(sym(5, 3), "◎", "numbers off: badge centres on row 3; row3='{row3}'");
         }
 
         // ── show_room_numbers = true ──────────────────────────────────────────────
@@ -6029,7 +6018,7 @@ mod tests {
             assert!(row3.contains("#1"), "numbers on: #id must appear on row 3; got '{row3}'");
             // Still pulled south — but the id now holds the centre, so it takes the nearest blank
             // beside it rather than landing on top of it.
-            let on_row3 = (1u16..=9).find(|&x| sym(x, 3) == "⊗");
+            let on_row3 = (1u16..=9).find(|&x| sym(x, 3) == "◎");
             assert!(on_row3.is_some(), "numbers on: badge stays on row 3, toward Cellar; row3='{row3}'");
             assert!(row3.contains("#1"), "numbers on: the id survives the badge; got '{row3}'");
         }
@@ -6162,12 +6151,12 @@ mod tests {
         //
         //     ╭─────────╮ ╭─────────╮
         //     │  West   │ │  East   │
-        //     │        ⊗│ │⊙        │
+        //     │        ◎│ │◉        │
         //     ╰─────────╯ ╰─────────╯
         //              └───┘ facing each other
         //
         // The old rule pinned both to a fixed column, so the westward badge pointed away from its
-        // partner — visible on Zork's Behind House, whose `⊙` sat on the east side while Kitchen,
+        // partner — visible on Zork's Behind House, whose `◉` sat on the east side while Kitchen,
         // the room it leads to, is west.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
@@ -6189,9 +6178,9 @@ mod tests {
         let col_of = |rows: &[String], want: &str| -> Option<usize> {
             rows.iter().find_map(|r| r.chars().position(|c| c.to_string() == want))
         };
-        let w = col_of(&west, "⊗").unwrap_or_else(|| panic!("West's ⊗ must render: {west:?}"));
-        let e = col_of(&east, "⊙").unwrap_or_else(|| panic!("East's ⊙ must render: {east:?}"));
-        assert!(w > e, "West's ⊗ leans east ({w}) and East's ⊙ leans west ({e}): {west:?} {east:?}");
+        let w = col_of(&west, "◎").unwrap_or_else(|| panic!("West's ◎ must render: {west:?}"));
+        let e = col_of(&east, "◉").unwrap_or_else(|| panic!("East's ◉ must render: {east:?}"));
+        assert!(w > e, "West's ◎ leans east ({w}) and East's ◉ leans west ({e}): {west:?} {east:?}");
         assert_eq!(w, 8, "West's badge takes the last interior column, nearest East");
         assert_eq!(e, 0, "East's badge takes the first interior column, nearest West");
     }
@@ -6200,7 +6189,7 @@ mod tests {
     fn a_badge_never_overwrites_the_room_name() {
         // SQ-0351's other half: "the closest EMPTY spot". Blankness is read back from the buffer
         // after the name is drawn, so a badge lands in the name's padding instead of on a letter.
-        // The old fixed column silently clipped long names — Zork's `◀  House ⊙▶` is "House"
+        // The old fixed column silently clipped long names — Zork's `◀  House ◉▶` is "House"
         // centred as "  House  " with the badge sitting on column 9.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
@@ -6219,7 +6208,7 @@ mod tests {
         let rows = interior_rows(&buf, (BOX_W + MIN_GUTTER) as u16, 0);
         assert!(rows[0].contains("Behind"), "the name survives intact: {rows:?}");
         assert!(
-            rows.iter().any(|r| r.contains("⊙")),
+            rows.iter().any(|r| r.contains("◉")),
             "the badge renders: {rows:?}"
         );
         // Every name character is still present — nothing was overwritten.

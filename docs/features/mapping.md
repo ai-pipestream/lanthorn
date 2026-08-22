@@ -471,8 +471,11 @@ touching a line of code:
   `light` (default), `heavy`, or `dotted`.
 - `portal_path_style` — the same three presets, applied on their own to the
   up/down/in/out portal links: `dotted` (default) keeps the familiar ┊/┄ threads.
-- `portal_icons` — up/down/in/out markers: `ascii` (default), `nerdfont`, or
-  `nerdfont-stairs` for distinct stairway icons.
+- `portal_icons` — up/down/in/out markers: `ascii` (default: `↑ ↓ ◉ ◎`), `nerdfont`,
+  or `nerdfont-stairs` for distinct stairway icons. The in/out pair is deliberately
+  drawn from Geometric Shapes rather than the `⊙`/`⊗` of Miscellaneous Mathematical
+  Operators, which plenty of monospace faces — Fira Code among them — simply do not
+  carry; `portal.in` and `portal.out` override either one on its own.
 
 The matrix view has its own selectors beside the map's colours:
 `map.matrix.header`, `map.matrix.row:here`, `map.matrix.row:selected`,

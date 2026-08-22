@@ -76,9 +76,9 @@ pub struct PortalGlyphs {
     pub up: char,
     /// Down portal icon (↓).
     pub down: char,
-    /// In portal icon (⊙).
+    /// In portal icon (◉).
     pub in_: char,
-    /// Out portal icon (⊗).
+    /// Out portal icon (◎).
     pub out: char,
     /// Unknown portal icon (?).
     pub unknown: char,
@@ -154,8 +154,9 @@ impl Default for SymbolSet {
                 path_h: '┄',
                 up: '↑',
                 down: '↓',
-                in_: '⊙',
-                out: '⊗',
+                // ◉/◎, not ⊙/⊗ — see `PortalGlyphs::preset`'s "ascii" arm.
+                in_: '◉',
+                out: '◎',
                 unknown: '?',
             },
             meta_gutter: '▏',
@@ -350,25 +351,41 @@ impl PortalGlyphs {
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
-    /// - "ascii"            — ASCII-compatible glyphs (default): ●/↑/↓/⊙/⊗/? with ┊┄ connectors
+    /// - "ascii"            — ASCII-compatible glyphs (default): ●/↑/↓/◉/◎/? with ┊┄ connectors
     /// - "nerdfont"         — Nerd Font single-width icon codepoints (requires patched font)
-    ///   nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0B71) for up,
-    ///   nf-md-arrow_down_circle (U+F0B72) for down, nf-fa-sign_in (U+F090) for in,
+    ///   nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0CE1) for up,
+    ///   nf-md-arrow_down_circle (U+F0CDB) for down, nf-fa-sign_in (U+F090) for in,
     ///   nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
     /// - "nerdfont-stairs"  — Nerd Font 4 distinct direction icons (requires patched font)
     ///   up=mdi-stairs-up (U+F12BD), down=mdi-stairs-down (U+F12BE),
     ///   in=mdi-location-enter (U+F0FC4), out=mdi-exit-run (U+F0A48)
     pub fn preset(name: &str) -> Option<PortalGlyphs> {
         Some(match name {
+            // In/Out are ◉ FISHEYE (U+25C9) and ◎ BULLSEYE (U+25CE), not the ⊙ (U+2299) and
+            // ⊗ (U+2297) they were until SQ-0989. The old pair sits in Miscellaneous
+            // Mathematical Operators, which monospace faces routinely skip: Fira Code — the
+            // face `pty_stream::gallery::FONT_CANDIDATES` leads with, and a common terminal
+            // font — carries neither (checked with `fc-list ":charset=2299"`, and pinned
+            // against its cmap by SQ-0963), so the default map drew tofu or borrowed a
+            // fallback face with the wrong metrics. Geometric Shapes is the block the map
+            // already depends on for ● ▲ ▼ ◀ ▶, and every monospace face measured that has
+            // ⊙/⊗ also has ◉/◎ — the swap costs no coverage and buys Fira Code's.
+            // Same reading as before (a circle with something in it, non-directional):
+            // ◉ a filled way in, ◎ a hollow way out. A user who prefers the old pair keeps
+            // it with `portal.in`/`portal.out` overrides in `style.toml`.
             "ascii" => PortalGlyphs {
                 marker: '●', path: '┊', path_h: '┄',
-                up: '↑', down: '↓', in_: '⊙', out: '⊗', unknown: '?',
+                up: '↑', down: '↓', in_: '◉', out: '◎', unknown: '?',
             },
             "nerdfont" => PortalGlyphs {
                 // nf-fa-circle U+F111, connectors keep the same box-drawing chars
                 marker: '\u{F111}', path: '┊', path_h: '┄',
-                // nf-md-arrow_up_circle U+F0B71, nf-md-arrow_down_circle U+F0B72
-                up: '\u{F0B71}', down: '\u{F0B72}',
+                // md-arrow_up_circle U+F0CE1, md-arrow_down_circle U+F0CDB — resolved by NAME
+                // from the Nerd Fonts `glyphnames.json` (v3.5.1). They used to read F0B71 and
+                // F0B72, which that file calls md-card_bulleted_off{,_outline}: patched faces
+                // do carry those codepoints, so the preset drew a crisp, confident icon of the
+                // wrong thing rather than a missing glyph anyone would notice (SQ-0989).
+                up: '\u{F0CE1}', down: '\u{F0CDB}',
                 // nf-fa-sign_in U+F090, nf-fa-sign_out U+F08B
                 in_: '\u{F090}', out: '\u{F08B}',
                 // nf-fa-question_circle U+F059
@@ -719,6 +736,42 @@ mod tests {
         let expected = SymbolSet::resolve(&cfg);
         let got = SymbolSet::from_preset_names("ascii", "filled", "ascii", "light");
         assert_eq!(got, expected);
+    }
+
+    /// The DEFAULT icons must be drawable by an ordinary monospace face, which the
+    /// ⊙/⊗ they used to be were not (SQ-0989): Fira Code — the face the gallery
+    /// rasterises with — carries no Miscellaneous Mathematical Operators at all.
+    /// Geometric Shapes is the block the map already requires for ● ▲ ▼ ◀ ▶, so
+    /// pin the default in/out there and a future swap back to a maths operator
+    /// fails here instead of on somebody's screen.
+    #[test]
+    fn default_portal_in_out_come_from_geometric_shapes() {
+        let p = PortalGlyphs::preset("ascii").expect("default preset");
+        let shapes = 0x25A0..=0x25FF;
+        for (slot, ch) in [("in", p.in_), ("out", p.out)] {
+            assert!(shapes.contains(&(ch as u32)), "portal.{slot} = {ch:?} is outside Geometric Shapes");
+            assert!(!is_wide_estimate(ch), "portal.{slot} = {ch:?} estimates as double-width");
+        }
+        assert_ne!(p.in_, p.out, "in and out must be told apart");
+        assert_ne!(p.in_, p.marker, "in must not read as the notes marker");
+        assert_ne!(p.out, p.marker, "out must not read as the notes marker");
+        // And the pair is the same one `SymbolSet::default()` hands the renderer.
+        assert_eq!((SymbolSet::default().portal.in_, SymbolSet::default().portal.out), (p.in_, p.out));
+    }
+
+    /// Codepoints resolved by NAME from the Nerd Fonts `glyphnames.json` (v3.5.1),
+    /// not from memory: up/down here were F0B71/F0B72 — `md-card_bulleted_off` and
+    /// its outline — for as long as the preset existed, and a patched face draws
+    /// those happily, so nothing looked broken (SQ-0989).
+    #[test]
+    fn nerdfont_portal_icons_are_the_named_codepoints() {
+        let p = PortalGlyphs::preset("nerdfont").expect("preset");
+        assert_eq!(p.up, '\u{F0CE1}', "md-arrow_up_circle");
+        assert_eq!(p.down, '\u{F0CDB}', "md-arrow_down_circle");
+        assert_eq!(p.in_, '\u{F090}', "fa-sign_in");
+        assert_eq!(p.out, '\u{F08B}', "fa-sign_out");
+        assert_eq!(p.marker, '\u{F111}', "fa-circle");
+        assert_eq!(p.unknown, '\u{F059}', "fa-question_circle");
     }
 
     #[test]

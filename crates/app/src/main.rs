@@ -1277,7 +1277,7 @@ fn handle_map_export(
         Action::ExportMap(dest) => {
             let path = app::export::resolve_export_path(dest.as_deref(), game_dir, "map.txt");
             if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
-            match std::fs::write(&path, render_dump(&mapper.graph)) {
+            match std::fs::write(&path, render_dump(&mapper.graph, &state.symbols)) {
                 Ok(()) => state.push_notice(&format!("[map dump written to {}]", abbreviate_home(&path))),
                 Err(e) => state.push_notice(&format!("[map dump failed: {}]", e)),
             }

@@ -819,10 +819,11 @@ fn is_structural(ch: char) -> bool {
 /// Coverage is no longer the deciding question, because [`Face::draw`] asks the
 /// face whether it HAS each glyph and falls back to the bitmap master when it
 /// does not. Worth knowing anyway: Fira Code does carry the map's arrowheads
-/// (`↑ ↓ ▲ ▼ ◀ ▶`, verified against its `cmap`) and does NOT carry the portal
-/// badges `⊙`/`⊗`, which JetBrains Mono did. Neither does the bitmap master, so
-/// a frame containing one is named in the run's output rather than silently
-/// losing it.
+/// (`↑ ↓ ▲ ▼ ◀ ▶`, verified against its `cmap`) and does NOT carry `⊙`/`⊗`, which
+/// JetBrains Mono did. Neither does the bitmap master, so a frame containing one
+/// is named in the run's output rather than silently losing it. That hole is why
+/// the portal badges are no longer those two codepoints: the default in/out pair
+/// is `◉`/`◎` from Geometric Shapes, which Fira Code does carry (SQ-0989).
 ///
 /// Deliberately short and platform-obvious. `.ttc` collections are skipped —
 /// fontdue reads a single face — so this list is plain `.ttf` only.

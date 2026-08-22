@@ -21,8 +21,9 @@ use mapper::graph::MapGraph;
 use mapper::layout::detect_chains;
 use mapper::render::render_layer;
 
-use crate::render::map::{boxes_axes, portal_glyph, render_map};
+use crate::render::map::{arrow_for_direction, boxes_axes, render_map};
 use crate::state::{AppState, Zoom};
+use crate::symbols::SymbolSet;
 
 /// Max dump buffer dimension (cells) to bound memory on very large maps.
 const MAX_DIM: i32 = 4000;
@@ -49,7 +50,7 @@ fn dir_str(d: Direction) -> &'static str {
 /// Render the map to a line-art ASCII string (rooms as boxes, connectors as
 /// `─│┼` lines, exits as arrowheads).
 #[allow(clippy::field_reassign_with_default)]
-fn ascii_map(graph: &MapGraph, layer: mapper::layer::LayerId) -> String {
+fn ascii_map(graph: &MapGraph, layer: mapper::layer::LayerId, symbols: &SymbolSet) -> String {
     // `render_layer`, not `render` on a pre-sliced subgraph: only `render_layer` flags rooms that
     // own a cross-layer portal and appends the interlayer badges. Rendering a subgraph through
     // plain `render` silently dropped BOTH, so the dump showed a room with a staircase to another
@@ -82,7 +83,11 @@ fn ascii_map(graph: &MapGraph, layer: mapper::layer::LayerId) -> String {
 
     // Render at Boxes zoom (AppState default) with scroll set to pad the map.
     // Always show room numbers in the dump (diagnostic context).
+    // The player's OWN glyph set, not `AppState::default()`'s: a dump is a picture of
+    // the map on screen, and one drawn with somebody else's box style and portal icons
+    // is a picture of a map nobody is looking at (SQ-0989).
     let mut state = AppState::default();
+    state.symbols = symbols.clone();
     state.zoom = Zoom::Boxes;
     state.scroll = (min_col - 2, min_row - 2);
     state.show_room_numbers = true;
@@ -107,8 +112,8 @@ fn ascii_map(graph: &MapGraph, layer: mapper::layer::LayerId) -> String {
     lines[first..=last].join("\n")
 }
 
-/// Produce the full map dump string for `graph`.
-pub fn render_dump(graph: &MapGraph) -> String {
+/// Produce the full map dump string for `graph`, drawn with the player's `symbols`.
+pub fn render_dump(graph: &MapGraph, symbols: &SymbolSet) -> String {
     let mut rooms: Vec<&mapper::graph::Room> = graph.rooms().collect();
     rooms.sort_by_key(|r| r.id);
     let conns = graph.connections();
@@ -190,7 +195,8 @@ pub fn render_dump(graph: &MapGraph) -> String {
         .filter(|c| grid_offset(c.dir).is_none())
         .map(|c| {
             let name = graph.room(c.dest).map(|r| r.label().to_string()).unwrap_or_default();
-            format!("PORTAL {} {} #{} {}", c.origin, portal_glyph(c.dir), c.dest, name)
+            let glyph = arrow_for_direction(c.dir, &symbols.arrows, &symbols.portal);
+            format!("PORTAL {} {} #{} {}", c.origin, glyph, c.dest, name)
         })
         .collect();
     if !portals.is_empty() {
@@ -213,14 +219,14 @@ pub fn render_dump(graph: &MapGraph) -> String {
     if map_layers.len() <= 1 {
         // Keep rendering whichever layer actually holds the rooms — it is not always MAIN_LAYER.
         let only = map_layers.first().copied().unwrap_or(mapper::layer::MAIN_LAYER);
-        out.push_str(&ascii_map(graph, only));
+        out.push_str(&ascii_map(graph, only, symbols));
     } else {
         for (i, &l) in map_layers.iter().enumerate() {
             if i > 0 {
                 out.push('\n');
             }
             out.push_str(&format!("# --- layer {} ({}) ---\n", l, graph.layer_name(l)));
-            out.push_str(&ascii_map(graph, l));
+            out.push_str(&ascii_map(graph, l, symbols));
         }
     }
     out.push_str("\n#\n# Annotate problems below — lines starting with # are comments:\n#\n");
@@ -249,7 +255,7 @@ mod tests {
         let region = mapper::layer::planar_region(&g, 2);
         let l = mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New)
             .expect("peel cellar");
-        let dump = render_dump(&g);
+        let dump = render_dump(&g, &SymbolSet::default());
         // ROOM legend tags the peeled room's layer; the base room carries no tag.
         assert!(dump.contains(&format!("ROOM 2 \"Cellar\" pos=0,0 align=none layer={l}")), "dump:\n{dump}");
         assert!(dump.lines().any(|ln| ln.starts_with("ROOM 1 \"Hall\"") && !ln.contains("layer=")));
@@ -258,12 +264,47 @@ mod tests {
         assert!(dump.contains(&format!("# --- layer {l} (Cellar) ---")), "dump:\n{dump}");
     }
 
+    /// A dump is drawn with the PLAYER's glyphs, in both places it names a portal:
+    /// the PORTALS legend and the badge inside the room box. It used to reach for a
+    /// pair of hard-coded constants for the legend and `AppState::default()` for the
+    /// map, so `/export-map` showed the shipped icons to a player who had chosen
+    /// others — and matching a dump against the screen is the whole point of it
+    /// (SQ-0989).
+    #[test]
+    fn dump_portals_use_the_configured_icon_preset() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Vault".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::In, 2);
+
+        let nerd = SymbolSet::from_preset_names("light", "filled", "nerdfont", "light");
+        let dump = render_dump(&g, &nerd);
+        // nf-fa-sign_in (U+F090) — the "nerdfont" preset's In icon.
+        assert!(
+            dump.contains(&format!("PORTAL 1 {} #2 Vault", '\u{F090}')),
+            "legend must use the configured preset:\n{dump}"
+        );
+        assert!(dump.contains('\u{F090}'), "map badge must use it too:\n{dump}");
+        // And the default preset's In icon appears nowhere: the dump committed to one set.
+        let ascii_in = SymbolSet::default().portal.in_;
+        assert!(!dump.contains(ascii_in), "default icon {ascii_in:?} leaked into a themed dump:\n{dump}");
+
+        // The default set still reads as it always did.
+        let plain = render_dump(&g, &SymbolSet::default());
+        assert!(
+            plain.contains(&format!("PORTAL 1 {ascii_in} #2 Vault")),
+            "default dump keeps the default icon:\n{plain}"
+        );
+    }
+
     #[test]
     fn dump_lists_rooms_edges_and_ids() {
         let mut m = Mapper::default();
         m.observe(1, "West of House", None);
         m.observe(2, "Forest", Some(Direction::N));
-        let dump = render_dump(&m.graph);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
 
         assert!(dump.contains("# lanthorn map dump"));
         assert!(dump.contains("ROOM 1 \"West of House\""), "room legend: {dump}");
@@ -279,7 +320,7 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "A", None);
         m.observe(2, "B", Some(Direction::E));
-        let dump = render_dump(&m.graph);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
         // A horizontal connector run should serialize to box-drawing line-art.
         let has_line = dump.contains('─') || dump.contains('│') || dump.contains('┼');
         assert!(has_line, "expected line-art connectors in:\n{dump}");
@@ -291,7 +332,7 @@ mod tests {
     #[test]
     fn empty_map_dump_is_safe() {
         let g = MapGraph::new();
-        let dump = render_dump(&g);
+        let dump = render_dump(&g, &SymbolSet::default());
         assert!(dump.contains("# lanthorn map dump"));
         assert!(dump.contains("(empty map)"));
     }
@@ -301,7 +342,7 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "A", None);
         m.observe(2, "B", Some(Direction::E));
-        let dump = render_dump(&m.graph);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
         // A connector line-art glyph appears, and the legend no longer advertises ▒.
         assert!(dump.contains('─') || dump.contains('│'), "line-art connector expected:\n{dump}");
         assert!(!dump.contains("▒ = unrouted"), "unrouted concept removed from legend");
@@ -315,7 +356,7 @@ mod tests {
         m.observe(2, "B", Some(Direction::E));
         // make it a reciprocal E/W pair so a chain forms
         m.graph.add_edge(2, Direction::W, 1);
-        let dump = render_dump(&m.graph);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
         assert!(dump.contains("align=row[1,2]"), "reciprocal pair annotated as a row chain:\n{dump}");
     }
 
@@ -323,7 +364,7 @@ mod tests {
     fn dump_legend_marks_ungrouped_room() {
         let mut m = mapper::mapper::Mapper::default();
         m.observe(1, "A", None);
-        let dump = render_dump(&m.graph);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
         assert!(dump.contains("align=none"), "lone room shows align=none:\n{dump}");
     }
 
@@ -357,7 +398,7 @@ mod tests {
             g.add_edge(id, Direction::E, 1);
         }
 
-        let dump = render_dump(&g);
+        let dump = render_dump(&g, &SymbolSet::default());
 
         // Every room's id label must appear in the dump.
         for id in 1u16..=6 {
@@ -381,7 +422,7 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "Cellar", None);
         m.observe(2, "Attic", Some(Direction::Up)); // edge 1 →Up→ 2, both placed
-        let dump = render_dump(&m.graph);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
         assert!(dump.contains("# === PORTALS"), "portal legend section present:\n{dump}");
         assert!(
             dump.contains("PORTAL 1 ↑ #2 Attic"),
