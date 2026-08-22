@@ -218,3 +218,149 @@ shade for the ink and the artwork, because the card has two colours and everythi
 on the screen is one of them. The table now says #AAAAAA, and the Macintosh's mono
 plate — whose white really is white, see mac-zorkzero-bw.jpg, 31.6% #FFFFFF inside
 the game window — moved to a table of its own rather than sharing this one.
+
+
+THE FOUR SQ-0917 FONT-METRIC CAPTURES (2026-08-22)
+
+  amiga-arthur.png       Arthur on an Amiga, gameplay ("Town square, St John's
+                         Day, Terce"). 320x200.
+  amiga-arthur-hint.png  The same game's InvisiClues screen. 720x569.
+  mac-zorkzero-game.png  Zork Zero on a compact Macintosh, BLACK AND WHITE press,
+                         at the Banquet Hall. 552x385.
+  mac-zorkzero-hint.png  The same press's InvisiClues topic list. 552x382.
+
+These exist to answer one question the repo could not answer internally: what
+CELL did each machine lay Version 6 text out on? babelmap advertises 8x16 at
+header $26/$27 and quantizes every v6 coordinate by it. `v6_font_cell` declined to
+change that three times (EGA SQ-0790, Macintosh SQ-0838, Apple IIgs SQ-0857) on
+the reasoning that nothing depended on it, and SQ-0917 is where something did.
+
+TWO OF THEM ARE PIXEL-EXACT. TWO ARE NOT. THE DIFFERENCE IS THE WHOLE POINT.
+
+  amiga-arthur.png       18 colours, every channel of every one a multiple of
+                         0x11 (0x44, 0x55, 0x99, 0xDD...). That is a 4-bit-per-
+                         channel OCS palette with no blended value anywhere. A
+                         resampled or video-captured frame carries off-palette
+                         averages; this one carries none, so it is native pixels.
+  mac-zorkzero-*.png     1-bit. The hint capture has literally TWO colours. The
+                         uniform outer border resolves to a content rect of
+                         exactly 512x342 — a compact Macintosh screen (Plus / SE
+                         / Classic) inside a 20 px emulator frame. 1:1.
+  amiga-arthur-hint.png  720x569 with off-palette greys, and its text pitch is
+                         20 px against the gameplay capture's 10. A DOUBLED
+                         rendition of the same 320x200 screen, not a native hires
+                         one. Good for layout, z-order and the SQ-1004 island
+                         defect; normalise before quoting a metric from it.
+
+DO NOT MEASURE METRICS FROM THE mac-*.jpg FILES. `mac-arthur.jpg` is lossy,
+windowed, and its advance-to-line-height ratio comes out 5.6/14 = 0.40 where the
+Mac's own colWidth/lineHeight is 7/15 = 0.47 and babelmap's is 8/16 = 0.50.
+Something is scaled by a factor the file cannot tell you. The one thing it does
+support is a scale-INVARIANT claim: both its prose lines give the same px/char.
+
+THE MACINTOSH: 480x300 ON A 15-ROW LINE, DRAWN PROPORTIONALLY
+
+The window frame inside the 512x342 desktop sits at desktop-relative rows 19
+(top), 23-37 (title bar) and 338-339 (bottom), columns 11 and 500-501. The
+content is exactly 300 ROWS tall and ~480 wide after the inner inset — which is
+`Pic.data`'s 480x300 (SQ-0838), confirmed from outside for the first time.
+
+The line height is 15, three independent ways:
+
+  1. The inverse highlight bar on PROLOGUE spans rows 118..132 — exactly 15 rows.
+     An inverse bar is drawn to the CELL, so this measures the cell and not ink.
+  2. All fifteen topic rows land on y = 118 + 15*i, a formula that indexed 14
+     consecutive lines correctly.
+  3. Banner baselines are 15 apart (84 -> 99). And the GAMEPLAY capture's prose
+     has the same 15 px pitch (line tops 241, 256, 271, 285), so it is not a
+     hint-screen peculiarity.
+
+Infocom's Mac interpreter reads `lineHeight := 15 {16}`. It is 15.
+
+AND THE FACE IS PROPORTIONAL, WHICH IS THE FINDING
+
+The test controls for glyph identity: WING is the same four-glyph run in three
+different topics.
+
+  EAST WING      W at char index 5   x = 137   WING inks 30 px
+  WEST WING      W at char index 5   x = 139   WING inks 30 px
+  SECRET WING    W at char index 7   x = 151   WING inks 30 px
+
+Same run, same index 5, DIFFERENT x — 137 against 139 — because WEST is 2 px
+wider than EAST. Under any fixed pitch those two must be equal. The measurement
+is sound in both directions: identical strings do have identical widths (WING
+inks to 30 px in all three rows, AREA to 31 px in all three of its rows).
+
+But the AVERAGE advance is 7.00. WING at index 5 (x=137) against index 7 (x=151)
+is 14 px over two characters. BAILEY/VILLAGE AREA puts AREA at index 15, x=207 —
+106 px over 15 characters, 7.07.
+
+That resolves what looks like a contradiction with `native_disk_font.rs`, which
+reads FONT 524 as fixed-pitch. Infocom's Mac source is `stdFont := geneva;
+textSize (12); lineHeight := 15 {16}; colWidth := 7`, and Geneva 12 is a
+PROPORTIONAL System font. The interpreter draws proportional Geneva and DECLARES
+a nominal column width of 7 — 7 being Geneva's average, which is why the two
+agree. `colWidth := 7` was never a drawn advance; it is a declared metric, the
+same quantity as header $27.
+
+So the Macintosh needs the CELL and not the glyphs. Wiring FONT 524 into the
+renderer would be wrong on its own terms, because the real interpreter did not
+tell the story about proportional widths either. It told it 7.
+
+A SECOND, SMALLER FACE ON THE BANNER — INTERPRETER CHROME, NOT A Z-MACHINE FONT
+
+The InvisiClues banner ("Hit N for next item." / "Hit Return to see hints.") is
+drawn ~6.3 px average against the topic list's 7.0. Same-string widths are
+consistent there too — "Hit" inks to 17 px in all four of its occurrences, "to"
+to 11 px in both — so it is a real second face and not noise. Presumably Geneva 9
+/ FONT 1033 (7x12, advance 6).
+
+The Z-machine cannot express this: fonts 1-4 are normal, picture, character
+graphics and fixed-pitch, and there is no smaller face among them. So it is the
+Mac interpreter's own chrome and babelmap should not reproduce it — but it does
+temper SQ-0917's acceptance test. Going 8 -> 7 removes most of the reported
+banner overrun and may not remove all of it. A residual at 7 is this second face,
+not a failed cell change.
+
+THE AMIGA: 320x200 ON A 10-ROW LINE, AND GENUINELY PROPORTIONAL
+
+White text pixel rows in amiga-arthur.png run 121-129, 131-139, 141-149, 161-169,
+171-179 — pitch exactly 10 — and the inverse status bar occupies rows 100-109,
+exactly one cell, independently. Glyphs use about 7 rows with descenders reaching
+the 9th.
+
+Prose line 1 is "You walk into the town square. The churchyard lies to the
+north," — 64 characters spanning x=14..301, 288 px, 4.5 px/char. Fixed pitch at
+the nominal 10 would need 640 px on a 320 px screen, so proportional is not a
+detail here; it is the only way the line fits. Segmenting by inter-word gaps:
+
+  You 15px/3=5.00   walk 20/4=5.00   into 16/4=4.00   the 13/3=4.33
+  town 21/4=5.25    square. 32/7=4.57   The 15/3=5.00   churchyard 50/10=5.00
+  lies 15/4=3.75    to 8/2=4.00   the 13/3=4.33   north, 26/6=4.33
+
+A fixed-pitch face gives every word the SAME px/char. These range 3.75 to 5.25
+and track word content (lies, all narrow letters, lowest; town, with its w,
+highest). That is a falsification and not merely a consistency check.
+
+So `native_disk_font.rs`'s `arthur_carries_a_proportional_text_font` — 10x10
+nominal, FPF_PROPORTIONAL set, advance 2..=8, read from char.data on the r54 /
+890606 floppy — now agrees with a real machine and not only with its own parser.
+
+Band structure of the gameplay frame, for anyone pinning geometry against it:
+rows 0-6 grey ground; 7-90 knotwork border and illustration; 91-99 grey; 100-109
+the inverse status bar (one cell); 110-120 grey; 121-179 prose at 10 px pitch;
+190-199 the input line. A green vertical rule runs down x~314-319 full height.
+
+A SEPARATE FINDING: AMIGA TEXT IS 25% LARGER RELATIVE TO ITS ART THAN OURS
+
+AMIGA_STD_WINDOW is (320, 200) and V6_ART_SCALE doubles it onto the 640x400 unit
+screen, where the 8x16 cell gives 80x25 characters. The machine in this capture
+has 20 text rows, not 25. As a ratio, which does not depend on the doubling:
+babelmap's line is 16/400 = 4.0% of screen height, the Amiga's is 10/200 = 5.0%.
+
+This is NOT a defect claim and should not be actioned from this note alone. The
+2x unit-screen model is deliberate (SQ-0479) and Arthur's windows are laid out
+from what the story is told, so a taller grid is not automatically a wrong one.
+It is recorded because it is now measurable against a machine, and because it
+says the Macintosh is the outlier by a wide margin while the Amiga is merely a
+bit small.
