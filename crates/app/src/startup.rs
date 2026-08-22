@@ -1397,6 +1397,47 @@ pub(crate) fn boot_story(
 /// entered). A non-interactive stdin (piped or EOF) reads as "no".
 fn prompt_yes_no(question: &str) -> bool {
     use std::io::Write as _;
+    // THE CONSOLE MAY NOT BE ABLE TO GIVE US A LINE (SQ-1007).
+    //
+    // `read_line` does not read keys; it waits for the console driver to hand it
+    // an assembled line, which the driver only does with `ENABLE_LINE_INPUT` and
+    // `ENABLE_ECHO_INPUT` set. In raw mode those are off, so every keystroke
+    // vanishes and the call blocks for ever. This prompt runs BEFORE anything
+    // else in lanthorn touches the terminal — the colour query is at
+    // `query_terminal_default_colors`, raw mode at `enable_raw_mode`, both far
+    // below — so it inherits whatever the console was left in, and on Windows a
+    // console's input mode outlives the process that set it.
+    //
+    // Reported on 0.2.0: the first launch in a fresh terminal answered normally,
+    // and a second launch in the SAME window ignored every keypress. Only Ctrl-Z
+    // got through — the console's EOF signal — so `read_line` returned `Ok(0)`,
+    // the arm below read that as "no", and startup carried on to the story list.
+    //
+    // Three observations, and between them they name the three bits crossterm
+    // clears for raw mode (`NOT_RAW_MODE_MASK`) one at a time, which is what
+    // makes this a diagnosis rather than a guess:
+    //
+    //   * nothing echoed             → `ENABLE_ECHO_INPUT` is off
+    //   * keys never formed a line   → `ENABLE_LINE_INPUT` is off
+    //   * Ctrl-C did not interrupt   → `ENABLE_PROCESSED_INPUT` is off, since
+    //     Windows only raises CTRL_C_EVENT when it is set and otherwise delivers
+    //     a plain 0x03 byte
+    //
+    // The shell looking FINE in between is not evidence against that, though it
+    // reads like it: PSReadLine reads key events itself and draws the line it is
+    // editing, so a console left raw behaves normally there. lanthorn's own TUI is
+    // immune for the same reason — it sets raw mode deliberately. This prompt is
+    // the one cooked-mode consumer in the whole program, which is why it is the
+    // only thing that broke.
+    //
+    // One call fixes it, for different reasons on each platform. crossterm's
+    // Windows `disable_raw_mode` SETS the cooked bits (`mode | LINE | ECHO |
+    // PROCESSED`) rather than restoring a mode it saved earlier, so it repairs a
+    // console this process never broke. On unix it restores the termios saved at
+    // `enable_raw_mode` and is a no-op when there is none — which is always here,
+    // since nothing has enabled raw mode yet. Unix untouched, Windows repaired,
+    // and neither depending on the previous run having exited tidily.
+    let _ = crossterm::terminal::disable_raw_mode();
     print!("{question} [y/N] ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();

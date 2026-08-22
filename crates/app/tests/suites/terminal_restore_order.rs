@@ -130,6 +130,12 @@ fn nothing_else_in_the_tui_leaves_raw_mode() {
     const EXEMPT: [&str; 2] = ["picker_ui.rs", "term_colors.rs"];
     let mut offenders: Vec<String> = Vec::new();
     let mut seen_in_main = 0usize;
+    // `startup.rs` has exactly one, and it is the opposite operation: the prompt
+    // that runs BEFORE the TUI exists puts a console back INTO line mode so
+    // `read_line` can assemble one (SQ-1007). It is not a teardown and this rule
+    // does not apply to it — but "startup.rs is exempt" would be too broad, so the
+    // count is pinned and the next case checks where it lives.
+    let mut seen_in_startup = 0usize;
     let mut stack = vec![app_src()];
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir).expect("the src directory is part of the checkout");
@@ -152,6 +158,10 @@ fn nothing_else_in_the_tui_leaves_raw_mode() {
                 seen_in_main = hits;
                 continue;
             }
+            if name == "startup.rs" {
+                seen_in_startup = hits;
+                continue;
+            }
             offenders.push(name);
         }
     }
@@ -160,11 +170,53 @@ fn nothing_else_in_the_tui_leaves_raw_mode() {
         "main.rs leaves raw mode in {seen_in_main} places; restore_terminal is meant to be the \
          only one, so the ordering this file pins covers every exit path at once (SQ-0998).",
     );
+    assert_eq!(
+        seen_in_startup, 1,
+        "startup.rs leaves or restores raw mode in {seen_in_startup} places; exactly one is \
+         expected — `prompt_yes_no`'s repair (SQ-1007), which the next case locates.",
+    );
     assert!(
         offenders.is_empty(),
         "these files leave raw mode outside restore_terminal: {offenders:?}\n\
          Every teardown in the TUI has to silence the terminal before it leaves raw mode, or a \
          mouse report generated in the gap reaches the shell (SQ-0998). Route the new path \
          through restore_terminal rather than repeating the sequence.",
+    );
+}
+
+/// **The other end of the same rule (SQ-1007): startup must not read a LINE from
+/// a console that may not be able to assemble one.**
+///
+/// `prompt_yes_no` runs before lanthorn enables raw mode, so it inherits whatever
+/// the console was left in — and on Windows a console's input mode outlives the
+/// process that set it, so one untidy exit makes every later launch in that window
+/// hang on the prompt. `read_line` waits for the driver to hand it a line, which
+/// the driver only does with `ENABLE_LINE_INPUT`/`ENABLE_ECHO_INPUT` set.
+///
+/// Pinned at the source, for the reason the cases above are: the defect needs a
+/// Windows console left dirty by a previous PROCESS, which no harness here can
+/// stage, and crossterm's `disable_raw_mode` is a no-op on unix when nothing
+/// enabled raw mode — so a runtime test on this platform would pass either way and
+/// prove nothing.
+#[test]
+fn the_startup_prompt_puts_the_console_back_in_line_mode_first() {
+    let src = read_src("startup.rs");
+    let full = fn_body(&src, "prompt_yes_no");
+    // Comments in this function name both calls, and at length — search the code.
+    let body: String = full
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let repair = body
+        .find("disable_raw_mode")
+        .expect("prompt_yes_no must put the console back in line mode before reading a line");
+    let read = body
+        .find("read_line")
+        .expect("prompt_yes_no still reads a line — if it does not, this case needs rewriting");
+    assert!(
+        repair < read,
+        "the repair must come BEFORE the read: a console still in raw mode never assembles \
+         the line `read_line` is waiting for, so every keystroke vanishes and the call blocks",
     );
 }
