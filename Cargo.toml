@@ -45,11 +45,26 @@ debug = "line-tables-only"
 # ceiling. Seven more of the same shape in `cells * font_size` (src/lib.rs,
 # src/sliced.rs) do not panic; they silently compute a wrapped pixel dimension.
 #
-# The branch is the v11.0.6 release commit plus exactly those eight lines —
-# deliberately NOT master, which carries an unrelated change to font-size
-# detection (ioctl + env hints), the very input this geometry is derived from.
-# Upstream PR: https://github.com/ratatui/ratatui-image/pull/189
-# REMOVE THIS once a release carrying the fix exists: delete the stanza and bump
-# the version in crates/app/Cargo.toml.
+# The branch is the v11.0.6 release commit — deliberately NOT master, which
+# carries an unrelated change to font-size detection (ioctl + env hints), the
+# very input this geometry is derived from.
+# Upstream PR for the wrap: https://github.com/ratatui/ratatui-image/pull/189
+#
+# It has since grown three more additions, each one method or one variant, and
+# each one a thing the crate cannot express and lanthorn cannot work around:
+#
+#   * `Picker::set_font_size` (SQ-0992) — a mid-session font change must not
+#     rebuild the picker, which would drop the queried capability list.
+#   * `Capability::KittyCompression` + `o=z` transmits (SQ-0991) — probe the
+#     terminal before deflating, because a transmit it cannot inflate is
+#     invisible rather than slow.
+#   * `Picker::new_protocol_with_id` and a NAMED virtual placement (`p=1`,
+#     SQ-0996) — a kitty placement writes its image id into every cell it
+#     covers, so re-encoding changed art under a freshly drawn random id
+#     repaints the whole rect. The caller is the only one who knows two encodes
+#     are the same thing changing.
+#
+# REMOVE THIS once a release carrying all of them exists: delete the stanza and
+# bump the version in crates/app/Cargo.toml.
 [patch.crates-io]
 ratatui-image = { git = "https://github.com/sharkusk/ratatui-image", branch = "lanthorn-11.0.6-u16-fix" }

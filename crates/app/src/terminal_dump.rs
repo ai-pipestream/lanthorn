@@ -404,11 +404,24 @@ pub fn dump_lines(s: &TerminalSnapshot) -> Vec<DumpLine> {
         )
     };
     out.push(ratatui_line);
+    // The two encoders read the same probe since SQ-0997. They are still reported
+    // separately, because they are separate code and one of them silently ignored
+    // the answer for as long as both existed — a single merged line would say
+    // nothing about whether that is still true.
     if s.protocol.as_deref() == Some("kitty") {
-        out.push(value(
-            "    graphics-window uploads (lanthorn's own transmit): COMPRESSED — unconditionally; \
-             that path states o=z whatever the probe said",
-        ));
+        out.push(if s.kitty_compression {
+            value(
+                "    graphics-window uploads (lanthorn's own transmit — Glulx toolbars, Scott \
+                 room pictures, v6 graphics windows): COMPRESSED — the same o=z probe governs \
+                 both encoders",
+            )
+        } else {
+            assumed(
+                "    graphics-window uploads (lanthorn's own transmit — Glulx toolbars, Scott \
+                 room pictures, v6 graphics windows): RAW — the terminal did not answer the o=z \
+                 probe, and a transmit it cannot inflate would store no image at all",
+            )
+        });
     }
 
     // ── render state, insofar as it explains the traffic ─────────────────────
@@ -606,19 +619,32 @@ mod tests {
     /// The question that prompted the whole command. Both directions, because
     /// both fail silently: a raw wire looks like nothing, and so does a
     /// terminal that cannot inflate.
+    ///
+    /// **Both encoders, and the same answer from each** (SQ-0997). This line used
+    /// to report the graphics-window path as compressed "unconditionally", which
+    /// was true and was the defect; a report that still said so after the fix
+    /// would be lying about the one thing it exists to tell you.
     #[test]
     fn compression_is_reported_both_ways_and_raw_is_flagged() {
         let s = snap();
-        let l = dump_lines(&s).into_iter().find(|l| l.text.contains("ratatui-image uploads")).unwrap();
-        assert_eq!(l.kind, DumpKind::Value);
-        assert!(l.text.contains("COMPRESSED"), "{}", l.text);
+        for path in ["ratatui-image uploads", "graphics-window uploads"] {
+            let l = dump_lines(&s).into_iter().find(|l| l.text.contains(path)).unwrap();
+            assert_eq!(l.kind, DumpKind::Value, "{path}: {}", l.text);
+            assert!(l.text.contains("COMPRESSED"), "{path}: {}", l.text);
+        }
 
         let mut s = snap();
         s.kitty_compression = false;
         s.capabilities = vec!["Kitty".into()];
-        let l = dump_lines(&s).into_iter().find(|l| l.text.contains("ratatui-image uploads")).unwrap();
-        assert_eq!(l.kind, DumpKind::Assumed, "a silently raw wire is exactly what needs marking");
-        assert!(l.text.contains("RAW"), "{}", l.text);
+        for path in ["ratatui-image uploads", "graphics-window uploads"] {
+            let l = dump_lines(&s).into_iter().find(|l| l.text.contains(path)).unwrap();
+            assert_eq!(l.kind, DumpKind::Assumed, "{path}: a silently raw wire needs marking");
+            assert!(l.text.contains("RAW"), "{path}: {}", l.text);
+        }
+        assert!(
+            !text(&s).contains("unconditionally"),
+            "no path states o=z whatever the probe said any more (SQ-0997)"
+        );
     }
 
     /// Not-kitty must not claim either answer — `o=z` is a kitty key and a sixel

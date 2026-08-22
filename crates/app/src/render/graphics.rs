@@ -741,6 +741,31 @@ pub fn v6_upscale_cap(picker: &Picker) -> Option<f64> {
     }
 }
 
+/// Whether this terminal may be sent a DEFLATED kitty transmission (SQ-0997).
+///
+/// `o=z` is not a hint a terminal may ignore. One that cannot inflate refuses the
+/// transmission outright: the image is never stored, and every placement naming
+/// it draws nothing — so a graphics window simply has no picture in it, with no
+/// error, no fallback, and nothing on screen to suggest anything went wrong.
+///
+/// That is why SQ-0991 made `ratatui-image` probe before compressing. Lanthorn's
+/// OWN transmit — [`kitty_transmit_virtual`], which SQ-0976 taught to compress
+/// before the capability existed — stated `o=z` whatever the probe said, so on
+/// such a terminal every graphics-window image (Glulx toolbars, Scott room
+/// pictures, v6 graphics windows) vanished silently while the chrome ring beside
+/// them, encoded by the crate, drew fine. Two encoders, one wire, one answer.
+///
+/// The picker is the thing that knows, exactly as it is for [`v6_upscale_cap`].
+/// An EMPTY capability list means raw, and it has to: that is what
+/// `Picker::halfblocks()`, the deprecated `from_fontsize`, the default picker
+/// returned when a query fails, tmux without passthrough and the terminal
+/// blacklist all leave behind, and none of them is evidence that this terminal
+/// can inflate anything. Fail safe — a raw upload is merely slower, an
+/// uninflatable one is invisible.
+pub fn kitty_compression(picker: &Picker) -> bool {
+    picker.capabilities().contains(&ratatui_image::picker::Capability::KittyCompression)
+}
+
 /// The cell rect the v6 composite occupies under HALF-BLOCKS, without building a
 /// pixel of it (SQ-0973).
 ///
@@ -1209,7 +1234,7 @@ impl GraphicsRender {
         // (Ghostty/macOS 2×), the image covered only part of the window and
         // mouse clicks mapped to the wrong game pixels. (SQ-0520)
         if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty {
-            self.render_kitty_virtual(gw, area, buf);
+            self.render_kitty_virtual(gw, area, kitty_compression(picker), buf);
             return;
         }
         let fresh = matches!(self.cache.get(&gw.win),
@@ -1382,7 +1407,13 @@ impl GraphicsRender {
     /// the version each time, and the release hashes equal to what is already
     /// uploaded (SQ-0564's insight, kept; SQ-0564's LRU of alternative uploads is
     /// gone, because an id you might place is an id in the cells).
-    fn render_kitty_virtual(&mut self, gw: &GraphicsWindow, area: Rect, buf: &mut Buffer) {
+    fn render_kitty_virtual(
+        &mut self,
+        gw: &GraphicsWindow,
+        area: Rect,
+        compress: bool,
+        buf: &mut Buffer,
+    ) {
         // A resize invalidates this window's upload: the placement's r×c grid is
         // baked into the transmission, so what the terminal holds cannot be
         // re-placed at the new size. Start the window over — and DELETE the upload
@@ -1423,7 +1454,7 @@ impl GraphicsRender {
                 });
             } else {
                 entry.pending_transmit =
-                    Some(kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width));
+                    Some(kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width, compress));
                 entry.uploaded = Some(hash);
                 self.note_op(GraphicsOp::Upload {
                     target: GraphicsTarget::Window(gw.win),
@@ -1462,6 +1493,14 @@ impl GraphicsRender {
         &self.pending_deletes
     }
 
+    /// The deletes waiting to ride out BEHIND the placement that supersedes them
+    /// (SQ-0817). Separate from [`Self::queued_deletes`] because "nothing was
+    /// freed" is only true when both are empty (SQ-0996).
+    #[cfg(test)]
+    fn queued_deletes_after_place(&self) -> &str {
+        &self.deletes_after_place
+    }
+
     /// What each cache keyed on cell geometry is currently holding, for SQ-0988:
     /// `(non-kitty window protocols, chrome bands, kitty window uploads,
     /// a raster composite?)`. One accessor rather than four because the whole
@@ -1483,7 +1522,24 @@ impl GraphicsRender {
     /// Half-blocks takes its own arm (SQ-0973) and lands on the same cell rect by a
     /// single resample — see [`v6_halfblocks_protocol`] for why the pre-scale every
     /// other backend needs is pure waste there.
-    fn encode_v6(picker: &Picker, canvas: &image::RgbaImage, gen: u64, area: Rect, lock: Option<f32>) -> Option<V6Ready> {
+    ///
+    /// `reuse` is the kitty image id the composite currently on screen lives under,
+    /// and the new encode goes out under it (SQ-0996). The composite covers the
+    /// whole pane — 3,680 cells at 117x64 — and the id is written into every one of
+    /// them, so an encode under a fresh id repaints the pane in cells on top of
+    /// sending the picture. Measured on Journey r83 in raster mode, one changed
+    /// frame: 48,742 bytes for a 7,668-byte image. `None` on the first encode after
+    /// boot or after [`Self::invalidate_v6`] (nothing to reuse — and the delete that
+    /// abandonment queued means there had better not be), and under every backend
+    /// with no addressable id, where `placed_id` is never anything else.
+    fn encode_v6(
+        picker: &Picker,
+        canvas: &image::RgbaImage,
+        gen: u64,
+        area: Rect,
+        lock: Option<f32>,
+        reuse: Option<u32>,
+    ) -> Option<V6Ready> {
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
@@ -1492,7 +1548,11 @@ impl GraphicsRender {
         } else {
             let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock, v6_upscale_cap(picker));
             let img = image::DynamicImage::ImageRgba8(img);
-            picker.new_protocol(img, Size::new(area.width, area.height), fit).ok()?
+            let size = Size::new(area.width, area.height);
+            match reuse {
+                Some(id) => picker.new_protocol_with_id(img, size, fit, id).ok()?,
+                None => picker.new_protocol(img, size, fit).ok()?,
+            }
         };
         Some(V6Ready {
             gen,
@@ -1501,7 +1561,9 @@ impl GraphicsRender {
             proto,
             native_w: canvas.width() as u16,
             native_h: canvas.height() as u16,
-            placed_id: None,
+            // The id this composite is already placed under, carried across the
+            // re-encode: `redraw_v6` re-confirms it off the placement it writes.
+            placed_id: reuse,
         })
     }
 
@@ -1543,12 +1605,18 @@ impl GraphicsRender {
         if area.width == 0 || area.height == 0 || canvas.width() == 0 || canvas.height() == 0 {
             return;
         }
+        // The id the composite on screen lives under, so the re-encode replaces its
+        // pixels rather than moving to a new id and repainting the pane's cells
+        // (SQ-0996). `None` when there is no composite yet, which is the same
+        // branch that has to encode synchronously.
+        let reuse = self.v6.as_ref().and_then(|r| r.placed_id);
         if self.v6.is_none() {
-            self.v6 = Self::encode_v6(picker, &canvas, gen, area, lock);
+            self.v6 = Self::encode_v6(picker, &canvas, gen, area, lock, None);
             return;
         }
         let picker = picker.clone();
-        self.v6_job = Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area, lock)));
+        self.v6_job =
+            Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area, lock, reuse)));
     }
 
     /// Drop the last-ready v6 raster composite (and detach any in-flight encode,
@@ -1643,8 +1711,18 @@ impl GraphicsRender {
             // It is also the composite the terminal is showing RIGHT NOW, and the
             // replacement is a whole pane of image data away, so the delete rides
             // BEHIND the placement that covers the pane again (SQ-0817).
+            //
+            // …but since SQ-0996 the replacement is usually the SAME id, re-transmitted
+            // — and deleting that would free the image this frame is about to place.
+            // Written as the comparison rather than as "never delete" because the
+            // reuse can be absent (a non-kitty backend, a composite never placed) and
+            // then the old rule still applies exactly.
+            let reused = ready.placed_id;
             let stale = self.v6.replace(ready);
-            self.queue_protocol_delete_after_place(stale.and_then(|r| r.placed_id));
+            let stale_id = stale.and_then(|r| r.placed_id);
+            if stale_id != reused {
+                self.queue_protocol_delete_after_place(stale_id);
+            }
         }
         true
     }
@@ -2020,21 +2098,11 @@ impl GraphicsRender {
                 band_img
             };
             let img = self.seal_band(band_img);
-            match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
-                Ok(p) => {
-                    self.band_encodes += 1;
-                    // Whatever this key held is being replaced: free it in the
-                    // terminal before the only record of its id is overwritten
-                    // (SQ-0753).
-                    let stale = self.chrome_bands.insert(key, (hash, p, None));
-                    self.queue_protocol_delete_after_place(stale.and_then(|(_, _, id)| id));
-                    self.note_op(GraphicsOp::Upload {
-                        target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                        id: None,
-                        cells: (band.width, band.height),
-                    });
-                }
-                Err(_) => return,
+            // Under the id this band is already placed as, when it has one — see
+            // [`Self::band_encode`] (SQ-0996).
+            let reuse = self.chrome_bands.get(&key).and_then(|(_, _, id)| *id);
+            if self.band_encode(picker, img, key, band, hash, reuse).is_none() {
+                return;
             }
         } else {
             self.note_op(GraphicsOp::Reuse {
@@ -2098,12 +2166,73 @@ impl GraphicsRender {
     }
 
     /// Record the kitty image id a band was just placed as, so the upload can be
-    /// freed when the entry is abandoned (SQ-0753). A no-op under a protocol with
-    /// no addressable id (half-blocks, sixel).
+    /// freed when the entry is abandoned (SQ-0753) — and so the band's NEXT encode
+    /// can go out under the same id (SQ-0996; see [`Self::band_encode`]). A no-op
+    /// under a protocol with no addressable id (half-blocks, sixel).
     fn remember_band_id(&mut self, key: BandKey, id: Option<u32>) {
         if let Some((_, _, slot)) = self.chrome_bands.get_mut(&key) {
             *slot = id;
         }
+    }
+
+    /// Encode one chrome band, UNDER THE ID IT IS ALREADY PLACED AS when it has
+    /// one (SQ-0996), and record the upload. `None` if the encode failed.
+    ///
+    /// A kitty virtual placement writes the image id into EVERY cell of its rect —
+    /// low 24 bits as the foreground colour, high byte as the third diacritic — so
+    /// the id is a per-cell value, and a band that re-encodes under a fresh id
+    /// dirties every one of those cells. `ratatui-image` draws its ids at random
+    /// (`rand::random()` per `Protocol`) and this path builds a new `Protocol` on
+    /// every content change, so until now a chrome band that changed by one pixel
+    /// repainted its whole placeholder rect. Measured on Journey r83 at 117x64
+    /// under a pty, the 39x20-cell illustration band: 26,968 bytes for a frame
+    /// whose image was 15,136 — the rest was cells.
+    ///
+    /// Handing the previous id back to the crate replaces the DATA behind an
+    /// unchanged placement instead. The placeholder cells come out byte-identical
+    /// to the last frame's except the first, which carries the transmit, so
+    /// ratatui's diff emits one cell and the picture.
+    ///
+    /// The id comes from the placement we last WROTE, not from an allocator: it is
+    /// read back off the cells (`place_protocol_with`), so it is `None` under
+    /// half-blocks and sixel — which have no ids and want none — and `None` before
+    /// a band's first place, where the crate's random draw is exactly right. That
+    /// also means an EVICTED band gets a fresh id, which it must: eviction queues
+    /// an `a=d` for the old one, and a delete riding out on another band's cell
+    /// could otherwise be emitted after the re-transmit that revived the id.
+    fn band_encode(
+        &mut self,
+        picker: &Picker,
+        img: image::DynamicImage,
+        key: BandKey,
+        band: Rect,
+        hash: u64,
+        reuse: Option<u32>,
+    ) -> Option<()> {
+        let size = Size::new(band.width, band.height);
+        let encoded = match reuse {
+            Some(id) => picker.new_protocol_with_id(img, size, Resize::Fit(None), id),
+            None => picker.new_protocol(img, size, Resize::Fit(None)),
+        };
+        let p = encoded.ok()?;
+        self.band_encodes += 1;
+        // The id carries forward with the new protocol, so the placement's cells
+        // are the ones already on screen and `remember_band_id` re-confirms it.
+        let stale = self.chrome_bands.insert(key, (hash, p, reuse));
+        let stale_id = stale.and_then(|(_, _, id)| id);
+        // Whatever this key held is being replaced: free it in the terminal before
+        // the only record of its id is overwritten (SQ-0753) — UNLESS it is the id
+        // we just re-transmitted to, which is the whole point and would delete the
+        // image this frame is about to show.
+        if stale_id != reuse {
+            self.queue_protocol_delete_after_place(stale_id);
+        }
+        self.note_op(GraphicsOp::Upload {
+            target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+            id: reuse,
+            cells: (band.width, band.height),
+        });
+        Some(())
     }
 
     /// SQ-0511: draw ONE side flank band VERTICALLY STRETCHED — sample the native
@@ -2192,18 +2321,9 @@ impl GraphicsRender {
             }
             let stretched = resize_directional(&src, bw, bh);
             let img = self.seal_band(stretched);
-            match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
-                Ok(p) => {
-                    self.band_encodes += 1;
-                    let stale = self.chrome_bands.insert(key, (hash, p, None));
-                    self.queue_protocol_delete_after_place(stale.and_then(|(_, _, id)| id));
-                    self.note_op(GraphicsOp::Upload {
-                        target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                        id: None,
-                        cells: (band.width, band.height),
-                    });
-                }
-                Err(_) => return,
+            let reuse = self.chrome_bands.get(&key).and_then(|(_, _, id)| *id);
+            if self.band_encode(picker, img, key, band, hash, reuse).is_none() {
+                return;
             }
         } else {
             self.note_op(GraphicsOp::Reuse {
@@ -2340,18 +2460,9 @@ impl GraphicsRender {
                 band_img
             };
             let img = self.seal_band(scaled);
-            match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
-                Ok(p) => {
-                    self.band_encodes += 1;
-                    let stale = self.chrome_bands.insert(key, (hash, p, None));
-                    self.queue_protocol_delete_after_place(stale.and_then(|(_, _, id)| id));
-                    self.note_op(GraphicsOp::Upload {
-                        target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                        id: None,
-                        cells: (band.width, band.height),
-                    });
-                }
-                Err(_) => return,
+            let reuse = self.chrome_bands.get(&key).and_then(|(_, _, id)| *id);
+            if self.band_encode(picker, img, key, band, hash, reuse).is_none() {
+                return;
             }
         } else {
             self.note_op(GraphicsOp::Reuse {
@@ -2534,9 +2645,17 @@ fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
 
 /// The kitty transmit sequence for `canvas` as image `id`: a VIRTUAL placement
 /// (`U=1`) declaring an explicit `r×c` grid, so the terminal scales the image
-/// to exactly the placeholder rect (SQ-0520). RGBA, zlib-compressed, chunked per
-/// the protocol's 4096-encoded-byte limit. (No tmux passthrough — matches the
-/// app's existing kitty support, which targets direct terminals.)
+/// to exactly the placeholder rect (SQ-0520). RGBA, chunked per the protocol's
+/// 4096-encoded-byte limit, and zlib-compressed when `compress` says the terminal
+/// can inflate it. (No tmux passthrough — matches the app's existing kitty
+/// support, which targets direct terminals.)
+///
+/// **`compress` is a capability, not a preference** (SQ-0997). It comes from
+/// [`kitty_compression`], and this function stated `o=z` unconditionally until it
+/// did: a terminal that answers the kitty query but not the `o=z` one refuses a
+/// deflated transmission, stores no image, and draws nothing for every placement
+/// naming it — with no error and nothing on screen to explain the missing picture.
+/// See [`kitty_compression`] for why an unasked terminal counts as "cannot".
 ///
 /// **`o=z` is the payload's encoding and nothing else** (SQ-0976). Per the kitty
 /// graphics protocol: *"the payload is now compressed using deflate (this occurs
@@ -2565,10 +2684,25 @@ fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
 /// duplicate placements. A named one is replaced in the map. The placeholder cells
 /// still encode placement 0, which resolves to "the first virtual placement of
 /// this image" and therefore to the only one.
-fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u16) -> String {
+fn kitty_transmit_virtual(
+    canvas: &image::RgbaImage,
+    id: u32,
+    rows: u16,
+    cols: u16,
+    compress: bool,
+) -> String {
     use std::fmt::Write as _;
     let (w, h) = (canvas.width(), canvas.height());
-    let payload = zlib_deflate(canvas.as_raw());
+    let deflated;
+    // SQ-0997: `compress` is [`kitty_compression`]'s answer for the picker in
+    // force. Raw when it is false — the geometry keys are untouched either way,
+    // because `o=z` describes the payload's encoding and nothing about the image.
+    let (payload, encoding): (&[u8], &str) = if compress {
+        deflated = zlib_deflate(canvas.as_raw());
+        (&deflated, "o=z,")
+    } else {
+        (canvas.as_raw(), "")
+    };
     let chunks: Vec<&[u8]> = payload.chunks(3072).collect();
     let n = chunks.len();
     let mut out = String::with_capacity(payload.len() / 3 * 4 + n * 24);
@@ -2577,7 +2711,7 @@ fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u
         if i == 0 {
             write!(
                 out,
-                "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,o=z,t=d,\
+                "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,{encoding}t=d,\
                  s={w},v={h},r={rows},c={cols},m={more};"
             )
             .unwrap();
@@ -3433,7 +3567,7 @@ mod resample_tests {
             let cells = super::v6_halfblocks_grid(canvas.dimensions(), box_w, box_h, fs, None);
             let (gw, gh) = sample_grid(cells);
 
-            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
             assert_eq!(ready.proto.size(), cells, "{cols}x{rows}: the protocol reports the grid");
 
             // One resample, straight from the canvas — then the crate, whose resample
@@ -3526,7 +3660,7 @@ mod resample_tests {
         let canvas = dithered_plate(640, 400);
         for (cols, rows) in [(458u16, 144u16), (200, 60), (60, 24)] {
             let area = Rect::new(0, 0, cols, rows);
-            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
             let cells = ready.proto.size();
             let (gw, gh) = sample_grid(cells);
             let ideal = ideal(&canvas, gw, gh);
@@ -3546,7 +3680,7 @@ mod resample_tests {
         }
         // …and at the pane the defect was reported at, by a margin worth having.
         let area = Rect::new(0, 0, 458, 144);
-        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
         let cells = ready.proto.size();
         let ideal = ideal(&canvas, sample_grid(cells).0, sample_grid(cells).1);
         let once = rms(&screen_grid(&ready.proto, cells), &ideal);
@@ -3582,7 +3716,7 @@ mod resample_tests {
                 .new_protocol(image::DynamicImage::ImageRgba8(img), Size::new(area.width, area.height), fit)
                 .expect("encode")
                 .size();
-            let got = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None).expect("encode");
+            let got = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
             assert_eq!(
                 got.proto.size(),
                 want,
@@ -4283,7 +4417,9 @@ mod tests {
         gr.render(&picker, &gw, area, Style::default(), &mut buf);
         let first = buf.cell((0, 0)).unwrap().symbol().to_string();
         assert!(first.contains(",r=2,c=138,"), "transmit declares the explicit cell grid");
-        assert!(first.contains("a=T,U=1,f=32,o=z"), "virtual placement transmit present");
+        // No `o=z`: `from_fontsize` asks the terminal nothing, so its capability
+        // list is empty and the transmit must go out raw (SQ-0997).
+        assert!(first.contains("a=T,U=1,f=32,t=d"), "virtual placement transmit present");
         assert!(first.contains(",p=1,"), "and names the placement it owns (SQ-0995)");
         assert!(first.contains('\u{10EEEE}'), "placeholder run present");
         assert!(!first.contains("a=d"), "first transmit deletes nothing");
@@ -4566,7 +4702,7 @@ mod tests {
         let area = Rect::new(0, 0, 200, 100);
         let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
         let kitty = kitty_picker(10, 20);
-        let ready = GraphicsRender::encode_v6(&kitty, &canvas, 1, area, None).expect("encode");
+        let ready = GraphicsRender::encode_v6(&kitty, &canvas, 1, area, None, None).expect("encode");
         // The encoded protocol reports its device size; 2× of 32 = 64 px = at most
         // ceil(64/20)=4 cells tall / ceil(64/10)=7 wide. Assert it is far smaller than
         // the pane (the cap engaged), not the full 200×100.
@@ -4574,7 +4710,7 @@ mod tests {
         assert!(sz.width <= 14 && sz.height <= 8, "capped image is ~2× native, got {sz:?}");
         // …and the same canvas on half-blocks, which encodes nothing, reaches the pane.
         let hb = Picker::halfblocks();
-        let hb_ready = GraphicsRender::encode_v6(&hb, &canvas, 1, area, None).expect("encode");
+        let hb_ready = GraphicsRender::encode_v6(&hb, &canvas, 1, area, None, None).expect("encode");
         let hb_sz = hb_ready.proto.size();
         assert!(
             hb_sz.width > sz.width && hb_sz.height > sz.height,
@@ -4587,6 +4723,181 @@ mod tests {
             area.width,
             area.height
         );
+    }
+
+    /// SQ-0996, on the two `ratatui-image` paths the v6 pane is actually drawn
+    /// through: a CHANGED chrome band and a CHANGED raster composite each cost the
+    /// picture and ONE cell, not the whole placeholder rect.
+    ///
+    /// The id is a per-cell value — `kitty_place_rows` writes its low 24 bits into
+    /// every placeholder's foreground and its high byte into the third diacritic —
+    /// so an id that moves dirties every cell of the placement. `ratatui-image`
+    /// draws a fresh random id for every `Protocol`, and both of these paths build a
+    /// new `Protocol` on every content change, so one changed pixel repainted the
+    /// rect. Measured under a pty on Journey r83 in raster mode at 117x64, one
+    /// changed frame: 3,680 cells and 48,742 bytes for a 7,668-byte image, against
+    /// 1 cell and 7,806 bytes.
+    ///
+    /// Asserted as a BUFFER DIFF because that is what ratatui emits — the property
+    /// is not "the id is equal" (a fix that held the id and rewrote the cells
+    /// anyway would pass that) but "the frame is one cell wide".
+    ///
+    /// FALSIFY by dropping the `reuse` argument at either encode site — hand
+    /// `picker.new_protocol` the image and let it draw its own id: the band case
+    /// fails with all 80 of its cells in the diff and the composite case with all
+    /// 40 of its.
+    mod stable_image_ids {
+        use super::*;
+
+        const CELL: (u16, u16) = (8, 18);
+
+        fn tinted(w: u32, h: u32, green: u8) -> image::RgbaImage {
+            image::RgbaImage::from_fn(w, h, |x, y| {
+                image::Rgba([((x + y) % 251) as u8, green, 0x40, 255])
+            })
+        }
+
+        #[test]
+        fn a_changed_chrome_band_keeps_its_id_so_the_diff_is_one_cell_not_the_rect() {
+            use crate::render::v6_layout::uniform_scale;
+            let picker = kitty_picker(CELL.0, CELL.1);
+            let mut gr = GraphicsRender::default();
+            let pane = Rect::new(0, 0, 20, 10);
+            let native = (pane.width as u32 * CELL.0 as u32, pane.height as u32 * CELL.1 as u32);
+            let scale = uniform_scale((native.0 as u16, native.1 as u16), (native.0, native.1));
+            let band = Rect::new(pane.x, pane.y, pane.width, 4);
+            let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+
+            let draw = |gr: &mut GraphicsRender, green: u8| {
+                let mut buf = Buffer::empty(pane);
+                gr.draw_chrome_band(&picker, &tinted(native.0, native.1, green), &scale, pane, band, &mut buf);
+                buf
+            };
+            // Two frames of the first art, so the band is settled — the second sheds
+            // the transmit escape and is otherwise identical to the first.
+            let _ = draw(&mut gr, 40);
+            let settled = draw(&mut gr, 40);
+            let id = gr.chrome_band_id(key).expect("a kitty placement names its image");
+
+            let changed = draw(&mut gr, 90);
+            // The DIFF first: it is the symptom, and a fix that held the id while
+            // rewriting the cells anyway would sail past the id assertion below.
+            let diff = settled.diff(&changed);
+            let cells = usize::from(band.width) * usize::from(band.height);
+            assert_eq!(
+                diff.len(),
+                1,
+                "a changed band costs the lead cell (which carries the transmit) and nothing \
+                 else, not all {cells} placeholders"
+            );
+            assert_eq!(gr.chrome_band_id(key), Some(id), "and its id did not move");
+            assert!(
+                diff[0].2.symbol().contains("a=T,"),
+                "and that one cell IS the new upload — one cell and no transmit would be a \
+                 frame that changed nothing"
+            );
+            assert!(
+                gr.queued_deletes().is_empty() && gr.queued_deletes_after_place().is_empty(),
+                "nothing is freed: the id we re-transmitted to is the id on screen, and \
+                 deleting it would take the picture with it"
+            );
+        }
+
+        #[test]
+        fn a_changed_raster_composite_keeps_its_id_so_the_diff_is_one_cell_not_the_pane() {
+            let picker = kitty_picker(CELL.0, CELL.1);
+            let mut gr = GraphicsRender::default();
+            let area = Rect::new(0, 0, 10, 4);
+            let native = (area.width as u32 * CELL.0 as u32, area.height as u32 * CELL.1 as u32);
+
+            let draw = |gr: &mut GraphicsRender, gen: u64, green: u8| {
+                gr.spawn_v6_encode(&picker, tinted(native.0, native.1, green), gen, area, None);
+                drain_v6_job(gr);
+                let mut buf = Buffer::empty(area);
+                gr.redraw_v6(&picker, area, &mut buf);
+                buf
+            };
+            let _ = draw(&mut gr, 1, 40);
+            let settled = draw(&mut gr, 2, 40);
+            let id = gr.v6.as_ref().and_then(|r| r.placed_id).expect("the composite is placed");
+
+            let changed = draw(&mut gr, 3, 90);
+            let diff = settled.diff(&changed);
+            let cells = usize::from(area.width) * usize::from(area.height);
+            assert_eq!(
+                diff.len(),
+                1,
+                "a changed composite costs one cell, not the pane's {cells}"
+            );
+            assert_eq!(
+                gr.v6.as_ref().and_then(|r| r.placed_id),
+                Some(id),
+                "and its id did not move"
+            );
+            assert!(diff[0].2.symbol().contains("a=T,"), "and that cell carries the new upload");
+            assert!(
+                gr.queued_deletes().is_empty() && gr.queued_deletes_after_place().is_empty(),
+                "the composite being replaced IS the one re-transmitted to; freeing it would \
+                 blank the pane"
+            );
+        }
+
+        /// SQ-0637 is untouched by SQ-0996, which is the half that is easy to lose:
+        /// an upload the app can no longer re-place must still be DELETED in the
+        /// terminal, or every abandoned band and every abandoned composite leaks a
+        /// cache generation until the terminal's own quota evicts something live.
+        ///
+        /// The id must not survive the abandonment either. Reviving a deleted id
+        /// would emit `a=d` for it (queued at eviction, riding out on whichever
+        /// placement goes next) possibly AFTER the transmit that revived it, and
+        /// the picture would be freed the moment it arrived.
+        #[test]
+        fn an_abandoned_upload_is_still_freed_and_never_comes_back_under_the_same_id() {
+            use crate::render::v6_layout::uniform_scale;
+            let picker = kitty_picker(CELL.0, CELL.1);
+            let mut gr = GraphicsRender::default();
+            let pane = Rect::new(0, 0, 20, 10);
+            let native = (pane.width as u32 * CELL.0 as u32, pane.height as u32 * CELL.1 as u32);
+            let scale = uniform_scale((native.0 as u16, native.1 as u16), (native.0, native.1));
+            let band = Rect::new(pane.x, pane.y, pane.width, 4);
+            let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+            let art = tinted(native.0, native.1, 40);
+
+            let mut buf = Buffer::empty(pane);
+            gr.draw_chrome_band(&picker, &art, &scale, pane, band, &mut buf);
+            let first = gr.chrome_band_id(key).expect("a kitty placement names its image");
+
+            gr.retain_chrome_bands(&std::collections::HashSet::new());
+            assert!(
+                gr.queued_deletes().contains(&format!("a=d,d=I,i={first}")),
+                "an evicted band is freed in the terminal, not merely forgotten (SQ-0637): {:?}",
+                gr.queued_deletes()
+            );
+
+            let mut buf = Buffer::empty(pane);
+            gr.draw_chrome_band(&picker, &art, &scale, pane, band, &mut buf);
+            assert_ne!(
+                gr.chrome_band_id(key),
+                Some(first),
+                "the revived band takes a NEW id — the old one has an `a=d` in flight for it"
+            );
+
+            // …and the same for the whole-pane composite, whose abandonment is the
+            // raster→ring transition Journey makes two frames into its boot.
+            let area = Rect::new(0, 0, 10, 4);
+            let canvas = tinted(area.width as u32 * CELL.0 as u32, area.height as u32 * CELL.1 as u32, 40);
+            gr.spawn_v6_encode(&picker, canvas, 1, area, None);
+            drain_v6_job(&mut gr);
+            let mut buf = Buffer::empty(area);
+            gr.redraw_v6(&picker, area, &mut buf);
+            let composite = gr.v6.as_ref().and_then(|r| r.placed_id).expect("placed");
+            gr.invalidate_v6();
+            assert!(
+                gr.queued_deletes().contains(&format!("a=d,d=I,i={composite}")),
+                "an abandoned composite is freed too: {:?}",
+                gr.queued_deletes()
+            );
+        }
     }
 
     #[test]
@@ -5047,13 +5358,21 @@ mod tests {
         assert_eq!(queued_delete_ids(&gr), vec![id], "invalidate frees what it drops");
     }
 
-    /// SQ-0753, the leak that runs on EVERY frame rather than at a transition: a
-    /// band whose pixels changed re-encodes into the same cache slot, and the
-    /// `insert` used to be the last anyone ever heard of its predecessor's id.
-    /// Journey's picture column re-encodes on each menu step, so this is where the
-    /// megabytes went.
+    /// SQ-0753's per-frame leak, and how SQ-0996 closed it for good: a band whose
+    /// pixels changed re-encodes into the same cache slot, and the `insert` used to
+    /// be the last anyone ever heard of its predecessor's id. Journey's picture
+    /// column re-encodes on each menu step, so this is where the megabytes went.
+    ///
+    /// SQ-0753 answered it by DELETING the predecessor. SQ-0996 answers it by not
+    /// creating one: the re-encode goes out under the id the band is already placed
+    /// as, replacing the data behind it. There is no predecessor to orphan, and no
+    /// delete — deleting that id would take the picture the frame just sent.
+    ///
+    /// A band therefore holds exactly ONE image in the terminal for as long as it
+    /// keeps its slot, which is a tighter bound than "free the last one each time"
+    /// and costs the whole placeholder rect less per frame.
     #[test]
-    fn re_encoding_a_chrome_band_deletes_the_upload_it_replaces() {
+    fn re_encoding_a_chrome_band_replaces_its_upload_in_place() {
         let (picker, mut chrome, scale, pane, band, mut buf) = band_fixture();
         let mut gr = GraphicsRender::default();
         let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
@@ -5069,11 +5388,21 @@ mod tests {
         // Change a pixel inside this band's native footprint → re-encode.
         chrome.put_pixel(1, 2, image::Rgba([255, 0, 0, 255]));
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
-        let second = gr.chrome_band_id(key).expect("placed again");
-        assert_ne!(second, first, "a re-encode is a new upload with a new id");
-        // The delete rides out on the replacement's own placement, in one batch.
-        assert_eq!(freed_ids(&gr, &buf), vec![first], "the replaced upload is freed, not orphaned");
-        assert!(gr.queued_deletes().is_empty(), "and it went with the frame rather than waiting");
+        assert_eq!(
+            gr.chrome_band_id(key),
+            Some(first),
+            "a re-encode re-transmits to the id the band already lives under (SQ-0996)"
+        );
+        assert!(
+            freed_ids(&gr, &buf).is_empty(),
+            "and frees nothing: that id is the one on screen, so an `a=d` for it would blank \
+             the rect the frame just repainted"
+        );
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            text.contains(&format!("i={first},")),
+            "the new pixels did go out, under the unmoved id"
+        );
     }
 
     /// SQ-0817: …and it rides BEHIND that placement, never ahead of it.
@@ -5089,6 +5418,16 @@ mod tests {
     /// A frame's cells are emitted in row-major order, so their concatenated symbols
     /// are the frame's byte order: the assertion is simply that this delete is the
     /// last escape in it.
+    ///
+    /// **Driven at the mechanism, because SQ-0996 removed its last producer.** The
+    /// two paths that used to supersede an upload — a chrome band re-encoding into
+    /// its own slot, the composite replaced by the next encode — now re-transmit to
+    /// the id already on screen and free nothing at all, so nothing reaches
+    /// `deletes_after_place` through the ordinary v6 frame any more. The RULE is
+    /// unchanged and the machinery is kept for whatever queues into it next: a
+    /// delete for an id that is still covering its rect must be emitted after every
+    /// byte of the placement that covers it again. Queuing one directly is the only
+    /// way left to say so, and saying so is worth more than deleting the guard.
     #[test]
     fn the_upload_being_replaced_is_freed_only_after_its_replacement_is_placed() {
         let (picker, mut chrome, scale, pane, band, mut buf) = band_fixture();
@@ -5098,18 +5437,19 @@ mod tests {
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
         let first = gr.chrome_band_id(key).expect("placed");
 
-        // The replacement frame gets a clean buffer, so what it carries is its own.
+        // The replacement frame gets a clean buffer, so what it carries is its own —
+        // and an upload that is still covering this very rect is queued to be freed
+        // on it.
         let mut buf = Buffer::empty(pane);
+        gr.queue_protocol_delete_after_place(Some(first));
         chrome.put_pixel(1, 2, image::Rgba([255, 0, 0, 255]));
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
-        let second = gr.chrome_band_id(key).expect("placed again");
-        assert_ne!(second, first, "a re-encode is a new upload with a new id");
 
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         let del = format!("\x1b_Gq=2,a=d,d=I,i={first}\x1b\\");
-        let at = text.find(&del).expect("the replaced upload is freed in this frame");
+        let at = text.find(&del).expect("the superseded upload is freed in this frame");
         assert!(
-            text[..at].contains(&format!("i={second}")),
+            text[..at].contains("a=T,"),
             "the replacement was still un-transmitted when its predecessor was freed — the \
              rect draws nothing until the upload lands, which is the flicker"
         );
@@ -5138,42 +5478,33 @@ mod tests {
         gr.redraw_v6(&picker, area, &mut buf);
         let first = gr.v6.as_ref().and_then(|r| r.placed_id).expect("the composite knows its id");
 
-        // A second generation replaces it on the worker thread. The composite it
-        // replaces is the whole pane the terminal is showing, so its delete waits
-        // BEHIND the placement that covers the pane again rather than riding ahead of
-        // a pane-sized upload (SQ-0817).
+        // A second generation replaces it on the worker thread — and since SQ-0996 it
+        // is the SAME upload, re-transmitted: the composite's id is written into all
+        // 12 of this pane's placeholder cells (3,680 at 117x64), so moving it would
+        // repaint the pane to change the picture. Nothing is freed, because the id
+        // being replaced is the id the frame is about to place.
         gr.spawn_v6_encode(&picker, canvas.clone(), 2, area, None);
         drain_v6_job(&mut gr);
         assert!(
-            queued_delete_ids(&gr).is_empty(),
-            "the live composite must not be freed ahead of its own replacement"
-        );
-        assert_eq!(
-            delete_ids(&gr.deletes_after_place),
-            vec![first],
-            "…it is queued to ride out behind that replacement"
+            queued_delete_ids(&gr).is_empty() && gr.deletes_after_place.is_empty(),
+            "a re-encode frees nothing: it replaces the data behind an id that never moved"
         );
         let mut frame = Buffer::empty(area);
         gr.redraw_v6(&picker, area, &mut frame);
         let second = gr.v6.as_ref().and_then(|r| r.placed_id).expect("placed");
-        assert_ne!(second, first, "the new generation is a different upload");
+        assert_eq!(second, first, "the new generation lives under the same id");
 
         let text: String = frame.content().iter().map(|c| c.symbol()).collect();
-        let at = text
-            .find(&format!("\x1b_Gq=2,a=d,d=I,i={first}\x1b\\"))
-            .expect("the superseded composite is freed on the frame that replaces it");
-        assert_eq!(
-            at,
-            text.rfind("\x1b_G").expect("the frame carries APC traffic"),
-            "the composite is freed only after every byte of its replacement"
-        );
+        assert!(text.contains(&format!("i={first},")), "the new pixels went out under it");
+        assert!(!text.contains("a=d,"), "and took nothing with them");
 
-        // …and the raster→ring transition frees whatever was up. Nothing places
-        // after it — that is what the transition IS — so it waits for the frame's
-        // closing flush.
+        // …but the raster→ring transition abandons the composite outright — there is
+        // no re-transmit to replace it, so SQ-0637's delete still has to happen, and
+        // nothing places after it (that is what the transition IS), so it waits for
+        // the frame's closing flush.
         gr.invalidate_v6();
-        assert_eq!(queued_delete_ids(&gr), vec![second], "invalidation frees the live composite too");
-        assert_eq!(freed_ids(&gr, &frame), vec![first, second], "both generations end up freed");
+        assert_eq!(queued_delete_ids(&gr), vec![second], "invalidation frees the live composite");
+        assert_eq!(freed_ids(&gr, &frame), vec![second], "which is the one upload there was");
     }
 
     /// The deletes above are worthless unless they reach the terminal, and the v6
@@ -5268,7 +5599,7 @@ mod tests {
         #[test]
         fn the_transmit_declares_o_z_and_the_canvas_own_uncompressed_dimensions() {
             let img = canvas(640, 400);
-            let (keys, _) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 25, 80));
+            let (keys, _) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 25, 80, true));
             assert!(keys.contains(",o=z"), "the payload is compressed and must say so: {keys}");
             assert!(keys.contains(",f=32"), "`o=z` is the encoding; `f` is still the format: {keys}");
             // s/v name the image, not the payload. 640x400 is 1,024,000 raw bytes
@@ -5283,7 +5614,7 @@ mod tests {
         fn inflating_the_reassembled_payload_reproduces_the_canvas_byte_for_byte() {
             for (w, h) in [(640u32, 400u32), (232, 304), (1104, 36), (1, 1)] {
                 let img = canvas(w, h);
-                let (_, payload) = parse(&kitty_transmit_virtual(&img, 7, 2, 8));
+                let (_, payload) = parse(&kitty_transmit_virtual(&img, 7, 2, 8, true));
                 let mut raw = Vec::new();
                 std::io::copy(&mut flate2::read::ZlibDecoder::new(&payload[..]), &mut raw)
                     .unwrap_or_else(|e| panic!("{w}x{h}: the payload must be one zlib stream: {e}"));
@@ -5301,7 +5632,7 @@ mod tests {
                 let c = ((y / 25) * 17) as u8;
                 image::Rgba([c, c / 2, 255 - c, 255])
             });
-            let transmit = kitty_transmit_virtual(&img, 7, 25, 80);
+            let transmit = kitty_transmit_virtual(&img, 7, 25, 80, true);
             let raw_b64 = 1024000usize.div_ceil(3) * 4;
             assert!(
                 transmit.len() * 20 < raw_b64,
@@ -5310,6 +5641,63 @@ mod tests {
                 transmit.len()
             );
         }
+
+        /// SQ-0997: a terminal that did not answer the `o=z` probe is sent the
+        /// pixels RAW, and the transmission is otherwise the same command.
+        ///
+        /// The claim is not "we omitted `o=z`" but that the bytes behind the
+        /// omission are the canvas itself: a transmit that dropped the key while
+        /// still deflating the payload contains no `o=z` just the same, and a real
+        /// terminal would read `s*v*4` bytes of image out of a few thousand bytes
+        /// of zlib and store nothing. Every geometry key is unchanged, because
+        /// `o=z` describes the payload's encoding and nothing about the image.
+        #[test]
+        fn a_terminal_that_cannot_inflate_is_sent_the_canvas_raw() {
+            let img = canvas(232, 304);
+            let (keys, payload) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 19, 29, false));
+            assert!(!keys.contains("o=z"), "nothing may claim to be compressed: {keys}");
+            assert!(keys.contains(",f=32"), "the format is still RGBA: {keys}");
+            assert!(keys.contains(",s=232,v=304,"), "the pixel dimensions do not move: {keys}");
+            assert!(keys.contains(",r=19,c=29,"), "nor does the explicit placeholder grid: {keys}");
+            assert_eq!(payload, *img.as_raw(), "the payload IS the canvas, undeflated");
+        }
+    }
+
+    /// SQ-0997: the graphics-window encoder asks the picker whether this terminal
+    /// can inflate, exactly as `ratatui-image` has since SQ-0991.
+    ///
+    /// A capability list can only be filled by `Picker::from_query_stdio`, which
+    /// needs a terminal — so every picker a headless test can build reports "no",
+    /// and "no" is the answer that matters: an `o=z` transmission such a terminal
+    /// cannot inflate is REFUSED, the image is never stored, and every placeholder
+    /// cell naming it draws nothing at all. The window is simply empty, silently.
+    ///
+    /// FALSIFY by restoring the unconditional `o=z` in `kitty_transmit_virtual`:
+    /// this fails on the first assertion, with the frame claiming a compression
+    /// nobody agreed to.
+    #[test]
+    fn a_graphics_window_transmit_is_raw_when_the_picker_knows_of_no_compression() {
+        let img = image::RgbaImage::from_fn(64, 36, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 241) as u8, 0x40, 255])
+        });
+        let gw = GraphicsWindow { win: 4, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
+        let picker = kitty_picker(8, 18);
+        assert!(
+            !kitty_compression(&picker),
+            "an unqueried picker carries no capabilities, so it cannot promise inflation"
+        );
+
+        let area = Rect::new(0, 0, 8, 2);
+        let mut gr = GraphicsRender::default();
+        let mut buf = Buffer::empty(area);
+        gr.render(&picker, &gw, area, Style::default(), &mut buf);
+
+        let first = buf.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(first.contains("a=T,U=1,f=32,t=d"), "the transmit is there and states no encoding: {first:?}");
+        assert!(
+            !first.contains("o=z"),
+            "the terminal never said it could inflate, so the transmit must not say it did: {first:?}"
+        );
     }
 
     /// SQ-0988: the terminal's cell size is measured once at launch, so a font
@@ -5364,9 +5752,9 @@ mod tests {
                 image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255])
             });
             let area = Rect::new(0, 0, 80, 25);
-            let a = GraphicsRender::encode_v6(&kitty(4, 7), &canvas, 1, area, None)
+            let a = GraphicsRender::encode_v6(&kitty(4, 7), &canvas, 1, area, None, None)
                 .expect("a kitty encode of a real canvas");
-            let b = GraphicsRender::encode_v6(&kitty(4, 9), &canvas, 1, area, None)
+            let b = GraphicsRender::encode_v6(&kitty(4, 9), &canvas, 1, area, None, None)
                 .expect("a kitty encode of a real canvas");
             assert_ne!(
                 (a.proto.size().width, a.proto.size().height),

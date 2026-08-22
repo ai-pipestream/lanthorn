@@ -2596,6 +2596,16 @@ Measured on advent.blb under a pty, the whole capture went from ~314 KB to 54 KB
 Compressing the image is only half that path's bill, though — see *A graphics
 window's image id never moves* below for the other half, which was larger.
 
+**And it asks the terminal first, on both paths** (SQ-0997). This one did not,
+for a while: SQ-0976 taught it `o=z` before `Capability::KittyCompression`
+existed, so it stated `o=z` whatever the probe said — and on a terminal that
+speaks kitty graphics but cannot inflate, that is not a slow upload but an absent
+one. The transmission is refused, the image is never stored, and every
+placeholder cell naming it draws nothing: no error, no fallback, just windows
+with no pictures in them, while the chrome ring beside them (which *did* ask)
+drew perfectly. Both encoders now read the same answer, and an empty capability
+list means raw — see the paragraph on what *cannot* ask, below.
+
 The v6 chrome ring's bands and the full-pane raster composite go through
 `ratatui-image`, which is a layer down and was the larger prize — the ring alone
 was emitting more than the windows ever did. It compresses too now (SQ-0991),
@@ -2695,6 +2705,67 @@ Resize is the one thing that still churns the id, and must: the placement's `r×
 grid is baked into the transmission, so an upload at the old size can never be
 re-placed at the new one. It is deleted in the same batch as its replacement, as
 it has been since SQ-0637.
+
+## …and neither does a chrome band's, nor the raster composite's
+
+The section above is about *graphics windows* — Glulx toolbars, Scott room
+pictures, the odd v6 window drawn as an image. **The v6 pane is not drawn through
+that emitter at all.** Journey r83, Zork Zero r393, Shogun r322 and Arthur r74
+emit no ids from lanthorn's own range: their art is a chrome ring of bands and,
+in raster mode, one full-pane composite, and both go through `ratatui-image`. So
+the whole win above landed one layer away from the pictures most players are
+looking at.
+
+The crate has the same defect, from the other direction. It draws a fresh
+`rand::random()` id for every `Protocol` it builds, and lanthorn builds a new one
+on every content change — so a band that changed by one pixel, and a composite
+that changed by one pixel, each repainted their entire placeholder rect. A
+composite covers the pane: 3,680 cells at 117×64.
+
+The fix is the same fix, and it needed one addition to the fork:
+`Picker::new_protocol_with_id`, which is `new_protocol` with the kitty id handed
+in instead of drawn. Lanthorn passes back the id the band or composite is
+*already placed as* — read off the placement it last wrote, which is also what
+makes it `None` under half-blocks and sixel, where there are no ids and none are
+wanted. The crate's own transmit now names its placement (`p=1`) for the same
+reason lanthorn's does, and for one more: `StatefulKitty::resize_encode` already
+re-transmitted to a live id on every resize, so the duplicate-placement pile-up
+was reachable in the crate without lanthorn's help.
+
+Measured under a pty at 117×64, comparing frames by their image payload so the
+two runs are describing the same frame:
+
+| frame (Journey r83, raster mode) | before | after | |
+|---|---:|---:|---|
+| composite, 7,668 B image | 48,742 B / 3,680 cells | 7,806 B / **1 cell** | 6.2× |
+| composite, 25,452 B image | 62,911 B / 3,680 cells | 24,622 B / **1 cell** | 2.6× |
+| composite, 42,084 B image | 83,274 B / 3,680 cells | 42,339 B / **1 cell** | 2.0× |
+
+| frame (Zork Zero r393, hybrid ring) | before | after | |
+|---|---:|---:|---|
+| one 64×126 band, 588 B image | 1,346 B / 56 cells | 729 B / **1 cell** | 1.85× |
+| one 64×126 band, 604 B image | 1,419 B / 56 cells | 745 B / **1 cell** | 1.90× |
+| two bands, 600 + 592 B images | 3,272 B / 116 cells | 1,580 B / **4 cells** | 2.07× |
+
+Every changed frame now costs its picture and a single cell. The floor is the
+image, which is what it should be.
+
+**One frame shape does not improve, and it is worth knowing why.** Journey r83's
+39×20-cell illustration band went 27,751 B → 26,943 B on the frames where the
+picture changes, and still emitted all 780 placeholders. The id holds still; the
+*background* underneath does not. Those cells carry a background colour taken from
+the game's window, Journey changes it when it changes scene, and a cell's style is
+part of ratatui's cell equality — so the rect is dirty for a reason that has
+nothing to do with the id, on exactly the frames the art moves. The colour is
+invisible (the image covers it) and its repaint is pure cost; not painting a
+ground into a cell a placement is about to cover is a separate change, and not
+this one.
+
+SQ-0637 is untouched in both paths: a band evicted from the ring, a ring
+invalidated wholesale, and a composite abandoned at the raster→ring transition are
+all still deleted in the terminal, and all come back under a **new** id. They have
+to — the `a=d` for the old one is queued and rides out on whichever placement goes
+next, which could be after a transmit that revived it.
 
 ## Half-blocks pays by the cell, and no palette can help it
 
@@ -2903,7 +2974,7 @@ question the command was written for:
 ```
   kitty transmission compression (o=z):
     ratatui-image uploads (v6 chrome bands, the raster composite, cover + inline art): COMPRESSED — the terminal answered the o=z probe
-    graphics-window uploads (lanthorn's own transmit): COMPRESSED — unconditionally; that path states o=z whatever the probe said
+    graphics-window uploads (lanthorn's own transmit — Glulx toolbars, Scott room pictures, v6 graphics windows): COMPRESSED — the same o=z probe governs both encoders
 ```
 
 Two lines because there are two encoders, and only one of them asks. Compression
