@@ -413,6 +413,17 @@ know which side you're on).
   grouped by category; `/help <command>` shows one command's usage and
   description. Names Tab-autocomplete, and feedback stays quiet on the status
   line.
+- **`/dump-terminal`** — what lanthorn detected about the terminal it is drawing
+  on, and, for every number that is a guess, that it *is* one: the graphics
+  protocol and whether it was detected or forced; the cell size in pixels **and
+  whether it was measured (`CSI 16 t`), derived (`TIOCGWINSZ`) or assumed (a
+  hardcoded 10x20)**; the cell aspect and its signed distance from the 2.000 that
+  makes a half-block sample square; the capability list — including whether kitty
+  uploads are actually going out compressed, which fails silently in both
+  directions; and the render state and byte counts that explain each other when a
+  session feels slow. Printed to the transcript and appended to
+  `~/.lanthorn/dump-terminal.log`, which is the copy to attach to a bug report.
+  See [the v6 graphics notes](v6-graphics.md) for a worked example.
 - **Command palette** — a fuzzy-searchable popup over *every* registry command,
   reachable even where no prompt exists (modals, the debug pane). Press `/` at an
   empty story prompt, or `/` inside the leader dialog (`Ctrl+P`), to summon it.

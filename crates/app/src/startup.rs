@@ -45,7 +45,10 @@ pub(crate) struct BootResult {
     pub session: Box<dyn Engine>,
     pub mapper: Mapper,
     pub state: AppState,
-    pub terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Wrapped in [`app::terminal_dump::CountingWriter`] so `/dump-terminal` can
+    /// report how many bytes a frame costs (SQ-0994). One `fetch_add` per write
+    /// and one per flush; it never looks at a byte.
+    pub terminal: Terminal<CrosstermBackend<app::terminal_dump::CountingWriter<Stdout>>>,
     pub game_dir: std::path::PathBuf,
     pub ifid: String,
     pub arc_file: std::path::PathBuf,
@@ -1357,7 +1360,17 @@ pub(crate) fn boot_story(
         let _ = execute!(stdout(), EnableMouseCapture);
     }
 
-    let terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
+    // Every byte the backend writes is counted on the way out, so `/dump-terminal`
+    // can answer "why does this feel slow?" with numbers (SQ-0994). The handle is
+    // shared with `AppState`, which is the only thing that reads them; the
+    // `execute!(stdout(), …)` escapes above deliberately bypass it, because they
+    // are session setup rather than frame traffic.
+    let traffic: app::terminal_dump::TrafficHandle = Default::default();
+    state.term_traffic = Some(std::sync::Arc::clone(&traffic));
+    let terminal = match Terminal::new(CrosstermBackend::new(app::terminal_dump::CountingWriter::new(
+        stdout(),
+        traffic,
+    ))) {
         Ok(t) => t,
         Err(e) => {
             restore_terminal();

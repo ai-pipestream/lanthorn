@@ -61,6 +61,8 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # "room_dock.header" = { parent = "heading" }
 # "room_dock.header:pinned" = { parent = "accent", reversed = true }
 # story_info_title = { parent = "heading" }
+# terminal_dump_heading = { parent = "heading", bold = true }
+# terminal_dump_assumed = { parent = "alert" }
 # story_info_value = { parent = "text" }
 # story_info_blurb = { parent = "muted", italic = true }
 # story_info_link = { parent = "accent", underline = true }
