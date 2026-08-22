@@ -80,6 +80,21 @@ from a different adventure is refused rather than half-applied.
 
 ### Fixed
 
+- **The map's in/out portal badges are glyphs your font actually has.** They were
+  `⊙` and `⊗` from Miscellaneous Mathematical Operators, a block monospace faces
+  routinely skip — Fira Code carries neither, so the badge came out as tofu or in
+  whatever fallback face your terminal reached for, at the wrong weight and width.
+  They are now `◉` and `◎` from Geometric Shapes, the block the map already leans
+  on for `● ▲ ▼ ◀ ▶`: the same reading (a circle with something in it, filled for
+  the way in, hollow for the way out) drawn by every font that could draw the old
+  pair, and by several that could not. `portal.in` / `portal.out` in `style.toml`
+  put the old pair back in one line. The `nerdfont` preset's up/down icons are
+  fixed too — they named two codepoints that Nerd Fonts calls
+  `md-card_bulleted_off`, so patched faces drew a crisp icon of the wrong thing.
+- **`/export-map` draws the map with your glyphs, not the shipped ones.** The dump
+  reached for hard-coded portal constants and a default symbol set, so a player
+  who had chosen `portal_icons = "nerdfont"` got a dump that disagreed with the
+  screen it was meant to be a picture of.
 - **Quitting a CLI no longer lets your shell draw over the game's last page.**
   Under `--pin bottom` the final screen never reached scrollback: the teardown
   parked the cursor on the bottom row and then reset the scroll region, and
