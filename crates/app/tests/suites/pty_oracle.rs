@@ -703,6 +703,91 @@ mod emitter {
         );
     }
 
+    /// SQ-0996, the same property one layer over: a CHROME BAND, which is placed by
+    /// `ratatui-image` rather than by lanthorn's own emitter.
+    ///
+    /// This is the path the v6 pane is actually drawn through. SQ-0995's lane
+    /// established that `render_kitty_virtual` — the window emitter every case above
+    /// exercises — is not reached by v6 at all: Journey, Zork Zero, Shogun and
+    /// Arthur emit no ids from lanthorn's own range, because their art is a chrome
+    /// ring of bands and a raster composite, and both go through the crate. The
+    /// crate drew a fresh `rand::random()` id per `Protocol`, so a band that changed
+    /// by one pixel repainted its whole placeholder rect; `Picker::new_protocol_with_id`
+    /// (added to the fork) hands it back the id it is already placed as.
+    ///
+    /// Both halves again, and for the same reason as the window case: the bytes are
+    /// what the quest is about, and the emulator's storage is what makes them safe.
+    /// A re-transmit that replaced the image without re-creating the placement would
+    /// cost one cell and draw nothing at all.
+    #[test]
+    fn a_changed_chrome_band_re_transmits_to_the_same_id_and_emits_one_cell() {
+        use app::render::v6_layout::uniform_scale;
+        const PLACEHOLDER: &[u8] = "\u{10EEEE}".as_bytes();
+
+        let picker = kitty_picker(CELL_W, CELL_H);
+        let mut gr = GraphicsRender::default();
+        let (mut term, sink) = terminal();
+
+        let pane = Rect::new(0, 0, COLS, ROWS);
+        let native = (u32::from(COLS) * u32::from(CELL_W), u32::from(ROWS) * u32::from(CELL_H));
+        let scale = uniform_scale((native.0 as u16, native.1 as u16), native);
+        let band = Rect::new(0, 0, COLS, 4);
+        let art = |green: u8| {
+            image::RgbaImage::from_fn(native.0, native.1, |_x, y| {
+                image::Rgba([(y % 251) as u8, green, 200, 255])
+            })
+        };
+        let mut frame = |gr: &mut GraphicsRender, green: u8| {
+            term.draw(|f| gr.draw_chrome_band(&picker, &art(green), &scale, pane, band, f.buffer_mut()))
+                .expect("drawing into a byte sink cannot fail");
+        };
+
+        // Two frames of the first art, so the band is settled.
+        frame(&mut gr, 40);
+        frame(&mut gr, 40);
+        let settled = sink.0.borrow().len();
+
+        frame(&mut gr, 90);
+        let emitted = sink.0.borrow()[settled..].to_vec();
+
+        let cells = emitted.windows(PLACEHOLDER.len()).filter(|w| *w == PLACEHOLDER).count();
+        let grid = usize::from(band.width) * usize::from(band.height);
+        assert_eq!(
+            cells, 1,
+            "a changed band emits the lead cell carrying the transmit and nothing else, not \
+             all {grid} placeholders ({} bytes emitted)",
+            emitted.len()
+        );
+        assert!(
+            emitted.windows(4).any(|w| w == b"a=T,"),
+            "and it does carry the new pixels — one cell and no upload would be a frame that \
+             changed nothing"
+        );
+        assert!(
+            !emitted.windows(4).any(|w| w == b"a=d,"),
+            "and frees nothing: the id re-transmitted to is the id on screen"
+        );
+
+        // What a real terminal is holding afterwards.
+        let res = resolve(&sink);
+        assert_eq!(res.placements.len(), 1, "{}", res.describe_placements());
+        let p = &res.placements[0];
+        assert_eq!(
+            (p.top, p.bottom, p.left, p.right, p.cells),
+            (band.y, band.y + band.height - 1, band.x, band.x + band.width - 1, grid),
+            "the re-transmit must leave the placement covering the whole band: {}",
+            p.describe()
+        );
+        let img = res.images.get(&p.image_id).unwrap_or_else(|| {
+            panic!("the terminal holds no image {:#010x}: {}", p.image_id, res.describe_placements())
+        });
+        assert_eq!(
+            img.rgba.get(1).copied(),
+            Some(90),
+            "re-transmitting to a live id replaces the data behind it"
+        );
+    }
+
     /// The other half of the rule, and the reason the fix is buffer-visible cells
     /// rather than only self-describing ones: a frame that simply STOPS drawing the
     /// art must unpaint every placeholder cell it left behind.
