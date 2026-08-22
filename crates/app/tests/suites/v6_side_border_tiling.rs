@@ -277,10 +277,35 @@ fn drive(s: &mut GameSession, turns: usize) {
 fn render_state_with(honor: bool) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
-    state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+    state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(CELL));
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honor;
     state
+}
+
+/// The one statement of this suite's device cell, and the ONLY one (SQ-0990).
+///
+/// 8x18 is a plausible kitty cell and deliberately NOT the gallery's 8x16: the
+/// gallery wants an exact 1:2 so a half-block sample comes out square (SQ-0963),
+/// while this suite is about how bands tile and stretch, where a cell that is not
+/// 1:2 is the harder case and the one a real terminal is more likely to hand you.
+/// The value is not the point — the duplication was. It used to be restated at
+/// four `pane.1 as u32 * 18` sites beside the picker that actually decides, and
+/// nothing tied them: change the picker and every one of those numbers silently
+/// keeps measuring a screen the render no longer draws, which is exactly how
+/// `ring_scout` and this file's own `boot()` came to measure 560x384 presses at
+/// 640x400 and hide two real defects for two rounds (SQ-0901). [`pane_dev`] now
+/// reads the cell back off the picker, so the two cannot disagree at all.
+const CELL: ratatui_image::FontSize = ratatui_image::FontSize { width: 8, height: 18 };
+
+/// The pane in DEVICE pixels, taken from the picker the render will actually use.
+fn pane_dev(state: &app::state::AppState, pane: (u16, u16)) -> (u32, u32) {
+    let fs = state
+        .game_picker
+        .as_ref()
+        .expect("every render_state carries a picker; the cell is what this converts")
+        .font_size();
+    (u32::from(pane.0) * u32::from(fs.width), u32::from(pane.1) * u32::from(fs.height))
 }
 
 /// The shipped default, and this suite's primary baseline.
@@ -369,7 +394,7 @@ fn frame_mags(session: &GameSession, pane: (u16, u16)) -> (Vec<app::render::grap
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
     let native = app::render::v6_layout::native_extent(items);
-    let pane_dev = (pane.0 as u32 * 8, pane.1 as u32 * 18);
+    let pane_dev = pane_dev(&state, pane);
     let s = app::render::v6_layout::uniform_scale(native, pane_dev).s;
     let mags = state.graphics_render.borrow().band_mags.clone();
     (mags, s)
@@ -1932,7 +1957,7 @@ fn a_divider_extension_replicates_a_rule_and_never_a_picture() {
                 let mut buf = Buffer::empty(area);
                 let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
                 let log = state.graphics_render.borrow().band_log.clone();
-                let scale = app::render::v6_layout::uniform_scale(native, (w as u32 * 8, h as u32 * 18)).s;
+                let scale = app::render::v6_layout::uniform_scale(native, pane_dev(&state, (w, h))).s;
                 // One native text cell, plus the terminal column the crop's own
                 // outward rounding can add at each end.
                 let widest = 8.0 + 2.0 * (8.0 / scale).ceil();
@@ -2178,7 +2203,7 @@ fn frame_mags_locked(
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
     let native = app::render::v6_layout::native_extent(items);
-    let pane_dev = (pane.0 as u32 * 8, pane.1 as u32 * 18);
+    let pane_dev = pane_dev(&state, pane);
     let free = app::render::v6_layout::uniform_scale(native, pane_dev).s;
     let locked = app::render::v6_layout::fitted_scale(native, pane_dev, art_scale, true).0.s;
     let mags = state.graphics_render.borrow().band_mags.clone();
@@ -2297,7 +2322,7 @@ fn a_pane_below_the_smallest_rung_still_renders_freely() {
             WinNode::Layered(items) => app::render::v6_layout::native_extent(items),
             other => panic!("v6 Layered root, got {other:?}"),
         };
-        let pane_dev = (pane.0 as u32 * 8, pane.1 as u32 * 18);
+        let pane_dev = pane_dev(&render_state(), pane);
         assert!(
             app::render::v6_layout::locked_scale(native, pane_dev, art_scale).is_none(),
             "{}: {native:?} into {pane_dev:?} must have no rung, or this case proves nothing",
