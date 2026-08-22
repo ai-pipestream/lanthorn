@@ -1944,6 +1944,42 @@ pub fn story_text_native(
     story_prose_box(inset, story_gfx)
 }
 
+/// The pane COLUMNS the game's screen covers — `[off_x, off_x + native_w · s)` in
+/// device pixels, quantized OUTWARD to whole cells and clamped to `pane` (SQ-0946).
+///
+/// The letterbox margin beside it belongs to nobody: the ring's art bands are
+/// transparent there by construction, and a cell path that paints the GAME's own
+/// ground into it puts the frame off-centre by however wide the margin is. Journey's
+/// IBM PC press (`journey-r83-s890706.z6`, release 83) is the report — its left
+/// picture panel and its bottom command strip are both cell fills, and both ran to
+/// the pane edge. At a 98x37 pane with `v6_pixel_lock` on (`s = 1`, `off_x = 72`) the
+/// screen covers columns 9..89, and the panel was flooding 0..38: nine columns of
+/// game-coloured ground down the left of a pane whose right margin was bare, which is
+/// exactly the "not centred horizontally" the user sees. The ART itself was centred
+/// throughout — measured symmetric to the cell at every pane width from 80 to 160.
+///
+/// OUTWARD, not inward, and that is `screen::edge_glyph_col`'s rounding rather than
+/// [`native_viewport_box`]'s: an edge glyph is stamped in the column its
+/// native cell's outer edge falls in, so the ground beneath it has to be there. The
+/// viewport rounds the other way because it is carving a region out, not filling one.
+///
+/// Zero-cost where the art already fills the pane (`off_x == 0` and a width-bound
+/// fit), which is every frame the lock is off and the pane is wide — this only ever
+/// removes ink from a margin the game's screen does not reach.
+pub fn screen_cols(
+    scale: &Scale,
+    native_w: u16,
+    cell_px: (u16, u16),
+    pane: ratatui::layout::Rect,
+) -> (u16, u16) {
+    let cw = if cell_px.0 == 0 { 1 } else { cell_px.0 } as f32;
+    let dev0 = pane.x as f32 * cw + scale.off_x as f32;
+    let dev1 = dev0 + native_w as f32 * scale.s;
+    let lo = (dev0 / cw).floor().clamp(pane.x as f32, pane.right() as f32) as u16;
+    let hi = (dev1 / cw).ceil().clamp(lo as f32, pane.right() as f32) as u16;
+    (lo, hi)
+}
+
 /// The story viewport cell rect (relative to the pane's top-left cell) for the
 /// HYBRID render mode: the win0 box (`story` x_px/y_px/w_px/h_px, native game
 /// pixels) mapped through the letterbox [`Scale`] to device pixels, then quantized

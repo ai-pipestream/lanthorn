@@ -1899,7 +1899,25 @@ fn render_node(
                                         let inner = bord.and_then(|(_, i, _)| i.map(|(e, _)| e));
                                         let outer = bord.and_then(|(_, _, o)| o.map(|(e, _)| e));
                                         menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, inner, outer)
-                                            .map(|p| (*r, p))
+                                            // SQ-0946: and the panel's ground stops at the
+                                            // game SCREEN's edge. `menu_flank_panel` bounds
+                                            // the fill by the flank's two BORDER columns and
+                                            // falls back to the band when a border is not
+                                            // found — which is Journey's IBM PC press, whose
+                                            // outer rule is a reverse-video space the border
+                                            // probe does not return. The band runs to the
+                                            // pane edge, so the fill ran into the letterbox
+                                            // margin: nine columns of panel colour down the
+                                            // left of a 98x37 pane with `v6_pixel_lock` on,
+                                            // against a bare right margin. That asymmetry IS
+                                            // the report; the art itself was centred to the
+                                            // cell at every width measured.
+                                            .map(|(bg, fill, dest, crop)| {
+                                                let (lo, hi) = v6::screen_cols(&scale, native.0, cell_px, area);
+                                                let x = fill.x.max(lo);
+                                                let w = fill.right().min(hi).saturating_sub(x);
+                                                (*r, (bg, Rect::new(x, fill.y, w, fill.height), dest, crop))
+                                            })
                                     }
                                     _ => None,
                                 })
@@ -7063,8 +7081,15 @@ fn draw_chrome_text_strip(
     } else {
         base
     };
+    // …and it stops at the game SCREEN's edge, not the band's (SQ-0946). A band runs
+    // to the pane edge, and where the letterbox leaves a horizontal margin the strip
+    // was flooding the game's own ground into it — Journey's bottom command strip,
+    // nine columns past the frame on each side at a 98x37 pane with `v6_pixel_lock`
+    // on. Nothing changes where the art fills the pane, which is every width-bound
+    // fit with the lock off.
+    let (screen_lo, screen_hi) = crate::render::v6_layout::screen_cols(scale, native.0, cell_px, pane);
     for y in rect.y..rect.bottom() {
-        for x in rect.x..rect.right() {
+        for x in rect.x.max(screen_lo)..rect.right().min(screen_hi) {
             if let Some(c) = buf.cell_mut((x, y)) {
                 c.set_symbol(" ").set_style(strip_fill);
             }
@@ -7176,7 +7201,8 @@ fn draw_chrome_text_strip(
             || crate::render::v6_layout::packed_explicit(row_bg)
         {
             let fill = v6_run_style(base, row_fg, row_bg, all_rev as u8, honor, colors);
-            for c in rect.x..rect.right() {
+            // Bounded by the game SCREEN, like the strip flood above (SQ-0946).
+            for c in rect.x.max(screen_lo)..rect.right().min(screen_hi) {
                 buf.set_stringn(c, *row as u16, " ", 1, fill);
             }
         }

@@ -404,8 +404,25 @@ fn journey_hybrid_menu_full_black_panel_dividers_continuous() {
     // (a) The ENTIRE menu panel is a black background — every cell in the strip
     // (reversed or not, the stored bg stays black under the REVERSED modifier) is
     // Color::Black, so no theme backdrop shows through the gaps between the runs.
+    //
+    // "The entire panel" is the game's own SCREEN, not the pane (SQ-0946). At this
+    // size the halfblock cell is 1x2, so the pane is 100x60 device pixels against a
+    // 640x400 native screen and the fit is HEIGHT-bound: `s = 0.15`, the screen is 96
+    // device columns wide, and a two-column letterbox margin opens either side of it.
+    // The menu's ground stops there, because a strip that floods the margin puts the
+    // game's frame off centre by however wide the margin is — which is the whole of
+    // SQ-0946, reported on this very game. The gaps this case is about are the ones
+    // BETWEEN the runs, and they are all inside the screen.
+    let (lo, hi) = {
+        use app::render::v6_layout as v6;
+        let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+        let native = v6::native_extent(items.as_slice());
+        let (scale, _) = v6::fitted_scale(native, (area.width as u32, area.height as u32 * 2), (2, 2), false);
+        v6::screen_cols(&scale, native.0, (1, 2), area)
+    };
+    assert_eq!((lo, hi), (2, 98), "the height-bound fit leaves two columns of letterbox either side");
     for y in header_y..=game_y {
-        for x in 0..area.width {
+        for x in lo..hi {
             assert_eq!(
                 buf.cell((x, y)).unwrap().bg,
                 Color::Black,
