@@ -2632,6 +2632,52 @@ is exactly why it went unseen. The refresh now hands the new cell size to the
 picker it already has (`Picker::set_font_size`, added to the fork for it) and
 touches nothing else (SQ-0992).
 
+## Half-blocks pays by the cell, and no palette can help it
+
+Compression is a kitty story. Half-blocks emits no image at all — it emits
+*cells*, one `▀` per cell with a truecolor foreground and background — so `o=z`
+does nothing for it and its bill is written entirely in SGR. Measured under a pty
+with `--image-protocol halfblocks`, four fifths of everything lanthorn writes is
+colour changes:
+
+| capture | full repaint | SGR share | distinct colours |
+|---|---:|---:|---:|
+| Zork Zero r393, 200×100 cells at 4×9 px | 180 KB | 84.7% | 1,083 |
+| Zork Zero r393, 458×144 cells at 4×9 px | 489 KB | 81.7% | 1,419 |
+| Zork Zero r393, 700×220 cells at 4×9 px | 936 KB | 78.3% | 1,712 |
+| Journey r83, 117×64 cells at 8×18 px | 150 KB | 82.8% | 4,746 |
+
+`ESC[38;2;R;G;B;48;2;R;G;Bm` is about thirty bytes; the indexed form
+`ESC[38;5;N;48;5;Nm` is about eighteen, and OSC 4 can program a terminal palette
+entry to an exact RGB — so an obvious idea is to index the colour instead of
+spelling it. Infocom artwork is famously sixteen colours: a decoded picture is one
+palette index per pixel through a `[Rgb; 16]`, and 640×400 Amiga hires is four
+bitplanes, which is where the ceiling comes from. Sixteen entries, sixteen colours,
+done.
+
+**Except the artwork's colours are not what goes on the wire.** Half-blocks
+resolves one sample per column and two per row, so the composite is resampled onto
+that sample grid on the way out, and a *shrinking* resample averages neighbours
+into colours that were never in the picture. Aspect is preserved, so both axes
+always travel together and the whole thing turns on one comparison — the sample
+grid against the canvas:
+
+| Zork Zero picture 41 (15 colours) on its 640×400 screen | sample grid | colours emitted |
+|---|---|---:|
+| 117×64 pane | 117×74 | 665 |
+| 200×60 pane | 192×120 | 614 |
+| 458×144 pane | 458×288 | 1,165 |
+| **640×200 pane** | **640×400** | **15** |
+
+Shogun's richest illustration reaches 15,539. The grid stops shrinking only at a
+**640-column terminal**, and only there does an indexed encoding of the artwork
+become exact — which is not a width anybody has. Mapping the real numbers into the
+standard 256-colour cube instead costs a mean RGB error of 21–26 with 5–6% of
+emissions landing exactly: visible posterisation, on precisely the dithered art
+where the saving would have been concentrated. So neither half was built, and
+`v6_halfblocks_colour_depth` is the measurement kept executable so the idea can be
+re-opened on evidence rather than on arithmetic.
+
 ## `/dump-windows` reports the last frame the *game* drew
 
 When a v6 layout looks wrong, `/dump-windows` is how you say what you saw: one
