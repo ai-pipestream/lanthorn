@@ -364,3 +364,47 @@ from what the story is told, so a taller grid is not automatically a wrong one.
 It is recorded because it is now measurable against a machine, and because it
 says the Macintosh is the outlier by a wide margin while the Amiga is merely a
 bit small.
+
+
+AND THE COLOUR MACINTOSH PRESS, WHICH CLOSES THE PAIR (2026-08-22)
+
+  mac-zorkzero.png   Zork Zero, COLOUR press, at the Banquet Hall. 652x424.
+  mac-arthur.png     Arthur, COLOUR press. 652x423.
+
+Both are window captures rather than whole desktops, and both supersede the
+same-named .jpg beside them for every purpose except colour — the JPEGs remain
+only because they were cited before these existed. Measure from the PNGs.
+
+The question these answer is whether 7x15 is the b/w press's cell or the
+MACHINE's. It is the machine's, and `mac/xzip.lst` says so in one statement:
+
+    totRows := (bottom - top) {DIV lineheight};
+    totCols := ((right - left) - (2 * wMarg)) {DIV colWidth};
+
+One code path, one lineHeight, one colWidth. What the `myBig` branch varies is
+the window RECT it divides, not the cell it divides by:
+
+  CPic.data (colour)   320x200 art at 2x   ->  640x400 screen   ->  91 x 26 chars
+  Pic.data  (b&w)      480x300 art at 1x   ->  480x300 screen   ->  68 x 20 chars
+
+Measured, and it holds:
+
+  mac-arthur.png     content y 20..419 = 400 ROWS exactly, x 2..649 = 648 wide
+  mac-zorkzero-*.png content y 38..337 = 300 ROWS exactly, x 12..499 = 488 wide
+
+Both are 8 px wider than the interpreter's `wx`, which is `2 * wMarg` with
+wMarg = 4 — exactly the term totCols subtracts before dividing. 648-8 = 640 and
+488-8 = 480, the two `wx` values above.
+
+The colour prose confirms the line height independently: ascender tops at 266,
+281, 296, 311, 326 and 341, five consecutive gaps of 15. The b/w capture's
+PROLOGUE inverse bar says 15 from the other direction. Same cell, both presses.
+
+NOTE THE DIRECTION OF THAT PASCAL, IT IS AN IMPLEMENTATION CONSTRAINT
+
+totCols is derived FROM the window, and subtracts a margin before dividing.
+babelmap goes the other way — `session.rs` computes cols from pixels and
+`write_screen_dims` re-multiplies cols by the cell back into $22. That round trip
+is lossless at 8 (480/8 = 60, 60*8 = 480) and LOSSY at 7 (480/7 = 68, 68*7 =
+476). So the v6 path has to carry the pixel screen as primary and derive the
+grid from it, the way the Mac does. SQ-0917 is not a constant swap.
