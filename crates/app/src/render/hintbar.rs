@@ -50,6 +50,11 @@ pub const DEBUG_HINTS_UNIVERSAL: &[(&str, &str)] = &[
     ("\u{2190}\u{2192}", "section"),
     ("\u{2191}\u{2193}", "scroll"),
     ("PgUp/PgDn", "page"),
+    // Advertised only once they meant one thing (SQ-0984): they jumped to the
+    // extremes in the list sections and moved a single instruction or hex row in
+    // Disassembly and Memory, and a key that needs two descriptions cannot have
+    // an entry here.
+    ("Home/End", "ends"),
     ("Esc", "back"),
 ];
 
@@ -58,9 +63,10 @@ pub const DEBUG_HINTS_UNIVERSAL: &[(&str, &str)] = &[
 /// alone rather than advertising a key that does nothing where the user is
 /// standing.
 ///
-/// `g` is listed under Disassembly rather than universally: `handle_key`
-/// accepts it from any tab, but all it does is re-anchor the disassembly, which
-/// is invisible from anywhere else.
+/// `g` is listed under Disassembly rather than universally because that is where
+/// it works. It used to be accepted from any tab while only ever re-anchoring the
+/// disassembly — invisible from anywhere else, and the handler is now gated to
+/// match this list rather than the other way round (SQ-0984).
 fn debug_section_hints(
     section: Section,
     disasm_mode: &'static str,
@@ -185,7 +191,7 @@ mod tests {
 
     /// The universal tail, spelled out once so the per-section cases below
     /// assert on the whole line rather than on fragments of it.
-    const TAIL: &str = "Tab: window | \u{2190}\u{2192}: section | \u{2191}\u{2193}: scroll | PgUp/PgDn: page | Esc: back";
+    const TAIL: &str = "Tab: window | \u{2190}\u{2192}: section | \u{2191}\u{2193}: scroll | PgUp/PgDn: page | Home/End: ends | Esc: back";
 
     #[test]
     fn literal_hint_bar_joins_debug_hints() {
@@ -241,6 +247,31 @@ mod tests {
         assert!(line.ends_with('…'), "and the universal tail is what got cut: {line}");
         let line = literal_hint_bar(&debug_hints(Section::Disasm, "basic"), 24);
         assert!(line.starts_with("g: PC | r: basic"), "{line}");
+    }
+
+    /// SQ-0984: `Home`/`End` work in every section, so every section says so.
+    ///
+    /// They were left off the bar because they did not mean one thing — jump to
+    /// the extremes in the list sections, one instruction or one hex row in
+    /// Disassembly and Memory. Now that they do, the omission would be the same
+    /// defect as SQ-0980's the other way round: a key that works and is never
+    /// mentioned.
+    #[test]
+    fn every_section_advertises_the_keys_that_hold_everywhere() {
+        for section in [
+            Section::Disasm,
+            Section::Globals,
+            Section::Locals,
+            Section::Objects,
+            Section::Dict,
+            Section::CallStack,
+            Section::EvalStack,
+            Section::Memory,
+        ] {
+            let line = literal_hint_bar(&debug_hints(section, "full"), 200);
+            assert!(line.contains("Home/End: ends"), "{section:?} jumps to the ends: {line}");
+            assert!(line.contains("PgUp/PgDn: page"), "{section:?} pages: {line}");
+        }
     }
 
     #[test]

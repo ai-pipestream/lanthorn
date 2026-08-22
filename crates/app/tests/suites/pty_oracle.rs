@@ -291,6 +291,161 @@ mod protocol {
         let d = oracle::disagreements(&ours, &res);
         assert!(d.is_empty(), "the two decoders must agree on a plain painted fill: {d:#?}");
     }
+
+    /// An image id whose high byte is zero, so the low-24-bit foreground colour
+    /// below carries the whole of it and the placeholder run needs no real
+    /// high-byte diacritic.
+    const STACK_ID: u32 = 0x0000_0007;
+    /// How many cells wide the stacked placements and their placeholder run are.
+    const STACK_COLS: u16 = 2;
+
+    /// One image, several PIN placements on the home cell, and a placeholder run
+    /// printed over the top of them. Each pin is
+    /// `(placement id, z, source row, declared columns)`.
+    ///
+    /// Contrived, and it has to be: this is the shape that reaches the ambiguity
+    /// SQ-0982 is about, where more than one resolved placement lands on one
+    /// `(image, col, row)` and something has to choose between them. The transmit
+    /// is `a=t` — transmit ONLY — so the image arrives with no placement of its
+    /// own and every candidate below is one the test authored. Because none of
+    /// them is `U=1`, `Placement::grid` finds no virtual placement for the id and
+    /// the emulator resolves the placeholder run to nothing, which is exactly what
+    /// leaves the run to be explained by the pins.
+    fn stacked_pins(pins: &[(u32, i32, u32, u16)]) -> String {
+        let (w, h) = (u32::from(STACK_COLS) * CELL_W, CELL_H);
+        let mut s = format!(
+            "\x1b_Gq=2,a=t,i={STACK_ID},f=32,t=d,s={w},v={h},m=0;{}\x1b\\",
+            b64(&[9u8, 9, 9, 255].repeat((w * h) as usize))
+        );
+        for &(placement, z, source_row, cols) in pins {
+            // `C=1` so displaying one does not walk the cursor off the cell the
+            // next one has to be anchored to.
+            s.push_str(&format!(
+                "\x1b[1;1H\x1b_Gq=2,a=p,i={STACK_ID},p={placement},c={cols},r=1,\
+                 z={z},y={source_row},C=1\x1b\\"
+            ));
+        }
+        // The run itself, in lanthorn's own shape: the lead cell carries the
+        // diacritic triple (image row 0, image column 0, id high byte 0) and the
+        // rest lean on the continuation rule.
+        s.push_str("\x1b[1;1H\x1b[38;2;0;0;7m");
+        s.push('\u{10EEEE}');
+        s.push(D[0]);
+        s.push(D[0]);
+        s.push(D[0]);
+        for _ in 1..STACK_COLS {
+            s.push('\u{10EEEE}');
+        }
+        s.push_str("\x1b[39m");
+        s
+    }
+
+    /// One resolution of such a stream.
+    fn stacked_resolve(bytes: &str) -> oracle::Resolved {
+        oracle::resolve(
+            bytes.as_bytes(),
+            COLS,
+            ROWS,
+            CELL_W,
+            CELL_H,
+            Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)),
+        )
+    }
+
+    /// The source row the oracle reports for the home cell of such a stream.
+    fn stacked_source_row(bytes: &str) -> Option<u32> {
+        stacked_resolve(bytes).cell(0, 0).source_y
+    }
+
+    /// The rects it aggregates those placements into, as text — `ImageRect` is not
+    /// `PartialEq`, and its own description names everything two resolutions of one
+    /// stream could differ on.
+    fn stacked_rects(bytes: &str) -> String {
+        stacked_resolve(bytes).describe_placements()
+    }
+
+    /// Six placements of one image on one cell: the cell reports the source row
+    /// of the one a renderer draws on TOP.
+    ///
+    /// `OracleCell::source_y` answers "which pixel row of that image lands here",
+    /// and what lands on the glass is the topmost draw — so the protocol's own
+    /// z-order is the precedence, not whichever candidate a `HashMap` happened to
+    /// hand over last (SQ-0982). Each placement reads a different row of the image
+    /// (`y=0,2,…,10`) and sits at its own z, so exactly one answer is right and the
+    /// other five are the readings a wrong precedence gives.
+    #[test]
+    fn several_placements_on_one_cell_report_the_topmost_source_row() {
+        let pins: Vec<(u32, i32, u32, u16)> =
+            (0..6).map(|i| (i + 1, i as i32, i * 2, STACK_COLS)).collect();
+        let bytes = stacked_pins(&pins);
+
+        assert_eq!(
+            stacked_source_row(&bytes),
+            Some(10),
+            "z=5 is the top of the stack, so the cell shows image row 10 — any other \
+             row here is a lower placement winning, and `None` means the run never \
+             resolved at all"
+        );
+
+        // The other direction, which is what stops the above from passing for a
+        // reader that simply prefers the largest source row: turn the stack over
+        // and the bottom-most row is the one on top.
+        let flipped: Vec<(u32, i32, u32, u16)> =
+            (0..6).map(|i| (i + 1, -(i as i32), i * 2, STACK_COLS)).collect();
+        assert_eq!(
+            stacked_source_row(&stacked_pins(&flipped)),
+            Some(0),
+            "with the z order reversed, y=0 is the placement on top"
+        );
+    }
+
+    /// The same bytes must resolve to the same reading.
+    ///
+    /// The case SQ-0982 needed and did not have. `resolve_placements` documents
+    /// itself as returning "placements in arbitrary order" — it walks a `HashMap`
+    /// — so the candidate list for a cell arrives in a fresh random permutation on
+    /// every call, and `resolve_rects` used to take whichever ended up last. An
+    /// instrument that answers differently on different runs is worse than one that
+    /// is merely wrong, because nobody can tell which answer they got.
+    ///
+    /// Six candidates at ONE z, so the protocol's own rule cannot separate them and
+    /// only the deterministic tail can, read twelve times: an unordered pick passes
+    /// only if all twelve land on the same candidate, about one run in 10^9. Not a
+    /// probabilistic test in the direction that matters — the fix makes it pass
+    /// every time, and only the failure is chance.
+    ///
+    /// Each candidate also declares a DIFFERENT cell grid (`c=1..6`), which reaches
+    /// the second unordered read in the same function: the pin branch took the
+    /// declared grid off the first placement of that image the `HashMap` happened
+    /// to yield, so the rect's own extent flipped between runs too. That is why the
+    /// rect is asserted alongside the source row.
+    #[test]
+    fn the_same_bytes_always_resolve_the_same_way() {
+        let pins: Vec<(u32, i32, u32, u16)> =
+            (0..6).map(|i| (i + 1, 0, i * 2, i as u16 + 1)).collect();
+        let bytes = stacked_pins(&pins);
+
+        let first_row = stacked_source_row(&bytes);
+        let first_rect = stacked_rects(&bytes);
+        // Non-vacuity: the run has to have resolved to SOMETHING and the pins to a
+        // rect, or every resolution below agrees with the first one for free.
+        assert!(first_row.is_some(), "the run must resolve to one of the six placements");
+        assert!(!first_rect.is_empty(), "the six pins must resolve to a rect");
+        for attempt in 1..12 {
+            assert_eq!(
+                stacked_source_row(&bytes),
+                first_row,
+                "resolution {attempt} of the identical stream read a different source row — \
+                 the oracle's answer is not a function of the bytes (SQ-0982)"
+            );
+            assert_eq!(
+                stacked_rects(&bytes),
+                first_rect,
+                "resolution {attempt} of the identical stream described a different rect — \
+                 the oracle's answer is not a function of the bytes (SQ-0982)"
+            );
+        }
+    }
 }
 
 /// The real emitter, the real ratatui diff, a real terminal — no pty, no fixture,
