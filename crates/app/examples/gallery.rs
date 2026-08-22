@@ -151,6 +151,23 @@ fn main() -> std::process::ExitCode {
         print!("  {:<24} ", shot.id);
         let _ = std::io::Write::flush(&mut std::io::stdout());
 
+        // A SHOT THAT FAILS TAKES ITS OLD FRAME WITH IT (SQ-0999). Until it did,
+        // a failed shot left the previous PNG on disk and `index.html` presented
+        // it beside the fresh ones identically — so a run reading "5 frame(s),
+        // 8 failure(s)" still produced a sheet of thirteen pictures, eight of them
+        // hours old. That is worse than a gap: it made a TOTAL loss of artwork
+        // look like a partial regression, and cost two wrong hypotheses before
+        // anyone checked the mtimes.
+        let png = out.join(format!("{}.png", shot.id));
+        let drop_stale = || {
+            if png.is_file() {
+                match std::fs::remove_file(&png) {
+                    Ok(()) => eprintln!("       (removed the stale {})", png.display()),
+                    Err(e) => eprintln!("       (could not remove the stale {}: {e})", png.display()),
+                }
+            }
+        };
+
         // Provenance FIRST, and from the mount rather than the filename: a disk
         // image is a different build of the game, so a frame captioned with a
         // release it did not load is worse than one captioned with none.
@@ -159,6 +176,7 @@ fn main() -> std::process::ExitCode {
             Err(e) => {
                 println!("SKIP  {e}");
                 failed.push(format!("{}: {e}", shot.id));
+                drop_stale();
                 continue;
             }
         };
@@ -210,6 +228,7 @@ fn main() -> std::process::ExitCode {
         let (Some(cap), Some(res)) = (cap, res) else {
             println!("FAIL after {attempts} attempt(s)  {last}");
             failed.push(last);
+            drop_stale();
             continue;
         };
         let face = if bitmap {
@@ -230,7 +249,6 @@ fn main() -> std::process::ExitCode {
             face.draw(canvas, ch, px, py, cw, chh, fg)
         });
 
-        let png = out.join(format!("{}.png", shot.id));
         let native = provenance.native;
         let mut t = Taken {
             id: shot.id.clone(),
@@ -276,13 +294,26 @@ fn main() -> std::process::ExitCode {
             Err(e) => {
                 println!("FAIL  writing {}: {e}", png.display());
                 failed.push(format!("{}: writing the png: {e}", shot.id));
+                drop_stale();
             }
         }
     }
     let _ = std::fs::remove_dir_all(&work);
 
+    // A PARTIAL RUN LEAVES THE SHEET ALONE (SQ-0999). `--only` used to rewrite
+    // `index.html` with just the shots it regenerated, quietly discarding the
+    // other twelve — and it did not need to, because a sheet references frames by
+    // FILENAME: the shot it just rewrote is already the one the existing sheet
+    // points at. Nothing is lost by not touching it, and a full run still rebuilds
+    // it from scratch.
     let sheet = out.join("index.html");
-    if let Err(e) = std::fs::write(&sheet, gallery::contact_sheet(&taken, &failed)) {
+    if only.is_empty() {
+        if let Err(e) = std::fs::write(&sheet, gallery::contact_sheet(&taken, &failed)) {
+            eprintln!("gallery: writing {}: {e}", sheet.display());
+        }
+    } else if sheet.is_file() {
+        println!("sheet   : left as it was — a partial run points at the same filenames");
+    } else if let Err(e) = std::fs::write(&sheet, gallery::contact_sheet(&taken, &failed)) {
         eprintln!("gallery: writing {}: {e}", sheet.display());
     }
     let recipe = out.join("gallery.json");
