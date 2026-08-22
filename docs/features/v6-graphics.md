@@ -2620,6 +2620,18 @@ uncompressed image is merely slow, while an image the terminal cannot inflate is
 nothing. Our own placement oracle demonstrated exactly that when it met `o=z`
 without a zlib decoder linked in.
 
+A capability is also something you can *lose* without noticing. lanthorn
+re-measures the terminal's cell size on every resize (SQ-0988), because a cell is
+two roundings at different rates and changing font size mid-session leaves the
+composite fitted with an aspect ratio up to ~29% wrong. That refresh used to
+build a *replacement* picker around the new cell with `from_fontsize` and copy
+the protocol across — which preserved the protocol and nothing else, so the
+capability list went with the discarded picker and a queried kitty session
+dropped back to raw transmits until the app was relaunched. It fails safe, which
+is exactly why it went unseen. The refresh now hands the new cell size to the
+picker it already has (`Picker::set_font_size`, added to the fork for it) and
+touches nothing else (SQ-0992).
+
 ## `/dump-windows` reports the last frame the *game* drew
 
 When a v6 layout looks wrong, `/dump-windows` is how you say what you saw: one

@@ -588,21 +588,35 @@ pub(crate) fn terminal_cell_size() -> Option<ratatui_image::FontSize> {
 /// stretched and comes right again after a relaunch, which is exactly how it was
 /// reported.
 ///
-/// The protocol is carried across rather than re-detected: `o=z`, kitty,
-/// sixel — none of that changed, only the cell. `from_fontsize` is deprecated
-/// upstream in favour of the stdio query this must not perform; it is the
-/// pattern `render::graphics` already uses for the same reason.
+/// **The cell is the only thing that moved, so the cell is the only thing
+/// touched.** The picker is mutated in place rather than rebuilt, because a
+/// queried picker knows things this function cannot re-derive without asking the
+/// terminal again: the protocol, and behind it the whole capability list —
+/// `KittyCompression` (`o=z`, worth up to 88x on a raster composite),
+/// `RectangularOps`, the tmux flag. A font change tells you nothing about any of
+/// them.
+///
+/// This used to rebuild with the deprecated `Picker::from_fontsize` and copy the
+/// protocol across by hand, which preserved exactly the one field it named:
+/// `from_fontsize` constructs `capabilities: Vec::new()`, so a mid-session font
+/// change silently dropped compression back to raw and left it there until the
+/// app was relaunched. It fails safe, which is why nobody saw it (SQ-0992).
+/// Re-querying is not the alternative either — `Picker::from_query_stdio` writes
+/// an escape and reads the reply, which is the whole thing
+/// [`terminal_cell_size`] exists to avoid.
 pub(crate) fn refresh_cell_size(picker: &mut ratatui_image::picker::Picker) -> bool {
     let Some(fs) = terminal_cell_size() else { return false };
+    apply_cell_size(picker, fs)
+}
+
+/// [`refresh_cell_size`] with the measurement handed in, so it can be driven
+/// without a tty.
+fn apply_cell_size(picker: &mut ratatui_image::picker::Picker, fs: ratatui_image::FontSize) -> bool {
     let was = picker.font_size();
     if (fs.width, fs.height) == (was.width, was.height) {
         return false;
     }
-    let protocol = picker.protocol_type();
-    #[allow(deprecated)]
-    let mut next = ratatui_image::picker::Picker::from_fontsize(fs);
-    next.set_protocol_type(protocol);
-    *picker = next;
+    picker.set_font_size(fs);
     true
 }
 
@@ -3225,6 +3239,74 @@ mod tests {
                 "the browser dispatch must not mention `{banned}` — a gesture that \
                  reads the keystroke here bypasses the slash::COMMANDS registry \
                  (SQ-0796). Add a Context::Browser command instead."
+            );
+        }
+    }
+
+    // ── Cell-size refresh (SQ-0988/SQ-0992) ───────────────────────────────────
+
+    /// A cell-size refresh moves the cell and leaves the rest of the picker
+    /// alone — the protocol it was queried for, and the capability list behind
+    /// it (SQ-0992).
+    ///
+    /// The capability half of this assertion is weaker here than it looks:
+    /// `Picker`'s fields are private and there is no way to build one carrying
+    /// capabilities from outside the crate, so the list this compares is empty.
+    /// The seeded version of the same property lives where the fields are
+    /// reachable, in `ratatui-image`'s own
+    /// `picker::tests::test_set_font_size_keeps_the_rest_of_the_picker`. What
+    /// this case pins is the arithmetic, and its neighbour below pins the shape
+    /// that made capabilities survivable at all.
+    #[test]
+    fn a_cell_size_refresh_moves_the_cell_and_nothing_else() {
+        use ratatui_image::picker::ProtocolType;
+        use ratatui_image::FontSize;
+
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let capabilities_before = picker.capabilities().clone();
+        let was = picker.font_size();
+
+        // The same measurement is not a change, and the caller is told so — it
+        // throws away everything it fitted against the old cell on a `true`.
+        assert!(!super::apply_cell_size(&mut picker, FontSize::new(was.width, was.height)));
+        assert_eq!((was.width, was.height), (picker.font_size().width, picker.font_size().height));
+
+        // A different cell: the size moves, and nothing else does.
+        assert!(super::apply_cell_size(&mut picker, FontSize::new(7, 15)));
+        assert_eq!((7, 15), (picker.font_size().width, picker.font_size().height));
+        assert_eq!(ProtocolType::Kitty, picker.protocol_type());
+        assert_eq!(&capabilities_before, picker.capabilities());
+    }
+
+    /// **The anti-drift guard (SQ-0992).** The refresh must MUTATE the picker.
+    /// Rebuilding it preserves exactly the fields whoever wrote the rebuild
+    /// remembered to copy across, and the one that was forgotten —
+    /// `capabilities`, which `Picker::from_fontsize` constructs empty — costs a
+    /// kitty session its `o=z` compression the moment the user changes font
+    /// size, silently and until relaunch.
+    ///
+    /// Read off the source because that is where the property lives: with no way
+    /// to build a picker that carries capabilities from outside the crate, no
+    /// runtime assertion in this crate can tell a rebuild from a mutation.
+    #[test]
+    fn a_cell_size_refresh_never_rebuilds_the_picker() {
+        let src = include_str!("picker_ui.rs");
+        let start = src.find("pub(crate) fn refresh_cell_size(picker").expect("the refresh");
+        let tail = start + src[start..].find("fn apply_cell_size(").expect("the applier");
+        let end = tail + src[tail..].find("\n}\n").expect("the applier's closing brace");
+        let region = &src[start..end];
+
+        assert!(region.len() > 300, "the bounds must bracket both function bodies");
+        assert!(region.contains("set_font_size"), "the refresh must go through the setter");
+
+        for banned in ["from_fontsize", "Picker::from", "*picker ="] {
+            assert!(
+                !region.contains(banned),
+                "the cell-size refresh must not mention `{banned}` — building a \
+                 replacement picker drops every capability the original was \
+                 queried for, `KittyCompression` among them (SQ-0992). Mutate the \
+                 picker instead."
             );
         }
     }
