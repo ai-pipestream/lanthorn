@@ -217,7 +217,19 @@ Five parts, and the split matters for Windows:
 | `tests/pty_stream/decode.rs` | Bytes → named sequences → a screen model: cursor, SGR, kitty APC commands, U+10EEEE placeholder cells. **Portable**, and unit-tested on every platform. |
 | `tests/pty_stream/oracle.rs` | The same bytes through a real terminal emulator — see [the placement oracle](#a-second-reader-for-the-same-bytes-the-placement-oracle). **Portable.** |
 | `tests/pty_stream/raster.rs` | That resolved screen drawn as a PNG — see [looking at the frame](#looking-at-the-frame-the-rasteriser). **Portable.** |
+| `tests/pty_stream/inflate.rs` | Undoes the kitty protocol's `o=z` before the oracle sees it — see below. **Portable.** |
 | `tests/pty_stream/mod.rs` | The report — protocol verdict, uploads, placement rects, a background map, and the finding. |
+
+**Compressed uploads have to be undone for the oracle, and only for it.** A
+graphics-window upload is transmitted zlib-compressed (`o=z`), which is a
+transport encoding sitting at exactly the level base64 sits at. Our own decoder
+never noticed — it counts payload bytes and does not decode pixels — but the
+oracle's terminal core deliberately links no codecs at all: its image decoder is
+a seam and the byte-stream entry point wires the null one, so a compressed
+transmit fails with `EINVAL: decompression failed`, the image is never stored,
+and every placement naming it vanishes. `Capture::bytes` therefore stays the wire
+stream (`Flush` offsets index it, and the wire size is a measurement worth
+having) and `Capture::terminal_bytes()` is what the oracle is handed.
 
 **It verifies the protocol first, and says so out loud.** lanthorn picks its
 graphics backend from `Picker::from_query_stdio`, which asks the terminal three

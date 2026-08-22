@@ -1442,6 +1442,15 @@ impl GraphicsRender {
         &self.pending_deletes
     }
 
+    /// What each cache keyed on cell geometry is currently holding, for SQ-0988:
+    /// `(non-kitty window protocols, chrome bands, kitty window uploads,
+    /// a raster composite?)`. One accessor rather than four because the whole
+    /// question is which of them survive an invalidation and which must not.
+    #[cfg(test)]
+    fn cell_keyed_cache_sizes(&self) -> (usize, usize, usize, bool) {
+        (self.cache.len(), self.chrome_bands.len(), self.kitty_wins.len(), self.v6.is_some())
+    }
+
     /// Resize + encode a native v6 canvas into a terminal image protocol,
     /// upscaled (Nearest → crisp pixel art) to fill `area`'s device pixels with
     /// aspect preserved, capped at whatever this backend's [`v6_upscale_cap`] is.
@@ -1541,6 +1550,56 @@ impl GraphicsRender {
             self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Raster });
         }
         self.v6_job = None;
+    }
+
+    /// SQ-0988: the terminal's CELL changed size. Throw away everything fitted
+    /// against the old one.
+    ///
+    /// A resize normally changes the cell GRID, and every cache here is keyed on
+    /// a rect in cells, so a resize invalidates them by not matching. A font-size
+    /// change is the case that slips through: the pane can keep the same
+    /// `width × height` in cells while every one of those cells becomes a
+    /// different box in pixels, and a cache keyed in cells sees no change at all.
+    ///
+    /// What that leaves behind, cache by cache:
+    ///
+    /// * `cache` — the non-kitty per-window protocol, keyed `(version, cols,
+    ///   rows)`. STALE: the protocol holds an image encoded for the old device
+    ///   box, and nothing about the window changed to dislodge it.
+    /// * `v6` — the raster composite, keyed `(gen, area_w, area_h)` in cells, so
+    ///   [`Self::v6_wants_build`] answers "already have it" and the pane keeps
+    ///   showing a picture resampled to the old pixel size. STALE, and the most
+    ///   visible of the two.
+    ///
+    /// And three that are already safe — checked, not assumed, because two of
+    /// them share the suspect key shape and only one of the three is safe for
+    /// the same reason:
+    ///
+    /// * `chrome_bands` — the key IS in cells, but the freshness HASH mixes in
+    ///   `(bw, bh)` in device pixels, so a font change makes every band miss and
+    ///   re-encode on its own.
+    /// * `chrome_scaled` — keyed on the scaled dimensions, likewise device
+    ///   pixels.
+    /// * `kitty_wins` — keyed `(version, w, h)` in cells, exactly like `cache`,
+    ///   and nonetheless immune: [`Self::render_kitty_virtual`] transmits the
+    ///   canvas at its NATIVE size with an explicit `r×c` grid and lets the
+    ///   terminal scale it to the cell rect (SQ-0520). It never reads
+    ///   `picker.font_size()` at all, so there is nothing in that cache fitted
+    ///   to a cell, and re-uploading would spend a full canvas to arrive at the
+    ///   same pixels.
+    ///
+    /// The two device-pixel caches are dropped anyway even though they would
+    /// re-encode by themselves: they are cheap to rebuild, and a ring whose
+    /// bands survived a font change while the composite behind them did not is a
+    /// seam waiting to happen. `kitty_wins` is deliberately KEPT.
+    ///
+    /// Every drop frees its upload in the terminal rather than merely forgetting
+    /// it (SQ-0753), which is why this delegates instead of clearing the maps.
+    pub fn invalidate_cell_geometry(&mut self) {
+        self.cache.clear();
+        self.invalidate_v6();
+        self.invalidate_chrome_bands();
+        self.chrome_scaled = None;
     }
 
     /// Poll the background v6 encode: if it finished, install its protocol as the
@@ -2423,22 +2482,73 @@ fn kitty_b64(data: &[u8]) -> String {
     out
 }
 
+/// Deflate a transmit payload for the kitty protocol's `o=z`.
+///
+/// RFC 1950 (zlib), which is the ONLY compression the protocol defines. Level 6
+/// (`Compression::default()`) rather than 1 or 9 — measured on real v6 canvases
+/// in SQ-0976, where the three levels are not close:
+///
+/// | canvas (turns)                | b64 raw | L1 b64 | L6 b64 | L9 b64 | L1 / L6 / L9 ms |
+/// |-------------------------------|--------:|-------:|-------:|-------:|-----------------|
+/// | Zork Zero r393 win 7, 640x400 | 1365336 |  35068 |   6580 |   6024 | 0.40 / 1.43 / 2.40 |
+/// | Shogun r322 win 7, 640x400    | 1365336 |  20276 |   6532 |   6040 | 0.27 / 1.77 / 3.30 |
+/// | Journey r83 win 3, 232x304    |  376152 |  27168 |  10884 |  10016 | 0.35 / 1.88 / 5.34 |
+/// | Zork Zero r393 win 1, 640x78  |  266240 |   3180 |    960 |    964 | 0.05 / 0.26 / 0.37 |
+///
+/// L1 leaves three to five times as much on the wire for a millisecond saved;
+/// L9 buys 5–8% more for two to four times L6's cost, and on one canvas it is
+/// *larger*. Sixteen-colour flat artwork is what deflate is best at, and 1.4–3.3
+/// ms on the render worker is nothing beside 1.37 MB of base64.
+///
+/// Writing into a `Vec` has no failure mode; the `expect` documents that rather
+/// than inventing a fallback path no test could reach.
+fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut enc = flate2::write::ZlibEncoder::new(
+        Vec::with_capacity(raw.len() / 32 + 64),
+        flate2::Compression::default(),
+    );
+    enc.write_all(raw).expect("a zlib encoder writing into a Vec cannot fail");
+    enc.finish().expect("a zlib encoder writing into a Vec cannot fail")
+}
+
 /// The kitty transmit sequence for `canvas` as image `id`: a VIRTUAL placement
 /// (`U=1`) declaring an explicit `r×c` grid, so the terminal scales the image
-/// to exactly the placeholder rect (SQ-0520). RGBA chunked per the protocol's
-/// 4096-encoded-byte limit. (No tmux passthrough — matches the app's existing
-/// kitty support, which targets direct terminals.)
+/// to exactly the placeholder rect (SQ-0520). RGBA, zlib-compressed, chunked per
+/// the protocol's 4096-encoded-byte limit. (No tmux passthrough — matches the
+/// app's existing kitty support, which targets direct terminals.)
+///
+/// **`o=z` is the payload's encoding and nothing else** (SQ-0976). Per the kitty
+/// graphics protocol: *"the payload is now compressed using deflate (this occurs
+/// prior to base64 encoding)"*, so `f=32` still names the format the terminal
+/// finds after inflating, and `s=`/`v=` still name the **uncompressed** image's
+/// pixel dimensions — the terminal sizes its buffer from `s*v*4` and the inflated
+/// payload must be exactly that long. The `S` key is not involved: the spec
+/// requires it only for PNG-plus-compression, where the decompressed length is
+/// not implied by the geometry.
+///
+/// Chunking therefore applies to the COMPRESSED stream, because it is the thing
+/// being base64-encoded — *"the pixel data must first be base64 encoded then
+/// chunked up into chunks no larger than 4096 bytes"*. 3072 compressed bytes make
+/// exactly 4096 base64 characters and satisfy "all chunks except the last must
+/// have a size that is a multiple of 4"; continuation chunks carry only `m` and
+/// `q`, as the spec demands, so `o=z` is stated once on the first chunk and
+/// governs the reassembled whole.
+///
+/// The upload cache above this (`canvas_hash`, SQ-0564) is untouched: it is keyed
+/// on the canvas's own pixels, which is upstream of how they are encoded.
 fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u16) -> String {
     use std::fmt::Write as _;
     let (w, h) = (canvas.width(), canvas.height());
-    let bytes = canvas.as_raw();
-    let chunks: Vec<&[u8]> = bytes.chunks(3072).collect();
+    let payload = zlib_deflate(canvas.as_raw());
+    let chunks: Vec<&[u8]> = payload.chunks(3072).collect();
     let n = chunks.len();
-    let mut out = String::with_capacity(bytes.len() / 3 * 4 + n * 24);
+    let mut out = String::with_capacity(payload.len() / 3 * 4 + n * 24);
     for (i, chunk) in chunks.into_iter().enumerate() {
         let more = u8::from(i + 1 < n);
         if i == 0 {
-            write!(out, "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},r={rows},c={cols},m={more};").unwrap();
+            write!(out, "\x1b_Gq=2,i={id},a=T,U=1,f=32,o=z,t=d,s={w},v={h},r={rows},c={cols},m={more};")
+                .unwrap();
         } else {
             write!(out, "\x1b_Gq=2,m={more};").unwrap();
         }
@@ -4141,7 +4251,7 @@ mod tests {
         gr.render(&picker, &gw, area, Style::default(), &mut buf);
         let first = buf.cell((0, 0)).unwrap().symbol().to_string();
         assert!(first.contains(",r=2,c=138,"), "transmit declares the explicit cell grid");
-        assert!(first.contains("a=T,U=1,f=32"), "virtual placement transmit present");
+        assert!(first.contains("a=T,U=1,f=32,o=z"), "virtual placement transmit present");
         assert!(first.contains('\u{10EEEE}'), "placeholder run present");
         assert!(!first.contains("a=d"), "first transmit deletes nothing");
         assert!(buf.cell((0, 1)).unwrap().symbol().contains('\u{10EEEE}'), "second row placed");
@@ -5047,5 +5157,252 @@ mod tests {
             carried.contains(&format!("a=d,d=I,i={id}")),
             "the delete must be IN the frame's cells, or it is never written: {carried:?}"
         );
+    }
+
+    /// SQ-0976: what the terminal is handed for a kitty window upload.
+    ///
+    /// The claim under test is not "we wrote `o=z`" — that is a substring — but
+    /// that the bytes behind it are a well-formed zlib stream of EXACTLY the
+    /// canvas, reassembled from the chunks in the order they were emitted. A
+    /// transmit that compresses each chunk separately, or that chunks the raw
+    /// bytes and compresses after, or that declares the compressed length in `s`
+    /// and `v`, all still contain `o=z` and all draw nothing.
+    mod compressed_upload {
+        use super::*;
+
+        /// Standard-alphabet base64, decoded. The emitter hand-rolls the encoder
+        /// (`kitty_b64`) rather than take a dependency, so the check has to be
+        /// able to undo it independently — a shared codec proves nothing about
+        /// either half.
+        fn unb64(s: &str) -> Vec<u8> {
+            const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut acc = 0u32;
+            let mut bits = 0u32;
+            let mut out = Vec::new();
+            for c in s.bytes().filter(|&c| c != b'=') {
+                let v = T.iter().position(|&t| t == c).unwrap_or_else(|| panic!("base64 alphabet: {c:?}"));
+                acc = (acc << 6) | v as u32;
+                bits += 6;
+                if bits >= 8 {
+                    bits -= 8;
+                    out.push((acc >> bits) as u8);
+                }
+            }
+            out
+        }
+
+        /// Split a transmit into `(first chunk's control keys, every payload
+        /// concatenated in emission order)`.
+        fn parse(transmit: &str) -> (String, Vec<u8>) {
+            let mut keys = String::new();
+            let mut payload = Vec::new();
+            for (i, cmd) in transmit.split("\x1b_G").skip(1).enumerate() {
+                let body = cmd.strip_suffix("\x1b\\").expect("every APC command is ST-terminated");
+                let (params, b64) = body.split_once(';').expect("every transmit chunk has a payload");
+                if i == 0 {
+                    keys = params.to_string();
+                } else {
+                    assert!(
+                        params.split(',').all(|kv| kv.starts_with("m=") || kv.starts_with("q=")),
+                        "a continuation chunk may carry only `m` and `q`: {params}"
+                    );
+                }
+                assert!(b64.len() <= 4096, "chunk of {} base64 bytes exceeds the protocol's 4096", b64.len());
+                let last = params.contains("m=0");
+                assert!(last || b64.len() % 4 == 0, "every chunk but the last must be a multiple of 4");
+                payload.extend_from_slice(&unb64(b64));
+            }
+            (keys, payload)
+        }
+
+        /// A canvas whose pixels are not all one colour, or a codec bug that
+        /// dropped everything after the first chunk would still round-trip.
+        fn canvas(w: u32, h: u32) -> image::RgbaImage {
+            image::RgbaImage::from_fn(w, h, |x, y| {
+                image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x * 7 + y * 13) % 239) as u8, 255])
+            })
+        }
+
+        #[test]
+        fn the_transmit_declares_o_z_and_the_canvas_own_uncompressed_dimensions() {
+            let img = canvas(640, 400);
+            let (keys, _) = parse(&kitty_transmit_virtual(&img, 0x00B0_0001, 25, 80));
+            assert!(keys.contains(",o=z"), "the payload is compressed and must say so: {keys}");
+            assert!(keys.contains(",f=32"), "`o=z` is the encoding; `f` is still the format: {keys}");
+            // s/v name the image, not the payload. 640x400 is 1,024,000 raw bytes
+            // and a few thousand compressed, so a transmit that confused the two
+            // would be caught here and nowhere else.
+            assert!(keys.contains(",s=640,v=400,"), "s/v are the UNCOMPRESSED pixel dimensions: {keys}");
+            assert!(keys.contains(",r=25,c=80,"), "the explicit placeholder grid survives (SQ-0520)");
+            assert!(!keys.contains("S="), "`S` is for PNG-plus-compression only, and this is f=32");
+        }
+
+        #[test]
+        fn inflating_the_reassembled_payload_reproduces_the_canvas_byte_for_byte() {
+            for (w, h) in [(640u32, 400u32), (232, 304), (1104, 36), (1, 1)] {
+                let img = canvas(w, h);
+                let (_, payload) = parse(&kitty_transmit_virtual(&img, 7, 2, 8));
+                let mut raw = Vec::new();
+                std::io::copy(&mut flate2::read::ZlibDecoder::new(&payload[..]), &mut raw)
+                    .unwrap_or_else(|e| panic!("{w}x{h}: the payload must be one zlib stream: {e}"));
+                assert_eq!(raw.len(), (w * h * 4) as usize, "{w}x{h}: kitty sizes its buffer from s*v*4");
+                assert_eq!(&raw, img.as_raw(), "{w}x{h}: the inflated payload is the canvas");
+            }
+        }
+
+        /// The point of the exercise, kept as a number so a regression that
+        /// silently stops compressing is a failure rather than a slow terminal.
+        #[test]
+        fn a_flat_artwork_canvas_costs_a_fraction_of_its_raw_upload() {
+            // Sixteen colours in horizontal bands — the shape of every v6 frame.
+            let img = image::RgbaImage::from_fn(640, 400, |_x, y| {
+                let c = ((y / 25) * 17) as u8;
+                image::Rgba([c, c / 2, 255 - c, 255])
+            });
+            let transmit = kitty_transmit_virtual(&img, 7, 25, 80);
+            let raw_b64 = 1024000usize.div_ceil(3) * 4;
+            assert!(
+                transmit.len() * 20 < raw_b64,
+                "a 16-colour 640x400 frame must cost under a twentieth of its raw upload: \
+                 {} bytes against {raw_b64}",
+                transmit.len()
+            );
+        }
+    }
+
+    /// SQ-0988: the terminal's cell size is measured once at launch, so a font
+    /// change mid-session leaves every fit running on the launch cell.
+    ///
+    /// The absolute size does not matter — geometry multiplies by `fw`/`fh` to
+    /// reach a device box and divides by them again, so a uniform scale error
+    /// cancels. The ASPECT RATIO is what survives, and it genuinely moves between
+    /// adjacent font sizes: a cell is `round(advance_em · px)` by
+    /// `round(line_em · px)`, and the two round at different rates.
+    mod cell_size_change {
+        use super::*;
+
+        /// A kitty picker at a stated cell size, the way the app's other headless
+        /// paths already build one.
+        fn kitty(w: u16, h: u16) -> Picker {
+            #[allow(deprecated)]
+            let mut p = Picker::from_fontsize(ratatui_image::FontSize::new(w, h));
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+            p
+        }
+
+        /// The claim the whole quest rests on, in arithmetic: the SAME cell rect
+        /// at a different cell SHAPE fits a different box.
+        ///
+        /// 4x7 and 4x9 are FiraCode at 6 px and 7 px — a face whose design ratio
+        /// is 2.002, yielding real cells of 1.750 and 2.250. Two adjacent font
+        /// sizes, one keystroke apart.
+        #[test]
+        fn the_same_cell_rect_at_a_different_cell_shape_fits_a_different_box() {
+            let target = Size::new(80, 25);
+            let src = (640u32, 400u32);
+            let tall = fit_geometry(ratatui_image::FontSize::new(4, 7), src, target, false);
+            let taller = fit_geometry(ratatui_image::FontSize::new(4, 9), src, target, false);
+            assert_ne!(
+                (tall.cells.width, tall.cells.height),
+                (taller.cells.width, taller.cells.height),
+                "80x25 cells fits {}x{} at a 1.750 cell and {}x{} at a 2.250 one — were these \
+                 equal there would be nothing to fix",
+                tall.cells.width,
+                tall.cells.height,
+                taller.cells.width,
+                taller.cells.height
+            );
+        }
+
+        /// And the raster composite is encoded FOR the cell it was built against:
+        /// two pickers, one area, two different pictures.
+        #[test]
+        fn the_raster_composite_is_encoded_for_the_cell_it_was_built_against() {
+            let canvas = image::RgbaImage::from_fn(320, 200, |x, y| {
+                image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255])
+            });
+            let area = Rect::new(0, 0, 80, 25);
+            let a = GraphicsRender::encode_v6(&kitty(4, 7), &canvas, 1, area, None)
+                .expect("a kitty encode of a real canvas");
+            let b = GraphicsRender::encode_v6(&kitty(4, 9), &canvas, 1, area, None)
+                .expect("a kitty encode of a real canvas");
+            assert_ne!(
+                (a.proto.size().width, a.proto.size().height),
+                (b.proto.size().width, b.proto.size().height),
+                "the composite is fitted to the cell, so it cannot be the same picture at both"
+            );
+        }
+
+        /// …and yet the key that decides whether to rebuild it cannot see the
+        /// difference. The defect, stated as a test.
+        #[test]
+        fn the_composite_survives_a_font_change_until_the_caches_are_told() {
+            let canvas = image::RgbaImage::from_pixel(320, 200, image::Rgba([10, 20, 30, 255]));
+            let area = Rect::new(0, 0, 80, 25);
+            let mut gr = GraphicsRender::default();
+            assert!(gr.v6_wants_build(1, area), "nothing is built yet");
+            gr.spawn_v6_encode(&kitty(4, 7), canvas, 1, area, None);
+            assert!(!gr.v6_wants_build(1, area), "the first encode installs a composite");
+
+            // The pane is still 80x25 cells; only the cells changed shape. Nothing
+            // in the key moved, so the composite fitted to a 1.750 cell is what the
+            // pane would go on drawing at 2.250.
+            assert!(
+                !gr.v6_wants_build(1, area),
+                "the key is (gen, cols, rows) and a font change moves none of the three — \
+                 which is precisely why the invalidation below has to be explicit"
+            );
+
+            gr.invalidate_cell_geometry();
+            assert!(gr.v6_wants_build(1, area), "once the cell moved, the composite must be rebuilt");
+        }
+
+        /// Which caches the invalidation drops, and — just as load-bearing — which
+        /// it must NOT.
+        ///
+        /// `kitty_wins` shares `cache`'s key shape and is nonetheless immune: a
+        /// virtual placement sends the canvas at native size and names an `r×c`
+        /// grid, so the terminal rescales to the new cell rect on its own.
+        /// Dropping it would re-upload a whole canvas to arrive at the same
+        /// pixels, which on a v6 window is megabytes for nothing.
+        #[test]
+        fn invalidating_drops_what_was_fitted_to_the_cell_and_keeps_what_was_not() {
+            let img = image::RgbaImage::from_pixel(64, 32, image::Rgba([7, 7, 7, 255]));
+            let gw =
+                GraphicsWindow { win: 7, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
+            let area = Rect::new(0, 0, 20, 4);
+            let mut gr = GraphicsRender::default();
+
+            // A kitty window upload…
+            let mut buf = Buffer::empty(area);
+            gr.render(&kitty(8, 18), &gw, area, Style::default(), &mut buf);
+            // …a non-kitty window protocol, on a second window…
+            let gw2 = GraphicsWindow { win: 8, ..gw.clone() };
+            let mut sixel = kitty(8, 18);
+            sixel.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+            let mut buf2 = Buffer::empty(area);
+            gr.render(&sixel, &gw2, area, Style::default(), &mut buf2);
+            // …and a raster composite.
+            gr.spawn_v6_encode(&kitty(8, 18), (*gw.canvas).clone(), 1, area, None);
+
+            let (cache, _bands, kitty_wins, v6) = gr.cell_keyed_cache_sizes();
+            assert_eq!(
+                (cache, kitty_wins, v6),
+                (1, 1, true),
+                "the fixture must actually populate all three, or the assertions below pass \
+                 vacuously"
+            );
+
+            gr.invalidate_cell_geometry();
+            let (cache, bands, kitty_wins, v6) = gr.cell_keyed_cache_sizes();
+            assert_eq!(cache, 0, "the non-kitty window protocol was encoded at the old device box");
+            assert_eq!(bands, 0, "chrome bands go with it, so the ring cannot outlive the composite");
+            assert!(!v6, "the raster composite was resampled to the old device box");
+            assert_eq!(
+                kitty_wins, 1,
+                "a virtual placement is scaled to its r×c grid BY THE TERMINAL, so its upload is \
+                 still correct — re-sending it would spend a whole canvas for nothing"
+            );
+        }
     }
 }

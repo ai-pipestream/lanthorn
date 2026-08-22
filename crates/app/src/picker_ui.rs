@@ -553,6 +553,59 @@ pub(crate) fn build_cover_picker(mode: app::config::ImageProtocol) -> Option<rat
     }
 }
 
+/// The terminal's cell size in pixels **right now**, from `TIOCGWINSZ`.
+///
+/// One `ioctl` on the tty: no escape written, no stdin read, nothing for the
+/// app's own input loop to race with. That is the whole reason this exists
+/// beside [`build_cover_picker`], whose `Picker::from_query_stdio` writes a
+/// capability query and reads the reply — genuinely delicate mid-session with
+/// the app in raw mode owning the keyboard, and the reason the cell size used to
+/// be measured once at launch and never again (SQ-0988).
+///
+/// `None` when the terminal reports no pixel geometry (`ws_xpixel`/`ws_ypixel`
+/// are documented as "unused" by the tty ioctl and are zero on plenty of
+/// terminals, and Windows has no equivalent at all). A caller must then KEEP the
+/// value it has: a default would be a guess replacing a measurement.
+pub(crate) fn terminal_cell_size() -> Option<ratatui_image::FontSize> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    if ws.width == 0 || ws.height == 0 || ws.columns == 0 || ws.rows == 0 {
+        return None;
+    }
+    Some(ratatui_image::FontSize::new(ws.width / ws.columns, ws.height / ws.rows))
+}
+
+/// Re-derive `picker`'s cell size after a resize. Answers whether it MOVED, so
+/// the caller can throw away what it fitted against the old one.
+///
+/// **The absolute size does not matter; the aspect ratio does.** Geometry
+/// multiplies by `fw`/`fh` to reach a device box and divides by them again to
+/// return to cells, so a uniform scale error cancels out. What survives is
+/// `fw : fh` — and a cell is `round(advance_em · px)` by `round(line_em · px)`,
+/// two roundings at different rates, so even a face whose design ratio is
+/// exactly 2.002 (FiraCode) yields real cells from 1.750 (4x7 at 6 px) to 2.250
+/// (4x9 at 7 px). Change font size mid-session and the composite is fitted with
+/// an aspect up to ~29% wrong until the app is restarted; the art looks subtly
+/// stretched and comes right again after a relaunch, which is exactly how it was
+/// reported.
+///
+/// The protocol is carried across rather than re-detected: `o=z`, kitty,
+/// sixel — none of that changed, only the cell. `from_fontsize` is deprecated
+/// upstream in favour of the stdio query this must not perform; it is the
+/// pattern `render::graphics` already uses for the same reason.
+pub(crate) fn refresh_cell_size(picker: &mut ratatui_image::picker::Picker) -> bool {
+    let Some(fs) = terminal_cell_size() else { return false };
+    let was = picker.font_size();
+    if (fs.width, fs.height) == (was.width, was.height) {
+        return false;
+    }
+    let protocol = picker.protocol_type();
+    #[allow(deprecated)]
+    let mut next = ratatui_image::picker::Picker::from_fontsize(fs);
+    next.set_protocol_type(protocol);
+    *picker = next;
+    true
+}
+
 /// What the browser hands back: the story to play, and the boot-time overrides
 /// the user asked for on the way out (SQ-0789). `overrides` is empty for every
 /// ordinary launch — Enter and a double left-click never touch it — so the
@@ -710,7 +763,9 @@ pub(crate) fn run_story_picker(
         }
     };
 
-    let cover_picker = if cfg.images { build_cover_picker(cfg.image_protocol) } else { None };
+    // `mut` since SQ-0988: a resize can move the terminal's cell size, and the
+    // picker is re-derived from `TIOCGWINSZ` when it does.
+    let mut cover_picker = if cfg.images { build_cover_picker(cfg.image_protocol) } else { None };
     let mut cover = app::cover::CoverState::default();
 
     // The browser's keys, resolved the same way the game's are (SQ-0796): the
@@ -1804,6 +1859,11 @@ pub(crate) fn run_story_picker(
             }
             Ok(Event::Resize(_, _)) => {
                 let _ = terminal.clear();
+                // SQ-0988: the cell may have changed shape, not just the grid.
+                // Every built cover raster was aspect-fitted against the old one.
+                if cover_picker.as_mut().is_some_and(refresh_cell_size) {
+                    cover.invalidate_cell_geometry();
+                }
             }
             Ok(_) => {}
             Err(_) => break None,

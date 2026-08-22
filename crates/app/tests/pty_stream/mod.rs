@@ -36,6 +36,10 @@ pub mod driver;
 /// with [`driver`], because a gallery of frames nobody captured is nothing.
 #[cfg(unix)]
 pub mod gallery;
+/// SQ-0976: undo the kitty protocol's `o=z` so [`oracle`]'s terminal core — which
+/// links no zlib at all — can still read a compressed upload. Portable, because
+/// bytes captured on unix are resolved everywhere.
+pub mod inflate;
 pub mod oracle;
 pub mod raster;
 
