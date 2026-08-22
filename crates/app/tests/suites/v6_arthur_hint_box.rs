@@ -78,13 +78,28 @@ const MESSAGE: &str = "If only you had a crystal ball....";
 /// 100x25 is the same height in a wider terminal, so the pair separates the
 /// column mapping from the row mapping.
 ///
-/// **Both are 25 rows deliberately, and that is not a round number** — at any
-/// TALLER pane the hybrid-ring story viewport keeps its native rect (11 rows)
-/// but takes every leftover cell row with it (21 rows at 80x34, 35 at 80x48),
-/// overdrawing this box and every other v6 window below the story window. That
-/// is SQ-1008, a render-layer defect this suite found and did not fix; pinning
-/// a taller pane here would pin the bug rather than the fix.
-const PANES: &[(u16, u16)] = &[(80, 25), (100, 25)];
+/// The three TALLER panes are SQ-1008, and they are the ones that were failing.
+/// A pane with rows to spare puts the ring on a reclaiming plan (`frame` here —
+/// Arthur's poles flank the story full height), which top-anchors the story and
+/// grows its viewport into the letterbox slack. That growth used to run to
+/// `area.bottom()` unconditionally: the viewport kept its native rect
+/// `(28, 208, 584, 176)` = 11 native rows and came out 17 cells tall at 100x34,
+/// 21 at 80x34 and 35 at 80x48, so it overdrew this box — and every other v6
+/// window below the story window — at any terminal taller than the game's own
+/// screen, which is most terminals. See [`the_box_survives_the_reclaim`] for the
+/// shape that keeps them apart.
+const PANES: &[(u16, u16)] = &[(80, 25), (100, 25), (100, 34), (80, 34), (80, 48)];
+
+/// The story window's own native rect on this frame, and the box's — the two
+/// things every geometry claim below is made of. Window 0 ends at native y 384
+/// and window 3 is the 16-px row after it, the LAST text row of a 640x400
+/// screen. That one row is what the reclaim used to swallow.
+const NATIVE_STORY: (u16, u16, u16, u16) = (28, 208, 584, 176);
+const NATIVE_BOX: (u16, u16, u16, u16) = (28, 384, 584, 16);
+/// How many terminal rows the story viewport is worth at its native size — the
+/// floor a reclaiming plan must stay above, since window 0 is a scrolling
+/// buffer and the reclaimed rows are its history.
+const NATIVE_STORY_ROWS: u16 = 11;
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -184,12 +199,28 @@ fn rows(buf: &Buffer, area: Rect) -> Vec<String> {
         .collect()
 }
 
-fn state() -> app::state::AppState {
+fn state(honor: bool) -> app::state::AppState {
     let mut st = app::state::AppState::default();
     st.colors = app::colors::ColorScheme::terminal_default();
     st.game_picker = Some(app::render::graphics::kitty_picker(8, 16));
     st.config.v6_render = app::config::V6RenderMode::Hybrid;
+    st.config.honor_game_colours = honor;
     st
+}
+
+/// The cell rect the ring gave the story viewport on the frame just rendered,
+/// read back out of `v6_cell_map` — the same record `/dump-windows` reports, so
+/// a claim made here is a claim about what the player's screen was carved into.
+fn viewport_cells(st: &app::state::AppState) -> (u16, u16, u16, u16) {
+    st.v6_cell_map
+        .borrow()
+        .iter()
+        .find(|c| c.label == "viewport")
+        .map(|c| {
+            assert_eq!(c.native, NATIVE_STORY, "{FIXTURE}: the viewport's native rect");
+            c.cells
+        })
+        .expect("a hybrid-ring frame records its story viewport")
 }
 
 /// **The report.** The message the game answers `hint` with reaches the screen:
@@ -212,20 +243,104 @@ fn the_hint_box_carries_the_games_answer() {
     );
 
     let mut checked = 0usize;
-    for &(w, h) in PANES {
-        let st = state();
-        let area = Rect::new(0, 0, w, h);
-        let mut buf = Buffer::empty(area);
-        let _ = app::render::screen::render_story_pane(&s.screen(), false, None, &st, area, &mut buf);
-        let lines = rows(&buf, area);
-        assert!(
-            lines.iter().any(|r| r.contains(MESSAGE)),
-            "{FIXTURE} r{RELEASE} {w}x{h}: {MESSAGE:?} must be drawn with glyphs:\n{}",
-            lines.join("\n")
-        );
-        checked += 1;
+    for honor in [true, false] {
+        for &(w, h) in PANES {
+            let st = state(honor);
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let _ =
+                app::render::screen::render_story_pane(&s.screen(), false, None, &st, area, &mut buf);
+            let lines = rows(&buf, area);
+            assert!(
+                lines.iter().any(|r| r.contains(MESSAGE)),
+                "{FIXTURE} r{RELEASE} {w}x{h} honor={honor}: {MESSAGE:?} must be drawn with \
+                 glyphs:\n{}",
+                lines.join("\n")
+            );
+            checked += 1;
+        }
     }
-    assert_eq!(checked, PANES.len(), "every pane measured");
+    assert_eq!(checked, PANES.len() * 2, "every pane measured in both colour modes");
+}
+
+/// **SQ-1008.** A pane taller than the game's own screen must not cost the game
+/// a window.
+///
+/// The story viewport's growth into the letterbox slack is deliberate and stays:
+/// window 0 is a scrolling buffer, and the reclaimed rows are how the player
+/// reads more than its eleven native rows of history. What it may not grow over
+/// is the row the game is using — Arthur puts window 3 at native
+/// `(28, 384, 584, 16)`, the last text row of his 640x400 screen, and prints the
+/// boxed answer to `hint` into it.
+///
+/// So both halves are asserted together, because either alone is satisfiable by
+/// a wrong fix: the viewport is TALLER than its native 11 rows (the reclaim
+/// survived — clamping it to the native rect would have passed the box test and
+/// cost the transcript its history), and it STOPS ABOVE the box, which is drawn
+/// on the pane's last row through the same bottom-anchored scale Journey's
+/// command strip uses.
+///
+/// Non-vacuity guard: the 25-row panes are the contrast, and they must still be
+/// on the letterbox plan with an unreclaimed 11-row viewport. If Arthur ever
+/// stops taking a reclaiming plan at 34 rows this case would pass by measuring
+/// nothing, so the taller panes assert the growth itself.
+#[test]
+fn the_box_survives_the_reclaim() {
+    let _g = app::v6_palette_at_boot();
+    let present = stories_dir().join(FIXTURE).exists();
+    let Some((s, _)) = hint_in_play() else {
+        assert!(!present, "{FIXTURE} is present but yielded no hint turn");
+        return;
+    };
+
+    let mut checked = 0usize;
+    for honor in [true, false] {
+        for &(w, h) in PANES {
+            let st = state(honor);
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let _ =
+                app::render::screen::render_story_pane(&s.screen(), false, None, &st, area, &mut buf);
+            let lines = rows(&buf, area);
+            let box_row = lines.iter().position(|r| r.contains(MESSAGE)).unwrap_or_else(|| {
+                panic!("{FIXTURE} r{RELEASE} {w}x{h} honor={honor}: no box row:\n{}", lines.join("\n"))
+            }) as u16;
+            let vp = viewport_cells(&st);
+            let (vp_top, vp_rows) = (vp.1, vp.3);
+
+            assert!(
+                vp_top + vp_rows <= box_row,
+                "{FIXTURE} r{RELEASE} {w}x{h} honor={honor}: the story viewport (rows \
+                 {vp_top}..{}) must stop above window 3's row {box_row} — native {NATIVE_BOX:?}",
+                vp_top + vp_rows
+            );
+
+            if h > 25 {
+                assert_eq!(
+                    box_row,
+                    h - 1,
+                    "{FIXTURE} r{RELEASE} {w}x{h} honor={honor}: the box is the game's last \
+                     native row, so a reclaimed pane bottom-anchors it"
+                );
+                assert!(
+                    vp_rows > NATIVE_STORY_ROWS,
+                    "{FIXTURE} r{RELEASE} {w}x{h} honor={honor}: the reclaim must survive — a \
+                     {vp_rows}-row viewport is no more than window 0's own \
+                     {NATIVE_STORY_ROWS} native rows, so the transcript lost its history"
+                );
+            } else {
+                // The contrast the report was found on: no slack, no reclaim.
+                assert_eq!(
+                    (vp_rows, box_row),
+                    (NATIVE_STORY_ROWS, h - 1),
+                    "{FIXTURE} r{RELEASE} {w}x{h} honor={honor}: Arthur's own screen exactly — \
+                     an unreclaimed viewport and the box on the last row"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, PANES.len() * 2, "every pane measured in both colour modes");
 }
 
 /// The half of the report that was NOT a defect, pinned so nobody "fixes" it:

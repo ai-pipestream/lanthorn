@@ -1007,7 +1007,52 @@ fn render_node(
                             BottomPlan::Extend | BottomPlan::Frame => {
                                 let vp = v6::native_viewport_box(Some(vp_native), &top_scale, (area.width, area.height), cell_px);
                                 let (x, y) = (area.x + vp.x, area.y + vp.y);
-                                (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
+                                // SQ-1008: the reclaim takes the letterbox slack below the
+                                // story — and it may not take a row the GAME is still using.
+                                //
+                                // Both arms reach here on the premise that nothing lives
+                                // below the story window: `Extend`'s by elimination, and
+                                // this pair's enclosed-frame arm by the story reaching
+                                // "within one native text row of the screen bottom". That
+                                // second premise is one row loose, and Arthur spends the row
+                                // it forgives. `Arthur - The Quest for Excalibur.adf`
+                                // (release 54 / serial 890606) answers `hint` in play by
+                                // laying window 3 across native `(28, 384, 584, 16)` — the
+                                // LAST text row of a 640x400 screen, with window 0 ending at
+                                // 384 — and printing *"If only you had a crystal ball...."*
+                                // into it. `menu_strip_below_story` never sees it, because
+                                // its own `native.1 <= story_bottom + 16` guard returns
+                                // false before it looks; so the plan is `Frame` (his poles
+                                // flank the story full height), the viewport grew to
+                                // `area.bottom()`, and `content_ring_bands` carved
+                                // `pane − viewport` and found no bottom band to put the box
+                                // in. MEASURED, same frame, sixteen turns in: viewport 11
+                                // rows at 80x25 and 100x25 with the box drawn on row 24;
+                                // 17 rows at 100x34, 21 at 80x34, 35 at 80x48 with the box
+                                // drawn nowhere. Any v6 window below the story window was
+                                // invisible at any terminal taller than the game's own
+                                // screen, which is most terminals.
+                                //
+                                // The extra rows are not the defect and are not clamped
+                                // here: they are the transcript's, and window 0 is a
+                                // SCROLLING buffer whose history the player reads far past
+                                // its eleven native rows. What they may not include is the
+                                // game's own bottom-anchored content. So take the rows that
+                                // content needs off the pane's bottom and hand back the
+                                // bottom-anchored scale for them — which is exactly what the
+                                // `Menu` arm below does for Journey's command strip, reused
+                                // rather than restated so the two cannot drift. `rows` is 0
+                                // on every frame with nothing below the story, which is
+                                // every frame in the corpus but this one, and the arm is
+                                // then byte-identical to what it was.
+                                let rows = menu_band_rows(&menu_band_runs(&chrome_runs, story));
+                                if rows == 0 {
+                                    (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
+                                } else {
+                                    let bottom_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
+                                    let band_top = area.bottom().saturating_sub(rows).clamp(y + 1, area.bottom());
+                                    (top_scale, Rect::new(x, y, vp.width, band_top.saturating_sub(y)), Some(bottom_scale))
+                                }
                             }
                             BottomPlan::Menu => {
                                 let menu_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
@@ -2233,7 +2278,17 @@ fn render_node(
                             // is where clicks are meaningful (story-region clicks map
                             // through the menu offset, but the game reads only the
                             // menu pixels). Extend/Letterbox use one scale everywhere.
-                            let click_scale = menu.as_ref().unwrap_or(&scale);
+                            //
+                            // Asked of the PLAN and not of `menu.is_some()` since SQ-1008,
+                            // which gave the Extend/Frame plans a bottom-anchored band of
+                            // their own for content the game keeps below the story window
+                            // (Arthur's boxed `hint` message). That band is paint, not a
+                            // picker: the interactive region on those frames is still the
+                            // story, so they must keep inverting through the story scale.
+                            // Byte-identical for all four plans as they stood — `menu` was
+                            // `Some` under exactly the `Menu` plan and nowhere else.
+                            let click_scale =
+                                if matches!(plan, BottomPlan::Menu) { menu.as_ref().unwrap_or(&scale) } else { &scale };
                             // SQ-0550: that scale alone inverts the menu WRONG. The menu
                             // is a TEXT strip, and `draw_chrome_text_strip` packs its game
                             // rows onto CONSECUTIVE terminal rows from the strip's top

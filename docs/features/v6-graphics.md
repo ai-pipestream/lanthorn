@@ -1355,6 +1355,22 @@ session-only switch that never touches your saved config:
   A game whose frame *encloses* the story to the screen bottom (Zork Zero's full
   frame) keeps the centred letterbox untouched, and a pane at or below the scaled
   native height (no dead space) degrades to that same centred layout.
+  **What the story reclaims is dead space, and a row the game is using is not
+  dead.** "An open bottom" is a claim about the frame, and the planner reached it
+  by forgiving the last native text row — a story window ending within one row of
+  the screen bottom counted as reaching it. Arthur spends exactly that row. Ask
+  him for a hint in play and he lays window 3 across the foot of the screen and
+  prints *"If only you had a crystal ball...."* into it; answer him with a blank
+  line and he puts *"I beg your pardon?"* in the same place. At 80×25 — his own
+  screen, no slack, centred letterbox — the box was drawn all along, and at every
+  taller terminal the story viewport grew straight over it and the message was on
+  no screen at all. Raster never lost it, which is the tell: its composite is
+  built at native size, so a pane cannot take a row out of it. So the reclaim now
+  stops above whatever the game keeps below its story window and bottom-anchors it
+  to the pane's last rows — the same treatment Journey's command menu has always
+  had, for the same reason. The transcript keeps everything else: window 0 is a
+  scrolling buffer and those rows are its history, so at 80×34 it is 20 rows deep
+  against its 11 native ones.
   **What the pane is shaped like decides how much is reclaimed; it never decides
   what the game has.** Those are two questions and the planner used to run them
   together, taking its "no dead space, centre it" shortcut *before* it had so much
