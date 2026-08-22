@@ -77,6 +77,8 @@ mod wizard_sniffer;
 
 #[path = "suites/palette_lock_discipline.rs"]
 mod palette_lock_discipline;
+#[path = "suites/terminal_restore_order.rs"]
+mod terminal_restore_order;
 #[path = "suites/release_enumeration.rs"]
 mod release_enumeration;
 #[path = "suites/volume_chooser.rs"]
