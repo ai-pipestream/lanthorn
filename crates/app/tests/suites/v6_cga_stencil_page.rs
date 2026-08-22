@@ -827,7 +827,11 @@ fn the_cards_pair_is_settled_before_the_story_loads() {
                     // The definition, its doc comment and this very case are not
                     // calls; a call is the method on a value.
                     if line.contains(".two_colour_card_screen(") && !line.trim_start().starts_with("//") {
-                        callers.push(format!("{}: {}", path.display(), line.trim()));
+                        // Normalise the separator: on Windows `display()` yields
+                        // `crates\app\tests\...`, so the `/tests/` filter below
+                        // matched nothing and every test file counted as production.
+                        let shown = path.display().to_string().replace('\\', "/");
+                        callers.push(format!("{shown}: {}", line.trim()));
                     }
                 }
             }
