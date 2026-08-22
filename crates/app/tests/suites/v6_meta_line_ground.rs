@@ -66,6 +66,18 @@ const AMIGA_FLOPPY: &str = "Zork Zero - The Revenge of Megaboz.adf";
 /// it at all, so this is the CONTROL — the machine's page is the ground and the
 /// frame must not move.
 const MAC_DISK: &str = "Zork Zero Disk.image";
+/// **Arthur's Amiga floppy, release 54 / serial 890606** — the second half of the
+/// report, and the press that shows why the story page alone is the wrong key.
+///
+/// Here §8.3's Amiga pair publishes `Rgb(66, 66, 66)` as the ground while the
+/// PERIOD LOOK's page is `Rgb(7, 75, 161)`; the two are separate facts and this is
+/// where they disagree. Arthur declares no window page of its own, so a fix keyed
+/// on `v6_story_page` does nothing here and the meta line stayed a blue sentence
+/// in a grey row.
+///
+/// It needs driving: at the boot frame window 0 is an intro plate, not a
+/// transcript, so [`frame`] walks the intro before rendering.
+const ARTHUR_FLOPPY: &str = "Arthur - The Quest for Excalibur.adf";
 
 /// The text a case pushes as lanthorn's own, distinctive enough to find by eye in
 /// a failure message.
@@ -97,6 +109,11 @@ struct Frame {
 ///
 /// `None` when the gitignored medium is absent.
 fn frame(file: &str, honor: bool) -> Option<Frame> {
+    frame_driven(file, honor, false)
+}
+
+/// [`frame`], optionally walking the intro first — see [`ARTHUR_FLOPPY`].
+fn frame_driven(file: &str, honor: bool, drive: bool) -> Option<Frame> {
     let path = stories_dir().join(file);
     let bytes = match app::hints::load_story(&path) {
         Ok(app::hints::LoadedStory::ZCode(b)) => b,
@@ -137,6 +154,25 @@ fn frame(file: &str, honor: bool) -> Option<Frame> {
     state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
     state.config.v6_render = app::config::V6RenderMode::Hybrid;
     state.config.honor_game_colours = honoured;
+    // Zork Zero's boot banner IS the transcript; Arthur opens on an intro plate
+    // and window 0 only becomes a transcript once the intro is walked. Driving to
+    // a frame the app actually draws is the whole point — a harness that rendered
+    // the plate would measure a screen with no prose on it and agree with itself.
+    if drive {
+        for _ in 0..14 {
+            let r = match session.pending_input() {
+                app::session::InputKind::Line => session.submit(""),
+                app::session::InputKind::Char => session.submit_char(13),
+                app::session::InputKind::Event => session.submit(""),
+            };
+            if r.transcript.to_lowercase().contains("y or n") {
+                let _ = session.submit_char(b'n');
+            }
+            assert!(!session.quit, "{file}: quit while walking the intro");
+        }
+        let r = session.submit("look");
+        assert!(r.fault.is_none(), "{file}: `look` faulted: {:?}", r.fault);
+    }
     let elems = Engine::take_transcript_elems(&mut session);
     app::state::apply_transcript_elems(&mut state, &elems);
     state.push_transcript_kind(META, TranscriptKind::Meta);
@@ -159,6 +195,34 @@ fn frame(file: &str, honor: bool) -> Option<Frame> {
     Some(Frame { state, buf, viewport })
 }
 
+/// Every background on the first row containing `needle` — the cells with a glyph
+/// in them AND the blank ones beside them, which is the comparison that matters:
+/// the reported symptom is a coloured SENTENCE in a differently-coloured ROW.
+///
+/// One entry means one ground across the whole row, which is what a line printed
+/// on a page looks like.
+fn whole_row_grounds(f: &Frame, needle: &str) -> Option<Vec<Color>> {
+    let y = row_of(f, needle)?;
+    let mut out: Vec<Color> = Vec::new();
+    for x in f.viewport.x..f.viewport.right() {
+        let bg = f.buf.cell((x, y)).expect("in-bounds cell").bg;
+        if !out.contains(&bg) {
+            out.push(bg);
+        }
+    }
+    Some(out)
+}
+
+/// The first row containing `needle`.
+fn row_of(f: &Frame, needle: &str) -> Option<u16> {
+    let text = |y: u16| -> String {
+        (f.viewport.x..f.viewport.right())
+            .map(|x| f.buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+            .collect()
+    };
+    (f.viewport.y..f.viewport.bottom()).find(|&y| text(y).contains(needle))
+}
+
 /// The backgrounds carried by the drawn (non-blank) cells of the first row
 /// containing `needle`, most common first. `None` when no row has it.
 fn row_grounds(f: &Frame, needle: &str) -> Option<Vec<Color>> {
@@ -179,42 +243,59 @@ fn row_grounds(f: &Frame, needle: &str) -> Option<Vec<Color>> {
 }
 
 /// **The deliverable, as a relation.** On every medium and in both colour modes,
-/// lanthorn's own meta line is read on the same ground as the story's prose.
+/// lanthorn's own meta line is read on ONE ground — the one the pane put down —
+/// and not as a coloured sentence sitting in a differently-coloured row.
 ///
-/// The prose row is the room name the game just printed — a Story line with no
-/// runs of its own, so its cells carry the pane's ground and nothing else. If the
-/// meta line's ground differs from it, the player sees a stripe.
+/// The row is its own reference, which is what lets one case cover four presses.
+/// Zork Zero prints prose into window 0 and the room name is a second reference
+/// (asserted below where it exists); Arthur's transcript is EMPTY on this frame —
+/// its prose never reaches `take_transcript_elems` at all, which is a separate
+/// defect and filed as one — so a case keyed on a prose row would have had nothing
+/// to compare against on the very press the second half of the report came from.
 ///
-/// Falsified by reverting `render::transcript`'s re-grounding: the IBM PC frame
-/// comes back `[Rgb(173, 173, 173), Rgb(0, 0, 173)]` against a prose ground of
-/// `Rgb(173, 173, 173)` — the pip on the page, the sentence on the machine.
+/// Falsified by reverting `render::transcript`'s re-grounding: Zork Zero r393 comes
+/// back `[Rgb(173, 173, 173), Rgb(0, 0, 173)]` and Arthur's Amiga floppy
+/// `[Rgb(66, 66, 66), Rgb(7, 75, 161)]` — in both, the machine's or the period
+/// look's page laid over the page the frame is actually being read on.
 #[test]
-fn a_meta_line_is_read_on_the_same_ground_as_the_prose() {
+fn a_meta_line_is_read_on_one_ground_and_it_is_the_frames_own() {
     let _g = app::v6_palette_at_boot();
     let mut seen = 0usize;
     let mut any = false;
-    for file in [IBM_PC_STORY, AMIGA_FLOPPY, MAC_DISK] {
+    for (file, drive) in [
+        (IBM_PC_STORY, false),
+        (AMIGA_FLOPPY, false),
+        (MAC_DISK, false),
+        (ARTHUR_FLOPPY, true),
+    ] {
         any |= stories_dir().join(file).exists();
         for honor in [true, false] {
-            let Some(f) = frame(file, honor) else { continue };
+            let Some(f) = frame_driven(file, honor, drive) else { continue };
             seen += 1;
             let what = format!("{file} honor={honor}");
 
-            let prose = row_grounds(&f, "Banquet Hall")
-                .unwrap_or_else(|| panic!("{what}: premise — the boot banner names the room"));
-            assert_eq!(
-                prose.len(),
-                1,
-                "{what}: premise — the prose row is one ground, or it cannot be the reference: {prose:?}",
-            );
-            let meta = row_grounds(&f, META)
+            let meta = whole_row_grounds(&f, META)
                 .unwrap_or_else(|| panic!("{what}: premise — the meta line reached the frame"));
-
             assert_eq!(
-                meta, prose,
-                "{what}: lanthorn's own line is read on a different ground from the prose above \
-                 it — the machine's page punched through the page the story declared",
+                meta.len(),
+                1,
+                "{what}: lanthorn's own line is a coloured sentence in a differently-coloured \
+                 row — the machine's or the period look's page laid over the frame's own: {meta:?}",
             );
+
+            // …and where the game printed prose, that is the same ground. The
+            // stronger statement, available on the presses that have a room name.
+            if let Some(prose) = row_grounds(&f, "Banquet Hall") {
+                assert_eq!(
+                    prose.len(),
+                    1,
+                    "{what}: premise — the prose row is one ground, or it is no reference: {prose:?}",
+                );
+                assert_eq!(
+                    meta, prose,
+                    "{what}: the meta line is read on a different ground from the prose above it",
+                );
+            }
         }
     }
     assert!(!any || seen > 0, "a present medium must have produced a frame");

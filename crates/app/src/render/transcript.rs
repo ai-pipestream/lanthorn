@@ -2164,12 +2164,36 @@ fn render_middle(
         // colour happens to equal the machine's loses nothing, because the two
         // agree. All three move together because one table row paints all three
         // with the same justification.
+        // THE GROUND THE PROSE IS READ ON — the window's own page, else the
+        // MACHINE's. The same two layers `inline_image::page_for` resolves a float's
+        // ground through, and for the same reason: it is the paper, and everything
+        // printed on the page has to agree about it.
+        //
+        // NOT `normal_style.bg`, which looks like the obvious answer and is not one.
+        // It is what an INHERITED channel falls back to, and Zork Zero's prose runs
+        // name their own background, so the cells the player reads carry the game's
+        // grey while `normal_style` carries whatever the period look painted the
+        // `transcript` selector.
+        //
+        // Both layers are needed because each press has only one of them. Zork Zero
+        // r393 declares a window page (`Rgb(173, 173, 173)`) and publishes no machine
+        // pair; Arthur's Amiga floppy declares no window page and publishes a pair
+        // (`Rgb(66, 66, 66)`). Either way the PERIOD LOOK's page is a third,
+        // independent number — `Rgb(0, 0, 173)` and `Rgb(7, 75, 161)` respectively —
+        // which is what makes a fix keyed on one layer alone silently miss the other
+        // press. It did: this shipped keyed on the story page and Arthur was still a
+        // blue sentence in a grey row.
+        let prose_ground = state
+            .v6_story_page
+            .get()
+            .map(|(r, g, b)| ratatui::style::Color::Rgb(r, g, b))
+            .or_else(|| crate::render::screen::v6_machine_page(state, Style::default()).bg);
         let reground = |s: Style| -> Style {
-            match (state.v6_story_page.get(), state.period_look) {
-                (Some((r, g, b)), Some(look))
+            match (prose_ground, state.period_look) {
+                (Some(ground), Some(look))
                     if s.bg == Some(ratatui::style::Color::Rgb(look.page.0, look.page.1, look.page.2)) =>
                 {
-                    s.bg(ratatui::style::Color::Rgb(r, g, b))
+                    s.bg(ground)
                 }
                 _ => s,
             }
@@ -2181,8 +2205,26 @@ fn render_middle(
             .iter()
             .zip(filtered_kinds.iter())
             .map(|(&i, kind)| {
+                // An explicitly-styled line takes the same rule, so the rule does
+                // not depend on which push a caller reached for.
+                //
+                // `/dump-terminal`'s headings and its ASSUMED values arrive through
+                // `push_transcript_internal_styled`, which lands a resolved style
+                // here and used to return before the re-grounding below ever ran.
+                // Measured: they are NOT affected today — `terminal_dump_heading`
+                // inherits `heading` and `terminal_dump_assumed` inherits `alert`,
+                // `period::painted` paints neither role, and both resolve with no
+                // background at all, so their cells keep whatever the pane put
+                // down. This is applied for uniformity rather than to fix an
+                // observed frame: a style that DOES carry the period page has no
+                // business being treated differently for having come in through
+                // the other door.
+                //
+                // `reground` is the same self-limiting test either way — only a
+                // background the period look itself put there is replaced — so a
+                // style a caller or a user chose is passed through untouched.
                 if let Some(ov) = state.transcript_styles.get(i).copied().flatten() {
-                    return ov;
+                    return reground(ov);
                 }
                 match kind {
                     TranscriptKind::Story   => state.colors.resolve_story_style(normal_style, &state.transcript[i], room_name, machine_owns_ink),
