@@ -83,10 +83,30 @@ pub(crate) fn blit_band(
 }
 
 /// Cache key for one band row's built protocol: the image's pixel-buffer
-/// identity, the band geometry that determines the resized strip, and the page
+/// identity, the band geometry that determines the resized strip, the page
 /// the strip was flattened onto (see [`flatten_onto`]) so a theme or game-colour
-/// change re-encodes instead of serving a strip baked over the old page.
-type BandCacheKey = (usize, u16, u16, u16, u32);
+/// change re-encodes instead of serving a strip baked over the old page, and the
+/// CELL SIZE that geometry is measured in.
+///
+/// The cell size is in the key because `cols`/`rows` are a count and the resample
+/// is in pixels: `box_w = cols · cell_w`. A terminal font-size change moves the
+/// cell without necessarily moving the count — `InlineImage::fitted_cells` rounds
+/// native pixels UP to whole cells, so adjacent font sizes routinely land on the
+/// same one — and without it here, every key hit and the strips served were the
+/// ones resampled for the old cell. Zork Zero's drop-cap and room icons came back
+/// as misaligned bands at some font sizes and not others, and only until the game
+/// was restarted, which rebuilt the pictures behind fresh `Arc`s and missed every
+/// pointer key (SQ-1003). SQ-0988 fixed the same defect for the OTHER cache —
+/// `draw_chrome_band` folds `(cw, ch)` into its freshness hash, and a resize
+/// clears `GraphicsRender` outright — but `InlineImageRender` is a sibling field
+/// on `AppState` and got neither. It is a key rather than a second invalidation
+/// call so there is nothing for a future resize path to forget.
+type BandCacheKey = (usize, u16, u16, u16, u32, u16, u16);
+
+/// Cache key for a band's shared fit: [`BandCacheKey`] without the row or the
+/// page, since the fit is the whole picture and predates both. It carries the
+/// cell size for the same reason (SQ-1003).
+type FittedKey = (usize, u16, u16, u16, u16);
 
 /// Resize `src` to sit inside a `box_w × box_h` pixel box WITHOUT distorting it,
 /// centred, with the leftover margin left transparent (SQ-0704).
@@ -229,14 +249,14 @@ pub struct InlineImageRender {
     /// freed address (the ABA bug). Same shared allocation the live image holds.
     cache: std::collections::HashMap<BandCacheKey, (std::sync::Arc<image::RgbaImage>, Protocol)>,
     /// The whole source image fitted to a band's cell box, cached per
-    /// `(source-arc-ptr, cols, rows)` and SHARED by every row of that band. The
+    /// [`FittedKey`] and SHARED by every row of that band. The
     /// fit `resize_exact` is by far the expensive step (a full-image resample);
     /// doing it once per band instead of once per row is what keeps the first
     /// scroll that brings a tall image into view smooth — otherwise all N band
     /// rows resample the whole image in a single paint frame (SQ-0513). The
     /// paired `Arc` pins the SOURCE buffer so the pointer key can't ABA-collide,
     /// mirroring `cache`.
-    fitted: std::collections::HashMap<(usize, u16, u16), (std::sync::Arc<image::RgbaImage>, image::DynamicImage)>,
+    fitted: std::collections::HashMap<FittedKey, (std::sync::Arc<image::RgbaImage>, image::DynamicImage)>,
 }
 
 impl std::fmt::Debug for InlineImageRender {
@@ -270,12 +290,16 @@ impl InlineImageRender {
         let page_key = page.map_or(0, |p| {
             u32::from_be_bytes([1, p[0], p[1], p[2]])
         });
-        let key: BandCacheKey = (src_ptr, band.cols, band.rows, band.row, page_key);
+        // Cell pixel size comes from the picker font, and joins both keys: it is
+        // what the resample below is measured in, and it moves under a terminal
+        // font-size change that leaves `cols`/`rows` alone (SQ-1003).
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1), fs.height.max(1));
+        let key: BandCacheKey = (src_ptr, band.cols, band.rows, band.row, page_key, cw, ch);
         if !self.cache.contains_key(&key) {
             // Fit the whole image to the band's cell box in pixels, then crop
-            // the strip for this row. Cell pixel size comes from the picker font.
-            let fs = picker.font_size();
-            let (fw, fh) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+            // the strip for this row.
+            let (fw, fh) = (cw as u32, ch as u32);
             let box_w = band.cols as u32 * fw;
             let box_h = band.rows as u32 * fh;
             if box_w == 0 || box_h == 0 {
@@ -290,7 +314,8 @@ impl InlineImageRender {
             // row's strip from it. Sharing the resample across the band's rows is
             // the SQ-0513 fix — the crop is cheap; the resize is not.
             let strip = {
-                let (_pin, full) = self.fitted.entry((src_ptr, band.cols, band.rows)).or_insert_with(|| {
+                let fit_key: FittedKey = (src_ptr, band.cols, band.rows, cw, ch);
+                let (_pin, full) = self.fitted.entry(fit_key).or_insert_with(|| {
                     // Fit, do not stretch: the cell box is rounded up per axis and
                     // is almost never the picture's own shape (SQ-0704).
                     let fitted = image::DynamicImage::ImageRgba8(fit_preserving_aspect(
@@ -533,6 +558,46 @@ mod tests {
         let band_row1 = crate::render::transcript::ImageBand { row: 1, ..band };
         r.render_row(&picker, &band_row1, Rect::new(0, 0, 2, 1), None, &mut buf);
         assert_eq!(r.cache.len(), 2);
+    }
+
+    #[test]
+    fn a_font_size_change_re_resamples_instead_of_serving_the_old_cell() {
+        // SQ-1003. Both caches are keyed in CELLS, and the cell's pixel size is
+        // what decides the resample — so a font-size change that leaves `cols`
+        // and `rows` alone must still miss. It did not, and Zork Zero's drop-cap
+        // and room icons came back as misaligned bands the moment the terminal
+        // font moved: pixels fitted to the old cell, placed into the new one.
+        // Restarting the game cleared it, because the pictures came back behind
+        // fresh `Arc`s and every pointer key missed — which is what says cache
+        // rather than geometry.
+        let px = image::RgbaImage::new(32, 32);
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None, margin_px: None,
+        };
+        let (cols, rows) = (4u16, 2u16);
+        let band = crate::render::transcript::ImageBand { image: img, cols, rows, row: 0, x_off: 0 };
+        let mut picker = Picker::halfblocks();
+        picker.set_font_size(ratatui_image::FontSize::new(8, 16));
+        let mut buf = Buffer::empty(Rect::new(0, 0, cols + 2, rows + 2));
+        let mut r = InlineImageRender::default();
+        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, &mut buf);
+        let small = r.fitted.values().next().expect("the band was fitted").1.clone();
+        assert_eq!((small.width(), small.height()), (32, 32), "fitted to the 8x16 cell");
+
+        // The same band, the same cell COUNT, a bigger cell.
+        picker.set_font_size(ratatui_image::FontSize::new(16, 32));
+        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, &mut buf);
+        assert_eq!(r.fitted.len(), 2, "the new cell size is a new fit, not a hit on the old one");
+        let big = r
+            .fitted
+            .values()
+            .map(|(_, f)| (f.width(), f.height()))
+            .max()
+            .expect("two fits");
+        assert_eq!(big, (64, 64), "fitted to the 16x32 cell — the picture is resampled, not rescaled by the terminal");
+        assert_eq!(r.cache.len(), 2, "and the row's built protocol is rebuilt with it");
     }
 
     #[test]
