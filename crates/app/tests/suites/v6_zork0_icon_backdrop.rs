@@ -126,8 +126,8 @@ fn zork0_room_icons_rest_on_the_banner_windows_own_white_page() {
     let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
 
     let state = render_state(app::config::V6RenderMode::Hybrid, true);
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
 
     let win1 = banner(&layout.chrome).expect("Zork0's banner window publishes its own background");
@@ -141,6 +141,7 @@ fn zork0_room_icons_rest_on_the_banner_windows_own_white_page() {
         default_bg,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
 
     // Precondition (the symptom): inside the banner window, below the frame art,
@@ -171,6 +172,7 @@ fn zork0_room_icons_rest_on_the_banner_windows_own_white_page() {
         layout.story,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
 
     // (1) Every hole now reads the BANNER WINDOW's own page: opaque white
@@ -268,8 +270,8 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
     let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
 
     let state = render_state(app::config::V6RenderMode::Hybrid, false);
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
 
     assert!(
@@ -284,6 +286,7 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
         default_bg,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
     let mut after = before.clone();
     app::render::v6_layout::fill_window_pages(
@@ -292,6 +295,7 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
         layout.story,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
     assert_eq!(before.as_raw(), after.as_raw(), "declined colours leave the composite byte-identical");
 
@@ -327,8 +331,8 @@ fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
     let state = render_state(app::config::V6RenderMode::Hybrid, true);
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
 
     // The banner really is listed twice — a Graphics entry with no colour of its
@@ -355,6 +359,7 @@ fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
         default_bg,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
     app::render::v6_layout::fill_window_pages(
         &mut canvas,
@@ -362,6 +367,7 @@ fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
         layout.story,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
     let clear: Vec<(u32, u32)> = (68..78)
         .flat_map(|y| (276..321).map(move |x| (x, y)))

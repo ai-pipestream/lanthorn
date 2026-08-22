@@ -143,7 +143,7 @@ fn the_table_is_a_full_screen_fill_that_survives_only_as_a_window_page() {
     // …and window 1 still declares that green as its page.
     let model = session.screen();
     let app::engine::WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let table = layout
         .chrome
         .iter()
@@ -160,7 +160,7 @@ fn the_table_is_a_full_screen_fill_that_survives_only_as_a_window_page() {
 /// cell quantization.
 ///
 /// Falsified by reverting `fill_painted_window_pages` to the plain
-/// `if honor { fill_window_pages(..) }` gate:
+/// `if honor { fill_window_pages(.., zvm::screen::V6Cell::DEFAULT) }` gate:
 /// "Hybrid honor=false title pane=100x34: the felt table reaches the pane — 0 of
 /// 3400 cells are baize, wanted more than 1700".
 #[test]
@@ -239,8 +239,8 @@ fn the_score_screen_does_not_bridge_the_gap_between_two_runs() {
         content_size: (80, 25),
     };
     let WinNode::Layered(items) = &model.root else { unreachable!() };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
@@ -304,8 +304,8 @@ fn no_reachable_scopa_row_floods_a_gap_it_does_not_span() {
         let Some(session) = scopa(deal, false) else { return };
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-        let native = app::render::v6_layout::native_extent(items);
-        let layout = app::render::v6_layout::classify_windows(items);
+        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let colors = app::colors::ColorScheme::terminal_default();
         let canvas = app::render::v6_layout::build_chrome_canvas(
             &layout.chrome,
@@ -314,6 +314,7 @@ fn no_reachable_scopa_row_floods_a_gap_it_does_not_span() {
             image::Rgba([0, 0, 0, 255]),
             &colors,
             app::render::v6_layout::TextLayer::All,
+            zvm::screen::V6Cell::DEFAULT,
         );
 
         for it in &layout.chrome {

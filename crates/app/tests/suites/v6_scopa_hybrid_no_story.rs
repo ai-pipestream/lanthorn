@@ -106,7 +106,7 @@ fn scopa_publishes_no_story_window_but_does_paint_a_ground() {
     let Some(session) = scopa_dealt() else { return };
     let model = session.screen();
     let app::engine::WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     assert!(
         layout.story.is_none(),
         "scopa publishes no primary Buffer — its screen is Grids, so hybrid's ring arm is skipped"

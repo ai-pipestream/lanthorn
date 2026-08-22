@@ -320,8 +320,8 @@ fn the_raster_composite_keeps_both_rows_right_justified() {
             state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
             state.config.v6_render = app::config::V6RenderMode::Raster;
             state.config.honor_game_colours = honor;
-            let native = app::render::v6_layout::native_extent(items);
-            let layout = app::render::v6_layout::classify_windows(items);
+            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
             let band_ink = |row: u32| -> Option<u32> {
                 let bg = *canvas.get_pixel(0, row * 16);

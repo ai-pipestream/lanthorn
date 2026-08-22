@@ -162,7 +162,7 @@ fn chrome_runs(model: &app::engine::ScreenModel) -> Vec<PxText> {
 /// height is how many of these rows there are, and nothing about the pane.
 fn menu_rows_of(model: &app::engine::ScreenModel) -> std::collections::BTreeMap<u32, Vec<PxText>> {
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-    let story = app::render::v6_layout::classify_windows(items).story.expect("story window");
+    let story = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT).story.expect("story window");
     let story_bottom = story.y_px as u32 + story.h_px as u32;
     let mut out: std::collections::BTreeMap<u32, Vec<PxText>> = Default::default();
     for t in chrome_runs(model) {

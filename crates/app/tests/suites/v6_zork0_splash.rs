@@ -116,7 +116,7 @@ fn zork0_title_splash_fills_the_screen_and_carves_no_story_viewport() {
     // The core of the render fix: with window 0 collapsed there is NO story
     // window to classify, so the hybrid renderer never carves an inset text
     // viewport over the picture — it falls through to the full-art path.
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     assert!(layout.story.is_none(), "no story viewport is carved over the full-screen splash");
 
     // And the hybrid render must not paint the prior transcript over the splash.

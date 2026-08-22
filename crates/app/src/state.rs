@@ -2648,6 +2648,24 @@ pub struct AppState {
     /// reverses behind each run and lets the page show between) and the input
     /// cursor's shape.
     pub period_look: Option<zvm::interpreter::PeriodLook>,
+    /// The Version 6 character cell this session's machine quantizes by
+    /// (SQ-0917) — the render path's copy of [`zvm::cpu::Machine::v6_cell`].
+    ///
+    /// Every native-pixel-to-terminal-column step in `render/` divides by this,
+    /// so it has to be the SAME number the engine placed the runs with: the
+    /// engine emits a run at a multiple of `cell.w` and the renderer recovers
+    /// the column by dividing by it. A renderer dividing by 8 while the engine
+    /// stepped by 7 puts every run in the wrong column.
+    ///
+    /// Threaded from here into the geometry helpers rather than read ambiently.
+    /// A module-level or thread-local cell would be SQ-0958's shape exactly — a
+    /// case that renders without setting one inherits whatever the last case
+    /// left, which is invisible under nextest's per-test processes and wrong
+    /// under `cargo test`.
+    ///
+    /// [`zvm::screen::V6Cell::DEFAULT`] (8x16) until a profile says otherwise,
+    /// which is still every profile today.
+    pub v6_cell: zvm::screen::V6Cell,
 
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
@@ -2964,6 +2982,7 @@ impl Default for AppState {
             artwork_declines_colours: false,
             story_zversion: None,
             period_look: None,
+            v6_cell: zvm::screen::V6Cell::DEFAULT,
             transcript_scroll: 0,
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,

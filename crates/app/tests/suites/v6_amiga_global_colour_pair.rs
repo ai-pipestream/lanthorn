@@ -944,7 +944,7 @@ fn chrome_inherits_the_page_the_game_dressed() {
         let model = app::engine::Engine::screen(&s);
         let app::engine::WinNode::Layered(items) = &model.root else { panic!("{label}: Layered") };
         let dressed = app::render::v6_layout::story_bg_rgba(
-            app::render::v6_layout::classify_windows(items.as_slice()).story,
+            app::render::v6_layout::classify_windows(items.as_slice(), zvm::screen::V6Cell::DEFAULT).story,
             &app::colors::ColorScheme::terminal_default(),
         );
 
@@ -987,7 +987,7 @@ fn chrome_inherits_the_page_the_game_dressed() {
             // Arthur's frame is all image bands and has no inked cell at all.)
             None => assert!(
                 app::render::v6_layout::story_bg_rgba(
-                    app::render::v6_layout::classify_windows(items.as_slice()).story,
+                    app::render::v6_layout::classify_windows(items.as_slice(), zvm::screen::V6Cell::DEFAULT).story,
                     &state.colors,
                 )
                 .is_none(),

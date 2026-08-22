@@ -238,8 +238,8 @@ fn journeys_frame_border_is_a_single_native_pixel_column() {
             WinNode::Layered(v) => v,
             _ => &[],
         };
-        let layout = app::render::v6_layout::classify_windows(items);
-        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
         let colors = app::colors::ColorScheme::terminal_default();
         let canvas = app::render::v6_layout::build_chrome_canvas(
             &layout.chrome,
@@ -248,6 +248,7 @@ fn journeys_frame_border_is_a_single_native_pixel_column() {
             image::Rgba([0, 0, 0, 255]),
             &colors,
             app::render::v6_layout::TextLayer::All,
+            zvm::screen::V6Cell::DEFAULT,
         );
         let story = layout.story.expect("Journey publishes a story window at its menu");
         let mid = story.y_px as u32 + (story.h_px as u32) / 2;

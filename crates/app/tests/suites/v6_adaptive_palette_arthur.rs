@@ -148,8 +148,8 @@ fn chrome(session: &mut GameSession) -> image::RgbaImage {
     use image::Rgba;
     let model = session.screen();
     let WinNode::Layered(items) = model.root.clone() else { panic!("v6 stories build a Layered root") };
-    let native = app::render::v6_layout::native_extent(&items);
-    let layout = app::render::v6_layout::classify_windows(&items);
+    let native = app::render::v6_layout::native_extent(&items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(&items, zvm::screen::V6Cell::DEFAULT);
     app::render::v6_layout::build_chrome_canvas(
         &layout.chrome,
         native,
@@ -157,6 +157,7 @@ fn chrome(session: &mut GameSession) -> image::RgbaImage {
         Rgba([0, 0, 0, 255]),
         &app::colors::ColorScheme::terminal_default(),
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     )
 }
 

@@ -155,13 +155,13 @@ fn journey_menu_rasterizes_into_the_bottom_band() {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
 
-    let native = v6::native_extent(items);
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
     assert!(
         native.1 >= 385,
         "native extent must cover the menu runs (bottom at native y≈385); got {native:?}"
     );
 
-    let layout = v6::classify_windows(items);
+    let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let colors = app::colors::ColorScheme::terminal_default();
     let canvas = v6::build_chrome_canvas(
         &layout.chrome,
@@ -170,6 +170,7 @@ fn journey_menu_rasterizes_into_the_bottom_band() {
         image::Rgba([0, 0, 0, 255]),
         &colors,
         v6::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
     // Count opaque ink in the bottom band (native rows 19–24 → y 304..).
     let y0 = 19 * 16u32;
@@ -278,12 +279,13 @@ fn journey_raster_reverse_header_bar_is_solid_body_untouched() {
     let Some(session) = journey_at_menu() else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = v6::native_extent(items);
-    let layout = v6::classify_windows(items);
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let colors = app::colors::ColorScheme::terminal_default();
     let canvas = v6::build_chrome_canvas(
         &layout.chrome, native, image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]), &colors,
         v6::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
     let ncols = (canvas.width() / 8) as u32;
     // A whole 8-px cell is "filled" when every pixel column has opaque ink.
@@ -416,7 +418,7 @@ fn journey_hybrid_menu_full_black_panel_dividers_continuous() {
     let (lo, hi) = {
         use app::render::v6_layout as v6;
         let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-        let native = v6::native_extent(items.as_slice());
+        let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
         let (scale, _) = v6::fitted_scale(native, (area.width as u32, area.height as u32 * 2), (2, 2), false);
         v6::screen_cols(&scale, native.0, (1, 2), area)
     };
@@ -509,14 +511,15 @@ fn journey_pixel_band_canvas_excludes_menu_keeps_divider() {
     let Some(session) = journey_at_menu() else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = v6::native_extent(items);
-    let layout = v6::classify_windows(items);
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let story = layout.story.expect("story window");
     let story_bottom = (story.y_px + story.h_px) as u32;
     let colors = app::colors::ColorScheme::terminal_default();
     let mut canvas = v6::build_chrome_canvas(
         &layout.chrome, native, image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]), &colors,
         v6::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
 
     // The menu runs sit BELOW the story box; collect their native tops.
@@ -545,7 +548,7 @@ fn journey_pixel_band_canvas_excludes_menu_keeps_divider() {
     // The menu band spans the pane, so its strip's native columns are the whole
     // screen — the span `screen.rs` passes for any full-width strip (SQ-0894).
     let carve: Vec<(u16, u32, u32)> = menu_tops.iter().map(|&t| (t, 0, u32::MAX)).collect();
-    v6::clear_text_rows(&mut canvas, &carve);
+    v6::clear_text_rows(&mut canvas, &carve, zvm::screen::V6Cell::DEFAULT);
 
     // Every carved menu row is now fully transparent.
     for &top in &menu_tops {
@@ -656,8 +659,8 @@ fn journey_hybrid_tall_pane_divider_reaches_menu() {
     use app::engine::WinNode;
     use app::render::v6_layout as v6;
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = v6::native_extent(items);
-    let story = v6::classify_windows(items).story.expect("story window");
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let story = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT).story.expect("story window");
     let fs = ratatui_image::picker::Picker::halfblocks().font_size();
     let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
     let s = v6::uniform_scale(native, (area.width as u32 * cw, area.height as u32 * ch)).s;
@@ -996,13 +999,13 @@ fn journey_bold_menu_label_rasterizes_emboldened() {
     assert!(!bold.is_empty(), "Journey's command menu must carry at least one bold painted run at the menu page");
     eprintln!("Journey bold menu run(s): {bold:?}");
 
-    let native = v6::native_extent(items);
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
     let colors = app::colors::ColorScheme::terminal_default();
     let fg = image::Rgba([220, 220, 220, 255]);
     let bg = image::Rgba([0, 0, 0, 255]);
     let render = |items: &[app::engine::PositionedWindow]| {
-        let layout = v6::classify_windows(items);
-        v6::build_chrome_canvas(&layout.chrome, native, fg, bg, &colors, v6::TextLayer::All)
+        let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+        v6::build_chrome_canvas(&layout.chrome, native, fg, bg, &colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT)
     };
     let with_bold = render(items);
 

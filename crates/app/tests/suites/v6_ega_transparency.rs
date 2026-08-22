@@ -90,7 +90,7 @@ fn fmvpoker_ega_dealt() -> Option<GameSession> {
 fn story_canvas(s: &GameSession) -> image::RgbaImage {
     let model = s.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let plate = layout.story_gfx.expect("fmvpoker draws its table into window 0");
     let WinNode::Graphics(g) = &plate.node else { panic!("story_gfx is a Graphics leaf") };
     g.canvas.as_ref().clone()

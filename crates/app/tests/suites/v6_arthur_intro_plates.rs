@@ -285,7 +285,7 @@ fn arthur_intro_publishes_the_plate_as_story_graphics() {
         let _ = honor;
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
-        let layout = app::render::v6_layout::classify_windows(items);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         // The capture loop ends on an intro keypress wait, so a plate is up.
         let gfx = layout
             .story_gfx
@@ -312,8 +312,8 @@ fn arthur_raster_composite_carries_the_plate() {
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
         let state = render_state(app::config::V6RenderMode::Raster, honor);
-        let native = app::render::v6_layout::native_extent(items);
-        let layout = app::render::v6_layout::classify_windows(items);
+        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let plate = layout.story_gfx.expect("a plate is up").clone();
         let WinNode::Graphics(gw) = &plate.node else { panic!("story_gfx is a Graphics leaf") };
 
@@ -450,8 +450,8 @@ fn arthur_plate_is_never_overpainted_by_scrollback_prose() {
             );
             let model = session.screen();
             let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-            let native = app::render::v6_layout::native_extent(items);
-            let layout = app::render::v6_layout::classify_windows(items);
+            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let plate = layout.story_gfx.expect("a plate is up").clone();
             let WinNode::Graphics(gw) = &plate.node else { panic!("story_gfx is a Graphics leaf") };
 
@@ -578,7 +578,7 @@ fn zork0_window0_drop_caps_stay_inline_floats() {
         );
         let model = session.screen();
         if let WinNode::Layered(items) = &model.root {
-            let layout = app::render::v6_layout::classify_windows(items);
+            let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             assert!(
                 layout.story_gfx.is_none(),
                 "Zork Zero publishes no story_gfx — its window-0 art is inline, not placed"

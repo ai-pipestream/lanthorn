@@ -318,7 +318,7 @@ fn a_locked_half_blocks_frame_is_the_free_one() {
         let WinNode::Layered(items) = &model.root else {
             panic!("{}: a v6 frame has a Layered root", spec.file)
         };
-        let native = v6::native_extent(items.as_slice());
+        let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
 
         for (pw, ph) in PANES {
             // Non-vacuity: the OLD behaviour must actually have moved this frame, or
@@ -465,7 +465,7 @@ fn a_locked_kitty_frame_still_snaps_to_the_ladder() {
         let WinNode::Layered(items) = &model.root else {
             panic!("{}: a v6 frame has a Layered root", spec.file)
         };
-        let native = v6::native_extent(items.as_slice());
+        let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
 
         for (pw, ph) in PANES {
             let pane_dev = (u32::from(pw) * u32::from(KITTY_CELL.0), u32::from(ph) * u32::from(KITTY_CELL.1));

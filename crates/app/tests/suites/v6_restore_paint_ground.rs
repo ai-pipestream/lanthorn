@@ -328,8 +328,8 @@ fn the_restored_ground_is_the_same_at_any_pane_size_and_on_any_backend() {
             let _gen = app::render::screen::v6_raster_gen(
                 items, &state, pane, state.game_picker.as_ref().expect("picker"),
             );
-            let native = app::render::v6_layout::native_extent(items);
-            let layout = app::render::v6_layout::classify_windows(items);
+            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
             composites.push(canvas);
         }

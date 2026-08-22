@@ -272,18 +272,18 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
 
     let colors = app::colors::ColorScheme::default();
     use app::render::v6_layout as v6;
-    let native = v6::native_extent(items);
-    let layout = v6::classify_windows(items);
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let default_fg = image::Rgba([220, 220, 220, 255]);
     let default_bg = image::Rgba([0, 0, 0, 255]);
-    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All);
+    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
     // A visible story line of 'X's; assert none of its glyph pixels land on an opaque chrome
     // pixel of the frame (they sit in the clear interior).
     let main = v6::MainText { lines: vec!["X".repeat(30)], styles: Vec::new(), input: String::new(), cursor_col: 0, awaiting: false, floats: Vec::new() };
     let chrome_only = canvas.clone(); // snapshot BEFORE story text, to know which pixels are chrome
     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
         let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 16).max(1) as u16);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg, &[]);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg, &[], zvm::screen::V6Cell::DEFAULT);
     }
     // non-empty
     assert!(canvas.pixels().any(|p| p[3] > 0), "composited canvas has content");
@@ -331,8 +331,8 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     };
 
     use app::render::v6_layout as v6;
-    let native = v6::native_extent(items);
-    let layout = v6::classify_windows(items);
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Story is the primary buffer window (Zork0's window 0), inset inside the
     // 640×400 frame (SQ-0479) at the Rect-derived position (1-based (87,79) →
@@ -351,7 +351,7 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     let colors = app::colors::ColorScheme::default();
     let default_fg = image::Rgba([220, 220, 220, 255]);
     let default_bg = image::Rgba([0, 0, 0, 255]);
-    let chrome = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All);
+    let chrome = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
     let (sx, sy, sw, sh) = v6::story_clear_native(layout.story, &chrome).expect("story has a clear interior");
     assert!(sw > 100 && sh > 60, "clear interior is a real story region, got {sw}x{sh}");
     assert!(sy >= story.y_px as u32, "story text starts at/below the window top (banner cleared)");

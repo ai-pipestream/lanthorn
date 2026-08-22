@@ -155,7 +155,7 @@ fn classify_windows_files_no_primary_buffer_under_chrome() {
     let Some(session) = started() else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("a v6 story builds a Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     assert!(layout.story.is_some(), "the story window is the primary Buffer");
     let stray: Vec<_> = layout
         .chrome

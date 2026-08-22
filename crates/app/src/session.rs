@@ -2939,7 +2939,10 @@ impl GameSession {
     /// geometry, text, z-order — is read from the live `screen.v6` table either way,
     /// so the two differ only in which pixels the `Graphics` leaves carry.
     fn v6_screen_model(&self, visible: &std::collections::HashMap<u8, crate::graphics::Canvas>) -> ScreenModel {
-        use zvm::screen::{V6_FONT_HEIGHT, V6_FONT_WIDTH};
+        // SQ-0917: the session's own cell, which every native-pixel-to-cell step
+        // below divides by. The engine placed these runs with it, so the model has
+        // to recover them with the same number.
+        let (font_w, font_h) = (self.machine.v6_cell.w, self.machine.v6_cell.h);
         let screen = &self.machine.screen;
         let v6 = screen.v6.as_ref().expect("caller checked screen.v6.is_some()");
 
@@ -3020,8 +3023,8 @@ impl GameSession {
             // the composite raster is 0-based, so positions drop by one here.
             let x_px = win.x_coord.saturating_sub(1);
             let y_px = win.y_coord.saturating_sub(1);
-            let x = x_px / V6_FONT_WIDTH;
-            let y = y_px / V6_FONT_HEIGHT;
+            let x = x_px / font_w;
+            let y = y_px / font_h;
             let (cols, rows) = (win.grid.cols, win.grid.rows);
             // …and the box the renderer gets is the part of it that is ON SCREEN
             // (SQ-0710) — see `v6_clip_box`.
@@ -3064,17 +3067,17 @@ impl GameSession {
             if !win.retired.is_empty() {
                 let (mut rx0, mut ry0, mut rx1, mut ry1) = (u16::MAX, u16::MAX, 0u16, 0u16);
                 for t in &win.retired {
-                    let w = (t.text.chars().count() as u16).saturating_mul(V6_FONT_WIDTH);
+                    let w = (t.text.chars().count() as u16).saturating_mul(font_w);
                     rx0 = rx0.min(t.x.saturating_sub(1));
                     ry0 = ry0.min(t.y.saturating_sub(1));
                     rx1 = rx1.max(t.x.saturating_sub(1).saturating_add(w));
-                    ry1 = ry1.max(t.y.saturating_sub(1).saturating_add(V6_FONT_HEIGHT));
+                    ry1 = ry1.max(t.y.saturating_sub(1).saturating_add(font_h));
                 }
                 text_entries.push(PositionedWindow {
-                    x: rx0 / V6_FONT_WIDTH,
-                    y: ry0 / V6_FONT_HEIGHT,
-                    w: (rx1 - rx0).div_ceil(V6_FONT_WIDTH),
-                    h: (ry1 - ry0).div_ceil(V6_FONT_HEIGHT),
+                    x: rx0 / font_w,
+                    y: ry0 / font_h,
+                    w: (rx1 - rx0).div_ceil(font_w),
+                    h: (ry1 - ry0).div_ceil(font_h),
                     x_px: rx0,
                     y_px: ry0,
                     w_px: rx1 - rx0,
@@ -3180,8 +3183,8 @@ impl GameSession {
                     // The v6 window cursor is stored in 1-based PIXELS (ZMSD
                     // §8.8.3.2); the cell renderer wants 1-based cells.
                     cursor: (
-                        (win.y_cursor.max(1) - 1) / V6_FONT_HEIGHT + 1,
-                        (win.x_cursor.max(1) - 1) / V6_FONT_WIDTH + 1,
+                        (win.y_cursor.max(1) - 1) / font_h + 1,
+                        (win.x_cursor.max(1) - 1) / font_w + 1,
                     ),
                     cursor_active: v6.current == i as u8,
                     border: BorderPref::Unspecified,

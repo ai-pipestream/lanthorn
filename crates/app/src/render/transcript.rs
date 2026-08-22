@@ -2284,8 +2284,8 @@ fn render_middle(
                     if im.scaled.is_none() && hybrid_ring {
                         let (w, h) = (im.pixels.width().max(1), im.pixels.height().max(1));
                         im.scaled = Some((
-                            text_rate(w, char_px.0, crate::render::v6_layout::FONT_W),
-                            text_rate(h, char_px.1, crate::render::v6_layout::FONT_H),
+                            text_rate(w, char_px.0, u32::from(state.v6_cell.w)),
+                            text_rate(h, char_px.1, u32::from(state.v6_cell.h)),
                         ));
                     }
                 }

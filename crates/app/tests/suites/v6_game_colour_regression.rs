@@ -179,7 +179,7 @@ fn cell_census_honor(model: &ScreenModel, mode: app::config::V6RenderMode, honor
 fn story_pair(model: &ScreenModel) -> (Option<image::Rgba<u8>>, Option<image::Rgba<u8>>) {
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
     let colors = app::colors::ColorScheme::terminal_default();
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     (
         app::render::v6_layout::story_fg_rgba(layout.story, &colors),
         app::render::v6_layout::story_bg_rgba(layout.story, &colors),
@@ -189,7 +189,7 @@ fn story_pair(model: &ScreenModel) -> (Option<image::Rgba<u8>>, Option<image::Rg
 /// The story window's native pixel rect `(x, y, w, h)` in the 640×400 canvas.
 fn story_rect(model: &ScreenModel) -> (u32, u32, u32, u32) {
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let s = layout.story.expect("a story window");
     (s.x_px as u32, s.y_px as u32, s.w_px as u32, s.h_px as u32)
 }
@@ -206,8 +206,8 @@ fn raster_canvas(
     state: &app::state::AppState,
 ) -> (image::RgbaImage, Option<app::render::screen::RasterMetrics>) {
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     app::render::screen::build_v6_raster_canvas(&layout, native, state)
 }
 
@@ -375,8 +375,8 @@ fn shogun_splash_still_shows_its_art_in_hybrid() {
         // the splash and the chrome ring collapses to zero thickness.
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let layout = app::render::v6_layout::classify_windows(items);
-        let native = app::render::v6_layout::native_extent(items);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
         if let Some(story) = layout.story {
             assert!(
                 !(story.w_px >= native.0 && story.h_px >= native.1),
@@ -415,9 +415,9 @@ fn shogun_gets_its_story_window_back_once_the_game_uses_it() {
         }
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let layout = app::render::v6_layout::classify_windows(items);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let story = layout.story.expect("colours={colours}: in play, window 0 IS the story window");
-        let native = app::render::v6_layout::native_extent(items);
+        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
         assert!(
             story.w_px < native.0 || story.h_px < native.1,
             "colours={colours}: and it is the game's own box, not the whole screen"

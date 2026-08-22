@@ -134,7 +134,7 @@ fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::st
     }
     let (fg, bg) = match &model.root {
         WinNode::Layered(items) => {
-            let story = crate::render::v6_layout::classify_windows(items).story;
+            let story = crate::render::v6_layout::classify_windows(items, state.v6_cell).story;
             let (f, b) = crate::render::v6_layout::story_pair_packed(story);
             let (f, b) = (crate::state::unpack_zcolour(f), crate::state::unpack_zcolour(b));
             let declared_none = matches!(f, zvm::screen::ZColour::Default)
@@ -798,8 +798,8 @@ fn render_node(
             if let Some(picker) = state.game_picker.as_ref() {
                 let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
-                let native = v6::native_extent(items);
-                let layout = v6::classify_windows(items);
+                let native = v6::native_extent(items, state.v6_cell);
+                let layout = v6::classify_windows(items, state.v6_cell);
                 // The native chrome canvas is built per-branch below (SQ-0469):
                 // the raster arm skips the build entirely on an unchanged frame.
 
@@ -949,7 +949,7 @@ fn render_node(
                         // from the raw window box. `None` = the plate owns the screen and
                         // no prose belongs on this frame (SQ-0707), which for the ring
                         // means the whole pane is chrome.
-                        let vp_native = v6::story_text_native(Some(story), &frame_art, layout.story_gfx);
+                        let vp_native = v6::story_text_native(Some(story), &frame_art, layout.story_gfx, state.v6_cell);
                         let plate_owns_screen = vp_native.is_none();
                         // Fall back to the declared box so every stage below still has a
                         // native rectangle to reason about; the empty viewport is applied
@@ -1045,7 +1045,7 @@ fn render_node(
                                 // on every frame with nothing below the story, which is
                                 // every frame in the corpus but this one, and the arm is
                                 // then byte-identical to what it was.
-                                let rows = menu_band_rows(&menu_band_runs(&chrome_runs, story));
+                                let rows = menu_band_rows(&menu_band_runs(&chrome_runs, story), state.v6_cell);
                                 if rows == 0 {
                                     (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
                                 } else {
@@ -1085,7 +1085,7 @@ fn render_node(
                                 // here by construction: the band is exactly the menu's own
                                 // rows, and `menu_band_strips` gives it to the cell path
                                 // whole, so there is no leftover row to misclassify.
-                                let menu_rows = menu_band_rows(&menu_band_runs(&chrome_runs, story));
+                                let menu_rows = menu_band_rows(&menu_band_runs(&chrome_runs, story), state.v6_cell);
                                 let menu_top = area.bottom().saturating_sub(menu_rows).clamp(y + 1, area.bottom());
                                 (top_scale, Rect::new(x, y, vp.width, menu_top.saturating_sub(y)), Some(menu_scale))
                             }
@@ -1180,7 +1180,7 @@ fn render_node(
                         // screen paints its ornaments down to native y=335 and puts window 0
                         // at y=336), so the overlap test correctly finds nothing to inset and
                         // the columns still have to come from somewhere. They come from here.
-                        let (art_left, art_right) = flank_art_columns(&gfx, &scale, cell_px, area);
+                        let (art_left, art_right) = flank_art_columns(&gfx, &scale, cell_px, area, state.v6_cell);
                         let viewport = {
                             let x = viewport.x.max(art_left).min(viewport.right());
                             let r = viewport.right().min(art_right).max(x);
@@ -1718,7 +1718,7 @@ fn render_node(
                                 }
                             }
                         }
-                        let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows));
+                        let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows), state.v6_cell);
                         // SQ-0896: …and the STORY window's own plate, which the chrome
                         // canvas excludes by construction — `classify_windows` sets a
                         // `win == 0` Graphics aside as `story_gfx` so the ring does not
@@ -1742,6 +1742,7 @@ fn render_node(
                             &mut canvas,
                             state.v6_paint.borrow().as_deref(),
                             v6::TextLayer::SkipGlyphRows(&glyph_rows),
+                            state.v6_cell,
                         );
                         // SQ-0883: the INK layer, frozen — art, glyph ink and painted
                         // ground, before any window's PAGE floods the rest. The border
@@ -1759,6 +1760,7 @@ fn render_node(
                                 layout.story,
                                 &state.colors,
                                 v6::TextLayer::SkipGlyphRows(&glyph_rows),
+                                state.v6_cell,
                             );
                             // …and the story window's own page under the pixels the
                             // ring bands ship (SQ-0704, hybrid half). Raster flattens
@@ -1780,6 +1782,7 @@ fn render_node(
                                 layout.story,
                                 &state.colors,
                                 state.v6_paint.borrow().as_deref(),
+                                state.v6_cell,
                             );
                         }
                         // SQ-0903: the carve that used to be here is GONE, and the
@@ -1844,6 +1847,7 @@ fn render_node(
                                         flank_border_extension(
                                             *r, area, viewport, &scale, cell_px, story, native, &ink, &gfx,
                                             &chrome_runs, bottom, which,
+                                            state.v6_cell,
                                         )
                                         .filter(|(_, ink)| !glyph_borders_only || matches!(ink, BorderInk::Glyph { .. }))
                                     };
@@ -2192,6 +2196,7 @@ fn render_node(
                                     }
                                     ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
                                         runs, *r, &scale, cell_px, area, native, base, state.config.honor_game_colours, &state.colors, buf,
+                                        state.v6_cell,
                                     ),
                                 }
                             }
@@ -2244,6 +2249,7 @@ fn render_node(
                                         ChromeStrip::Art(_, r) => gr.draw_chrome_band(picker, &canvas, ms, area, *r, buf),
                                         ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
                                             runs, *r, ms, cell_px, area, native, base, state.config.honor_game_colours, &state.colors, buf,
+                                            state.v6_cell,
                                         ),
                                     }
                                 }
@@ -2268,6 +2274,7 @@ fn render_node(
                                 stamp_runs_over_art(
                                     &over_art_runs, &art_rects, &scale, cell_px, area, &gfx,
                                     default_fg, default_bg, &state.colors, buf,
+                                    state.v6_cell,
                                 );
                             }
                             // Record the letterbox geometry for click→game-pixel
@@ -2675,7 +2682,7 @@ fn render_node(
                             // that built `in_box`, so the subtraction never goes negative.
                             let run_col = |t: &crate::engine::PxText| {
                                 let px = t.x.max(1) as i32 - 1;
-                                viewport.x as i32 + (px - vp_native.0 as i32) / v6::FONT_W as i32
+                                viewport.x as i32 + (px - vp_native.0 as i32) / i32::from(state.v6_cell.w)
                             };
                             let merged = merge_strip_fragments(row_runs);
                             // SQ-0898: the cells this row's GLYPH runs occupy, so a
@@ -2975,7 +2982,7 @@ fn render_node(
             // filling everything below at full size, with working
             // metrics/scrollback. (SQ-0186)
             {
-                let layout = crate::render::v6_layout::classify_windows(items);
+                let layout = crate::render::v6_layout::classify_windows(items, state.v6_cell);
                 // SQ-0906: chrome that names no background of its own sits on the page
                 // the GAME dressed the screen with — the story window's own background.
                 //
@@ -3009,7 +3016,7 @@ fn render_node(
                 };
                 // Native screen width in cells (v6 screens vary — Zork0 is
                 // 320px/40 cells, others differ) sets the anchor thresholds.
-                let (native_w, native_h) = crate::render::v6_layout::native_extent(items);
+                let (native_w, native_h) = crate::render::v6_layout::native_extent(items, state.v6_cell);
                 let ncols = (native_w as u32).div_ceil(8).max(1);
                 // v6 mouse input in the cell path (SQ-0532/A-F4): this branch draws
                 // no game image, so there is no letterbox to invert — but the pane
@@ -3822,7 +3829,7 @@ pub fn build_v6_raster_canvas(
     // Raster has no cells to draw text with, so it needs every run imaged: the
     // empty set is not a default here, it is this path's answer (SQ-0903).
     let mut canvas =
-        v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::All);
+        v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::All, state.v6_cell);
     // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
     // canvas does not draw. The story page below spares them like any chrome text.
     // …and the live input line into whichever of them the player is typing into
@@ -3830,7 +3837,7 @@ pub fn build_v6_raster_canvas(
     // `build_main_text` applies to the transcript's own live line.
     let panel_input =
         (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
-    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors, panel_input);
+    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors, panel_input, state.v6_cell);
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
     // `fill_window_pages`), so `story_clear_native` below still finds it clear.
@@ -3839,9 +3846,16 @@ pub fn build_v6_raster_canvas(
     // what is left, because a fill is the oldest thing on the screen: the game
     // filled its rectangle, then printed the label on top of it.
     let grounds = |c: &mut image::RgbaImage| {
-        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref(), v6::TextLayer::All);
+        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref(), v6::TextLayer::All, state.v6_cell);
         if honor {
-            v6::fill_window_pages(c, &layout.chrome, layout.story, &state.colors, v6::TextLayer::All);
+            v6::fill_window_pages(
+                c,
+                &layout.chrome,
+                layout.story,
+                &state.colors,
+                v6::TextLayer::All,
+                state.v6_cell,
+            );
         } else {
             // SQ-0716: colours declined, but a window the game has PAINTED INTO still
             // gets its page — scopa's felt table is a full-screen `erase_window` in
@@ -3855,6 +3869,7 @@ pub fn build_v6_raster_canvas(
                 layout.story,
                 &state.colors,
                 state.v6_paint.borrow().as_deref(),
+                state.v6_cell,
             );
         }
     };
@@ -3919,6 +3934,7 @@ pub fn build_v6_raster_canvas(
             page,
             &layout.chrome,
             state.v6_paint.borrow().as_deref(),
+            state.v6_cell,
         );
         // …then the story window's OWN absolutely-placed artwork, before any
         // prose: Arthur's intro centres a 584×392 plate in window 0, so the plate
@@ -3935,7 +3951,7 @@ pub fn build_v6_raster_canvas(
         // prose box, and no scroll metrics, exactly as when a plate owns the
         // screen. See `story_window_is_a_canvas`: fmvpoker alone.
         if story_window_is_a_canvas(layout, native) {
-            v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors);
+            v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors, state.v6_cell);
             return finish_v6_raster_canvas(canvas, page, raster_metrics);
         }
         // Whether any prose belongs on THIS frame, and where (SQ-0707). An
@@ -3943,7 +3959,7 @@ pub fn build_v6_raster_canvas(
         // game erases, draws, and waits, so the narration is its own picture-less
         // screen. `None` = the plate owns the screen, and rasterizing scrollback
         // onto it would paint the PREVIOUS screen's text across the art.
-        let Some((tx, ty, tw, th)) = v6::story_prose_box((sx, sy, sw, sh), layout.story_gfx) else {
+        let Some((tx, ty, tw, th)) = v6::story_prose_box((sx, sy, sw, sh), layout.story_gfx, state.v6_cell) else {
             return finish_v6_raster_canvas(canvas, page, raster_metrics);
         };
         // Window-0 inline pictures (drop-caps, room icons) arrive as
@@ -3951,7 +3967,7 @@ pub fn build_v6_raster_canvas(
         // build_main_text wraps text beside them and draw_story_text
         // blits each at its anchored row — they scroll with the text.
         // Non-square 8×16 v6 cell (SQ-0479): columns divide the
-        // clear width by FONT_W(8), rows the height by FONT_H(16).
+        // clear width by font_w(8), rows the height by font_h(16).
         let (sx, sy) = (tx, ty);
         let cols = (tw / 8).max(1) as u16;
         let rows = (th / 16).max(1) as u16;
@@ -3965,7 +3981,7 @@ pub fn build_v6_raster_canvas(
         // line the player needs in order to see their draw. The transcript is the
         // host's re-render of window 0's whole history; the label is on the screen
         // now, so the label wins.
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &v6::chrome_text_rects(&layout.chrome));
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &v6::chrome_text_rects(&layout.chrome, state.v6_cell), state.v6_cell);
         // [more] pager indicator (SQ-0455): when a single turn's output
         // overflowed the story box the shared pager (SQ-0404) parks the
         // scroll and shows a `[more]` prompt. The raster path can't reserve
@@ -3990,7 +4006,7 @@ pub fn build_v6_raster_canvas(
             let last_row = rows.saturating_sub(1) as u32;
             let start_col = (cols as u32).saturating_sub(n);
             for (i, ch) in label.chars().enumerate() {
-                // 8×16 cell: X by FONT_W(8), Y by FONT_H(16).
+                // 8×16 cell: X by font_w(8), Y by font_h(16).
                 crate::render::bitfont::blit_glyph(
                     &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 16, 8, 16, prompt_ink, Some(block),
                 );
@@ -4164,9 +4180,9 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
 pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render::v6_layout::MainText, RasterMetrics) {
     // Non-square 8×16 v6 cell (SQ-0479). Picture pixels arriving here are already
     // in unit space (session scales v6 art ×2 before storing), so a float spans
-    // height/FONT_H text rows and indents width/FONT_W columns.
-    const FONT_W: u32 = 8;
-    const FONT_H: u32 = 16;
+    // height/font_h text rows and indents width/font_w columns.
+    let font_w = u32::from(state.v6_cell.w);
+    let font_h = u32::from(state.v6_cell.h);
     // A prose column narrower than this (cells) isn't worth floating a picture
     // beside — fall back to a full-width band.
     const MIN_TEXT_COLS: u16 = 8;
@@ -4227,8 +4243,8 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
             // its bottom pixels. (Infocom's own countdown used floor and let
             // the overlap happen; with our whole-cell glyphs the ceil reads
             // far cleaner.)
-            let img_rows = (px.height().div_ceil(FONT_H) as u16).max(1);
-            let img_cols = (px.width().div_ceil(FONT_W) as u16).max(1);
+            let img_rows = (px.height().div_ceil(font_h) as u16).max(1);
+            let img_cols = (px.width().div_ceil(font_w) as u16).max(1);
             let band = |floats: &mut Vec<AbsFloat>, wrapped: &mut Vec<String>| {
                 // A full-width band: reserve blank text rows so the wrap below
                 // can't place prose beside or over the picture.
@@ -4242,8 +4258,8 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
                     // A drop-cap floats at the LEFT: it occupies no text row of
                     // its own — the wrap below narrows the rows beside it, and the
                     // text is pushed right past the picture.
-                    let indent_px = img.margin_px.unwrap_or(px.width() + FONT_W);
-                    let reserve = indent_px.div_ceil(FONT_W) as u16;
+                    let indent_px = img.margin_px.unwrap_or(px.width() + font_w);
+                    let reserve = indent_px.div_ceil(font_w) as u16;
                     floats.push(AbsFloat {
                         row: wrapped.len(),
                         rows: img_rows,
@@ -4743,7 +4759,7 @@ fn draw_painted_screen(
         // menu selection moves, the game repaints the old row's gaps as plain
         // spaces, and skipping those left the stale reversed cells behind
         // (SQ-0490).
-        // 8×16 v6 cell (SQ-0479): quantize Y by FONT_H(16), X by FONT_W(8).
+        // 8×16 v6 cell (SQ-0479): quantize Y by font_h(16), X by font_w(8).
         let row = (t.y.max(1) - 1) / 16;
         let Some(y) = place(row) else { continue };
         let col = (t.x.max(1) - 1) / 8;
@@ -5740,6 +5756,7 @@ fn flank_border_extension(
     runs: &[&crate::engine::PxText],
     menu_top_row: u16,
     which: FlankBorder,
+    cell: zvm::screen::V6Cell,
 ) -> Option<FlankBorderExt> {
     let cw = cell_px.0.max(1) as f32;
     let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
@@ -5768,9 +5785,9 @@ fn flank_border_extension(
     // and the menu: the user's "big chunk of the border missing from the right side (at
     // the bottom)". Look across ONE text cell for the ink before giving up. A
     // reverse-video block border inks offset 0, so it takes exactly the path it did.
-    const FONT_W: u32 = 8;
+    let font_w = u32::from(cell.w);
     let seek_ink = |from: u32, outward_is_left: bool| -> Option<u32> {
-        (0..FONT_W).find_map(|d| {
+        (0..font_w).find_map(|d| {
             let x = if outward_is_left { from.checked_sub(d + 1)? } else { from + d };
             opaque(x, mid).then_some(x)
         })
@@ -5879,7 +5896,7 @@ fn flank_border_extension(
         let gnx0 = (t.x.max(1) as u32 - 1) + idx * 8;
         // SQ-0783: …aligned outward when it is the SCREEN's own edge cell, so the
         // frame reaches the pane instead of leaving the column beside it blank.
-        let col = edge_glyph_col(gnx0, native.0 as u32, scale, cell_px, pane)
+        let col = edge_glyph_col(gnx0, native.0 as u32, scale, cell_px, pane, cell)
             .unwrap_or_else(|| run_cell(t, scale, cell_px, pane).0 + idx as i32);
         let col = u16::try_from(col).ok()?;
         if col < band.x || col >= band.right() {
@@ -5954,7 +5971,7 @@ fn flank_border_extension(
     // text cell, plus the terminal column each end's outward rounding above can add.
     // Every real border in the corpus is a reverse-video space or a box glyph, and
     // both live inside one cell by construction.
-    let widest = FONT_W + 2 * (cw / s).ceil() as u32;
+    let widest = font_w + 2 * (cw / s).ceil() as u32;
     if cnx1 - cnx0 > widest {
         return None;
     }
@@ -6053,9 +6070,10 @@ fn strip_native_origin(
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     pane: Rect,
+    cell: zvm::screen::V6Cell,
 ) -> Option<i32> {
-    /// The v6 text cell is 8x16 (SQ-0479).
-    const FONT_W: i32 = 8;
+    // The v6 text cell is 8x16 (SQ-0479).
+    let font_w = i32::from(cell.w);
     if runs.is_empty() {
         return None;
     }
@@ -6071,9 +6089,9 @@ fn strip_native_origin(
         return None;
     }
     let x0 = runs.iter().map(|t| t.x.max(1) as i32 - 1).min()?;
-    let x1 = runs.iter().map(|t| (t.x.max(1) as i32 - 1) + t.text.chars().count() as i32 * FONT_W).max()?;
+    let x1 = runs.iter().map(|t| (t.x.max(1) as i32 - 1) + t.text.chars().count() as i32 * font_w).max()?;
     let cw = cell_px.0.max(1) as f32;
-    let cells = ((x1 - x0) as f32 / FONT_W as f32).max(1.0);
+    let cells = ((x1 - x0) as f32 / font_w as f32).max(1.0);
     let footprint = (x1 - x0) as f32 * scale.s / cw;
     let slack = (footprint - cells).max(0.0);
     let left = pane.x as f32 + (scale.off_x as f32 + x0 as f32 * scale.s) / cw;
@@ -6119,14 +6137,15 @@ fn edge_glyph_col(
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     pane: Rect,
+    cell: zvm::screen::V6Cell,
 ) -> Option<i32> {
-    /// The v6 text cell is 8x16 (SQ-0479).
-    const FONT_W: u32 = 8;
+    // The v6 text cell is 8x16 (SQ-0479).
+    let font_w = u32::from(cell.w);
     let cw = cell_px.0.max(1) as f32;
     let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * scale.s) / cw;
     if nx0 == 0 {
         Some(pane.x as i32 + dev(0).floor() as i32)
-    } else if nx0 + FONT_W >= native_w {
+    } else if nx0 + font_w >= native_w {
         Some(pane.x as i32 + dev(native_w).ceil() as i32 - 1)
     } else {
         None
@@ -6159,10 +6178,10 @@ fn menu_band_runs<'a>(
 /// SQ-0543), so the menu's height in rows is a property of the MENU — fixed, and
 /// derived from its native pixel height — not of whatever the letterbox happened to
 /// leave under the story.
-fn menu_band_rows(menu: &[&crate::engine::PxText]) -> u16 {
-    /// The v6 text cell is 8x16 (SQ-0479).
-    const FONT_H: i32 = 16;
-    let rows: Vec<i32> = menu.iter().map(|t| (t.y.max(1) as i32 - 1) / FONT_H).collect();
+fn menu_band_rows(menu: &[&crate::engine::PxText], cell: zvm::screen::V6Cell) -> u16 {
+    // The v6 text cell is 8x16 (SQ-0479).
+    let font_h = i32::from(cell.h);
+    let rows: Vec<i32> = menu.iter().map(|t| (t.y.max(1) as i32 - 1) / font_h).collect();
     match (rows.iter().min(), rows.iter().max()) {
         (Some(&a), Some(&b)) => (b - a + 1).clamp(0, u16::MAX as i32) as u16,
         _ => 0,
@@ -6537,6 +6556,7 @@ fn flank_art_columns(
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     pane: Rect,
+    cell: zvm::screen::V6Cell,
 ) -> (u16, u16) {
     let (w, h) = (gfx.width(), gfx.height());
     let mid = w / 2;
@@ -6575,9 +6595,9 @@ fn flank_art_columns(
     // moment it answers for one edge and not the other.
     //
     // It NEVER TOUCHED THE EDGE it is claimed for (see the table above).
-    const FONT_W: u32 = 8;
+    let font_w = u32::from(cell.w);
     let reaches = |from: u32, inward: i32| {
-        (0..h).any(|y| (0..FONT_W as i32).any(|d| opaque((from as i32 + d * inward) as u32, y)))
+        (0..h).any(|y| (0..font_w as i32).any(|d| opaque((from as i32 + d * inward) as u32, y)))
     };
     let (left, right) = (
         left.filter(|&e| e < mid).filter(|_| reaches(0, 1)),
@@ -7050,10 +7070,11 @@ fn stamp_runs_over_art(
     default_bg: image::Rgba<u8>,
     colors: &ColorScheme,
     buf: &mut Buffer,
+    cell: zvm::screen::V6Cell,
 ) {
     use std::collections::HashMap;
-    const FONT_W: u32 = 8;
-    const FONT_H: u32 = 16;
+    let font_w = u32::from(cell.w);
+    let font_h = u32::from(cell.h);
 
     let rgb = |c: image::Rgba<u8>| ratatui::style::Color::Rgb(c.0[0], c.0[1], c.0[2]);
     // SQ-0892's rule, which this path has to obey like every other glyph path: a
@@ -7112,10 +7133,10 @@ fn stamp_runs_over_art(
     }
 
     for (t, cells) in placed {
-        let span_w = t.text.chars().count().max(1) as u32 * FONT_W;
+        let span_w = t.text.chars().count().max(1) as u32 * font_w;
         let (px0, py) = (t.x.max(1) as u32 - 1, t.y.max(1) as u32 - 1);
         let (ink, block) = crate::render::v6_layout::chrome_run_ink(t, default_fg, default_bg, colors, || {
-            crate::render::v6_layout::region_has_opaque(gfx, px0, py, span_w, FONT_H)
+            crate::render::v6_layout::region_has_opaque(gfx, px0, py, span_w, font_h)
         });
         // Reverse is already resolved into the pair by `chrome_run_ink`, so the
         // REVERSED modifier must NOT be set as well — the terminal would swap the
@@ -7149,6 +7170,7 @@ fn draw_chrome_text_strip(
     honor: bool,
     colors: &ColorScheme,
     buf: &mut Buffer,
+    cell: zvm::screen::V6Cell,
 ) {
     use crate::engine::PxText;
     use std::collections::BTreeMap;
@@ -7206,8 +7228,8 @@ fn draw_chrome_text_strip(
     // survive, since their indices differ by more than one; and wherever the old
     // mapping already produced consecutive rows — any pane small enough that a
     // game row is about a terminal row — the result is byte-identical.
-    const FONT_H: i32 = 16; // the v6 text cell is 8×16 (SQ-0479)
-    let game_row = |t: &PxText| (t.y.max(1) as i32 - 1) / FONT_H;
+    let font_h = i32::from(cell.h); // the v6 text cell is 8×16 (SQ-0479)
+    let game_row = |t: &PxText| (t.y.max(1) as i32 - 1) / font_h;
     let first_row = runs.iter().map(|t| game_row(t)).min().unwrap_or(0);
     let mut raw: BTreeMap<i32, Vec<&PxText>> = BTreeMap::new();
     for t in runs {
@@ -7234,7 +7256,7 @@ fn draw_chrome_text_strip(
     // and for why a row with two runs on it is refused. Asked AFTER the collapse, so
     // the count is of runs as they will be drawn.
     let drawn: Vec<&PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
-    let native_origin = strip_native_origin(&drawn, scale, cell_px, pane);
+    let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
 
     // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run in
@@ -7345,7 +7367,7 @@ fn draw_chrome_text_strip(
             // stays unbroken through the corner.
             let c = match t.text.chars().next() {
                 Some(g) if t.text.chars().count() == 1 && is_box_glyph(g) => {
-                    edge_glyph_col(t.x.max(1) as u32 - 1, native.0 as u32, scale, cell_px, pane).unwrap_or(c)
+                    edge_glyph_col(t.x.max(1) as u32 - 1, native.0 as u32, scale, cell_px, pane, cell).unwrap_or(c)
                 }
                 _ => c,
             };
@@ -8175,7 +8197,8 @@ mod tests {
         // a plain divide, so the expected numbers are readable.
         let scale = crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 };
         let pane = Rect::new(0, 0, 80, 30);
-        let columns = |c: &image::RgbaImage| flank_art_columns(c, &scale, (8, 18), pane);
+        let columns =
+            |c: &image::RgbaImage| flank_art_columns(c, &scale, (8, 18), pane, zvm::screen::V6Cell::DEFAULT);
 
         // No art at all: the flank has nothing to say and the whole pane is left to
         // the caller's own answer.
@@ -8314,9 +8337,9 @@ mod tests {
         assert_ne!(ink, page_default, "ink and page must never resolve to the same colour");
 
         // ── Compose exactly as the raster branch does ────────────────────────
-        let native = v6::native_extent(&items);
-        let layout = v6::classify_windows(&items);
-        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors, v6::TextLayer::All);
+        let native = v6::native_extent(&items, zvm::screen::V6Cell::DEFAULT);
+        let layout = v6::classify_windows(&items, zvm::screen::V6Cell::DEFAULT);
+        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
         let chrome_only = canvas.clone(); // pre-fill artwork reference
         let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(page_default);
         let (sx, sy, sw, sh) = v6::story_clear_native(layout.story, &canvas).expect("Zork0 has a story window");
@@ -8325,7 +8348,7 @@ mod tests {
         let cols = (sw / 8).max(1) as u16;
         let rows = (sh / 16).max(1) as u16;
         let (main, _) = build_main_text(&state, cols, rows);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[]);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[], zvm::screen::V6Cell::DEFAULT);
         let pre_flatten = canvas.clone();
         v6::flatten_onto_page(&mut canvas, page);
 
@@ -8447,7 +8470,7 @@ mod tests {
 
     #[test]
     fn build_main_text_floats_inline_image_and_narrows_beside_it() {
-        // A transcript-anchored inline image (32×64 → 4 rows at FONT_H 16, margin
+        // A transcript-anchored inline image (32×64 → 4 rows at font_h 16, margin
         // 40px → 5 cols) becomes a float: it occupies no text row, the 4 rows
         // beside it wrap narrower, and rows past it wrap at full width.
         let mut state = crate::state::AppState::default();
@@ -8497,7 +8520,7 @@ mod tests {
         let (main, _) = build_main_text(&state, 40, 30);
         assert_eq!(main.floats.len(), 1, "the image still carries its pixels for the canvas blit");
         let f = &main.floats[0];
-        // 64px / FONT_H(16) = 4 rows, anchored right after "before" (row 1).
+        // 64px / font_h(16) = 4 rows, anchored right after "before" (row 1).
         assert_eq!((f.row, f.rows), (1, 4), "band anchored after 'before', 64px/16 = 4 rows");
         assert_eq!(main.lines[0], "before");
         // Every row the band spans is blank — no text row overlaps its rows.
@@ -11153,7 +11176,7 @@ mod tests {
     /// 29×20 raster cells (a 19-row body budget).
     fn raster_v6_model() -> ScreenModel {
         // Authentic 640×400 unit geometry (SQ-0479): the story window's 320px
-        // height quantizes to 320/FONT_H(16) = 20 raster rows.
+        // height quantizes to 320/font_h(16) = 20 raster rows.
         let chrome_img = image::RgbaImage::new(640, 400); // all alpha 0 (transparent)
         let chrome = PositionedWindow {
             x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
@@ -11199,7 +11222,7 @@ mod tests {
             &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
         );
         let m = m.expect("raster path now reports story-box scroll metrics");
-        assert_eq!(m.viewport_rows, 19, "story box is 20 raster rows (320px/FONT_H 16) minus the input line");
+        assert_eq!(m.viewport_rows, 19, "story box is 20 raster rows (320px/font_h 16) minus the input line");
         assert_eq!(m.total_rows, 40, "all 40 wrapped transcript rows counted");
         assert_eq!(m.max_scroll, 21, "40 total - 19 body");
 
@@ -11373,7 +11396,7 @@ mod tests {
         let (nw, nh) = crate::render::v6_layout::native_extent(match &model.root {
             WinNode::Layered(items) => items,
             _ => unreachable!("cell_path_v6_model is Layered"),
-        });
+        }, zvm::screen::V6Cell::DEFAULT);
         assert_eq!((map.native_w, map.native_h), (nw, nh));
 
         // Top-left cell → the top-left game pixel (1-based origin, ZMSD §8.8.1).
@@ -11835,7 +11858,7 @@ mod tests {
                     continue;
                 }
             };
-            let native = crate::render::v6_layout::native_extent(&items);
+            let native = crate::render::v6_layout::native_extent(&items, zvm::screen::V6Cell::DEFAULT);
 
             let mut state = AppState::default();
             state.colors = crate::colors::ColorScheme::terminal_default();
@@ -11856,13 +11879,13 @@ mod tests {
 
             // Build closure: replicate the raster branch's canvas construction.
             let build = || {
-                let layout = crate::render::v6_layout::classify_windows(&items);
-                let mut canvas = crate::render::v6_layout::build_chrome_canvas(&layout.chrome, native, fg, bg, &state.colors, crate::render::v6_layout::TextLayer::All);
+                let layout = crate::render::v6_layout::classify_windows(&items, zvm::screen::V6Cell::DEFAULT);
+                let mut canvas = crate::render::v6_layout::build_chrome_canvas(&layout.chrome, native, fg, bg, &state.colors, crate::render::v6_layout::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
                 if let Some((sx, sy, sw, sh)) = crate::render::v6_layout::story_clear_native(layout.story, &canvas) {
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;
                     let (main, _) = build_main_text(&state, cols, rows);
-                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[]);
+                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[], zvm::screen::V6Cell::DEFAULT);
                 }
                 canvas
             };

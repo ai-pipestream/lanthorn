@@ -136,8 +136,8 @@ fn select_a_card(s: &mut GameSession) {
 fn composite(s: &GameSession, honor: bool) -> image::RgbaImage {
     let model = s.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();

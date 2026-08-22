@@ -405,8 +405,8 @@ fn flank_pixels(session: &GameSession) -> (u64, u64) {
     use app::engine::{Engine as _, WinNode};
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
     let story = layout.story.expect("Shogun's gameplay screen has a story window");
     let (lx, rx) = (story.x_px as u32, story.x_px as u32 + story.w_px as u32);

@@ -322,8 +322,8 @@ fn scout(
         }
         let m = s.screen();
         let app::engine::WinNode::Layered(it) = &m.root else { continue };
-        let nat = v6::native_extent(it.as_slice());
-        let lay = v6::classify_windows(it.as_slice());
+        let nat = v6::native_extent(it.as_slice(), zvm::screen::V6Cell::DEFAULT);
+        let lay = v6::classify_windows(it.as_slice(), zvm::screen::V6Cell::DEFAULT);
         let pd = (pane_cells.0 as u32 * cell_px.0 as u32, pane_cells.1 as u32 * cell_px.1 as u32);
         let sc = v6::uniform_scale(nat, pd);
         let vp_box = v6::story_viewport_box(lay.story, &sc, pane_cells, cell_px);
@@ -338,7 +338,7 @@ fn scout(
                 app::render::screen::picture_takeover_reason(w, &lay.chrome, lay.story_gfx, nat)
             });
             let prose = v6::story_clear_native(lay.story, &g)
-                .and_then(|c| v6::story_prose_box(c, lay.story_gfx));
+                .and_then(|c| v6::story_prose_box(c, lay.story_gfx, zvm::screen::V6Cell::DEFAULT));
             println!(
                 "  turn {t}: {} box {}x{}@({},{}) content {}x{}@({},{}); win0 {:?} -> clear {:?} prose {:?} [{}]",
                 if vp_box == vp_clear { "same  " } else { "DIFFERS" },
@@ -357,8 +357,8 @@ fn scout(
         return Err("not a Layered v6 frame".into());
     };
 
-    let native = v6::native_extent(items.as_slice());
-    let layout = v6::classify_windows(items.as_slice());
+    let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+    let layout = v6::classify_windows(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
     let pane_dev = (pane_cells.0 as u32 * cell_px.0 as u32, pane_cells.1 as u32 * cell_px.1 as u32);
     let scale = v6::uniform_scale(native, pane_dev);
     let pane = Rect::new(0, 0, pane_cells.0, pane_cells.1);
@@ -407,7 +407,7 @@ fn scout(
     // painted no pixel of — `None` when the plate owns the screen (SQ-0707), which
     // for the ring means the whole pane is chrome and no transcript belongs here.
     let plate = layout.story_gfx.map(|pw| (pw.x_px, pw.y_px, pw.w_px, pw.h_px));
-    let prose = native_clear.and_then(|c| v6::story_prose_box(c, layout.story_gfx));
+    let prose = native_clear.and_then(|c| v6::story_prose_box(c, layout.story_gfx, zvm::screen::V6Cell::DEFAULT));
     println!(
         "      plate {plate:?}  ->  prose {prose:?}{}",
         match (native_clear, prose) {

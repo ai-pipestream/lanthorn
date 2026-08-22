@@ -567,8 +567,8 @@ fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
     let (ink, page) = app::render::screen::v6_host_pair(&state);
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let canvas = app::render::v6_layout::build_chrome_canvas(
         &layout.chrome,
         native,
@@ -576,6 +576,7 @@ fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
         page,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
+        zvm::screen::V6Cell::DEFAULT,
     );
     // The banner is found by the text in it, never by a window id.
     let banner = layout

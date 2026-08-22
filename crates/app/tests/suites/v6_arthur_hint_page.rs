@@ -340,7 +340,7 @@ fn raster_and_hybrid_draw_the_same_page() {
     };
     let model = s.screen();
     let WinNode::Layered(items) = &model.root else { panic!("{FIXTURE}: a v6 frame is Layered") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     assert!(layout.story.is_none(), "{FIXTURE}: the hint menu withdraws the story window");
 
     // Render the hybrid frame FIRST: `render_story_pane_frame` is what publishes
@@ -354,7 +354,7 @@ fn raster_and_hybrid_draw_the_same_page() {
     guard_shape(&st, &buf, area, &format!("{FIXTURE} hybrid-vs-raster"));
 
     let (ink, page) = app::render::screen::v6_host_pair(&st);
-    let native = app::render::v6_layout::native_extent(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
     let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &st);
     let mut census: std::collections::BTreeMap<[u8; 4], usize> = Default::default();
     for px in canvas.pixels() {

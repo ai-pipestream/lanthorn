@@ -201,8 +201,8 @@ fn shogun_frozen_header_reaches_the_composite() {
     };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // The frozen prose publishes as its own paint layer, at the prose's extent —
     // NOT at the window's new box, which would read as an overlay strip sitting
@@ -402,9 +402,9 @@ fn shogun_frozen_header_stays_centred_in_every_render_path() {
     let layout = app::render::v6_layout::classify_windows(match &model.root {
         WinNode::Layered(items) => items,
         _ => panic!("v6 builds a Layered root"),
-    });
+    }, zvm::screen::V6Cell::DEFAULT);
     let native = match &model.root {
-        WinNode::Layered(items) => app::render::v6_layout::native_extent(items),
+        WinNode::Layered(items) => app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT),
         _ => unreachable!(),
     };
     for honor in [true, false] {
@@ -606,8 +606,8 @@ fn shogun_resumed_prompt_lands_beside_the_menu() {
         WinNode::Layered(items) => items,
         _ => panic!("v6 builds a Layered root"),
     };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     for honor in [true, false] {
         let mut state = app::state::AppState::default();
         state.colors = app::colors::ColorScheme::terminal_default();

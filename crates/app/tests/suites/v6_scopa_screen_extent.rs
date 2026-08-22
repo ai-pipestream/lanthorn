@@ -112,7 +112,7 @@ fn a_measuring_window_never_inflates_the_published_screen() {
     let items = items(&model);
 
     assert_eq!(
-        app::render::v6_layout::native_extent(items),
+        app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT),
         (640, 400),
         "a scratch measuring window must not enlarge the screen"
     );
@@ -162,8 +162,8 @@ fn the_dealt_table_composites_at_screen_scale_and_paints_no_black_bands() {
     let Some(session) = scopa_dealt() else { return };
     let model = session.screen();
     let items = items(&model);
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     for honor in [true, false] {
         // The composite is built once per colour mode: it is the game's own

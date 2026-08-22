@@ -171,8 +171,8 @@ fn distance(a: &image::RgbaImage, b: &image::RgbaImage) -> f64 {
 fn flank_columns(session: &GameSession) -> (u32, u32, u32, u32) {
     let model = session.screen();
     let app::engine::WinNode::Layered(items) = &model.root else { panic!("v6 root is Layered") };
-    let native = app::render::v6_layout::native_extent(items);
-    let story = app::render::v6_layout::classify_windows(items).story.expect("a story window");
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let story = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT).story.expect("a story window");
     let left = u32::from(story.x_px).min(u32::from(native.0));
     let right = (u32::from(story.x_px) + u32::from(story.w_px)).min(u32::from(native.0));
     assert!(left > 0 && right < u32::from(native.0), "premise: the frame HAS side art");

@@ -210,7 +210,7 @@ fn viewport_of(state: &app::state::AppState) -> Quad {
 /// beside it, so this is what "beside the story box" is measured against.
 fn story_box(model: &app::engine::ScreenModel) -> (u32, u32, u32, u32) {
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-    let s = app::render::v6_layout::classify_windows(items).story.expect("story window");
+    let s = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT).story.expect("story window");
     (s.x_px as u32, s.y_px as u32, s.w_px as u32, s.h_px as u32)
 }
 
@@ -249,7 +249,7 @@ fn side_rule_runs(model: &app::engine::ScreenModel) -> Vec<PxText> {
 /// which rounds to two decimals and drifts a column at some pane widths.
 fn run_col(t: &PxText, model: &app::engine::ScreenModel, area: Rect) -> u16 {
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
     let (cw, ch) = (8u32, 18u32);
     let s = app::render::v6_layout::uniform_scale(native, (area.width as u32 * cw, area.height as u32 * ch));
     let px = t.x.max(1) as f32 - 1.0;
@@ -581,7 +581,7 @@ fn journeys_picture_band_carries_no_pixel_of_the_frames_own_rules() {
         let transcript = session.take_transcript();
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-        let native = app::render::v6_layout::native_extent(items);
+        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
         let mut wide_seen = 0usize;
         for honor in [true, false] {
             for (w, h) in WIDE {
@@ -836,7 +836,7 @@ fn the_frames_edge_reaches_the_panes_last_column() {
     let transcript = session.take_transcript();
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
     let mut spans_two = 0usize;
     for honor in [true, false] {
         // The whole transition (SQ-0780's sweep found its own defect appearing at 155,

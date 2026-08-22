@@ -181,8 +181,8 @@ fn shoguns_chrome_canvas_keeps_the_status_page_off_the_ring() {
     );
 
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items.as_slice());
-    let layout = app::render::v6_layout::classify_windows(items.as_slice());
+    let native = app::render::v6_layout::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
     // The rows the ring claims: Shogun prints its band at native y 1 and 17, so their
     // tops are 0 and 16 and between them they are the window's whole 32 rows.
     let glyph_rows: std::collections::HashSet<u16> = layout
@@ -221,11 +221,12 @@ fn shoguns_chrome_canvas_keeps_the_status_page_off_the_ring() {
             image::Rgba([0, 0, 0, 255]),
             &colors,
             text,
+            zvm::screen::V6Cell::DEFAULT,
         );
         // The ring's own order (SQ-0706): art and glyphs, then the painted ground
         // beneath them, then the window pages filling whatever neither claimed.
-        app::render::v6_layout::blit_paint_ground(&mut canvas, Some(&paint), text);
-        app::render::v6_layout::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &colors, text);
+        app::render::v6_layout::blit_paint_ground(&mut canvas, Some(&paint), text, zvm::screen::V6Cell::DEFAULT);
+        app::render::v6_layout::fill_window_pages(&mut canvas, &layout.chrome, layout.story, &colors, text, zvm::screen::V6Cell::DEFAULT);
         canvas
     };
     // The four native columns the flank's last cell reaches into, over the window's
@@ -445,7 +446,7 @@ fn shoguns_status_erase_reaches_past_the_story_window_on_the_painted_ground() {
     // The allocation those pixels depend on: the ground shares a coordinate space AND
     // an extent with the chrome canvas `blit_paint_ground` copies it into.
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items.as_slice());
+    let native = app::render::v6_layout::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
     assert_eq!(
         (ground.width(), ground.height()),
         (u32::from(native.0), u32::from(native.1)),

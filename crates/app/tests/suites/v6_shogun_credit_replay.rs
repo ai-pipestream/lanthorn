@@ -171,7 +171,7 @@ fn canvas_rows(session: &GameSession) -> Vec<String> {
 fn prose_box_cells(session: &GameSession) -> (u16, u16) {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let story = layout.story.expect("the credits screen has a story window");
     ((story.w_px / 8).max(1), (story.h_px / 16).max(1))
 }
@@ -191,7 +191,7 @@ fn the_menu_sits_inside_the_story_windows_own_box() {
         let Some((session, _, _)) = boot(r) else { continue };
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-        let layout = app::render::v6_layout::classify_windows(items);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let story = layout.story.expect("the credits screen has a story window");
         let (top, bottom) = (story.y_px, story.y_px + story.h_px);
 

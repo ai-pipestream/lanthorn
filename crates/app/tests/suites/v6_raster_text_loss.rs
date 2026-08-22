@@ -80,8 +80,8 @@ fn composite(
 ) -> (image::RgbaImage, Option<app::render::screen::RasterMetrics>) {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     app::render::screen::build_v6_raster_canvas(&layout, native, state)
 }
 
@@ -167,7 +167,7 @@ fn shogun_title_shows_its_prose(honor: bool) {
     // Premise: the box the game declared really is four rows beside the menu.
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let story = app::render::v6_layout::classify_windows(items).story.expect("Shogun has a story window");
+    let story = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT).story.expect("Shogun has a story window");
     assert_eq!(
         (story.x_px as u32, story.y_px as u32, story.w_px as u32, story.h_px as u32),
         SHOGUN_STORY,
@@ -359,7 +359,7 @@ fn fmvpoker_text_reaches_the_composite(honor: bool) {
     // its bounding box is the whole screen, its painted pixels a small minority.
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let plate = layout.story_gfx.expect("fmvpoker draws a backdrop into window 0 (SQ-0714)");
     let WinNode::Graphics(g) = &plate.node else { panic!("story_gfx is a Graphics leaf") };
     let (pw, ph) = g.canvas.dimensions();
@@ -375,7 +375,7 @@ fn fmvpoker_text_reaches_the_composite(honor: bool) {
     // largest rectangle of the clear interior the plate painted no pixel of, and a
     // frame's BOUNDING box (which is the whole screen) used to make it answer "the
     // plate owns the screen" — which is why not one line of text was drawn.
-    let prose = app::render::v6_layout::story_prose_box((0, 0, 640, 400), layout.story_gfx)
+    let prose = app::render::v6_layout::story_prose_box((0, 0, 640, 400), layout.story_gfx, zvm::screen::V6Cell::DEFAULT)
         .expect("the hollow frame leaves a prose box");
 
     assert!(
@@ -441,7 +441,7 @@ fn journey_text_panel_survives_the_menu_fill(honor: bool) {
         app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let layout = app::render::v6_layout::classify_windows(items);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let Some(story) = layout.story else { continue };
         if (story.x_px, story.y_px, story.w_px, story.h_px) != (240, 0, 392, 304) {
             continue;

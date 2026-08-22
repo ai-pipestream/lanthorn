@@ -116,7 +116,7 @@ fn hint_menu(file: &str, release: u16) -> Option<GameSession> {
 fn topic_runs(s: &GameSession) -> Vec<app::engine::PxText> {
     let model = s.screen();
     let WinNode::Layered(items) = &model.root else { return Vec::new() };
-    let layout = app::render::v6_layout::classify_windows(items);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     match layout.story.map(|st| &st.node) {
         Some(WinNode::Grid(g)) => g.px_texts.clone(),
         _ => Vec::new(),

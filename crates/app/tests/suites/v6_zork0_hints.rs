@@ -346,7 +346,7 @@ fn a_withdrawn_buffer_leaves_the_menu_grid_as_the_story_surface() {
             !items.iter().any(|pw| matches!(&pw.node, WinNode::Buffer(b) if b.primary)),
             "{file}: this release is expected to withdraw its primary buffer for the menu"
         );
-        let layout = app::render::v6_layout::classify_windows(items);
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let story = layout.story.unwrap_or_else(|| panic!("{file}: the middle grid must stand in for it"));
         assert!(matches!(&story.node, WinNode::Grid(_)), "{file}: the surface is that Grid");
         // …and it is still chrome, or the 22 topic runs it carries are never drawn.

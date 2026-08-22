@@ -309,7 +309,7 @@ fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
         let app::engine::WinNode::Layered(items) = &model.root else {
             panic!("v6 builds a Layered root")
         };
-        let story = app::render::v6_layout::classify_windows(items).story;
+        let story = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT).story;
         let (_, b) = app::render::v6_layout::story_pair_packed(story);
         // `story_bg_rgba` is the very function `render::screen` floods the pane
         // with, so the colour compared below is the one the frame was painted in.
@@ -704,8 +704,8 @@ fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
                 panic!("v6 builds a Layered root")
             };
             app::v6_set_palette(f.palette);
-            let native = app::render::v6_layout::native_extent(items);
-            let layout = app::render::v6_layout::classify_windows(items);
+            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let (canvas, _) =
                 app::render::screen::build_v6_raster_canvas(&layout, native, &f.state);
             let mut tally: std::collections::BTreeMap<[u8; 4], usize> = Default::default();
@@ -911,8 +911,8 @@ fn a_story_colour_change_moves_the_ground_the_plate_stands_on() {
             let app::engine::WinNode::Layered(items) = &f.model.root else {
                 panic!("v6 builds a Layered root")
             };
-            let native = app::render::v6_layout::native_extent(items);
-            let layout = app::render::v6_layout::classify_windows(items);
+            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let (canvas, _) =
                 app::render::screen::build_v6_raster_canvas(&layout, native, &f.state);
             let mut tally: std::collections::BTreeMap<[u8; 4], usize> = Default::default();

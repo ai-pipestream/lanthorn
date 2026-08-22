@@ -486,8 +486,8 @@ fn shogun_hybrid_boot_menu_is_one_coherent_ring_screen_with_a_solid_selection_ba
         WinNode::Layered(items) => items,
         _ => panic!("v6 builds a Layered root"),
     };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
     let ground = canvas.get_pixel(180, 337).0; // the same row, left of the menu
     let lit = |x: u32, top: u32| (top..top + 16).any(|y| canvas.get_pixel(x, y).0 != ground);
@@ -977,12 +977,12 @@ fn shogun_raster_status_band_floods_game_white() {
     let WinNode::Layered(items) = &screen.root else {
         panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", screen.root);
     };
-    let native = v6::native_extent(items);
-    let layout = v6::classify_windows(items);
+    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let colors = app::colors::ColorScheme::default();
     let default_fg = Rgba([220, 220, 220, 255]);
     let default_bg = Rgba([0, 0, 0, 255]);
-    let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All);
+    let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
 
     // Gather the status band's runs: chrome grid runs on native row 0 (px y=1), the
     // "SHOGUN" title row, a non-reverse black-on-white band (bg = z-colour 9,
@@ -1104,7 +1104,7 @@ fn shogun_prose_emphasis_reaches_the_raster_faces() {
     // a +1 double-strike of it.
     let draw = |m: &v6::MainText| {
         let mut c = image::RgbaImage::new(cols as u32 * 8, 40 * 16);
-        v6::draw_story_text(&mut c, m, 0, 0, cols, 40, image::Rgba([255, 255, 255, 255]), &[]);
+        v6::draw_story_text(&mut c, m, 0, 0, cols, 40, image::Rgba([255, 255, 255, 255]), &[], zvm::screen::V6Cell::DEFAULT);
         c
     };
     let styled = draw(&main);

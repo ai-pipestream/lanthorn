@@ -102,13 +102,14 @@ fn panel_lines(session: &GameSession) -> Vec<String> {
 fn secondary_prose_canvas(session: &GameSession, state: &app::state::AppState) -> image::RgbaImage {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items);
-    let layout = app::render::v6_layout::classify_windows(items);
+    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let mut canvas = image::RgbaImage::new(native.0.max(1) as u32, native.1.max(1) as u32);
     let ink = image::Rgba([0u8, 0, 0, 255]);
     let panel_input = (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
     app::render::v6_layout::draw_secondary_prose(
         &mut canvas, &layout.chrome, ink, state.config.honor_game_colours, &state.colors, panel_input,
+        zvm::screen::V6Cell::DEFAULT,
     );
     canvas
 }
