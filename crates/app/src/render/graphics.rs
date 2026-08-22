@@ -1019,6 +1019,10 @@ pub struct GraphicsRender {
     /// happened across an event like a restore. Dump it either side: if the number
     /// has not moved, every band was a cache hit and the terminal was sent nothing.
     pub band_encodes: u64,
+    /// What every kitty upload since launch has cost the wire, and what the same
+    /// pixels would have cost raw (SQ-1005). Measured off the transmits themselves,
+    /// so it covers `ratatui-image`'s encoder as well as ours.
+    pub uploads: UploadBytes,
     /// The whole native chrome canvas scaled to device pixels, shared across all
     /// bands of a frame so the expensive Nearest resize runs at most ONCE per
     /// changed frame instead of once per band (SQ-0514). Keyed on the canvas
@@ -1453,8 +1457,10 @@ impl GraphicsRender {
                     id: Some(entry.id),
                 });
             } else {
-                entry.pending_transmit =
-                    Some(kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width, compress));
+                let transmit =
+                    kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width, compress);
+                self.uploads.add(measure_transmit(&transmit));
+                entry.pending_transmit = Some(transmit);
                 entry.uploaded = Some(hash);
                 self.note_op(GraphicsOp::Upload {
                     target: GraphicsTarget::Window(gw.win),
@@ -1750,7 +1756,8 @@ impl GraphicsRender {
         // [`Self::deletes_after_place`].
         let pending = std::mem::take(&mut self.pending_deletes);
         let after = std::mem::take(&mut self.deletes_after_place);
-        let placed_id = place_protocol_with(proto, dest, buf, &pending, &after);
+        let (placed_id, placed_bytes) = place_protocol_with(proto, dest, buf, &pending, &after);
+        self.uploads.add(placed_bytes);
         if placed_id.is_none() {
             self.pending_deletes = pending;
             // Nothing was placed, so nothing on screen depends on these either:
@@ -2126,14 +2133,17 @@ impl GraphicsRender {
             let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
             (dest, sz, place_protocol_with(proto, dest, buf, &pending, &after))
         });
-        if !matches!(placed, Some((_, _, Some(_)))) {
+        if !matches!(placed, Some((_, _, (Some(_), _)))) {
             self.pending_deletes = pending;
             // Nothing was placed, so nothing on screen depends on the supersede
             // deletes either — hand them to the ordinary queue rather than strand them.
             self.pending_deletes.push_str(&after);
         }
+        if let Some((_, _, (_, bytes))) = placed {
+            self.uploads.add(bytes);
+        }
         match placed {
-            Some((dest, sz, id)) => {
+            Some((dest, sz, (id, _))) => {
                 self.band_log.push(format!(
                     "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{} at ({},{}) · native {} · {}",
                     band.width, band.height, band.x, band.y,
@@ -2352,14 +2362,17 @@ impl GraphicsRender {
             let dest = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
             (dest, sz, place_protocol_with(proto, dest, buf, &pending, &after))
         });
-        if !matches!(placed, Some((_, _, Some(_)))) {
+        if !matches!(placed, Some((_, _, (Some(_), _)))) {
             self.pending_deletes = pending;
             // Nothing was placed, so nothing on screen depends on the supersede
             // deletes either — hand them to the ordinary queue rather than strand them.
             self.pending_deletes.push_str(&after);
         }
+        if let Some((_, _, (_, bytes))) = placed {
+            self.uploads.add(bytes);
+        }
         match placed {
-            Some((dest, sz, id)) => {
+            Some((dest, sz, (id, _))) => {
                 self.band_log.push(format!(
                     "band {}x{}@({},{}) [{slot:?}, stretched]: {} · proto {}x{} · placed {}x{} at ({},{}) · native {cw_n}x{ch_n}@({cx},{cy}) · {}",
                     band.width, band.height, band.x, band.y,
@@ -2483,14 +2496,17 @@ impl GraphicsRender {
             let at = Rect::new(band.x, band.y, sz.width.min(band.width), sz.height.min(band.height));
             (at, sz, place_protocol_with(proto, at, buf, &pending, &after))
         });
-        if !matches!(placed, Some((_, _, Some(_)))) {
+        if !matches!(placed, Some((_, _, (Some(_), _)))) {
             self.pending_deletes = pending;
             // Nothing was placed, so nothing on screen depends on the supersede
             // deletes either — hand them to the ordinary queue rather than strand them.
             self.pending_deletes.push_str(&after);
         }
+        if let Some((_, _, (_, bytes))) = placed {
+            self.uploads.add(bytes);
+        }
         match placed {
-            Some((placed_at, sz, id)) => {
+            Some((placed_at, sz, (id, _))) => {
                 let (blank, run, run_at) = blank_rows(src);
                 self.band_log.push(format!(
                     "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · into {dw}x{dh}px at ({dx},{dy}) of {bw}x{bh} · blank rows {}, longest run {} at {} · {}",
@@ -2724,6 +2740,90 @@ fn kitty_transmit_virtual(
     out
 }
 
+/// What kitty uploads have cost, and what the same pixels would have cost with no
+/// compression at all (SQ-1005).
+///
+/// Read off the WIRE rather than out of an encoder, which is why it can speak for
+/// both of them: lanthorn emits its graphics-window transmits itself
+/// ([`kitty_transmit_virtual`]) while every band, composite, inline picture and
+/// cover tile is encoded by `ratatui-image`, and neither hands back the two
+/// lengths. The transmit declares its own geometry — `f=32` with `s=W,v=H` is
+/// `W · H · 4` bytes of RGBA — so the uncompressed size is known without inflating
+/// anything, or even reading the payload.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UploadBytes {
+    /// Bytes actually written for the transmit: control blocks, base64 and the
+    /// `ESC \` terminators of every chunk.
+    pub wire: u64,
+    /// The image's own pixel bytes, from the geometry the transmit declares.
+    pub pixels: u64,
+    /// Transmits counted — a first chunk each, so this is images and not chunks.
+    pub uploads: u64,
+}
+
+impl UploadBytes {
+    fn add(&mut self, other: UploadBytes) {
+        self.wire += other.wire;
+        self.pixels += other.pixels;
+        self.uploads += other.uploads;
+    }
+
+    /// What [`Self::pixels`] would have occupied on the wire uncompressed: base64
+    /// is 4 bytes per 3, and the control blocks are the same either way.
+    ///
+    /// This is the honest comparison for "what did `o=z` buy", because `wire`
+    /// already includes base64 — comparing a deflated-and-encoded stream against
+    /// raw pixel bytes would credit compression with the 4/3 expansion it never
+    /// removed.
+    pub fn wire_uncompressed(&self) -> u64 {
+        self.pixels.div_ceil(3) * 4
+    }
+}
+
+/// Measure one transmit's cost off its own bytes. See [`UploadBytes`].
+///
+/// Cheap on purpose: it reads each chunk's control block — the few dozen bytes
+/// before the `;` — and the chunk's length, never its payload. A 14 MB upload
+/// costs the same to measure as a 200-byte one, which is what lets this sit on the
+/// frame path where [`crate::terminal_dump::Traffic`] deliberately would not scan.
+///
+/// A chunk with no `s`/`v` is a continuation (`m=1` carries no geometry) and adds
+/// wire without adding pixels, so a chunked upload is counted once.
+pub fn measure_transmit(transmit: &str) -> UploadBytes {
+    let mut out = UploadBytes::default();
+    let b = transmit.as_bytes();
+    let mut i = 0usize;
+    while let Some(rel) = b[i..].windows(3).position(|w| w == b"\x1b_G") {
+        let start = i + rel;
+        // The chunk runs to its `ESC \`; a truncated one is measured to the end.
+        let end = b[start..]
+            .windows(2)
+            .position(|w| w == b"\x1b\\")
+            .map_or(b.len(), |p| start + p + 2);
+        out.wire += (end - start) as u64;
+        let head_end = b[start..end].iter().position(|&c| c == b';').map_or(end, |p| start + p);
+        let params = &transmit[start + 3..head_end];
+        let get = |key: &str| -> Option<u64> {
+            params.split(',').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+        };
+        // `S` is the kitty spec's own "size of the uncompressed data" and only ever
+        // accompanies a compressed PNG; for the `f=32` RGBA we and the crate emit,
+        // the declared geometry is the same fact and is always present.
+        if let Some(size) = get("S") {
+            out.pixels += size;
+            out.uploads += 1;
+        } else if let (Some(w), Some(h)) = (get("s"), get("v")) {
+            out.pixels += w * h * 4;
+            out.uploads += 1;
+        }
+        i = end;
+        if i >= b.len() {
+            break;
+        }
+    }
+    out
+}
+
 /// Hash a canvas's pixels, so two canvases that look identical share one upload
 /// (SQ-0564). Only ever compared against other hashes from this same function —
 /// a collision would place the wrong cached image, which SipHash makes a
@@ -2854,7 +2954,7 @@ fn kitty_place_rows(id: u32, transmit: Option<&str>, area: Rect, buf: &mut Buffe
 /// never be freed in the terminal (SQ-0753): the crate keeps the id private, so
 /// reading it back off the placement it just wrote is how we learn to name it.
 pub fn place_protocol(proto: &Protocol, dest: Rect, buf: &mut Buffer) -> Option<u32> {
-    place_protocol_with(proto, dest, buf, "", "")
+    place_protocol_with(proto, dest, buf, "", "").0
 }
 
 /// [`place_protocol`], with `prefix` (queued `a=d` deletes) riding on the very first
@@ -2875,7 +2975,7 @@ fn place_protocol_with(
     buf: &mut Buffer,
     prefix: &str,
     suffix: &str,
-) -> Option<u32> {
+) -> (Option<u32>, UploadBytes) {
     Image::new(proto).render(dest, buf);
     reseat_kitty_placement(dest, buf, prefix, suffix)
 }
@@ -2883,8 +2983,17 @@ fn place_protocol_with(
 /// Rewrite each row of a `ratatui-image` kitty placement at `area` in place, and
 /// return the image id the rows name. See [`place_protocol`]; a no-op returning
 /// `None` for anything that is not a kitty placement.
-fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str, suffix: &str) -> Option<u32> {
+fn reseat_kitty_placement(
+    area: Rect,
+    buf: &mut Buffer,
+    prefix: &str,
+    suffix: &str,
+) -> (Option<u32>, UploadBytes) {
     let mut id = None;
+    // The image data rides on the row that carries it, ahead of that row's own
+    // escapes — `row.prefix`. Measured here because this is the ONE funnel every
+    // `ratatui-image` upload passes through (SQ-1005).
+    let mut bytes = UploadBytes::default();
     let mut prefix = (!prefix.is_empty()).then_some(prefix);
     // The last cell this re-seat writes — where a `suffix` delete goes, so it is
     // emitted AFTER every byte of the placement it supersedes (SQ-0817).
@@ -2897,6 +3006,7 @@ fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str, suffix: &s
         // coming back — never half-answered.
         let this_id = placement_id(row.fg, row.extra_d);
         id = id.or(this_id);
+        bytes.add(measure_transmit(row.prefix));
         let width = row.cells.min(area.width);
         let head = match this_id.and(prefix.take()) {
             Some(p) => format!("{p}{}", row.prefix),
@@ -2928,7 +3038,7 @@ fn reseat_kitty_placement(area: Rect, buf: &mut Buffer, prefix: &str, suffix: &s
             cell.set_symbol(&symbol);
         }
     }
-    id
+    (id, bytes)
 }
 
 /// Reassemble a kitty image id from the two halves a placeholder row carries: the
@@ -5594,6 +5704,98 @@ mod tests {
             image::RgbaImage::from_fn(w, h, |x, y| {
                 image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x * 7 + y * 13) % 239) as u8, 255])
             })
+        }
+
+        /// SQ-1005: the transmit measures itself, off its own control block.
+        ///
+        /// The point of measuring the WIRE rather than an encoder is that one
+        /// number then speaks for both encoders — lanthorn emits its
+        /// graphics-window uploads and `ratatui-image` encodes everything else, and
+        /// neither hands back the two lengths. So the parser has to hold against a
+        /// chunked transmit (a continuation chunk carries no geometry and must not
+        /// be counted as a second image) and against a raw one.
+        #[test]
+        fn a_transmit_reports_its_wire_cost_and_the_pixels_it_stands_for() {
+            let img = canvas(640, 400);
+            let pixels = 640u64 * 400 * 4;
+
+            let raw = kitty_transmit_virtual(&img, 7, 25, 80, false);
+            let m = measure_transmit(&raw);
+            assert_eq!(m.uploads, 1, "one image, however many chunks it took");
+            assert_eq!(m.pixels, pixels, "s x v x 4 for f=32 RGBA");
+            assert_eq!(m.wire, raw.len() as u64, "an uncompressed transmit IS its wire cost");
+            assert!(
+                m.wire >= m.wire_uncompressed(),
+                "base64 alone cannot come out smaller than base64: {} vs {}",
+                m.wire,
+                m.wire_uncompressed(),
+            );
+
+            let zipped = kitty_transmit_virtual(&img, 7, 25, 80, true);
+            let z = measure_transmit(&zipped);
+            assert_eq!(z.uploads, 1, "still one image");
+            assert_eq!(z.pixels, pixels, "the declared geometry is the IMAGE, not the payload");
+            assert_eq!(z.wire, zipped.len() as u64);
+            assert_eq!(
+                z.wire_uncompressed(),
+                m.wire_uncompressed(),
+                "the same pixels stand for the same uncompressed wire either way",
+            );
+
+            // The measurement's whole purpose, and the number worth quoting — but
+            // NOT on `canvas()`, whose pixels are pseudo-random on purpose so that
+            // a codec bug dropping every chunk but the first would still be caught.
+            // Noise does not deflate: that canvas measures 1,369,725 raw against
+            // 973,792 compressed, a ratio of 1.4 that says nothing about a game.
+            //
+            // Infocom v6 art is a 16-colour palette in flat runs, which is what
+            // `o=z` is worth having for, so the ratio is asserted on a canvas
+            // shaped like one.
+            let art = image::RgbaImage::from_fn(640, 400, |x, y| {
+                let band = ((y / 24) + (x / 80)) % 16;
+                image::Rgba([band as u8 * 17, 40 + band as u8 * 9, 90, 255])
+            });
+            let (flat_raw, flat_z) = (
+                measure_transmit(&kitty_transmit_virtual(&art, 7, 25, 80, false)),
+                measure_transmit(&kitty_transmit_virtual(&art, 7, 25, 80, true)),
+            );
+            assert!(
+                flat_z.wire * 20 < flat_raw.wire,
+                "on artwork-shaped pixels compression must be worth an order of magnitude: \
+                 {} vs {}",
+                flat_z.wire,
+                flat_raw.wire,
+            );
+            eprintln!(
+                "640x400 flat art: {} pixel bytes, {} on the wire raw, {} compressed ({:.1}x)",
+                flat_z.pixels,
+                flat_raw.wire,
+                flat_z.wire,
+                flat_raw.wire as f64 / flat_z.wire.max(1) as f64,
+            );
+            eprintln!(
+                "640x400 noise:    {} pixel bytes, {} on the wire raw, {} compressed ({:.1}x)",
+                z.pixels,
+                m.wire,
+                z.wire,
+                m.wire as f64 / z.wire.max(1) as f64,
+            );
+        }
+
+        /// Two transmits in one string are two images, and a stream with none is
+        /// zero — the accumulator adds these up across a session, so a parser that
+        /// double-counted or fell off the end would drift silently.
+        #[test]
+        fn measuring_counts_images_and_not_chunks() {
+            assert_eq!(measure_transmit(""), UploadBytes::default());
+            assert_eq!(measure_transmit("just some cells\u{10eeee}"), UploadBytes::default());
+
+            let a = kitty_transmit_virtual(&canvas(64, 32), 1, 2, 8, true);
+            let b = kitty_transmit_virtual(&canvas(16, 16), 2, 1, 2, false);
+            let both = measure_transmit(&format!("{a}{b}"));
+            assert_eq!(both.uploads, 2);
+            assert_eq!(both.pixels, 64 * 32 * 4 + 16 * 16 * 4);
+            assert_eq!(both.wire, (a.len() + b.len()) as u64);
         }
 
         #[test]

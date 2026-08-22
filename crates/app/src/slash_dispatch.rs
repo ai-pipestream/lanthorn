@@ -850,6 +850,7 @@ fn terminal_snapshot(
             last_flush_bytes: t.last_flush_bytes(),
         }),
         band_encodes: gr.band_encodes,
+        uploads: gr.uploads,
         ops,
     }
 }

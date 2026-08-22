@@ -210,6 +210,9 @@ pub struct TerminalSnapshot {
     pub traffic: Option<TrafficStats>,
     /// Uploads the chrome-band and composite path has encoded since launch.
     pub band_encodes: u64,
+    /// What every kitty upload since launch cost the wire, against what the same
+    /// pixels would have cost uncompressed (SQ-1005).
+    pub uploads: crate::render::graphics::UploadBytes,
     /// The last recorded frame's graphics ops.
     pub ops: OpCounts,
 }
@@ -503,11 +506,40 @@ pub fn dump_lines(s: &TerminalSnapshot) -> Vec<DumpLine> {
         "  chrome-band / composite uploads since launch: {}",
         thousands(s.band_encodes)
     )));
-    out.push(assumed(
-        "  compressed vs raw upload sizes: unavailable — neither encoder reports the two lengths, \
-         and adding that would mean instrumenting the encode path; the o=z lines above say \
-         whether compression is on, not what it bought",
-    ));
+    // SQ-1005: what compression actually bought, on THIS session's real workload.
+    // Read off the transmits rather than out of an encoder, which is the only way
+    // one number can speak for both of them — lanthorn emits its graphics-window
+    // uploads itself and `ratatui-image` encodes everything else.
+    let u = s.uploads;
+    if u.uploads == 0 {
+        out.push(value("  kitty upload bytes: nothing uploaded yet this session"));
+    } else {
+        let raw = u.wire_uncompressed();
+        out.push(value(format!(
+            "  kitty uploads: {} image(s), {} pixel bytes",
+            thousands(u.uploads),
+            thousands(u.pixels)
+        )));
+        out.push(value(format!(
+            "  on the wire: {} bytes, against {} uncompressed{}",
+            thousands(u.wire),
+            thousands(raw),
+            match (raw.checked_sub(u.wire), raw) {
+                (Some(saved), r) if r > 0 && saved > 0 => format!(
+                    " — {}x smaller, {} bytes saved ({}%)",
+                    format_args!("{:.1}", r as f64 / u.wire.max(1) as f64),
+                    thousands(saved),
+                    saved * 100 / r
+                ),
+                _ => String::new(),
+            }
+        )));
+        out.push(assumed(
+            "  (both measured from the transmits' own control blocks — `s`x`v`x4 for f=32 RGBA, or \
+             `S` when one is declared. The uncompressed figure is base64'd too, since `o=z` never \
+             removed the 4/3 expansion and crediting it with that would flatter the ratio.)",
+        ));
+    }
     out
 }
 
@@ -535,6 +567,11 @@ mod tests {
             render: None,
             traffic: Some(TrafficStats { total_bytes: 1_234_567, flushes: 20, last_flush_bytes: 48_213 }),
             band_encodes: 87,
+            uploads: crate::render::graphics::UploadBytes {
+                wire: 200_000,
+                pixels: 12_000_000,
+                uploads: 9,
+            },
             ops: OpCounts { uploads: 3, reuses: 12, places: 15, drops: 2, placed_cells: 65_952 },
         }
     }
@@ -669,7 +706,11 @@ mod tests {
         assert!(t.contains("65,952"), "placeholder cells: {t}");
         assert!(t.contains("115x61 cells = 7,015"), "the pane grid and its product: {t}");
         assert!(t.contains("3 upload(s), 12 reuse(s), 15 placement(s), 2 drop(s)"), "{t}");
-        assert!(t.contains("compressed vs raw upload sizes: unavailable"), "{t}");
+        // SQ-1005: what compression bought, not a disclaimer that it cannot be known.
+        assert!(t.contains("9 image(s), 12,000,000 pixel bytes"), "the upload totals: {t}");
+        assert!(t.contains("200,000 bytes, against 16,000,000 uncompressed"), "both sides: {t}");
+        assert!(t.contains("80.0x smaller"), "the ratio: {t}");
+        assert!(t.contains("15,800,000 bytes saved (98%)"), "the saving: {t}");
     }
 
     /// With no terminal there are no byte counts, and saying so is the honest
