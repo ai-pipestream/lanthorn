@@ -2593,6 +2593,8 @@ base64.
 **That path is graphics *windows*** — Glulx's clickable toolbars, Scott room
 pictures, and any v6 graphics window drawn as an image rather than as cells.
 Measured on advent.blb under a pty, the whole capture went from ~314 KB to 54 KB.
+Compressing the image is only half that path's bill, though — see *A graphics
+window's image id never moves* below for the other half, which was larger.
 
 The v6 chrome ring's bands and the full-pane raster composite go through
 `ratatui-image`, which is a layer down and was the larger prize — the ring alone
@@ -2631,6 +2633,68 @@ dropped back to raw transmits until the app was relaunched. It fails safe, which
 is exactly why it went unseen. The refresh now hands the new cell size to the
 picker it already has (`Picker::set_font_size`, added to the fork for it) and
 touches nothing else (SQ-0992).
+
+## A graphics window's image id never moves, so a changed picture costs the picture
+
+Compressing the payload only helps if the payload is what you are paying for. On
+a kitty terminal a graphics window is drawn as a **virtual placement**: the canvas
+is transmitted once, and every cell of the window's rect gets a `U+10EEEE`
+placeholder that names the image — its id's low 24 bits as the cell's foreground
+colour, the high byte as a third combining diacritic. The cells are ordinary
+buffer cells, so they go through ratatui's diff like any other content, and a
+frame whose picture did not change emits nothing at all. That is the design
+working.
+
+**The id is a per-cell value, and that is the trap.** Change the id and every one
+of those cells differs, so the diff emits all of them. Until SQ-0995 a new id was
+allocated whenever a canvas-content hash missed, which meant one changed pixel
+repainted the whole grid — and, worse, so did a canvas the terminal *already had*,
+because re-placing a cached upload swaps the id back. Measured under a pty:
+
+| capture, one frame in which the picture changed | before | after | |
+|---|---:|---:|---|
+| golden_baton.blb at 117×50, a 115×16-cell room picture | 21,867 B | 3,271 B | **6.7×** |
+| golden_baton.blb at 230×64, a 228×16-cell room picture | 42,207 B | 3,723 B | **11.3×** |
+| waxworks.blb at 160×50, a 158×16-cell room picture | 29,419 B | 3,251 B | **9.0×** |
+| golden_baton at 230×64, whole session over three moves | 129,461 B | 55,229 B | 2.3× |
+
+The compressed image in the 230×64 row is 2,208 bytes. Everything else in the
+42,207 was placeholder cells being repainted for no reason.
+
+The fix is to hold the id still and replace the data behind it. The protocol
+licenses this directly — *"When re-transmitting image data for a specific id, the
+existing image and all its placements must be deleted"* — and our transmit is
+`a=T,U=1,r,c`, which re-creates the window's placement in the same command that
+replaces its data, so the cells never stop resolving. Two details make it safe:
+
+- **The transmit now names its placement (`p=1`).** `p=0` means "assign me an
+  internal placement id", and Ghostty's storage replaces the *image* on a
+  re-transmit while leaving placements alone — so an unnamed placement would leave
+  one dead duplicate behind per frame of animation. A named one is replaced in
+  place. The placeholder cells still encode placement 0, which resolves to "the
+  first virtual placement of this image" and therefore to the only one.
+- **Nothing blanks mid-transfer.** A chunked transmit commits only on its final
+  chunk, so the old picture stays on screen for the whole of the new one's
+  journey.
+
+What this replaced is the SQ-0564 upload cache: eight canvases per window kept in
+the terminal, so a game flipping between a resting and a pressed toolbar re-placed
+an id instead of re-uploading it. That cache cannot coexist with a stable id — an
+id you might place is an id in every cell — and the measurement above is why it
+does not deserve to. It saved the *image* on a flip-back and paid the whole grid
+in cells to do it: the golden_baton frame that returned to a room it had already
+drawn transmitted zero bytes of picture and still cost 39,859 bytes. A window now
+holds exactly one image in the terminal however long it animates, which is a
+tighter bound than the cap ever gave, with no eviction to get wrong.
+
+The half of SQ-0564 that survives is the content hash itself: a game that repaints
+its window from scratch onto identical pixels (advent.blb's toolbar does this to
+release a button) still transmits nothing.
+
+Resize is the one thing that still churns the id, and must: the placement's `r×c`
+grid is baked into the transmission, so an upload at the old size can never be
+re-placed at the new one. It is deleted in the same batch as its replacement, as
+it has been since SQ-0637.
 
 ## Half-blocks pays by the cell, and no palette can help it
 

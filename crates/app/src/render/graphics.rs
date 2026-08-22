@@ -1136,33 +1136,50 @@ pub fn kitty_picker(cell_w: u16, cell_h: u16) -> Picker {
     picker
 }
 
-/// How many distinct canvases one graphics window keeps uploaded in the terminal
-/// (SQ-0564). Bounds the terminal's image memory — at advent.blb's toolbar size
-/// (1104×36 RGBA ≈ 155 KiB) this is ~1.2 MiB per window — while still covering a
-/// game that cycles through a handful of fixed frames.
-const KITTY_CACHE: usize = 8;
+/// The placement id every graphics-window transmit names (SQ-0995).
+///
+/// Placement ids are scoped to their image, so one constant serves every window.
+/// It has to be stated rather than left at the protocol's default of 0, because
+/// `p=0` means "assign me an internal id" and this path now re-transmits to the
+/// SAME image id on every content change: an unnamed placement would be a fresh
+/// internal placement each time, piling up unreachable duplicates for the life of
+/// the window. Naming it makes each re-transmit REPLACE the one placement the
+/// window owns. The placeholder cells still encode placement 0 — "any virtual
+/// placement of this image" — which resolves to it precisely because it is the
+/// only one.
+const KITTY_PLACEMENT: u32 = 1;
 
-/// The kitty images backing one graphics window (SQ-0520/SQ-0564).
+/// The kitty image backing one graphics window (SQ-0520/SQ-0995).
 struct KittyWindowImage {
-    /// Canvas version the cache was last reconciled against. Hashing a canvas
+    /// Canvas version the upload was last reconciled against. Hashing a canvas
     /// costs a pass over every pixel, so it only happens when the game actually
     /// drew something — not on every frame.
     version: u64,
     w: u16,
     h: u16,
-    /// The id currently placed on screen; 0 before the first upload.
+    /// The id this window's pixels live under in the terminal, allocated once
+    /// when the entry is created and STABLE for as long as the window keeps this
+    /// cell size (SQ-0995).
+    ///
+    /// The id is a PER-CELL value — `kitty_place_rows` writes its low 24 bits into
+    /// every placeholder cell's foreground and its high byte into the third
+    /// diacritic — so changing it dirties the whole grid. Keying an id on the
+    /// canvas's CONTENT, as this did before, therefore made one changed pixel
+    /// repaint every cell of the window: measured on golden_baton.blb at 230×64,
+    /// a 228×16 window cost 42,207 bytes for a frame whose compressed image was
+    /// 2,208. Holding the id still and replacing the data behind it costs the
+    /// image and nothing else.
     id: u32,
-    /// The transmit escape (plus any eviction deletes), prepended to the first
-    /// placeholder row of the next emitted frame, then dropped — the terminal
-    /// keeps the image by id after that.
+    /// The transmit escape, prepended to the first placeholder row of the next
+    /// emitted frame, then dropped — the terminal keeps the image by id after that.
     pending_transmit: Option<String>,
-    /// Content hash → uploaded id for every canvas transmitted at this size,
-    /// least-recently-placed FIRST. A game that flips between a few fixed
-    /// canvases re-places an id it already sent instead of re-uploading:
-    /// advent.blb's toolbar alternates between the resting bar and one
-    /// pressed-button variant per press, so releasing a button used to re-send
-    /// the whole canvas for a picture the terminal already had.
-    sent: Vec<(u64, u32)>,
+    /// Hash of the pixels currently uploaded under [`Self::id`], or `None` while
+    /// nothing has been transmitted yet. A repaint that lands on identical pixels
+    /// (advent.blb's toolbar redraws itself from scratch to release a button)
+    /// re-places the id and sends nothing; `None` also tells
+    /// [`GraphicsRender::queue_kitty_deletes`] there is nothing in the terminal to
+    /// free.
+    uploaded: Option<u64>,
 }
 
 impl std::fmt::Debug for GraphicsRender {
@@ -1237,16 +1254,23 @@ impl GraphicsRender {
         }
     }
 
-    /// Queue `a=d,d=I` deletes for every id an abandoned [`KittyWindowImage`] still
-    /// holds in the terminal, and record one [`GraphicsOp::Drop`] per id (SQ-0637).
+    /// Queue an `a=d,d=I` delete for the id an abandoned [`KittyWindowImage`] still
+    /// holds in the terminal, and record a [`GraphicsOp::Drop`] for it (SQ-0637).
     /// `d=I` frees the image data AND its placements, so nothing deleted here can be
-    /// re-placed — which is correct: the entry that knew these ids is gone.
+    /// re-placed — which is correct: the entry that knew this id is gone.
+    ///
+    /// One id, not a cache generation: since SQ-0995 a window owns exactly one
+    /// upload at a given cell size and replaces the data behind it in place. An
+    /// entry that never transmitted (`uploaded` is `None`) names nothing the
+    /// terminal is holding, so it queues nothing.
     fn queue_kitty_deletes(&mut self, entry: &KittyWindowImage, win: u32) {
         use std::fmt::Write as _;
-        for &(_, id) in &entry.sent {
-            write!(self.pending_deletes, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\").expect("write to String");
-            self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Window(win) });
+        if entry.uploaded.is_none() {
+            return;
         }
+        let id = entry.id;
+        write!(self.pending_deletes, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\").expect("write to String");
+        self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Window(win) });
     }
 
     /// Queue an `a=d,d=I` delete for ONE abandoned `ratatui-image` upload (SQ-0753).
@@ -1332,24 +1356,38 @@ impl GraphicsRender {
     /// logical-vs-device pixel mismatch — and the cell→game-pixel mouse
     /// mapping in `glk_mouse_target` stays truthful.
     ///
-    /// Each distinct canvas is transmitted once per area size and kept in the
-    /// terminal (up to [`KITTY_CACHE`]), keyed by a hash of its pixels: a game
-    /// that returns to a canvas it has drawn before re-places that id and sends
-    /// no image data at all. Placeholder cells are re-written every frame
-    /// (identical content, so the terminal diff drops them when unchanged).
+    /// THE ID IS STABLE AND THE DATA BEHIND IT IS REPLACED (SQ-0995). A window
+    /// takes one image id when its entry is created and keeps it for as long as
+    /// the window keeps that cell size; a changed canvas re-transmits to the SAME
+    /// id. That is the whole reason the placeholder design pays off: the id lives
+    /// in every cell (low 24 bits in the foreground, high byte in the third
+    /// diacritic), so an id that changes dirties every cell of the window and
+    /// ratatui's diff emits all of them. Allocating a fresh id per canvas — which
+    /// this did until SQ-0995 — meant one changed pixel repainted the whole grid,
+    /// and it did so on a CACHE HIT too, since re-placing a previously uploaded
+    /// canvas also swaps the id back. Measured on golden_baton.blb at 230×64
+    /// cells, a 228×16-cell room picture: 42,207 bytes for a changed frame whose
+    /// compressed image was 2,208, and 39,859 bytes for a frame that transmitted
+    /// nothing at all. With the id held still, both collapse to the image.
     ///
-    /// Keying on CONTENT rather than on the canvas version is what makes a
-    /// button press cheap. advent.blb's toolbar redraws itself from scratch to
-    /// show a button pressed and again to release it, bumping the version each
-    /// time; the release repaints the resting bar pixel-for-pixel, so it costs a
-    /// re-place instead of a second full upload. (SQ-0564)
+    /// The protocol licenses it: *"When re-transmitting image data for a specific
+    /// id, the existing image and all its placements must be deleted"* — the data
+    /// is replaced wholesale, and our `a=T,U=1,r,c,p=1` re-creates the window's one
+    /// placement in the same command, so the cells never stop resolving. The old
+    /// image also stays on screen throughout, because a chunked transmit commits
+    /// only on its final chunk: nothing blanks mid-transfer.
+    ///
+    /// A repaint that lands on identical pixels still costs nothing — advent.blb's
+    /// toolbar redraws itself from scratch to press and release a button, bumping
+    /// the version each time, and the release hashes equal to what is already
+    /// uploaded (SQ-0564's insight, kept; SQ-0564's LRU of alternative uploads is
+    /// gone, because an id you might place is an id in the cells).
     fn render_kitty_virtual(&mut self, gw: &GraphicsWindow, area: Rect, buf: &mut Buffer) {
-        use std::fmt::Write as _;
-        // A resize invalidates every upload for this window: the placement's r×c
-        // grid is baked into the transmission, so nothing cached at the old size
-        // can be re-placed. Start the window's cache over — and DELETE the uploads
-        // being abandoned, or every resize would strand a whole cache generation in
-        // the terminal (SQ-0637).
+        // A resize invalidates this window's upload: the placement's r×c grid is
+        // baked into the transmission, so what the terminal holds cannot be
+        // re-placed at the new size. Start the window over — and DELETE the upload
+        // being abandoned, or every resize would strand a generation in the
+        // terminal (SQ-0637).
         let previous = self.kitty_wins.remove(&gw.win);
         let mut entry = match previous {
             Some(e) if e.w == area.width && e.h == area.height => e,
@@ -1357,61 +1395,41 @@ impl GraphicsRender {
                 if let Some(stale) = stale {
                     self.queue_kitty_deletes(&stale, gw.win);
                 }
+                // Private id range, disjoint from ratatui-image's random ids in
+                // practice. The top byte stays 0, which is what keeps every id this
+                // path allocates nameable by `kitty_place_rows` — it now encodes the
+                // byte rather than assuming it (SQ-0772), but the diacritic table
+                // tops out at 296 and an id above that could not be placed at all.
+                self.next_kitty_id = self.next_kitty_id.wrapping_add(1) & 0x000F_FFFF;
                 KittyWindowImage {
                     version: 0,
                     w: area.width,
                     h: area.height,
-                    id: 0,
+                    id: 0x00B0_0000 | self.next_kitty_id,
                     pending_transmit: None,
-                    sent: Vec::new(),
+                    uploaded: None,
                 }
             }
         };
-        if entry.id == 0 || entry.version != gw.version {
+        if entry.uploaded.is_none() || entry.version != gw.version {
             entry.version = gw.version;
             let hash = canvas_hash(&gw.canvas);
-            match entry.sent.iter().position(|&(h, _)| h == hash) {
-                // The terminal already has these exact pixels: re-place that id,
-                // transmit nothing, and mark it most-recently-placed.
-                Some(pos) => {
-                    let sent = entry.sent.remove(pos);
-                    entry.id = sent.1;
-                    entry.sent.push(sent);
-                    self.note_op(GraphicsOp::Reuse {
-                        target: GraphicsTarget::Window(gw.win),
-                        id: Some(entry.id),
-                    });
-                }
-                None => {
-                    // Private id range, disjoint from ratatui-image's random ids in
-                    // practice. The top byte stays 0, which is what keeps every id
-                    // this path allocates nameable by `kitty_place_rows` — it now
-                    // encodes the byte rather than assuming it (SQ-0772), but the
-                    // diacritic table tops out at 296 and an id above that could not
-                    // be placed at all.
-                    self.next_kitty_id = self.next_kitty_id.wrapping_add(1) & 0x000F_FFFF;
-                    let id = 0x00B0_0000 | self.next_kitty_id;
-                    let mut transmit = String::new();
-                    // Past the cap, free the least-recently-placed upload. Never
-                    // the id being placed nor the one still on screen — both sit
-                    // at the most-recent end, so no frame is ever blanked while
-                    // its replacement is still being parsed. d=I frees data +
-                    // placements.
-                    while entry.sent.len() >= KITTY_CACHE {
-                        let (_, dead) = entry.sent.remove(0);
-                        write!(transmit, "\x1b_Gq=2,a=d,d=I,i={dead}\x1b\\").unwrap();
-                        self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Window(gw.win) });
-                    }
-                    transmit.push_str(&kitty_transmit_virtual(&gw.canvas, id, area.height, area.width));
-                    entry.pending_transmit = Some(transmit);
-                    entry.id = id;
-                    entry.sent.push((hash, id));
-                    self.note_op(GraphicsOp::Upload {
-                        target: GraphicsTarget::Window(gw.win),
-                        id: Some(id),
-                        cells: (area.width, area.height),
-                    });
-                }
+            if entry.uploaded == Some(hash) {
+                // The terminal already holds these exact pixels under this id:
+                // re-place it and transmit nothing.
+                self.note_op(GraphicsOp::Reuse {
+                    target: GraphicsTarget::Window(gw.win),
+                    id: Some(entry.id),
+                });
+            } else {
+                entry.pending_transmit =
+                    Some(kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width));
+                entry.uploaded = Some(hash);
+                self.note_op(GraphicsOp::Upload {
+                    target: GraphicsTarget::Window(gw.win),
+                    id: Some(entry.id),
+                    cells: (area.width, area.height),
+                });
             }
         }
         // Queued deletes (a closed window, or this window's pre-resize generation)
@@ -1429,11 +1447,13 @@ impl GraphicsRender {
         self.kitty_wins.insert(gw.win, entry);
     }
 
-    /// How many distinct canvases this window currently has uploaded, and whether
-    /// the last reconcile transmitted one (observability hook, SQ-0564).
+    /// How many images this window is holding in the terminal (0 before its first
+    /// transmit, 1 thereafter) and the id they live under (observability hook,
+    /// SQ-0564/SQ-0995). The count is the thing worth asserting: an id that is
+    /// replaced in place can never grow it.
     #[cfg(test)]
     fn kitty_uploads(&self, win: u32) -> Option<(usize, u32)> {
-        self.kitty_wins.get(&win).map(|e| (e.sent.len(), e.id))
+        self.kitty_wins.get(&win).map(|e| (usize::from(e.uploaded.is_some()), e.id))
     }
 
     /// The kitty delete escapes waiting to be written to the terminal (SQ-0637).
@@ -2535,8 +2555,16 @@ fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
 /// `q`, as the spec demands, so `o=z` is stated once on the first chunk and
 /// governs the reassembled whole.
 ///
-/// The upload cache above this (`canvas_hash`, SQ-0564) is untouched: it is keyed
-/// on the canvas's own pixels, which is upstream of how they are encoded.
+/// **`p=` names the placement** (SQ-0995), because `id` is now stable across a
+/// window's whole life and this command is re-issued whenever the canvas changes.
+/// The protocol says *"When re-transmitting image data for a specific id, the
+/// existing image and all its placements must be deleted"*, so on a conforming
+/// terminal this command replaces both; but Ghostty's storage replaces only the
+/// image and leaves placements alone, and an unnamed placement (`p=0`) is
+/// *"assign me an internal id"* — so a hundred re-transmits would leave a hundred
+/// duplicate placements. A named one is replaced in the map. The placeholder cells
+/// still encode placement 0, which resolves to "the first virtual placement of
+/// this image" and therefore to the only one.
 fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u16) -> String {
     use std::fmt::Write as _;
     let (w, h) = (canvas.width(), canvas.height());
@@ -2547,8 +2575,12 @@ fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u
     for (i, chunk) in chunks.into_iter().enumerate() {
         let more = u8::from(i + 1 < n);
         if i == 0 {
-            write!(out, "\x1b_Gq=2,i={id},a=T,U=1,f=32,o=z,t=d,s={w},v={h},r={rows},c={cols},m={more};")
-                .unwrap();
+            write!(
+                out,
+                "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,o=z,t=d,\
+                 s={w},v={h},r={rows},c={cols},m={more};"
+            )
+            .unwrap();
         } else {
             write!(out, "\x1b_Gq=2,m={more};").unwrap();
         }
@@ -4252,6 +4284,7 @@ mod tests {
         let first = buf.cell((0, 0)).unwrap().symbol().to_string();
         assert!(first.contains(",r=2,c=138,"), "transmit declares the explicit cell grid");
         assert!(first.contains("a=T,U=1,f=32,o=z"), "virtual placement transmit present");
+        assert!(first.contains(",p=1,"), "and names the placement it owns (SQ-0995)");
         assert!(first.contains('\u{10EEEE}'), "placeholder run present");
         assert!(!first.contains("a=d"), "first transmit deletes nothing");
         assert!(buf.cell((0, 1)).unwrap().symbol().contains('\u{10EEEE}'), "second row placed");
@@ -4287,100 +4320,99 @@ mod tests {
             .expect("numeric id")
     }
 
-    /// SQ-0564: the toolbar-press pattern. A game that alternates between two
-    /// canvases — a resting bar and a pressed-button variant — uploads each ONCE
-    /// and thereafter only re-places. Before this, every press and every release
-    /// re-sent the whole canvas (155 KiB for advent.blb's toolbar, twice per
-    /// click), which is the churn behind the toolbar's black frames.
+    /// THE PROPERTY SQ-0995 IS ABOUT. A changed canvas keeps the window's image id,
+    /// so ratatui's diff carries the transmit and NOTHING ELSE: one cell out of the
+    /// whole grid.
+    ///
+    /// The id is a per-cell value — `kitty_place_rows` writes its low 24 bits into
+    /// every placeholder's foreground and its high byte into the third diacritic —
+    /// so an id that changes dirties every cell of the window. This is asserted on
+    /// the DIFF rather than on the buffer because the buffer looks the same either
+    /// way: both builds write `w*h` placeholders every frame, and the only question
+    /// is how many of them ratatui then has to emit. Restore the per-hash id
+    /// allocation and this case fails with 276 cells instead of 1.
     #[test]
-    fn alternating_canvases_are_uploaded_once_each_then_re_placed() {
-        #[allow(deprecated)]
-        let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
-        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    fn a_changed_canvas_keeps_the_id_so_the_diff_is_one_cell_not_the_grid() {
+        let picker = kitty_picker(8, 18);
         let area = Rect::new(0, 0, 138, 2);
+        let cells = usize::from(area.width) * usize::from(area.height);
         let mut gr = GraphicsRender::default();
 
-        let resting = std::sync::Arc::new(image::RgbaImage::from_pixel(
-            1104, 36, image::Rgba([220, 220, 220, 255]),
-        ));
-        // The same bar with one button drawn pressed: a few differing pixels.
-        let pressed = std::sync::Arc::new({
-            let mut img = (*resting).clone();
-            for x in 14..26 {
-                img.put_pixel(x, 2, image::Rgba([154, 154, 154, 255]));
-            }
-            img
-        });
-
-        // Each canvas the game paints bumps the version, exactly as advent's
-        // toolbar does when it repaints itself from scratch.
-        let frame = |gr: &mut GraphicsRender, canvas: &std::sync::Arc<image::RgbaImage>, version: u64| {
-            let gw = GraphicsWindow { win: 2, canvas: canvas.clone(), version, upscale: false };
+        // A frame of the same window, one pixel different from the last.
+        let frame = |gr: &mut GraphicsRender, version: u64, tint: u8| {
+            let mut img = image::RgbaImage::from_pixel(1104, 36, image::Rgba([220, 220, 220, 255]));
+            img.put_pixel(0, 0, image::Rgba([tint, 0, 0, 255]));
+            let gw =
+                GraphicsWindow { win: 2, canvas: std::sync::Arc::new(img), version, upscale: false };
             let mut buf = Buffer::empty(area);
             gr.render(&picker, &gw, area, Style::default(), &mut buf);
-            buf.cell((0, 0)).unwrap().symbol().to_string()
+            buf
         };
 
-        let f1 = frame(&mut gr, &resting, 1);
-        assert!(f1.contains("a=T"), "the resting bar uploads once");
-        let resting_id = id_of(&f1);
+        let a = frame(&mut gr, 1, 1);
+        let b = frame(&mut gr, 2, 2);
+        let lead_a = a.cell((0, 0)).unwrap().symbol().to_string();
+        let lead_b = b.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(lead_b.contains("a=T"), "the changed pixels are transmitted");
 
-        let f2 = frame(&mut gr, &pressed, 2);
-        assert!(f2.contains("a=T"), "the pressed variant is a new picture — upload it");
-        let pressed_id = id_of(&f2);
-        assert_ne!(pressed_id, resting_id, "distinct canvases get distinct ids");
+        // The symptom first: this is the count that was `cells` before SQ-0995.
+        let diff = a.diff(&b);
+        assert_eq!(
+            diff.len(),
+            1,
+            "a changed canvas costs the transmit and nothing else, not {cells} placeholder cells"
+        );
+        assert_eq!(diff[0].0, area.x, "and it is the lead cell, which carries the transmit");
+        assert_eq!(diff[0].1, area.y);
+        // …and the reason for it.
+        assert_eq!(id_of(&lead_a), id_of(&lead_b), "the id is what holds still");
 
-        // Release: back to the resting bar. THIS is the frame that used to re-send
-        // the entire canvas.
-        let f3 = frame(&mut gr, &resting, 3);
-        assert!(!f3.contains("a=T"), "releasing re-places the resting upload, sends no pixels");
-        assert!(!f3.contains("a=d"), "and frees nothing — both canvases are still wanted");
-        assert_eq!(gr.kitty_uploads(2), Some((2, resting_id)), "two uploads; resting one placed");
-
-        // Press again: likewise free.
-        let f4 = frame(&mut gr, &pressed, 4);
-        assert!(!f4.contains("a=T"), "pressing again re-places the pressed upload");
-        assert_eq!(gr.kitty_uploads(2), Some((2, pressed_id)), "still two uploads");
+        // The frame AFTER an upload drops the escape from that lead cell, so it
+        // diffs once more and then the window is free again.
+        let c = frame(&mut gr, 3, 2);
+        assert!(
+            !c.cell((0, 0)).unwrap().symbol().contains("a=T"),
+            "identical pixels are not re-uploaded (SQ-0564's insight, kept)"
+        );
+        assert_eq!(b.diff(&c).len(), 1, "only the lead cell, shedding the escape");
+        let d = frame(&mut gr, 4, 2);
+        assert_eq!(c.diff(&d).len(), 0, "a settled window emits nothing at all");
+        assert_eq!(gr.kitty_uploads(2), Some((1, id_of(&lead_a))), "one upload, still placed");
     }
 
-    /// The cache is bounded: past [`KITTY_CACHE`] distinct canvases the
-    /// least-recently-placed upload is freed, so a long animation can't grow the
-    /// terminal's image memory without limit. The freed id is never the one on
-    /// screen — that would blank the window mid-parse.
+    /// A window animating through many canvases never holds more than ONE image in
+    /// the terminal, and never queues a delete to get there: the id is stable and
+    /// the data behind it is replaced (SQ-0995). This is what the SQ-0564 LRU used
+    /// to buy with a cap and an eviction — and could not, because re-placing a
+    /// cached id swapped the id in every cell and repainted the grid anyway.
     #[test]
-    fn kitty_cache_evicts_the_least_recently_placed_upload() {
-        #[allow(deprecated)]
-        let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
-        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    fn an_animating_window_holds_exactly_one_upload_and_evicts_nothing() {
+        let picker = kitty_picker(8, 18);
         let area = Rect::new(0, 0, 10, 2);
         let mut gr = GraphicsRender::default();
-        let mut ids = Vec::new();
-        for i in 0..=KITTY_CACHE as u32 {
-            // A distinct canvas per frame (differing in one pixel's red channel).
+        let mut ids = std::collections::BTreeSet::new();
+        for i in 0..24u32 {
             let mut img = image::RgbaImage::from_pixel(80, 36, image::Rgba([10, 20, 30, 255]));
             img.put_pixel(0, 0, image::Rgba([i as u8, 0, 0, 255]));
             let gw = GraphicsWindow {
                 win: 4,
                 canvas: std::sync::Arc::new(img),
-                version: i as u64 + 1,
+                version: u64::from(i) + 1,
                 upscale: false,
             };
             let mut buf = Buffer::empty(area);
             gr.render(&picker, &gw, area, Style::default(), &mut buf);
             let sym = buf.cell((0, 0)).unwrap().symbol().to_string();
             assert!(sym.contains("a=T"), "frame {i} is a new picture → uploaded");
-            ids.push(id_of(&sym));
-            if i < KITTY_CACHE as u32 {
-                assert!(!sym.contains("a=d"), "frame {i} is within the cap → frees nothing");
-            } else {
-                assert!(sym.contains("a=d,d=I"), "past the cap → frees the oldest");
-                assert!(
-                    sym.contains(&format!("i={}", ids[0])),
-                    "and it is the FIRST upload that is freed, not the visible one"
-                );
-            }
+            assert!(!sym.contains("a=d"), "frame {i} replaces its data; nothing is abandoned");
+            ids.insert(id_of(&sym));
         }
-        assert_eq!(gr.kitty_uploads(4).map(|(n, _)| n), Some(KITTY_CACHE), "cap holds");
+        assert_eq!(ids.len(), 1, "24 canvases, one id: {ids:?}");
+        assert_eq!(
+            gr.kitty_uploads(4).map(|(n, _)| n),
+            Some(1),
+            "and one image in the terminal, with no cap needed to bound it"
+        );
     }
 
     #[test]
@@ -4752,9 +4784,12 @@ mod tests {
     // ── Kitty upload lifetime (SQ-0637) ──────────────────────────────────────
 
     /// Render `win` at `area` through the kitty path with `n` DISTINCT canvases,
-    /// returning the ids the terminal was told to keep.
-    fn upload_generations(gr: &mut GraphicsRender, picker: &Picker, win: u32, area: Rect, n: u8) -> Vec<u32> {
-        let mut ids = Vec::new();
+    /// returning the id the terminal was told to keep.
+    ///
+    /// One id however many canvases pass through, since SQ-0995: each is
+    /// transmitted, and each replaces the data behind the same id.
+    fn upload_generations(gr: &mut GraphicsRender, picker: &Picker, win: u32, area: Rect, n: u8) -> u32 {
+        let mut ids = std::collections::BTreeSet::new();
         for i in 0..n {
             let mut img = image::RgbaImage::from_pixel(64, 32, image::Rgba([9, 9, 9, 255]));
             img.put_pixel(0, 0, image::Rgba([i, 0, 0, 255]));
@@ -4763,34 +4798,33 @@ mod tests {
             gr.render(picker, &gw, area, Style::default(), &mut buf);
             let sym = buf.cell((area.x, area.y)).unwrap().symbol().to_string();
             assert!(sym.contains("a=T"), "generation {i} is a new picture → uploaded");
-            ids.push(id_of(&sym));
+            ids.insert(id_of(&sym));
         }
-        ids
+        assert_eq!(ids.len(), 1, "one stable id across {n} canvases: {ids:?}");
+        ids.into_iter().next().expect("n >= 1")
     }
 
     #[test]
     fn closing_a_kitty_window_deletes_its_uploads() {
         // SQ-0637: `retain_live` used to forget a closed window's `KittyWindowImage`
-        // silently. The terminal keeps every transmitted generation until told to
-        // free it, so a Glulx game that closes its graphics window (or reopens one
-        // under a new id) leaked all of them.
+        // silently. The terminal keeps a transmitted image until told to free it, so
+        // a Glulx game that closes its graphics window (or reopens one under a new
+        // id) leaked it.
         let picker = kitty_picker(8, 18);
         let area = Rect::new(0, 0, 8, 2);
         let mut gr = GraphicsRender::default();
-        let ids = upload_generations(&mut gr, &picker, 2, area, 3);
+        let id = upload_generations(&mut gr, &picker, 2, area, 3);
 
         gr.begin_band_log(); // frame boundary: only the close's ops below
         gr.retain_live(&std::collections::HashSet::new());
         let queued = gr.queued_deletes().to_string();
-        for id in &ids {
-            assert!(
-                queued.contains(&format!("a=d,d=I,i={id}")),
-                "every upload of the closed window is freed (missing i={id}): {queued:?}"
-            );
-        }
+        assert!(
+            queued.contains(&format!("a=d,d=I,i={id}")),
+            "the closed window's upload is freed (missing i={id}): {queued:?}"
+        );
         assert_eq!(
             gr.ops().iter().filter(|o| matches!(o, GraphicsOp::Drop { .. })).count(),
-            ids.len(),
+            1,
             "one Drop op per freed upload"
         );
 
@@ -4811,12 +4845,14 @@ mod tests {
 
     #[test]
     fn resizing_a_kitty_window_deletes_the_uploads_it_abandons() {
-        // A size change restarts the window's cache (the r×c grid is baked into the
-        // transmission), so the old generations can never be re-placed — they must be
-        // freed, in the SAME batch as the new upload (SQ-0637).
+        // A size change restarts the window's upload (the r×c grid is baked into the
+        // transmission), so the old image can never be re-placed at the new size — it
+        // must be freed, in the SAME batch as the new upload (SQ-0637). SQ-0995 made
+        // the id stable ACROSS CONTENT, not across geometry: a resize still abandons
+        // what it cannot use, and still names it.
         let picker = kitty_picker(8, 18);
         let mut gr = GraphicsRender::default();
-        let old_ids = upload_generations(&mut gr, &picker, 2, Rect::new(0, 0, 8, 2), 2);
+        let old_id = upload_generations(&mut gr, &picker, 2, Rect::new(0, 0, 8, 2), 2);
 
         let bigger = Rect::new(0, 0, 12, 3);
         let mut buf = Buffer::empty(bigger);
@@ -4828,14 +4864,20 @@ mod tests {
         };
         gr.render(&picker, &gw, bigger, Style::default(), &mut buf);
         let sym = buf.cell((0, 0)).unwrap().symbol().to_string();
-        for id in &old_ids {
-            assert!(sym.contains(&format!("a=d,d=I,i={id}")), "pre-resize upload i={id} freed: {sym:?}");
-        }
+        assert!(
+            sym.contains(&format!("a=d,d=I,i={old_id}")),
+            "pre-resize upload i={old_id} freed: {sym:?}"
+        );
         assert!(sym.contains("a=T"), "and the new size is transmitted in the same batch");
+        assert!(
+            !sym.contains(&format!("i={old_id},p=")),
+            "under a NEW id — the transmit must not name the id it just freed: {sym:?}"
+        );
         let delete_at = sym.find("a=d").expect("a delete");
         let transmit_at = sym.find("a=T").expect("a transmit");
         assert!(delete_at < transmit_at, "frees precede the transmit they make room for");
         assert!(gr.queued_deletes().is_empty(), "the placement carried them; nothing left queued");
+        assert_eq!(gr.kitty_uploads(2).map(|(n, _)| n), Some(1), "one live upload after the resize");
     }
 
     #[test]
