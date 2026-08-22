@@ -1561,13 +1561,16 @@ fn main() {
     // an SGR ink on the floor. The cursor goes through DECSCUSR, which states the
     // real shape rather than an approximation of it; `cli_host::term` records what
     // that cannot say (the colour).
+    // Asked of `period_look_for` rather than read off the row, because one row
+    // stores no pair: the IBM PC's screen is its own palette resolving the pair it
+    // reports, and the Version is what picks the palette (SQ-0939/SQ-0983).
     let period_look = machine
         .mem
         .version()
         .le(&4)
-        .then(|| interpreter.and_then(zvm::interpreter::machine))
+        .then_some(interpreter)
         .flatten()
-        .and_then(|m| m.period_look)
+        .and_then(|n| zvm::interpreter::period_look_for(n, Some(machine.mem.version())))
         .filter(|_| args.period_look && honor && stdout_is_tty && !mode.plain());
     if let Some(look) = period_look {
         use zvm::interpreter::CursorShape;

@@ -680,7 +680,9 @@ mod view_tests {
     /// view emitted for everybody.
     #[test]
     fn the_status_band_is_dressed_as_its_machine_dressed_it() {
-        let look = |n| zvm::interpreter::machine(n).unwrap().period_look.unwrap();
+        // Asked the way the front-end asks (SQ-0983): one row stores no pair, so
+        // reading the row would be reading a value that never reaches a screen.
+        let look = |n| zvm::interpreter::period_look_for(n, None).unwrap();
         let bar = " Council Chamber   Score: 0/0 ";
 
         // No look, and the Solid Gold C64: the plain full-width reverse, which is

@@ -4742,7 +4742,7 @@ mod tests {
             (zvm::interpreter::MACINTOSH_INTERPRETER_NUMBER, "▏"),
             (zvm::interpreter::AMIGA_INTERPRETER_NUMBER, " "),
         ] {
-            let look = zvm::interpreter::machine(number).unwrap().period_look.unwrap();
+            let look = zvm::interpreter::period_look_for(number, None).unwrap();
             let mut state = AppState::default();
             state.config.command_bar = true;
             state.input.set("hi", true);
@@ -4855,10 +4855,9 @@ mod tests {
     #[test]
     fn the_body_and_the_input_line_stand_on_the_machines_page() {
         let machine = minimal_machine();
-        let look = zvm::interpreter::machine(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)
-            .unwrap()
-            .period_look
-            .unwrap();
+        let look =
+            zvm::interpreter::period_look_for(zvm::interpreter::AMIGA_INTERPRETER_NUMBER, None)
+                .unwrap();
         let mut state = AppState::default();
         state.period_look = Some(look);
         crate::period::apply_to_theme(&mut state.colors.theme, &look, Some(3));
@@ -4896,10 +4895,9 @@ mod tests {
     #[test]
     fn the_amiga_status_line_is_a_full_width_reverse_of_its_body_pair() {
         let machine = minimal_machine();
-        let look = zvm::interpreter::machine(zvm::interpreter::AMIGA_INTERPRETER_NUMBER)
-            .unwrap()
-            .period_look
-            .unwrap();
+        let look =
+            zvm::interpreter::period_look_for(zvm::interpreter::AMIGA_INTERPRETER_NUMBER, None)
+                .unwrap();
         let mut state = AppState::default();
         state.period_look = Some(look);
         crate::period::apply_to_theme(&mut state.colors.theme, &look, Some(3));

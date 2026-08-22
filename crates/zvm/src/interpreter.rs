@@ -466,6 +466,10 @@ pub enum StatusBand {
 /// this field does not, by the user's explicit decision (SQ-0873) to go with the
 /// captures in hand rather than chase emulator names, versions and palette settings.
 ///
+/// **One row's body pair is resolved rather than observed**, and the row says so
+/// instead of storing one: see [`MachineLook::Resolved`]. A value that arrives here
+/// from [`period_look_for`] is therefore the screen, whichever way it was reached.
+///
 /// What that costs is bounded and worth stating: the Amiga's `#074BA1` and the
 /// Commodore 64's `#6C6C6C` are values a palette choice can move — `#074BA1` is not
 /// a bit-replicated OCS value (those widen to `0x00, 0x11, ... 0xFF`), so the
@@ -511,6 +515,57 @@ pub struct PeriodLook {
     /// reads the field without the shape gets the pair's own reverse rather than
     /// the previous generation's orange.
     pub cursor_colour: (u8, u8, u8),
+}
+
+/// What a row STORES about its screen, which on one machine cannot be a
+/// [`PeriodLook`] at all (SQ-0983).
+///
+/// **A machine whose body pair is derived must have nowhere to write a second
+/// one.** The IBM PC's row used to store `#0000AA` under `#AAAAAA` *and* have
+/// [`period_look_for`] resolve the pair afresh out of
+/// [`MachineProfile::default_colours`], overwriting both — so the stored constant
+/// was never on anybody's screen, and correcting its numbers would only have left
+/// the same trap for the next reader. This enum removes the field instead of
+/// fixing the value: a [`Self::Resolved`] row states the two decisions a palette
+/// cannot make, and no page, ink or cursor colour can be written beside them.
+///
+/// **The pair is unrepresentable as a constant anyway**, which is what settles it.
+/// Infocom's two IBM interpreters disagree about white — XZIP resolves colour 9 to
+/// `#ADADAD` and YZIP to `#FFFFFF` — so the machine's ink depends on the story's
+/// Version, and one stored value cannot be true for both. The stored pair was not
+/// merely stale; it was answering a question that has two answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineLook {
+    /// Every value read off a capture in `machine-screenshots/`, which is what a
+    /// machine whose screen is simply a fact states. Eight of the nine rows.
+    Measured(PeriodLook),
+    /// The body pair is this machine's own palette resolving the pair the row
+    /// already states in [`MachineProfile::default_colours`] — one table lookup,
+    /// not a second measurement to drift from the first — and the caret is that
+    /// same ink, which is how the capture measured it.
+    ///
+    /// So the screen a v1–v5 story is painted on and the colour a v6 story gets
+    /// from `@set_colour(9)` cannot disagree: they are the same lookup, through the
+    /// palette [`palette_for`] picks for the story's Version.
+    ///
+    /// **The Amiga is why this is not what every row does.** Its `default_colours`
+    /// report 12/9, a GREY page, from its v5-era interpreter, while its v3
+    /// interpreter draws a BLUE one — the divergence
+    /// `the_period_look_is_not_the_default_pair` exists to pin. Deriving its look
+    /// from its pair would overwrite a measured blue screen with a grey one, so it
+    /// stays [`Self::Measured`], and the choice is now the ROW's rather than a
+    /// palette match buried in a function.
+    ///
+    /// A row that states this must state `default_colours` too, and both numbers
+    /// must resolve in its palette; `a_resolved_row_states_the_pair_it_resolves`
+    /// is what holds that.
+    Resolved {
+        /// How the status line was set apart — measured, and never derivable from
+        /// the pair.
+        status: StatusBand,
+        /// The input cursor's shape — measured. Its COLOUR is the resolved ink.
+        cursor_shape: CursorShape,
+    },
 }
 
 /// The Apple II family's period look, shared by interpreters 2, 9 and 10.
@@ -643,7 +698,10 @@ pub struct MachineProfile {
     /// with `st-zork1.png` (SQ-0933). The variant stays because the next machine
     /// added to this table will start out unmeasured, and stating a look by
     /// inference is what `the_machines_with_no_capture_decline` exists to stop.
-    pub period_look: Option<PeriodLook>,
+    ///
+    /// A row states a [`MachineLook`] rather than a [`PeriodLook`] because one
+    /// machine's body pair is not a stored value at all — see that type.
+    pub period_look: Option<MachineLook>,
 }
 
 /// Every §11.1.3 machine zvm models, in number order.
@@ -679,7 +737,7 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
-        period_look: Some(APPLE_PERIOD_LOOK),
+        period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
     MachineProfile {
         number: MACINTOSH_INTERPRETER_NUMBER,
@@ -692,13 +750,13 @@ pub const MACHINES: &[MachineProfile] = &[
         // mac-zork1.jpg: Zork I r88/840726 on a Mac Plus, screen 512x342. A 1-bit
         // screen, so no palette can move these; the status line is set apart by
         // rules rather than by ground, and the caret is 1px by the line height.
-        period_look: Some(PeriodLook {
+        period_look: Some(MachineLook::Measured(PeriodLook {
             page: (0xFF, 0xFF, 0xFF),
             ink: (0x00, 0x00, 0x00),
             status: StatusBand::Ruled,
             cursor_shape: CursorShape::Bar,
             cursor_colour: (0x00, 0x00, 0x00),
-        }),
+        })),
     },
     MachineProfile {
         number: AMIGA_INTERPRETER_NUMBER,
@@ -712,7 +770,7 @@ pub const MACHINES: &[MachineProfile] = &[
         // both giving the identical palette in 7-8 exact colours. Note the page
         // is BLUE where default_colours above reports 12/9, a grey — the v3 and
         // v5 interpreters differ, which is the whole reason this field exists.
-        period_look: Some(PeriodLook {
+        period_look: Some(MachineLook::Measured(PeriodLook {
             page: (0x07, 0x4B, 0xA1),
             ink: (0xFF, 0xFF, 0xFF),
             // SQ-0873: the capture reverses PER RUN — 376 px of page show between
@@ -724,7 +782,7 @@ pub const MACHINES: &[MachineProfile] = &[
             status: StatusBand::FullReverse,
             cursor_shape: CursorShape::Block,
             cursor_colour: (0xFF, 0x7E, 0x1C),
-        }),
+        })),
     },
     MachineProfile {
         number: ATARI_ST_INTERPRETER_NUMBER,
@@ -754,9 +812,9 @@ pub const MACHINES: &[MachineProfile] = &[
         // Infocom's `st/` interpreter — DEF_BACK 9 (white) under DEF_FORE 2 (black)
         // — and the v3 capture shows the same two. What a v5 story is TOLD and what
         // a v3 story is SHOWN agree, exactly as they did for the IBM PC.
-        period_look: Some(PeriodLook {
+        period_look: Some(MachineLook::Measured(PeriodLook {
             // WHITE, not the capture's #EBEBEB, for the same reason the IBM PC row
-            // takes EGA's #0000AA over a screenshot's #0F009E: the dimming belongs
+            // takes EGA's own entries over a screenshot's #0F009E: the dimming belongs
             // to the emulator's scanline filter, and standard colours 9 and 2 are
             // white and black with no shade to be wrong about.
             page: (0xFF, 0xFF, 0xFF),
@@ -768,7 +826,7 @@ pub const MACHINES: &[MachineProfile] = &[
             // A filled 8x8 cell immediately right of the `>` prompt.
             cursor_shape: CursorShape::Block,
             cursor_colour: (0x00, 0x00, 0x00),
-        }),
+        })),
     },
     MachineProfile {
         number: IBM_PC_INTERPRETER_NUMBER,
@@ -825,14 +883,23 @@ pub const MACHINES: &[MachineProfile] = &[
         // `PerRun` on the user's instruction rather than growing the type for one
         // glyph colour on one row. The red is real and is not modelled; see
         // `machine-screenshots/info.txt`.
-        period_look: Some(PeriodLook {
-            page: (0x00, 0x00, 0xAA),
-            ink: (0xAA, 0xAA, 0xAA),
+        //
+        // **AND THE PAIR IS NOT STORED HERE**, which is the one row in this table
+        // that states no page and no ink (SQ-0983). The adapter's entries 1 and 7
+        // are #0000AA and #AAAAAA, as above — that is the truth about the hardware
+        // and it does not change. What a STORY is shown is those numbers through
+        // the Z-machine's own 15-bit colour space, where 0xAA truncates to 21/31
+        // and comes back bit-replicated as 0xAD: #0000AD under #ADADAD. The row
+        // resolves 6 and 9 through its palette rather than restating them, so the
+        // default page and a story's own `@set_colour(6)` are one lookup and cannot
+        // abut each other three parts in 255 apart. See `MachineLook::Resolved`;
+        // the ink is also the one value in this table that depends on the story's
+        // Version, so there is no constant to correct.
+        period_look: Some(MachineLook::Resolved {
             // Per-run in the capture, full-width here — the same ruling as the
             // Amiga's above, and the same reason.
             status: StatusBand::FullReverse,
             cursor_shape: CursorShape::Underscore,
-            cursor_colour: (0xAA, 0xAA, 0xAA),
         }),
     },
     MachineProfile {
@@ -848,13 +915,13 @@ pub const MACHINES: &[MachineProfile] = &[
         // c128-trinity.png: Trinity (v4) at the first prompt, two colours exactly.
         // #55FFFF is RGBI light cyan on the nose, so this row is as close to
         // palette-independent as an emulator capture gets.
-        period_look: Some(PeriodLook {
+        period_look: Some(MachineLook::Measured(PeriodLook {
             page: (0x00, 0x00, 0x00),
             ink: (0x55, 0xFF, 0xFF),
             status: StatusBand::FullReverse,
             cursor_shape: CursorShape::Underscore,
             cursor_colour: (0x55, 0xFF, 0xFF),
-        }),
+        })),
     },
     MachineProfile {
         number: COMMODORE_64_INTERPRETER_NUMBER,
@@ -872,13 +939,13 @@ pub const MACHINES: &[MachineProfile] = &[
         //
         // Black page, white ink, and the status line a plain full-width reverse
         // running x 37..522 with no interior gap wider than a glyph.
-        period_look: Some(PeriodLook {
+        period_look: Some(MachineLook::Measured(PeriodLook {
             page: (0x00, 0x00, 0x00),
             ink: (0xFF, 0xFF, 0xFF),
             status: StatusBand::FullReverse,
             cursor_shape: CursorShape::Underscore,
             cursor_colour: (0xFF, 0xFF, 0xFF),
-        }),
+        })),
     },
     MachineProfile {
         number: APPLE_IIC_INTERPRETER_NUMBER,
@@ -888,7 +955,7 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
-        period_look: Some(APPLE_PERIOD_LOOK),
+        period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
     MachineProfile {
         number: APPLE_IIGS_INTERPRETER_NUMBER,
@@ -898,7 +965,7 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
-        period_look: Some(APPLE_PERIOD_LOOK),
+        period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
 ];
 
@@ -916,18 +983,19 @@ pub fn machine(number: u8) -> Option<&'static MachineProfile> {
 /// IBM PC's white MOVED between Infocom's two interpreters ([`Palette::IbmXzip`]
 /// versus [`Palette::IbmYzip`]), so one stored pair cannot be true for both.
 ///
-/// For the machine whose palette is its OWN, the body pair is not an independent
-/// measurement at all: it is that palette's resolution of the pair the row already
-/// states in [`MachineProfile::default_colours`]. Deriving it means the screen a
-/// v1–v5 story is painted on and the colour a v6 story gets from `@set_colour(9)`
-/// cannot disagree — they are the same table lookup.
+/// For that machine the body pair is not an independent measurement at all: it is
+/// its own palette's resolution of the pair the row already states in
+/// [`MachineProfile::default_colours`]. Deriving it means the screen a v1–v5 story
+/// is painted on and the colour a v6 story gets from `@set_colour(9)` cannot
+/// disagree — they are the same table lookup.
 ///
-/// **The Amiga is why this is not done for everyone.** Its row reports 12/9, a GREY
-/// page, from its v5-era interpreter, while its v3 interpreter draws a BLUE one —
-/// the divergence `the_period_look_is_not_the_default_pair` exists to pin. Deriving
-/// its look from its pair would overwrite a measured blue screen with a grey one.
-/// So the derivation is gated on the machine resolving numbers through its own
-/// palette, which is exactly the case where the two are one fact.
+/// **The row says which it is, and this function no longer guesses** (SQ-0983). It
+/// used to derive for any machine whose palette was one of the IBM pair and quietly
+/// overwrite whatever that row had stored, which left the IBM PC carrying a page and
+/// ink nothing ever read. A [`MachineLook::Resolved`] row now stores no pair to be
+/// overwritten, and a [`MachineLook::Measured`] one is answered untouched — the
+/// Amiga's blue included, which is the case that argued the gate into existence and
+/// is now enforced by the row's own shape rather than by a palette match here.
 ///
 /// # The caret moved with the interpreter generation too (SQ-0947)
 ///
@@ -941,21 +1009,29 @@ pub fn machine(number: u8) -> Option<&'static MachineProfile> {
 /// which is this table's rule everywhere else.
 pub fn period_look_for(number: u8, zversion: Option<u8>) -> Option<PeriodLook> {
     let m = machine(number)?;
-    let mut look = m.period_look?;
-    if let (Palette::IbmXzip | Palette::IbmYzip, Some((bg, fg))) = (m.palette, m.default_colours) {
-        let p = palette_for(number, zversion);
-        let resolve = |n: u8| match p {
-            Palette::IbmYzip => crate::screen::ega_true_colour(n, true),
-            _ => crate::screen::ega_true_colour(n, false),
+    let mut look = match m.period_look? {
+        MachineLook::Measured(l) => l,
+        MachineLook::Resolved { status, cursor_shape } => {
+            // Declining here is unreachable and stays a decline rather than a
+            // panic: a row that states `Resolved` must state the pair it resolves,
+            // which `a_resolved_row_states_the_pair_it_resolves` holds.
+            let (bg, fg) = m.default_colours?;
+            let p = palette_for(number, zversion);
+            let rgb = |n: u8| crate::screen::true_colour_in(p, n).map(crate::screen::rgb15_to_888);
+            let ink = rgb(fg)?;
+            PeriodLook {
+                page: rgb(bg)?,
+                ink,
+                status,
+                cursor_shape,
+                // The capture measures the caret in the ink (`dos-hitchhiker.png`,
+                // one cell wide across its bottom quarter), and a resolved row has
+                // no way to say anything else — which is the point: the stored
+                // `#AAAAAA` used to sit three parts in 255 from the ink beside it.
+                cursor_colour: ink,
+            }
         }
-        .map(crate::screen::rgb15_to_888);
-        if let Some(rgb) = resolve(bg) {
-            look.page = rgb;
-        }
-        if let Some(rgb) = resolve(fg) {
-            look.ink = rgb;
-        }
-    }
+    };
     // After the pair, so the ink parked in `cursor_colour` is the one this VERSION
     // resolves — the IBM PC's v6 white is `#FFFFFF` through YZIP, not XZIP's
     // `#AAAAAA`.
@@ -1119,7 +1195,12 @@ mod tests {
     fn the_period_look_is_not_the_default_pair() {
         let amiga = machine(AMIGA_INTERPRETER_NUMBER).expect("modelled");
         assert_eq!(amiga.default_colours, Some((12, 9)), "grey page, white ink, from v5");
-        let look = amiga.period_look.expect("measured on two v3 floppies");
+        // SQ-0983: the Amiga is `Measured` and must stay so — a `Resolved` row would
+        // paint its v3 screen with its v5 pair's grey, which is this case's whole
+        // point, now stated in the row's own shape.
+        let Some(MachineLook::Measured(look)) = amiga.period_look else {
+            panic!("the Amiga's look is measured on two v3 floppies, never resolved");
+        };
         assert_eq!(look.page, (0x07, 0x4B, 0xA1), "and the v3 interpreter's page is BLUE");
         // Grey is 10..12 in §8.3.1; whatever blue resolves to, it is not that.
         assert_ne!(look.page.0, look.page.1, "a grey has equal channels; this does not");
@@ -1134,7 +1215,7 @@ mod tests {
     /// three stored cursor shapes, and neither follows from the body pair.
     #[test]
     fn the_status_band_and_cursor_do_not_follow_from_the_body_pair() {
-        let look = |n| machine(n).expect("modelled").period_look.expect("measured");
+        let look = |n| period_look_for(n, None).expect("measured");
         let (apple, mac, amiga, c128) = (
             look(APPLE_IIE_INTERPRETER_NUMBER),
             look(MACINTOSH_INTERPRETER_NUMBER),
@@ -1174,7 +1255,7 @@ mod tests {
         // property of the whole table and only the whole table can falsify it.
         let odd: Vec<&str> = MACHINES
             .iter()
-            .filter_map(|m| m.period_look.map(|l| (m.name, l)))
+            .filter_map(|m| period_look_for(m.number, None).map(|l| (m.name, l)))
             .filter(|(_, l)| l.cursor_colour != l.page && l.cursor_colour != l.ink)
             .map(|(name, _)| name)
             .collect();
@@ -1255,7 +1336,7 @@ mod tests {
     #[test]
     fn the_caret_the_version_six_interpreters_draw_is_the_pair_reversed() {
         let caret = |n, v| period_look_for(n, Some(v)).expect("measured").cursor_shape;
-        let orange = machine(AMIGA_INTERPRETER_NUMBER).expect("modelled").period_look.unwrap();
+        let orange = period_look_for(AMIGA_INTERPRETER_NUMBER, Some(3)).expect("measured");
         assert_eq!(orange.cursor_colour, (0xFF, 0x7E, 0x1C), "the stored v3 measurement");
 
         for (n, stored) in [
@@ -1277,12 +1358,14 @@ mod tests {
         // palette has resolved it, so this is #FFFFFF and not XZIP's #AAAAAA.
         let dos6 = period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(6)).expect("measured");
         assert_eq!(dos6.cursor_colour, (0xFF, 0xFF, 0xFF), "EGA 15, not EGA 7");
-        // …where a v3 story leaves the field alone, so the underscore keeps the
-        // grey `dos-hitchhiker.png` was censused for.
-        assert_eq!(
-            period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(3)).expect("measured").cursor_colour,
-            machine(IBM_PC_INTERPRETER_NUMBER).expect("modelled").period_look.unwrap().cursor_colour,
-        );
+        // …where a v3 story gets XZIP's instead, so the underscore is the grey
+        // `dos-hitchhiker.png` was censused for. Asserted against that version's own
+        // INK rather than against a stored constant, which is the only thing a
+        // resolved row can be checked against — and which the row used to contradict
+        // by three parts in 255 (SQ-0983).
+        let dos3 = period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(3)).expect("measured");
+        assert_eq!(dos3.cursor_colour, dos3.ink, "the underscore is drawn in the ink");
+        assert_ne!(dos3.cursor_colour, dos6.cursor_colour, "…and the two whites differ");
 
         // The control: mac-zorkzero.jpg and mac-shogun.jpg draw a bar, so the
         // Macintosh does not move — and neither does a machine with no v6 capture.
@@ -1293,7 +1376,10 @@ mod tests {
             COMMODORE_64_INTERPRETER_NUMBER,
             COMMODORE_128_INTERPRETER_NUMBER,
         ] {
-            let stored = machine(n).expect("modelled").period_look.expect("measured");
+            let row = machine(n).expect("modelled").period_look.expect("measured");
+            let MachineLook::Measured(stored) = row else {
+                panic!("machine {n} states a measured look")
+            };
             for v in 1..=6 {
                 assert_eq!(
                     period_look_for(n, Some(v)),
@@ -1302,6 +1388,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The IBM PC's body pair is a lookup, and the row stores none** (SQ-0983).
+    ///
+    /// The row used to carry `#0000AA` under `#AAAAAA` — EGA attributes 1 and 7,
+    /// which is the truth about the ADAPTER — while `period_look_for` resolved the
+    /// pair afresh and overwrote both. What a story is shown is those same entries
+    /// through the Z-machine's 15-bit colour space, where `0xAA` truncates to 21/31
+    /// and comes back bit-replicated as `0xAD`, so the stored constant was three
+    /// parts in 255 from anything on screen and nothing read it.
+    ///
+    /// **And it could not have been corrected, only removed.** The ink is
+    /// version-dependent: XZIP resolves colour 9 to `#ADADAD` and YZIP to
+    /// `#FFFFFF`, so no single constant is true for both, which is the half of the
+    /// argument that a corrected number would not have answered. The pair a v1–v5
+    /// story is painted on must also be what its own `@set_colour(6)` resolves to,
+    /// or a default page and a story-set one would abut at a window edge three
+    /// parts apart.
+    #[test]
+    fn the_ibm_pcs_period_look_is_its_palette_and_never_a_stored_pair() {
+        let ibm = machine(IBM_PC_INTERPRETER_NUMBER).expect("modelled");
+        assert!(
+            matches!(ibm.period_look, Some(MachineLook::Resolved { .. })),
+            "the row states the two decisions a palette cannot make, and no pair",
+        );
+
+        // v1–v5: XZIP, and the pair is EGA 1 and EGA 7 through the 15-bit space.
+        for v in 1..=5 {
+            let look = period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(v)).expect("resolved");
+            assert_eq!(look.page, (0x00, 0x00, 0xAD), "v{v}: EGA 1 through 15-bit");
+            assert_eq!(look.ink, (0xAD, 0xAD, 0xAD), "v{v}: EGA 7 through 15-bit");
+            assert_eq!(look.cursor_colour, look.ink, "v{v}: the underscore is drawn in the ink");
+            assert_eq!(look.cursor_shape, CursorShape::Underscore, "v{v}: dos-hitchhiker.png");
+            assert_eq!(look.status, StatusBand::FullReverse, "v{v}: the row's own ruling");
+            // The adapter's own bytes are never what a story is shown.
+            assert_ne!(look.page, (0x00, 0x00, 0xAA), "v{v}: not the adapter's byte");
+            assert_ne!(look.ink, (0xAA, 0xAA, 0xAA), "v{v}: nor its grey");
+        }
+
+        // v6: YZIP, and white moves — which is why no constant could hold it.
+        let v6 = period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(6)).expect("resolved");
+        assert_eq!(v6.ink, (0xFF, 0xFF, 0xFF), "YZIP sends white to EGA 15");
+        assert_eq!(v6.page, (0x00, 0x00, 0xAD), "…and blue is the one both agree on");
+        assert_ne!(
+            v6.ink,
+            period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(5)).expect("resolved").ink,
+            "one machine, two inks: a stored pair cannot be true for both",
+        );
+
+        // The pair is the SAME lookup a story's own colour numbers take, which is
+        // the consistency the derivation exists for: a default page and a page the
+        // story asks for by number cannot come out different blues.
+        for (v, p) in [(3u8, Palette::IbmXzip), (6, Palette::IbmYzip)] {
+            let (bg, fg) = ibm.default_colours.expect("the row reports a pair");
+            let look = period_look_for(IBM_PC_INTERPRETER_NUMBER, Some(v)).expect("resolved");
+            let rgb = |n| crate::screen::true_colour_in(p, n).map(crate::screen::rgb15_to_888);
+            assert_eq!(Some(look.page), rgb(bg), "v{v}: the page IS colour {bg}");
+            assert_eq!(Some(look.ink), rgb(fg), "v{v}: the ink IS colour {fg}");
+        }
+    }
+
+    /// **Every other machine answers its stored measurement, unchanged** — asked of
+    /// the table rather than transcribed from it, so a row that starts deriving its
+    /// look has to say so here (SQ-0983).
+    ///
+    /// The restructuring that emptied the IBM PC's pair could have moved any row's,
+    /// and a hand-copied table of expected colours would drift with the rows it was
+    /// copied from. This censuses `MACHINES` instead: a `Measured` row is what
+    /// `period_look_for` hands back for every version below 6, byte for byte, and
+    /// exactly one row is not `Measured`.
+    #[test]
+    fn every_other_machines_period_look_is_the_one_its_row_stores() {
+        let mut measured = 0;
+        let mut resolved: Vec<&str> = Vec::new();
+        for m in MACHINES {
+            match m.period_look.expect("every modelled machine has been measured") {
+                MachineLook::Measured(stored) => {
+                    measured += 1;
+                    for v in 1..=5 {
+                        assert_eq!(
+                            period_look_for(m.number, Some(v)),
+                            Some(stored),
+                            "{} at v{v} answers its own capture and nothing else",
+                            m.name,
+                        );
+                    }
+                    assert_eq!(
+                        period_look_for(m.number, None),
+                        Some(stored),
+                        "{}: and a machine asked with no story is the same machine",
+                        m.name,
+                    );
+                }
+                MachineLook::Resolved { .. } => resolved.push(m.name),
+            }
+        }
+        assert_eq!(resolved, ["IBM PC"], "one row derives its pair; the rest are measured");
+        assert_eq!(measured, 8, "…and the other eight are not excused from the census");
+    }
+
+    /// A [`MachineLook::Resolved`] row must state the pair it resolves, and its
+    /// palette must have both numbers — the invariant that keeps the decline inside
+    /// [`period_look_for`] unreachable rather than merely unlikely.
+    #[test]
+    fn a_resolved_row_states_the_pair_it_resolves() {
+        let mut seen = 0;
+        for m in MACHINES {
+            if !matches!(m.period_look, Some(MachineLook::Resolved { .. })) {
+                continue;
+            }
+            seen += 1;
+            let (bg, fg) = m.default_colours.unwrap_or_else(|| {
+                panic!("{}: a resolved look has nothing to resolve without a pair", m.name)
+            });
+            for v in [None, Some(1), Some(5), Some(6)] {
+                let p = palette_for(m.number, v);
+                for n in [bg, fg] {
+                    assert!(
+                        crate::screen::true_colour_in(p, n).is_some(),
+                        "{}: colour {n} has no true colour in {p:?}",
+                        m.name,
+                    );
+                }
+                assert!(period_look_for(m.number, v).is_some(), "{}: so it answers", m.name);
+            }
+        }
+        assert_eq!(seen, 1, "the IBM PC is the row this invariant is about");
     }
 
     /// Declines are declines, and the ones here are for want of a capture rather
@@ -1326,7 +1539,9 @@ mod tests {
         // Infocom's `st/` interpreter long before any capture existed, is
         // DEF_BACK 9 / DEF_FORE 2 — white and black in §8.3.1.
         let st = machine(ATARI_ST_INTERPRETER_NUMBER).expect("modelled");
-        let look = st.period_look.expect("st-zork1.png, Zork I r88/840726");
+        let Some(MachineLook::Measured(look)) = st.period_look else {
+            panic!("st-zork1.png, Zork I r88/840726 — measured, not resolved")
+        };
         assert_eq!(st.default_colours, Some((9, 2)), "told white under black");
         assert_eq!(look.page, (0xFF, 0xFF, 0xFF), "…and shown the same");
         assert_eq!(look.ink, (0x00, 0x00, 0x00));

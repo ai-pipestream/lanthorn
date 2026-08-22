@@ -70,8 +70,8 @@ use crate::interpreter::{
 };
 use crate::screen::{rgb15_to_888, true_colour_in, Palette};
 
-/// `#RRGGBB` for a measured true colour, which needs no palette — a period look
-/// is observed rather than resolved through §8.3.1.
+/// `#RRGGBB` for a true colour that has already been settled — a period look
+/// arrives as RGB, whether the row measured it or its palette resolved it.
 fn hex((r, g, b): (u8, u8, u8)) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
@@ -105,6 +105,14 @@ fn cursor(look: &PeriodLook) -> String {
 
 /// The period-look table, which is a second block rather than four more columns
 /// because it is a different KIND of claim — see the module docs.
+///
+/// **Asked of [`period_look_for`], not read off the rows** (SQ-0983). Most rows
+/// store their look and the two are the same string either way; the IBM PC's does
+/// not store a pair at all, because its screen is its own palette resolving the
+/// pair block 1 already prints. This block is the v1–v5 answer, which is the
+/// Version the block is about — block 3 is where a machine whose answer moves says
+/// so. Reading the rows instead is what let that machine print a page nothing was
+/// ever painted in.
 fn period_looks() -> String {
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     let mut s = format!("\n{LOOK_INTRO}\n");
@@ -114,8 +122,8 @@ fn period_looks() -> String {
     ));
     s.push_str(&format!("  {}\n", "-".repeat(name_w + 48)));
     for m in MACHINES {
-        let (page, ink, band, cur) = match &m.period_look {
-            Some(l) => (hex(l.page), hex(l.ink), status(l.status), cursor(l)),
+        let (page, ink, band, cur) = match period_look_for(m.number, None) {
+            Some(l) => (hex(l.page), hex(l.ink), status(l.status), cursor(&l)),
             None => ("-".into(), "-".into(), "-".into(), "no capture".into()),
         };
         s.push_str(&format!(
@@ -327,6 +335,16 @@ const LOOK_INTRO: &str = "2. WHAT THE SCREEN LOOKED LIKE - presentation for a v1
    capture, not a machine with no look.
    Ask for it with zvm-cli's --period-look (off by default there, on in
    lanthorn); the cursor's SHAPE is drawn with DECSCUSR, its colour cannot be.
+   ONE ROW IS RESOLVED RATHER THAN OBSERVED. The IBM PC's screen IS its own
+   palette's rendering of the pair it reports in block 1, so its page and ink
+   are that lookup and no pair is stored for them - two of Infocom's IBM
+   interpreters disagree about white, so the value depends on the story's
+   Version and block 3 says how. The adapter's own entries are EGA 1 #0000AA
+   and EGA 7 #AAAAAA, which is the truth about the hardware; a colour number
+   reaches a story through the Z-machine's 15-bit space, where 0xAA truncates
+   to 21/31 and comes back bit-replicated as 0xAD. Three parts in 255, an
+   artifact of the colour space rather than an error in either value, and
+   #0000AD / #ADADAD is what the screen gets.
 ";
 
 /// See [`TOLD_INTRO`].
@@ -348,13 +366,11 @@ graphics    the palette section 8.3.1 colour NUMBERS resolve through, which for
             and it is the one every page and ink here is drawn in.
 cursor      'reversed cell' is the pair on screen, reversed - a caret with no
             colour of its own, which is what Version 6 moved these two to.
-page / ink  RESOLVED through the mode beside them, where block 2's are the
-            values as measured. They differ by three parts in 255 on the IBM
-            PC - #0000AA against #0000AD - and the difference is not an error
-            in either: a colour number reaches a story through the Z-machine's
-            15-bit space, so the adapter's 0xAA truncates to the 5-bit 21 and
-            comes back bit-replicated as 0xAD. This block is what the screen
-            gets, because period_look_for is what a front-end asks.
+page / ink  RESOLVED through the mode beside them. Block 2 prints the same
+            values for the v1-v5 row, because both blocks ask period_look_for,
+            which is the question a front-end asks; what this block adds is
+            what Version 6 moves. Block 2's note says why the IBM PC's page
+            reads #0000AD where the adapter's own entry is #0000AA.
 
 A third IBM graphics mode reaches no row here, because no Version selects it:
 the CGA card, installed from the picture ARCHIVE a launch loads (lanthorn's
@@ -394,6 +410,7 @@ const ABSENT: &str = "  1   what declining a number already falls through to; wh
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interpreter::MachineLook;
 
     /// Every modelled machine appears, with its number and its name.
     #[test]
@@ -466,11 +483,26 @@ mod tests {
                 + usize::from(v6_screen_page)
                 + usize::from(one_screen_palette);
             assert_eq!(rows[0].matches("yes").count(), want, "{name}: screen rules\n{all}");
+            // Exhaustive on the VARIANT too, for the same reason the destructure
+            // above is exhaustive on the fields: a row that stores its look and one
+            // that resolves it store different things, and a new variant must
+            // decide what reaches the reader before this compiles (SQ-0983).
             match period_look {
-                Some(l) => {
+                Some(MachineLook::Measured(l)) => {
                     assert!(all.contains(&hex(l.page)), "{name}: period page");
                     assert!(all.contains(&hex(l.ink)), "{name}: period ink");
                     assert!(all.contains(&status(l.status)), "{name}: status band");
+                    assert!(all.contains(&cursor(&l)), "{name}: cursor");
+                }
+                Some(MachineLook::Resolved { status: band, cursor_shape }) => {
+                    // The two decisions the row DOES state reach the output…
+                    assert!(all.contains(&status(band)), "{name}: status band");
+                    // …and the pair it does not is printed as the machine resolves
+                    // it, which is the only pair that was ever on a screen.
+                    let l = period_look_for(number, None).expect("a resolved row answers");
+                    assert_eq!(l.cursor_shape, cursor_shape, "{name}: the stored caret shape");
+                    assert!(all.contains(&hex(l.page)), "{name}: resolved page");
+                    assert!(all.contains(&hex(l.ink)), "{name}: resolved ink");
                     assert!(all.contains(&cursor(&l)), "{name}: cursor");
                 }
                 None => assert!(all.contains("no capture"), "{name}: a period decline says so"),
