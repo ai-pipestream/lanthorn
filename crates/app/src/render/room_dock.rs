@@ -30,6 +30,7 @@ use super::paneframe::InsetSegment;
 use crate::colors::ColorScheme;
 use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
 use crate::state::RoomDockView;
+use crate::symbols::SymbolSet;
 
 /// Rows the dock refuses to shrink below: 2 border rows, the header line and two
 /// body lines. Below that it says nothing a glance can use.
@@ -40,13 +41,6 @@ pub const MIN_ROOM_DOCK_ROWS: u16 = 5;
 /// is a dock you cannot drag back.
 pub const MIN_MAP_ROWS: u16 = 3;
 
-/// The marker the header uses while the dock FOLLOWS the player.
-pub const FOLLOWING_MARKER: &str = "\u{2316} following";
-/// The marker the header uses while the dock is PINNED to a selected room.
-///
-/// A BMP glyph, not the design sketch's 📌: an emoji is double-width in a cell
-/// grid, and the header is drawn cell-by-cell like every other line here.
-pub const PINNED_MARKER: &str = "\u{2299} pinned";
 
 /// The dock's fully-open target height in rows: `pct`% of the frame, floored at
 /// [`MIN_ROOM_DOCK_ROWS`] and capped so the map pane keeps [`MIN_MAP_ROWS`].
@@ -79,8 +73,21 @@ pub fn dock_room(selected: Option<RoomId>, graph: &MapGraph) -> Option<RoomId> {
 /// dock is in. The name is the matrix-NUMBERED form ("Maze 4") whenever the
 /// layer numbers it, so the dock, the matrix table and the exit card all call
 /// the same room the same thing.
-pub fn header_line(graph: &MapGraph, room: Option<RoomId>, pinned: bool) -> String {
-    let marker = if pinned { PINNED_MARKER } else { FOLLOWING_MARKER };
+/// The two regime markers come from the player's [`SymbolSet`] (`dock.following`
+/// / `dock.pinned` in `style.toml`) rather than from constants here. They were
+/// `U+2316` and `U+2299`, and the second is the glyph SQ-0989 took off the map
+/// for being undrawable in Fira Code — the dock was the other place it lived.
+pub fn header_line(
+    graph: &MapGraph,
+    room: Option<RoomId>,
+    pinned: bool,
+    symbols: &SymbolSet,
+) -> String {
+    let marker = if pinned {
+        format!("{} pinned", symbols.dock_pinned)
+    } else {
+        format!("{} following", symbols.dock_following)
+    };
     match room.and_then(|id| graph.room(id).map(|_| id)) {
         Some(id) => {
             let layer = graph.layer_of(id);
@@ -117,6 +124,7 @@ pub fn draw_room_dock(
     current_room: Option<RoomId>,
     area: Rect,
     colors: &ColorScheme,
+    symbols: &SymbolSet,
     highlighted: bool,
     buf: &mut Buffer,
 ) -> Vec<(RoomDockView, Rect)> {
@@ -184,7 +192,7 @@ pub fn draw_room_dock(
         buf,
         content.x,
         content.y,
-        &header_line(graph, room, pinned),
+        &header_line(graph, room, pinned, symbols),
         header_style,
         content,
     );
@@ -252,6 +260,42 @@ mod tests {
         buf.content().iter().map(|c| c.symbol().to_owned()).collect()
     }
 
+    /// SQ-0989's other half: the dock's two regime markers are the player's, and
+    /// the defaults are glyphs a shipped face can actually draw.
+    ///
+    /// They were `U+2316` and `U+2299`, hard-coded — the second being the very
+    /// glyph that quest took off the map for being absent from Fira Code, which
+    /// left it drawn in the dock two panes away. Measured with
+    /// `fc-list ":charset=NNNN" file`: no FiraCode face carries 2316 or 2299;
+    /// thirteen carry 25C6 and 25C7.
+    #[test]
+    fn the_docks_regime_markers_are_themeable_and_drawable() {
+        let g = graph_with_current();
+
+        let d = SymbolSet::default();
+        assert!(
+            ('\u{25A0}'..='\u{25FF}').contains(&d.dock_following)
+                && ('\u{25A0}'..='\u{25FF}').contains(&d.dock_pinned),
+            "both defaults come from Geometric Shapes, the block the map already needs",
+        );
+        assert_ne!(d.dock_following, d.dock_pinned, "the two regimes must read apart");
+
+        // The player's own glyphs reach the header, both ways round.
+        let mine = SymbolSet { dock_following: '~', dock_pinned: '!', ..SymbolSet::default() };
+        let following = header_line(&g, Some(1), false, &mine);
+        let pinned = header_line(&g, Some(1), true, &mine);
+        assert!(following.contains("~ following"), "{following}");
+        assert!(pinned.contains("! pinned"), "{pinned}");
+        assert!(
+            !following.contains(d.dock_following) && !pinned.contains(d.dock_pinned),
+            "the shipped preset must not survive an override: {following} / {pinned}",
+        );
+
+        // …including the room-less header, which is a separate format arm.
+        let nowhere = header_line(&MapGraph::new(), None, false, &mine);
+        assert!(nowhere.contains("~ following"), "{nowhere}");
+    }
+
     fn graph_with_current() -> MapGraph {
         let mut g = MapGraph::new();
         g.upsert_room(1, "West of House".into());
@@ -296,17 +340,17 @@ mod tests {
     #[test]
     fn header_states_the_room_its_layer_and_the_regime() {
         let g = graph_with_current();
-        let following = header_line(&g, Some(1), false);
+        let following = header_line(&g, Some(1), false, &SymbolSet::default());
         assert!(following.contains("West of House"), "{following}");
         assert!(following.contains("Main"), "the layer is named: {following}");
         assert!(following.contains("following"), "{following}");
         assert!(!following.contains("pinned"), "{following}");
 
-        let pinned = header_line(&g, Some(2), true);
+        let pinned = header_line(&g, Some(2), true, &SymbolSet::default());
         assert!(pinned.contains("Forest Path") && pinned.contains("pinned"), "{pinned}");
         assert!(!pinned.contains("following"), "{pinned}");
 
-        let nowhere = header_line(&MapGraph::new(), None, false);
+        let nowhere = header_line(&MapGraph::new(), None, false, &SymbolSet::default());
         assert!(nowhere.contains("nowhere yet"), "{nowhere}");
     }
 
@@ -317,14 +361,14 @@ mod tests {
         let colors = ColorScheme::default();
 
         let mut buf = Buffer::empty(area);
-        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area, &colors, false, &mut buf);
+        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area, &colors, &SymbolSet::default(), false, &mut buf);
         let info = buf_text(&buf);
         assert!(info.contains("West of House"), "the header names the room: {info}");
         assert!(info.contains("Exits:"), "the Info body draws the exit card");
         assert!(info.contains("Forest Path"), "…naming where east goes");
 
         let mut buf = Buffer::empty(area);
-        draw_room_dock(&g, Some(1), true, RoomDockView::Diagnostics, &[], Some(1), area, &colors, false, &mut buf);
+        draw_room_dock(&g, Some(1), true, RoomDockView::Diagnostics, &[], Some(1), area, &colors, &SymbolSet::default(), false, &mut buf);
         let diag = buf_text(&buf);
         assert!(diag.contains("Pos"), "the Diagnostics body draws the grid position: {diag}");
         assert!(diag.contains("edge"), "…and the edge summary");
@@ -336,7 +380,7 @@ mod tests {
         let g = MapGraph::new();
         let area = Rect::new(0, 0, 50, 10);
         let mut buf = Buffer::empty(area);
-        draw_room_dock(&g, None, false, RoomDockView::Info, &[], None, area, &ColorScheme::default(), false, &mut buf);
+        draw_room_dock(&g, None, false, RoomDockView::Info, &[], None, area, &ColorScheme::default(), &SymbolSet::default(), false, &mut buf);
         let text = buf_text(&buf);
         assert!(text.contains("nowhere yet"), "{text}");
         assert!(text.contains("not placed you in a room yet"), "{text}");
@@ -353,7 +397,7 @@ mod tests {
         let area = Rect::new(0, 0, 60, 12);
         let mut buf = Buffer::empty(area);
         let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
-            &ColorScheme::default(), false, &mut buf);
+            &ColorScheme::default(), &SymbolSet::default(), false, &mut buf);
 
         assert_eq!(tabs.len(), 2, "one rect per view");
         assert_eq!(tabs[0].0, RoomDockView::Info);
@@ -378,7 +422,7 @@ mod tests {
         let area = Rect::new(0, 0, 60, 12);
         let mut buf = Buffer::empty(area);
         let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
-            &ColorScheme::default(), false, &mut buf);
+            &ColorScheme::default(), &SymbolSet::default(), false, &mut buf);
 
         let click = |col: u16, row: u16| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -438,7 +482,7 @@ mod tests {
 
         let mut buf = Buffer::empty(area);
         let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
-            &colors, false, &mut buf);
+            &colors, &SymbolSet::default(), false, &mut buf);
 
         let top: String = (0..area.width).map(|x| buf.cell((x, 0)).unwrap().symbol()).collect();
         assert!(top.contains("┤ Room "), "the shared left cap: {top:?}");
@@ -452,7 +496,7 @@ mod tests {
         // …and it follows the view, not the tab order.
         let mut buf = Buffer::empty(area);
         let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Diagnostics, &[], Some(1), area,
-            &colors, false, &mut buf);
+            &colors, &SymbolSet::default(), false, &mut buf);
         let fg_at = |r: Rect| buf.cell((r.x + 1, r.y)).and_then(|c| c.style().fg);
         assert_eq!(fg_at(tabs[0].1), Some(Color::Blue));
         assert_eq!(fg_at(tabs[1].1), Some(Color::Green));
@@ -469,7 +513,7 @@ mod tests {
 
         let mut buf = Buffer::empty(area);
         draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
-            &colors, false, &mut buf);
+            &colors, &SymbolSet::default(), false, &mut buf);
         assert_eq!(
             buf.cell((0, 0)).unwrap().symbol(),
             "\u{2554}",
@@ -482,7 +526,7 @@ mod tests {
         let g = graph_with_current();
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1),
-            Rect::new(0, 0, 0, 0), &ColorScheme::default(), false, &mut buf);
+            Rect::new(0, 0, 0, 0), &ColorScheme::default(), &SymbolSet::default(), false, &mut buf);
     }
 
     /// Every new visual element is styleable: `room_dock` paints the body and
@@ -515,14 +559,14 @@ mod tests {
         };
 
         let mut buf = Buffer::empty(area);
-        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area, &colors, false, &mut buf);
+        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area, &colors, &SymbolSet::default(), false, &mut buf);
         let fgs = fgs_of(&buf);
         assert!(fgs.contains(&Some(Color::Blue)), "the following header uses room_dock.header");
         assert!(fgs.contains(&Some(Color::Magenta)), "the body uses room_dock");
         assert!(!fgs.contains(&Some(Color::Green)), "…and not the pinned variant");
 
         let mut buf = Buffer::empty(area);
-        draw_room_dock(&g, Some(1), true, RoomDockView::Info, &[], Some(1), area, &colors, false, &mut buf);
+        draw_room_dock(&g, Some(1), true, RoomDockView::Info, &[], Some(1), area, &colors, &SymbolSet::default(), false, &mut buf);
         assert!(
             fgs_of(&buf).contains(&Some(Color::Green)),
             "a pinned header uses room_dock.header:pinned"

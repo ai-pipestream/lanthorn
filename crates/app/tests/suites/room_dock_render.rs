@@ -58,6 +58,7 @@ fn draw(g: &MapGraph, st: &AppState) -> (Buffer, Rect) {
         g.current(),
         pl.room_dock,
         &st.colors,
+        &st.symbols,
         false,
         &mut buf,
     );
@@ -271,6 +272,7 @@ fn the_whole_info_body_fits_at_the_default_dock_height() {
         Some(here),
         pl.room_dock,
         &st.colors,
+        &st.symbols,
         false,
         &mut buf,
     );
@@ -344,6 +346,7 @@ fn the_info_body_lists_the_current_rooms_objects_from_a_real_engine() {
         Some(here),
         pl.room_dock,
         &st.colors,
+        &st.symbols,
         false,
         &mut buf,
     );
@@ -367,6 +370,7 @@ fn the_info_body_lists_the_current_rooms_objects_from_a_real_engine() {
         Some(here),
         pl.room_dock,
         &st.colors,
+        &st.symbols,
         false,
         &mut buf,
     );

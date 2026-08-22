@@ -104,6 +104,21 @@ pub struct SymbolSet {
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
     pub warning_gutter: char,
+    /// Header marker for the room dock while it FOLLOWS the player.
+    ///
+    /// Hollow against [`Self::dock_pinned`]'s filled, the same reading the portal
+    /// icons use: hollow is the moving state, filled is the fixed one. Both were
+    /// hard-coded in `render::room_dock` until SQ-0989's follow-up, as `U+2316`
+    /// POSITION INDICATOR and `U+2299` CIRCLED DOT — the second being the very
+    /// glyph that quest removed from the map for being undrawable, and neither is
+    /// in Fira Code (`fc-list ":charset=2316"` and `":charset=2299"` match no
+    /// FiraCode face; `25C6`/`25C7` match 13 each).
+    pub dock_following: char,
+    /// Header marker for the room dock while it is PINNED to a selected room.
+    ///
+    /// A BMP glyph, not the design sketch's emoji: an emoji is double-width in a
+    /// cell grid and the header is drawn cell-by-cell like every other line there.
+    pub dock_pinned: char,
     /// Draw ne/nw/se/sw connectors as a chain of half-diagonals out of the room corner, using the
     /// `path.diag_*` glyphs (SQ-0314). On by default.
     ///
@@ -159,6 +174,8 @@ impl Default for SymbolSet {
                 out: '◎',
                 unknown: '?',
             },
+            dock_following: '◇',
+            dock_pinned: '◆',
             meta_gutter: '▏',
             warning_gutter: '!',
             diagonal_corners: true,
@@ -435,6 +452,8 @@ impl SymbolSet {
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
             meta_gutter: SymbolSet::default().meta_gutter,
             warning_gutter: SymbolSet::default().warning_gutter,
+            dock_following: SymbolSet::default().dock_following,
+            dock_pinned: SymbolSet::default().dock_pinned,
             diagonal_corners: cfg.diagonal_corners,
         };
 
@@ -584,6 +603,8 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "portal.marker"    => s.portal.marker = ch,
         "gutter.meta"      => s.meta_gutter = ch,
         "gutter.warning"   => s.warning_gutter = ch,
+        "dock.following"   => s.dock_following = ch,
+        "dock.pinned"      => s.dock_pinned = ch,
         _ => {} // unknown key — ignored
     }
 }

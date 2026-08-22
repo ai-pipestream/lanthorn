@@ -74,8 +74,10 @@ inspecting the machine, and firing commands — without ever leaving the story.
   click, as the map pane's layer tabs: click either name to switch bodies.
 
   **It follows you by default.** With nothing selected the dock describes the
-  room you are standing in and updates every move — the header says `⌖ following`.
-  Click a room to **pin** it (`⊙ pinned`); the dock then holds that room while
+  room you are standing in and updates every move — the header says `◇ following`.
+  Click a room to **pin** it (`◆ pinned`) — hollow while it moves with you, filled
+  once it is fixed, and both settable as `dock.following` / `dock.pinned` in
+  `style.toml`; the dock then holds that room while
   you walk on. Pinning is just selecting, so the map highlight and the matrix
   cross-highlight always agree with the dock. **Unpin** — back to following — by
   clicking the pinned room again, clicking empty map space, or pressing **Esc**;

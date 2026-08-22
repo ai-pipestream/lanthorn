@@ -973,6 +973,7 @@ fn draw_frame(
                 current_room,
                 pane_layout.room_dock,
                 &state.colors,
+                &state.symbols,
                 dock_resize_hl,
                 buf,
             );

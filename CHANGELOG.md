@@ -91,6 +91,12 @@ from a different adventure is refused rather than half-applied.
   put the old pair back in one line. The `nerdfont` preset's up/down icons are
   fixed too — they named two codepoints that Nerd Fonts calls
   `md-card_bulleted_off`, so patched faces drew a crisp icon of the wrong thing.
+- **The room dock's follow/pin markers are themeable, and drawable.** They were
+  `⌖` and `⊙`, hard-coded two panes away from the map — and the second is the very
+  glyph the badges above just lost for being missing from Fira Code, so removing it
+  from one place had left it drawn in the other. They are now `◇` and `◆`, hollow
+  while the dock follows you and filled once you pin it, and `dock.following` /
+  `dock.pinned` in `style.toml` change either.
 - **`/export-map` draws the map with your glyphs, not the shipped ones.** The dump
   reached for hard-coded portal constants and a default symbol set, so a player
   who had chosen `portal_icons = "nerdfont"` got a dump that disagreed with the
