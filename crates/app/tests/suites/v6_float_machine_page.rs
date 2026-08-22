@@ -95,6 +95,12 @@ struct Frame {
 ///
 /// `None` when the gitignored medium is absent.
 fn frame(file: &str, pictures: Option<&str>, honor: bool) -> Option<Frame> {
+    frame_at(file, pictures, honor, PANE)
+}
+
+/// [`frame`] at a stated pane, so a case can move the v6 magnification without
+/// moving anything else (SQ-1002).
+fn frame_at(file: &str, pictures: Option<&str>, honor: bool, pane: Rect) -> Option<Frame> {
     let path = stories_dir().join(file);
     let bytes = match app::hints::load_story(&path) {
         Ok(app::hints::LoadedStory::ZCode(b)) => b,
@@ -149,8 +155,8 @@ fn frame(file: &str, pictures: Option<&str>, honor: bool) -> Option<Frame> {
     app::state::apply_transcript_elems(&mut state, &elems);
 
     let model = session.screen();
-    let mut buf = Buffer::empty(PANE);
-    let _ = app::render::screen::render_story_pane(&model, false, None, &state, PANE, &mut buf);
+    let mut buf = Buffer::empty(pane);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, pane, &mut buf);
     let viewport = state
         .transcript_geom
         .get()
@@ -193,18 +199,20 @@ fn float_rows(f: &Frame) -> Vec<FloatRow> {
 /// flattened onto the ground its own prose is read on — at the page the render
 /// resolved, and in the pixels it drew.
 ///
-/// The second half is what a resolved page alone cannot see — that the strip the
-/// encoder built really was flattened onto it. Halfblocks is the honest oracle:
-/// its encoder writes each vertical pixel pair as a cell's foreground and
-/// background, so a cell of the picture's transparent ground comes out as that
-/// ground in BOTH halves.
+/// The corroboration that the strip was really flattened onto that page lives in
+/// [`the_float_strip_is_flattened_onto_the_page_the_frame_resolved`], as a
+/// DIFFERENCE rather than as a colour count.
 ///
-/// The first half is the sharper falsifier and the second is corroboration:
-/// reverting the fix fails the first on every case, and the second on the
-/// Macintosh's two-colour archive (`Pic.data`, measured: zero such cells). It does
-/// not fail on the colour archive, whose ornate drop-cap has white pixels of its
-/// own — which is exactly why the relation, not a pixel count, is the assertion
-/// that carries this suite.
+/// It used to be counted here: cells of the picture whose halfblock pair was the
+/// page in BOTH halves. That worked only because the picture's box was loose —
+/// `fit_preserving_aspect` letterboxes into a ceil'd cell box, and the leftover
+/// margin is transparent ground. SQ-1002 sized these pictures at the TEXT's rate
+/// instead of the chrome ring's, which is both correct and tighter: the box is now
+/// the footprint the game drew the picture for, so at the Macintosh's two-colour
+/// archive not one cell is entirely margin any more (measured: 2 such cells on
+/// three of the four frames, 0 on the fourth). An oracle that depends on how much
+/// slack a resample happens to leave is luck, not evidence — so the claim moved to
+/// a test that changes the page and requires the picture to change with it.
 fn assert_float_ground_is_the_prose_ground(f: &Frame, what: &str) {
     let rows = float_rows(f);
     assert!(
@@ -217,7 +225,6 @@ fn assert_float_ground_is_the_prose_ground(f: &Frame, what: &str) {
         .unwrap_or_else(|| panic!("{what}: this frame resolves no page at all for its inline floats"));
     let page_color = ratatui::style::Color::Rgb(page[0], page[1], page[2]);
 
-    let mut ground_cells = 0usize;
     for r in &rows {
         eprintln!(
             "{what}: float row {} prose@{} prose_bg={:?} float_page={:?}",
@@ -229,20 +236,7 @@ fn assert_float_ground_is_the_prose_ground(f: &Frame, what: &str) {
              beside it is read on",
             r.row
         );
-        // …and the strip really was drawn on it. The picture occupies the columns
-        // left of the reserved gutter at `prose_col - 1`.
-        for x in f.viewport.x..r.prose_col.saturating_sub(1) {
-            let c = f.buf.cell((x, r.row)).unwrap();
-            if c.fg == page_color && c.bg == page_color {
-                ground_cells += 1;
-            }
-        }
     }
-    assert!(
-        ground_cells > 0,
-        "{what}: not one cell of the pictures' own columns carries the page the prose sits on — \
-         the transparent ground of these cut-out PNGs was flattened onto something else",
-    );
 }
 
 // ── The Macintosh: the reported case ─────────────────────────────────────────
@@ -285,6 +279,115 @@ fn the_macintosh_float_ground_is_the_machines_white_page() {
 
         assert_float_ground_is_the_prose_ground(&f, &what);
     }
+}
+
+/// **Corroboration, as a DIFFERENCE: the strip really is flattened onto the page
+/// the frame resolved** (SQ-1002 replaces SQ-0848's colour count; see
+/// [`assert_float_ground_is_the_prose_ground`]).
+///
+/// A resolved page proves what the render DECIDED, never what it drew. The one
+/// thing that separates the two is whether the picture's own pixels move when the
+/// page does: `flatten_onto` composites the cut-out's transparent ground against
+/// the page BEFORE the strip is encoded, so a different page is a different strip
+/// and different cells. A strip that was never flattened encodes the same raw
+/// artwork either way and comes out byte-identical — which is exactly the reported
+/// defect, a room icon sitting on the terminal's ground instead of the story's.
+///
+/// The same medium at `honor_game_colours` true and false is the pair to use,
+/// because the switch is what moves the page and nothing else about these frames:
+/// true resolves the Macintosh's white through the machine layer, false leaves the
+/// theme's dark ground (`the_macintosh_machine_page_never_survives_declined_colours`
+/// pins that half). Both archives, because a Macintosh is one machine with two.
+///
+/// Non-vacuous in both directions: the pages must actually differ, and both frames
+/// must actually float something.
+#[test]
+fn the_float_strip_is_flattened_onto_the_page_the_frame_resolved() {
+    let _g = app::v6_palette_at_boot();
+    for archive in [None, Some("Pic.data")] {
+        let (Some(honoured), Some(declined)) =
+            (frame(MAC_DISK, archive, true), frame(MAC_DISK, archive, false))
+        else {
+            return;
+        };
+        let what = format!("mac r296 {archive:?}");
+        assert_ne!(
+            app::render::inline_image::float_page(&honoured.state),
+            app::render::inline_image::float_page(&declined.state),
+            "{what}: premise — the two frames must resolve DIFFERENT pages, or this proves nothing",
+        );
+
+        // Every cell of every float's own columns, keyed by position so a layout
+        // that moved would show up as a difference rather than hide one.
+        let strip = |f: &Frame| -> Vec<(u16, u16, String, ratatui::style::Color, ratatui::style::Color)> {
+            float_rows(f)
+                .iter()
+                .flat_map(|r| {
+                    (f.viewport.x..r.prose_col.saturating_sub(1)).map(move |x| {
+                        let c = f.buf.cell((x, r.row)).unwrap();
+                        (x, r.row, c.symbol().to_string(), c.fg, c.bg)
+                    })
+                })
+                .collect()
+        };
+        let (a, b) = (strip(&honoured), strip(&declined));
+        assert!(!a.is_empty(), "{what}: premise — the honoured frame floats a picture at all");
+        assert!(!b.is_empty(), "{what}: premise — so does the declined one");
+        assert_ne!(
+            a, b,
+            "{what}: the pictures' cells are identical under two different pages, so the strip was \
+             never composited against either — a cut-out handed to the protocol with its alpha \
+             intact draws the same pixels whatever the story window declared",
+        );
+    }
+}
+
+/// **SQ-1002: a story picture is sized by the TEXT it sits beside, never by the
+/// chrome ring's magnification.**
+///
+/// Zork Zero draws its ornate drop-cap four of its own text lines tall, on a
+/// screen whose character cell is 8x16 native pixels. Hybrid maps that space onto
+/// the terminal at two rates at once — art by the letterbox factor `s`, text at
+/// one native cell per terminal cell — and these pictures used to be scaled by
+/// `s`, "to match the chrome ring". They sit in the TEXT, so at `s = 2` the cap
+/// claimed eight terminal rows beside the four-row paragraph it opens, and it grew
+/// further the bigger the pane got. The real DOS press
+/// (`machine-screenshots/dos-zorkzero.png`) shows the cap spanning exactly four
+/// lines and the room icon three.
+///
+/// Two panes of the SAME WIDTH — so the wrap is identical and only the
+/// magnification moves — must indent their prose by the same number of columns,
+/// because that indent is the picture's own width plus the game's margin. Under
+/// the old rule it moved with `s`.
+///
+/// Non-vacuous by its premise: the two frames must actually resolve different
+/// magnifications, or the case is comparing a frame with itself.
+#[test]
+fn a_float_keeps_its_footprint_when_the_art_magnification_moves() {
+    let _g = app::v6_palette_at_boot();
+    const TALL: Rect = Rect { x: 0, y: 0, width: 120, height: 45 };
+    const SHORT: Rect = Rect { x: 0, y: 0, width: 120, height: 25 };
+    let (Some(tall), Some(short)) = (
+        frame_at(IBM_PC_STORY, None, true, TALL),
+        frame_at(IBM_PC_STORY, None, true, SHORT),
+    ) else {
+        return;
+    };
+    let (st, ss) = (tall.state.v6_image_scale.get(), short.state.v6_image_scale.get());
+    assert_ne!(st, ss, "premise: the two panes must magnify the ART differently ({st} vs {ss})");
+
+    let indent = |f: &Frame| {
+        let rows = float_rows(f);
+        assert!(!rows.is_empty(), "premise: the boot banner floats prose beside its drop-cap");
+        rows[0].prose_col - f.viewport.x
+    };
+    assert_eq!(
+        indent(&tall),
+        indent(&short),
+        "the drop-cap's footprint moved with the chrome ring's magnification ({st}x vs {ss}x) — a \
+         picture drawn inside the text flow is sized by the text, which is one native 8x16 cell \
+         per terminal cell whatever the art is scaled to",
+    );
 }
 
 /// **Guard: `honor_game_colours = false` stays a no-op.**

@@ -1770,6 +1770,23 @@ at the left margin of the story text and wraps the surrounding lines beside
 them, so they scroll naturally with the transcript instead of sitting in a
 fixed frame.
 
+**A story picture is sized by the text it sits beside, not by the frame around
+it.** Hybrid maps the game's native pixel space onto your terminal at two rates
+at once: the chrome ring is artwork, magnified to fill the pane, while the prose
+is terminal glyphs — one native 8×16 character cell per terminal cell, whatever
+the art is doing. A drop-cap lives in the prose. Zork Zero draws its illuminated
+capital four of its own text lines tall and its room icons three, and those are
+the numbers that have to survive, so the float is laid out at the *text's* rate:
+`ceil(width/8) × ceil(height/16)` cells, the footprint the game drew it for.
+
+Matching the ring instead is the obvious-looking mistake, and it was ours for a
+while. At a magnification of 2 the cap claimed eight terminal rows beside the
+four-row paragraph it opens, and it grew further every time the window did — the
+cap was not too big, everything else was too small. Raster mode never had the
+problem, because there the glyphs are painted into the same native canvas as the
+art and the whole finished frame is scaled once; hybrid now agrees with it, and
+both agree with a real DOS press.
+
 The tell is where the game put the picture: **on the current text line, or
 somewhere it chose for itself.** A drop-cap is drawn at window 0's text cursor —
 it belongs to the paragraph beside it and has to travel with it. Ask for a

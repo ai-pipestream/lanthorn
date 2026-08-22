@@ -692,6 +692,8 @@ fn render_node(
             // the v6 image would be invisible — the cell fallback keeps the pane
             // readable behind the overlay until it closes.
             state.v6_image_scale.set(1.0);
+            // Not the hybrid ring until the ring path below says so (SQ-1002).
+            state.v6_hybrid_ring.set(false);
             // A painted MENU screen prints chrome text INSIDE the story window's
             // box, below the status band — Shogun's boot menu paints rows 21–23
             // over its story buffer (rows 21–25). In HYBRID mode such a takeover
@@ -900,11 +902,20 @@ fn render_node(
                             state.config.v6_pixel_lock,
                         );
                         state.v6_scale_lock_fallback.set(lock_fallback);
-                        // Publish the letterbox factor so inline story pictures
-                        // (drop-caps, room icons) scale to match the chrome ring.
-                        // The scale FACTOR is unchanged by the SQ-0505 anchoring
-                        // below (only the vertical offset moves), so publish it now.
+                        // Publish the letterbox factor — the magnification the ART
+                        // is drawn at, and since SQ-1002 nothing else. The scale
+                        // FACTOR is unchanged by the SQ-0505 anchoring below (only
+                        // the vertical offset moves), so publish it now.
+                        //
+                        // Inline story pictures used to be scaled by it, to "match
+                        // the chrome ring". They must not: a drop-cap is drawn
+                        // INSIDE the text flow, and in hybrid the text is glyphs at
+                        // one native cell per terminal cell while the ring is pixels
+                        // at `s`. Matching the ring made Zork Zero's cap twice the
+                        // height of the paragraph it opens. `render_transcript` reads
+                        // the flag instead and sizes them at the TEXT's rate.
                         state.v6_image_scale.set(scale_center.s);
+                        state.v6_hybrid_ring.set(true);
                         // SQ-0896: TWO art canvases, and the difference between them is
                         // the whole of this quest.
                         //

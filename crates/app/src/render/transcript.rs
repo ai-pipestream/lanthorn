@@ -900,9 +900,11 @@ fn float_text_indent(img: &crate::inline_image::InlineImage, cell_w: u16, cols: 
     let cell_w = cell_w.max(1) as u32;
     let indent = match img.margin_px {
         Some(margin) => {
-            // `scaled` already encodes `v6_image_scale`; derive the same factor
+            // `scaled` already encodes the picture's factor; derive the same one
             // and apply it to the game-pixel margin so text lines up with the
-            // scaled picture.
+            // scaled picture. Since SQ-1002 that factor is the TEXT's rate
+            // (`device_cell / 8`), so this resolves to the game's own margin in
+            // native character cells — which is what it was authored as.
             let native_w = img.pixels.width().max(1);
             let scaled_w = img.scaled.map(|(w, _)| w).unwrap_or(native_w).max(1);
             let scaled_margin = (margin as u64 * scaled_w as u64 / native_w as u64) as u32;
@@ -2165,12 +2167,30 @@ fn render_middle(
         // Inline images parallel the filtered lines, indexed by the SAME visible
         // indices. Bands are only emitted when a game Picker is present (images
         // enabled); `char_px` is the picker's cell pixel size for pixel-accurate fit.
-        // v6 hybrid: the chrome frame is scaled by the letterbox factor, so the
-        // story's inline pictures (drop-caps, room icons — authored in native
-        // game pixels) must scale by the SAME factor to match it. Published
-        // per-frame by the v6 Layered arm; 0 (unset) or 1 = no scaling.
-        let img_scale = state.v6_image_scale.get();
-        let img_scale = if img_scale > 1.0 { img_scale } else { 1.0 };
+        //
+        // A v6 STORY PICTURE FOLLOWS THE TEXT, NOT THE FRAME (SQ-1002). Zork Zero's
+        // drop-caps and room icons are authored in native game pixels on a screen
+        // whose character cell is 8x16, to sit beside a specific number of lines of
+        // the game's own prose — the cap that opens a paragraph is drawn four text
+        // lines tall. Hybrid maps the game's native pixel space onto the terminal
+        // at two different rates: art by the letterbox factor `s`, and text at one
+        // native cell per TERMINAL cell. This used to scale the pictures by `s`,
+        // "to match the chrome ring", which is the wrong half of the frame — at
+        // `s = 2` the cap claimed eight terminal rows beside a four-row paragraph,
+        // and it grew further the larger the pane got.
+        //
+        // The text's rate is `device_cell / native_cell` per axis, so a picture
+        // `w x h` native pixels lands on `ceil(w/8) x ceil(h/16)` cells — the
+        // footprint the game drew it for, and exactly what RASTER mode has always
+        // given it (`build_main_text`, which composes glyphs and art together at
+        // the native cell and scales the finished canvas once).
+        //
+        // Per axis and not one scalar, because a terminal cell is very rarely
+        // 1:2 — at 8x18 the horizontal rate is 1.0 and the vertical 1.125.
+        // `fit_preserving_aspect` keeps the picture's own shape inside the box, so
+        // an uneven box letterboxes rather than stretching.
+        let hybrid_ring = state.v6_hybrid_ring.get();
+        let text_rate = |px: u32, cell: u16, native: u32| (px * u32::from(cell)).div_ceil(native);
         // SQ-0895: this used to fork on frameless, which applied its own
         // inline-image sizing and was the ONLY mode that drew graphics-window
         // CONTENT splashes inline — every other mode had to DROP the
@@ -2183,11 +2203,11 @@ fn render_middle(
             .map(|&i| {
                 let mut img = state.transcript_images.get(i).cloned().flatten();
                 if let Some(im) = img.as_mut() {
-                    if im.scaled.is_none() && img_scale > 1.0 {
+                    if im.scaled.is_none() && hybrid_ring {
                         let (w, h) = (im.pixels.width().max(1), im.pixels.height().max(1));
                         im.scaled = Some((
-                            (w as f32 * img_scale) as u32,
-                            (h as f32 * img_scale) as u32,
+                            text_rate(w, char_px.0, crate::render::v6_layout::FONT_W),
+                            text_rate(h, char_px.1, crate::render::v6_layout::FONT_H),
                         ));
                     }
                 }

@@ -2397,10 +2397,27 @@ pub struct AppState {
     pub selection_edge: i32,
     /// This frame's transcript geometry, published by render for the mouse/copy paths. (SQ-0197)
     pub transcript_geom: std::cell::Cell<Option<crate::clipboard::TranscriptGeom>>,
-    /// v6 hybrid letterbox scale, published per-frame by the render's Layered
-    /// arm so inline story pictures scale to match the chrome frame (see
-    /// `render_transcript`). 0.0 (the Default) and 1.0 both mean "no scaling".
+    /// v6 hybrid letterbox scale — the magnification the ART is drawn at,
+    /// published per-frame by the render's Layered arm. 0.0 (the Default) and 1.0
+    /// both mean "no scaling".
+    ///
+    /// It is the ART's factor and NOTHING else since SQ-1002; inline story
+    /// pictures used to be scaled by it and must not be (see [`Self::v6_hybrid_ring`]).
+    /// `/dump-terminal` reports it as the frame's magnification, which is the one
+    /// remaining reader that wants exactly this number.
     pub v6_image_scale: std::cell::Cell<f32>,
+    /// This frame drew the v6 chrome ring in HYBRID mode — art as pixels, text as
+    /// terminal glyphs (SQ-1002).
+    ///
+    /// Published where [`Self::v6_image_scale`] is, and read by `render_transcript`
+    /// for one decision: how big an inline story picture (a drop-cap, a room icon)
+    /// should be. In hybrid the two halves of the frame are mapped out of the
+    /// game's native pixel space at DIFFERENT rates — art by the letterbox scale,
+    /// text at one native 8x16 cell per terminal cell — and a picture drawn inside
+    /// the text flow has to follow the text, which is the thing it was authored to
+    /// sit beside. Following the art instead is what made Zork Zero's drop-cap
+    /// eight rows tall beside the four-line paragraph it opens.
+    pub v6_hybrid_ring: std::cell::Cell<bool>,
     /// The per-axis density of the artwork this launch mounted —
     /// [`crate::graphics::PictSource::art_scale`], resolved once at boot by
     /// `startup.rs` (and again by an `@restart`, `reset.rs`) from the archive's own
@@ -2978,6 +2995,7 @@ impl Default for AppState {
             selection_edge: 0,
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
+            v6_hybrid_ring: std::cell::Cell::new(false),
             v6_art_scale: (crate::session::V6_ART_SCALE, crate::session::V6_ART_SCALE),
             v6_scale_lock_fallback: std::cell::Cell::new(false),
             v6_story_page: std::cell::Cell::new(None),
