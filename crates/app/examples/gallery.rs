@@ -185,8 +185,13 @@ fn main() -> std::process::ExitCode {
                     continue;
                 }
             };
+            // The capture's own bytes are the WIRE stream, and since SQ-0991 a kitty
+            // transmit may be zlib-deflated (`o=z`). Resolving those directly finds the
+            // placement and then has no pixels to paint, which is a BLANK illustration
+            // panel and a shot that fails its art guard for a reason that looks like the
+            // game's fault. `terminal_bytes()` inflates first, exactly as a terminal does.
             let r = pty_stream::oracle::resolve(
-                &c.bytes,
+                &c.terminal_bytes(),
                 c.spec.cols,
                 c.spec.rows,
                 u32::from(cell_w),

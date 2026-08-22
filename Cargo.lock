@@ -2275,7 +2275,7 @@ dependencies = [
 [[package]]
 name = "ratatui-image"
 version = "11.0.6"
-source = "git+https://github.com/sharkusk/ratatui-image?branch=lanthorn-11.0.6-u16-fix#6f9655cfab60ca41c60b8a9a5a59a82264b4b620"
+source = "git+https://github.com/sharkusk/ratatui-image?branch=lanthorn-11.0.6-u16-fix#fe7db0c46e99838718290ed76a95b562df46d477"
 dependencies = [
  "base64-simd",
  "flate2",
