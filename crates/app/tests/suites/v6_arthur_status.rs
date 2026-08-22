@@ -236,12 +236,23 @@ fn arthur_hybrid_status_churchyard_is_one_word_date_right() {
 }
 
 /// (SQ-0505 dynamic hybrid layout) At a TALL pane (90×40 — taller than the 8:5
-/// native aspect, so there is vertical letterbox dead space), Arthur has NO bottom
-/// chrome: header art + status bar on top, side borders, nothing below the story.
-/// The ring is top-anchored (no vertical centering) and the story text viewport
-/// extends all the way to the pane BOTTOM at its constant inset width. Where the
+/// native aspect, so there is vertical letterbox dead space), Arthur has no bottom
+/// ART: header art + status bar on top, side borders, nothing painted below the
+/// story. The ring is top-anchored (no vertical centering) and the story text
+/// viewport extends to the pane BOTTOM at its constant inset width. Where the
 /// side art runs out, the poles are TILED down the rest of the flank (SQ-0698) —
 /// never stretched, which would elongate them by whatever the slack happens to be.
+///
+/// **RE-BLESSED, SQ-1008: "to the pane bottom" is one row short of it here, and
+/// always was.** This frame is not the empty-below-the-story frame the case was
+/// written for. `arthur-r74-s890714.z6` reaches gameplay by tapping blank lines,
+/// and Arthur answers the last one in a BOX — window 3 at native
+/// `(28, 384, 584, 16)`, the last text row of his 640x400 screen, carrying
+/// *"I beg your pardon?"*. At 80x25 (no slack, letterbox plan) the ring drew it
+/// all along; here the reclaim grew the viewport over it and it was on no screen
+/// at all, which is the whole of SQ-1008. The reclaim itself is untouched — the
+/// viewport is still 24 rows against window 0's 11 native ones — so this case
+/// still measures what it was written to measure, one row higher.
 #[test]
 fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
     use ratatui::style::Color;
@@ -257,9 +268,25 @@ fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
 
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    // SQ-1008: the game's own bottom row is drawn, on the pane's last row…
+    let boxed = (0..area.height).find(|&y| row_text(y).contains("I beg your pardon?"));
+    assert_eq!(
+        boxed,
+        Some(area.bottom() - 1),
+        "window 3's boxed message is bottom-anchored to the pane's last row; pane:\n{}",
+        (0..area.height).map(row_text).collect::<Vec<_>>().join("\n")
+    );
     let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
-    // The story viewport reaches the pane bottom (dead space reclaimed).
-    assert_eq!(vp.bottom(), area.bottom(), "story viewport extends to the pane bottom; got {vp:?}");
+    // …and the story viewport reclaims every dead row above it.
+    assert_eq!(
+        vp.bottom(),
+        area.bottom() - 1,
+        "story viewport extends to the pane bottom, less window 3's own row; got {vp:?}"
+    );
+    assert!(vp.height > 11, "the reclaim survives — {vp:?} against window 0's 11 native rows");
     // It keeps its side insets — the story column did NOT reflow to full width.
     assert!(vp.x > 0 && vp.right() < area.right(), "story keeps its constant inset width beside the side borders; got {vp:?}");
     // The top chrome ring (header art + status bar) is still imaged above the story.
