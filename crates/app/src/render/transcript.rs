@@ -2138,9 +2138,45 @@ fn render_middle(
         // pens. Off the Amiga `normal_style` IS `colors.transcript` and the flag is
         // false, so every other frame resolves exactly as before.
         let machine_owns_ink = state.v6_page_pair.get().is_some();
-        let transcript_input = state.colors.theme.get("transcript_input").style;
-        let transcript_meta = state.colors.theme.get("transcript_meta").style;
-        let transcript_warning = state.colors.theme.get("transcript_warning").style;
+        // SQ-0954: AND THE STORY WINDOW'S OWN PAGE OVER THAT, for lanthorn's own
+        // annotations.
+        //
+        // `period::painted` gives the echoed command, the meta gutter and a warning
+        // the machine's PAGE — deliberately, so their ground is the paper the prose
+        // is on rather than the theme's punched through the middle of the
+        // transcript. That is right whenever the machine's page IS the ground. In
+        // v6 it need not be: a game that calls `set_colour` on window 0 declares
+        // its own, and Zork Zero does.
+        //
+        // Measured at 120x45, release 393 off the DOS floppy, colours honoured: the
+        // story page is `Rgb(173, 173, 173)` and the meta line came out with its
+        // TEXT on the IBM PC's blue `Rgb(0, 0, 173)` and its gutter glyph on the
+        // grey — two grounds on one row, a blue stripe through a grey page. The
+        // Amiga floppy reads the same way against `Rgb(7, 75, 161)`. The Macintosh
+        // disk does NOT, because there the machine page and the story page are both
+        // white, which is exactly why a single-machine test would have missed it.
+        //
+        // So re-ground them on the window's page — and ONLY where the period look
+        // is what put the page there, which is what the `bg == look.page` test
+        // says. A user who set one of these backgrounds in `style.toml` was never
+        // painted over by `period::painted` (it paints only selectors still at
+        // `Provenance::Default`) and is not painted over here either; a user whose
+        // colour happens to equal the machine's loses nothing, because the two
+        // agree. All three move together because one table row paints all three
+        // with the same justification.
+        let reground = |s: Style| -> Style {
+            match (state.v6_story_page.get(), state.period_look) {
+                (Some((r, g, b)), Some(look))
+                    if s.bg == Some(ratatui::style::Color::Rgb(look.page.0, look.page.1, look.page.2)) =>
+                {
+                    s.bg(ratatui::style::Color::Rgb(r, g, b))
+                }
+                _ => s,
+            }
+        };
+        let transcript_input = reground(state.colors.theme.get("transcript_input").style);
+        let transcript_meta = reground(state.colors.theme.get("transcript_meta").style);
+        let transcript_warning = reground(state.colors.theme.get("transcript_warning").style);
         let filtered_styles: Vec<Style> = visible_indices
             .iter()
             .zip(filtered_kinds.iter())

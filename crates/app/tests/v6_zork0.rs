@@ -18,6 +18,9 @@ mod v6_cga_stencil_page;
 mod v6_ega_dither_blend;
 #[path = "suites/v6_float_machine_page.rs"]
 mod v6_float_machine_page;
+
+#[path = "suites/v6_meta_line_ground.rs"]
+mod v6_meta_line_ground;
 #[path = "suites/v6_float_margin_ground.rs"]
 mod v6_float_margin_ground;
 #[path = "suites/v6_glyphs_over_art.rs"]
