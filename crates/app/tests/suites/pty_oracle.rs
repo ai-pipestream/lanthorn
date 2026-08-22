@@ -486,10 +486,17 @@ mod emitter {
     /// draws the wrong row of it is distinguishable from one that draws the right
     /// one. A flat canvas would let the corrupt reading pass.
     fn window(version: u64) -> GraphicsWindow {
+        tinted_window(version, 40)
+    }
+
+    /// [`window`], with the green channel under our control so two versions can
+    /// differ in their PIXELS and not merely in their version number — which is
+    /// what tells a re-transmit apart from a re-place (SQ-0995).
+    fn tinted_window(version: u64, green: u8) -> GraphicsWindow {
         let (w, h) = (u32::from(ART.width) * u32::from(CELL_W), u32::from(ART.height) * u32::from(CELL_H));
         let mut canvas = image::RgbaImage::new(w, h);
         for (_, y, p) in canvas.enumerate_pixels_mut() {
-            *p = image::Rgba([(y % 251) as u8, 40, 200, 255]);
+            *p = image::Rgba([(y % 251) as u8, green, 200, 255]);
         }
         GraphicsWindow { win: 1, canvas: std::sync::Arc::new(canvas), version, upscale: false }
     }
@@ -573,6 +580,80 @@ mod emitter {
             rows.windows(2).all(|w| w[0] < w[1]),
             "each screen row must draw a LOWER row of the image than the one above it, else \
              the placement is redrawing one row over and over: {rows:?}"
+        );
+    }
+
+    /// SQ-0995, judged on the wire and by a real terminal core rather than on our
+    /// own buffer. A frame whose canvas CHANGED emits ONE placeholder cell, not the
+    /// window's whole grid — and the image behind the id that never moved is the new
+    /// canvas, with the placement still covering every cell of the rect.
+    ///
+    /// The two halves have to be asserted together. The cheap half (bytes) is what
+    /// the quest is about: the id is a per-cell value, so re-keying it per canvas
+    /// made one changed pixel repaint `width*height` cells. The expensive half
+    /// (Ghostty's storage) is what makes the cheap half safe: the protocol says
+    /// *"When re-transmitting image data for a specific id, the existing image and
+    /// all its placements must be deleted"*, and if the emulator applied that
+    /// without our `a=T,U=1,r,c,p=1` re-creating the placement in the same command,
+    /// the frame would cost one cell and draw nothing.
+    #[test]
+    fn a_changed_canvas_re_transmits_to_the_same_id_and_emits_one_cell() {
+        const PLACEHOLDER: &[u8] = "\u{10EEEE}".as_bytes();
+        let picker = kitty_picker(CELL_W, CELL_H);
+        let mut gr = GraphicsRender::default();
+        let (mut term, sink) = terminal();
+
+        // Two frames of the first canvas, so the window is settled: the second
+        // sheds the transmit escape and is otherwise identical.
+        for version in 1..=2 {
+            term.draw(|f| gr.render(&picker, &tinted_window(version, 40), ART, Style::default(), f.buffer_mut()))
+                .expect("drawing into a byte sink cannot fail");
+        }
+        let settled = sink.0.borrow().len();
+
+        // Now the game repaints its window with different pixels.
+        term.draw(|f| gr.render(&picker, &tinted_window(3, 90), ART, Style::default(), f.buffer_mut()))
+            .expect("drawing into a byte sink cannot fail");
+        let frame = sink.0.borrow()[settled..].to_vec();
+
+        let cells = frame.windows(PLACEHOLDER.len()).filter(|w| *w == PLACEHOLDER).count();
+        let grid = usize::from(ART.width) * usize::from(ART.height);
+        assert_eq!(
+            cells, 1,
+            "a changed canvas emits the lead cell carrying the transmit and nothing else, \
+             not all {grid} placeholders ({} bytes emitted)",
+            frame.len()
+        );
+        assert!(
+            frame.windows(4).any(|w| w == b"a=T,"),
+            "and the frame does carry the new pixels — one cell and no upload would be a \
+             frame that changed nothing"
+        );
+
+        // What a real terminal is holding afterwards.
+        let res = resolve(&sink);
+        assert_eq!(res.placements.len(), 1, "{}", res.describe_placements());
+        let p = &res.placements[0];
+        assert_eq!(
+            (p.top, p.bottom, p.left, p.right, p.cells),
+            (ART.y, ART.y + ART.height - 1, ART.x, ART.x + ART.width - 1, grid),
+            "the re-transmit must leave the placement covering the whole rect: {}",
+            p.describe()
+        );
+        let rows = source_rows(&res);
+        assert!(
+            rows.windows(2).all(|w| w[0] < w[1]),
+            "and each screen row still draws its own row of the image: {rows:?}"
+        );
+
+        // The pixels behind that id are the SECOND canvas: green 90, not 40.
+        let img = res.images.get(&p.image_id).unwrap_or_else(|| {
+            panic!("the terminal holds no image {:#010x}: {}", p.image_id, res.describe_placements())
+        });
+        assert_eq!(
+            img.rgba.get(1).copied(),
+            Some(90),
+            "re-transmitting to a live id replaces the data behind it"
         );
     }
 
