@@ -107,7 +107,7 @@ fn key_specs_parse_and_the_turn_count_ignores_waits() {
 fn the_backend_chooses_the_cell_size() {
     for s in &manifest().shots {
         let want = match s.backend {
-            Backend::Kitty => (8, 16),
+            Backend::Kitty => (16, 32),
             Backend::Halfblocks => (10, 20),
         };
         assert_eq!(s.cell_px(), want, "`{}` ({})", s.id, s.backend.as_str());
@@ -119,12 +119,14 @@ fn the_backend_chooses_the_cell_size() {
 /// A half-block sample is `cell_width` wide by `cell_height / 2` tall, so a cell
 /// of any other aspect samples the artwork finer across than down — JetBrains
 /// Mono's 2.200 cell, which these shots used to be taken in, is 10% coarser
-/// vertically at every size anyone would pick. The kitty cell was 8x18 (2.250)
-/// and is now 8x16.
+/// vertically at every size anyone would pick. The kitty cell was 8x18 (2.250),
+/// then 8x16, and is now 16x32 (SQ-1001) — the ratio is the invariant, not the
+/// absolute size.
 ///
-/// FALSIFY by putting 18 back: this fails, and `the_backend_chooses_the_cell_size`
-/// fails beside it. Both are meant to, because the pair is the whole pin — one
-/// says which cell, this one says why that cell and not a neighbouring one.
+/// FALSIFY by putting 18 back, or 16x30: this fails, and
+/// `the_backend_chooses_the_cell_size` fails beside it. Both are meant to,
+/// because the pair is the whole pin — one says which cell, this one says why
+/// that shape of cell and not a neighbouring one.
 #[test]
 fn the_cell_is_square_for_half_block_samples() {
     for backend in [Backend::Kitty, Backend::Halfblocks] {
@@ -175,21 +177,39 @@ fn the_default_font_list_leads_with_the_face_whose_cell_is_one_to_two() {
 /// The control matters more than the assertion. 117x40 — what every shot in this
 /// file used to be — is 1.4375x, and a case that only checked the sizes we chose
 /// would pass just as happily if `magnification` returned a constant 2.
+///
+/// The kitty rungs are HALF what they were, because the cell doubled (SQ-1001):
+/// the device box each grid covers is unchanged, so 82x28 on a 16x32 cell is the
+/// same 1280x800 the old 162x53 was on an 8x16 one. The magnification is a
+/// property of the box and not of the cell, which is exactly why the type could
+/// double without a single frame changing size or crispness.
 #[test]
 fn the_manifest_sizes_are_the_ones_that_magnify_a_640x400_press_by_a_whole_number() {
-    let mag = |size: &str, backend: &str| -> f64 {
+    let on = |size: &str, backend: &str, native: (u32, u32)| -> f64 {
         let body = GOOD.replace(r#"size = "117x40""#, &format!("size = {size:?}"));
         let body = format!("{body}backend = {backend:?}\n");
-        parse_one(&body).expect("valid").shots[0].magnification((640, 400)).expect("a full-width pane")
+        parse_one(&body).expect("valid").shots[0].magnification(native).expect("a full-width pane")
     };
-    for (size, want) in [("96x28", 1.0), ("162x53", 2.0), ("242x78", 3.0)] {
+    let mag = |size: &str, backend: &str| on(size, backend, (640, 400));
+    for (size, want) in [("82x28", 2.0), ("122x41", 3.0), ("162x53", 4.0)] {
         assert_eq!(mag(size, "kitty"), want, "kitty {size}");
     }
     for (size, want) in [("66x23", 1.0), ("130x43", 2.0)] {
         assert_eq!(mag(size, "halfblocks"), want, "half-blocks {size}");
     }
-    assert_eq!(mag("117x40", "kitty"), 1.4375, "the size this manifest used to use, and the reason it no longer does");
-    assert_eq!(mag("160x50", "kitty"), 1.88, "one row and two columns off 2x is still a resampled frame");
+    assert_eq!(mag("117x40", "kitty"), 2.875, "the size this manifest used to use, and the reason it no longer does");
+    assert_eq!(mag("160x50", "kitty"), 3.76, "one row and two columns off 4x is still a resampled frame");
+    // The Macintosh's monochrome plates are the one press here that is not
+    // 640x400, and `zork0-mac-mono` is the one shot that is not 82x28. Both
+    // halves matter: the size is chosen for the SCREEN, not copied off the row
+    // above it (SQ-1001).
+    assert_eq!(on("62x22", "kitty", (480, 300)), 2.0, "the monochrome Macintosh's 480x300 screen");
+    let sloppy = on("82x28", "kitty", (480, 300));
+    assert!(
+        (sloppy - 2.666_666_666_666_666_5).abs() < 1e-9,
+        "82x28 on the monochrome Macintosh is {sloppy}, not a whole number — which is what copying \
+         the standard size onto a press with a different screen buys"
+    );
 }
 
 /// The committed manifest itself, over whichever media this machine has.
@@ -209,7 +229,7 @@ fn every_v6_shot_magnifies_by_a_whole_number() {
             continue;
         }
         any_present = true;
-        let Ok(p) = Provenance::read(&path) else { continue };
+        let Ok(p) = Provenance::read(&path, s.pictures()) else { continue };
         // A story with no pixel screen has no magnification, and the map shot's
         // pane is a split this file deliberately does not restate.
         let (Some(native), Some(mag)) = (p.native, p.native.and_then(|n| s.magnification(n))) else {
@@ -233,6 +253,30 @@ fn every_v6_shot_magnifies_by_a_whole_number() {
         "the media are present but not one shot resolved a native screen — the derivation in \
          `Provenance::read` has stopped working, and a check that silently stops checking is worse \
          than none"
+    );
+}
+
+/// A `--pictures` shot's archive is read back out of `args`, because the
+/// provenance under the frame is computed FROM it (SQ-1001).
+///
+/// The named archive settles the machine and the picture space both, so a shot
+/// whose `--pictures` the harness cannot see gets a native screen, a
+/// magnification and a profile belonging to the rendition it did not draw — and
+/// every one of those numbers stays self-consistent, which is why `expect` cannot
+/// catch it. Two renditions of one scene look like each other.
+#[test]
+fn a_named_picture_archive_is_read_back_out_of_the_arguments() {
+    let one = parse_one(&format!("{GOOD}args = [\"--pictures\", \"Pic.data\"]\n")).expect("valid");
+    assert_eq!(one.shots[0].pictures(), Some("Pic.data"));
+    assert_eq!(parse_one(GOOD).expect("valid").shots[0].pictures(), None, "a shot that names none has none");
+    // A flag with nothing after it is not a name, and must not become one.
+    let bare = parse_one(&format!("{GOOD}args = [\"--pictures\"]\n")).expect("valid");
+    assert_eq!(bare.shots[0].pictures(), None);
+    // And the committed manifest really does exercise the path.
+    assert!(
+        manifest().shots.iter().any(|s| s.pictures().is_some()),
+        "no shot names an archive with `--pictures`. The Macintosh disk ships two, and the gallery \
+         exists to show that they differ"
     );
 }
 

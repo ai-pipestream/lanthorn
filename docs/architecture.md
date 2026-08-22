@@ -446,7 +446,7 @@ cargo run -p app --example gallery -- --list        # what it would take
 cargo run -p app --example gallery -- --only journey-amiga
 ```
 
-Five things are deliberate:
+Six things are deliberate:
 
 - **The output is labelled a render inside its own pixels.** Every frame gets a
   footer strip saying so, drawn in the bitmap face whatever the frame above it
@@ -466,10 +466,20 @@ Five things are deliberate:
   1.231 em = 2.000) does at ten sizes in 6..24 px/em — 5x10, 6x12, 7x14, 8x16,
   9x18, 10x20, 11x22, 13x26, 14x28, 15x30, the historical terminal cells — where
   JetBrains Mono (2.200), which this list used to lead with, manages one. So Fira
-  Code leads the list, the shots are captured at 8x16 (kitty, was 8x18) and 10x20
-  (half-blocks), and the rasterisation size comes from the face's own line
-  metrics rather than a `0.78 × cell_h` guess: 13px and 16px respectively, with a
-  printed complaint if some other face's cell does not match the box it sits in.
+  Code leads the list, and the rasterisation size comes from the face's own line
+  metrics rather than a `0.78 × cell_h` guess, with a printed complaint if some
+  other face's cell does not match the box it sits in.
+
+  **The kitty cell is 16x32** (SQ-1001; it was 8x18, then 8x16), which is 26 px/em
+  of that face and lands exactly. The absolute size is not a taste either: a v6
+  press draws its text on an 8x16 *game*-pixel cell, hybrid gives each of those
+  characters one terminal cell, and the art beside it is magnified by `s` — so a
+  cell of `8s × 16s` puts one game character in one terminal cell and anything
+  smaller renders the prose at a fraction of the size the game laid out. At 8x16
+  against art at 2x it was rendering it at half. The knock-on is that a kitty shot
+  cannot magnify by less than 2: at 1x the game's 80-column screen would get 40
+  cells and its text overruns its own windows. Half-blocks keep 10x20 because
+  `Picker::halfblocks()` hardcodes that cell whatever the terminal reports.
 
   Coverage stopped being the deciding question at the same time. `Face::draw`
   used to send a fixed RANGE — U+2500..=U+259F — to the bitmap master and
@@ -483,17 +493,30 @@ Five things are deliberate:
   exists because a tofu box went unnoticed.
 
 - **A shot's `size` is a magnification.** A v6 press lays out on a fixed native
-  screen (640x400 for everything in the manifest) and lanthorn letterboxes it
-  into the story pane at `min(box_w / native_w, box_h / native_h)`, unrounded;
-  the composite is then resized once to `round(native · s)` with every band a 1:1
+  screen (640x400 for most of the manifest) and lanthorn letterboxes it into the
+  story pane at `min(box_w / native_w, box_h / native_h)`, unrounded; the
+  composite is then resized once to `round(native · s)` with every band a 1:1
   crop out of it. So `s` is the only place softness can enter, and the manifest's
-  sizes are the ones where it is a whole number — 96x28, 162x53 and 242x78 for a
-  640x400 press at an 8x16 cell (1x, 2x, 3x), 130x43 at half-blocks' 10x20. The
+  sizes are the ones where it is a whole number — 82x28, 122x41 and 162x53 for a
+  640x400 press at a 16x32 cell (2x, 3x, 4x), 130x43 at half-blocks' 10x20. The
   first draft was 117x40 throughout, which is 1.4375x. `Provenance` derives the
   native screen from the mounted medium through `startup.rs`'s own chain, the
   tool prints the magnification under every frame, and
   `every_v6_shot_magnifies_by_a_whole_number` fails the gate if a size drifts off
-  it. This cannot become one constant: Arthur's Apple II press is 560x384.
+  it. This cannot become one constant: Arthur's Apple II press is 560x384, and
+  the Macintosh's monochrome plates are 480x300 — which is why `zork0-mac-mono`
+  is 92x32 and every other kitty shot is 82x28.
+- **A `--pictures` name is part of the provenance** (SQ-1001). A shot may pass
+  `args = ["--pictures", "Pic.data"]` to choose which rendition of the artwork to
+  draw, and the archive's own flavour then picks the machine. `Provenance::read`
+  takes that name and resolves the override the way `startup.rs` does, because the
+  named archive changes the picture space the press lays out on: read without it,
+  the native screen, the magnification and the profile all belong to the rendition
+  the shot did not draw, and all of them stay self-consistent. `expect` cannot
+  catch that — two renditions of one scene look like each other. A named archive
+  that will not load fails the shot outright rather than falling back to the
+  Blorb, which in the app is the right call for a player and in a gallery is a
+  caption describing a picture that is not there.
 - **Nothing about a frame is declared twice.** The release and serial come from
   the header of the bytes the medium mounted; the turn count is counted off the
   key script. A manifest that tries to state either is refused.

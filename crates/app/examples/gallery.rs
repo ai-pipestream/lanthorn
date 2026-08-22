@@ -171,7 +171,7 @@ fn main() -> std::process::ExitCode {
         // Provenance FIRST, and from the mount rather than the filename: a disk
         // image is a different build of the game, so a frame captioned with a
         // release it did not load is worse than one captioned with none.
-        let provenance = match gallery::Provenance::read(&shot.media_path()) {
+        let provenance = match gallery::Provenance::read(&shot.media_path(), shot.pictures()) {
             Ok(p) => p,
             Err(e) => {
                 println!("SKIP  {e}");

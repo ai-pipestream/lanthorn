@@ -17,15 +17,24 @@
 # neighbouring disk under a caption about Zork Zero's border art. `expect` names
 # something that must be on the resolved screen, and it caught that.
 #
-# `backend` chooses the cell size too (kitty 8x16, half-blocks 10x20), because
+# `backend` chooses the cell size too (kitty 16x32, half-blocks 10x20), because
 # the half-block picker uses its own 10x20 font whatever the terminal reports and
 # a capture at any other cell size draws a geometry lanthorn was not using. Both
 # cells are exactly 1:2, which is what makes a half-block sample square.
 #
+# `args` is passed to lanthorn as typed, minus the three arguments the tool owns.
+# `--pictures NAME` is the interesting one and the reason Zork Zero has six rows
+# below: it names WHICH rendition of the artwork to draw, and the archive's own
+# flavour then picks the machine. The harness reads that name back out of `args`
+# so the provenance under the frame describes the screen the shot actually booted
+# — the Macintosh's monochrome plates lay out on 480x300 where its colour ones
+# are 320x200 doubled, and a magnification computed off the wrong one is wrong
+# and self-consistent (SQ-1001).
+#
 # ── `size` IS A MAGNIFICATION, NOT A TASTE (SQ-0963) ─────────────────────────
 #
-# A v6 press lays itself out on a fixed native screen — 640x400 for every medium
-# in this manifest — and lanthorn letterboxes that into the story pane at
+# A v6 press lays itself out on a fixed native screen — 640x400 for most media in
+# this manifest — and lanthorn letterboxes that into the story pane at
 # `min(box_w / native_w, box_h / native_h)`, unrounded. The composite is resized
 # ONCE to `round(native * s)` and every band is a 1:1 crop out of it, so `s` is
 # the only place softness can enter a frame: at a whole `s` one art pixel lands on
@@ -36,20 +45,43 @@
 # The story pane's content is `COLS - 2` by `ROWS - 3` cells (one row for the help
 # bar, one cell of border on every side), so with a 640x400 press:
 #
-#   kitty, 8x16 cell        s = min((COLS-2)/80, (ROWS-3)/25)
-#     1x  96x28      2x  162x53      3x  242x78
+#   kitty, 16x32 cell       s = min((COLS-2)/40, (ROWS-3)/12.5)
+#     2x  82x28      3x  122x41     4x  162x53
 #   half-blocks, 10x20 cell s = min((COLS-2)/64, (ROWS-3)/20)
 #     1x  66x23      2x  130x43
 #
-# Each of those binds on BOTH axes at once, so the art fills the pane exactly with
-# no letterbox left over. `every_v6_shot_magnifies_by_a_whole_number` recomputes
-# this over the committed file and fails if a size drifts off it, and the gallery
-# tool prints the magnification it measured under every frame.
+# `every_v6_shot_magnifies_by_a_whole_number` recomputes this over the committed
+# file and fails if a size drifts off it, and the gallery tool prints the
+# magnification it measured under every frame.
 #
 # This is per-shot arithmetic and cannot become one constant: presses differ in
-# native size (Arthur's Apple II press is 560x384), so a size that is integral for
-# one is fractional for the next. The native screen is DERIVED at capture time
-# from the mounted medium, never declared here.
+# native size (Arthur's Apple II press is 560x384, the Macintosh's monochrome
+# plates are 480x300 — which is why `zork0-mac-mono` is 92x32 and nothing else
+# is), so a size that is integral for one is fractional for the next. The native
+# screen is DERIVED at capture time from the mounted medium, never declared here.
+#
+# ── AND WHY THE KITTY GRIDS HALVED (SQ-1001) ─────────────────────────────────
+#
+# Every kitty shot used to be 162x53 on an 8x16 cell, and the type in them was
+# half the size the game laid out. A v6 press draws its text on an 8x16 GAME-pixel
+# cell; hybrid mode gives each of those characters one TERMINAL cell; the art
+# beside it is magnified by `s`. So the terminal cell that matches the art is
+# `8s x 16s`, and at `s = 2` that is 16x32 — the cell every kitty shot is now
+# captured at, with the grid halved to hold the same box. The frames are the same
+# device size and the same magnification; the prose in them is twice as big and
+# sits in its own boxes the way the artist drew it.
+#
+# The rung that went is 1x. At `s = 1` a 16x32 cell would give the game's own
+# 80-column screen 40 cells to lay out in, and its text overruns its windows —
+# measured on Journey at 42x16, where "Individual Commands" came out "Individual
+# Comman". So a kitty shot magnifies by at least 2, and the pane-size row now runs
+# 2x / 3x / 4x. It shows exactly what it showed before: one artwork at three
+# resolutions, none of them a resampled version of another.
+#
+# The half-block row keeps its 10x20 cell and its small type, and that is not an
+# oversight: `Picker::halfblocks()` hardcodes 10x20 whatever the terminal reports,
+# so capturing at any other cell would draw a geometry lanthorn was not using. Its
+# type is the size a reader without a graphics protocol actually gets.
 #
 # The media directories (`stories/`, `treasures/`, `masterpieces/`) are
 # gitignored, so this cannot run anywhere they are absent. A missing medium is a
@@ -72,9 +104,9 @@ game reserves and paints into, with the prose and the party menu laid out around
 it. lanthorn keeps the art as kitty graphics and the text as terminal cells, so \
 the two share a boundary without either being resampled."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "162x53"
+size = "82x28"
 expect = ["The Party", "Individual Commands"]
-expect_art_cells = 600
+expect_art_cells = 150
 
 [[shots]]
 id = "journey-amiga"
@@ -87,12 +119,39 @@ file above, with the Amiga's palette and its own idea of which window the \
 narration goes through. lanthorn reads the medium and dresses the screen as that \
 machine did."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "162x53"
+size = "82x28"
 expect = ["The Party", "Individual Commands"]
 
-# ── Zork Zero: three presses of one game ─────────────────────────────────────
+# ── Zork Zero: six renditions of one scene ───────────────────────────────────
 #
-# Three media, three builds. This is the row the /media page is for.
+# THE POINT OF THIS ROW IS THAT THE FRAMES DIFFER (SQ-1001). It used to be four,
+# and every one of them drew the MCGA plates: the Blorb wraps them, the 720K DOS
+# floppy carries `ZORK0.MG1` and nothing else, and the Amiga's and the Macintosh's
+# COLOUR art is close enough to MCGA at a glance that a reader saw one picture
+# four times over. What Zork Zero actually shipped as is five video cards, and
+# those differences are not subtle at all — CGA is two colours, EGA dithers
+# sixteen, the Macintosh's second archive is black and white.
+#
+# Which rendition each row draws, and where it comes from:
+#
+#   zork0-blorb     Zork0.blb beside the story        MCGA, 256 colours
+#   zork0-dos       720K DOS floppy, disk 1           MCGA — the only art on it
+#   zork0-dos-cga   360K DOS floppy, disk 1           CGA, two colours
+#   zork0-dos-ega   360K DOS floppy, disk 2           EGA, off disk 3 of that box
+#   zork0-amiga     Amiga floppy                      the Amiga's own plates
+#   zork0-mac-mono  Macintosh floppy, --pictures      Pic.data, monochrome
+#
+# NOT here, and it is the one that was cut rather than the one that was never
+# tried: the Macintosh's COLOUR archive, `CPic.data`, which is what that disk
+# hands back on its own. It was captured and it is a fifth brown frame — the same
+# picture as the Blorb, the 720K floppy and the Amiga. Its release (296, October
+# 1988) and its machine are worth showing, so `zork0-mac-mono` carries them, off
+# the same disk.
+#
+# The first key is not for the game. lanthorn raises a notice on the opening
+# frame and the next key dismisses it rather than reaching the parser, so
+# `text:look` on its own typed "ook" and every one of these frames used to carry
+# `[I don't know the word "ook."]` under its artwork. Measured 2026-08-21.
 
 [[shots]]
 id = "zork0-blorb"
@@ -103,11 +162,59 @@ caption = """
 Zork Zero frames every scene in a decorated border that is genuine artwork on all \
 four sides, with a compass rose and a heraldic banner across the top. The flanks \
 are the one thing hybrid mode rasterises on purpose: their pixels are not \
-anything the game printed as a character."""
-keys = "wait:3000,text:look,cr,wait:2000"
-size = "162x53"
+anything the game printed as a character. This is the Blorb beside the story, \
+which wraps the 256-colour MCGA plates — the reference the five frames below are \
+worth reading against."""
+keys = "wait:3000,cr,wait:1200,text:look,cr,wait:2000"
+size = "82x28"
 expect = ["Zork Zero", "Banquet Hall"]
-expect_art_cells = 1500
+expect_art_cells = 375
+
+[[shots]]
+id = "zork0-dos"
+title = "Zork Zero"
+press = "DOS 720K release floppy (.ima, FAT12)"
+media = "stories/Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) (720K) (Disk 1) [!].ima"
+caption = """
+The PC pressing on 720K, which carries `ZORK0.MG1` and no other rendition — so \
+this is the same MCGA artwork as the Blorb frame above, off the disk it was cut \
+from, and the difference between the two frames is the machine: the IBM PC's own \
+page and palette, taken from the medium and not configured."""
+keys = "wait:3000,cr,wait:1200,text:look,cr,wait:2000"
+size = "82x28"
+expect = ["Zork Zero", "Banquet Hall"]
+expect_art_cells = 375
+
+[[shots]]
+id = "zork0-dos-cga"
+title = "Zork Zero"
+press = "DOS 360K release floppies (.ima, FAT12), disk 1 of 3"
+media = "stories/Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) (360K) (Disk 1) [!].ima"
+caption = """
+The same artwork as everything above it, on a card that had four colours and \
+could show two of them at once. The banner, the columns and the compass rose are \
+all still there, dithered out of black and white — which is what Zork Zero looked \
+like on a great many of the PCs it was bought for. Naming disk 1 is how you ask \
+for it; the release's default is the colour rendition on disk 3."""
+keys = "wait:3000,cr,wait:1200,text:look,cr,wait:2000"
+size = "82x28"
+expect = ["Zork Zero", "Banquet Hall"]
+expect_art_cells = 375
+
+[[shots]]
+id = "zork0-dos-ega"
+title = "Zork Zero"
+press = "DOS 360K release floppies (.ima, FAT12), disk 2 of 3"
+media = "stories/Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) (360K) (Disk 2) [!].ima"
+caption = """
+The same release on 360K disks, where the story sits alone on disk 2 and the EGA \
+plates are on disk 3 — a release is not a platter, and lanthorn asks the box \
+rather than the disk. Sixteen colours dithered against each other, which is what \
+most people who bought this in 1989 actually saw."""
+keys = "wait:3000,cr,wait:1200,text:look,cr,wait:2000"
+size = "82x28"
+expect = ["Zork Zero", "Banquet Hall"]
+expect_art_cells = 375
 
 [[shots]]
 id = "zork0-amiga"
@@ -118,38 +225,31 @@ caption = """
 The Amiga pressing, which is release 366 where the story file is 393 and lays its \
 story window out somewhere else. Nothing was configured to get this: the mount \
 reported an Amiga floppy and the profile followed."""
-keys = "wait:3000,text:look,cr,wait:2000"
-size = "162x53"
+keys = "wait:3000,cr,wait:1200,text:look,cr,wait:2000"
+size = "82x28"
 expect = ["Zork Zero", "Banquet Hall"]
-expect_art_cells = 1500
+expect_art_cells = 375
 
 [[shots]]
-id = "zork0-macintosh"
+id = "zork0-mac-mono"
 title = "Zork Zero"
-press = "Macintosh release floppy (.image, HFS)"
+press = "Macintosh release floppy (.image, HFS), monochrome plates"
 media = "stories/Zork Zero Disk.image"
+args = ["--pictures", "Pic.data"]
 caption = """
-The Macintosh disk, and by a distance the outlier of the three: October 1988, \
-where both the others are 1989. Read it beside the Blorb frame — same scene, same \
-art, a build nearly a year older and a machine profile of its own."""
-keys = "wait:3000,text:look,cr,wait:2000"
-size = "162x53"
+The Macintosh disk, by a distance the outlier of the set: release 296, October \
+1988, where every other press here is 1989. Macs were sold with two screens and \
+the disk carries an archive for each; this is `Pic.data`, the monochrome one, \
+drawn for a Mac Plus. Choosing it is a preference nothing on the volume states, so \
+it is named outright — and it is not the colour art in two colours but a different \
+set of plates, hatched and stippled by hand. It lays out on a 480x300 screen where \
+the colour ones are 320x200 doubled, which is why this is the one row here that is \
+not 82x28: 92x32 magnifies a 480x300 press by a whole number and 82x28 would have \
+magnified it by 2.667."""
+keys = "wait:3000,cr,wait:1200,text:look,cr,wait:2000"
+size = "92x32"
 expect = ["Zork Zero", "Banquet Hall"]
-expect_art_cells = 1500
-
-[[shots]]
-id = "zork0-dos"
-title = "Zork Zero"
-press = "DOS 720K release floppy (.ima, FAT12)"
-media = "stories/Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) (720K) (Disk 1) [!].ima"
-caption = """
-The PC pressing, with its EGA plates. The same release as the story file, and a \
-different machine's page and palette — which is the whole of the difference \
-between these two frames."""
-keys = "wait:3000,text:look,cr,wait:2000"
-size = "162x53"
-expect = ["Zork Zero", "Banquet Hall"]
-expect_art_cells = 1500
+expect_art_cells = 200
 
 # ── Arthur: the tiled flank ──────────────────────────────────────────────────
 #
@@ -182,9 +282,9 @@ they stay pictures; the status band beneath them, and the italics in the prose, 
 characters the game printed, so they stay characters. Deciding that per strip is \
 what hybrid mode is for."""
 keys = "wait:4000,text:n,wait:2500,text:n,wait:4000,cr,wait:2500,cr,wait:2500,cr,wait:2500,cr,wait:2500,cr,wait:3000"
-size = "162x53"
+size = "82x28"
 expect = ["Churchyard", "St Anne's Day"]
-expect_art_cells = 800
+expect_art_cells = 200
 
 # ── The full-frame composites ────────────────────────────────────────────────
 #
@@ -202,10 +302,10 @@ A modern Version 6 game that draws its whole screen as one composite — a card 
 rather than a page with a picture on it. The deal is pinned to a seed so this frame \
 is the same frame every release."""
 keys = "wait:2500,cr,wait:1500,cr,wait:1500"
-size = "162x53"
+size = "82x28"
 seed = 12345
 expect = ["scopa"]
-expect_art_cells = 3000
+expect_art_cells = 750
 
 [[shots]]
 id = "fmvpoker"
@@ -217,32 +317,22 @@ The other full-frame composite in the corpus, and the one that proved the seed \
 matters: two captures of it differ by tens of thousands of pixels and not one of \
 them is a rendering difference."""
 keys = "wait:2500,cr,wait:1500,cr,wait:1500"
-size = "162x53"
+size = "82x28"
 seed = 12345
 expect = ["fmvpoker.z6"]
-expect_art_cells = 3000
+expect_art_cells = 750
 
 # ── Pane sizes ───────────────────────────────────────────────────────────────
 #
 # The same game, the same release, the same turn — three terminals. Layout
 # changes character between them, which is a thing a single frame cannot show.
 #
-# These three are 1x, 2x and 3x of Journey's 640x400 screen, which is the row that
-# shows what an integer magnification buys: the same artwork at three resolutions,
-# every one of them pixel-exact, and none of them a resampled version of another.
-
-[[shots]]
-id = "journey-narrow"
-title = "Journey"
-press = "story file, in a small terminal"
-media = "stories/journey-r83-s890706.z6"
-caption = """
-The same frame in a 96x28 terminal, where the pane holds Journey's 640x400 screen \
-at exactly 1:1. v6 art is scaled by pixel and text placed by cell, so a smaller \
-pane is a different composition rather than the same one shrunk."""
-keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "96x28"
-expect = ["The Party", "Individual Commands"]
+# With `journey-blorb` above they are 2x, 3x and 4x of Journey's 640x400 screen,
+# which is the row that shows what an integer magnification buys: the same artwork
+# at three resolutions, every one of them pixel-exact, and none of them a
+# resampled version of another. The row opened on 1x until SQ-1001 moved the kitty
+# cell to 16x32 — see the header for why a 1x kitty shot no longer has room for
+# the game's own text.
 
 [[shots]]
 id = "journey-wide"
@@ -250,11 +340,24 @@ title = "Journey"
 press = "story file, in a large terminal"
 media = "stories/journey-r83-s890706.z6"
 caption = """
-And in a 242x78 terminal, where the same screen goes up three times without a \
-single interpolated edge — one art pixel to a 3x3 block of device pixels, exactly \
-as the artist drew it."""
+The same frame in a 122x41 terminal, where the same screen goes up three times \
+without a single interpolated edge — one art pixel to a 3x3 block of device \
+pixels, exactly as the artist drew it."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "242x78"
+size = "122x41"
+expect = ["The Party", "Individual Commands"]
+
+[[shots]]
+id = "journey-huge"
+title = "Journey"
+press = "story file, in a very large terminal"
+media = "stories/journey-r83-s890706.z6"
+caption = """
+And four times, in a 162x53 terminal — the pane a full-screen window on a 4K \
+display gives you. v6 art is scaled by pixel and text placed by cell, so each of \
+these three is a different composition rather than the same one enlarged."""
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+size = "162x53"
 expect = ["The Party", "Individual Commands"]
 
 # ── The fallback everyone can see ────────────────────────────────────────────
@@ -286,6 +389,6 @@ The map pane, drawn from nothing but the game's own output as the player walks. 
 This is the one frame in the gallery that is about lanthorn rather than about a \
 game."""
 keys = "wait:2000,text:n,cr,wait:700,text:n,cr,wait:700,text:up,cr,wait:700,text:take egg,cr,wait:700,text:down,cr,wait:900"
-size = "140x40"
+size = "122x44"
 show_map = true
 expect = ["Forest Path", "Up a Tree", "West of House"]

@@ -256,14 +256,36 @@ impl Shot {
     /// coincidence. A half-block sample is `cell_width` wide by `cell_height / 2`
     /// tall, so a square sample — equal resolution on both axes — wants a cell
     /// of exactly 1:2, and anything else samples the artwork finer across than
-    /// down for no reason at all. The kitty cell was 8x18 and is now **8x16**:
-    /// 1:2, the historical VGA text cell, the cell `app::render::bitfont`'s
-    /// Uni-VGA master blits into 1:1 rather than resampling, and one of the ten
-    /// sizes the gallery's own face lands a whole-numbered cell on (see
-    /// [`FONT_CANDIDATES`]). `the_cell_is_square_for_half_block_samples` pins it.
+    /// down for no reason at all. `the_cell_is_square_for_half_block_samples`
+    /// pins that ratio for both backends.
+    ///
+    /// THE KITTY CELL IS **16x32**, AND IT IS THE GAME'S OWN FONT (SQ-1001). It
+    /// was 8x18, then 8x16, and 8x16 was half the size the frames needed. A v6
+    /// press draws its text on an 8x16 GAME-pixel cell (`v6_layout::FONT_W` /
+    /// `FONT_H`, `zvm::screen::V6_FONT_*`), hybrid mode gives each of those
+    /// characters one TERMINAL cell, and the art beside it is magnified by `s` —
+    /// so a terminal cell of `8 x 16` against art at `s = 2` renders type at half
+    /// the size the game laid out. That is not a taste; it is visible in every
+    /// frame taken before this quest, where Journey's menu is a third the height
+    /// of its own box. The cell that matches is `8s x 16s`, and at the `s = 2`
+    /// this manifest's standard grid uses that is 16x32: one game character to
+    /// one terminal cell, exactly.
+    ///
+    /// The knock-on is that **a kitty shot may not magnify by less than 2**.
+    /// At `s = 1` the game's own 80-column screen would have to fit 40 cells and
+    /// its text overruns its windows — measured, on Journey at 42x16: "Individual
+    /// Commands" came out as "Individual Comman". The 1x rung the pane-size row
+    /// used to open on is gone for that reason and not for a nicer picture.
+    ///
+    /// 16x32 is also on the default face's exact-cell ladder: Fira Code's cell is
+    /// 0.615/1.231 em = 2.000, so 26 px/em rounds to exactly 16x32 and
+    /// [`Face::cell_complaint`] stays quiet (see [`FONT_CANDIDATES`]). 20x40 —
+    /// the other size considered — does not: 32 px gives 20x39 and 33 px gives
+    /// 20x41, so every shot would have been drawn in type that did not sit square
+    /// in its cell.
     pub fn cell_px(&self) -> (u16, u16) {
         match self.backend {
-            Backend::Kitty => (8, 16),
+            Backend::Kitty => (16, 32),
             Backend::Halfblocks => (10, 20),
         }
     }
@@ -346,6 +368,21 @@ impl Shot {
     pub fn media_path(&self) -> PathBuf {
         repo_root().join(&self.media)
     }
+
+    /// The archive this shot names with `--pictures`, if it names one.
+    ///
+    /// Read back out of `args` rather than declared a second time. It is not
+    /// decoration: a named archive picks BOTH the artwork and the machine — a
+    /// DOS `.eg1` asks for the IBM PC, the Macintosh's monochrome `Pic.data` for
+    /// a two-colour Macintosh — and it changes the picture SPACE the press lays
+    /// itself out on, which is the denominator of every magnification this file
+    /// computes. A [`Provenance`] read without it describes a screen the shot
+    /// never booted, and every number around it stays self-consistently wrong
+    /// (SQ-1001).
+    pub fn pictures(&self) -> Option<&str> {
+        let i = self.args.iter().position(|a| a == "--pictures")?;
+        self.args.get(i + 1).map(String::as_str)
+    }
 }
 
 // ── Provenance ────────────────────────────────────────────────────────────────
@@ -376,25 +413,66 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    pub fn read(path: &Path) -> Result<Provenance, String> {
+    /// `pictures` is the shot's `--pictures` name, from [`Shot::pictures`], and
+    /// has to be passed for the same reason lanthorn itself resolves the
+    /// override before it builds the engine: the named archive settles both the
+    /// interpreter profile and the picture space, so a native screen read
+    /// without it is the DEFAULT rendition's screen wearing this shot's caption.
+    /// Zork Zero's Macintosh disk is the case that shows it — `CPic.data` is
+    /// 320x200 doubled to 640x400, its monochrome `Pic.data` is 480x300 at 1:1,
+    /// and the two want different pane sizes to magnify by a whole number.
+    pub fn read(path: &Path, pictures: Option<&str>) -> Result<Provenance, String> {
         let (loaded, image) = app::hints::load_mounted_story(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let bytes = loaded.bytes();
         if bytes.len() < 0x18 {
             return Err(format!("{}: too short to carry a Z-machine header", path.display()));
         }
+        // A NAMED ARCHIVE THAT DOES NOT LOAD IS A REFUSAL, not a fallback. In the
+        // app it is: lanthorn says so and draws the Blorb instead, which is the
+        // right call for a player mid-launch. In a gallery it would be a shot
+        // captioned "the monochrome plates" showing the colour ones, with the
+        // release, serial and medium all still perfectly correct — the exact
+        // shape of failure `expect` exists for, and `expect` cannot see it
+        // because both renditions draw the same scene.
+        //
+        // Only "did not load" is fatal. `warning()` also speaks for a LOADED
+        // archive whose continuation volume was refused — Arthur's and Journey's
+        // EGA ship as `.EG1` + `.EG2` — and that is a frame with fewer pictures
+        // in it, not a frame of the wrong rendition.
+        let over = picture_override(path, pictures);
+        if matches!(
+            over,
+            app::graphics::PictureOverride::Missing { .. } | app::graphics::PictureOverride::Unusable { .. }
+        ) {
+            return Err(over.warning().unwrap_or_else(|| "the named archive did not load".into()));
+        }
         Ok(Provenance {
             version: bytes[0],
             release: u16::from_be_bytes([bytes[2], bytes[3]]),
             serial: String::from_utf8_lossy(&bytes[0x12..0x18]).into_owned(),
             medium: medium_name(image),
-            native: (bytes[0] == 6).then(|| native_screen(path, image)).flatten(),
+            native: (bytes[0] == 6).then(|| native_screen(path, image, over)).flatten(),
         })
     }
 
     /// `v6 r83/s890706 off a story file`.
     pub fn describe(&self) -> String {
         format!("v{} r{}/s{} off {}", self.version, self.release, self.serial, self.medium)
+    }
+}
+
+/// Resolve a shot's `--pictures` name the way lanthorn's own launch does.
+///
+/// Only the shot's own flag reaches here. The per-game sidecar the two-argument
+/// [`app::graphics::PictureOverride::resolve`] would also read belongs to a save
+/// directory the gallery creates fresh for every capture, so there is never one
+/// to find — and looking for one anyway would let a stale sidecar on this machine
+/// change what the committed manifest captures.
+fn picture_override(path: &Path, pictures: Option<&str>) -> app::graphics::PictureOverride {
+    match pictures {
+        Some(name) => app::graphics::PictureOverride::resolve_with_session(path, path, Some(name)),
+        None => app::graphics::PictureOverride::Unset,
     }
 }
 
@@ -408,9 +486,19 @@ impl Provenance {
 /// if `native_std_window` is left off — and this number is the DENOMINATOR of
 /// every magnification below, so getting it wrong would make each of them
 /// self-consistently wrong.
-fn native_screen(path: &Path, image: Option<app::hints::DiskImage>) -> Option<(u32, u32)> {
-    let profile = app::interpreter::InterpreterProfile::resolve(path, None, None, image);
-    let picts = app::graphics::PictSource::resolve(path, None);
+///
+/// `over` is the shot's `--pictures` archive, already resolved, and enters the
+/// chain exactly where `startup.rs` puts it: the override is settled first, its
+/// FLAVOUR selects the profile, and the loaded archive outranks the Blorb and the
+/// medium's own art.
+fn native_screen(
+    path: &Path,
+    image: Option<app::hints::DiskImage>,
+    over: app::graphics::PictureOverride,
+) -> Option<(u32, u32)> {
+    let flavour = over.flavour();
+    let profile = app::interpreter::InterpreterProfile::resolve(path, None, flavour, image);
+    let picts = app::graphics::PictSource::resolve_with_override(path, over, None);
     let space = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
     let art_scale = picts.art_scale();
     // `session.rs`'s own rule: a declared picture space is drawn at the scale
