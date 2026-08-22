@@ -92,6 +92,22 @@ fn transmit(id: u32) -> String {
     )
 }
 
+/// [`transmit`]'s twin with its payload deflated and `o=z` declared — the shape
+/// lanthorn actually sends to a terminal that can inflate (SQ-0991).
+fn transmit_compressed(id: u32) -> String {
+    use std::io::Write as _;
+    let (w, h) = (u32::from(ART_COLS) * CELL_W, u32::from(ART_ROWS) * CELL_H);
+    let rgba = [7u8, 8, 9, 255].repeat((w * h) as usize);
+    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(&rgba).expect("an in-memory encoder cannot fail");
+    let z = e.finish().expect("an in-memory encoder cannot fail");
+    assert!(z.len() < 3072, "one chunk keeps the fixture readable; chunking is inflate.rs's own case");
+    format!(
+        "\x1b_Gq=2,a=T,U=1,i={id},f=32,o=z,t=d,s={w},v={h},c={ART_COLS},r={ART_ROWS},z=3,m=0;{}\x1b\\",
+        b64(&z)
+    )
+}
+
 /// One row of placeholders in lanthorn's own shape: the LEAD cell carries the
 /// full diacritic triple (image row, image column, id high byte) and every cell
 /// after it is a bare `U+10EEEE` relying on the continuation rule.
@@ -135,6 +151,53 @@ fn overpaint_lead_cells(s: &mut String) {
 mod protocol {
     use super::*;
     use crate::pty_stream::oracle::{self, Origin};
+
+    /// SQ-1000: the oracle undoes `o=z` ITSELF, so a caller holding a raw capture
+    /// cannot silently resolve a screen with no pixels on it.
+    ///
+    /// This is the defect that took the project's own proof sheet out. The
+    /// terminal core links no zlib, so a compressed transmit is dropped outright —
+    /// and the PLACEMENT still resolves, because the placeholder cells are just
+    /// cells. `examples/gallery.rs` kept finding each illustration's rect and
+    /// painting nothing into it, which reads as a game that drew a blank screen.
+    /// Every gallery illustration went blank the moment compression shipped and
+    /// 5,945 tests passed throughout (SQ-0991/SQ-0999). Undoing it was each
+    /// caller's job until now, which is a contract nobody can see they have
+    /// broken.
+    ///
+    /// Asserted as a TWIN of the uncompressed frame rather than against a copied
+    /// expectation: same image, same placement, one of them deflated. A stream
+    /// the oracle cannot inflate resolves the placement with no `source_y` at all,
+    /// so the last assertion is the one that separates "art" from "art-shaped
+    /// hole".
+    #[test]
+    fn a_compressed_transmit_resolves_exactly_as_its_uncompressed_twin() {
+        let by = |stream: String| {
+            oracle::resolve(stream.as_bytes(), COLS, ROWS, CELL_W, CELL_H, Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)))
+        };
+        let mut plain = transmit(ID_HIGH);
+        let mut zipped = transmit_compressed(ID_HIGH);
+        for row in 0..ART_ROWS {
+            plain.push_str(&placeholder_row(row, HIGH_164));
+            zipped.push_str(&placeholder_row(row, HIGH_164));
+        }
+        assert!(zipped.contains("o=z"), "the fixture must actually be compressed");
+
+        let (a, b) = (by(plain), by(zipped));
+        assert_eq!(a.placements.len(), 1, "the direction: {}", a.describe_placements());
+        assert_eq!(
+            b.describe_placements(),
+            a.describe_placements(),
+            "the deflated twin resolves to the same placement, cell for cell"
+        );
+        let rows: Vec<Option<u32>> =
+            (ART_TOP..ART_TOP + ART_ROWS).map(|r| b.cell(r, ART_LEFT).source_y).collect();
+        assert!(
+            rows.iter().all(Option::is_some),
+            "every art cell draws a row of the IMAGE; a dropped upload leaves the placement \
+             standing with nothing behind it, which is what a blank illustration panel is: {rows:?}"
+        );
+    }
 
     /// The baseline: a run with its lead cell intact is an image, and the oracle
     /// says where. Without this direction the next test would pass for a
@@ -533,12 +596,12 @@ mod emitter {
     /// Resolve everything written so far the way a terminal would.
     ///
     /// The emitter compresses its uploads (`o=z`, SQ-0976) and the oracle's
-    /// terminal core links no zlib, so the bytes go through the same transport
-    /// rewrite a captured stream does — without it every case below reads a
-    /// screen with no art on it at all.
+    /// terminal core links no zlib. `oracle::resolve` undoes that itself now
+    /// (SQ-1000), so this hands it the wire bytes exactly as a capture would —
+    /// which is also what `a_compressed_upload_resolves_without_the_caller_undoing_it`
+    /// pins.
     fn resolve(sink: &Sink) -> oracle::Resolved {
         let bytes = sink.0.borrow();
-        let bytes = pty_stream::inflate::kitty_inflate(&bytes);
         oracle::resolve(&bytes, COLS, ROWS, u32::from(CELL_W), u32::from(CELL_H), Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)))
     }
 

@@ -333,6 +333,23 @@ struct Grid {
 /// `answered` is the `(fg, bg)` the driver replied to OSC 10/11 with; see
 /// [`Colors::from_window`]. `None` falls back to the emulator palette, which is
 /// right only for a stream nobody answered a probe for.
+///
+/// **`bytes` may be the raw wire stream: the `o=z` rewrite happens HERE** (SQ-1000).
+/// The terminal core this resolves through links no zlib — a compressed transmit
+/// is dropped outright and every placement naming it vanishes — so the rewrite in
+/// [`super::inflate`] is not optional for any caller. It used to be each caller's
+/// job, and the failure mode is silent in the worst possible way: the placement
+/// still resolves, there are simply no pixels behind it, which reads as a game
+/// that drew nothing. `examples/gallery.rs` passed `Capture::bytes` and every
+/// illustration in the project's own proof sheet went blank the moment `o=z`
+/// shipped, with 5,945 tests passing throughout (SQ-0991/SQ-0999).
+///
+/// [`kitty_inflate`](super::inflate::kitty_inflate) borrows when the stream has no
+/// `o=z` in it and strips the key from what it rewrites, so it is idempotent and
+/// free on an uncompressed stream: a caller that already holds
+/// [`Capture::terminal_bytes`](super::driver::Capture::terminal_bytes) — still the
+/// right expression for any OTHER reader of what a terminal would see — loses
+/// nothing by passing it.
 pub fn resolve(
     bytes: &[u8],
     cols: u16,
@@ -341,6 +358,7 @@ pub fn resolve(
     cell_h: u32,
     answered: Option<([u8; 3], [u8; 3])>,
 ) -> Resolved {
+    let bytes = &super::inflate::kitty_inflate(bytes);
     let mut t = Terminal::new(Options { cols, rows, max_scrollback: 10_000, ..Default::default() });
     // Pixel geometry is not a constructor argument; these are public fields and
     // the kitty model reads them directly.
