@@ -124,12 +124,22 @@ fn withhold_arrow_from_v6(
 /// Restore the terminal to cooked mode and leave the alternate screen.
 /// Called both on clean exit and from the panic hook.
 /// DisableMouseCapture MUST be issued here so both paths release the mouse.
+///
+/// **Order matters, and it is the reverse of setup: silence the terminal FIRST,
+/// leave raw mode LAST** (SQ-0998). This ran the other way round for as long as it
+/// existed, and the window between the two was wide enough to lose a mouse report
+/// into the shell: `disable_raw_mode` puts ICANON+ECHO back while mode 1003
+/// any-motion reporting is still on, so a report generated in that window goes to
+/// the line discipline instead of to us. The user's shell prompt came back carrying
+/// `35;154;45M` — the tail of `ESC [ < 35;154;45 M`, an SGR (1006) motion report at
+/// column 154, row 45, whose `ESC [ <` the shell ate as an escape and whose
+/// remainder it kept as typed input. With the escapes written while raw mode still
+/// holds, no report can reach the line discipline at all.
 fn restore_terminal() {
     // SQ-0586: FIRST, so anything printed after this — a panic message, a CLI error,
     // the captured-output notice below — reaches the terminal rather than the log we
     // pointed fd 2 at. Idempotent and safe when nothing was installed.
     app::stderr_redirect::restore();
-    let _ = disable_raw_mode();
     // Mode 1016 (pixel mouse reporting) is terminal state that outlives us, and
     // DisableMouseCapture does not clear it — a shell left in PixelMode would hand
     // pixel coordinates to the next program that reads the mouse. (SQ-0563)
@@ -144,7 +154,45 @@ fn restore_terminal() {
         DisableMouseCapture,
         LeaveAlternateScreen
     );
+    // Disabling reporting stops NEW reports; it cannot unsend one already queued.
+    // Anything that arrived between the event loop's last `read()` and the escapes
+    // above is still sitting in the tty's input queue, and leaving raw mode hands it
+    // straight to the shell. Take it off the fd first. (SQ-0998)
+    drain_pending_input();
+    let _ = disable_raw_mode();
 }
+
+/// Consume whatever input is already queued, so it dies with this process instead of
+/// landing on the shell's command line.
+///
+/// `poll(ZERO)` is what does the work: it reads the available bytes off stdin and
+/// parses them into crossterm's own in-memory queue, which the process takes with it.
+/// `read()` is only there to empty that queue, because `poll` short-circuits on a
+/// non-empty one and would otherwise stop reading the fd after the first event.
+///
+/// Bounded, and never blocking. `poll` with a zero timeout only *try*-locks
+/// crossterm's reader and answers `false` when another thread holds it, so this is a
+/// no-op — rather than a wedge — on the one path that runs off the main thread: the
+/// SQ-0502 termination watchdog, which exists precisely because the main loop can be
+/// stuck inside `read()` on a dead pty. The iteration cap covers the other direction,
+/// a terminal still streaming motion faster than we drain it.
+fn drain_pending_input() {
+    for _ in 0..MAX_DRAINED_EVENTS {
+        match poll(Duration::ZERO) {
+            Ok(true) => {
+                if read().is_err() {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// How many queued events [`drain_pending_input`] will discard before giving up.
+/// A quit with the pointer in motion queues a handful; anything past this is a
+/// terminal talking faster than we can listen, and exiting promptly matters more.
+const MAX_DRAINED_EVENTS: usize = 256;
 
 /// Print what the fd-2 redirect swallowed while the TUI was up (SQ-0586), once the
 /// terminal is back. Silent when nothing was captured, which is the normal case.
