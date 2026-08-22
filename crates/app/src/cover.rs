@@ -323,6 +323,20 @@ mod tests {
     /// resource holding `png`. Mirrors `fetch_worker::tests::blorb_with_fspc_and_cover`
     /// (duplicated here, test-only, to keep this module's fixtures self-contained).
     fn blorb_with_fspc(png: &[u8]) -> Vec<u8> {
+        blorb_with_fspc_naming(png, b"Pict", 7, 7)
+    }
+
+    /// [`blorb_with_fspc`] with the dangling cases spelled out: the single
+    /// resource is indexed under `usage`/`res_number`, and the `Fspc` chunk
+    /// names `fspc_number`. Pass a `fspc_number` no resource has, or a `usage`
+    /// that isn't `Pict`, to build a container whose frontispiece cannot
+    /// resolve — the case the Blorb spec does not legislate for (SQ-0985).
+    fn blorb_with_fspc_naming(
+        png: &[u8],
+        usage: &[u8; 4],
+        res_number: u32,
+        fspc_number: u32,
+    ) -> Vec<u8> {
         fn iff_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
             let mut v = Vec::new();
             v.extend_from_slice(ty);
@@ -335,8 +349,8 @@ mod tests {
         }
         let mut ridx = Vec::new();
         ridx.extend_from_slice(&1u32.to_be_bytes()); // count
-        ridx.extend_from_slice(b"Pict");
-        ridx.extend_from_slice(&7u32.to_be_bytes()); // number
+        ridx.extend_from_slice(usage);
+        ridx.extend_from_slice(&res_number.to_be_bytes()); // number
         let ridx_chunk_len = 8 + (4 + 12);
         let fspc_chunk_len = 8 + 4;
         let pict_off = 12 + ridx_chunk_len + fspc_chunk_len;
@@ -344,7 +358,7 @@ mod tests {
         let mut inner = Vec::new();
         inner.extend_from_slice(b"IFRS");
         inner.extend_from_slice(&iff_chunk(b"RIdx", &ridx));
-        inner.extend_from_slice(&iff_chunk(b"Fspc", &7u32.to_be_bytes()));
+        inner.extend_from_slice(&iff_chunk(b"Fspc", &fspc_number.to_be_bytes()));
         inner.extend_from_slice(&iff_chunk(b"PNG ", png));
         let mut file = Vec::new();
         file.extend_from_slice(b"FORM");
@@ -604,6 +618,47 @@ mod tests {
         let img = load_cover(&story_path, Some(&game_dir)).expect("own frontispiece should load");
         let px = img.to_rgb8().get_pixel(0, 0).0;
         assert_eq!(px, [200, 50, 50], "the story's own Fspc must win over a fetched cover.png");
+
+        let _ = std::fs::remove_dir_all(story_path.parent().unwrap());
+    }
+
+    /// An `Fspc` naming a Pict that isn't in the index is a container the Blorb
+    /// spec does not legislate for — it says the chunk holds the "number of a
+    /// Pict resource" and stops there. The picker's only sane reading is *no
+    /// cover*, silently, and specifically **not** a claim on the cover slot:
+    /// the fetched sidecar must still get its turn, exactly as if the broken
+    /// chunk weren't there (SQ-0985).
+    #[test]
+    fn a_dangling_fspc_falls_through_to_the_fetched_cover() {
+        // Indexed as Pict 7; the Fspc names Pict 9, which does not exist.
+        let blorb = blorb_with_fspc_naming(&png_bytes_colored([200, 50, 50]), b"Pict", 7, 9);
+        let (story_path, game_dir) = temp_story_and_game_dir("dangling", &blorb);
+        std::fs::write(game_dir.join("cover.png"), png_bytes_colored([1, 2, 3])).unwrap();
+
+        assert!(load_cover(&story_path, None).is_none(), "an unresolvable Fspc is no cover");
+        let img = load_cover(&story_path, Some(&game_dir)).expect("the sidecar still applies");
+        assert_eq!(
+            img.to_rgb8().get_pixel(0, 0).0,
+            [1, 2, 3],
+            "a dangling Fspc must not shadow the fetched cover.png"
+        );
+
+        let _ = std::fs::remove_dir_all(story_path.parent().unwrap());
+    }
+
+    /// `Fspc` names a **Pict** resource. A container whose only resource with
+    /// that number is a sound resolves to no cover — `Blorb::resource` matches
+    /// on usage as well as number, so the picture lookup simply misses, and it
+    /// must miss rather than decode whatever bytes happen to sit there.
+    #[test]
+    fn an_fspc_naming_a_non_pict_resource_is_no_cover() {
+        let blorb = blorb_with_fspc_naming(&png_bytes_colored([200, 50, 50]), b"Snd ", 7, 7);
+        let (story_path, _game_dir) = temp_story_and_game_dir("wrong-usage", &blorb);
+
+        assert!(
+            load_cover(&story_path, None).is_none(),
+            "Fspc resolves through Pict; a Snd of the same number is not the frontispiece"
+        );
 
         let _ = std::fs::remove_dir_all(story_path.parent().unwrap());
     }

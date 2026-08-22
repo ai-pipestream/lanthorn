@@ -865,6 +865,22 @@ mod tests {
         assert_eq!(b.frontispiece(), None);
     }
 
+    /// The spec gives `Fspc` a length of exactly 4 — one resource number. A
+    /// chunk declaring less than that has not said a number, so the container
+    /// parses with no frontispiece rather than with a number read off whatever
+    /// followed it (SQ-0985; the `clen >= 4` guard in `parse`). The rest of the
+    /// blorb must survive: one bad optional chunk is not a bad blorb.
+    #[test]
+    fn a_short_fspc_chunk_declares_no_frontispiece() {
+        let b = Blorb::parse(build_blorb_with_top(
+            &[(b"Exec", 0, b"ZCOD", b"abcd")],
+            &[(b"Fspc", &[0, 7])], // two bytes: not a resource number
+        ))
+        .unwrap();
+        assert_eq!(b.frontispiece(), None);
+        assert_eq!(b.resource(b"Exec", 0).unwrap().0, b"ZCOD");
+    }
+
     #[test]
     fn ifmd_chunk_is_exposed_verbatim() {
         let xml = br#"<ifindex version="1.0"><story><bibliographic><title>T</title></bibliographic></story></ifindex>"#;
