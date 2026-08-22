@@ -376,9 +376,9 @@ pub struct V6Text {
 }
 
 impl V6Text {
-    /// Pixel width of this run (fixed-cell font).
-    fn px_w(&self) -> u32 {
-        self.text.chars().count() as u32 * V6_FONT_WIDTH as u32
+    /// Pixel width of this run, on the cell the session declared (SQ-0917).
+    fn px_w(&self, cell: V6Cell) -> u32 {
+        self.text.chars().count() as u32 * cell.w as u32
     }
 }
 
@@ -489,8 +489,8 @@ impl ZWindow {
     /// height in text lines less one, matching frotz's `screen_new_line`
     /// threshold (`above + below - 1`). Degenerate (zero-height) windows
     /// report 1 rather than 0 so the count never starts already-due.
-    pub fn more_interval(&self) -> i16 {
-        let lines = (self.y_size / V6_FONT_HEIGHT) as i32;
+    pub fn more_interval(&self, cell: V6Cell) -> i16 {
+        let lines = (self.y_size / cell.h) as i32;
         (lines - 1).clamp(1, i16::MAX as i32) as i16
     }
 
@@ -511,8 +511,8 @@ impl ZWindow {
     /// windows whenever a keystroke actually arrives — see
     /// `console_read_input`/`console_read_key` — which is what stops the count
     /// drifting down to the -999 floor over a long game.
-    pub fn reload_line_count(&mut self) {
-        self.line_count = self.more_interval() as u16;
+    pub fn reload_line_count(&mut self, cell: V6Cell) {
+        self.line_count = self.more_interval(cell) as u16;
     }
 
     /// One new-line in the *scrolling prose* regime (v6 window 0, or an Inform
@@ -525,14 +525,14 @@ impl ZWindow {
     /// The *paint* regime deliberately does not use this: painted text keeps
     /// running past the bottom of its window (runs are screen-absolute), so
     /// clamping there would move glyphs the games expect to stay put.
-    pub fn prose_new_line(&mut self) {
+    pub fn prose_new_line(&mut self, cell: V6Cell) {
         self.x_cursor = self.left_margin.saturating_add(1);
         if self.scrolling() {
             self.tick_line_count();
         }
-        let fh = V6_FONT_HEIGHT as u32;
+        let fh = cell.h as u32;
         if self.y_cursor as u32 + 2 * fh - 1 <= self.y_size as u32 {
-            self.y_cursor += V6_FONT_HEIGHT;
+            self.y_cursor += cell.h;
         } else {
             // The window scrolled under a stationary cursor, so everything
             // already on screen moved up one line and the top line left the
@@ -540,7 +540,7 @@ impl ZWindow {
             // the old rows would freeze the prose in places it no longer is.
             let top = self.y_coord;
             for t in self.streamed.iter_mut() {
-                t.y = t.y.saturating_sub(V6_FONT_HEIGHT);
+                t.y = t.y.saturating_sub(cell.h);
             }
             self.streamed.retain(|t| t.y >= top);
         }
@@ -565,7 +565,7 @@ impl ZWindow {
     /// (SQ-0697) — see [`ZWindow::streamed`]. Extends the run in progress when the
     /// glyph continues it in the same style at the next cell; starts a new one
     /// otherwise (a new line, a `set_cursor` jump, a style or colour change).
-    pub fn record_streamed(&mut self, ch: char, style: u8, fg: ZColour, bg: ZColour) {
+    pub fn record_streamed(&mut self, ch: char, style: u8, fg: ZColour, bg: ZColour, cell: V6Cell) {
         // Window coords and cursors are both 1-based, so the absolute position is
         // origin + cursor - 1 (ZMSD §8.8.1/§8.8.3.2).
         let x = self.x_coord.saturating_add(self.x_cursor).saturating_sub(1);
@@ -573,7 +573,7 @@ impl ZWindow {
         // Where this burst of prose STARTED (SQ-0804) — see `stream_origin`.
         self.stream_origin.get_or_insert((y, x));
         if let Some(last) = self.streamed.last_mut() {
-            let end = last.x as u32 + last.px_w();
+            let end = last.x as u32 + last.px_w(cell);
             if last.y == y
                 && end == x as u32
                 && last.style == style
@@ -610,7 +610,7 @@ impl ZWindow {
     ///
     /// Returns `true` when anything was frozen, which is the host's cue to restart
     /// its transcript at the window's new origin.
-    pub fn retire_streamed(&mut self, x: u16, y: u16, w: u16, h: u16) -> bool {
+    pub fn retire_streamed(&mut self, x: u16, y: u16, w: u16, h: u16, cell: V6Cell) -> bool {
         if self.streamed.is_empty() {
             return false;
         }
@@ -623,8 +623,8 @@ impl ZWindow {
             let ry = run.y.max(1) as i32;
             let covered = rx >= left
                 && ry >= top
-                && rx + run.px_w() as i32 <= right
-                && ry + V6_FONT_HEIGHT as i32 <= bottom;
+                && rx + run.px_w(cell) as i32 <= right
+                && ry + cell.h as i32 <= bottom;
             if covered {
                 kept.push(run);
             } else {
@@ -694,7 +694,7 @@ impl ZWindow {
     /// fully outside the window's visible height `[1, y_size]`), and shifts
     /// the cell-grid fallback by whole rows (`pixels / V6_FONT_HEIGHT`,
     /// truncated toward zero).
-    pub fn scroll_pixels(&mut self, pixels: i16) {
+    pub fn scroll_pixels(&mut self, pixels: i16, cell: V6Cell) {
         // Runs are screen-absolute: the scroll region is this window's CURRENT
         // screen rect; runs shift within it and drop when they leave it.
         let top = self.y_coord.max(1) as i32;
@@ -702,7 +702,7 @@ impl ZWindow {
         let delta = pixels as i32;
         self.texts.retain_mut(|t| {
             let new_y = t.y as i32 - delta;
-            let bottom = new_y + V6_FONT_HEIGHT as i32 - 1;
+            let bottom = new_y + cell.h as i32 - 1;
             if bottom < top || new_y > bottom_edge {
                 false
             } else {
@@ -710,7 +710,7 @@ impl ZWindow {
                 true
             }
         });
-        let rows = pixels / V6_FONT_HEIGHT as i16;
+        let rows = pixels / cell.h as i16;
         self.grid.scroll_rows(rows);
     }
 }
@@ -726,13 +726,20 @@ pub struct V6Windows {
 /// drop it entirely, keep it, or split it into up-to-two remnants. A glyph is
 /// erased when its 8×8 cell intersects the rect at all (paint replaces whole
 /// glyphs; sub-glyph residue can't be represented as text).
-fn trim_run_against_rect(run: V6Text, top: i32, left: i32, h: i32, w: i32) -> Vec<V6Text> {
+fn trim_run_against_rect(
+    run: V6Text,
+    top: i32,
+    left: i32,
+    h: i32,
+    w: i32,
+    cell: V6Cell,
+) -> Vec<V6Text> {
     let ry = run.y as i32;
     // Vertical band overlap?
-    if ry + V6_FONT_HEIGHT as i32 <= top || ry >= top + h {
+    if ry + cell.h as i32 <= top || ry >= top + h {
         return vec![run];
     }
-    let fw = V6_FONT_WIDTH as i32;
+    let fw = cell.w as i32;
     let rx = run.x as i32;
     let n = run.text.chars().count() as i32;
     if rx + n * fw <= left || rx >= left + w {
@@ -785,7 +792,7 @@ impl V6Windows {
     /// labels. (Non-space ink on transparent bg is approximated as covering
     /// its cell: latest-wins per cell, since a text-run model can't
     /// overstrike.)
-    pub fn paint_run(&mut self, win: usize, run: V6Text) {
+    pub fn paint_run(&mut self, win: usize, run: V6Text, cell: V6Cell) {
         if run.text.is_empty() {
             return;
         }
@@ -801,7 +808,7 @@ impl V6Windows {
         // gaps (Shogun pads its status fields with spaces) and erasing under
         // them would eat a neighbouring label painted in the same row.
         let clearing = run.text.chars().all(|c| c == ' ');
-        let fw = V6_FONT_WIDTH as i32;
+        let fw = cell.w as i32;
         let mut seg_start: Option<i32> = None; // char index of current erasing segment
         let chars: Vec<char> = run.text.chars().collect();
         for i in 0..=chars.len() {
@@ -812,8 +819,9 @@ impl V6Windows {
                     self.erase_screen_rect(
                         run.y as i32,
                         run.x as i32 + s * fw,
-                        V6_FONT_HEIGHT as i32,
+                        cell.h as i32,
                         (i as i32 - s) * fw,
+                        cell,
                     );
                     seg_start = None;
                 }
@@ -830,7 +838,7 @@ impl V6Windows {
     /// (which erases the target window's CURRENT screen rect — Shogun erases
     /// its 1-px caret window without disturbing the menu items painted around
     /// it earlier).
-    pub fn erase_screen_rect(&mut self, top: i32, left: i32, h: i32, w: i32) {
+    pub fn erase_screen_rect(&mut self, top: i32, left: i32, h: i32, w: i32, cell: V6Cell) {
         if h <= 0 || w <= 0 {
             return;
         }
@@ -847,14 +855,16 @@ impl V6Windows {
                 if layer.iter().any(|t| {
                     let ty = t.y as i32;
                     let tx = t.x as i32;
-                    ty + (V6_FONT_HEIGHT as i32) > top
+                    ty + (cell.h as i32) > top
                         && ty < top + h
-                        && tx + (t.px_w() as i32) > left
+                        && tx + (t.px_w(cell) as i32) > left
                         && tx < left + w
                 }) {
                     let old = std::mem::take(layer);
-                    *layer =
-                        old.into_iter().flat_map(|t| trim_run_against_rect(t, top, left, h, w)).collect();
+                    *layer = old
+                        .into_iter()
+                        .flat_map(|t| trim_run_against_rect(t, top, left, h, w, cell))
+                        .collect();
                 }
             }
         }
@@ -1362,11 +1372,11 @@ impl StreamState {
     /// The wrap itself happens here, at close, on the whole accumulated buffer
     /// (splitting on ASCII spaces) rather than incrementally per printed word
     /// the way Frotz's `memory_word` does it.
-    pub fn pop_stream3(&mut self, mem: &mut Memory) {
+    pub fn pop_stream3(&mut self, mem: &mut Memory, cell: V6Cell) {
         if let Some(frame) = self.stream3_stack.pop() {
             let total_width = match frame.width_px {
                 Some(w) => {
-                    let (bytes, total_width) = wrap_stream3_text(&frame.buf, w);
+                    let (bytes, total_width) = wrap_stream3_text(&frame.buf, w, cell);
                     // One (count word, bytes) record per line, then a zero word.
                     // `wrap_stream3_text` marks the breaks with ZSCII 13 (§7.1.2.2.1),
                     // which is how the lines are recovered — the separator itself is
@@ -1389,7 +1399,7 @@ impl StreamState {
                     for (i, &b) in frame.buf.iter().enumerate() {
                         mem.write_byte(frame.table_addr + 2 + i as u32, b);
                     }
-                    frame.buf.len() as u32 * V6_FONT_WIDTH as u32
+                    frame.buf.len() as u32 * cell.w as u32
                 }
             };
             // ZMSD §7.1.2.1: in v6, deselecting stream 3 stores "the total
@@ -1415,7 +1425,7 @@ impl StreamState {
 }
 
 /// Word-wrap a stream-3 buffer to `width_px` pixels (fixed-width v6 font,
-/// `V6_FONT_WIDTH` per glyph), replacing the space at each wrap point with a
+/// `cell.w` per glyph), replacing the space at each wrap point with a
 /// ZSCII 13 newline (ZMSD §7.1.2.2.1: "Newlines are written to output stream
 /// 3 as ZSCII 13") — mirrors Frotz's `memory_word`/`memory_close`
 /// (`redirect.c`): a word that would overflow the current line drops its
@@ -1424,8 +1434,8 @@ impl StreamState {
 /// counted as printable width, and line-width accounting restarts after them.
 /// Returns the rewritten bytes and the total width (sum of every completed
 /// line's pixel width, hard-broken or wrapped) for header $30.
-fn wrap_stream3_text(buf: &[u8], width_px: u16) -> (Vec<u8>, u32) {
-    let fw = V6_FONT_WIDTH as u32;
+fn wrap_stream3_text(buf: &[u8], width_px: u16, cell: V6Cell) -> (Vec<u8>, u32) {
+    let fw = cell.w as u32;
     let mut out = Vec::with_capacity(buf.len());
     let mut total: u32 = 0;
     for segment in buf.split(|&b| b == 13) {
@@ -1578,7 +1588,10 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_availa
     // read "0 lines", print "[Screen too small.]" and abort on the first turn.
     // Seed a generous default; the host refines it to the real pane size via
     // `write_screen_dims` once known (and on resize).
-    write_screen_dims(mem, DEFAULT_SCREEN_ROWS, DEFAULT_SCREEN_COLS);
+    // The boot seed always uses the DEFAULT cell: the host has not resolved a
+    // profile yet, and `Machine::set_screen_dims` rewrites all of this with the
+    // real one the moment it does (SQ-0917).
+    write_screen_dims(mem, DEFAULT_SCREEN_ROWS, DEFAULT_SCREEN_COLS, V6Cell::DEFAULT);
 
     // Default colours (ZMSD §8.3.2/§8.3.3). Bytes $2C (default background) and
     // $2D (default foreground) exist in V5+. §8.3.3: a colour-capable interpreter
@@ -2151,6 +2164,70 @@ pub const DEFAULT_SCREEN_COLS: u8 = 80;
 pub const V6_FONT_WIDTH: u16 = 8;
 pub const V6_FONT_HEIGHT: u16 = 16;
 
+/// The Version 6 character cell in native pixels, as a value rather than a pair
+/// of constants (SQ-0917).
+///
+/// # Why this is state and not a constant
+///
+/// The two constants above are one machine's cell, and for years they were read
+/// as every machine's. They are not. Infocom's Macintosh interpreter set
+/// `colWidth := 7` and `lineHeight := 15 {16}`; the Apple IIgs YZIP set
+/// `MFONT_W EQU 3` and `FONT_H EQU 9`. `v6_font_cell` in the app declined to
+/// express any of that three times — EGA (SQ-0790), Macintosh (SQ-0838), Apple
+/// IIgs (SQ-0857) — each time on the reasoning that nothing depended on it.
+///
+/// Something does now. On the black-and-white Macintosh press the archive puts
+/// the story on a 480x300 screen; at 8 wide that is 60 columns, where the
+/// machine's own 7 gives 68. The story lays its hint banner out for the columns
+/// it is told it has, so eight columns of it have nowhere to go and the glyphs
+/// overrun the banner.
+///
+/// # It is a DECLARED metric, not a drawn advance
+///
+/// Worth stating here because it is the trap: `machine-screenshots/mac-zorkzero-hint.png`
+/// shows the Macintosh drawing **proportionally** — `WING` is the same glyph run
+/// at character index 5 in both `EAST WING` and `WEST WING` and starts at x=137
+/// in one and x=139 in the other, which no fixed pitch permits. Infocom's
+/// `stdFont := geneva` is a proportional System font and 7 is simply its average
+/// advance. So `colWidth := 7` is exactly the quantity header `$27` carries: what
+/// the story is TOLD its cell is, which is a different thing from how the
+/// interpreter chose to paint. Matching the declared metric is both the smaller
+/// change and the faithful one; matching the drawn face would mean proportional
+/// layout, which the Z-machine's own column arithmetic cannot express.
+///
+/// # Not a global
+///
+/// The cell is per-session — resolved once at boot from the medium's profile and
+/// never changed — so it lives on [`crate::cpu::Machine`] and is threaded to the
+/// handful of places that quantize by it. It deliberately does NOT live on
+/// [`ScreenState`], which the host archives: the cell is derived from the
+/// profile, so a restore must re-derive it rather than replay a stored copy
+/// (CLAUDE.md, "persist the recipe, not the result"). And it is emphatically not
+/// process-global — see `zvm::screen::set_palette` for what that costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V6Cell {
+    pub w: u16,
+    pub h: u16,
+}
+
+impl V6Cell {
+    /// The 8x16 cell described above — every machine's until a profile says
+    /// otherwise, and the value a bare `Machine` (every unit test) carries.
+    pub const DEFAULT: V6Cell = V6Cell { w: V6_FONT_WIDTH, h: V6_FONT_HEIGHT };
+
+    /// Guard against a zero axis reaching the divisions below. A profile that
+    /// stated `0` would otherwise panic somewhere far from the mistake.
+    pub fn new(w: u16, h: u16) -> Self {
+        V6Cell { w: w.max(1), h: h.max(1) }
+    }
+}
+
+impl Default for V6Cell {
+    fn default() -> Self {
+        V6Cell::DEFAULT
+    }
+}
+
 /// Upper bound on any character-grid dimension a story operand can request
 /// (`split_window`, EXT `window_size`). A hostile/buggy story passing 0xFFFF
 /// would otherwise force a rows×cols cell allocation in the hundreds of
@@ -2179,7 +2256,7 @@ pub const STREAMED_MAX_RUNS: usize = 8000;
 /// v5+: also word 0x22 = width in units, word 0x24 = height in units, and font
 /// size bytes 0x26/0x27 = 1 (one unit per char cell, since we render a fixed
 /// character grid). `rows`/`cols` of 0 are clamped to 1 to avoid a zero size.
-pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8) {
+pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8, cell: V6Cell) {
     let version = mem.version();
     if version < 4 {
         return; // v1-3 have no settable screen-size header fields.
@@ -2193,15 +2270,15 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8) {
         // height in units. v6 units are pixels, so width = cols·8 (640) and
         // height = rows·16 (400) — the ·16 is why a non-square cell needs this
         // path (a square cell made $24 latently correct).
-        mem.write_word(0x22, cols as u16 * V6_FONT_WIDTH); // screen width, pixels
-        mem.write_word(0x24, rows as u16 * V6_FONT_HEIGHT); // screen height, pixels
+        mem.write_word(0x22, cols as u16 * cell.w); // screen width, pixels
+        mem.write_word(0x24, rows as u16 * cell.h); // screen height, pixels
         // ZMSD §11.1 header table (verified against the spec): byte $26 = "Font
         // width in V5, or font HEIGHT in V6"; byte $27 = "Font height in V5, or
         // font WIDTH in V6" — the famous V5↔V6 swap (§8.1.1: "in Version 6 the
         // width and height are stored the other way round"). So in V6:
         // $26 = HEIGHT (16), $27 = WIDTH (8). Latent while square; load-bearing now.
-        mem.write_byte(0x26, V6_FONT_HEIGHT as u8);
-        mem.write_byte(0x27, V6_FONT_WIDTH as u8);
+        mem.write_byte(0x26, cell.h as u8);
+        mem.write_byte(0x27, cell.w as u8);
         return;
     }
     mem.write_byte(0x20, rows);
@@ -2355,19 +2432,19 @@ mod tests {
         assert_eq!(w.stream_origin, None, "a window that has printed nothing has no origin");
         assert_eq!(w.pen(), (9, 7), "the pen is origin + cursor - 1, screen-absolute (§8.8.1)");
 
-        w.record_streamed('a', 0, ZColour::Default, ZColour::Default);
+        w.record_streamed('a', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
         assert_eq!(w.stream_origin, Some((9, 7)), "the first glyph lands at the pen");
 
         // A second glyph, wherever it goes, must not move the origin.
         w.x_cursor += V6_FONT_WIDTH;
-        w.record_streamed('b', 0, ZColour::Default, ZColour::Default);
+        w.record_streamed('b', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
         w.y_cursor += V6_FONT_HEIGHT;
-        w.record_streamed('c', 0, ZColour::Default, ZColour::Default);
+        w.record_streamed('c', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
         assert_eq!(w.stream_origin, Some((9, 7)), "…and only the first");
 
         w.clear_stream_origin();
         assert_eq!(w.stream_origin, None, "cleared, ready for the next burst");
-        w.record_streamed('d', 0, ZColour::Default, ZColour::Default);
+        w.record_streamed('d', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
         assert_eq!(w.stream_origin, Some(w.pen()), "the next burst records its own start");
     }
 
@@ -2512,14 +2589,14 @@ mod tests {
         // v1-3 use bytes 0x20+ for other header data; never clobber them.
         let mut mem = Memory::new(sample_story(3)).unwrap();
         let before = mem.read_byte(0x20);
-        write_screen_dims(&mut mem, 30, 60);
+        write_screen_dims(&mut mem, 30, 60, V6Cell::DEFAULT);
         assert_eq!(mem.read_byte(0x20), before, "v3 header byte 0x20 must be untouched");
     }
 
     #[test]
     fn write_screen_dims_clamps_zero_to_one() {
         let mut mem = Memory::new(sample_story(4)).unwrap();
-        write_screen_dims(&mut mem, 0, 0);
+        write_screen_dims(&mut mem, 0, 0, V6Cell::DEFAULT);
         assert_eq!(mem.read_byte(0x20), 1, "zero rows clamped to 1");
         assert_eq!(mem.read_byte(0x21), 1, "zero cols clamped to 1");
     }
@@ -2527,7 +2604,7 @@ mod tests {
     #[test]
     fn v6_advertises_pixel_screen_and_font() {
         let mut m = Memory::new(sample_story(6)).unwrap();
-        write_screen_dims(&mut m, 24, 80);
+        write_screen_dims(&mut m, 24, 80, V6Cell::DEFAULT);
         assert_eq!(m.read_byte(0x20), 24, "rows");
         assert_eq!(m.read_byte(0x21), 80, "cols");
         assert_eq!(m.read_word(0x22), 80 * V6_FONT_WIDTH, "screen width in pixels");
@@ -2978,7 +3055,7 @@ mod tests {
         // Scroll forward by 32px (two 16px lines):
         //   y=9  -> new_y=-23, bottom=-23+16-1=-8 < 1 -> fully above, dropped.
         //   y=1  -> new_y=-31, bottom=-31+16-1=-16 < 1 -> fully above, dropped.
-        w.scroll_pixels(32);
+        w.scroll_pixels(32, V6Cell::DEFAULT);
         assert!(w.texts.is_empty(), "both runs fully scrolled above the window");
     }
 
@@ -2987,7 +3064,7 @@ mod tests {
         let mut w = ZWindow { y_size: 24, ..Default::default() };
         w.texts.push(V6Text { y: 9, x: 1, text: "keep".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
         // Scroll forward by 8px: y=9 -> 1, bottom=1+16-1=16 >= 1, still kept.
-        w.scroll_pixels(8);
+        w.scroll_pixels(8, V6Cell::DEFAULT);
         assert_eq!(w.texts.len(), 1, "run still overlapping the window is kept");
         assert_eq!(w.texts[0].y, 1, "kept run shifted by -pixels");
     }
@@ -2996,7 +3073,7 @@ mod tests {
     fn zwindow_scroll_pixels_negative_scrolls_down() {
         let mut w = ZWindow { y_size: 24, ..Default::default() };
         w.texts.push(V6Text { y: 5, x: 1, text: "a".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
-        w.scroll_pixels(-3);
+        w.scroll_pixels(-3, V6Cell::DEFAULT);
         assert_eq!(w.texts[0].y, 8, "negative pixels shift y downward (y - (-3) = y+3)");
     }
 
@@ -3006,7 +3083,7 @@ mod tests {
         w.grid.resize(3, 2);
         w.grid.put(1, 1, 'A', 0, ZColour::Default, ZColour::Default);
         w.grid.put(2, 1, 'B', 0, ZColour::Default, ZColour::Default);
-        w.scroll_pixels(V6_FONT_HEIGHT as i16); // exactly one row
+        w.scroll_pixels(V6_FONT_HEIGHT as i16, V6Cell::DEFAULT); // exactly one row
         assert_eq!(w.grid.cell(1, 1).ch, 'B', "grid shifted one row up");
     }
 
@@ -3026,7 +3103,7 @@ mod tests {
         assert!(ss.stream3_active());
 
         ss.write_stream3_bytes(b"Hello");
-        ss.pop_stream3(&mut mem);
+        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
 
         assert!(!ss.stream3_active());
 
@@ -3051,7 +3128,7 @@ mod tests {
 
         ss.push_stream3(table_addr, None);
         ss.write_stream3_bytes(&[195]);
-        ss.pop_stream3(&mut mem);
+        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
 
         assert_eq!(mem.read_word(table_addr), 1, "length word should be 1");
         assert_eq!(mem.read_byte(table_addr + 2), 195);
@@ -3100,9 +3177,9 @@ mod tests {
         ss.write_stream3_bytes(b"ab");
         ss.push_stream3(table2, None);
         ss.write_stream3_bytes(b"cd");
-        ss.pop_stream3(&mut mem); // finalise table2
+        ss.pop_stream3(&mut mem, V6Cell::DEFAULT); // finalise table2
         ss.write_stream3_bytes(b"ef");
-        ss.pop_stream3(&mut mem); // finalise table1
+        ss.pop_stream3(&mut mem, V6Cell::DEFAULT); // finalise table1
 
         // table2: "cd" (2 bytes)
         assert_eq!(mem.read_word(table2), 2);
@@ -3161,7 +3238,7 @@ mod tests {
 
         ss.push_stream3(table_addr, Some(40));
         ss.write_stream3_bytes(b"AAAA BBBB");
-        ss.pop_stream3(&mut mem);
+        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
 
         assert_eq!(read_formatted(&mem, table_addr), ["AAAA", "BBBB"], "one record per line");
         // Total width = 4 chars + 4 chars (the dropped space isn't printable width).
@@ -3180,7 +3257,7 @@ mod tests {
 
         ss.push_stream3(table_addr, Some(200));
         ss.write_stream3_bytes(b"Score:");
-        ss.pop_stream3(&mut mem);
+        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
 
         assert_eq!(read_formatted(&mem, table_addr), ["Score:"]);
         assert_eq!(mem.read_word(table_addr), 6, "the one line's own character count");
@@ -3201,7 +3278,7 @@ mod tests {
 
         ss.push_stream3(table_addr, None);
         ss.write_stream3_bytes(b"AAAA BBBB");
-        ss.pop_stream3(&mut mem);
+        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
 
         assert_eq!(mem.read_word(table_addr), 9, "word 0 is the whole character count");
         let bytes: Vec<u8> = (0..9).map(|i| mem.read_byte(table_addr + 2 + i)).collect();

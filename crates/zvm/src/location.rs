@@ -46,7 +46,7 @@
 
 use crate::cpu::exec::Machine;
 use crate::objects::{entries_base, entry_size, get_parent, object_snapshot, prop_table_ptr_offset, short_name, ObjectSnapshot};
-use crate::screen::{UpperWindow, V6_FONT_HEIGHT, V6_FONT_WIDTH};
+use crate::screen::{UpperWindow, V6Cell};
 
 /// Normalize for matching/hashing: trim, collapse whitespace, lowercase.
 pub(crate) fn normalize_name(s: &str) -> String {
@@ -248,7 +248,9 @@ const V6_LEFT_ANCHOR_MAX_DX: u16 = 96;
 /// 640×400 screen, and treating IT as a status band would mine menu labels for room
 /// names. Zork Zero's 78px band and Arthur's 12-rows-down bar are unaffected either
 /// way: they sit genuinely ABOVE their story window and are found by that rule.
-const V6_STATUS_STRIP_MAX_H: u16 = 2 * V6_FONT_HEIGHT;
+fn v6_status_strip_max_h(cell: V6Cell) -> u16 {
+    2 * cell.h
+}
 
 /// One v6 status-band candidate: the cleaned room text and whether it was
 /// left-anchored. Left-anchored runs are tried for StatusName; centered/other
@@ -275,8 +277,8 @@ fn is_v6_stat_field(s: &str) -> bool {
 /// Nearest cell, not floor: games paint on their own sub-cell offsets (Zork Zero
 /// starts its status text at x=71, Shogun at x=49), so a floor would smear runs
 /// that are really side by side into overlapping columns.
-fn v6_cell_of(x: u16) -> usize {
-    ((x.max(1) - 1 + V6_FONT_WIDTH / 2) / V6_FONT_WIDTH) as usize
+fn v6_cell_of(x: u16, cell: V6Cell) -> usize {
+    ((x.max(1) - 1 + cell.w / 2) / cell.w) as usize
 }
 
 /// One field of a rasterized status row: its text, the screen pixel `x` of its
@@ -298,11 +300,11 @@ struct V6Segment {
 /// actually sees, and then the ordinary "two or more spaces separate fields"
 /// rule splits the location from the score/date block for every title at once.
 /// Overlapping repaint is handled naturally — the later glyph wins the cell.
-fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)]) -> Vec<V6Segment> {
+fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)], cell: V6Cell) -> Vec<V6Segment> {
     let mut line: Vec<char> = Vec::new();
     let mut owner: Vec<u16> = Vec::new();
     for (t, win_x) in runs {
-        let start = v6_cell_of(t.x);
+        let start = v6_cell_of(t.x, cell);
         for (i, ch) in t.text.chars().enumerate() {
             let c = start + i;
             if c >= line.len() {
@@ -337,7 +339,7 @@ fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)]) -> Vec<V6Segment> {
         }
         out.push(V6Segment {
             text: line[start..=last].iter().collect(),
-            x: (start as u16).saturating_mul(V6_FONT_WIDTH) + 1,
+            x: (start as u16).saturating_mul(cell.w) + 1,
             win_x: owner[start],
         });
         i = last + 1;
@@ -350,11 +352,17 @@ fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)]) -> Vec<V6Segment> {
 /// whose bottom edge reaches past the story window's top. "Pinned to the top" is what keeps Shogun's bottom
 /// menu window (y=337, the same y as its story window, 48px tall) from qualifying —
 /// a bar overlaying the story starts at the screen top or not at all.
-fn is_v6_status_strip(i: usize, prose_idx: usize, w: &crate::screen::ZWindow, story_top: u16) -> bool {
+fn is_v6_status_strip(
+    i: usize,
+    prose_idx: usize,
+    w: &crate::screen::ZWindow,
+    story_top: u16,
+    cell: V6Cell,
+) -> bool {
     i != prose_idx
         && w.y_size > 0
-        && w.y_size <= V6_STATUS_STRIP_MAX_H
-        && w.y_coord <= V6_FONT_HEIGHT
+        && w.y_size <= v6_status_strip_max_h(cell)
+        && w.y_coord <= cell.h
         && w.y_coord + w.y_size > story_top
 }
 
@@ -372,6 +380,8 @@ fn is_v6_status_strip(i: usize, prose_idx: usize, w: &crate::screen::ZWindow, st
 /// first two and never finds Arthur (SQ-0530). Journey falls out for free: its
 /// story window owns y=1, so nothing is above it and a menu screen yields no room.
 fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
+    // SQ-0917: the session's cell, which every pixel-to-column step below divides by.
+    let cell = machine.v6_cell;
     let Some(v6) = machine.screen.v6.as_ref() else {
         return Vec::new();
     };
@@ -398,14 +408,15 @@ fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
         // window, so the rule below finds no band at all. Such a strip IS the band,
         // and only its own rows are: window 0's prose is never scooped in, because
         // window 0 can't be a strip.
-        let strip_bottom = is_v6_status_strip(i, prose_idx, w, story_top).then(|| w.y_coord + w.y_size);
+        let strip_bottom =
+            is_v6_status_strip(i, prose_idx, w, story_top, cell).then(|| w.y_coord + w.y_size);
         for t in w.texts.iter() {
             if t.text.is_empty() {
                 continue;
             }
             // Wholly above the story text: a run straddling the boundary is prose.
-            let above_story = t.y + V6_FONT_HEIGHT <= story_top;
-            let in_strip = strip_bottom.is_some_and(|b| t.y + V6_FONT_HEIGHT <= b);
+            let above_story = t.y + cell.h <= story_top;
+            let in_strip = strip_bottom.is_some_and(|b| t.y + cell.h <= b);
             if above_story || in_strip {
                 rows.entry(t.y).or_default().push((t, w.x_coord));
             }
@@ -415,7 +426,7 @@ fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
     let mut other = Vec::new();
     for (_y, mut runs) in rows {
         runs.sort_by_key(|(t, _)| t.x);
-        for seg in v6_row_segments(&runs) {
+        for seg in v6_row_segments(&runs, cell) {
             if is_v6_stat_field(&seg.text) {
                 continue;
             }

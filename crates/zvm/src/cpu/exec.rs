@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Windows, GRID_CELL_CAP, V6_FONT_HEIGHT, V6_FONT_WIDTH};
+use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Cell, V6Windows, GRID_CELL_CAP, V6_FONT_HEIGHT, V6_FONT_WIDTH};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -220,6 +220,17 @@ pub struct Machine {
     pending_input: Option<PendingInput>,
     /// Screen model: window layout, cursor, text style.
     pub screen: ScreenState,
+    /// The Version 6 character cell this session quantizes by (SQ-0917).
+    ///
+    /// Deliberately NOT on [`ScreenState`]: the host archives that, and the cell
+    /// is derived from the medium's interpreter profile, so a restore must
+    /// re-derive it rather than replay a stored copy. See [`V6Cell`] for why it
+    /// is state at all and why 7 on a Macintosh is a DECLARED metric rather than
+    /// a drawn advance.
+    ///
+    /// [`V6Cell::DEFAULT`] until a host calls [`Machine::set_v6_cell`], which is
+    /// the 8x16 every unit test in this crate expects.
+    pub v6_cell: V6Cell,
     /// Output stream routing: streams 1/2/3/4 state.
     pub streams: StreamState,
     /// Snapshot of the original dynamic memory (bytes 0..static_mem_base) taken
@@ -526,6 +537,7 @@ impl Machine {
             out,
             pending_input: None,
             screen,
+            v6_cell: V6Cell::DEFAULT,
             streams: StreamState::new(),
             original_dynamic,
             undo_stack: Vec::new(),
@@ -723,7 +735,7 @@ impl Machine {
     /// For v4/v5/v7/v8 a LIVE upper window follows the new WIDTH — see
     /// [`Machine::refit_upper_window_width`].
     pub fn set_screen_dims(&mut self, rows: u8, cols: u8) {
-        crate::screen::write_screen_dims(&mut self.mem, rows, cols);
+        crate::screen::write_screen_dims(&mut self.mem, rows, cols, self.v6_cell);
         if self.mem.version() == 6 {
             if let Some(v6) = self.screen.v6.as_mut() {
                 let width = cols.max(1) as u16 * crate::screen::V6_FONT_WIDTH;
@@ -1696,6 +1708,8 @@ impl Machine {
         store: Option<u8>,
         branch: Option<Branch>,
     ) -> StepResult {
+        // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
+        let cell = self.v6_cell;
         match opcode {
             // 0x00 call / call_vs — call with up to 3 args, store result
             0x00 => {
@@ -1957,7 +1971,7 @@ impl Machine {
                             let w = &mut v6.windows[win];
                             let nw = if screen_w > 0 { screen_w } else { w.x_size };
                             if (w.y_coord, w.x_coord, w.y_size, w.x_size) != (y, 1, h, nw)
-                                && w.retire_streamed(1, y, nw, h)
+                                && w.retire_streamed(1, y, nw, h, cell)
                             {
                                 retired = true;
                                 whole &= w.streamed.is_empty();
@@ -2256,7 +2270,7 @@ impl Machine {
                                     w.x_size as i32,
                                 )
                             };
-                            v6.erase_screen_rect(top, left, h, wd);
+                            v6.erase_screen_rect(top, left, h, wd, cell);
                             let w = &mut v6.windows[n as usize];
                             // ZMSD §8.8.5.3: erase "to background colour (even
                             // if the current text style is Reverse Video)" — the
@@ -2537,7 +2551,7 @@ impl Machine {
                         self.streams.push_stream3(table, width_px);
                     }
                     -3 => {
-                        self.streams.pop_stream3(&mut self.mem);
+                        self.streams.pop_stream3(&mut self.mem, self.v6_cell);
                     }
                     4  => { self.streams.stream4 = true; }
                     -4 => { self.streams.stream4 = false; }
@@ -2715,7 +2729,7 @@ impl Machine {
                         let width = if value == 1 { to_edge } else { (value as i32 - 1).min(to_edge) };
                         (y_abs, x_abs, width)
                     };
-                    v6.erase_screen_rect(top, left, crate::screen::V6_FONT_HEIGHT as i32, width);
+                    v6.erase_screen_rect(top, left, cell.h as i32, width, cell);
                     // Cell-grid mirror: blank from the cursor cell rightward.
                     let w = &mut v6.windows[cur.min(7)];
                     let row = (w.y_cursor.max(1) - 1) / crate::screen::V6_FONT_HEIGHT + 1;
@@ -2781,6 +2795,8 @@ impl Machine {
     // -----------------------------------------------------------------------
 
     fn exec_ext(&mut self, opcode: u8, ops: &[u16], store: Option<u8>, branch: Option<Branch>) -> StepResult {
+        // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
+        let cell = self.v6_cell;
         match opcode {
             // EXT:0x00 save — 0 operands: full game-state save (suspend).
             // ≥3 operands: v5 auxiliary "save table bytes name [prompt]".
@@ -3130,7 +3146,7 @@ impl Machine {
                         if (w.y_coord, w.x_coord) != (y, x) {
                             // Freeze whatever the window's NEW box leaves behind.
                             let (bw, bh) = (w.x_size, w.y_size);
-                            retired = w.retire_streamed(x, y, bw, bh);
+                            retired = w.retire_streamed(x, y, bw, bh, cell);
                             whole = w.streamed.is_empty();
                         }
                         w.y_coord = y;
@@ -3170,7 +3186,7 @@ impl Machine {
                         // new height and `x` the new width (ZMSD §15).
                         if (w.y_size, w.x_size) != (y, x) {
                             let (bx, by) = (w.x_coord, w.y_coord);
-                            retired = w.retire_streamed(bx, by, x, y);
+                            retired = w.retire_streamed(bx, by, x, y, cell);
                             whole = w.streamed.is_empty();
                         }
                         w.y_size = y;
@@ -3393,7 +3409,7 @@ impl Machine {
                     // Intentionally silent — see above.
                 } else if let Some(v6) = self.screen.v6.as_mut() {
                     if let Some(w) = v6.windows.get_mut(win as usize) {
-                        w.scroll_pixels(pixels);
+                        w.scroll_pixels(pixels, cell);
                     }
                 }
                 StepResult::Continue
@@ -3876,6 +3892,8 @@ impl Machine {
     ///
     /// No-op below v6.
     fn v6_advance_prose_cursor(&mut self, s: &str, shadow: bool) {
+        // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
+        let cell = self.v6_cell;
         let fw = V6_FONT_WIDTH;
         // The style/colours this text is going out in, for the SQ-0697 shadow
         // below — read before the window borrow.
@@ -3887,12 +3905,12 @@ impl Machine {
         let w = &mut v6.windows[idx];
         for ch in s.chars() {
             if ch == '\n' {
-                w.prose_new_line();
+                w.prose_new_line(cell);
                 continue;
             }
             let right_edge = w.x_size.saturating_sub(w.right_margin);
             if w.x_cursor.saturating_add(fw).saturating_sub(1) > right_edge {
-                w.prose_new_line();
+                w.prose_new_line(cell);
             }
             // Shadow where this glyph landed, so the prose can be frozen in place
             // if the window is later moved or resized (SQ-0697, ZMSD §15 —
@@ -3900,7 +3918,7 @@ impl Machine {
             // which is where the game's own `set_cursor` put it; the host stream
             // carries that column as an indent instead and cannot be read back.
             if shadow {
-                w.record_streamed(ch, style, fg, bg);
+                w.record_streamed(ch, style, fg, bg, cell);
             }
             w.x_cursor = w.x_cursor.saturating_add(fw);
         }
@@ -3913,9 +3931,11 @@ impl Machine {
     /// long game walks the count down to the -999 floor and silently turns
     /// "[MORE]" off for good. No-op below v6.
     fn v6_reload_line_counts(&mut self) {
+        // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
+        let cell = self.v6_cell;
         if let Some(v6) = self.screen.v6.as_mut() {
             for w in v6.windows.iter_mut() {
-                w.reload_line_count();
+                w.reload_line_count(cell);
             }
         }
     }
@@ -4006,6 +4026,8 @@ impl Machine {
     /// being stored in the upper window grid or forwarded to the output sink.
     /// With any other font the output is byte-identical to the input.
     pub fn print_text(&mut self, s: &str) {
+        // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
+        let cell = self.v6_cell;
         // ZMSD 7.1.2.5: when stream 3 is selected it is the ONLY output stream —
         // any future stream-2/4 transcript sink MUST be added below this early
         // return, never above it.
@@ -4197,7 +4219,7 @@ impl Machine {
                 }
                 if let Some(v6) = self.screen.v6.as_mut() {
                     for r in finished {
-                        v6.paint_run(idx, r);
+                        v6.paint_run(idx, r, cell);
                     }
                 }
                 return;
@@ -8100,7 +8122,7 @@ pub(crate) mod tests {
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
         m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[195], None, None);
-        m.streams.pop_stream3(&mut m.mem);
+        m.streams.pop_stream3(&mut m.mem, m.v6_cell);
 
         assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1, not the UTF-8 byte count");
         assert_eq!(m.mem.read_byte(table_addr + 2), 195);
@@ -8115,7 +8137,7 @@ pub(crate) mod tests {
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
         m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[10], None, None);
-        m.streams.pop_stream3(&mut m.mem);
+        m.streams.pop_stream3(&mut m.mem, m.v6_cell);
 
         assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1");
         assert_eq!(m.mem.read_byte(table_addr + 2), 10, "stream 3 must store verbatim ZSCII 10, not 32");
@@ -8131,7 +8153,7 @@ pub(crate) mod tests {
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
         m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[195], None, None);
-        m.streams.pop_stream3(&mut m.mem);
+        m.streams.pop_stream3(&mut m.mem, m.v6_cell);
 
         assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1");
         assert_eq!(m.mem.read_byte(table_addr + 2), 195);
@@ -10959,7 +10981,7 @@ pub(crate) mod tests {
     #[test]
     fn v6_line_count_reloads_on_input_but_not_on_a_timeout() {
         let mut m = v6_exec_machine();
-        let full = m.screen.v6.as_ref().unwrap().windows[0].more_interval();
+        let full = m.screen.v6.as_ref().unwrap().windows[0].more_interval(crate::screen::V6Cell::DEFAULT);
         m.exec_ext(0x19, &[0, 15, 1], None, None);
         m.exec_var(0x16, &[0], Some(0x01), None); // read_char (arms pending input)
         m.supply_char(0); // ZSCII 0 = timed out

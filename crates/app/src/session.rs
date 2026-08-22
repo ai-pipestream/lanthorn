@@ -945,8 +945,12 @@ impl GameSession {
                 let cell = u32::from(cell.max(1));
                 ((u32::from(px) + cell / 2) / cell).clamp(1, 255) as u8
             };
-            let cols = cells(w, zvm::screen::V6_FONT_WIDTH);
-            let rows = cells(h, zvm::screen::V6_FONT_HEIGHT);
+            // SQ-0917: the cell this session declares, not the 8x16 constant. Still
+            // 8x16 for every profile today — `InterpreterProfile::v6_font_cell` is
+            // what moves next, and this is the site that carries it to the story.
+            let v6_cell = machine.v6_cell;
+            let cols = cells(w, v6_cell.w);
+            let rows = cells(h, v6_cell.h);
             machine.set_screen_dims(rows, cols);
         } else if let Some((r, c)) = host_screen {
             // SQ-0680: seed the REAL host pane before boot, so a v4/v5 status
