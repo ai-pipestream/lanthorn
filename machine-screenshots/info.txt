@@ -252,11 +252,14 @@ TWO OF THEM ARE PIXEL-EXACT. TWO ARE NOT. THE DIFFERENCE IS THE WHOLE POINT.
                          one. Good for layout, z-order and the SQ-1004 island
                          defect; normalise before quoting a metric from it.
 
-DO NOT MEASURE METRICS FROM THE mac-*.jpg FILES. `mac-arthur.jpg` is lossy,
-windowed, and its advance-to-line-height ratio comes out 5.6/14 = 0.40 where the
-Mac's own colWidth/lineHeight is 7/15 = 0.47 and babelmap's is 8/16 = 0.50.
-Something is scaled by a factor the file cannot tell you. The one thing it does
-support is a scale-INVARIANT claim: both its prose lines give the same px/char.
+DO NOT MEASURE METRICS FROM THE REMAINING mac-*.jpg FILES. The now-deleted
+`mac-arthur.jpg` was the lesson: lossy, windowed, and its advance-to-line-height
+ratio came out 5.6/14 = 0.40 where the Mac's own colWidth/lineHeight is 7/15 =
+0.47 and babelmap's is 8/16 = 0.50. Something was scaled by a factor the file
+could not tell you about. The PNG that replaced it reads 7 and 15 cleanly, and
+its insertion caret is 15 rows where the JPEG's read 13 — the same scaling, seen
+from another angle. The three JPEGs still here are good for colour and for gross
+layout, and for nothing that has a number in it.
 
 THE MACINTOSH: 480x300 ON A 15-ROW LINE, DRAWN PROPORTIONALLY
 
