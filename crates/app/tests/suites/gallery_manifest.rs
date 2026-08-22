@@ -107,11 +107,133 @@ fn key_specs_parse_and_the_turn_count_ignores_waits() {
 fn the_backend_chooses_the_cell_size() {
     for s in &manifest().shots {
         let want = match s.backend {
-            Backend::Kitty => (8, 18),
+            Backend::Kitty => (8, 16),
             Backend::Halfblocks => (10, 20),
         };
         assert_eq!(s.cell_px(), want, "`{}` ({})", s.id, s.backend.as_str());
     }
+}
+
+/// Every cell this tool captures at is exactly 1:2 (SQ-0963).
+///
+/// A half-block sample is `cell_width` wide by `cell_height / 2` tall, so a cell
+/// of any other aspect samples the artwork finer across than down — JetBrains
+/// Mono's 2.200 cell, which these shots used to be taken in, is 10% coarser
+/// vertically at every size anyone would pick. The kitty cell was 8x18 (2.250)
+/// and is now 8x16.
+///
+/// FALSIFY by putting 18 back: this fails, and `the_backend_chooses_the_cell_size`
+/// fails beside it. Both are meant to, because the pair is the whole pin — one
+/// says which cell, this one says why that cell and not a neighbouring one.
+#[test]
+fn the_cell_is_square_for_half_block_samples() {
+    for backend in [Backend::Kitty, Backend::Halfblocks] {
+        let s = parse_one(&format!("{GOOD}backend = {:?}\n", backend.as_str()))
+            .expect("valid")
+            .shots
+            .remove(0);
+        let (w, h) = s.cell_px();
+        assert_eq!(
+            h,
+            w * 2,
+            "the {} cell is {w}x{h}. A half-block sample is one cell wide and half a cell tall, so \
+             only a 1:2 cell makes it square — and the gallery's face lands a whole-numbered cell on \
+             exactly the 1:2 sizes (5x10, 6x12, 7x14, 8x16, 9x18, 10x20, 11x22, 13x26, 14x28, 15x30)",
+            backend.as_str()
+        );
+    }
+}
+
+/// The default face is chosen on a measurement, so the list that names it is
+/// pinned rather than left to be re-sorted by whoever next has a preference.
+///
+/// Fira Code's cell is 0.615 / 1.231 em = **2.000 exactly**, and it is the only
+/// face measured on this machine that lands a whole-numbered 1:2 cell at ten of
+/// the nineteen sizes in 6..24 px/em. Every other candidate below it is there as
+/// a fallback for a machine that has no Nerd Font at all.
+#[test]
+fn the_default_font_list_leads_with_the_face_whose_cell_is_one_to_two() {
+    use super::pty_stream::gallery::FONT_CANDIDATES;
+    let first = FONT_CANDIDATES.first().copied().unwrap_or_default();
+    assert!(
+        first.contains("FiraCode"),
+        "the gallery's default face leads with `{first}`. It is supposed to lead with Fira Code, whose \
+         cell is exactly 1:2 — see FONT_CANDIDATES' own table. Reordering this list changes what every \
+         shot is sampled at, so it is a measurement to redo and not a preference to express"
+    );
+    assert!(
+        FONT_CANDIDATES.iter().any(|c| c.starts_with("~/")),
+        "Nerd Fonts install per-user (`~/Library/Fonts`, `~/.local/share/fonts`), so a list of purely \
+         absolute paths could never find the face this tool leads with"
+    );
+}
+
+/// The arithmetic half of SQ-0963, pinned without needing a single gitignored
+/// medium: at the sizes this manifest uses, a 640x400 press magnifies by a whole
+/// number and the neighbouring sizes do not.
+///
+/// The control matters more than the assertion. 117x40 — what every shot in this
+/// file used to be — is 1.4375x, and a case that only checked the sizes we chose
+/// would pass just as happily if `magnification` returned a constant 2.
+#[test]
+fn the_manifest_sizes_are_the_ones_that_magnify_a_640x400_press_by_a_whole_number() {
+    let mag = |size: &str, backend: &str| -> f64 {
+        let body = GOOD.replace(r#"size = "117x40""#, &format!("size = {size:?}"));
+        let body = format!("{body}backend = {backend:?}\n");
+        parse_one(&body).expect("valid").shots[0].magnification((640, 400)).expect("a full-width pane")
+    };
+    for (size, want) in [("96x28", 1.0), ("162x53", 2.0), ("242x78", 3.0)] {
+        assert_eq!(mag(size, "kitty"), want, "kitty {size}");
+    }
+    for (size, want) in [("66x23", 1.0), ("130x43", 2.0)] {
+        assert_eq!(mag(size, "halfblocks"), want, "half-blocks {size}");
+    }
+    assert_eq!(mag("117x40", "kitty"), 1.4375, "the size this manifest used to use, and the reason it no longer does");
+    assert_eq!(mag("160x50", "kitty"), 1.88, "one row and two columns off 2x is still a resampled frame");
+}
+
+/// The committed manifest itself, over whichever media this machine has.
+///
+/// Skips vacuously where `stories/` is absent — it is gitignored, so CI has none
+/// of it — but the moment a medium IS present its native screen is read off the
+/// mount and the shot's size has to magnify it by a whole number.
+#[test]
+fn every_v6_shot_magnifies_by_a_whole_number() {
+    use super::pty_stream::gallery::Provenance;
+    let m = manifest();
+    let mut any_present = false;
+    let mut checked = 0usize;
+    for s in &m.shots {
+        let path = s.media_path();
+        if !path.exists() {
+            continue;
+        }
+        any_present = true;
+        let Ok(p) = Provenance::read(&path) else { continue };
+        // A story with no pixel screen has no magnification, and the map shot's
+        // pane is a split this file deliberately does not restate.
+        let (Some(native), Some(mag)) = (p.native, p.native.and_then(|n| s.magnification(n))) else {
+            continue;
+        };
+        checked += 1;
+        assert!(
+            (mag - mag.round()).abs() < 1e-9 && mag >= 1.0,
+            "`{}` is {} on a {}x{} press, which magnifies by {mag}. Every edge in that frame is \
+             interpolated: the composite is resized once to round(native * s) and the bands are 1:1 \
+             crops out of it, so a fractional s is the one place softness can enter (SQ-0963). \
+             gallery.toml's header has the sizes that land on a whole number",
+            s.id,
+            s.size,
+            native.0,
+            native.1
+        );
+    }
+    assert!(
+        !any_present || checked > 0,
+        "the media are present but not one shot resolved a native screen — the derivation in \
+         `Provenance::read` has stopped working, and a check that silently stops checking is worse \
+         than none"
+    );
 }
 
 /// `--image-protocol halfblocks` is added by the tool for a half-block shot and

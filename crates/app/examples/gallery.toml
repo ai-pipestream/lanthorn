@@ -17,9 +17,39 @@
 # neighbouring disk under a caption about Zork Zero's border art. `expect` names
 # something that must be on the resolved screen, and it caught that.
 #
-# `backend` chooses the cell size too (kitty 8x18, half-blocks 10x20), because
+# `backend` chooses the cell size too (kitty 8x16, half-blocks 10x20), because
 # the half-block picker uses its own 10x20 font whatever the terminal reports and
-# a capture at any other cell size draws a geometry lanthorn was not using.
+# a capture at any other cell size draws a geometry lanthorn was not using. Both
+# cells are exactly 1:2, which is what makes a half-block sample square.
+#
+# ── `size` IS A MAGNIFICATION, NOT A TASTE (SQ-0963) ─────────────────────────
+#
+# A v6 press lays itself out on a fixed native screen — 640x400 for every medium
+# in this manifest — and lanthorn letterboxes that into the story pane at
+# `min(box_w / native_w, box_h / native_h)`, unrounded. The composite is resized
+# ONCE to `round(native * s)` and every band is a 1:1 crop out of it, so `s` is
+# the only place softness can enter a frame: at a whole `s` one art pixel lands on
+# a whole number of device pixels and the picture is exactly as crisp as the
+# artwork; at anything else every edge in it is interpolated. The first draft of
+# this file was 117x40 throughout, which is 1.4375x, and it showed.
+#
+# The story pane's content is `COLS - 2` by `ROWS - 3` cells (one row for the help
+# bar, one cell of border on every side), so with a 640x400 press:
+#
+#   kitty, 8x16 cell        s = min((COLS-2)/80, (ROWS-3)/25)
+#     1x  96x28      2x  162x53      3x  242x78
+#   half-blocks, 10x20 cell s = min((COLS-2)/64, (ROWS-3)/20)
+#     1x  66x23      2x  130x43
+#
+# Each of those binds on BOTH axes at once, so the art fills the pane exactly with
+# no letterbox left over. `every_v6_shot_magnifies_by_a_whole_number` recomputes
+# this over the committed file and fails if a size drifts off it, and the gallery
+# tool prints the magnification it measured under every frame.
+#
+# This is per-shot arithmetic and cannot become one constant: presses differ in
+# native size (Arthur's Apple II press is 560x384), so a size that is integral for
+# one is fractional for the next. The native screen is DERIVED at capture time
+# from the mounted medium, never declared here.
 #
 # The media directories (`stories/`, `treasures/`, `masterpieces/`) are
 # gitignored, so this cannot run anywhere they are absent. A missing medium is a
@@ -42,7 +72,7 @@ game reserves and paints into, with the prose and the party menu laid out around
 it. lanthorn keeps the art as kitty graphics and the text as terminal cells, so \
 the two share a boundary without either being resampled."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "117x40"
+size = "162x53"
 expect = ["The Party", "Individual Commands"]
 expect_art_cells = 600
 
@@ -57,7 +87,7 @@ file above, with the Amiga's palette and its own idea of which window the \
 narration goes through. lanthorn reads the medium and dresses the screen as that \
 machine did."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "117x40"
+size = "162x53"
 expect = ["The Party", "Individual Commands"]
 
 # ── Zork Zero: three presses of one game ─────────────────────────────────────
@@ -75,7 +105,7 @@ four sides, with a compass rose and a heraldic banner across the top. The flanks
 are the one thing hybrid mode rasterises on purpose: their pixels are not \
 anything the game printed as a character."""
 keys = "wait:3000,text:look,cr,wait:2000"
-size = "117x40"
+size = "162x53"
 expect = ["Zork Zero", "Banquet Hall"]
 expect_art_cells = 1500
 
@@ -89,7 +119,7 @@ The Amiga pressing, which is release 366 where the story file is 393 and lays it
 story window out somewhere else. Nothing was configured to get this: the mount \
 reported an Amiga floppy and the profile followed."""
 keys = "wait:3000,text:look,cr,wait:2000"
-size = "117x40"
+size = "162x53"
 expect = ["Zork Zero", "Banquet Hall"]
 expect_art_cells = 1500
 
@@ -103,7 +133,7 @@ The Macintosh disk, and by a distance the outlier of the three: October 1988, \
 where both the others are 1989. Read it beside the Blorb frame — same scene, same \
 art, a build nearly a year older and a machine profile of its own."""
 keys = "wait:3000,text:look,cr,wait:2000"
-size = "117x40"
+size = "162x53"
 expect = ["Zork Zero", "Banquet Hall"]
 expect_art_cells = 1500
 
@@ -117,7 +147,7 @@ The PC pressing, with its EGA plates. The same release as the story file, and a 
 different machine's page and palette — which is the whole of the difference \
 between these two frames."""
 keys = "wait:3000,text:look,cr,wait:2000"
-size = "117x40"
+size = "162x53"
 expect = ["Zork Zero", "Banquet Hall"]
 expect_art_cells = 1500
 
@@ -152,7 +182,7 @@ they stay pictures; the status band beneath them, and the italics in the prose, 
 characters the game printed, so they stay characters. Deciding that per strip is \
 what hybrid mode is for."""
 keys = "wait:4000,text:n,wait:2500,text:n,wait:4000,cr,wait:2500,cr,wait:2500,cr,wait:2500,cr,wait:2500,cr,wait:3000"
-size = "117x40"
+size = "162x53"
 expect = ["Churchyard", "St Anne's Day"]
 expect_art_cells = 800
 
@@ -172,7 +202,7 @@ A modern Version 6 game that draws its whole screen as one composite — a card 
 rather than a page with a picture on it. The deal is pinned to a seed so this frame \
 is the same frame every release."""
 keys = "wait:2500,cr,wait:1500,cr,wait:1500"
-size = "117x40"
+size = "162x53"
 seed = 12345
 expect = ["scopa"]
 expect_art_cells = 3000
@@ -187,7 +217,7 @@ The other full-frame composite in the corpus, and the one that proved the seed \
 matters: two captures of it differ by tens of thousands of pixels and not one of \
 them is a rendering difference."""
 keys = "wait:2500,cr,wait:1500,cr,wait:1500"
-size = "117x40"
+size = "162x53"
 seed = 12345
 expect = ["fmvpoker.z6"]
 expect_art_cells = 3000
@@ -196,6 +226,10 @@ expect_art_cells = 3000
 #
 # The same game, the same release, the same turn — three terminals. Layout
 # changes character between them, which is a thing a single frame cannot show.
+#
+# These three are 1x, 2x and 3x of Journey's 640x400 screen, which is the row that
+# shows what an integer magnification buys: the same artwork at three resolutions,
+# every one of them pixel-exact, and none of them a resampled version of another.
 
 [[shots]]
 id = "journey-narrow"
@@ -203,9 +237,9 @@ title = "Journey"
 press = "story file, in a small terminal"
 media = "stories/journey-r83-s890706.z6"
 caption = """
-The same frame in a 96x28 terminal. v6 art is scaled by pixel and text placed by \
-cell, so a smaller pane is a different composition rather than the same one \
-shrunk."""
+The same frame in a 96x28 terminal, where the pane holds Journey's 640x400 screen \
+at exactly 1:1. v6 art is scaled by pixel and text placed by cell, so a smaller \
+pane is a different composition rather than the same one shrunk."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
 size = "96x28"
 expect = ["The Party", "Individual Commands"]
@@ -215,9 +249,12 @@ id = "journey-wide"
 title = "Journey"
 press = "story file, in a large terminal"
 media = "stories/journey-r83-s890706.z6"
-caption = "And in a 160x50 terminal, where the art has room to be looked at."
+caption = """
+And in a 242x78 terminal, where the same screen goes up three times without a \
+single interpolated edge — one art pixel to a 3x3 block of device pixels, exactly \
+as the artist drew it."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "160x50"
+size = "242x78"
 expect = ["The Party", "Individual Commands"]
 
 # ── The fallback everyone can see ────────────────────────────────────────────
@@ -233,7 +270,7 @@ pixel path and resolves it into half-block cells — two vertical samples per ce
 so honest but coarse. It is also the only Version 6 output an asciinema cast can \
 carry, which is why it earns a row."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "117x40"
+size = "130x43"
 backend = "halfblocks"
 expect = ["The Party", "Individual Commands", "▀"]
 
