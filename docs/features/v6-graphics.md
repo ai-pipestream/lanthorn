@@ -2590,13 +2590,35 @@ times level 6's cost — and on one canvas it came out *larger*. The 1.4–3.3 m
 this spends lands on the render worker, which is nothing beside a megabyte of
 base64.
 
-**What this reaches is graphics *windows*** — Glulx's clickable toolbars, Scott
-room pictures, and any v6 graphics window drawn as an image rather than as cells.
+**That path is graphics *windows*** — Glulx's clickable toolbars, Scott room
+pictures, and any v6 graphics window drawn as an image rather than as cells.
 Measured on advent.blb under a pty, the whole capture went from ~314 KB to 54 KB.
-The v6 chrome ring's bands and the full-pane raster composite are uploaded by
-`ratatui-image` instead and are **not** compressed today; a Zork Zero raster
-session emits 2.82 MB per frame that would deflate to 31.5 KB, which is the
-larger prize and needs the change one layer down.
+
+The v6 chrome ring's bands and the full-pane raster composite go through
+`ratatui-image`, which is a layer down and was the larger prize — the ring alone
+was emitting more than the windows ever did. It compresses too now (SQ-0991),
+and the crate **asks the terminal first** rather than assuming:
+
+| capture (117×64, under a pty) | before | after | |
+|---|---:|---:|---|
+| Journey r30 hybrid, kitty payload | 3,431,392 B | 67,735 B | **50.7×** |
+| Zork Zero r393 raster, kitty payload | 14,151,821 B | 159,630 B | **88.7×** |
+| one 920×575 composite frame | 2,821,336 B | 32,452 B | 86.9× in 5.5 ms |
+
+The asking matters more than the ratio. `Capability::KittyCompression` rides the
+capability query already sent at startup, as one extra probe using the protocol's
+own query action (`a=q`) — sixteen base64 characters, no extra round trip, the
+same shape `RectangularOps` already had. Compression happens only when that probe
+came back `OK`.
+
+Everything that *cannot* ask — `Picker::halfblocks()`, `from_fontsize`, the
+default picker returned when the query gets no answer, tmux without passthrough,
+the WezTerm/Konsole blacklist — leaves the capability absent and therefore
+transmits raw. That is the safe direction and worth stating plainly: an
+uncompressed image is merely slow, while an image the terminal cannot inflate is
+**invisible**, because the transmit fails and every placement naming it draws
+nothing. Our own placement oracle demonstrated exactly that when it met `o=z`
+without a zlib decoder linked in.
 
 ## `/dump-windows` reports the last frame the *game* drew
 

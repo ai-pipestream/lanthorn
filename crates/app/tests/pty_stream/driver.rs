@@ -434,6 +434,21 @@ impl Responder {
                     "\x1b_Gi=31;OK\x1b\\".to_string(),
                 ),
             );
+            // SQ-0991: the same one-pixel query with the payload deflated, which
+            // is how `ratatui-image` asks whether this terminal can inflate an
+            // `o=z` transmission. Answer it the way kitty does, or every capture
+            // measures the UNCOMPRESSED wire — the backend would still be kitty
+            // and nothing would look wrong, which is the expensive kind of wrong.
+            // Matched on the parameters only: the payload is a zlib stream whose
+            // exact bytes are the encoder's business, not the protocol's.
+            v.insert(
+                1,
+                (
+                    "kitty transmission compression",
+                    b"\x1b_Gi=32,s=1,v=1,a=q,t=d,f=24,o=z;".as_slice(),
+                    "\x1b_Gi=32;OK\x1b\\".to_string(),
+                ),
+            );
         }
         v
     }
