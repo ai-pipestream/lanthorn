@@ -1038,6 +1038,35 @@ blocks and never says anything on the game screen — the same way every other
 too-small decision in lanthorn degrades rather than refuses. (The fallback is
 diagnostic state, destined for `/info`.)
 
+**And it does nothing under half-blocks, on purpose.** The whole promise is stated in
+*device pixels*, and half-blocks has none: it paints `▀` in two colours per cell, so
+the picture resolves onto one sample per column and two per row, and the "font size"
+the rung was counted in is a hardcoded 10×20 that `ratatui-image` itself calls
+completely arbitrary. Quantizing onto the sample grid instead — the honest analogue,
+and computable from the cell grid alone — was tried and measured, and it buys nothing,
+because half-blocks never magnifies at any size you would run: a 640×400 canvas has
+more pixels than a terminal has samples until the pane reaches 640×200 *cells*, so the
+picture is always being shrunk, and shrinking goes through a smoothing filter. On a
+640×400 plate of 2×2 art pixels in hard black-and-white stripes:
+
+| sample grid | ratio | samples that are a pure art-pixel colour |
+|---|---:|---:|
+| 640×400 | 1:1 | 640 / 640 |
+| 458×288 | 1.4:1 | 50 / 458 |
+| **320×200** | **2:1** | **0 / 320** |
+| 160×100 | 4:1 | 0 / 160 |
+
+The 320×200 row is the honest ladder's own rung — one art pixel onto exactly one
+sample — and every sample still lands on a 25/75 blend of two art pixels. Meanwhile at
+1:1 and above the art already comes out pure without any lock, and the lock could only
+move the factor *down* off that plateau. So there is no pane size at which it helps and
+a measured 17–20% of linear resolution to lose where it acts (at a 120×40 pane a
+640×400 canvas free-scales to 120×38 cells; the old device-pixel rung cut it to 96×30).
+Turning the switch on under half-blocks therefore changes nothing, and `/dump-terminal`
+reports the lock as `INERT` rather than claiming a snap that did not happen. This is not
+a magnification ceiling — half-blocks has had none since it stopped needing one, and the
+free scale still climbs the whole way to your pane.
+
 **And it is a per-game preference, not a global one.** Which side of that trade you
 want depends on the press you mounted — a 320-wide Amiga rendition has half-steps to
 land on and gives up little, while the Macintosh mono plate's whole-number ladder can

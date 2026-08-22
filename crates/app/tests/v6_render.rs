@@ -23,6 +23,8 @@ mod v6_frame_border_medium;
 mod v6_game_colour_regression;
 #[path = "suites/v6_menu_plan_zero_slack.rs"]
 mod v6_menu_plan_zero_slack;
+#[path = "suites/v6_pixel_lock_backend.rs"]
+mod v6_pixel_lock_backend;
 #[path = "suites/v6_pixel_lock_centring.rs"]
 mod v6_pixel_lock_centring;
 #[path = "suites/v6_prose_freeze.rs"]

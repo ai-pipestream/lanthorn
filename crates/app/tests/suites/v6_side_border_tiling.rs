@@ -2196,6 +2196,18 @@ fn frame_mags_locked(
 ) -> (Vec<app::render::graphics::BandMag>, f32, f32) {
     let model = session.screen();
     let mut state = render_state();
+    // SQ-0978: the lock is a DEVICE-pixel guarantee and only binds a backend that has
+    // device pixels. `render_state`'s picker is Halfblocks — deliberately, so this
+    // suite's other cases can assert on the pane's own cells — and half-blocks resolves
+    // the picture into cells, where a rung means nothing and the render free-scales.
+    // A case whose whole subject is the ladder has to render on a backend the ladder
+    // binds, or it asserts a factor nothing used. The CELL is untouched (`pane_dev`
+    // reads it back off this picker), so only the backend changes.
+    state
+        .game_picker
+        .as_mut()
+        .expect("render_state carries a picker")
+        .set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
     state.config.v6_pixel_lock = true;
     state.v6_art_scale = art_scale;
     let area = Rect::new(0, 0, pane.0, pane.1);

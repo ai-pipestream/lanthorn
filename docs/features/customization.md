@@ -514,7 +514,10 @@ re-seed the new template, or hand-write the new shape from
   EGA/CGA ones go 1×, 2×, 3× … The cost is screen area — the picture stops at the
   rung below your pane rather than filling it, so the margin around it (painted with
   the story's own page) gets wider. A pane too small for even the smallest rung
-  quietly falls back to free scaling. Whether the trade is worth it depends on the
+  quietly falls back to free scaling, and on the **half-blocks** backend the switch
+  does nothing at all — half-blocks paints coloured cells rather than pixels, so
+  there is no device pixel for an art pixel to land a whole number of. `/dump-terminal`
+  says so in those words. Whether the trade is worth it depends on the
   press you mounted, so it is settled **per game**: `/set-v6-pixel-lock` toggles it
   live (`on` / `off` to say so outright, `auto` to go back to inheriting this global
   key) and remembers the answer in that story's own sidecar, below — your global

@@ -178,6 +178,16 @@ pub struct RenderFacts {
     /// The last frame wanted the lock and the pane was too small for the lowest
     /// rung, so it free-scaled anyway (SQ-0936).
     pub pixel_lock_fell_back: bool,
+    /// The last frame wanted the lock on a backend with no rung to snap to, so it
+    /// was inert (SQ-0978). Half-blocks: the ladder is quantized in device pixels
+    /// and half-blocks resolves the picture into CELLS, one sample per column and
+    /// two per row, so the device pixels the rung is counted in are a number
+    /// `Picker::halfblocks`'s hardcoded 10x20 invented.
+    ///
+    /// Separate from [`Self::pixel_lock_fell_back`] because a reader told "the pane
+    /// is too small" goes looking for a bigger terminal, and there is no pane size
+    /// that would have honoured this one.
+    pub pixel_lock_inapplicable: bool,
     /// Recent render paths, newest last, consecutive repeats collapsed.
     pub paths: Vec<String>,
 }
@@ -454,15 +464,37 @@ pub fn dump_lines(s: &TerminalSnapshot) -> Vec<DumpLine> {
                 "  native screen: {}x{} game pixels, art_scale {}x{}",
                 r.native.0, r.native.1, r.art_scale.0, r.art_scale.1
             )));
-            let lock = match (r.pixel_lock, r.pixel_lock_fell_back) {
-                (false, _) => "pixel lock off (free scaling)".to_string(),
-                (true, false) => "pixel lock ON (snapped to the artwork's ladder)".to_string(),
-                (true, true) => "pixel lock ON but FELL BACK — the pane is too small for even the \
-                                 lowest rung, so this frame free-scaled"
+            // SQ-0978: three outcomes, not two. "FELL BACK" says the pane is too
+            // small, which a player can act on by resizing; "INERT" says the backend
+            // has no rung at any pane size, which they cannot. Reporting the second
+            // as the first sends a reader hunting for a bigger terminal, and claiming
+            // "snapped to the artwork's ladder" on half-blocks would be a guarantee
+            // that does not hold at all.
+            let lock = match (r.pixel_lock, r.pixel_lock_inapplicable, r.pixel_lock_fell_back) {
+                (false, _, _) => "pixel lock off (free scaling)".to_string(),
+                (true, true, _) => "pixel lock ON but INERT — half-blocks resolves the picture into \
+                                    CELLS (one sample per column, two per row) and never sees a \
+                                    device pixel, so there is no rung to snap to at any pane size; \
+                                    this frame free-scaled"
+                    .to_string(),
+                (true, false, false) => "pixel lock ON (snapped to the artwork's ladder)".to_string(),
+                (true, false, true) => "pixel lock ON but FELL BACK — the pane is too small for even \
+                                        the lowest rung, so this frame free-scaled"
                     .to_string(),
             };
-            let mag_line = format!("  magnification: {:.3}x, {lock}", r.magnification);
-            out.push(if r.pixel_lock && r.pixel_lock_fell_back { assumed(mag_line) } else { value(mag_line) });
+            // The magnification is device pixels per unit pixel — and under
+            // half-blocks the device pixel is `Picker::halfblocks`'s hardcoded 10x20,
+            // not the font on screen, so the bare number reads about ten times what
+            // the picture actually resolves at. Say so where it is printed rather
+            // than letting the reader assume the units they know (SQ-0978).
+            let nominal = matches!(s.protocol.as_deref(), Some("halfblocks"));
+            let mag_line = format!(
+                "  magnification: {:.3}x{}, {lock}",
+                r.magnification,
+                if nominal { " in NOMINAL 10x20 device pixels (half-blocks draws cells)" } else { "" }
+            );
+            let hedged = r.pixel_lock && (r.pixel_lock_fell_back || r.pixel_lock_inapplicable);
+            out.push(if hedged || nominal { assumed(mag_line) } else { value(mag_line) });
             if !r.paths.is_empty() {
                 out.push(value(format!("  recent render paths (oldest first): {}", r.paths.join(" · "))));
             }
@@ -738,6 +770,7 @@ mod tests {
             magnification: 1.5,
             pixel_lock: false,
             pixel_lock_fell_back: false,
+            pixel_lock_inapplicable: false,
             paths: vec!["raster x4".into()],
         });
         let t = text(&s);
@@ -761,12 +794,74 @@ mod tests {
             magnification: 1.0,
             pixel_lock: true,
             pixel_lock_fell_back: true,
+            pixel_lock_inapplicable: false,
             paths: vec![],
         });
         let l = dump_lines(&s).into_iter().find(|l| l.text.contains("magnification")).unwrap();
         assert_eq!(l.kind, DumpKind::Assumed);
         assert!(l.text.contains("FELL BACK"), "{}", l.text);
         assert!(text(&s).contains("picture takeover: art_paints_anything"));
+    }
+
+    /// SQ-0978: a lock the BACKEND cannot honour reads differently from a lock the
+    /// PANE was too small for. The report must not offer the reader a resize that
+    /// would not help, and must not claim the snap happened.
+    #[test]
+    fn a_pixel_lock_on_a_cell_backend_is_reported_as_inert_not_as_a_snap() {
+        let mut s = snap();
+        s.protocol = Some("halfblocks".into());
+        s.render = Some(RenderFacts {
+            mode: "hybrid",
+            takeover: None,
+            takeover_evaluated: true,
+            native: (640, 400),
+            art_scale: (2, 2),
+            magnification: 1.531,
+            pixel_lock: true,
+            pixel_lock_fell_back: false,
+            pixel_lock_inapplicable: true,
+            paths: vec![],
+        });
+        let l = dump_lines(&s).into_iter().find(|l| l.text.contains("magnification")).unwrap();
+        assert_eq!(l.kind, DumpKind::Assumed, "an inert lock is not the value the user asked for");
+        assert!(l.text.contains("INERT"), "{}", l.text);
+        assert!(
+            !l.text.contains("snapped to the artwork's ladder"),
+            "the guarantee did not hold, so the report must not claim it: {}",
+            l.text
+        );
+        assert!(
+            !l.text.contains("FELL BACK") && !l.text.contains("too small"),
+            "no pane size would have honoured this — pointing at the pane misdirects: {}",
+            l.text
+        );
+        // And the magnification itself is in the picker's invented 10x20, not in
+        // pixels this terminal has.
+        assert!(l.text.contains("NOMINAL 10x20"), "{}", l.text);
+    }
+
+    /// The same number under a backend that really has device pixels is a
+    /// measurement, and carries no hedge at all.
+    #[test]
+    fn a_kitty_magnification_is_reported_without_a_nominal_hedge() {
+        let mut s = snap();
+        s.protocol = Some("kitty".into());
+        s.render = Some(RenderFacts {
+            mode: "hybrid",
+            takeover: None,
+            takeover_evaluated: true,
+            native: (640, 400),
+            art_scale: (2, 2),
+            magnification: 1.5,
+            pixel_lock: true,
+            pixel_lock_fell_back: false,
+            pixel_lock_inapplicable: false,
+            paths: vec![],
+        });
+        let l = dump_lines(&s).into_iter().find(|l| l.text.contains("magnification")).unwrap();
+        assert_eq!(l.kind, DumpKind::Value, "{}", l.text);
+        assert!(l.text.contains("snapped to the artwork's ladder"), "{}", l.text);
+        assert!(!l.text.contains("NOMINAL"), "{}", l.text);
     }
 
     /// A forced protocol is not a detected one, and a bug report needs to know

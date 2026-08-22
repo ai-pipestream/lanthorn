@@ -802,6 +802,7 @@ fn terminal_snapshot(
                     magnification: state.v6_image_scale.get(),
                     pixel_lock: state.config.v6_pixel_lock,
                     pixel_lock_fell_back: state.v6_scale_lock_fallback.get(),
+                    pixel_lock_inapplicable: state.v6_scale_lock_inapplicable.get(),
                     paths: state
                         .v6_path_log
                         .borrow()
