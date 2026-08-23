@@ -23,6 +23,20 @@
 /unit_tests/*.gblorb
 /unit_tests/*.blb
 /unit_tests/*.z5
+# EVERY Z-machine version, not just the one we happened to fetch first. `*.z5`
+# stood alone until SQ-1015 found two Version 6 stories sitting here untracked
+# and UNIGNORED — Infocom's own in-house ZipTest regression builds, which are
+# proprietary — where a single `git add unit_tests/` would have committed them.
+# The hard rule against `git add -A` was the only thing standing in the way.
+/unit_tests/*.z1
+/unit_tests/*.z2
+/unit_tests/*.z3
+/unit_tests/*.z4
+/unit_tests/*.z6
+/unit_tests/*.z7
+/unit_tests/*.z8
+/unit_tests/*.zblorb
+/unit_tests/*.dat
 # ...and the files those test games WRITE when the suite drives them
 # (Glk external files, autosave/save-state dirs, generated blorbs)
 /unit_tests/*.glkdata
