@@ -717,14 +717,14 @@ fn render_node(
                 // prose window (SQ-0585), and taking its rows as the story box made an
                 // ordinary split look like a menu takeover.
                 matches!(&pw.node, WinNode::Buffer(b) if b.primary).then(|| {
-                    let top = pw.y_px / state.v6_cell.h;
+                    let top = state.v6_cell.row_of_origin0(pw.y_px);
                     (top, top + pw.h_px.max(1).div_ceil(16), pw.x_px as u32, pw.x_px as u32 + pw.w_px as u32)
                 })
             });
             let has_menu = items.iter().any(|pw| {
                 matches!(&pw.node, WinNode::Grid(g)
                     if g.px_texts.iter().any(|t| {
-                        let row = (t.y.max(1) - 1) / state.v6_cell.h;
+                        let row = state.v6_cell.row_of(t.y);
                         // SQ-0742: the run must be inside the story box on BOTH axes. The
                         // row test alone calls any chrome glyph that merely shares a row
                         // with the story a takeover — and a game whose frame is drawn with
@@ -740,7 +740,7 @@ fn render_node(
                         // which trim to empty and never tripped the gate, which is why only
                         // the Amiga route showed it.
                         let x0 = t.x.max(1) as u32 - 1;
-                        let x1 = x0 + t.text.chars().count().max(1) as u32 * u32::from(state.v6_cell.w);
+                        let x1 = x0 + state.v6_cell.run_px(&t.text).max(u32::from(state.v6_cell.w));
                         !t.text.trim().is_empty()
                             && row >= STATUS_BAND_ROWS
                             && story_box.is_some_and(|(top, bot, left, right)| {
@@ -1113,7 +1113,7 @@ fn render_node(
                                             .iter()
                                             .filter(|t| !t.text.trim().is_empty())
                                             .filter(|t| {
-                                                bound.is_some_and(|b| (t.y.max(1) - 1) / state.v6_cell.h <= b)
+                                                bound.is_some_and(|b| state.v6_cell.row_of(t.y) <= b)
                                             })
                                             .map(|t| run_cell(t, &scale, cell_px, area).1)
                                             .max()
@@ -1216,7 +1216,7 @@ fn render_node(
                                 let WinNode::Grid(g) = &pw.node else { continue };
                                 let span = (pw.x_px, pw.x_px.saturating_add(pw.w_px));
                                 for t in &g.px_texts {
-                                    let row = (t.y.max(1) - 1) / state.v6_cell.h;
+                                    let row = state.v6_cell.row_of(t.y);
                                     let e = m.entry(row).or_insert(span);
                                     e.0 = e.0.min(span.0);
                                     e.1 = e.1.max(span.1);
@@ -1318,7 +1318,7 @@ fn render_node(
                                             &gfx,
                                             t.x.max(1) as u32 - 1,
                                             py.max(0) as u32,
-                                            t.text.chars().count().max(1) as u32 * u32::from(state.v6_cell.w),
+                                            state.v6_cell.run_px(&t.text).max(u32::from(state.v6_cell.w)),
                                             16,
                                         )
                                 })
@@ -2340,7 +2340,7 @@ fn render_node(
                             // not where it prints off it, and the index then names a slot
                             // the text is not in.
                             let packed = |r: &Rect, runs: &[&crate::engine::PxText]| {
-                                let rows = runs.iter().map(|t| (t.y.max(1) - 1) / state.v6_cell.h);
+                                let rows = runs.iter().map(|t| state.v6_cell.row_of(t.y));
                                 let first = rows.clone().min()?;
                                 let last = rows.max()?;
                                 let first_top = runs.iter().map(|t| t.y.max(1) - 1).min()?;
@@ -3065,7 +3065,7 @@ fn render_node(
                     //   below it  → the command band, pinned to the pane BOTTOM
                     //   inside it → a painted menu overlay at its own native rows
                     // The story transcript fills whatever is left between them.
-                    let story_top = story.y_px / state.v6_cell.h;
+                    let story_top = state.v6_cell.row_of_origin0(story.y_px);
                     let story_bot =
                         ((story.y_px as u32 + story.h_px as u32).div_ceil(16)).min(u16::MAX as u32) as u16;
                     // The band is MEASURED here and PAINTED below, after the
@@ -3117,7 +3117,7 @@ fn render_node(
                     let below: Vec<u16> = runs
                         .iter()
                         .filter(|t| !t.text.trim().is_empty())
-                        .map(|t| (t.y.max(1) - 1) / state.v6_cell.h)
+                        .map(|t| state.v6_cell.row_of(t.y))
                         .filter(|&r| r >= story_bot)
                         .collect();
                     let bottom_span = match (below.iter().min(), below.iter().max()) {
@@ -4552,12 +4552,12 @@ fn overlaid_status_strip<'a>(
 /// non-blank run that lies within the window's rect, or `None` when it paints none
 /// there. (SQ-0582/SQ-0584)
 fn strip_rows(pw: &PositionedWindow, g: &crate::engine::GridWindow, cell: zvm::screen::V6Cell) -> Option<u16> {
-    let first = pw.y_px / cell.h;
+    let first = cell.row_of_origin0(pw.y_px);
     let last = pw.y_px.saturating_add(pw.h_px).div_ceil(cell.h).max(first + 1);
     g.px_texts
         .iter()
         .filter(|t| !t.text.trim().is_empty())
-        .map(|t| (t.y.max(1) - 1) / cell.h)
+        .map(|t| cell.row_of(t.y))
         .filter(|row| *row >= first && *row < last)
         .max()
 }
@@ -4612,9 +4612,9 @@ fn full_width_flood_rows(
                 if t.text.trim().is_empty() {
                     continue;
                 }
-                let row = (t.y.max(1) - 1) / cell.h;
+                let row = cell.row_of(t.y);
                 // Does this run sit within the rows its own window covers?
-                let win_first = pw.y_px / cell.h;
+                let win_first = cell.row_of_origin0(pw.y_px);
                 let win_last = pw.y_px.saturating_add(pw.h_px).div_ceil(16).max(win_first + 1);
                 let inside = row >= win_first && row < win_last;
                 per_row.entry(row).or_default().push((t, pw.w_px, pw.h_px, inside));
@@ -4766,9 +4766,9 @@ fn draw_painted_screen(
         // (SQ-0490).
         // The v6 cell (SQ-0479, per-machine since SQ-0917): quantize Y by its
         // height and X by its width — 8x16 everywhere but the Macintosh's 7x15.
-        let row = (t.y.max(1) - 1) / cell.h;
+        let row = cell.row_of(t.y);
         let Some(y) = place(row) else { continue };
-        let col = (t.x.max(1) - 1) / cell.w;
+        let col = cell.col_of(t.x);
         if area.x + col >= area.right() {
             continue;
         }
@@ -6089,7 +6089,7 @@ fn strip_native_origin(
     // 72 fields on one row.
     let mut per_row: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
     for t in runs {
-        *per_row.entry((t.y.max(1) - 1) / cell.h).or_default() += 1;
+        *per_row.entry(cell.row_of(t.y)).or_default() += 1;
     }
     if per_row.values().any(|&n| n > 1) {
         return None;
@@ -6274,7 +6274,7 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     fn over_art(&self, t: &crate::engine::PxText) -> bool {
         let px0 = t.x.max(1) as u32 - 1;
         let py = t.y.max(1) as u32 - 1;
-        let w = t.text.chars().count().max(1) as u32 * u32::from(self.v6_cell.w);
+        let w = self.v6_cell.run_px(&t.text).max(u32::from(self.v6_cell.w));
         crate::render::v6_layout::region_has_opaque(self.gfx, px0, py, w, u32::from(self.v6_cell.h))
     }
 
@@ -6401,7 +6401,7 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     fn blocked(&self, row: u16, cols: (u16, u16)) -> bool {
         match self.class(row) {
             RowClass::Text(rr) => rr.iter().any(|t| {
-                let native_row = (t.y.max(1) - 1) / self.v6_cell.h;
+                let native_row = self.v6_cell.row_of(t.y);
                 // A BAR reaches as far as its own WINDOW and no further (SQ-0949) —
                 // and only a bar takes this branch. A row of ordinary chrome text is
                 // still judged by where its GLYPHS stand: the window a run sits in
@@ -7811,7 +7811,7 @@ fn anchored_band_rows(runs: &[&crate::engine::PxText], band_rows: u16, pane_h: u
     let inked = || {
         runs.iter()
             .filter(|t| !t.text.trim().is_empty())
-            .map(|t| (t.y.max(1) - 1) / cell.h)
+            .map(|t| cell.row_of(t.y))
             .filter(|&r| r < band_rows)
     };
     let Some(first) = inked().min() else { return 0 };
@@ -7841,7 +7841,7 @@ fn draw_anchored_status_band(
     let Some(first_row) = runs
         .iter()
         .filter(|t| !t.text.trim().is_empty())
-        .map(|t| (t.y.max(1) - 1) / cell.h)
+        .map(|t| cell.row_of(t.y))
         .filter(|&r| r < band_rows)
         .min()
     else {
@@ -7856,7 +7856,7 @@ fn draw_anchored_status_band(
         let mut row_runs: Vec<&crate::engine::PxText> = runs
             .iter()
             .copied()
-            .filter(|t| !t.text.trim().is_empty() && (t.y.max(1) - 1) / cell.h == row)
+            .filter(|t| !t.text.trim().is_empty() && cell.row_of(t.y) == row)
             .collect();
         if row_runs.is_empty() {
             continue;
@@ -7878,7 +7878,7 @@ fn draw_anchored_status_band(
         let (mut left, mut center, mut right): (Vec<&str>, Vec<&str>, Vec<&str>) =
             (Vec::new(), Vec::new(), Vec::new());
         for t in &row_runs {
-            let start = ((t.x.max(1) - 1) / cell.w) as u32;
+            let start = (cell.col_of(t.x)) as u32;
             let len = t.text.chars().count() as u32;
             let end = start + len;
             // SQ-0717: the thirds rule reads a run's START, which is the right

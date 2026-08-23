@@ -2195,6 +2195,23 @@ pub const V6_FONT_HEIGHT: u16 = 16;
 /// change and the faithful one; matching the drawn face would mean proportional
 /// layout, which the Z-machine's own column arithmetic cannot express.
 ///
+/// # DECLARED, not DRAWN — the boundary that keeps this type honest
+///
+/// This is what the STORY IS TOLD: header `$26`/`$27`, the character grid, window
+/// property 13, and every coordinate the interpreter computes by advancing its
+/// cursor. **It is fixed on every machine, including ones that painted
+/// proportionally** — the Macintosh declares `colWidth := 7` while drawing Geneva
+/// 12, and a host that declared anything else would be lying to the story.
+///
+/// Where the ink actually goes is a different question, and one this type must not
+/// be asked. A proportional renderer — the Macintosh's own, or a future GUI —
+/// needs per-glyph advances, which is a `FontMetrics`-shaped thing supplied by the
+/// host. Both can be true at once, and were, on real hardware.
+///
+/// So: interpreting a coordinate the story produced is [`Self::row_of`],
+/// [`Self::col_of`], [`Self::run_px`]. Deciding where to put a pixel is not this
+/// type's business.
+///
 /// # Not a global
 ///
 /// The cell is per-session — resolved once at boot from the medium's profile and
@@ -2219,6 +2236,48 @@ impl V6Cell {
     /// stated `0` would otherwise panic somewhere far from the mistake.
     pub fn new(w: u16, h: u16) -> Self {
         V6Cell { w: w.max(1), h: h.max(1) }
+    }
+
+    /// The text ROW a 1-based native pixel Y falls in.
+    ///
+    /// ZMSD §8.8.1: v6 window and cursor coordinates are 1-based pixels, so the
+    /// `- 1` is the origin correction and not an off-by-one. It lived at three
+    /// dozen call sites before SQ-0917, hand-written every time, which is exactly
+    /// how a site that forgot it read one row high without anything complaining.
+    pub fn row_of(self, y_px: u16) -> u16 {
+        (y_px.max(1) - 1) / self.h
+    }
+
+    /// The row a **zero-based** native pixel Y falls in.
+    ///
+    /// Two conventions are live in this codebase and they look identical written
+    /// out longhand, which is why both are named here. A `PxText` run's `y` is
+    /// ZMSD's 1-based pixel and wants [`Self::row_of`]; a `PositionedWindow`'s
+    /// `y_px` was built as `t.y.saturating_sub(1)` and is already corrected, so
+    /// passing it to `row_of` would subtract one twice and land a row high.
+    ///
+    /// Bare `y_px / cell.h` said nothing about which it held. This says it.
+    pub fn row_of_origin0(self, y_px: u16) -> u16 {
+        y_px / self.h
+    }
+
+    /// The COLUMN a 1-based native pixel X falls in. See [`Self::row_of`].
+    pub fn col_of(self, x_px: u16) -> u16 {
+        (x_px.max(1) - 1) / self.w
+    }
+
+    /// The pixel width the STORY believes `s` occupies.
+    ///
+    /// **Uniform on purpose, even for a machine that painted proportionally.**
+    /// This answers what the story was told, and the interpreter's own cursor
+    /// arithmetic advances by a fixed cell — so a proportional answer here would
+    /// disagree with the coordinates the engine produced. See the type's own
+    /// documentation for the declared-versus-drawn split.
+    ///
+    /// Takes the text rather than a count because every call site has the text in
+    /// hand and was counting characters itself.
+    pub fn run_px(self, s: &str) -> u32 {
+        s.chars().count() as u32 * u32::from(self.w)
     }
 }
 
