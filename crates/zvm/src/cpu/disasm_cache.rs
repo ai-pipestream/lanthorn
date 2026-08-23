@@ -246,18 +246,27 @@ impl DisasmCache {
 
     /// Index of the unit containing `addr`. Clamps to `0` if `addr` is
     /// before the first unit, and to the last index if `addr` is at or past
-    /// the last unit's start. Assumes `units` is non-empty (true after
-    /// `build`).
-    fn unit_index_at(&self, addr: u32) -> usize {
-        debug_assert!(!self.units.is_empty(), "unit_index_at on an empty cache");
+    /// the last unit's start.
+    ///
+    /// `None` when there are no units, which is not hypothetical: a story whose
+    /// header `$04`/`$06` point past EOF gives `region_start == region_end`, so
+    /// `build` tiles nothing — and [`DisasmCache::empty`] constructs exactly that
+    /// object on purpose. The old signature returned `usize` and computed
+    /// `self.units.len() - 1`: a debug build stopped at the `debug_assert!` that
+    /// stood here, and a RELEASE build wrapped the subtraction to `usize::MAX`,
+    /// clamped it back to `0`, and indexed an empty vector (SQ-1030). An `Option`
+    /// is the honest answer — there is no unit at any address, because there are
+    /// no units.
+    fn unit_index_at(&self, addr: u32) -> Option<usize> {
+        let last = self.units.len().checked_sub(1)?;
         let pp = self.units.partition_point(|u| u.addr() <= addr);
-        pp.saturating_sub(1).min(self.units.len() - 1)
+        Some(pp.saturating_sub(1).min(last))
     }
 
     /// Start address of the unit strictly after the one containing `addr`.
     /// Clamps to the last unit's start (no movement past the end).
     pub fn next_addr(&self, addr: u32) -> u32 {
-        let i = self.unit_index_at(addr);
+        let Some(i) = self.unit_index_at(addr) else { return addr }; // no units: nowhere to move
         if i + 1 < self.units.len() {
             self.units[i + 1].addr()
         } else {
@@ -268,7 +277,7 @@ impl DisasmCache {
     /// Start address of the unit strictly before the one containing `addr`.
     /// Clamps to `region_start` (the first unit's start).
     pub fn prev_addr(&self, addr: u32) -> u32 {
-        let i = self.unit_index_at(addr);
+        let Some(i) = self.unit_index_at(addr) else { return addr }; // no units: nowhere to move
         if i > 0 {
             self.units[i - 1].addr()
         } else {
@@ -307,7 +316,7 @@ impl DisasmCache {
         if self.units.is_empty() || lines == 0 {
             return out;
         }
-        let mut i = self.unit_index_at(addr);
+        let Some(mut i) = self.unit_index_at(addr) else { return out };
         while i < self.units.len() && out.len() < lines {
             let prov = self.units[i].provenance();
             match self.units[i] {
@@ -383,7 +392,7 @@ impl DisasmCache {
         if pc < self.region_start || pc >= self.region_end {
             return false;
         }
-        let i = self.unit_index_at(pc);
+        let Some(i) = self.unit_index_at(pc) else { return false };
         if matches!(self.units[i], Unit::Instr { .. }) && self.units[i].addr() == pc {
             return false; // already an Instr boundary
         }
@@ -415,7 +424,11 @@ impl DisasmCache {
                 break;
             }
         }
-        let end_excl = if cur >= self.region_end { self.units.len() } else { self.unit_index_at(cur) };
+        let end_excl = if cur >= self.region_end {
+            self.units.len()
+        } else {
+            self.unit_index_at(cur).unwrap_or(self.units.len())
+        };
         let mut new_units: Vec<Unit> = Vec::new();
         if pc > lo {
             new_units.push(Unit::Data { addr: lo, len: pc - lo });
@@ -429,7 +442,8 @@ impl DisasmCache {
 
     /// True if `addr` is an existing unit start (or exactly `region_end`).
     fn is_unit_boundary(&self, addr: u32) -> bool {
-        addr == self.region_end || self.units[self.unit_index_at(addr)].addr() == addr
+        addr == self.region_end
+            || self.unit_index_at(addr).is_some_and(|i| self.units[i].addr() == addr)
     }
 
     /// A confirmed routine ENTRY (a call-stack `func_addr` — the strongest
@@ -443,13 +457,14 @@ impl DisasmCache {
         self.routines.insert(entry);
 
         let first = routine_first_instr(mem, entry, self.version).min(self.region_end);
-        let i = self.unit_index_at(entry);
+        let Some(i) = self.unit_index_at(entry) else { return false };
         let lo = self.units[i].addr();
         // Repair span end: the unit containing `first` (so the header AND its
         // first instruction both fit). When `first == region_end` there is no
         // instruction to place; the span ends at the last unit.
         let end_i = if first < self.region_end {
-            self.unit_index_at(first)
+            // `units` is non-empty here — the `unit_index_at(entry)` above returned.
+            self.unit_index_at(first).unwrap_or(0)
         } else {
             self.units.len() - 1
         };
@@ -550,8 +565,13 @@ pub fn boot_root(mem: &Memory) -> u32 {
 /// reject non-code content within these bounds.
 pub fn code_region(mem: &Memory) -> (u32, u32) {
     let high_mem_base = mem.read_word(0x04) as u32;
-    let region_start = high_mem_base.min(boot_root(mem));
     let region_end = mem.len() as u32;
+    // Clamped to `region_end`, so the region is empty rather than INVERTED when a
+    // malformed header points `$04`/`$06` past the end of the file. Every consumer
+    // reads this as a half-open `[start, end)`; a start past the end made `build`
+    // tile nothing while `region_start > region_end` still described a range, and
+    // the emptiness then surfaced far away in `unit_index_at` (SQ-1030).
+    let region_start = high_mem_base.min(boot_root(mem)).min(region_end);
     (region_start, region_end)
 }
 
@@ -784,6 +804,57 @@ fn validate_routine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A story whose header `$04` (high memory) and `$06` (initial PC / packed
+    /// `main`) both point past the end of the file. There is nothing malformed
+    /// about the LOAD — `Memory::new` accepts it — so the cache is asked to tile a
+    /// region that starts past where it ends, and tiles nothing (SQ-1030).
+    fn story_with_code_past_eof() -> Memory {
+        let mut buf = crate::header::tests_support::sample_story(5);
+        buf[0x04] = 0xFF; buf[0x05] = 0xFF; // high_mem_base = 0xFFFF, past EOF
+        buf[0x06] = 0xFF; buf[0x07] = 0xFF; // initial PC likewise
+        Memory::new(buf).unwrap()
+    }
+
+    #[test]
+    fn code_region_past_eof_is_empty_not_inverted() {
+        let mem = story_with_code_past_eof();
+        let (start, end) = code_region(&mem);
+        assert_eq!(end, mem.len() as u32);
+        assert_eq!(start, end, "a start past EOF clamps to the end, giving an EMPTY region");
+        assert!(start <= end, "the region is never inverted");
+    }
+
+    /// The release-mode half of SQ-1030: with no units, `unit_index_at` computed
+    /// `self.units.len() - 1`. A debug build hit the `debug_assert!` above it; a
+    /// release build wrapped to `usize::MAX`, clamped back to `0`, and indexed an
+    /// empty vector. Both are a host abort, and both are reachable from a story
+    /// file that loads cleanly.
+    #[test]
+    fn navigating_an_empty_cache_does_not_panic() {
+        let mem = story_with_code_past_eof();
+        for cache in [DisasmCache::build(&mem), DisasmCache::empty(&mem)] {
+            assert!(cache.units().is_empty(), "nothing to tile");
+            for addr in [0u32, 0x40, 0xFFFF, u32::MAX] {
+                assert_eq!(cache.next_addr(addr), addr, "no unit to move to");
+                assert_eq!(cache.prev_addr(addr), addr, "no unit to move to");
+                assert!(cache.disassemble(&mem, addr, 8, CacheFmt::Full).is_empty());
+            }
+        }
+    }
+
+    /// The same emptiness reached through the two repair entry points, which an
+    /// app-side debugger calls on every step it observes.
+    #[test]
+    fn confirming_into_an_empty_cache_is_a_clean_no_op() {
+        let mem = story_with_code_past_eof();
+        let mut cache = DisasmCache::build(&mem);
+        for addr in [0u32, 0x40, 0xFFFF] {
+            assert!(!cache.confirm_pc(&mem, addr), "nothing to confirm");
+            assert!(!cache.confirm_routine(&mem, addr), "nothing to confirm");
+        }
+        assert!(cache.units().is_empty(), "still nothing to tile");
+    }
 
     #[test]
     fn code_region_bounds_on_minizork() {
@@ -1547,7 +1618,7 @@ mod tests {
         };
         let pc = addr + 2; // strictly inside the Data run
         assert!(cache.confirm_pc(&mem, pc), "confirm_pc should report a change");
-        let i = cache.unit_index_at(pc);
+        let i = cache.unit_index_at(pc).expect("a built minizork cache has units");
         assert!(
             matches!(cache.units()[i], Unit::Instr { .. }),
             "pc should now name an Instr unit"

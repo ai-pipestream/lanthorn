@@ -1615,6 +1615,41 @@ impl Model {
 
     // ── slot accessors ────────────────────────────────────────────────────────
 
+    // # The window-tree invariant, and why the `unwrap`s below it are not a policy
+    // breach
+    //
+    // A review of `gvm` as an embeddable crate counted eighteen non-test
+    // `unwrap`/`expect` calls in this file and read them as host aborts reachable
+    // from a hostile Glulx file, against the crate's fault-and-continue policy.
+    // They are not, and the reason is worth stating once here rather than
+    // re-derived by the next reader (SQ-1030).
+    //
+    // Every one of them rests on a single invariant: **a live window's `parent`,
+    // `child1`, `child2` and `stream` ids all name live objects, and the tree is
+    // acyclic with every live window reachable from `root` exactly once.** There
+    // are only two ways into this model and both establish it:
+    //
+    //   * `window_open` / `window_close`, which allocate before they link and
+    //     re-link before they free — the ids they then `unwrap` are ones they
+    //     just created or just checked in the same function; and
+    //   * `Model::deserialize`, the ONLY untrusted entry (the "Glk " chunk of a
+    //     save file), which ends in `validate_snapshot` and returns `Err` rather
+    //     than installing a model that breaks any clause above (SQ-0623). Its
+    //     tests are `deserialize_rejects_a_dead_root`,
+    //     `…_a_window_with_a_dead_stream` and `…_a_child_cycle`.
+    //
+    // The stream cursors (`file_streams`, `savegame_streams`, `resource_streams`)
+    // are a smaller version of the same thing: each `get_mut(&id).unwrap()` is
+    // preceded, in its own function with no intervening removal, by a `get(&id)?`
+    // that already proved the key present. The re-lookup exists only to end the
+    // immutable borrow.
+    //
+    // So: if you are auditing a panic path, the question to ask is not "can `id`
+    // be bogus here" but "did something new learn to mutate `windows`/`streams`
+    // without going through those three doors". If something has, fix it there —
+    // widening these call sites would only move the corruption further from its
+    // cause.
+
     fn win(&self, id: u32) -> Option<&Window> {
         if id == 0 {
             return None;
@@ -1870,6 +1905,7 @@ impl Model {
             WinType::Pair | WinType::Graphics => [StyleColour::default(); NUMSTYLES as usize],
         };
         {
+            // `nid` was just allocated; see the invariant note by `win`.
             let w = self.win_mut(nid).unwrap();
             w.stream = sid;
             w.styles = styles;
@@ -1890,6 +1926,9 @@ impl Model {
             return None;
         }
 
+        // From here every id is either freshly allocated (`nid`, `pid`, `sid`) or
+        // already proved live (`split`, and `old_parent` by the tree invariant) —
+        // see the note by `win`.
         let pid = self.alloc_window(WinType::Pair, 0);
         let old_parent = self.win(split).unwrap().parent;
         {
@@ -1935,6 +1974,8 @@ impl Model {
             self.root = 0;
         } else {
             // The parent is a pair; promote the sibling into the pair's place.
+            // `parent`, its two children and `grandparent` are all live by the
+            // tree invariant — see the note by `win`.
             let pw = self.win(parent).unwrap();
             let sibling = if pw.child1 == win { pw.child2 } else { pw.child1 };
             let grandparent = pw.parent;
@@ -2084,6 +2125,9 @@ impl Model {
         }
     }
 
+    /// Lay `id` out into `rect`, recursing into a pair's children. Entered only
+    /// from `relayout` at `self.root` and from itself along child links, so `id` is
+    /// live by the tree invariant — see the note by `win`.
     fn layout_window(&mut self, id: u32, rect: Rect) {
         let (wintype, method, size, child1, child2, key) = {
             let w = self.win_mut(id).unwrap();
@@ -2167,6 +2211,11 @@ impl Model {
         Some(self.build_win_tree(self.root))
     }
     fn build_win_tree(&self, id: u32) -> WinTree {
+        // Entered at `self.root` (checked non-zero by the caller) and thereafter
+        // along child links only, so `id` is live and the recursion terminates —
+        // both by the tree invariant, enforced at every entrance to the model.
+        // See the note by `win`; a cyclic snapshot is rejected by
+        // `validate_snapshot`, not survived here.
         let w = self.win(id).expect("window_tree walks the live window tree");
         if w.wintype != WinType::Pair {
             // A window's effective default colour is its Normal-style hint WITH any
@@ -2454,6 +2503,7 @@ impl Model {
             let b = &rs.data[rs.pos..rs.pos + 4];
             (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 4)
         };
+        // Re-lookup to end the immutable borrow; `id` was proved present above.
         self.resource_streams.get_mut(&id).unwrap().pos += adv;
         if let Some(st) = self.stream_mut(id) {
             st.read_count = st.read_count.saturating_add(1);

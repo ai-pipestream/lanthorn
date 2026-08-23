@@ -2047,10 +2047,13 @@ impl Machine {
                                 retired = true;
                                 whole &= w.streamed.is_empty();
                             }
-                            w.x_coord = 1;
-                            w.y_coord = y;
-                            w.x_size = nw;
-                            w.y_size = h;
+                            // Through `put_prop` for the clamp — `y` and `h` are
+                            // derived from the story's own `rows` operand
+                            // (SQ-1030).
+                            w.put_prop(1, 1);
+                            w.put_prop(0, y);
+                            w.put_prop(3, nw);
+                            w.put_prop(2, h);
                         }
                     }
                     if retired {
@@ -2482,8 +2485,11 @@ impl Machine {
                             // units). A position outside the margins moves the
                             // cursor to the left margin (§15) — model that as a
                             // clamp to 1 for any zero/negative operand.
-                            w.y_cursor = if (row as i16) < 1 { 1 } else { row };
-                            w.x_cursor = if (col as i16) < 1 { 1 } else { col };
+                            // Through `put_prop`, which clamps (SQ-1030): the
+                            // operands are the story's and the print path adds
+                            // them.
+                            w.put_prop(4, if (row as i16) < 1 { 1 } else { row });
+                            w.put_prop(5, if (col as i16) < 1 { 1 } else { col });
                             // Remember that this column was DECLARED, so prose
                             // streaming out of a wrap+scroll window can carry it
                             // as an indent instead of dropping it — see
@@ -2758,14 +2764,27 @@ impl Machine {
             // VAR:0x1E print_table — print a rectangle of ZSCII text from the current cursor (ZMSD §15).
             0x1E => {
                 let mut addr = ops.first().copied().unwrap_or(0) as u32;
-                let width = ops.get(1).copied().unwrap_or(0);
-                let height = ops.get(2).copied().unwrap_or(1).max(1);
+                // ZMSD §15: print_table draws "a rectangle of text on screen".
+                // Both operands are story-controlled `u16`s, so the uncapped loop
+                // was `height x width` = up to 4.29e9 one-character prints —
+                // measured at 107 s and gigabytes of buffered output for ONE
+                // nine-byte instruction in a release build, during which `step()`
+                // did not return. `step()` IS an embedding host's only chance to
+                // interrupt anything, so the bound is not a nicety (SQ-1030).
+                //
+                // GRID_CELL_CAP is the same ceiling `split_window` and EXT
+                // `window_size` already put on a story-requested grid dimension,
+                // and for the same reason: past it there is no screen for the
+                // characters to land on. Anything the rectangle would have drawn
+                // beyond it was invisible.
+                let width = ops.get(1).copied().unwrap_or(0).min(GRID_CELL_CAP);
+                let height = ops.get(2).copied().unwrap_or(1).clamp(1, GRID_CELL_CAP);
                 let skip = ops.get(3).copied().unwrap_or(0) as u32;
                 let start_col = self.screen.cursor_col;
                 let start_row = self.screen.cursor_row;
                 for row in 0..height {
                     // Position each row at the starting column, one line down (correct once the grid exists).
-                    self.screen.cursor_row = start_row + row;
+                    self.screen.cursor_row = start_row.saturating_add(row);
                     self.screen.cursor_col = start_col;
                     for _ in 0..width {
                         let ch = zscii_to_char(self.mem.read_byte(addr) as u16);
@@ -3220,8 +3239,8 @@ impl Machine {
                             retired = w.retire_streamed(x, y, bw, bh, cell);
                             whole = w.streamed.is_empty();
                         }
-                        w.y_coord = y;
-                        w.x_coord = x;
+                        w.put_prop(0, y); // clamped — see ZWindow::put_prop
+                        w.put_prop(1, x);
                     }
                 }
                 if retired {
@@ -3260,8 +3279,8 @@ impl Machine {
                             retired = w.retire_streamed(bx, by, x, y, cell);
                             whole = w.streamed.is_empty();
                         }
-                        w.y_size = y;
-                        w.x_size = x;
+                        w.put_prop(2, y); // clamped — see ZWindow::put_prop
+                        w.put_prop(3, x);
                         // ZMSD §8.8.3.4: "If the window size is reduced so that
                         // its cursor lies outside it, the cursor should be reset
                         // to the left margin on the top line." Cursors are 1-based
@@ -3269,8 +3288,8 @@ impl Machine {
                         // left_margin + 1. (Painted text is unaffected —
                         // window_size "does not change the current display".)
                         if w.y_cursor > w.y_size || w.x_cursor > w.x_size {
-                            w.y_cursor = 1;
-                            w.x_cursor = w.left_margin + 1;
+                            w.put_prop(4, 1);
+                            w.put_prop(5, w.left_margin + 1);
                         }
                         let rows = (y / cell.h).clamp(1, GRID_CELL_CAP);
                         let cols = (x / cell.w).clamp(1, GRID_CELL_CAP);
@@ -3422,8 +3441,8 @@ impl Machine {
                 }
                 if let Some(v6) = self.screen.v6.as_mut() {
                     if let Some(w) = v6.windows.get_mut(win as usize) {
-                        w.left_margin = left;
-                        w.right_margin = right;
+                        w.put_prop(6, left); // clamped — see ZWindow::put_prop
+                        w.put_prop(7, right);
                         // ZMSD §15: "If the cursor is overtaken and now lies
                         // outside the margins altogether, move it back to the
                         // left margin of the current line." Outside means past
@@ -3434,7 +3453,7 @@ impl Machine {
                         // pixels.
                         let text_right = w.x_size.saturating_sub(right);
                         if w.x_cursor <= left || w.x_cursor > text_right {
-                            w.x_cursor = left + 1;
+                            w.put_prop(5, w.left_margin + 1);
                         }
                     }
                 }
@@ -4200,8 +4219,14 @@ impl Machine {
                             if w.scrolling() {
                                 w.tick_line_count();
                             }
-                            w.y_cursor += fh;
-                            w.x_cursor = w.left_margin + 1;
+                            // Saturating, because this is an ACCUMULATION and no
+                            // clamp on the stored value can bound one: a paint
+                            // window never scrolls, so a story that keeps printing
+                            // walks the cursor up a cell per new-line for as long
+                            // as it likes (SQ-1030). Same spelling as
+                            // `ZWindow::prose_new_line`, one file away.
+                            w.y_cursor = w.y_cursor.saturating_add(fh);
+                            w.x_cursor = w.left_margin.saturating_add(1);
                             continue;
                         }
                         // Word wrap: measure the word about to start and break
@@ -4234,8 +4259,8 @@ impl Machine {
                                     if w.scrolling() {
                                         w.tick_line_count();
                                     }
-                                    w.y_cursor += fh;
-                                    w.x_cursor = w.left_margin + 1;
+                                    w.y_cursor = w.y_cursor.saturating_add(fh);
+                                    w.x_cursor = w.left_margin.saturating_add(1);
                                     if at_space {
                                         continue; // the break consumes the space
                                     }
@@ -4253,8 +4278,12 @@ impl Machine {
                         let wrapping = w.attributes & 1 != 0;
                         let (r, c) = ((w.y_cursor.max(1) - 1) / fh + 1, (w.x_cursor.max(1) - 1) / fw + 1);
                         if !wrapping {
-                            let abs_x = w.x_coord.max(1) + w.x_cursor.max(1) - 1;
-                            if abs_x + fw - 1 > screen_w_px {
+                            // u32: both terms are capped (WINDOW_PX_CAP) but
+                            // `x_cursor` ADVANCES past that cap as the story
+                            // prints, and the sum of two u16 pixel coordinates
+                            // does not fit a u16 (SQ-1030).
+                            let abs_x = u32::from(w.x_coord.max(1)) + u32::from(w.x_cursor.max(1)) - 1;
+                            if abs_x + u32::from(fw) - 1 > u32::from(screen_w_px) {
                                 continue; // clipped at the screen edge; cursor pinned
                             }
                         }
@@ -4263,8 +4292,8 @@ impl Machine {
                         }
                         w.grid.put(r, c, out_ch, style, fg, bg);
                         run.get_or_insert_with(|| crate::screen::V6Text {
-                            y: w.y_coord.max(1) + w.y_cursor.max(1) - 1,
-                            x: w.x_coord.max(1) + w.x_cursor.max(1) - 1,
+                            y: w.y_coord.max(1).saturating_add(w.y_cursor.max(1)).saturating_sub(1),
+                            x: w.x_coord.max(1).saturating_add(w.x_cursor.max(1)).saturating_sub(1),
                             text: String::new(),
                             style,
                             fg,
@@ -4279,10 +4308,10 @@ impl Machine {
                             if w.scrolling() {
                                 w.tick_line_count();
                             }
-                            w.y_cursor += fh;
-                            w.x_cursor = w.left_margin + 1;
+                            w.y_cursor = w.y_cursor.saturating_add(fh);
+                            w.x_cursor = w.left_margin.saturating_add(1);
                         } else {
-                            w.x_cursor += fw;
+                            w.x_cursor = w.x_cursor.saturating_add(fw);
                         }
                     }
                     if let Some(r) = run.take() {
@@ -5085,6 +5114,7 @@ fn zscreen_colour_name(c: crate::screen::ZColour) -> String {
 pub(crate) mod tests {
     use super::*;
     use crate::header::tests_support::sample_story;
+    use crate::screen::WINDOW_PX_CAP;
     use crate::screen::ZColour;
 
     /// A v6 story whose `main` routine (0 locals) begins with `first_instr`.
@@ -11230,12 +11260,15 @@ pub(crate) mod tests {
     #[test]
     fn v6_window_size_clamps_hostile_dimensions() {
         // A story requesting a max-pixel window must not force a ~1 GB grid
-        // allocation; the cell grid is capped (pixel sizes still stored verbatim).
+        // allocation; the cell grid is capped. The PIXEL sizes were stored
+        // verbatim until SQ-1030, which found that a verbatim 0xFFFF is added to
+        // the cursor in the print path and aborts a debug-built host — so they
+        // are capped now too, at WINDOW_PX_CAP.
         let mut m = v6_exec_machine();
         m.exec_ext(0x11, &[1, 0xFFFF, 0xFFFF], None, None);
         let v6 = m.screen.v6.as_ref().unwrap();
-        assert_eq!(v6.windows[1].y_size, 0xFFFF, "pixel size stored verbatim");
-        assert_eq!(v6.windows[1].x_size, 0xFFFF);
+        assert_eq!(v6.windows[1].y_size, WINDOW_PX_CAP, "pixel size capped");
+        assert_eq!(v6.windows[1].x_size, WINDOW_PX_CAP);
         assert!(v6.windows[1].grid.rows <= 1024, "grid rows capped: {}", v6.windows[1].grid.rows);
         assert!(v6.windows[1].grid.cols <= 1024, "grid cols capped: {}", v6.windows[1].grid.cols);
     }
@@ -11777,5 +11810,152 @@ pub(crate) mod tests {
         m.exec_ext(0x0D, &[0x7FFF, (-1i16) as u16], None, None);
         assert_eq!(m.screen.current_fg, ZColour::True(0x7FFF));
         assert_eq!(m.screen.current_bg, ZColour::Default);
+    }
+
+    // ── SQ-1030: a hostile story must not abort its host ─────────────────────
+    //
+    // Every one of these is a short `main` rather than a direct `exec_*` call,
+    // because the claim under test is about what a STORY FILE can do to an
+    // embedding host, and a story file is the only thing that proves it.
+
+    /// VAR instruction with every operand a large (16-bit) constant — the form a
+    /// hostile story reaches for, and the one [`emit_var_instr`]'s small
+    /// constants cannot express.
+    fn emit_var_large(buf: &mut Vec<u8>, opcode: u8, ops: &[u16]) {
+        buf.push(0b1110_0000 | (opcode & 0x1F));
+        let mut type_byte: u8 = 0xFF;
+        for (i, _) in ops.iter().enumerate().take(4) {
+            type_byte &= !(0b11 << 6u8.saturating_sub(2 * i as u8)); // 0b00 = large const
+        }
+        buf.push(type_byte);
+        for &op in ops.iter().take(4) {
+            buf.extend_from_slice(&op.to_be_bytes());
+        }
+    }
+
+    /// `put_wind_prop` writes a window coordinate the print path then adds.
+    /// Before SQ-1030 this panicked in a debug build with "attempt to add with
+    /// overflow" at `w.x_coord.max(1) + w.x_cursor.max(1) - 1` (exec.rs), and
+    /// wrapped silently in release.
+    #[test]
+    fn hostile_put_wind_prop_coords_cannot_overflow_the_print_path() {
+        let mut body = Vec::new();
+        emit_ext_instr(&mut body, 0x19, &[1, 1, 0xFFFF]); // window 1, prop 1 (x_coord)
+        emit_ext_instr(&mut body, 0x19, &[1, 5, 0x7FFF]); // window 1, prop 5 (x_cursor)
+        emit_var_instr(&mut body, 0x0B, &[1]);            // set_window 1
+        emit_var_instr(&mut body, 0x05, &[65]);           // print_char 'A'
+        let mut m = Machine::new(Memory::new(v6_boot_story(&body)).unwrap());
+        for _ in 0..3 {
+            assert_eq!(m.step(), StepResult::Continue);
+        }
+        {
+            let w = &m.screen.v6.as_ref().unwrap().windows[1];
+            assert_eq!(w.x_coord, WINDOW_PX_CAP, "x_coord clamped on the way in");
+            assert_eq!(w.x_cursor, WINDOW_PX_CAP, "x_cursor clamped on the way in");
+        }
+        // The print is the step that used to abort the host.
+        assert_eq!(m.step(), StepResult::Continue);
+    }
+
+    /// The same field reached through the margin property, whose consumer is
+    /// `w.x_cursor = w.left_margin + 1` on every new-line.
+    #[test]
+    fn hostile_put_wind_prop_margin_cannot_overflow_the_newline_path() {
+        let mut body = Vec::new();
+        emit_ext_instr(&mut body, 0x19, &[1, 6, 0xFFFF]); // window 1, prop 6 (left_margin)
+        emit_var_instr(&mut body, 0x0B, &[1]);            // set_window 1
+        emit_var_instr(&mut body, 0x05, &[13]);           // print_char '\n'
+        let mut m = Machine::new(Memory::new(v6_boot_story(&body)).unwrap());
+        for _ in 0..3 {
+            assert_eq!(m.step(), StepResult::Continue);
+        }
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert!(w.left_margin <= WINDOW_PX_CAP, "left_margin clamped, got {}", w.left_margin);
+    }
+
+    /// `move_window`, `window_size`, `set_cursor` and `set_margins` write the
+    /// same eight fields without going anywhere near `put_wind_prop`, so a clamp
+    /// that guarded only the property setter would leave four routes open.
+    #[test]
+    fn hostile_window_geometry_opcodes_cannot_overflow_the_print_path() {
+        let mut body = Vec::new();
+        emit_ext_instr(&mut body, 0x10, &[1, 0xFFFF, 0xFFFF]); // move_window(win, y, x)
+        emit_ext_instr(&mut body, 0x11, &[1, 0xFFFF, 0xFFFF]); // window_size(win, y, x)
+        emit_var_large(&mut body, 0x0F, &[0x7FFF, 0x7FFF, 1]); // set_cursor(row, col, win)
+        emit_ext_instr(&mut body, 0x08, &[0xFFFF, 0xFFFF, 1]); // set_margins(left, right, win)
+        emit_var_instr(&mut body, 0x0B, &[1]);                 // set_window 1
+        emit_var_instr(&mut body, 0x05, &[65]);                // print_char 'A'
+        let mut m = Machine::new(Memory::new(v6_boot_story(&body)).unwrap());
+        for _ in 0..5 {
+            assert_eq!(m.step(), StepResult::Continue);
+        }
+        {
+            let w = &m.screen.v6.as_ref().unwrap().windows[1];
+            for (name, v) in [
+                ("y_coord", w.y_coord), ("x_coord", w.x_coord),
+                ("y_size", w.y_size), ("x_size", w.x_size),
+                ("y_cursor", w.y_cursor), ("x_cursor", w.x_cursor),
+                ("left_margin", w.left_margin), ("right_margin", w.right_margin),
+            ] {
+                assert!(v <= WINDOW_PX_CAP, "{name} clamped on the way in, got {v}");
+            }
+        }
+        // The print is the step that used to abort the host.
+        assert_eq!(m.step(), StepResult::Continue);
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        // Printing ADVANCES the cursor past the cap by one cell; what matters is
+        // that it did so by adding, not by wrapping through zero.
+        for (name, v) in [
+            ("y_coord", w.y_coord), ("x_coord", w.x_coord),
+            ("y_size", w.y_size), ("x_size", w.x_size),
+            ("y_cursor", w.y_cursor), ("x_cursor", w.x_cursor),
+            ("left_margin", w.left_margin), ("right_margin", w.right_margin),
+        ] {
+            assert!(v >= 1, "{name} did not wrap through zero, got {v}");
+        }
+    }
+
+    /// The cursor ADVANCE is an accumulation, not a written value, so the clamp
+    /// above cannot bound it: a paint window that never scrolls walks `y_cursor`
+    /// up by one cell per new-line for as long as the story keeps printing, and
+    /// `x_cursor` likewise per glyph.
+    #[test]
+    fn hostile_print_flood_cannot_overflow_the_cursor_advance() {
+        let mut m = v6_exec_machine();
+        {
+            let w = &mut m.screen.v6.as_mut().unwrap().windows[1];
+            w.y_cursor = WINDOW_PX_CAP;
+            w.x_cursor = WINDOW_PX_CAP;
+        }
+        m.exec_var(0x0B, &[1], None, None); // set_window 1 — attrs 0b1000, paint mode
+        m.print_text(&"\n".repeat(8000));
+        m.print_text(&"X".repeat(8000));
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert!(w.y_cursor >= WINDOW_PX_CAP, "y_cursor saturated rather than wrapping");
+        assert!(w.x_cursor >= WINDOW_PX_CAP, "x_cursor saturated rather than wrapping");
+    }
+
+    /// `print_table` loops height x width with both operands story-controlled.
+    /// Measured before SQ-1030, on this nine-byte instruction: **107 s in a
+    /// release build and 689 s in a debug one**, growing the output buffer into
+    /// the gigabytes, with `step()` — an embedding host's only chance to
+    /// interrupt anything — not returning for the whole of it. Measured after:
+    /// 0.21 s debug, 0.03 s release.
+    #[test]
+    fn hostile_print_table_returns_from_step_promptly() {
+        let mut body = Vec::new();
+        emit_var_large(&mut body, 0x1E, &[0x0040, 0xFFFF, 0xFFFF]); // addr, width, height
+        let mut m = Machine::new(Memory::new(v6_boot_story(&body)).unwrap());
+        let t0 = std::time::Instant::now();
+        // The table address runs off the end of memory long before the loop does,
+        // so `Fault` is the honest answer and `Continue` an acceptable one; what
+        // is under test is that ONE of them arrives at all.
+        let r = m.step();
+        let dt = t0.elapsed();
+        assert!(matches!(r, StepResult::Continue | StepResult::Fault), "got {r:?}");
+        assert!(
+            dt < std::time::Duration::from_secs(2),
+            "print_table(0xFFFF, 0xFFFF) must return control to the host promptly, took {dt:?}",
+        );
     }
 }

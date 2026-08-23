@@ -664,7 +664,25 @@ impl ZWindow {
     /// foreground and true background properties must not be written by
     /// put_wind_prop." They are read-derived from the window's channels in the
     /// `get_wind_prop` arm instead.
+    ///
+    /// # The one clamp
+    ///
+    /// This is the crate's ONLY writer of properties 0–7 from a story operand —
+    /// `move_window`, `window_size`, `set_cursor`, `set_margins` and `split_window`
+    /// all route through here rather than assigning the fields — so
+    /// [`WINDOW_PX_CAP`] is enforced once instead of at every consumer. The
+    /// consumers are half a dozen plain `+`s in the print path, and a story that
+    /// wrote `0xFFFF` here aborted a debug-built host four instructions into `main`
+    /// (SQ-1030). Six saturating additions would have fixed the same six sites; a
+    /// hand-maintained invariant spread across call sites is the symptom, and the
+    /// seventh consumer is written by someone with no reason to know any of this.
+    ///
+    /// Properties 8–15 are a routine address, a countdown, a style, a colour, a
+    /// font and a line count — none of them a pixel, none of them added to another
+    /// — so they are stored verbatim. In particular property 15 is SIGNED and has
+    /// its own floor at -999 (§8.8.3.2.2.3); clamping it here would break it.
     pub fn put_prop(&mut self, n: u16, v: u16) {
+        let v = if n <= 7 { v.min(WINDOW_PX_CAP) } else { v };
         match n {
             0 => self.y_coord = v,
             1 => self.x_coord = v,
@@ -2322,6 +2340,32 @@ impl Default for V6Cell {
 /// cells) yet caps worst-case storage at ~1M cells per window.
 pub const GRID_CELL_CAP: u16 = 1024;
 
+/// Upper bound, in pixels, on every window coordinate a STORY can write:
+/// properties 0-7 of ZMSD 1.1 §8.8.3.2 (`y coordinate`, `x coordinate`, `y size`,
+/// `x size`, `y cursor`, `x cursor`, `left margin size`, `right margin size`),
+/// whether they arrive through `put_wind_prop`, `move_window`, `window_size`,
+/// `set_cursor` or `set_margins`.
+///
+/// # Why a cap at all
+///
+/// The print path combines these fields with plain `+` — `x_coord + x_cursor - 1`,
+/// then `+ font_width - 1`, and `x_cursor = left_margin + 1` on every new-line.
+/// Stored verbatim, a story writing `0xFFFF` into one of them aborts a debug-built
+/// host with "attempt to add with overflow" four instructions into `main`, and
+/// wraps silently in a release one. A library cannot choose its embedder's
+/// profile, so neither outcome is acceptable (SQ-1030).
+///
+/// # Why 8192 and not `u16::MAX`
+///
+/// Saturating at `u16::MAX` would trade a panic for a window whose geometry is
+/// absurd but still self-consistent, which is the harder bug to see. This is the
+/// same ceiling [`GRID_CELL_CAP`] already states, in the other unit: 1024 cells at
+/// the 8-pixel cell this crate defaults to. The tallest, widest v6 screen anyone
+/// shipped is 640x400, so no real story comes within an order of magnitude of it —
+/// and two capped values plus a font cell stay far inside `u16`, which is exactly
+/// what the additions above need.
+pub const WINDOW_PX_CAP: u16 = 8192;
+
 /// Cap on [`ZWindow::prose`] (SQ-0585). A secondary prose window shows what is on
 /// screen and nothing more — the tallest v6 screen is 400px, 25 text rows, and a
 /// game that prints past its window's bottom without erasing has scrolled the
@@ -2475,6 +2519,33 @@ pub fn compute_status_line(mem: &Memory) -> StatusLine {
 
 #[cfg(test)]
 mod tests {
+    // ── SQ-1030: the one clamp ───────────────────────────────────────────────
+
+    /// `put_prop` is the crate's only writer of the eight geometry properties
+    /// from a story operand, so the clamp belongs to it and this case pins it.
+    /// Properties 8-15 are not pixels and are stored verbatim — property 15 in
+    /// particular is a SIGNED line count whose own floor is -999, and clamping it
+    /// to a positive pixel ceiling would silently disable "[MORE]".
+    #[test]
+    fn put_prop_clamps_the_geometry_and_leaves_the_rest_alone() {
+        let mut w = super::ZWindow::default();
+        for n in 0..=7u16 {
+            w.put_prop(n, 0xFFFF);
+            assert_eq!(w.get_prop(n), super::WINDOW_PX_CAP, "property {n} is a pixel and clamps");
+            w.put_prop(n, 300);
+            assert_eq!(w.get_prop(n), 300, "property {n} under the cap is untouched");
+        }
+        for n in 8..=15u16 {
+            w.put_prop(n, 0xFFFF);
+            assert_eq!(w.get_prop(n), 0xFFFF, "property {n} is not a pixel and is verbatim");
+        }
+        // §8.8.3.2 ends "The true foreground and true background properties must
+        // not be written by put_wind_prop" — 16/17 are still ignored.
+        w.put_prop(16, 1);
+        w.put_prop(17, 1);
+        assert_eq!(w.get_prop(16), 0);
+        assert_eq!(w.get_prop(17), 0);
+    }
 
     // ── SQ-0956: the two-colour card ─────────────────────────────────────────
     //
