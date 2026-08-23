@@ -2936,6 +2936,32 @@ impl GameSession {
                     format!(" — off-screen, clipped to {cw}x{chh}")
                 },
             ));
+            // **What the window's own text metrics are** (SQ-1009). A frame
+            // capture answers where a glyph LANDED; only this answers where the
+            // engine thought it could put one, and the two disagreeing is the
+            // whole class of v6 layout defect. It was absent when Arthur's F5
+            // description wrapped past its window, and the question — does the
+            // paint path break this line on a column count or a pixel width —
+            // had to be answered by reading `cpu::exec` instead of by looking.
+            //
+            // `usable` is the width a wrap SHOULD respect: ZMSD §8.8.3.2's
+            // properties 6 and 7 inset the text from both edges, so a window
+            // whose margins are non-zero is narrower than its `x_size` says.
+            let cell = self.machine.v6_cell;
+            out.push(format!(
+                "          text: grid {}x{} cells of {}x{}px · margins l={} r={} · usable {}px = {} cols",
+                w.grid.cols,
+                w.grid.rows,
+                cell.w,
+                cell.h,
+                w.left_margin,
+                w.right_margin,
+                w.x_size.saturating_sub(w.left_margin).saturating_sub(w.right_margin),
+                w.x_size
+                    .saturating_sub(w.left_margin)
+                    .saturating_sub(w.right_margin)
+                    / cell.w.max(1),
+            ));
             // What the model made of this window, matched by its native rect.
             let node = items.iter().find(|pw| (pw.x_px, pw.y_px, pw.w_px, pw.h_px) == native);
             out.push(match node.map(|pw| &pw.node) {
