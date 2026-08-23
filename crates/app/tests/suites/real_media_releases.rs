@@ -338,12 +338,23 @@ const V6_FRAMES: &[V6Frame] = &[
     // one medium untrue of the other.
     V6Frame { file: "Zork Zero - The Revenge of Megaboz.adf", turns: 12, prose_window: 0, box_px: (89, 81, 464, 320) },
     V6Frame { file: "zork0-r393-s890714.z6", turns: 12, prose_window: 0, box_px: (87, 79, 468, 320) },
-    // …and the Macintosh disk's r296, on the big colour Mac's 640×400 screen —
-    // the same box r393 lays out, which is the point: the Mac's COLOUR archive
-    // is the Amiga's picture space (`wx := 2*GFXAM_X`), so the geometry does not
-    // move. Only the monochrome archive is a different screen (SQ-0838), and
-    // `v6_macintosh_profile.rs` is where that one is pinned.
-    V6Frame { file: "Zork Zero Disk.image", turns: 12, prose_window: 0, box_px: (87, 79, 468, 320) },
+    // …and the Macintosh disk's r296, on the big colour Mac's 640×400 SCREEN —
+    // the same screen r393 gets, because the Mac's COLOUR archive is the Amiga's
+    // picture space (`wx := 2*GFXAM_X`). Only the monochrome archive is a
+    // different screen (SQ-0838), pinned in `v6_macintosh_profile.rs`.
+    //
+    // **But the box is NOT the same, and this pin used to say it was** (SQ-1021).
+    // A same-screen machine still lays windows out on its own CELL, and the
+    // Macintosh's is 7x15 where every other machine's is 8x16 (SQ-0917). Window 0
+    // is 21 Macintosh lines: 21 * 15 = **315**. The old pin read 320, which is
+    // 20 * 16 — a whole number of lines of a cell this machine does not have, and
+    // not a multiple of 15 at all (320/15 = 21.33), so no Macintosh could ever
+    // produce it. It was a fabricated frame: this harness booted the Mac at 8x16
+    // because it passed `None` for the cell, exactly as SQ-0901's Arthur frame was
+    // fabricated by omitting `native_std_window`. The width does not move, because
+    // the game places this window's left edge and width in pixels rather than in
+    // columns — which is why only one number here changed.
+    V6Frame { file: "Zork Zero Disk.image", turns: 12, prose_window: 0, box_px: (87, 79, 468, 315) },
     // Shogun and Arthur agree across their two builds. Pinned so that stays a
     // measured fact rather than an assumption.
     V6Frame { file: "James Clavell's Shogun.adf", turns: 12, prose_window: 0, box_px: (47, 33, 548, 368) },
@@ -607,24 +618,16 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
     // The same chain, in the same order: the Blorb's `Reso`, the archive the
     // medium supplied, then the machine (SQ-0838). No medium here names an
     // archive by hand, so tier 3's link is the one that is absent.
-    let v6_screen_px = picts
-        .std_window()
-        .or_else(|| picts.native_std_window())
-        .or_else(|| profile.std_window());
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        honor_game_colours,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
         profile.interpreter_number(),
-        false,
-        picture_dims,
-        v6_screen_px,
-        picts.art_scale(),
         profile.default_colours(),
-        None,
-        None,
-        None,
-    )
+    );
+    let mut s = GameSession::new_for_machine(bytes, honor_game_colours, false, false, picture_dims, None, None, &boot)
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", ctx(m)));
     assert!(!s.quit, "{}: quit during boot", ctx(m));
     assert!(s.machine.fault_trace.is_none(), "{}: faulted during boot", ctx(m));

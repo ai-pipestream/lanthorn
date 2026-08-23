@@ -126,25 +126,17 @@ fn frame_driven(file: &str, honor: bool, drive: bool) -> Option<Frame> {
     app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve_with_override(&path, PictureOverride::Unset, None);
     let picture_dims = picts.all_pict_dims();
-    let std_window = picts
-        .std_window()
-        .or_else(|| picts.native_std_window())
-        .or_else(|| profile.std_window());
     let honoured = honor && !picts.declines_game_colours(profile.default_colours());
-    let mut session = GameSession::new_with_art_scale(
-        bytes,
-        honoured,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
         profile.interpreter_number(),
-        false,
-        picture_dims,
-        std_window,
-        picts.art_scale(),
         honoured.then(|| profile.default_colours()).flatten(),
-        None,
-        None,
-        None,
-    )
+    );
+    let mut session = GameSession::new_for_machine(bytes, honoured, false, false, picture_dims, None, None, &boot)
     .expect("Zork Zero should load and boot without a ZError");
     assert!(!session.quit && session.machine.fault_trace.is_none(), "{file} booted cleanly");
     session.set_pict_source(Some(picts));

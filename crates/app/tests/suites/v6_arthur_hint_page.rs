@@ -133,21 +133,16 @@ fn boot() -> Option<GameSession> {
     app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
-    let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
         profile.interpreter_number(),
-        false,
-        picture_dims,
-        v6_screen_px,
-        picts.art_scale(),
         profile.default_colours(),
-        None,
-        None,
-        None,
-    )
+    );
+    let mut s = GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &boot)
     .unwrap_or_else(|e| panic!("{FIXTURE}: should boot without a ZError: {e:?}"));
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

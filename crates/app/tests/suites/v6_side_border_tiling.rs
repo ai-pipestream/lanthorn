@@ -177,23 +177,16 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
     // lays its windows out to fit it — so every rect the case then measures belongs
     // to a screen the player never sees. Arthur's and Journey's ProDOS releases are
     // both 560x384 presses, and both read as 640x400 here until this was added.
-    let v6_screen_px =
-        picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
-    let v6_art_scale = picts.art_scale();
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let machine = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
         profile.interpreter_number(),
-        false,
-        picture_dims,
-        v6_screen_px,
-        v6_art_scale,
         profile.default_colours(),
-        None,
-        None,
-        None,
-    )
+    );
+    let mut s = GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &machine)
     .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
     assert!(!s.quit, "{file}: quit during boot");
     s.set_pict_source(Some(picts));
@@ -232,22 +225,17 @@ fn boot_named(story: &str, archive: &str, release: (u16, &str)) -> Option<GameSe
     // picture space (SQ-0838 — 320x200 for MCGA/Amiga, 640x200 for EGA/CGA, and
     // 480x300 for the standard Macintosh's mono plate). The screen is that space
     // times the density below, which is 640x400 for every rendition here.
-    let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
-    let v6_art_scale = picts.art_scale();
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this harness
+    // cannot omit one — it was omitting the CELL.
+    let machine = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
         profile.interpreter_number(),
-        false,
-        picture_dims,
-        v6_screen_px,
-        v6_art_scale,
         profile.default_colours(),
-        None,
-        None,
-        None,
-    )
+    );
+    let mut s =
+        GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &machine)
     .unwrap_or_else(|e| panic!("{story} + {archive}: should boot without a ZError: {e:?}"));
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

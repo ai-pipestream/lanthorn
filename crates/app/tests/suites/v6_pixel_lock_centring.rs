@@ -130,8 +130,6 @@ fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
     app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let dims = picts.all_pict_dims();
-    let std_win = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
-    let art_scale = picts.art_scale();
     let release = u16::from_be_bytes([bytes[2], bytes[3]]);
     assert_eq!(
         release, s.release,
@@ -139,24 +137,22 @@ fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
          pinned to release {}",
         s.file, s.release
     );
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
+        profile.interpreter_number(),
+        profile.default_colours(),
+    );
+    let std_win = boot.screen_px;
+    let art_scale = boot.art_scale;
     eprintln!(
         "{}: booted as {profile:?} off {medium:?} · release {release} · screen {std_win:?} · art_scale {art_scale:?}",
         s.file
     );
-    let mut session = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
-        profile.interpreter_number(),
-        false,
-        dims,
-        std_win,
-        art_scale,
-        profile.default_colours(),
-        None,
-        None,
-        None,
-    )
+    let mut session = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", s.file));
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

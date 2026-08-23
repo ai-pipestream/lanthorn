@@ -78,23 +78,16 @@ fn boot(name: &str, keys: u8, taps: usize) -> Option<GameSession> {
     let profile = InterpreterProfile::resolve(&path, None, None, medium);
     let mut picts = PictSource::resolve(&path, None);
     let dims = picts.all_pict_dims();
-    let std_win =
-        picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
-    let art_scale = picts.art_scale();
-    let mut session = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
         profile.interpreter_number(),
-        false,
-        dims,
-        std_win,
-        art_scale,
         profile.default_colours(),
-        None,
-        None,
-        None,
-    )
+    );
+    let mut session = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .expect("the story should boot without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

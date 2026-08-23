@@ -80,23 +80,16 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
     app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let dims = picts.all_pict_dims();
-    let std_window =
-        picts.std_window().or(named).or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
-    let scale = picts.art_scale();
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        honor,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        named,
         profile.interpreter_number(),
-        false,
-        dims,
-        std_window,
-        scale,
         honor.then(|| profile.default_colours()).flatten(),
-        None,
-        None,
-        None,
-    )
+    );
+    let mut s = GameSession::new_for_machine(bytes, honor, false, false, dims, None, None, &boot)
     .expect("Zork Zero boots off the Macintosh disk");
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

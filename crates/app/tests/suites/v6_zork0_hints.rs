@@ -397,15 +397,18 @@ fn the_macintosh_hint_menu_keeps_its_leftmost_topic_column_at_every_width() {
     app::v6_set_palette(profile.palette());
     let mut picts = app::graphics::PictSource::resolve_with_override(&path, app::graphics::PictureOverride::Unset, None);
     let dims = picts.all_pict_dims();
-    let std_window = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
-    let art_scale = picts.art_scale();
     let honoured =
         !picts.declines_game_colours(profile.default_colours());
-    let mut s = app::session::GameSession::new_with_art_scale(
-        bytes, honoured, false, profile.interpreter_number(), false, dims, std_window, art_scale,
-        honoured.then(|| profile.default_colours()).flatten(), None, None,
+    // SQ-1021/SQ-1022: every per-machine fact in one value, so this
+    // harness cannot omit one — it was omitting the CELL.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
         None,
-    )
+        profile.interpreter_number(),
+        honoured.then(|| profile.default_colours()).flatten(),
+    );
+    let mut s = app::session::GameSession::new_for_machine(bytes, honoured, false, false, dims, None, None, &boot)
     .expect("Zork Zero boots off the Macintosh disk");
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();
