@@ -88,3 +88,74 @@ records whose `ENCODING` is wanted — every glyph in this font is uniformly
 bearing arithmetic. Then regenerate `vga16.rs` from the subset;
 `vga16::tests::the_table_matches_the_bdf_it_was_generated_from` parses this file
 and fails if the two ever disagree.
+
+## `7x14-subset.bdf` — a candidate v6 raster fallback face (SQ-1016)
+
+The **X11 misc-fixed** `7x14` font by Markus Kuhn: a public-domain 7×14
+fixed-pitch console face from the X.Org `misc-fixed` distribution.
+`crates/app/src/render/misc7x14.rs` is generated from this file. **This asset
+and its generated table are not wired into anything yet** — nothing calls
+`misc7x14::glyph` outside its own test. Deciding when it is used as a fallback
+face is separate work (SQ-1016/SQ-1017).
+
+### Why this font
+
+The Macintosh's 7×15 body face (FONT 524, `mac/xzip.lst`) lives only on
+gitignored commercial disk media. A Mac-shaped v6 cell reachable without one —
+for instance a bare `.z6` booted under `--interpreter 3` (SQ-1011) — has no
+face to draw with, and every disk font is otherwise untestable in CI since none
+of them can be committed. `misc-fixed`'s `7x14` is 7 pixels wide, matching the
+Macintosh cell, and is public domain, so it can be embedded and exercised in
+CI without touching any commercial fixture.
+
+It does **not** substitute for the Macintosh's 7×12 *alt* face (FONT 1033),
+which is Z-machine font 3 — box drawing, block elements, cursor arrows — a
+graphics character set that must tile edge to edge, a constraint no text font
+satisfies. See SQ-1017.
+
+### Provenance
+
+| | |
+|---|---|
+| upstream | <https://www.cl.cam.ac.uk/~mgk25/ucs-fonts.html> |
+| tarball | `misc-fixed` source tarball, sha256 `702fd1cdef9123e1871622a897727977c0933a420c50c94198f5bb22de8f0f8a` |
+| full font | `7x14.bdf`, sha256 `e366d3c685659fb69ab05d5994d3d6debe897d89853f0188a1fca62d1132503f` |
+| author | Markus Kuhn (and other X11/X.Org contributors) |
+| licence | public domain |
+
+This is stronger evidence than Uni-VGA's, whose licence is only asserted on the
+author's web page: the `COPYRIGHT` property is baked directly into the BDF
+itself, verbatim:
+
+> Public domain font.  Share and enjoy.
+
+The subset preserves the original `STARTFONT`/`FONT`/`STARTPROPERTIES`…
+`ENDPROPERTIES` header intact (including that `COPYRIGHT` line), so the file is
+self-documenting about its own provenance. **No ROM was traced** — same
+standard as Uni-VGA above: `misc-fixed` was drawn for X11 from scratch, not
+dumped from hardware.
+
+### Why a subset, and what is deliberately left out
+
+The full font is 2,576 glyphs. The subset is 194 glyphs, the exact same
+repertoire cut from Uni-VGA above:
+
+| range | what |
+|---|---|
+| `U+0020`–`U+007E` | printable ASCII |
+| `U+00A0`–`U+00FF` | Latin-1 Supplement — the ZSCII default Unicode table (ZMSD §3.8.5) |
+| `U+0152`, `U+0153` | `Œ`/`œ`, also ZSCII default table |
+| `U+FFFD` | the unknown-glyph placeholder |
+
+**Font 3 is excluded**, for the same reason as Uni-VGA's subset: box drawing,
+block elements and cursor arrows are a graphics character set, not a typeface,
+and nothing printed as *text* can reach `U+2500`.
+
+### How to regenerate
+
+Fetch the upstream tarball, check it against the sha256 above, and keep only
+the records whose `ENCODING` is wanted — every glyph in this font is uniformly
+`BBX 7 14 0 -2` / `DWIDTH 7 0`, so a record is 14 bytes of bitmap and needs no
+bearing arithmetic. Then regenerate `misc7x14.rs` from the subset;
+`misc7x14::tests::the_table_matches_the_bdf_it_was_generated_from` parses this
+file and fails if the two ever disagree.
