@@ -69,6 +69,54 @@ Three consequences of nextest's model worth knowing: it runs **each test in its 
   ```
   Do this in the same breath as the merge, not "later" — the cost is invisible until it is enormous.
 
+## Refactoring policy
+
+**Facts that must be considered TOGETHER should travel together as a value, not
+positionally.** When a function takes several parameters that are really one
+subject — the machine, the frame, the request — a caller who supplies a subset
+gets a *plausible* answer rather than an error, and the resulting defect is
+silent, self-consistent, and survives review. Adding the next fact then edits
+every call site again, which is when the omissions get made.
+
+The tell is a parameter list where two or more arguments always come from the
+same place, or a comment somewhere promising that another file does the same
+thing in the same order. **A hand-maintained invariant across files is the
+symptom**; the cure is a type.
+
+Measured here, repeatedly, always in the same shape — numbers that are entirely
+self-consistent and describe a screen the player never sees:
+
+- SQ-0901: two harnesses omitted `native_std_window`, so 560x384 presses were
+  measured at 640x400. A whole quest was fixed and tested against the fabricated
+  Arthur frame that produced.
+- SQ-1020: `ring_scout` omitted the v6 cell — in the instrument built to catch
+  SQ-0901 — so every Macintosh frame it reported was laid out on 8x16.
+- SQ-1021: the same omission across twelve Macintosh render harnesses, and a
+  pinned window height of 320 that no Macintosh can produce (`320/15 = 21.33`).
+- SQ-1022: `reset.rs` omitted the cell in PRODUCTION, so `@restart` re-booted a
+  Macintosh game on a different grid than its launch — three lines below a comment
+  promising "the same four links `startup.rs` resolves, in the same order".
+
+`app::machine_boot::MachineBoot` (the five per-machine boot facts) and
+`render::v6_layout::FrameGeometry` (unit screen, art density, text cell) are the
+two that exist. Prefer adding a fact to one of those over adding a parameter.
+
+**Corollary — a guard beats a convention.** Where the wrong spelling cannot be
+made unreachable, add a source-level case that fails it, the way
+`palette_lock_discipline` and
+`render::screen::tests::no_bare_v6_cell_literals_in_native_pixel_arithmetic` do.
+The next person to write `py + 16` has no reason to know any of this.
+
+**And do not regex Rust source to perform these conversions.** Multi-line call
+sites, method definitions that look like call sites, and arguments spanning lines
+all match patterns you did not intend; a regex sweep here has three times produced
+code that compiled into something subtly different or mangled a function
+signature into a call. Parse by paren balance, verify the shape you expect,
+**skip anything unrecognised rather than guessing**, and then check the
+conversion against the original (for SQ-1021 that meant diffing each converted
+file's `.or(...)` link against `git show HEAD:`, which caught a dropped
+named-archive link). Convert the awkward remainder by hand.
+
 ## Disk hygiene
 
 Cargo has no garbage collection for `target/`: every hash change writes a new artifact beside the old one and orphans it forever (`-Zgc` is nightly and reclaims the *registry* cache, not build output). Two things dominate, and neither needs a tool:
