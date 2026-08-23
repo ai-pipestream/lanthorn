@@ -118,22 +118,17 @@ fn boot(spec: &Specimen) -> Option<GameSession> {
     let profile = InterpreterProfile::resolve(&path, None, None, None);
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
-    // `startup.rs`'s own chain, in order. Skipping `native_std_window` is what booted
-    // a 560x384 press at 640x400 and fabricated a frame a whole quest was fixed
-    // against; there is no named-archive override in this harness.
-    let v6_screen_px = picts
-        .std_window()
-        .or_else(|| picts.native_std_window())
-        .or_else(|| profile.std_window());
-    let art_scale = picts.art_scale();
+    // SQ-1021/SQ-1022: `startup.rs`'s chain, resolved once rather than reproduced.
+    // The comment this replaces was right about why it matters — skipping
+    // `native_std_window` is what booted a 560x384 press at 640x400 and fabricated a
+    // frame a whole quest was fixed against — and a hand-copied chain is exactly how
+    // that keeps happening. Named `machine` because `boot` is a function here.
+    let machine = app::machine_boot::MachineBoot::resolve(profile, &picts, None, None, None);
     eprintln!(
-        "{}: v{} release {release} serial {serial}, profile {profile:?}, unit screen {v6_screen_px:?}, art_scale {art_scale:?}",
-        spec.title, bytes[0],
+        "{}: v{} release {release} serial {serial}, profile {profile:?}, unit screen {:?}, art_scale {:?}",
+        spec.title, bytes[0], machine.screen_px, machine.art_scale,
     );
-    let mut s = GameSession::new_with_art_scale(
-        bytes, true, false, None, false, dims, v6_screen_px, art_scale, None, None, None,
-        None,
-    )
+    let mut s = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &machine)
     .expect("a valid v6 story");
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

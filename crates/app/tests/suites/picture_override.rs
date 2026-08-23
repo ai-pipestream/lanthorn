@@ -530,12 +530,22 @@ fn zork_zeros_ega_rendition_boots_the_geometry_its_mcga_one_does() {
         let over = PictureOverride::resolve(&z0, &dir);
         let std_window = over.std_window();
         let mut picts = PictSource::resolve_with_override(&z0, over, None);
-        let art_scale = scale.map(Some).unwrap_or_else(|| picts.art_scale());
         let dims = picts.all_pict_dims();
-        let mut s = GameSession::new_with_art_scale(
-            bytes.clone(), false, false, None, false, dims, std_window, art_scale, None, None, None,
+        // SQ-1021/SQ-1022: resolved as one value, then the density is OVERRIDDEN
+        // where the caller named one — which is what this suite exists to test, and
+        // is why it sets the field rather than pretending the archive said it.
+        let mut machine = app::machine_boot::MachineBoot::resolve(
+            app::interpreter::InterpreterProfile::IbmPc,
+            &picts,
+            std_window,
             None,
-        )
+            None,
+        );
+        if let Some(forced) = scale {
+            machine.art_scale = Some(forced);
+        }
+        let mut s =
+            GameSession::new_for_machine(bytes.clone(), false, false, false, dims, None, None, &machine)
         .expect("Zork Zero boots");
         s.set_pict_source(Some(picts));
         s.flush_boot_pictures();

@@ -89,22 +89,27 @@ fn boot(archive: &str, honor_game_colours: bool) -> Option<GameSession> {
     // picture space (SQ-0838 — 320x200 for MCGA/Amiga, 640x200 for EGA/CGA, and
     // 480x300 for the standard Macintosh's mono plate). The screen is that space
     // times the density below, which is 640x400 for every rendition here.
-    let v6_screen_px = picts.std_window().or_else(|| picts.native_std_window());
-    let v6_art_scale = picts.art_scale();
-    let mut session = GameSession::new_with_art_scale(
+    // SQ-1021/SQ-1022: the machine's facts in one value. No medium names a machine
+    // here, so the profile is `IbmPc` — which is what the `None` interpreter number
+    // and `None` colours already meant, and whose `std_window()` is `None`, so
+    // completing the chain changes nothing and stops it being a chain.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        app::interpreter::InterpreterProfile::IbmPc,
+        &picts,
+        None,
+        None,
+        None,
+    );
+    // SQ-0811: no pinned random seed — this suite measures colour, not chance.
+    let mut session = GameSession::new_for_machine(
         story,
         honor_game_colours,
         false,
-        None,
         false,
         picture_dims,
-        v6_screen_px,
-        v6_art_scale,
         None,
         None,
-        // SQ-0811: no pinned random seed — this suite measures colour, not chance.
-        None,
-        None,
+        &boot,
     )
     .expect("Zork Zero (v6) loads and boots without a ZError");
     session.set_pict_source(Some(picts));

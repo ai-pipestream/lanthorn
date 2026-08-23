@@ -116,41 +116,31 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
     // The four links, in `startup.rs`'s order.
-    let std_window = picts
-        .std_window()
-        .or(named_art_std_window)
-        .or_else(|| picts.native_std_window())
-        .or_else(|| profile.std_window());
-    let art_scale = picts.art_scale();
     let monochrome = picts.is_monochrome();
     // SQ-0806/SQ-0846: two-colour artwork declares the interpreter colourless —
     // but only where the machine has no colours of its own to declare.
     let honoured = honor_game_colours
         && !picts.declines_game_colours(profile.default_colours());
     let default_colours = honoured.then(|| profile.default_colours()).flatten();
-    let mut session = GameSession::new_with_art_scale(
-        bytes,
-        honoured,
-        false,
+    // SQ-1021/SQ-1022: every per-machine fact in one value — including the 7x15
+    // cell this suite exists to exercise, which no longer has to be remembered
+    // separately from the four screen links beside it.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        named_art_std_window,
         explicit.or_else(|| profile.interpreter_number()),
-        false,
-        picture_dims,
-        std_window,
-        art_scale,
         default_colours,
-        None,
-        None,
-        // SQ-0917: the machine's own cell, so this whole suite exercises the 7x15
-        // the Macintosh declares rather than zvm's default.
-        Some(profile.v6_font_cell()),
-    )
+    );
+    let mut session =
+        GameSession::new_for_machine(bytes, honoured, false, false, picture_dims, None, None, &boot)
     .expect("Zork Zero boots off the Macintosh disk");
     assert!(!session.quit, "quit during boot");
     assert!(session.machine.fault_trace.is_none(), "faulted during boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
     let _ = std::fs::remove_dir_all(&dir);
-    Launch { session, std_window, art_scale, monochrome, honoured }
+    Launch { session, std_window: boot.screen_px, art_scale: boot.art_scale, monochrome, honoured }
 }
 
 /// Ask the game for its VERSION line, which is where Zork Zero names the machine

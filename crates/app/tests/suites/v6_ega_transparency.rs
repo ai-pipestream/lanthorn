@@ -55,24 +55,20 @@ fn fmvpoker_ega_dealt() -> Option<GameSession> {
     let pics = blorb::infocom_pics::InfocomPics::parse(art).expect("FMVPOKER.EG1 is a native archive");
     let mut picts = PictSource::from_native(pics);
     let dims = picts.all_pict_dims();
-    let scale = picts.art_scale();
-    let picts_std_window = picts.native_std_window();
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
-        None,
-        false,
-        dims,
-        // The archive's own 640x200 picture space; with `scale`'s (1, 2) below
-        // that is the same 640x400 unit screen every rendition lands on (SQ-0838).
-        picts_std_window,
-        scale,
+    // SQ-1021/SQ-1022: the machine's facts in one value. No medium names a machine
+    // here, so the profile is `IbmPc` — which is what the `None` interpreter number
+    // and `None` colours already meant, and whose `std_window()` is `None`, so
+    // completing the chain changes nothing and stops it being a chain.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        app::interpreter::InterpreterProfile::IbmPc,
+        &picts,
         None,
         None,
         None,
-        None,
-    )
+    );
+    // The archive's own 640x200 picture space; with an art scale of (1, 2) that is
+    // the same 640x400 unit screen every rendition lands on (SQ-0838).
+    let mut s = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .expect("a valid v6 story");
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

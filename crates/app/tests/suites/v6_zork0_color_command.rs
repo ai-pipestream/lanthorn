@@ -217,11 +217,6 @@ fn boot(file: &str, user_honours: bool) -> Option<Booted> {
     ));
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let picture_dims = picts.all_pict_dims();
-    let std_window = picts
-        .std_window()
-        .or(named_art_std_window)
-        .or_else(|| picts.native_std_window())
-        .or_else(|| profile.std_window());
 
     let cfg = app::config::Config {
         interpreter_profile: profile,
@@ -237,27 +232,24 @@ fn boot(file: &str, user_honours: bool) -> Option<Booted> {
         app::v6_set_palette(palette);
     }
     let reported = card_screen.map(|(_, pair)| pair).or_else(|| cfg.machine_default_colours());
+    let boot = app::machine_boot::MachineBoot::resolve(
+        cfg.interpreter_profile,
+        &picts,
+        named_art_std_window,
+        cfg.advertised_interpreter_number(),
+        honoured.then_some(reported).flatten(),
+    );
     eprintln!(
-        "{file}: r{RELEASE} profile={profile:?}/{source:?} screen={std_window:?} \
+        "{file}: r{RELEASE} profile={profile:?}/{source:?} screen={:?} \
          art_scale={:?} palette={:?} honoured={honoured} reported={reported:?}",
-        picts.art_scale(),
+        boot.screen_px,
+        boot.art_scale,
         zvm::screen::palette(),
     );
 
-    let mut session = GameSession::new_with_art_scale(
-        bytes,
-        honoured,
-        false,
-        cfg.advertised_interpreter_number(),
-        false,
-        picture_dims,
-        std_window,
-        picts.art_scale(),
-        honoured.then_some(reported).flatten(),
-        None,
-        None,
-        None,
-    )
+    // SQ-1021/SQ-1022: every per-machine fact in one value.
+    let mut session =
+        GameSession::new_for_machine(bytes, honoured, false, false, picture_dims, None, None, &boot)
     .expect("Zork Zero boots off the DOS press");
     assert!(!session.quit && session.machine.fault_trace.is_none(), "{file} booted cleanly");
     session.set_pict_source(Some(picts));

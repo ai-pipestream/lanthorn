@@ -104,19 +104,25 @@ fn boot(path: &Path, honor: bool, interpreter_override: Option<u8>) -> Option<Ga
     );
     let profile = InterpreterProfile::resolve(path, interpreter_override, None, None);
     app::v6_set_palette(profile.palette());
-    let s = GameSession::new_with_art_scale(
+    // SQ-1021/SQ-1022: every per-machine fact in one value. This suite mounts no
+    // archive, so the screen and the density come back `None` exactly as they were
+    // written by hand — and the CELL now rides along, which is the point.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &app::graphics::PictSource::new(None),
+        None,
+        interpreter_override.or_else(|| profile.interpreter_number()),
+        profile.default_colours(),
+    );
+    let s = GameSession::new_for_machine(
         loaded.bytes().to_vec(),
         honor,
         false,
-        interpreter_override.or_else(|| profile.interpreter_number()),
         false,
         Vec::new(),
         None,
         None,
-        profile.default_colours(),
-        None,
-        None,
-        None,
+        &boot,
     )
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", path.display()));
     assert!(!s.quit, "{}: quit during boot", path.display());
