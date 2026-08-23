@@ -88,11 +88,6 @@ pub(crate) fn reset_game(
             // restart comes back on the screen the launch settled — including
             // the archive's own picture space, which is the standard Macintosh's
             // 480×300 when the mono archive is the one mounted (SQ-0838).
-            let v6_screen_px = picts
-                .std_window()
-                .or(named_art_std_window)
-                .or_else(|| picts.native_std_window())
-                .or_else(|| profile.std_window());
             // SQ-0790: and the density the art arrives at, so a restart of a
             // story playing its EGA rendition comes back with the same geometry
             // it booted with. `None` for every Blorb-sourced story.
@@ -125,24 +120,34 @@ pub(crate) fn reset_game(
             } else {
                 None
             };
-            GameSession::new_with_art_scale(
+            // SQ-1022: every per-machine fact in one value, resolved the way
+            // `startup.rs` resolves it rather than reproduced here. It HAD drifted
+            // — this call passed `None` for the Version 6 cell, so restarting a
+            // Macintosh game re-booted it on 8x16 where the launch gave it 7x15.
+            // The comment above promised "the same four links" and by then there
+            // were five facts, which is exactly how a recipe fails.
+            let boot = app::machine_boot::MachineBoot::resolve(
+                profile,
+                &picts,
+                named_art_std_window,
+                state.config.interpreter_number.or_else(|| profile.interpreter_number()),
+                host_default_colours,
+            );
+            GameSession::new_for_machine(
                 bytes,
                 state.config.honor_game_colours,
                 state.config.enable_sound,
-                state.config.interpreter_number.or_else(|| profile.interpreter_number()),
                 // Keep boot tracing across a restart in a `--debug` session, as
                 // the Glulx arm below does.
                 state.persist_debug_trace,
                 picture_dims,
-                v6_screen_px,
-                v6_art_scale,
-                host_default_colours, None,
+                None,
                 // A restart re-draws the seed the same way the launch did
                 // (SQ-0811): a pinned `random_seed` replays the same game, and an
                 // unpinned one deals a fresh one — which is what restarting a
                 // randomised game is FOR.
                 Some(state.config.effective_random_seed()),
-                None,
+                &boot,
             )
             .map_err(|e| format!("{e:?}"))
             .map(|mut new_session| {

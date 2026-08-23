@@ -126,7 +126,16 @@ fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, 
     };
     zvm::screen::set_palette(profile_.palette());
     let dims = picts.all_pict_dims();
-    let std_win = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile_.std_window());
+    // SQ-1022. This dropped the CELL and the named-archive link; both ride along
+    // now, and neither is this file's business to remember.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile_,
+        &picts,
+        None,
+        profile_.interpreter_number(),
+        profile_.default_colours(),
+    );
+    let std_win = boot.screen_px;
     println!(
         "  booted as {:?}  ·  release {} serial {}  ·  screen {}{}",
         profile_,
@@ -135,21 +144,7 @@ fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, 
         std_win.map_or("(none)".into(), |(w, h)| format!("{w}x{h}")),
         archive.map(|a| format!("  ·  archive {a}")).unwrap_or_default(),
     );
-    let art_scale = picts.art_scale();
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
-        profile_.interpreter_number(),
-        false,
-        dims,
-        std_win,
-        art_scale,
-        profile_.default_colours(),
-        None,
-        None,
-        None,
-    )
+    let mut s = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .map_err(|e| format!("boot: {e:?}"))?;
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

@@ -1,0 +1,204 @@
+//! The per-machine facts a faithful Version 6 boot needs, resolved once
+//! (SQ-1022).
+//!
+//! # Why this is a value and not a documented recipe
+//!
+//! CLAUDE.md states the chain in prose — "boot a harness the way `startup.rs`
+//! boots, or you measure a screen the app never draws" — and every caller has
+//! been expected to follow it by hand. Four have not, and the failures are
+//! identical each time: the numbers stay entirely self-consistent and describe a
+//! screen the player never sees.
+//!
+//! * SQ-0901 found `ring_scout` and `v6_side_border_tiling` both omitting
+//!   `native_std_window`, so Journey r77 and Arthur r63 — **560x384** presses —
+//!   were measured at 640x400. That produced a fabricated Arthur frame which a
+//!   whole quest was then fixed and tested against.
+//! * SQ-1020 found `ring_scout` omitting the Version 6 CELL, so every Macintosh
+//!   frame it ever reported was laid out on 8x16 where the app uses 7x15 — in the
+//!   instrument built to catch SQ-0901.
+//! * SQ-1021 found the same omission across twelve Macintosh render harnesses.
+//!
+//! The clearest evidence that a recipe cannot hold this is in the two places that
+//! got it RIGHT. `reset.rs` carries the comment "The same four links `startup.rs`
+//! resolves, in the same order" — an invariant maintained across files by hand,
+//! by someone who saw the hazard and had no way to express it. And
+//! `v6_mac_pillar_feet`'s harness resolves the profile from its medium, gets all
+//! four `std_window` links right, takes the palette lock correctly — and passes
+//! `None` for the cell, because the cell was added to the chain after that
+//! harness was written.
+//!
+//! **A recipe grows and its copies do not.** So the chain is a value: a caller
+//! cannot omit a step because there are no steps to perform.
+//!
+//! # What it does and does not own
+//!
+//! It derives the three facts that keep getting dropped — the standard window,
+//! the art scale, and the cell. It TAKES the two that a caller legitimately owns,
+//! because deciding them involves policy this module has no business in:
+//!
+//! * the **profile**, which must come from the medium the MOUNT returned rather
+//!   than be re-derived from the path (SQ-0876 — a hybrid disc carries DOS builds
+//!   in a Macintosh volume, and answering "HFS" for all of them told every PC
+//!   story it was a Macintosh);
+//! * the **interpreter number** and **default colours**, which at launch pass
+//!   through `Config::advertised_interpreter_number` and the two-colour-card rule
+//!   (SQ-0930, SQ-0956) and at a restart are simply what the launch settled.
+
+use crate::graphics::PictSource;
+use crate::interpreter::InterpreterProfile;
+
+/// Everything `GameSession` needs to be told about the machine it is running on.
+///
+/// Construct with [`MachineBoot::resolve`]; never assemble the fields by hand,
+/// which is the practice this type exists to end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineBoot {
+    /// The machine, as the medium named it.
+    pub profile: InterpreterProfile,
+    /// Header `$1E`, or `None` to leave zvm's own default rule in force.
+    pub interpreter_number: Option<u8>,
+    /// The screen the story is TOLD it has, in native pixels — [`Self::resolve`]'s
+    /// four-link cascade.
+    pub screen_px: Option<(u16, u16)>,
+    /// How dense the artwork is (SQ-0790): a 320-wide rendition doubles onto the
+    /// unit screen at (2, 2), an EGA/CGA one is 640 wide with half-width pixels
+    /// and arrives at (1, 2). `None` for every Blorb-sourced story.
+    pub art_scale: Option<(u32, u32)>,
+    /// §8.3.3's pair, where the machine or the card states one.
+    pub default_colours: Option<(u8, u8)>,
+    /// The Version 6 character cell this machine declares (SQ-0917) — `(7, 15)`
+    /// on a Macintosh, `(8, 16)` everywhere else.
+    pub cell: (u16, u16),
+}
+
+impl MachineBoot {
+    /// Resolve the machine's facts from an already-mounted archive.
+    ///
+    /// `named_art_std_window` is [`crate::graphics::PictureOverride::std_window`],
+    /// read BEFORE the override is consumed by `PictSource::resolve_with_override`
+    /// — it is the second link below and the one `ring_scout` dropped.
+    ///
+    /// # The four links, and why they are in this order
+    ///
+    /// SQ-0837/SQ-0838. The ARCHIVE comes before the MACHINE because Infocom's own
+    /// Macintosh interpreter chose its window and its picture file in one decision
+    /// — "for a small window use mono gfx, for a big window use color gfx" — so a
+    /// mono `Pic.data` mounted off a Mac volume states the 480x300 std-Mac screen
+    /// it was drawn for. It disturbs no other medium: for an `.adf` the archive and
+    /// the Amiga profile give the same 320x200, and a story with no native archive
+    /// falls through to the machine exactly as it always did.
+    ///
+    /// 1. the container's own `Reso` chunk, if it declares one;
+    /// 2. the archive the PLAYER named, if they named one;
+    /// 3. the native archive's own picture space — the link SQ-0901 was about;
+    /// 4. the machine's standard window.
+    pub fn resolve(
+        profile: InterpreterProfile,
+        picts: &PictSource,
+        named_art_std_window: Option<(u16, u16)>,
+        interpreter_number: Option<u8>,
+        default_colours: Option<(u8, u8)>,
+    ) -> MachineBoot {
+        MachineBoot {
+            profile,
+            interpreter_number,
+            screen_px: picts
+                .std_window()
+                .or(named_art_std_window)
+                .or_else(|| picts.native_std_window())
+                .or_else(|| profile.std_window()),
+            art_scale: picts.art_scale(),
+            default_colours,
+            cell: profile.v6_font_cell(),
+        }
+    }
+
+    /// A story with no medium behind it — a bare `.z5`, or a Blorb.
+    ///
+    /// Every machine fact is absent and the cell is the universal 8x16, which is
+    /// what [`crate::session::GameSession::new_with_trace`] already passes. Named
+    /// so a test that genuinely has no machine says so, instead of looking like
+    /// one that forgot.
+    pub fn bare() -> MachineBoot {
+        MachineBoot {
+            profile: InterpreterProfile::IbmPc,
+            interpreter_number: None,
+            screen_px: None,
+            art_scale: None,
+            default_colours: None,
+            cell: InterpreterProfile::IbmPc.v6_font_cell(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cell rides along, which is the whole point (SQ-1021).
+    ///
+    /// Stated against the PROFILE rather than against a literal, so this holds
+    /// when a machine's declared cell changes — SQ-1009 may yet move the Amiga's.
+    #[test]
+    fn the_cell_is_the_machines_and_never_has_to_be_remembered() {
+        for profile in
+            [InterpreterProfile::Macintosh, InterpreterProfile::Amiga, InterpreterProfile::IbmPc]
+        {
+            let boot = MachineBoot::resolve(profile, &PictSource::new(None), None, None, None);
+            assert_eq!(
+                boot.cell,
+                profile.v6_font_cell(),
+                "{profile:?}: the cell comes from the machine, not from the caller",
+            );
+        }
+        // And the one that motivated all of this is genuinely not 8x16.
+        assert_eq!(
+            MachineBoot::resolve(
+                InterpreterProfile::Macintosh,
+                &PictSource::new(None),
+                None,
+                None,
+                None,
+            )
+            .cell,
+            (7, 15),
+            "a Macintosh boot carries 7x15 without the caller doing anything",
+        );
+    }
+
+    /// A caller that names an archive gets that archive's screen, and one that
+    /// does not falls through to the machine (SQ-0901's link).
+    #[test]
+    fn a_named_archive_outranks_the_machines_standard_window() {
+        let bare = PictSource::new(None);
+        let machine = MachineBoot::resolve(InterpreterProfile::Amiga, &bare, None, None, None);
+        assert_eq!(
+            machine.screen_px,
+            InterpreterProfile::Amiga.std_window(),
+            "no archive says anything, so the machine answers",
+        );
+        let named = MachineBoot::resolve(
+            InterpreterProfile::Amiga,
+            &bare,
+            Some((560, 384)),
+            None,
+            None,
+        );
+        assert_eq!(
+            named.screen_px,
+            Some((560, 384)),
+            "the archive the player named outranks the machine — the link ring_scout dropped",
+        );
+    }
+
+    /// `bare()` is the no-machine case, and says so.
+    #[test]
+    fn a_bare_story_carries_no_machine_facts_and_the_universal_cell() {
+        let b = MachineBoot::bare();
+        assert_eq!(
+            (b.interpreter_number, b.screen_px, b.art_scale, b.default_colours),
+            (None, None, None, None),
+        );
+        assert_eq!(b.cell, (8, 16), "the cell every machine but the Macintosh declares");
+    }
+}

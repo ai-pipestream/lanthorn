@@ -865,6 +865,46 @@ impl GameSession {
     /// the first prompt is one turn too late to change the game the player is
     /// handed. `None` — every caller but the launcher — leaves zvm's own fixed
     /// default, so a test's sequence stays the reproducible one it has always been.
+    /// Boot a story on a machine, told what that machine is in ONE argument
+    /// (SQ-1022).
+    ///
+    /// [`crate::machine_boot::MachineBoot`] carries the five per-machine facts —
+    /// interpreter number, screen, art scale, default colours, character cell —
+    /// so a caller cannot pass four of them. That is the whole point: every one of
+    /// those facts has been silently omitted by a real caller at least once, and
+    /// the failure is always the same shape, a screen that is entirely
+    /// self-consistent and that the player never sees (SQ-0901, SQ-1020, SQ-1021).
+    ///
+    /// Prefer this over [`Self::new_with_art_scale`] anywhere a medium is
+    /// involved. `new_with_trace` remains right for a bare story with no machine
+    /// behind it — and [`crate::machine_boot::MachineBoot::bare`] says so
+    /// explicitly where a caller wants to be plain about it.
+    pub fn new_for_machine(
+        story: Vec<u8>,
+        honor_game_colours: bool,
+        sound_available: bool,
+        trace_from_boot: bool,
+        picture_dims: Vec<(u16, u16, u16)>,
+        host_screen: Option<(u16, u16)>,
+        random_seed: Option<u32>,
+        boot: &crate::machine_boot::MachineBoot,
+    ) -> Result<GameSession, ZError> {
+        Self::new_with_art_scale(
+            story,
+            honor_game_colours,
+            sound_available,
+            boot.interpreter_number,
+            trace_from_boot,
+            picture_dims,
+            boot.screen_px,
+            boot.art_scale,
+            boot.default_colours,
+            host_screen,
+            random_seed,
+            Some(boot.cell),
+        )
+    }
+
     pub fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>, random_seed: Option<u32>, v6_cell: Option<(u16, u16)>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());

@@ -727,18 +727,26 @@ pub(crate) fn boot_story(
             // other medium: for an `.adf` the archive and the Amiga profile give
             // the same 320×200, and a story with no native archive falls through
             // to the machine exactly as before.
-            let v6_screen_px = picts
-                .std_window()
-                .or(named_art_std_window)
-                .or_else(|| picts.native_std_window())
-                .or_else(|| cfg.interpreter_profile.std_window());
+            // SQ-1022: the four links, the art scale, the interpreter number,
+            // the colours and the cell, resolved in ONE place so no other caller
+            // has to reproduce the order. `MachineBoot::resolve`'s own docs carry
+            // the SQ-0837/SQ-0838 reasoning for why the archive precedes the
+            // machine; it used to live here and is now where every caller sees it.
+            let boot = app::machine_boot::MachineBoot::resolve(
+                cfg.interpreter_profile,
+                &picts,
+                named_art_std_window,
+                // SQ-0719/SQ-0930 — the configured number wins, and a DOS medium
+                // names the IBM PC rather than falling through to zvm's default.
+                cfg.advertised_interpreter_number(),
+                host_default_colours,
+            );
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a
             // Blorb's does; an EGA/CGA one is 640 wide with half-width pixels and
             // arrives at (1, 2). `None` for every Blorb-sourced story, which is
             // the uniform rule untouched.
-            let v6_art_scale = picts.art_scale();
-            launch_art_scale = v6_art_scale;
+            launch_art_scale = boot.art_scale;
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
@@ -748,8 +756,7 @@ pub(crate) fn boot_story(
             // SQ-0930: …except when a DOS MEDIUM named the IBM PC, where deferring
             // to that rule told the story it was a DECSystem-20 off the one disk
             // that says otherwise. See `Config::advertised_interpreter_number`.
-            let interpreter_number = cfg.advertised_interpreter_number();
-            let mut s = match GameSession::new_with_art_scale(bytes, cfg.honor_game_colours, cfg.enable_sound, interpreter_number, cli.debug, picture_dims, v6_screen_px, v6_art_scale, host_default_colours, host_screen, Some(random_seed), Some(cfg.interpreter_profile.v6_font_cell())) {
+            let mut s = match GameSession::new_for_machine(bytes, cfg.honor_game_colours, cfg.enable_sound, cli.debug, picture_dims, host_screen, Some(random_seed), &boot) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;

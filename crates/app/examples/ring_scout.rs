@@ -258,8 +258,19 @@ fn scout(
     // the GAME lays its own windows out differently and every rect measured
     // afterwards describes a screen the player never sees. `art_scale` rides along
     // for the same reason (SQ-0790): a 320-wide plate is drawn at (2,2).
-    let std_win = picts.std_window().or_else(|| picts.native_std_window()).or_else(|| profile.std_window());
-    let art_scale = picts.art_scale();
+    // SQ-1022: one call, so this instrument cannot drift from the app again. It
+    // had drifted twice — SQ-0901 caught it omitting `native_std_window`, SQ-1020
+    // caught it omitting the CELL — and both times the numbers it printed were
+    // perfectly self-consistent descriptions of a screen the app never draws.
+    // Note it also never had the NAMED-ARCHIVE link; it has it now, for free.
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
+        profile.interpreter_number(),
+        profile.default_colours(),
+    );
+    let (std_win, art_scale) = (boot.screen_px, boot.art_scale);
     println!(
         "  booted as {:?}{}  ·  release {} serial {}  ·  screen {}  art scale {:?}",
         profile,
@@ -269,25 +280,7 @@ fn scout(
         std_win.map_or("(none)".into(), |(w, h)| format!("{w}x{h}")),
         art_scale,
     );
-    let mut s = GameSession::new_with_art_scale(
-        bytes,
-        true,
-        false,
-        profile.interpreter_number(),
-        false,
-        dims,
-        std_win,
-        art_scale,
-        profile.default_colours(),
-        None,
-        None,
-        // SQ-1020: the GAME's Version 6 cell, which `startup.rs` passes and this
-        // harness did not — so every Macintosh frame it ever measured was laid out
-        // on 8x16 where the app uses 7x15. That is the SQ-0901 failure again, in the
-        // instrument built to catch SQ-0901: the numbers stay self-consistent and
-        // describe a screen the player never sees.
-        Some(profile.v6_font_cell()),
-    )
+    let mut s = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .map_err(|e| format!("boot: {e:?}"))?;
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

@@ -775,8 +775,14 @@ fn the_raster_composite_and_the_floats_take_the_same_page_as_the_ring() {
 /// change made where the binding *reads* would keep the EGA pair and the bare-`.z6`
 /// pins would not notice, because there is no archive there and the answer is the
 /// same either way. The card's pair is therefore assigned after `picts` and before
-/// `GameSession::new_with_art_scale`, which is the call that runs the story to its
+/// `GameSession::new_for_machine`, which is the call that runs the story to its
 /// first prompt. This case reads the file and asserts that order.
+///
+/// SQ-1022 added a link in the middle: `MachineBoot::resolve` now TAKES the pair
+/// and carries it into the constructor, so the chain is assign → resolve → boot
+/// and this case pins all three. That is strictly stronger than before — the pair
+/// can no longer be settled between the resolve and the boot and be silently
+/// dropped, because the constructor no longer accepts it as a separate argument.
 ///
 /// The second half is a COUNT: `PictSource::two_colour_card_screen` is the only
 /// thing that decides the pair, and it has exactly two callers — `startup.rs` at
@@ -800,7 +806,8 @@ fn the_cards_pair_is_settled_before_the_story_loads() {
     let picts = at("let mut picts = ");
     let decide = at("picts.two_colour_card_screen(&cfg)");
     let assign = at("host_default_colours = Some(pair)");
-    let boot = at("GameSession::new_with_art_scale(");
+    let resolve = at("MachineBoot::resolve(");
+    let boot = at("GameSession::new_for_machine(");
     assert!(
         picts < decide,
         "the archive must exist before it can name a card — the decision moved above `picts`",
@@ -810,6 +817,11 @@ fn the_cards_pair_is_settled_before_the_story_loads() {
         "the pair must be in hand before the constructor runs the story to its first prompt",
     );
     assert!(decide < assign && assign < boot, "…and in that order");
+    assert!(
+        assign < resolve && resolve < boot,
+        "the pair is carried into the constructor by `MachineBoot`, so it must be in \
+         hand before the resolve, which must precede the boot (SQ-1022)",
+    );
 
     // The whole workspace, so a third caller anywhere fails this rather than
     // quietly re-deriving the pair while a game runs.
