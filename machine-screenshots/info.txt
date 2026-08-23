@@ -417,3 +417,41 @@ babelmap goes the other way — `session.rs` computes cols from pixels and
 is lossless at 8 (480/8 = 60, 60*8 = 480) and LOSSY at 7 (480/7 = 68, 68*7 =
 476). So the v6 path has to carry the pixel screen as primary and derive the
 grid from it, the way the Mac does. SQ-0917 is not a constant swap.
+
+WHAT THE MACINTOSH DID WITH ITS SECOND FONT — AN OPEN QUESTION, MEASURED (SQ-1017)
+
+Every Macintosh v6 title ships two faces in its application's resource fork.
+`FONT` 524 is the 7x15 body typeface SQ-1011 draws with. `FONT` 1033 is 7x12 with
+a uniform advance of 6, and it is NOT a second typeface: dumping its bitmaps
+(`cargo run -p app --example font_scout -- --glyph ...`) gives code 54 a solid
+block, 40 a single inked column, 38 a bar on one row, 65 a lower-left quadrant.
+Those are Version 6 font-3 shapes and there is no letterform among them. It
+agrees with `mac/xzip.lst` from the other side, where `ZFont` maps `ZALT` to
+`TextFont (8)` and a FONT id is family * 128 + size — 8 * 128 + 9 = 1033.
+
+THE OBVIOUS HYPOTHESIS IS FALSIFIED. Journey prints font-3 rules — SQ-0750 has
+babelmap rasterising "200 |s" a frame for it — so its Macintosh menu strip is
+where this face should be visible. On mac-journey.png (colour press, 652x421):
+
+  menu column x266..380   ink row tops 323, 337, 352, 382   pitches 14, 15, 30
+  prose       x266..640   ink row tops 37, 52, 67, 97, ...  pitches 15, 15, 30
+
+The menu strip runs on the SAME 15-row line as the prose. And its vertical rules
+are unbroken — x=386 over y=315..420 is one run of 76 dark pixels, x=512 likewise.
+A 12-tall glyph on a 15-row line must gap 3 px every line, and there is not one.
+So those rules do not come from `FONT` 1033 at the text line height, by some other
+route this capture cannot see.
+
+mac-arthur.png adds nothing for it either: that frame's border, knotwork and
+pillars are all ARTWORK, and its status bar is inverse text in the body face. No
+font 3 is visible on it at all.
+
+So: what the resource IS is settled, and what any story USED it for is not. It
+also fits no Macintosh grid we can measure — advance 6 against colWidth 7, height
+12 against lineHeight 15, and every window in both captures is on a 15-row line.
+
+(Recorded and NOT to be reasoned from: 480/6 = 80 and 300/12 = 25 exactly, so 6x12
+would give the MONO press a clean 80x25. The colour press's 640x400 gives
+106.7 x 33.3, so the fit is mono-only, and 480 and 300 are divisible enough that
+this is very likely coincidence. It needs independent evidence before it means
+anything.)

@@ -4,21 +4,41 @@
 //! of these in its resource fork, and *Beyond Zork* keeps one. MEASURED off
 //! `/MAC/ARTHUR FOLDER/ARTHUR`:
 //!
-//! | resource | cell | advance widths |
-//! |---|---|---|
-//! | `FONT` 524 | 7×15 | 6, 7 |
-//! | `FONT` 1033 | 7×12 | **6 only** |
+//! | resource | cell | advance | what it is |
+//! |---|---|---|---|
+//! | `FONT` 524 | 7×15 | 6, 7 | the body TYPEFACE — this is the one drawn with |
+//! | `FONT` 1033 | 7×12 | 6 only | the **font-3 graphics set**, not a typeface |
 //!
 //! A `FONT` id encodes family × 128 + point size, so 524 is family 4 at 12pt and
 //! 1033 is family 8 at 9pt; id ≡ 0 (mod 128) is the family-name record and carries
 //! no bitmap, which is why [`parse`] refuses a zero-length resource rather than
 //! treating it as a broken font.
 //!
-//! **These are the fonts worth drawing with.** The Amiga's are the other half of the
-//! corpus and the wrong shape for us: Arthur's is proportional, and SQ-0916 has a
-//! rendered comparison showing that centring a proportional font in lanthorn's fixed
-//! cell reads worse than the public-domain font it would replace. `FONT` 1033 gives
-//! every drawn character the same advance, so it drops into the cell model cleanly.
+//! **`FONT` 1033 is a graphics set and [`from_fork`] deliberately passes it over**
+//! (SQ-1017). `mac/xzip.lst`'s `ZFont` maps `ZALT` to `TextFont (8)`, which is
+//! family 8, which is this resource — and dumping its bitmaps confirms it from the
+//! other side: code 54 is a solid block, 40 a single column, 38 a bar on one row,
+//! 65 a lower-left quadrant. Those are Version 6 font-3 shapes and no letterform is
+//! among them. An earlier revision of this header called it a font "worth drawing
+//! with" that "drops into the cell model cleanly", which was wrong twice: it is not
+//! text, and it does not fit — advance 6 against `colWidth` 7, height 12 against
+//! `lineHeight` 15, so it tiles into no Macintosh grid we can observe.
+//!
+//! What no evidence yet shows is any story USING it. Journey prints font-3 rules
+//! and is the obvious place to look; on `machine-screenshots/mac-journey.png` its
+//! menu strip runs on a 15-row line and its vertical rules are UNBROKEN over 76
+//! pixels, where a 12-tall glyph would gap 3px per line. So those rules do not come
+//! from this face at the text line height. `mac-arthur.png` shows no font 3 at all —
+//! that frame's border and knotwork are artwork and its status bar is inverse body
+//! text. SQ-1017 is deferred on exactly this: we know what the resource is and not
+//! what it was for.
+//!
+//! The Amiga's fonts are the other half of the corpus and split the same way, which
+//! is worth stating because the two machines are NOT one argument: *Arthur*'s
+//! `char.data` is a proportional 10×10 TYPEFACE (SQ-0916 has a rendered comparison
+//! showing it reads worse centred in lanthorn's fixed cell than the public-domain
+//! face it would replace), while *Journey*'s `Char.data` is an 8×8 font-3 SET —
+//! exactly [`crate::bitmap_font`]-sized, so unlike this one it could blit 1:1.
 //!
 //! # Format
 //!
