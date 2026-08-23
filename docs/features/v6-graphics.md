@@ -1015,6 +1015,24 @@ would put its half-width art pixels on half a device pixel, which is the very th
 the mode exists to prevent. Pick the same rendition of one game on two different
 media and the ladder changes with it, because the artwork did.
 
+**A half step is whole for the ART and half for the TEXT, and that is a real cost.**
+The ladder above is derived from the artwork, and it has to be — but raster text is
+not drawn at the artwork's density. It is drawn on the machine's character cell,
+which lives in *native* pixels. So on any press where one art pixel is already two
+native pixels, a rung that is whole in art terms is a **half step in native terms**,
+and a 7-pixel-wide Macintosh glyph asked for 1.5× gets ten and a half device pixels:
+its strokes come out alternating one and two pixels wide, and `l` and `i` go ragged
+while the compass rose in the same frame stays perfectly crisp. That contrast inside
+one image is the signature.
+
+It is a property of the *press*, not of the font. The Macintosh's monochrome
+`Pic.data` is 480×300 at (1, 1) — art pixel and text pixel are the same size — so
+every rung there is a whole native step and its text is never touched. Its colour
+`CPic.data` is 320×200 doubled, so the half rungs are where the text breaks. Sit on
+a whole multiple and it is sharp again. Skipping the half rungs on the presses that
+cannot use them is tracked as a fix; until then, whole rungs are the workaround, and
+the mode remains off by default.
+
 The magnification stays **uniform** — horizontal equals vertical. The non-squareness
 of EGA and Apple II pixels is already carried by `art_scale` itself, so a uniform
 factor on top of it preserves the shape the artist drew.
