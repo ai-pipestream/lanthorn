@@ -86,6 +86,7 @@ fn boot(name: &str, keys: u8, taps: usize) -> Option<GameSession> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        None,
     );
     let mut session = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .expect("the story should boot without a ZError");
@@ -215,8 +216,7 @@ fn shoguns_chrome_canvas_keeps_the_status_page_off_the_ring() {
             image::Rgba([0, 0, 0, 255]),
             &colors,
             text,
-            zvm::screen::V6Cell::DEFAULT,
-            None,
+            &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
         );
         // The ring's own order (SQ-0706): art and glyphs, then the painted ground
         // beneath them, then the window pages filling whatever neither claimed.

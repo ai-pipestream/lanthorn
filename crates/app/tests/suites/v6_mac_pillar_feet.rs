@@ -88,6 +88,7 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
         named,
         profile.interpreter_number(),
         honor.then(|| profile.default_colours()).flatten(),
+        None,
     );
     let mut s = GameSession::new_for_machine(bytes, honor, false, false, dims, None, None, &boot)
     .expect("Zork Zero boots off the Macintosh disk");

@@ -1,0 +1,813 @@
+//! SQ-1009 — Arthur's Amiga floppy is drawn with the face the disk carries, at that
+//! face's own advances and on its own line.
+//!
+//! # What the machine does that lanthorn did not
+//!
+//! `machine-screenshots/amiga-arthur-*.png` are captures of Arthur running on a real
+//! Amiga, all exactly 2x the machine's 320x200 frame (they carry the overscan
+//! border, so an absolute x in one of them is 43 px right of the same pixel in our
+//! 640x400 native space — see `info.txt`). Every one of them shows PROPORTIONAL
+//! text: `i` narrow, `m` wide, and a line pitch of 20 device px where lanthorn gave
+//! the story 16.
+//!
+//! Both facts come off the disk. `char.data` is a 10x10 proportional AmigaDOS font
+//! with a real advance per glyph, and Arthur's press doubles its 320-wide art onto
+//! the 640x400 unit screen — so one face row is two native rows and the DECLARED
+//! cell is 8x20 rather than the machine table's 8x16.
+//!
+//! # The three things this pins, and why each needs its own case
+//!
+//! 1. **The declared cell follows the admitted face.** The story is told a 20-row
+//!    line, which is what makes it lay out 20 rows where it used to lay out 25.
+//! 2. **The pen advances per glyph.** `native_disk_font.rs` already pins the FONT's
+//!    advance table against three runs measured in `amiga-arthur-text.png`
+//!    (628/634/204 device px of ink). This suite asserts the same three numbers one
+//!    layer out — against the pixels the RASTER path actually composites — because
+//!    a correct table and a renderer that ignores it look identical from inside the
+//!    font.
+//! 3. **A grid publishes one run per character, and the pen has to see the line.**
+//!    Arthur's score bar arrives as 73 single-character runs at multiples of the
+//!    engine's declared cell, because `zvm`'s cursor advances by the DECLARED width
+//!    and records where it stopped — correctly, and it must keep doing so. Drawing
+//!    each of those at its own narrower width leaves a gap before every letter,
+//!    which is precisely what `amiga-arthur-church.png` does NOT show: there the
+//!    glyph origins of `Church` step 12, 10, 10, 10, 10 device px, which is
+//!    `C h u r c` from the face's own table and nothing else.
+//!
+//! # Fixtures
+//!
+//! `stories/` is gitignored, so every case that needs the floppy skips vacuously.
+//! The capture-derived numbers are transcribed here rather than measured at test
+//! time, so the cases stay honest without the PNGs.
+
+use std::path::PathBuf;
+
+use app::engine::{Engine, WinNode};
+use app::graphics::PictSource;
+use app::interpreter::InterpreterProfile;
+use app::render::v6_layout as v6;
+use app::session::GameSession;
+
+/// Release 54 / serial 890606 — the Amiga press, and the only release in the tree
+/// whose medium carries a proportional typeface.
+const FIXTURE: &str = "Arthur - The Quest for Excalibur.adf";
+const RELEASE: u16 = 54;
+const SERIAL: &str = "890606";
+
+/// The captures are 2x the machine's 320x200 frame, and so is our native space, so
+/// a SPAN in one is a span in the other. (An absolute x is not — they carry the
+/// overscan border.)
+const CAPTURE_IS_NATIVE_SCALE: u32 = 1;
+
+fn stories_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
+}
+
+/// Boot exactly as `startup.rs` boots (CLAUDE.md): the medium picks the profile and
+/// the source, the archive has its say about the screen, and the release's own face
+/// rides along in `MachineBoot` — which is what settles the declared cell now.
+fn boot() -> Option<(GameSession, app::machine_boot::MachineBoot)> {
+    let path = stories_dir().join(FIXTURE);
+    let Ok((loaded, _)) = app::hints::load_mounted_story(&path) else {
+        eprintln!("SKIP: gitignored floppy missing at {}", path.display());
+        return None;
+    };
+    let bytes = loaded.bytes().to_vec();
+    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), RELEASE, "{FIXTURE}: release");
+    assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), SERIAL, "{FIXTURE}: serial");
+    let (profile, source) = InterpreterProfile::resolve_with_source(&path, None, None, None);
+    app::v6_set_palette(profile.palette());
+    let mut picts = PictSource::resolve(&path, None);
+    let picture_dims = picts.all_pict_dims();
+    let face = app::native_font::resolve(&path, None, profile, source);
+    let machine = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
+        profile.interpreter_number(),
+        profile.default_colours(),
+        face,
+    );
+    let mut s =
+        GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &machine)
+            .unwrap_or_else(|e| panic!("{FIXTURE}: should boot without a ZError: {e:?}"));
+    s.set_pict_source(Some(picts));
+    s.flush_boot_pictures();
+    Some((s, machine))
+}
+
+/// A raster `AppState` carrying the machine's own cell, face and art scale.
+fn raster_state(machine: &app::machine_boot::MachineBoot) -> app::state::AppState {
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.config.v6_render = app::config::V6RenderMode::Raster;
+    state.config.honor_game_colours = true;
+    state.v6_text = machine.text_face();
+    if let Some(scale) = machine.art_scale {
+        state.v6_art_scale = scale;
+    }
+    state
+}
+
+/// Drive the intro to the churchyard — **16 turns and a `look`**, which is the same
+/// route `v6_arthur_hint_box` takes. The frame's shape is guarded below rather than
+/// assumed.
+fn in_the_churchyard() -> Option<(GameSession, app::state::AppState)> {
+    let (mut s, machine) = boot()?;
+    let mut state = raster_state(&machine);
+    let t0 = s.take_transcript();
+    state.push_transcript_kind(&t0, app::state::TranscriptKind::Story);
+    for _ in 0..15 {
+        let r = match s.pending_input() {
+            app::session::InputKind::Line => s.submit(""),
+            app::session::InputKind::Char => s.submit_char(13),
+            app::session::InputKind::Event => s.submit(""),
+        };
+        state.push_transcript_kind(&r.transcript, app::state::TranscriptKind::Story);
+        if r.transcript.to_lowercase().contains("y or n") {
+            let r2 = s.submit_char(b'n');
+            state.push_transcript_kind(&r2.transcript, app::state::TranscriptKind::Story);
+        }
+        assert!(!s.quit, "{FIXTURE}: quit while walking the intro");
+    }
+    let r = s.submit("look");
+    assert!(r.fault.is_none(), "{FIXTURE}: `look` faulted: {:?}", r.fault);
+    state.push_transcript_kind(&r.transcript, app::state::TranscriptKind::Story);
+    Some((s, state))
+}
+
+/// The raster composite for the frame `session` is standing on.
+fn raster(session: &GameSession, state: &app::state::AppState) -> image::RgbaImage {
+    let model = Engine::screen(session);
+    let WinNode::Layered(items) = &model.root else { panic!("{FIXTURE}: a v6 frame is Layered") };
+    let native = v6::native_extent(items, state.v6_text.cell());
+    let layout = v6::classify_windows(items, state.v6_text.cell());
+    app::render::screen::build_v6_raster_canvas(&layout, native, state).0
+}
+
+/// The x of every inked column-run in `rows` of `canvas`, against `ground`.
+///
+/// One entry per glyph on a text row, which is what makes an ADVANCE measurable:
+/// the distance between two entries' starts is the pen's step.
+fn glyph_runs(
+    canvas: &image::RgbaImage,
+    rows: std::ops::Range<u32>,
+    xs: std::ops::Range<u32>,
+    ground: image::Rgba<u8>,
+) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut cur: Option<u32> = None;
+    for x in xs.clone() {
+        let inked = rows.clone().any(|y| *canvas.get_pixel(x, y) != ground);
+        match (inked, cur) {
+            (true, None) => cur = Some(x),
+            (false, Some(c)) => {
+                out.push((c, x - 1));
+                cur = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(c) = cur {
+        out.push((c, xs.end - 1));
+    }
+    out
+}
+
+/// First inked column of the first glyph to last inked column of the last — what a
+/// SCREEN shows, one pixel narrower than the pen total because the final glyph's
+/// right side bearing leaves no mark. The same model `native_disk_font`'s `ink()`
+/// closure uses, so the two layers are measuring the same quantity.
+fn ink_span(canvas: &image::RgbaImage, rows: std::ops::Range<u32>, xs: std::ops::Range<u32>, ground: image::Rgba<u8>) -> Option<u32> {
+    let runs = glyph_runs(canvas, rows, xs, ground);
+    Some(runs.last()?.1 - runs.first()?.0 + 1)
+}
+
+// ── 1. the declared cell follows the face ────────────────────────────────────
+
+/// The line the STORY is told is the face's height times the art scale — 8x20.
+///
+/// Falsified by returning `profile.v6_font_cell()` from `native_font::declared_cell`
+/// unconditionally, which is what shipped before SQ-1009: the cell comes back 8x16
+/// and the game lays out 25 rows where the machine shows 20.
+#[test]
+fn the_amiga_floppy_declares_the_faces_own_twenty_row_line() {
+    let _g = app::v6_palette_at_boot();
+    let Some((session, machine)) = boot() else { return };
+    let face = machine.face.as_ref().expect("Arthur's floppy carries char.data");
+    assert_eq!((face.width, face.height), (10, 10), "char.data is 10x10 nominal");
+    assert!(face.proportional, "…and a TYPEFACE, which is what admits it at all");
+    assert_eq!(machine.art_scale, Some((2, 2)), "a 320-wide press doubles onto the unit screen");
+    assert_eq!(
+        machine.cell,
+        zvm::screen::V6Cell::new(8, 20),
+        "the height is the face's, times the art scale; the width stays the machine's \
+         because a proportional face has no single advance to declare",
+    );
+    // And the story RECEIVED it — the boot is what makes the declaration real.
+    assert_eq!(session.machine.v6_cell, zvm::screen::V6Cell::new(8, 20), "the engine holds it too");
+    assert_eq!(
+        u32::from(machine.cell.h),
+        u32::from(face.height) * 2 * CAPTURE_IS_NATIVE_SCALE,
+        "20 native rows = the 10 machine rows `amiga-arthur.png` measures, doubled",
+    );
+}
+
+/// No other configuration in the tree admits a `Metric` face, so nothing else moves.
+///
+/// Journey's and Beyond Zork's Amiga `Char.data` is the font-3 SET — fixed 8x8,
+/// code 65 a solid block (SQ-1017) — and a fixed face is either the cell or nothing.
+#[test]
+fn only_a_proportional_face_moves_a_machines_cell() {
+    for (disk, profile) in [
+        ("Journey - The Quest Begins.adf", InterpreterProfile::Amiga),
+        ("Beyond Zork - The Coconut of Quendor.adf", InterpreterProfile::Amiga),
+    ] {
+        let path = stories_dir().join(disk);
+        if !path.is_file() {
+            eprintln!("SKIP: gitignored floppy absent: {disk}");
+            continue;
+        }
+        let (p, source) = InterpreterProfile::resolve_with_source(&path, None, None, None);
+        let face = app::native_font::resolve(&path, None, p, source);
+        assert_eq!(
+            app::native_font::declared_cell(profile, face.as_ref(), (2, 2)),
+            profile.v6_font_cell(),
+            "{disk}: a fixed-pitch face declares nothing — the machine's cell stands",
+        );
+    }
+}
+
+// ── 2. the pen, measured on the pixels the raster path composites ────────────
+
+/// The three runs `machine-screenshots/amiga-arthur-text.png` measures, rendered.
+///
+/// `native_disk_font::the_advance_table_predicts_a_real_amiga_frame_to_the_pixel`
+/// asserts these same numbers against the FONT. This asserts them against the
+/// COMPOSITE, which is the layer the player sees and the layer that was wrong: a
+/// correct advance table and a renderer that steps by a fixed cell are
+/// indistinguishable from inside the font.
+///
+/// The prose is pushed onto the transcript directly rather than driven out of the
+/// game, so the case measures the three runs the capture measures rather than
+/// whatever line the intro happens to leave on screen.
+#[test]
+fn the_raster_prose_draws_the_runs_the_capture_measures() {
+    let _g = app::v6_palette_at_boot();
+    let Some((_session, machine)) = boot() else { return };
+    let tf = machine.text_face();
+    assert!(tf.proportional(), "non-vacuity: the pen under test is the face's");
+
+    let ground = image::Rgba([0, 0, 0, 255]);
+    let ink = image::Rgba([255, 255, 255, 255]);
+    for (run, measured_at_2x) in [
+        ("WHOSO PULLETH OUT THIS SWORD OF THIS STONE, IS RIGHTWISE KING", 628u32),
+        ("You are shivering in the cold night air of an English churchyard, unsure", 634),
+        ("BORN OF ALL ENGLAND.", 204),
+    ] {
+        let mut state = raster_state(&machine);
+        state.push_transcript_kind(run, app::state::TranscriptKind::Story);
+        // A box wide enough that the wrap cannot break the run — the wrap itself is
+        // pinned separately below.
+        let (cols, rows) = (120u16, 6u16);
+        let (mut main, _) = app::render::screen::build_main_text(&state, cols, rows);
+        // The live caret is the host's, not the game's, and it is 8 native px of
+        // solid block past the end of the run — measure the RUN.
+        main.awaiting = false;
+        assert_eq!(
+            main.lines.iter().filter(|l| !l.is_empty()).count(),
+            1,
+            "non-vacuity: {run:?} must reach the raster as ONE row, got {:?}",
+            main.lines,
+        );
+        let mut canvas = image::RgbaImage::from_pixel(
+            cols as u32 * u32::from(tf.cell().w),
+            rows as u32 * u32::from(tf.cell().h),
+            ground,
+        );
+        v6::draw_story_text(&mut canvas, &main, 0, 0, cols, rows, ink, &[], &tf);
+        let span = ink_span(&canvas, 0..canvas.height(), 0..canvas.width(), ground)
+            .unwrap_or_else(|| panic!("{run:?} drew no ink at all"));
+        assert_eq!(
+            span, measured_at_2x,
+            "amiga-arthur-text.png measures {measured_at_2x} device px of ink for {run:?}; \
+             the composite drew {span}",
+        );
+    }
+}
+
+/// **The wrap is by PIXEL.** A row carries as many characters as fit its width in
+/// the face's own advances, not a column count.
+///
+/// The capture's evidence is that full prose lines end within one word's width of
+/// the same margin while carrying DIFFERENT character counts — 71 on the first line
+/// and fewer on the fourth. Both halves are pinned: the rows differ in length, and
+/// each one is full to the pixel, which is the property a column wrap cannot have.
+///
+/// Note the face is WIDER per character than the cell, not narrower: it averages
+/// 5.21 face px against the cell's 4, so a pixel wrap fits FEWER characters on a
+/// line than the 73 columns the story was told it has. That is the same fact as the
+/// machine showing 20 text rows where lanthorn gave the story 25.
+#[test]
+fn raster_prose_wraps_by_pixel_and_fills_the_line() {
+    let _g = app::v6_palette_at_boot();
+    let Some((_session, machine)) = boot() else { return };
+    let tf = machine.text_face();
+    let mut state = raster_state(&machine);
+    // One long paragraph off the capture's own screen.
+    let para = "You are shivering in the cold night air of an English churchyard, unsure \
+                of how you came to be here, when suddenly a great stone appears before you \
+                with a sword thrust deep into it and words engraved upon its face.";
+    state.push_transcript_kind(para, app::state::TranscriptKind::Story);
+    let (cols, rows) = (73u16, 8u16);
+    let box_px = cols as u32 * u32::from(tf.cell().w);
+    let (main, _) = app::render::screen::build_main_text(&state, cols, rows);
+    let full: Vec<&String> = main.lines.iter().filter(|l| !l.is_empty()).collect();
+    assert!(full.len() >= 3, "non-vacuity: the paragraph must wrap several times, got {full:?}");
+    for line in &full {
+        assert!(
+            tf.run_px(line) <= box_px,
+            "{line:?} is {} px in a {box_px} px box — the wrap must be by pixel",
+            tf.run_px(line),
+        );
+    }
+    // Different character counts on rows that are all full — which is exactly what
+    // no column count can produce.
+    let counts: std::collections::BTreeSet<usize> =
+        full[..full.len() - 1].iter().map(|l| l.chars().count()).collect();
+    assert!(
+        counts.len() > 1,
+        "a pixel wrap gives rows of DIFFERENT lengths; a column wrap gives one length: {counts:?}",
+    );
+    // The rows are full in PIXELS and short in COLUMNS, which is the whole of it:
+    // the face averages 5.21 face px against the cell's 4, so a line fills before
+    // its 73 columns are spent. A column wrap would run every row out to within a
+    // word of the column budget instead.
+    let cell = tf.cell();
+    assert!(
+        full[..full.len() - 1]
+            .iter()
+            .all(|l| cell.run_px(l) + 4 * u32::from(cell.w) < box_px),
+        "every full row must stop well short of its COLUMN budget — the pen ran out \
+         first: {:?}",
+        full.iter().map(|l| (l.chars().count(), tf.run_px(l))).collect::<Vec<_>>(),
+    );
+    // …and every one of them is full to the pixel: the next row's first word could
+    // not have been added without crossing the margin.
+    for pair in full.windows(2) {
+        let next_word = pair[1].split(' ').next().unwrap_or("");
+        let would_be = tf.run_px(pair[0]) + tf.advance(' ') + tf.run_px(next_word);
+        assert!(
+            would_be > box_px,
+            "{:?} stopped at {} px of {box_px} with {next_word:?} ({} px) still to fit — \
+             that is a break by column, not by pixel",
+            pair[0],
+            tf.run_px(pair[0]),
+            tf.run_px(next_word),
+        );
+    }
+}
+
+// ── 3. the grid: one run per character, one pen per line ─────────────────────
+
+/// Arthur's score bar steps by the face's own advances, not by the engine's cell.
+///
+/// The bar reaches the renderer as ONE RUN PER CHARACTER at multiples of the
+/// declared cell — that is `zvm` recording where its own cursor stopped, and it is
+/// right. Re-joining the runs the engine's pen laid down contiguously is what lets a
+/// per-glyph pen see the line at all; without it every letter is stamped at its
+/// engine column and drawn at its own narrower width, which opens a gap before each
+/// one. `amiga-arthur-church.png` shows the machine's own `Church`, and its glyph
+/// origins step exactly the face's advances.
+#[test]
+fn the_score_bar_advances_by_the_faces_own_table() {
+    let _g = app::v6_palette_at_boot();
+    let Some((session, state)) = in_the_churchyard() else { return };
+    let tf = state.v6_text.clone();
+    assert!(tf.proportional(), "non-vacuity: the pen under test is the face's");
+
+    // Non-vacuity on the FRAME's shape: a one-row grid across the story columns,
+    // published as per-character pixel runs, is what this case is about.
+    let model = Engine::screen(&session);
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
+    let bar = items
+        .iter()
+        .find_map(|it| match &it.node {
+            WinNode::Grid(g) if g.rows == 1 && !g.px_texts.is_empty() && it.y_px == 200 => {
+                Some((it, g))
+            }
+            _ => None,
+        })
+        .expect("the churchyard frame carries a one-row status grid at native y=200");
+    assert!(
+        bar.1.px_texts.len() > 20,
+        "non-vacuity: the bar is published one run per character, got {}",
+        bar.1.px_texts.len(),
+    );
+    let printed: String = {
+        let mut runs: Vec<_> = bar.1.px_texts.iter().collect();
+        runs.sort_by_key(|t| t.x);
+        runs.iter().map(|t| t.text.as_str()).collect()
+    };
+    assert!(
+        printed.contains("Churchyard"),
+        "non-vacuity: the bar names the room, got {printed:?}",
+    );
+
+    let canvas = raster(&session, &state);
+    // The bar is reverse video, so its ground is the block and the glyphs are dark.
+    let ground = *canvas.get_pixel(u32::from(bar.0.x_px) + 2, 210);
+    let runs = glyph_runs(&canvas, 200..220, u32::from(bar.0.x_px)..u32::from(bar.0.x_px) + 120, ground);
+    assert!(runs.len() >= 10, "the room name draws ten glyphs, got {runs:?}");
+
+    // `Churchyard`, glyph by glyph: the step from one origin to the next is that
+    // glyph's advance, doubled onto the unit screen.
+    let expected: Vec<u32> = "Churchyar".chars().map(|c| tf.advance(c)).collect();
+    let measured: Vec<u32> = runs.windows(2).take(expected.len()).map(|w| w[1].0 - w[0].0).collect();
+    assert_eq!(
+        measured, expected,
+        "the bar must step by the face's advances (C h u r c h y a r), not by the \
+         8-px cell the engine placed the runs at",
+    );
+    // And the numbers `amiga-arthur-church.png` measures for `Church` — 12, 10, 10,
+    // 10, 10 device px between glyph origins — reached independently of the table.
+    assert_eq!(
+        &measured[..5],
+        &[12, 10, 10, 10, 10],
+        "amiga-arthur-church.png measures these five steps on the machine's own bar",
+    );
+}
+
+// ── 4. bold is WIDER, because the Amiga's is ─────────────────────────────────
+
+/// `tf_BoldSmear` is read, and a bold run advances by it.
+///
+/// The Amiga emboldens by smearing a glyph right and moving the pen the same amount
+/// so the extra column has somewhere to live. Arthur's `char.data` states a smear
+/// of one pixel. Synthesising the smear without widening — which is what `bitfont`
+/// did — eats the inter-character gap, and at a 3-to-8 px proportional advance
+/// there is no gap to spare, so bold words run together.
+#[test]
+fn a_bold_run_advances_by_the_faces_own_smear() {
+    let _g = app::v6_palette_at_boot();
+    let Some((_session, machine)) = boot() else { return };
+    let face = machine.face.as_ref().expect("char.data");
+    assert_eq!(face.bold_smear, 1, "Arthur's char.data states tf_BoldSmear = 1");
+    let tf = machine.text_face();
+    // §8.7.1 bit 2 is bold.
+    const BOLD: u8 = 2;
+    for ch in ['Y', 'o', 'u', ' ', 'a', 'r', 'e'] {
+        assert_eq!(
+            tf.advance_styled(ch, BOLD),
+            tf.advance(ch) + 2,
+            "{ch:?}: a bold glyph advances one FACE pixel further, which is two native",
+        );
+    }
+    let plain = "You are carrying:";
+    assert_eq!(
+        tf.run_px_styled(plain, BOLD),
+        tf.run_px(plain) + 2 * plain.chars().count() as u32,
+        "…and a whole bold run is that much wider — the tracking \
+         machine-screenshots/amiga-arthur-inventory.png shows on its headings",
+    );
+}
+
+// ── 5. what the machine did that a DECLARED width cannot ─────────────────────
+
+/// The room description as Arthur prints it, transcribed from the runs the F5
+/// screen publishes. One string, so the wrap under test is the only variable.
+const DESCRIPTION: &str = "You are standing in the bright moonlight of a mid-winter's night \
+in a deserted English churchyard. At the foot of the church steps is a large stone with a \
+jewelled sword protruding from it. The church entrance lies to the east, and just west of you \
+is a large gravestone. A stone wall encircles the churchyard, but there is an ironwork gate in \
+the wall to your south.";
+
+/// The six line spans `machine-screenshots/amiga-arthur-F5.png` measures for it, in
+/// device px of ink — rows 39, 59, 79, 99, 119 and 139, all starting at x=71.
+///
+/// The capture is 2x the machine's 320x200 frame and so is our native space, so a
+/// SPAN in one is a span in the other. (An absolute x is not: the capture carries
+/// the overscan border, and the offset is **43** — the description's text origin
+/// reads 71 against our native 28, and the score bar's left edge agrees.)
+const F5_SPANS: [u32; 6] = [568, 576, 556, 568, 566, 382];
+
+/// Arthur's description window is 584 native px wide, which is the 640 screen less
+/// the 28 px of decorated flank on either side.
+const PROSE_WINDOW_PX: u32 = 584;
+
+/// First inked column to last, from the face's own advance table.
+fn ink_px(font: &blorb::bitmap_font::BitmapFont, s: &str) -> u32 {
+    let (mut pen, mut first, mut last) = (0u32, None, 0u32);
+    for c in s.bytes() {
+        let Some(g) = font.glyph(c) else { continue };
+        for r in &g.rows {
+            for b in 0..8u32 {
+                if r & (0x80 >> b) != 0 {
+                    let v = pen + b;
+                    first = Some(first.map_or(v, |f: u32| f.min(v)));
+                    last = last.max(v);
+                }
+            }
+        }
+        pen += u32::from(g.width);
+    }
+    match first {
+        Some(f) => (last - f + 1) * 2,
+        None => 0,
+    }
+}
+
+fn pen_px(font: &blorb::bitmap_font::BitmapFont, s: &str) -> u32 {
+    s.bytes().filter_map(|c| font.glyph(c)).map(|g| u32::from(g.width) * 2).sum()
+}
+
+/// Greedy word wrap, which is what Arthur's own formatter does — verified against
+/// the engine: at a declared width of 8 the game wraps the description to 73
+/// columns and this model reproduces its six lines exactly.
+fn wrap_cols(text: &str, cols: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > cols {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The same wrap, measured in the face's own advances instead of in columns.
+fn wrap_px(font: &blorb::bitmap_font::BitmapFont, text: &str, px: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        if !cur.is_empty() && pen_px(font, &cur) + pen_px(font, " ") + pen_px(font, word) > px {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// **The Amiga MEASURED its proportional text; it did not declare an average.**
+///
+/// This is the finding, and it is why SQ-1009 still declares the machine's 8 for the
+/// WIDTH while taking the height from the face. It was reached by trying to recover
+/// a declared width and failing, which is worth keeping as a case because the
+/// failure is the result.
+///
+/// # What was measured
+///
+/// Arthur's own formatter word-wraps, using the width the interpreter declares and
+/// the window's own size: told 8, it wraps the description to 73 columns; told 9, to
+/// 64; told 10, to 58. Each of those was driven through the real story and read back
+/// out of the published runs, and `wrap_cols` reproduces every one of them exactly.
+///
+/// So a declared width `W` produces `floor(584 / W)` columns, and the question "what
+/// did the Amiga declare" has a testable answer: the `W` whose column count wraps
+/// the description where `amiga-arthur-F5.png` wraps it.
+///
+/// **There is no such integer.** The capture needs 65 columns; `floor(584/W)` steps
+/// 73, 64, 58, 53 across W = 8, 9, 10, 11 and never lands on 65. What DOES reproduce
+/// all six spans is a wrap measured in the face's own advances against the window's
+/// own width — and it does so across a 13-pixel-wide band straddling 584, which is
+/// the signature of a pixel rule rather than a coincidence of one text.
+///
+/// The tell is in the line lengths: 64, 65, 62, 65 and 63 characters, whose pen
+/// widths are 570, 578, 558, 570 and 568 px. Different character counts, the same
+/// pixel width, every line full to within 3% of the window. No column count does
+/// that; only a measure does.
+///
+/// # What it means for the fix
+///
+/// Reproducing the machine's layout needs the ENGINE to measure text with the
+/// host's face — the game asks how wide its text is and lays out from the answer.
+/// That is a much larger change than a declared constant, and it is not this
+/// quest's. Recorded here so the next person does not spend the afternoon hunting a
+/// number that is not there.
+#[test]
+fn no_declared_width_reproduces_the_machines_wrap_but_a_measured_one_does() {
+    let _g = app::v6_palette_at_boot();
+    let Some((_session, machine)) = boot() else { return };
+    let font = machine.face.as_ref().expect("char.data");
+
+    // (a) No integer declared width lands on the capture.
+    for w in 6u32..=16 {
+        let cols = (PROSE_WINDOW_PX / w) as usize;
+        let spans: Vec<u32> = wrap_cols(DESCRIPTION, cols).iter().map(|l| ink_px(font, l)).collect();
+        assert_ne!(
+            spans.as_slice(),
+            F5_SPANS.as_slice(),
+            "a declared width of {w} native px ({cols} columns) reproduces amiga-arthur-F5.png — \
+             if this ever fires, the Amiga DID declare an average and SQ-1009 should set it",
+        );
+    }
+
+    // (b) A measured wrap does, and over a band rather than at a point.
+    for px in [578u32, 580, 582, PROSE_WINDOW_PX, 586, 590] {
+        let spans: Vec<u32> = wrap_px(font, DESCRIPTION, px).iter().map(|l| ink_px(font, l)).collect();
+        assert_eq!(
+            spans.as_slice(),
+            F5_SPANS.as_slice(),
+            "a wrap measured in the face's own advances at {px} px must reproduce \
+             amiga-arthur-F5.png's six lines",
+        );
+    }
+
+    // (c) …and the reason: every line is full to the PIXEL while carrying a
+    // different number of characters.
+    let lines = wrap_px(font, DESCRIPTION, PROSE_WINDOW_PX);
+    let counts: std::collections::BTreeSet<usize> =
+        lines[..lines.len() - 1].iter().map(|l| l.chars().count()).collect();
+    assert!(counts.len() > 1, "the machine's lines differ in length: {counts:?}");
+    for l in &lines[..lines.len() - 1] {
+        let pen = pen_px(font, l);
+        assert!(
+            pen > PROSE_WINDOW_PX * 95 / 100 && pen <= PROSE_WINDOW_PX,
+            "{l:?} is {pen} px of a {PROSE_WINDOW_PX} px line — a measured wrap fills it",
+        );
+    }
+}
+
+/// **Arthur's two prose windows wrap the same text to the same points.**
+///
+/// `amiga-arthur-F5.png` shows the room description in the UPPER description window
+/// and `amiga-arthur-inventory.png` shows it in the LOWER prose window under the
+/// score bar, one line further on. Line for line, at the same x origin, the spans
+/// are the same — so the wrap is a fact about the WIDTH the two windows share (584
+/// native px each) and not about either window's own furniture. That is what makes
+/// [`no_declared_width_reproduces_the_machines_wrap_but_a_measured_one_does`]'s
+/// single window width the right thing to have measured against.
+#[test]
+fn both_of_arthurs_prose_windows_wrap_to_the_same_width() {
+    let _g = app::v6_palette_at_boot();
+    let Some((session, state)) = in_the_churchyard() else { return };
+    // Measured off the captures: the inventory frame's lower window carries F5's
+    // upper window from its second line on, plus the line that follows it.
+    const F5_UPPER: [u32; 7] = [568, 576, 556, 568, 566, 382, 198];
+    const INVENTORY_LOWER: [u32; 6] = [576, 556, 568, 566, 382, 198];
+    assert_eq!(
+        &F5_UPPER[1..],
+        &INVENTORY_LOWER[..],
+        "the same description, wrapped identically in two different windows",
+    );
+    // And in OUR model the two windows really are the same width, which is the
+    // fact that makes that possible. Guarded against the frame, not assumed.
+    let model = Engine::screen(&session);
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
+    let prose: Vec<u16> = items
+        .iter()
+        .filter(|it| {
+            u32::from(it.w_px) == PROSE_WINDOW_PX
+                && (matches!(&it.node, WinNode::Grid(g) if g.rows > 1)
+                    || matches!(&it.node, WinNode::Buffer(b) if b.primary))
+        })
+        .map(|it| it.y_px)
+        .collect();
+    assert!(
+        prose.len() >= 2,
+        "both prose windows are {PROSE_WINDOW_PX} px wide — found {} at {prose:?}",
+        prose.len(),
+    );
+    let _ = state;
+}
+
+/// **The score bar's right-hand field is placed by the GAME, from the declared
+/// width — nothing in the render path moves it.**
+///
+/// Worth its own case because the number looked like a rendering error and is not.
+/// The bar arrives as 73 single-character runs; 72 of them step by the declared
+/// cell and exactly one origin does not, and that discontinuity is where the game
+/// issued its own `set_cursor` for the date. It sits at
+/// `window_left + window_width − 25 × declared_width`, and it tracks the declared
+/// width exactly: 412 at a width of 8, 387 at 9, 362 at 10 — all measured by
+/// driving the story.
+///
+/// `machine-screenshots/amiga-arthur-church.png` puts the same field's first ink at
+/// capture x=431, which is native 388 at the established offset of 43 — so the
+/// machine's origin is 382 and ours is 411. **The whole of that 29-pixel gap is the
+/// declared width**, and the same measurement solves to a width of 9.2 native px,
+/// which is not an integer and agrees with the case above: the machine measured.
+#[test]
+fn the_score_bars_right_field_is_the_games_own_arithmetic() {
+    let _g = app::v6_palette_at_boot();
+    let Some((session, state)) = in_the_churchyard() else { return };
+    let cell_w = u32::from(state.v6_text.cell().w);
+    let model = Engine::screen(&session);
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
+    let (bar, g) = items
+        .iter()
+        .find_map(|it| match &it.node {
+            WinNode::Grid(g) if g.rows == 1 && !g.px_texts.is_empty() && it.y_px == 200 => Some((it, g)),
+            _ => None,
+        })
+        .expect("the churchyard frame carries a one-row status grid at native y=200");
+    let mut runs: Vec<&app::engine::PxText> = g.px_texts.iter().collect();
+    runs.sort_by_key(|t| t.x);
+    // The one origin the engine's own pen did not produce.
+    let breaks: Vec<u32> = runs
+        .windows(2)
+        .filter(|w| {
+            u32::from(w[0].x) + w[0].text.chars().count() as u32 * cell_w != u32::from(w[1].x)
+        })
+        .map(|w| u32::from(w[1].x) - 1)
+        .collect();
+    assert_eq!(breaks.len(), 1, "exactly one field is placed by set_cursor, got {breaks:?}");
+    let field: String = runs
+        .iter()
+        .skip_while(|t| u32::from(t.x) - 1 != breaks[0])
+        .map(|t| t.text.as_str())
+        .collect();
+    // The game names a ONE-BASED pixel (ZMSD §8.8.1), so its own answer is one
+    // more than the zero-based origin the renderer draws at.
+    let expected = u32::from(bar.x_px) + u32::from(bar.w_px)
+        - field.chars().count() as u32 * cell_w;
+    assert_eq!(
+        breaks[0] + 1,
+        expected,
+        "the date field sits at window_left + window_width − {} × {cell_w}; the render \
+         path draws it exactly there and contributes nothing to its position",
+        field.chars().count(),
+    );
+}
+
+// ── 6. an isolated reverse-video run is not a status bar ─────────────────────
+// ── 7. the window bounds the pen ─────────────────────────────────────────────
+
+/// **A proportional run stops at its window's right edge.**
+///
+/// ZMSD §8.8's window property 7 is a right margin and `zvm` lays its own prose out
+/// against `x_size − right_margin`, but nothing under `render/` had ever consulted
+/// either: the renderer drew rightward from a run's origin with no bound at all. At
+/// a fixed cell that was invisible, because our text was NARROWER than the machine's
+/// proportional face and a run always finished inside the box the game reserved for
+/// it. The pen removed the slack and the omission surfaced — it exposed this rather
+/// than causing it.
+///
+/// (Arthur sets both margins to zero on every window, measured; the bound is the
+/// window's own width. The property is honoured anyway, because a renderer that
+/// ignores it is how this happened.)
+#[test]
+fn a_proportional_run_stops_at_its_windows_right_edge() {
+    let _g = app::v6_palette_at_boot();
+    let Some((mut session, state)) = in_the_churchyard() else { return };
+    let _ = session.submit_char(137); // F5 — the long description, wrapped by the
+                                      // game at the declared width and therefore
+                                      // wider than the window once drawn.
+    let model = Engine::screen(&session);
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
+    let win = items
+        .iter()
+        .find(|it| it.y_px == 0 && u32::from(it.w_px) == PROSE_WINDOW_PX)
+        .expect("F5 opens a full-width description window at the top");
+    assert_eq!((win.left_margin, win.right_margin), (0, 0), "Arthur declares no margins");
+    // Non-vacuity: the game's own wrap really does overrun the pen's width here.
+    let over = match &win.node {
+        WinNode::Grid(g) => {
+            let mut v: Vec<&app::engine::PxText> = g.px_texts.iter().collect();
+            v.sort_by_key(|t| (t.y, t.x));
+            let mut rows: Vec<String> = Vec::new();
+            let mut last_y = None;
+            for t in v {
+                if Some(t.y) == last_y {
+                    rows.last_mut().expect("a row").push_str(&t.text);
+                } else {
+                    rows.push(t.text.clone());
+                    last_y = Some(t.y);
+                }
+            }
+            rows.iter().any(|r| state.v6_text.run_px(r) > PROSE_WINDOW_PX)
+        }
+        _ => false,
+    };
+    assert!(over, "non-vacuity: F5's lines must be wider than the window once penned");
+
+    let native = v6::native_extent(items, state.v6_text.cell());
+    let layout = v6::classify_windows(items, state.v6_text.cell());
+    let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    // Nothing is drawn right of the window, which is where the decorated flank is.
+    let right = u32::from(win.x_px) + u32::from(win.w_px);
+    let page = *canvas.get_pixel(right + 8, 190);
+    for y in 0..200u32 {
+        for x in right..canvas.width() {
+            assert_eq!(
+                *canvas.get_pixel(x, y),
+                page,
+                "a glyph reached native ({x}, {y}), outside the {PROSE_WINDOW_PX} px \
+                 window that bounds it",
+            );
+        }
+    }
+}

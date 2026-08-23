@@ -131,6 +131,7 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
         named_art_std_window,
         explicit.or_else(|| profile.interpreter_number()),
         default_colours,
+        None,
     );
     let mut session =
         GameSession::new_for_machine(bytes, honoured, false, false, picture_dims, None, None, &boot)
@@ -631,8 +632,7 @@ fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
         page,
         &state.colors,
         app::render::v6_layout::TextLayer::All,
-        zvm::screen::V6Cell::DEFAULT,
-        None,
+        &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
     );
     // The banner is found by the text in it, never by a window id.
     let banner = layout

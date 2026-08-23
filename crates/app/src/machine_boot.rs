@@ -33,8 +33,8 @@
 //! # What it does and does not own
 //!
 //! It derives the three facts that keep getting dropped — the standard window,
-//! the art scale, and the cell. It TAKES the two that a caller legitimately owns,
-//! because deciding them involves policy this module has no business in:
+//! the art scale, and the cell. It TAKES the three that a caller legitimately
+//! owns, because deciding them involves policy this module has no business in:
 //!
 //! * the **profile**, which must come from the medium the MOUNT returned rather
 //!   than be re-derived from the path (SQ-0876 — a hybrid disc carries DOS builds
@@ -42,7 +42,16 @@
 //!   story it was a Macintosh);
 //! * the **interpreter number** and **default colours**, which at launch pass
 //!   through `Config::advertised_interpreter_number` and the two-colour-card rule
-//!   (SQ-0930, SQ-0956) and at a restart are simply what the launch settled.
+//!   (SQ-0930, SQ-0956) and at a restart are simply what the launch settled;
+//! * the **face** the release's own medium carries (`crate::native_font::resolve`),
+//!   because reaching it needs the story path, the disc entry and how the profile
+//!   was decided — three facts a caller owns and this module never sees.
+//!
+//! The face is TAKEN and the CELL is derived from it (SQ-1009). A proportional
+//! typeface off a release disk states its own line height, so on Arthur's Amiga
+//! floppy the declared cell is 8x20 rather than the machine table's 8x16 — and that
+//! is precisely a fact three files were settling by hand, which is what put
+//! `reset.rs` a grid apart from `startup.rs` in SQ-1022.
 
 use crate::graphics::PictSource;
 use crate::interpreter::InterpreterProfile;
@@ -51,7 +60,7 @@ use crate::interpreter::InterpreterProfile;
 ///
 /// Construct with [`MachineBoot::resolve`]; never assemble the fields by hand,
 /// which is the practice this type exists to end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MachineBoot {
     /// The machine, as the medium named it.
     pub profile: InterpreterProfile,
@@ -67,8 +76,14 @@ pub struct MachineBoot {
     /// §8.3.3's pair, where the machine or the card states one.
     pub default_colours: Option<(u8, u8)>,
     /// The Version 6 character cell this machine declares (SQ-0917) — 7x15 on a
-    /// Macintosh, 8x16 everywhere else. The machine table's, since SQ-1013.
+    /// Macintosh, 8x16 everywhere else. The machine table's, since SQ-1013, and
+    /// the admitted FACE's where the release shipped a proportional one
+    /// ([`crate::native_font::declared_cell`], SQ-1009).
     pub cell: zvm::screen::V6Cell,
+    /// The typeface the release's own medium carries, when it carries a usable one
+    /// — [`crate::native_font::resolve`]. `None` for every other launch, which is
+    /// every machine but the Macintosh and Arthur's Amiga floppy.
+    pub face: Option<blorb::bitmap_font::BitmapFont>,
 }
 
 impl MachineBoot {
@@ -98,7 +113,9 @@ impl MachineBoot {
         named_art_std_window: Option<(u16, u16)>,
         interpreter_number: Option<u8>,
         default_colours: Option<(u8, u8)>,
+        face: Option<blorb::bitmap_font::BitmapFont>,
     ) -> MachineBoot {
+        let art_scale = picts.art_scale();
         MachineBoot {
             profile,
             interpreter_number,
@@ -107,10 +124,25 @@ impl MachineBoot {
                 .or(named_art_std_window)
                 .or_else(|| picts.native_std_window())
                 .or_else(|| profile.std_window()),
-            art_scale: picts.art_scale(),
+            art_scale,
             default_colours,
-            cell: profile.v6_font_cell(),
+            // SQ-1009: the cell follows the face, so this is one call rather than
+            // a rule each of `startup.rs`, `reload.rs` and `reset.rs` remembers.
+            cell: crate::native_font::declared_cell(
+                profile,
+                face.as_ref(),
+                art_scale.unwrap_or((1, 1)),
+            ),
+            face,
         }
+    }
+
+    /// The cell, the face and the pen as ONE value, for the renderer (SQ-1009).
+    ///
+    /// [`crate::state::AppState`] holds this rather than the two halves, so the
+    /// draw paths cannot be handed a cell from one boot and a face from another.
+    pub fn text_face(&self) -> crate::native_font::TextFace {
+        crate::native_font::TextFace::new(self.profile, self.face.clone(), self.art_scale)
     }
 
     /// A story with no medium behind it — a bare `.z5`, or a Blorb.
@@ -127,6 +159,7 @@ impl MachineBoot {
             art_scale: None,
             default_colours: None,
             cell: InterpreterProfile::IbmPc.v6_font_cell(),
+            face: None,
         }
     }
 }
@@ -144,7 +177,7 @@ mod tests {
         for profile in
             [InterpreterProfile::Macintosh, InterpreterProfile::Amiga, InterpreterProfile::IbmPc]
         {
-            let boot = MachineBoot::resolve(profile, &PictSource::new(None), None, None, None);
+            let boot = MachineBoot::resolve(profile, &PictSource::new(None), None, None, None, None);
             assert_eq!(
                 boot.cell,
                 profile.v6_font_cell(),
@@ -156,6 +189,7 @@ mod tests {
             MachineBoot::resolve(
                 InterpreterProfile::Macintosh,
                 &PictSource::new(None),
+                None,
                 None,
                 None,
                 None,
@@ -171,7 +205,7 @@ mod tests {
     #[test]
     fn a_named_archive_outranks_the_machines_standard_window() {
         let bare = PictSource::new(None);
-        let machine = MachineBoot::resolve(InterpreterProfile::Amiga, &bare, None, None, None);
+        let machine = MachineBoot::resolve(InterpreterProfile::Amiga, &bare, None, None, None, None);
         assert_eq!(
             machine.screen_px,
             InterpreterProfile::Amiga.std_window(),
@@ -181,6 +215,7 @@ mod tests {
             InterpreterProfile::Amiga,
             &bare,
             Some((560, 384)),
+            None,
             None,
             None,
         );

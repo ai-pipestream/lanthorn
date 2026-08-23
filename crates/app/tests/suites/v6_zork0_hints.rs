@@ -407,6 +407,7 @@ fn the_macintosh_hint_menu_keeps_its_leftmost_topic_column_at_every_width() {
         None,
         profile.interpreter_number(),
         honoured.then(|| profile.default_colours()).flatten(),
+        None,
     );
     let mut s = app::session::GameSession::new_for_machine(bytes, honoured, false, false, dims, None, None, &boot)
     .expect("Zork Zero boots off the Macintosh disk");

@@ -1129,14 +1129,18 @@ Amiga floppy or anywhere else.
   all three name the IBM PC and none of them moves byte `0x1E`; what a card does
   change is how densely its artwork was stored, which is
   [the art's business rather than the machine's](v6-graphics.md#choosing-which-artwork-a-game-draws).
-  The character cell is 8×16 on every profile — EGA's own 640×200 mode on an 8×8
-  cell is the same 80×25 grid — so no *rendition* alters the screen a game is
-  handed. (The one machine that would have moved it is the Macintosh, whose
-  interpreter typeset Version 6 in 12-point Geneva on a 7×15 cell. lanthorn keeps
-  its 8×16, so a standard-Mac screen comes out 60×19 characters where a real Mac
-  fitted 68×20 — slightly larger type, and four pixels of slack at the bottom.
-  Making the cell a per-machine runtime value reaches into every corner of the
-  screen model, and is not something a profile should smuggle in.) Setting
+  No *rendition* alters the screen a game is handed — EGA's own 640×200 mode on
+  an 8×8 cell is the same 80×25 grid the 8×16 one gives. The **machine** can,
+  though, and two of them do. The Macintosh's interpreter typeset Version 6 in
+  12-point Geneva on a **7×15** cell (`mac/xzip.lst`: `colWidth := 7;
+  lineHeight := 15`), so a standard-Mac screen is 68×20 characters rather than
+  60×19. And where a release disk carries a proportional typeface of its own,
+  the cell follows the *face*: Arthur's Amiga floppy ships a 10-row `char.data`,
+  and its art doubles onto the 640×400 unit screen, so the story is told a
+  **20-row line** and lays out the 20 text rows a real Amiga showed instead of
+  25. Only the HEIGHT moves — a proportional face has no single advance to
+  declare, so the width stays the machine's and the *drawing* is what goes
+  proportional. Setting
   `interpreter_number` yourself names the machine outright and outranks both, so
   `interpreter_number = 4` gets you the Amiga's palette, its standard window and
   its §8.3 screen rules rather than just the byte — a number that changed what

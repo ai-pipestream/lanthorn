@@ -170,7 +170,19 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     // the session was constructed with, so the renderer divides by the number the
     // engine multiplied by. They disagreeing is every run landing in the wrong
     // column, silently, because both answers look plausible.
-    state.v6_cell = state.config.interpreter_profile.v6_font_cell();
+    //
+    // SQ-1009: through `TextFace`, because the cell FOLLOWS the face where the
+    // release shipped a proportional one. Assigning the machine table's here is
+    // what would clobber Arthur's 20-row line back to 16 on the next style reload,
+    // hours into a session, with nothing on screen to say why. The face itself is
+    // kept — only the medium can produce one and this scope has no medium — and
+    // re-tested against the new profile, so a face that no longer fits declines
+    // exactly as it would have at launch.
+    state.v6_text = crate::native_font::TextFace::new(
+        state.config.interpreter_profile,
+        state.v6_text.face().cloned(),
+        Some(state.v6_art_scale),
+    );
     state.period_look = crate::period::resolve(
         state.config.interpreter_profile,
         state.config.period_look,

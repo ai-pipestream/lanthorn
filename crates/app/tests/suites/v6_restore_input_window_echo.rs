@@ -109,8 +109,7 @@ fn secondary_prose_canvas(session: &GameSession, state: &app::state::AppState) -
     let panel_input = (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
     app::render::v6_layout::draw_secondary_prose(
         &mut canvas, &layout.chrome, ink, state.config.honor_game_colours, &state.colors, panel_input,
-        zvm::screen::V6Cell::DEFAULT,
-        None,
+        &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
     );
     canvas
 }

@@ -126,13 +126,30 @@ pub(crate) fn reset_game(
             // Macintosh game re-booted it on 8x16 where the launch gave it 7x15.
             // The comment above promised "the same four links" and by then there
             // were five facts, which is exactly how a recipe fails.
+            // SQ-1009: and the release's own typeface, re-resolved off the medium
+            // exactly as `startup.rs` resolves it. It is a link in the chain now
+            // rather than a render detail, because the DECLARED cell follows the
+            // face — omit it and an `@restart` of Arthur's Amiga floppy re-boots
+            // the story on 8x16 where its launch gave it 8x20, which is SQ-1022's
+            // defect with a different fact in the hole.
+            let face = app::native_font::resolve(
+                story_path,
+                state.config.disk_entry.as_deref(),
+                profile,
+                state.config.interpreter_source,
+            );
             let boot = app::machine_boot::MachineBoot::resolve(
                 profile,
                 &picts,
                 named_art_std_window,
                 state.config.interpreter_number.or_else(|| profile.interpreter_number()),
                 host_default_colours,
+                face,
             );
+            // Republish the render's copy for the same reason `v6_art_scale` is
+            // republished above: a restart may have landed on a different archive,
+            // and the pen's scale rides on that.
+            state.v6_text = boot.text_face();
             GameSession::new_for_machine(
                 bytes,
                 state.config.honor_game_colours,

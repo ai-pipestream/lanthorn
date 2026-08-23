@@ -65,6 +65,7 @@ fn fmvpoker_ega_dealt() -> Option<GameSession> {
         None,
         None,
         None,
+        None,
     );
     // The archive's own 640x200 picture space; with an art scale of (1, 2) that is
     // the same 640x400 unit screen every rendition lands on (SQ-0838).

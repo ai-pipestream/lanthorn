@@ -982,7 +982,7 @@ fn shogun_raster_status_band_floods_game_white() {
     let colors = app::colors::ColorScheme::default();
     let default_fg = Rgba([220, 220, 220, 255]);
     let default_bg = Rgba([0, 0, 0, 255]);
-    let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT, None);
+    let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
 
     // Gather the status band's runs: chrome grid runs on native row 0 (px y=1), the
     // "SHOGUN" title row, a non-reverse black-on-white band (bg = z-colour 9,
@@ -1104,7 +1104,7 @@ fn shogun_prose_emphasis_reaches_the_raster_faces() {
     // a +1 double-strike of it.
     let draw = |m: &v6::MainText| {
         let mut c = image::RgbaImage::new(cols as u32 * 8, 40 * 16);
-        v6::draw_story_text(&mut c, m, 0, 0, cols, 40, image::Rgba([255, 255, 255, 255]), &[], zvm::screen::V6Cell::DEFAULT, None);
+        v6::draw_story_text(&mut c, m, 0, 0, cols, 40, image::Rgba([255, 255, 255, 255]), &[], &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         c
     };
     let styled = draw(&main);

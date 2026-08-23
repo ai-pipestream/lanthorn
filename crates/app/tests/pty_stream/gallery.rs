@@ -122,6 +122,15 @@ pub struct Shot {
     /// catches both.
     #[serde(default)]
     pub expect: Vec<String>,
+    /// Capture through the RASTER composite rather than hybrid (SQ-1009).
+    ///
+    /// Hybrid draws text as terminal cells, so a shot meant to show a face the
+    /// RELEASE shipped — Arthur's proportional Amiga typeface — cannot show it in
+    /// hybrid at all: the glyphs on screen would be the terminal's. Written into
+    /// the shot's own config beside the seed, which is the only channel the
+    /// manifest has into a run.
+    #[serde(default)]
+    pub raster: bool,
     /// The least number of cells a placement must actually cover.
     ///
     /// The guard for a frame with no text in it. Scopa and FMV Poker draw the
@@ -595,8 +604,12 @@ pub fn capture(shot: &Shot, bin: &Path, work: &Path, timeout: std::time::Duratio
     // The seed goes in the global config rather than the per-game sidecar: the
     // sidecar is a bare-lines file the driver already owns for `show_map`, and
     // two writers of one file is how a shot silently loses its seed.
-    std::fs::write(user_dir.join("config.toml"), format!("random_seed = {}\n", shot.seed))
-        .map_err(|e| format!("`{}`: writing the pinned seed: {e}", shot.id))?;
+    let render = if shot.raster { "v6_render = \"raster\"\n" } else { "" };
+    std::fs::write(
+        user_dir.join("config.toml"),
+        format!("random_seed = {}\n{render}", shot.seed),
+    )
+    .map_err(|e| format!("`{}`: writing the pinned seed: {e}", shot.id))?;
 
     let mut spec = Spec::new(bin, &media, &user_dir);
     spec.cols = cols;

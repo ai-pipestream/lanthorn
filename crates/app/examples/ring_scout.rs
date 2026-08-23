@@ -247,7 +247,8 @@ fn scout(
     // media is worse than no instrument at all.
     let mut picts = app::graphics::PictSource::resolve(p, entry);
     // No tier-3 archive is named here, so the machine comes from the medium alone.
-    let profile = app::interpreter::InterpreterProfile::resolve(p, None, None, disk_image);
+    let (profile, profile_source) =
+        app::interpreter::InterpreterProfile::resolve_with_source(p, None, None, disk_image);
     zvm::screen::set_palette(profile.palette());
     let dims = picts.all_pict_dims();
     // The screen size the game is TOLD it has, by `startup.rs`'s own chain. The
@@ -269,6 +270,11 @@ fn scout(
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        // SQ-1009: and the release's own typeface, which the DECLARED cell now
+        // follows — omit it and Arthur's Amiga floppy is measured on a 16-row line
+        // where the app gives it 20. The third omission this instrument would have
+        // made, after `native_std_window` and the cell itself.
+        app::native_font::resolve(p, entry, profile, profile_source),
     );
     let (std_win, art_scale) = (boot.screen_px, boot.art_scale);
     println!(
@@ -279,6 +285,17 @@ fn scout(
         String::from_utf8_lossy(&bytes[0x12..0x18]),
         std_win.map_or("(none)".into(), |(w, h)| format!("{w}x{h}")),
         art_scale,
+    );
+    println!(
+        "  cell {}x{}  ·  face {}",
+        boot.cell.w,
+        boot.cell.h,
+        boot.face.as_ref().map_or("(none)".to_string(), |f| format!(
+            "{}x{}{}",
+            f.width,
+            f.height,
+            if f.proportional { " proportional" } else { "" }
+        )),
     );
     let mut s = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .map_err(|e| format!("boot: {e:?}"))?;

@@ -248,8 +248,7 @@ fn journeys_frame_border_is_a_single_native_pixel_column() {
             image::Rgba([0, 0, 0, 255]),
             &colors,
             app::render::v6_layout::TextLayer::All,
-            zvm::screen::V6Cell::DEFAULT,
-            None,
+            &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
         );
         let story = layout.story.expect("Journey publishes a story window at its menu");
         let mid = story.y_px as u32 + (story.h_px as u32) / 2;

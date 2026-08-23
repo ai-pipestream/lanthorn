@@ -540,6 +540,7 @@ fn zork_zeros_ega_rendition_boots_the_geometry_its_mcga_one_does() {
             std_window,
             None,
             None,
+            None,
         );
         if let Some(forced) = scale {
             machine.art_scale = Some(forced);

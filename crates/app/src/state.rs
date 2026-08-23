@@ -2663,17 +2663,18 @@ pub struct AppState {
     /// left, which is invisible under nextest's per-test processes and wrong
     /// under `cargo test`.
     ///
-    /// [`zvm::screen::V6Cell::DEFAULT`] (8x16) until a profile says otherwise,
-    /// which is still every profile today.
-    pub v6_cell: zvm::screen::V6Cell,
-    /// The typeface the RELEASE shipped, when this session's medium carries one
-    /// that fits [`Self::v6_cell`] (SQ-1011) — see [`crate::native_font`].
+    /// [`zvm::screen::V6Cell::DEFAULT`] (8x16) until a profile says otherwise.
     ///
-    /// `None` on every machine but the Macintosh, and on a Macintosh reached by
-    /// hand rather than off its own volume. The renderer falls back to
-    /// `render::vga16`, which is right at an 8x16 cell and crowded at 7x15 —
-    /// which is the whole reason this field exists.
-    pub v6_face: Option<blorb::bitmap_font::BitmapFont>,
+    /// # …and the FACE that draws it, in the same value (SQ-1009)
+    ///
+    /// [`crate::native_font::TextFace`] carries the cell, the typeface the
+    /// RELEASE shipped (`None` on every medium that ships none), how that face may
+    /// be drawn, and the pen. They were two fields and were read together at every
+    /// render call site, which is CLAUDE.md's refactoring-policy tell — and the
+    /// cell is now DERIVED from the face on a machine whose release shipped a
+    /// proportional one, so holding them apart would let a frame be drawn with a
+    /// cell from one boot and a face from another.
+    pub v6_text: crate::native_font::TextFace,
 
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
@@ -2990,8 +2991,7 @@ impl Default for AppState {
             artwork_declines_colours: false,
             story_zversion: None,
             period_look: None,
-            v6_cell: zvm::screen::V6Cell::DEFAULT,
-            v6_face: None,
+            v6_text: crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
             transcript_scroll: 0,
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,

@@ -373,7 +373,7 @@ pixel path and resolves it into half-block cells — two vertical samples per ce
 so honest but coarse. It is also the only Version 6 output an asciinema cast can \
 carry, which is why it earns a row."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-size = "130x43"
+size = "194x63"
 backend = "halfblocks"
 expect = ["The Party", "Individual Commands", "▀"]
 
@@ -392,3 +392,31 @@ keys = "wait:2000,text:n,cr,wait:700,text:n,cr,wait:700,text:up,cr,wait:700,text
 size = "122x44"
 show_map = true
 expect = ["Forest Path", "Up a Tree", "West of House"]
+
+# ── The release's own typeface ───────────────────────────────────────────────
+#
+# `raster` is the only shot field that changes a render MODE, and this is the
+# only shot that needs it: hybrid draws text as terminal cells, so a frame meant
+# to show the face the disk shipped would show the reader's own font instead.
+
+[[shots]]
+id = "arthur-amiga-proportional"
+title = "Arthur: The Quest for Excalibur"
+press = "Amiga release floppy (.adf)"
+media = "stories/Arthur - The Quest for Excalibur.adf"
+caption = """
+The Amiga floppy carries its own typeface, and this frame is drawn with it — a \
+proportional face out of the disk's own `char.data`, on the ten-pixel line the \
+machine used rather than the sixteen every other press declares. The pen moves by \
+each glyph's own advance, so the status bar reads `Churchyard` at the spacing an \
+Amiga gave it, and the prose wraps where the pixels run out instead of where a \
+column count says."""
+keys = "wait:4000,text:n,wait:2500,text:n,wait:3000,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000,text:look,cr,wait:7000"
+size = "194x63"
+backend = "halfblocks"
+raster = true
+# In RASTER the whole screen is one image, so there are no cells for a text guard
+# to search — the same reason `scopa` and `fmvpoker` lean on `expect_art_cells`.
+# What the cells still carry is the pane title, which is what catches a medium
+# that opened a browser or a neighbouring story instead of this one.
+expect = ["Arthur - The Quest for Excalibur.adf", "▀"]

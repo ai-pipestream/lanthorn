@@ -314,8 +314,7 @@ fn no_reachable_scopa_row_floods_a_gap_it_does_not_span() {
             image::Rgba([0, 0, 0, 255]),
             &colors,
             app::render::v6_layout::TextLayer::All,
-            zvm::screen::V6Cell::DEFAULT,
-            None,
+            &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
         );
 
         for it in &layout.chrome {

@@ -177,7 +177,7 @@ fn scale2x(bits: &[u8; 8]) -> [[bool; 16]; 16] {
 /// ZMSD §8.7.1 style bit for bold, as the model packs it (see
 /// [`crate::engine::PxText::style`] / [`crate::engine::GridCell::style`] and
 /// `screen::v6_run_style`, which reads the same numbering for the cell paths).
-const STYLE_BOLD: u8 = 2;
+pub(crate) const STYLE_BOLD: u8 = 2;
 /// ZMSD §8.7.1 style bit for italic (see [`STYLE_BOLD`]).
 const STYLE_ITALIC: u8 = 4;
 
@@ -289,9 +289,9 @@ pub fn blit_glyph(
     ch: u32,
     fg: Rgba<u8>,
     bg: Option<Rgba<u8>>,
-    native: Option<&blorb::bitmap_font::BitmapFont>,
+    tf: Option<&crate::native_font::TextFace>,
 ) {
-    blit_glyph_styled(canvas, glyph, px, py, cw, ch, fg, bg, 0, native);
+    blit_glyph_styled(canvas, glyph, px, py, cw, ch, fg, bg, 0, tf);
 }
 
 /// [`blit_glyph`], with the run's ZMSD §8.7.1 `style` byte applied as a
@@ -308,9 +308,9 @@ pub fn blit_glyph_styled(
     fg: Rgba<u8>,
     bg: Option<Rgba<u8>>,
     style: u8,
-    // The face the RELEASE shipped, when this session has one (SQ-1011). Used
-    // only when it IS the cell — see the `native_face` filter below.
-    native: Option<&blorb::bitmap_font::BitmapFont>,
+    // The cell, the face the RELEASE shipped and the pen (SQ-1011, SQ-1009).
+    // `None` — and a `TextFace` with no face on it — draw exactly as before.
+    tf: Option<&crate::native_font::TextFace>,
 ) {
     // The 8x16 face first (SQ-0932): at the 8x16 cell every production call site
     // uses it samples 1:1, where an 8x8 master has to double every row. The 8x8
@@ -363,7 +363,27 @@ pub fn blit_glyph_styled(
     // the same wrong condition. What survives here is the cheap structural check
     // that the face is this cell — a guard against a mismatched pair reaching the
     // sampler, not a second opinion on fitness.
-    let native_face = native.filter(|f| u32::from(f.width) == cw && u32::from(f.height) == ch);
+    // **A PROPORTIONAL face is drawn at its OWN size, not stretched to the cell**
+    // (SQ-1009). It has no single advance to match `cw` against — that is what
+    // makes it proportional — so the `Cell` test below can never admit one and the
+    // filter would silently discard Arthur's whole typeface. Its bitmap is scaled
+    // by the ART scale instead (each face pixel becomes a `scale.0` x `scale.1`
+    // block, 2x2 on Arthur's Amiga floppy), which is what makes `face.height *
+    // art_scale.1` the declared cell height in the first place.
+    if let Some(t) = tf.filter(|t| t.proportional()) {
+        if let Some(g) = u8::try_from(u32::from(glyph))
+            .ok()
+            .and_then(|c| t.face().and_then(|f| f.glyph(c)))
+        {
+            blit_metric_glyph(canvas, g, px, py, ch, t.scale(), fg, bg, style, t.bold_smear(style));
+            return;
+        }
+        // A code the typeface does not carry falls through to the masters below,
+        // drawn in the cell exactly as it would be with no face at all.
+    }
+    let native_face = tf
+        .and_then(|t| t.face())
+        .filter(|f| u32::from(f.width) == cw && u32::from(f.height) == ch);
     let native_rows: Option<&[u8]> = native_face
         .and_then(|f| u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)))
         .map(|g| g.rows.as_slice())
@@ -414,6 +434,83 @@ pub fn blit_glyph_styled(
             }
         }
     }
+}
+
+/// One glyph of a PROPORTIONAL disk face, at the face's own size (SQ-1009).
+///
+/// Split out because every assumption the cell blit above makes is wrong here: the
+/// glyph's width is its own advance rather than `cw`, its rows are the face's
+/// rather than a fixed 8 or 16, and the only resampling wanted is a whole-number
+/// block per face pixel — `scale` is the ART scale, so on a press whose 320-wide
+/// rendition doubles onto the unit screen each face pixel is a 2x2 native block
+/// and the ten-row face fills the twenty-row line exactly.
+///
+/// Rows are MSB-leftmost, as [`crate::render::vga16`] packs them and as
+/// [`blorb::bitmap_font`] documents, so the style shears go `>>`.
+fn blit_metric_glyph(
+    canvas: &mut RgbaImage,
+    g: &blorb::bitmap_font::Glyph,
+    px: u32,
+    py: u32,
+    ch: u32,
+    scale: (u32, u32),
+    fg: Rgba<u8>,
+    bg: Option<Rgba<u8>>,
+    style: u8,
+    smear: u8,
+) {
+    let (sx, sy) = (scale.0.max(1), scale.1.max(1));
+    let rows = synthesize_rows(&g.rows, style, smear);
+    // The pen's own advance, which is where the NEXT glyph starts — so a painted
+    // background covers exactly the run and never a neighbour's column. Bold adds
+    // the face's own `tf_BoldSmear` to it, exactly as the machine does: the smear
+    // needs a column to live in or it eats the inter-character gap (SQ-1009).
+    let adv = (u32::from(g.width) + u32::from(smear)) * sx;
+    let (cwidth, cheight) = (canvas.width(), canvas.height());
+    for dy in 0..ch {
+        let oy = py + dy;
+        if oy >= cheight {
+            break;
+        }
+        let src_row = (dy / sy) as usize;
+        for dx in 0..adv {
+            let ox = px + dx;
+            if ox >= cwidth {
+                break;
+            }
+            let col = dx / sx;
+            let on = col < 8 && rows.get(src_row).is_some_and(|r| r & (0x80 >> col) != 0);
+            if on {
+                canvas.put_pixel(ox, oy, fg);
+            } else if let Some(b) = bg {
+                canvas.put_pixel(ox, oy, b);
+            }
+        }
+    }
+}
+
+/// [`synthesize_face16`]'s two transforms for a face of any height.
+///
+/// Same reasoning, same direction (MSB-leftmost, so right is `>>`), sheared at the
+/// midpoint of whatever height the face has rather than at a fixed row — and
+/// emboldened by the FACE's `tf_BoldSmear` rather than by a fixed one pixel.
+fn synthesize_rows(rows: &[u8], style: u8, smear: u8) -> Vec<u8> {
+    let mut out = rows.to_vec();
+    let half = out.len() / 2;
+    if style & STYLE_ITALIC != 0 {
+        for r in out.iter_mut().take(half) {
+            *r >>= 1;
+        }
+    }
+    if style & STYLE_BOLD != 0 {
+        // The face's OWN smear, not a fixed one pixel — and the caller has already
+        // widened the advance by the same amount.
+        let n = u32::from(smear.max(1));
+        for r in out.iter_mut() {
+            *r |= r.checked_shr(n).unwrap_or(0);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

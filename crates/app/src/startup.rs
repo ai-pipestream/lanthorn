@@ -585,6 +585,11 @@ pub(crate) fn boot_story(
     // does not carry it. `None` here means the uniform rule (a Blorb, or no v6 art
     // at all), which `AppState`'s own default already is.
     let mut launch_art_scale = None;
+    // SQ-1009: the release's own typeface, the cell it declares and the pen that
+    // draws with it, escaped the same way. Resolved inside the Z-code arm because
+    // that is where the medium is known, and needed there too — the DECLARED cell
+    // follows the face now, so the boot cannot be assembled without it.
+    let mut launch_text_face: Option<app::native_font::TextFace> = None;
     // The story's Version, for SQ-0873's period look — which belongs only to a
     // v1-v4 story, since colour arrives with v5 and anything shown before it is
     // presentation rather than a fact the story can read. `None` for Glulx and
@@ -732,6 +737,20 @@ pub(crate) fn boot_story(
             // has to reproduce the order. `MachineBoot::resolve`'s own docs carry
             // the SQ-0837/SQ-0838 reasoning for why the archive precedes the
             // machine; it used to live here and is now where every caller sees it.
+            // SQ-1011/SQ-1009: the typeface the RELEASE shipped on its own medium.
+            // Resolved HERE — before the boot, and long before `reload_style` —
+            // because the cell now follows the face rather than the other way
+            // round: a proportional disk font states its own line height, and the
+            // story has to be told that height at construction. Only this scope
+            // can ask, since the font lives on the medium and the answer depends on
+            // how the profile was decided (a machine asked for by hand has no
+            // volume to read).
+            let launch_face = app::native_font::resolve(
+                &story_path,
+                disk_entry,
+                cfg.interpreter_profile,
+                cfg.interpreter_source,
+            );
             let boot = app::machine_boot::MachineBoot::resolve(
                 cfg.interpreter_profile,
                 &picts,
@@ -740,6 +759,7 @@ pub(crate) fn boot_story(
                 // names the IBM PC rather than falling through to zvm's default.
                 cfg.advertised_interpreter_number(),
                 host_default_colours,
+                launch_face,
             );
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a
@@ -747,6 +767,8 @@ pub(crate) fn boot_story(
             // arrives at (1, 2). `None` for every Blorb-sourced story, which is
             // the uniform rule untouched.
             launch_art_scale = boot.art_scale;
+            // The cell, the face and the pen, as the one value the renderer takes.
+            launch_text_face = Some(boot.text_face());
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
@@ -1030,6 +1052,12 @@ pub(crate) fn boot_story(
     if let Some(scale) = launch_art_scale {
         state.v6_art_scale = scale;
     }
+    // SQ-1009: and the face that art scale is drawn at, with the cell it declares.
+    // Set BEFORE the `reload_style` below, which recomputes the cell and would
+    // otherwise put the machine table's back over the face's.
+    if let Some(face) = launch_text_face {
+        state.v6_text = face;
+    }
     // SQ-0873: and the story's Version, which `reload_style` needs to decide
     // whether this launch gets its machine's period look. Same reason as the two
     // above — the reload re-derives from the config and the per-story files, and
@@ -1150,18 +1178,6 @@ pub(crate) fn boot_story(
     // initial resolve above is global-only (game_dir wasn't set yet). On a per-game
     // parse error the global look already set above stands.
     let _ = app::reload::reload_style(&mut state);
-    // SQ-1011: the typeface the RELEASE shipped, resolved AFTER `reload_style` has
-    // settled `state.v6_cell` — the face is kept only when it IS that cell, so the
-    // cell has to be final first. Resolved here rather than in `reload_style`
-    // because the medium is what carries the font, and only this scope knows the
-    // story path and how the profile was decided (a Macintosh asked for by hand
-    // has no volume to read).
-    state.v6_face = app::native_font::resolve(
-        &story_path,
-        state.config.disk_entry.as_deref(),
-        state.config.interpreter_profile,
-        state.config.interpreter_source,
-    );
     if banner_elems.is_empty() {
         state.push_transcript(&banner);
     } else {

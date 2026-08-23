@@ -276,6 +276,7 @@ fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
         named_art_std_window,
         cfg.advertised_interpreter_number(),
         honoured.then_some(reported).flatten(),
+        None,
     );
     let mut session =
         GameSession::new_for_machine(bytes, honoured, false, false, picture_dims, None, None, &boot)

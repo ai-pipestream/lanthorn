@@ -141,6 +141,7 @@ fn boot() -> Option<GameSession> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        None,
     );
     let mut s = GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &boot)
     .unwrap_or_else(|e| panic!("{FIXTURE}: should boot without a ZError: {e:?}"));

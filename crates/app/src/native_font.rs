@@ -34,6 +34,7 @@
 //! the declared-versus-drawn boundary this sits on.
 
 use crate::interpreter::{InterpreterProfile, ProfileSource};
+use crate::render::bitfont::STYLE_BOLD;
 use blorb::bitmap_font::BitmapFont;
 use std::path::Path;
 
@@ -75,53 +76,295 @@ pub fn resolve(
     if source != ProfileSource::Medium {
         return None;
     }
-    let image = std::fs::read(story_path).ok()?;
-    let hfs = blorb::hfs::Hfs::mount(image).ok()?;
-    // `entry` is `None` for every loose file and single-story floppy — and also
-    // for a direct launch of a multi-game image, where `Hfs::story` is the thing
-    // that CHOSE the story, so asking it again names the same one rather than
-    // guessing. That is what makes `lanthorn InfocomMasterpieces.img` pair
-    // correctly without a picker row behind it.
-    let opened = entry.map(str::to_string).or_else(|| hfs.story().map(|(p, _)| p));
-    let face = match opened {
-        Some(p) => blorb::mac_font::from_volume_beside(&hfs, &p),
-        None => blorb::mac_font::from_volume(&hfs),
+    // An HFS volume keeps its faces in a resource fork; every other medium keeps
+    // them as FILES, and Arthur's Amiga floppy is the second kind. Ask the volume
+    // that can answer, and let `fit` decide whether what came back is usable.
+    let face = match blorb::hfs::Hfs::mount(std::fs::read(story_path).ok()?) {
+        Ok(hfs) => {
+            // `entry` is `None` for every loose file and single-story floppy — and
+            // also for a direct launch of a multi-game image, where `Hfs::story` is
+            // the thing that CHOSE the story, so asking it again names the same one
+            // rather than guessing. That is what makes
+            // `lanthorn InfocomMasterpieces.img` pair correctly without a picker
+            // row behind it.
+            let opened = entry.map(str::to_string).or_else(|| hfs.story().map(|(p, _)| p));
+            match opened {
+                Some(p) => blorb::mac_font::from_volume_beside(&hfs, &p),
+                None => blorb::mac_font::from_volume(&hfs),
+            }
+        }
+        Err(_) => amiga_face(story_path),
     }?;
-    fits(&face, profile).then_some(face)
+    fit(&face, profile).is_some().then_some(face)
 }
 
-/// A face is usable only when it IS the cell — same width, same height.
+/// The disk font an AmigaDOS volume carries, if it carries one.
 ///
-/// This is the guard that keeps the fix from becoming the defect it replaces. A
-/// face drawn for a different advance has to be resampled into the cell, and
-/// resampling is exactly what made `vga16` crowd at 7 wide. Better to keep the
+/// Split out because it is the same lookup [`detected`] performs and the two must
+/// not drift: SQ-1011 shipped inert twice over a fitness rule that existed in two
+/// places, and a second copy of the LOOKUP would be the same defect one layer down.
+fn amiga_face(story_path: &Path) -> Option<BitmapFont> {
+    let files: Vec<(String, Vec<u8>)> = crate::assets::files(story_path)
+        .into_iter()
+        .filter(|f| f.is_on_medium())
+        .filter_map(|f| {
+            let name = f.name.clone();
+            f.into_bytes().map(|b| (name, b))
+        })
+        .collect();
+    blorb::amiga_font::from_volume(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
+}
+
+/// How a release's own face may be drawn, where it may be drawn at all.
+///
+/// The two are not degrees of the same thing. [`FaceFit::Cell`] is a face that IS
+/// the character cell and blits into it untouched; [`FaceFit::Metric`] is a face
+/// whose own metrics REPLACE the cell's, and adopting it changes what the story is
+/// told (SQ-1009). A caller has to know which it got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceFit {
+    /// Same width, same height, one advance across printable ASCII — blit 1:1.
+    /// The Macintosh's `FONT` 524.
+    Cell,
+    /// A proportional typeface: the pen advances per glyph and the line is the
+    /// face's own height. Arthur's Amiga `char.data`.
+    Metric,
+}
+
+/// Which of the two ways — if either — this face may be drawn on `profile`.
+///
+/// # `Cell`: the face IS the cell
+///
+/// This is the guard that keeps SQ-1011's fix from becoming the defect it replaces.
+/// A fixed face drawn for a different advance has to be resampled into the cell,
+/// and resampling is exactly what made `vga16` crowd at 7 wide. Better to keep the
 /// known face than to introduce a second, differently-wrong one — so a mismatch
-/// declines rather than scales.
+/// declines rather than scales. It also keeps the two facts honest about each
+/// other: if a future profile moves its cell and the shipped face no longer
+/// matches, this notices instead of silently drawing at the wrong pitch.
 ///
-/// It also means the two facts stay honest about each other: if a future profile
-/// moves its cell and the shipped face no longer matches, this notices instead of
-/// silently drawing at the wrong pitch.
-fn fits(face: &BitmapFont, profile: InterpreterProfile) -> bool {
+/// # `Metric`: the face brings its own
+///
+/// A PROPORTIONAL face has no single advance to match a cell against, so the test
+/// above can never admit one and the resampling argument does not apply — there is
+/// nothing to resample it to. What it has instead is a real advance per glyph and a
+/// real line height, and a machine that shipped one drew text with them. So it is
+/// admitted on being a typeface at all, and the cell follows it
+/// ([`declared_cell`]) rather than the other way round.
+///
+/// **Proportional is also what separates a typeface from the font-3 SET**, which is
+/// the trap this ordering avoids. Journey and Beyond Zork ship an 8x8 `Char.data` /
+/// `Graphic.Data` that parses identically and is a box-drawing graphics set, not
+/// letters — its code 65 is a solid block (SQ-1017). Both are fixed-pitch and carry
+/// null `tf_CharSpace`/`tf_CharKern`, so both fall to the `Cell` test and are
+/// declined there for not being the cell, exactly as they were before this existed.
+///
+/// # Why the printable range and not `BitmapFont::proportional`
+///
+/// That flag is measured over every non-blank glyph in the resource, and `FONT`
+/// 524's Mac-roman accented range genuinely does vary — so it answers `true` for a
+/// face that advances by exactly 7 across `!` to `~`, which is the only part a story
+/// prints. SQ-0916 recorded this ("called proportional — true only if you count the
+/// accented high range, which no game prints") and
+/// `the_macintosh_font_is_fixed_pitch_but_narrower_than_our_cell` measures the
+/// printable set as exactly `{7}`.
+///
+/// Gating on the flag is what made SQ-1011 ship INERT: the face resolved, failed
+/// here, and the renderer silently kept `vga16` while four before/after frames came
+/// back byte-identical. Ask the question the renderer actually depends on — does
+/// every character a game prints advance by one cell. That same question, answered
+/// the other way, is what now admits the Amiga's.
+pub fn fit(face: &BitmapFont, profile: InterpreterProfile) -> Option<FaceFit> {
     let cell = profile.v6_font_cell();
-    let (cw, ch) = (cell.w, cell.h);
-    if u16::from(face.width) != cw || u16::from(face.height) != ch {
-        return false;
+    let uniform =
+        (b'!'..=b'~').all(|c| face.glyph(c).is_none_or(|g| u16::from(g.width) == cell.w));
+    if u16::from(face.width) == cell.w && u16::from(face.height) == cell.h && uniform {
+        return Some(FaceFit::Cell);
     }
-    // **Uniform over PRINTABLE ASCII, which is not the same as `face.proportional`.**
-    //
-    // That flag is measured over every non-blank glyph in the resource, and `FONT`
-    // 524's Mac-roman accented range genuinely does vary — so it answers `true`
-    // for a face that advances by exactly 7 across `!` to `~`, which is the only
-    // part a story prints. SQ-0916 recorded this ("called proportional — true only
-    // if you count the accented high range, which no game prints") and
-    // `the_macintosh_font_is_fixed_pitch_but_narrower_than_our_cell` measures the
-    // printable set as exactly `{7}`.
-    //
-    // Gating on the flag is what made this feature ship INERT: the face resolved,
-    // failed here, and the renderer silently kept `vga16` while four before/after
-    // frames came back byte-identical. Ask the question the renderer actually
-    // depends on — does every character a game prints advance by one cell.
-    (b'!'..=b'~').all(|c| face.glyph(c).is_none_or(|g| u16::from(g.width) == cw))
+    (!uniform).then_some(FaceFit::Metric)
+}
+
+/// The Version 6 cell a machine declares once its own face has been admitted.
+///
+/// # The cell follows the FACE, and only when the face brings metrics
+///
+/// [`FaceFit::Cell`] and no face at all both answer `profile.v6_font_cell()`
+/// unchanged, so every configuration that shipped before SQ-1009 lands on the same
+/// number it always did. A [`FaceFit::Metric`] face is the one case where the
+/// machine's table is not the whole story: it is a real typeface off the release's
+/// own disk, drawn on its own line, and Arthur's Amiga floppy is the release that
+/// has one.
+///
+/// # Why the HEIGHT moves and the WIDTH does not
+///
+/// The height is MEASURED. Arthur's `char.data` is 10 rows, `machine-screenshots/
+/// amiga-arthur.png` reads a text pitch of exactly 10 in the machine's own 320x200
+/// frame, and the four 2x captures read 20 — the same fact twice, and the reason
+/// `art_scale` multiplies it: a v6 coordinate is a NATIVE pixel, and on a press
+/// whose art doubles onto the unit screen one machine row is two native rows. For
+/// Arthur that is a 20-row line against the 16 we declared, which is the 20 text
+/// rows the machine shows against our 25.
+///
+/// The width is NOT measured, and there is nothing here to measure. A proportional
+/// face has no single advance — that is what makes it proportional — so any number
+/// picked for `$27` would be a guess, and this repo does not guess declared
+/// metrics (the Macintosh states `colWidth := 7` in `mac/xzip.lst` while painting
+/// proportional Geneva; no equivalent Amiga listing survives, see SQ-1009). The
+/// profile's width therefore stands, and what the story is TOLD about its columns
+/// is unchanged. Only the DRAWING is proportional, which is the split
+/// [`zvm::screen::V6Cell`] exists to name.
+///
+/// `art_scale` is [`crate::machine_boot::MachineBoot::art_scale`]; `None` there
+/// means an undoubled rendition and should arrive here as `(1, 1)`.
+pub fn declared_cell(
+    profile: InterpreterProfile,
+    face: Option<&BitmapFont>,
+    art_scale: (u32, u32),
+) -> zvm::screen::V6Cell {
+    let cell = profile.v6_font_cell();
+    match face.and_then(|f| fit(f, profile).map(|k| (f, k))) {
+        Some((f, FaceFit::Metric)) => {
+            zvm::screen::V6Cell::new(cell.w, u16::from(f.height).saturating_mul(art_scale.1 as u16))
+        }
+        _ => cell,
+    }
+}
+
+/// The cell, the face it is drawn with, and the pen that advances across it.
+///
+/// # Why these are one value
+///
+/// CLAUDE.md's refactoring policy: facts that must be considered TOGETHER travel
+/// together, and the tell is a parameter list where two arguments always come from
+/// the same place. `cell: V6Cell, face: Option<&BitmapFont>` were adjacent
+/// parameters on five render functions and were supplied from the same two
+/// [`crate::state::AppState`] fields at every one of the six call sites. Adding the
+/// scale — which a [`FaceFit::Metric`] face needs and a `Cell` one does not — would
+/// have edited all six again, which is when the omissions get made (SQ-0901,
+/// SQ-1020, SQ-1021, SQ-1022, all the same shape).
+///
+/// # The pen
+///
+/// [`Self::advance`] is the whole difference between a machine that drew Arthur's
+/// prose and lanthorn before SQ-1009. With no face, or a `Cell` face, it answers
+/// the cell width for every character and every existing path behaves byte for
+/// byte as it did. With a `Metric` face it answers that glyph's own advance times
+/// the art scale, which is what `machine-screenshots/amiga-arthur-text.png`
+/// measures to the pixel on three separate runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextFace {
+    cell: zvm::screen::V6Cell,
+    face: Option<BitmapFont>,
+    fit: Option<FaceFit>,
+    scale: (u32, u32),
+}
+
+impl TextFace {
+    /// Pair a resolved face with the machine that will draw it.
+    ///
+    /// The cell is [`declared_cell`]'s and never the caller's, so the three places
+    /// that settle it — launch, style reload, `@restart` — cannot disagree.
+    pub fn new(
+        profile: InterpreterProfile,
+        face: Option<BitmapFont>,
+        art_scale: Option<(u32, u32)>,
+    ) -> TextFace {
+        let scale = art_scale.unwrap_or((1, 1));
+        let fit = face.as_ref().and_then(|f| fit(f, profile));
+        TextFace { cell: declared_cell(profile, face.as_ref(), scale), face, fit, scale }
+    }
+
+    /// A cell with no release face behind it — a bare story, or a host default.
+    pub fn cell_only(cell: zvm::screen::V6Cell) -> TextFace {
+        TextFace { cell, face: None, fit: None, scale: (1, 1) }
+    }
+
+    /// What the STORY was told: [`zvm::screen::V6Cell`], declared metrics.
+    pub fn cell(&self) -> zvm::screen::V6Cell {
+        self.cell
+    }
+
+    /// The face the renderer may draw with, if the release shipped a usable one.
+    pub fn face(&self) -> Option<&BitmapFont> {
+        self.face.as_ref()
+    }
+
+    /// How that face may be drawn — see [`FaceFit`].
+    pub fn fit(&self) -> Option<FaceFit> {
+        self.fit
+    }
+
+    /// Native pixels per face pixel, on each axis.
+    pub fn scale(&self) -> (u32, u32) {
+        self.scale
+    }
+
+    /// Whether the pen advances per glyph rather than by a fixed cell.
+    pub fn proportional(&self) -> bool {
+        self.fit == Some(FaceFit::Metric)
+    }
+
+    /// Native pixels the pen moves for one ROMAN character — [`Self::advance_styled`]
+    /// with no style byte.
+    pub fn advance(&self, ch: char) -> u32 {
+        self.advance_styled(ch, 0)
+    }
+
+    /// Native pixels the pen moves for one character drawn in ZMSD §8.7.1 `style`.
+    ///
+    /// A character the face does not cover falls back to the cell width, which is
+    /// what every non-`Metric` configuration answers for everything.
+    ///
+    /// # Bold is WIDER, and that is not decoration
+    ///
+    /// The Amiga emboldens by smearing a glyph `tf_BoldSmear` pixels to the right
+    /// and advancing the pen by the same amount, so the extra column has somewhere
+    /// to live. Our synthesised bold smears without widening — at the old fixed
+    /// 8-wide cell there was slack to absorb that, and at a real 3-to-8 px
+    /// proportional advance there is none, so every bold glyph ate its own
+    /// inter-character gap and bold words ran together. Arthur's `char.data`
+    /// states a smear of **1** (SQ-1009).
+    pub fn advance_styled(&self, ch: char, style: u8) -> u32 {
+        let cell_w = u32::from(self.cell.w);
+        if !self.proportional() {
+            return cell_w;
+        }
+        let Some(face) = self.face.as_ref() else { return cell_w };
+        let g = u8::try_from(u32::from(ch)).ok().and_then(|c| face.glyph(c));
+        g.map_or(cell_w, |g| {
+            (u32::from(g.width) + u32::from(self.bold_smear(style))) * self.scale.0
+        })
+    }
+
+    /// How far a run in `style` smears, in FACE pixels — 0 unless it is bold.
+    pub fn bold_smear(&self, style: u8) -> u8 {
+        match self.face.as_ref() {
+            Some(f) if style & STYLE_BOLD != 0 => f.bold_smear,
+            _ => 0,
+        }
+    }
+
+    /// Native pixels a whole ROMAN run occupies — the pen's total, bearings and all.
+    ///
+    /// This is the width that WRAPS: `machine-screenshots/amiga-arthur-text.png`
+    /// ends every full prose line within one word's width of the same pixel margin
+    /// while carrying different character counts, which no column count reproduces.
+    pub fn run_px(&self, s: &str) -> u32 {
+        self.run_px_styled(s, 0)
+    }
+
+    /// [`Self::run_px`] for a run carrying a §8.7.1 style byte.
+    pub fn run_px_styled(&self, s: &str, style: u8) -> u32 {
+        if !self.proportional() {
+            return self.cell.run_px(s);
+        }
+        s.chars().map(|c| self.advance_styled(c, style)).sum()
+    }
+
+    /// Native pixels from one text baseline to the next — the cell's height.
+    pub fn line_px(&self) -> u32 {
+        u32::from(self.cell.h)
+    }
 }
 
 /// One typeface a story's own medium carries, for the browser's info panel
