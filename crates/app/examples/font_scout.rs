@@ -30,6 +30,7 @@
 
 fn main() {
     let mut entry: Option<String> = None;
+    let mut glyphs: Vec<char> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--entry" {
@@ -42,11 +43,21 @@ fn main() {
             }
             continue;
         }
-        scout(std::path::Path::new(&arg), entry.as_deref());
+        if arg == "--glyph" {
+            match args.next() {
+                Some(g) => glyphs.extend(g.chars()),
+                None => {
+                    eprintln!("font_scout: --glyph needs one or more characters");
+                    std::process::exit(2);
+                }
+            }
+            continue;
+        }
+        scout(std::path::Path::new(&arg), entry.as_deref(), &glyphs);
     }
 }
 
-fn scout(path: &std::path::Path, entry: Option<&str>) {
+fn scout(path: &std::path::Path, entry: Option<&str>, glyphs: &[char]) {
     println!("\n=== {} ===", path.display());
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -131,6 +142,16 @@ fn scout(path: &std::path::Path, entry: Option<&str>) {
                     r.id,
                     r.data.len(),
                 );
+                // `--glyph A` is how you tell a TYPEFACE from the font-3 graphics
+                // set, which is a different thing wearing the same shape: font 3's
+                // code 65 is a solid block, and every letterform has an apex, a
+                // crossbar and two legs. Reading the bitmap is the only way to
+                // know, and a metrics line cannot say it.
+                if let Some(f) = blorb::mac_font::parse(&r.data) {
+                    for &c in glyphs {
+                        print_glyph(&f, c);
+                    }
+                }
             }
         }
     }
@@ -155,5 +176,25 @@ fn scout(path: &std::path::Path, entry: Option<&str>) {
         );
         let faces = blorb::mac_font::faces_beside(&hfs, p);
         println!("  faces_beside -> {:?}", faces.iter().map(|(id, f)| (*id, f.width, f.height)).collect::<Vec<_>>());
+    }
+}
+
+/// One glyph as pixels, because whether a face is a typeface is a question about
+/// its shapes and nothing else answers it.
+fn print_glyph(font: &blorb::bitmap_font::BitmapFont, ch: char) {
+    let Ok(code) = u8::try_from(ch as u32) else {
+        println!("        {ch:?}: not a byte code");
+        return;
+    };
+    let Some(g) = font.glyph(code) else {
+        println!("        {ch:?} (0x{code:02X}): not in this font");
+        return;
+    };
+    println!("        {ch:?} (0x{code:02X}) advance={} :", g.width);
+    for (i, row) in g.rows.iter().enumerate() {
+        let bits: String =
+            (0..8).map(|b| if row & (0x80 >> b) != 0 { '#' } else { '.' }).collect();
+        let baseline = if i + 1 == usize::from(font.baseline) { " <- baseline" } else { "" };
+        println!("          {bits}{baseline}");
     }
 }
