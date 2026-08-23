@@ -911,7 +911,7 @@ impl GameSession {
     /// doors are [`Self::new_for_machine`], which takes them as one value, and
     /// [`Self::new_with_trace`], which is the honest no-machine case. This is a
     /// compile error rather than a convention, which is the point.
-    fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>, random_seed: Option<u32>, v6_cell: Option<(u16, u16)>) -> Result<GameSession, ZError> {
+    fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>, random_seed: Option<u32>, v6_cell: Option<zvm::screen::V6Cell>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
@@ -929,8 +929,8 @@ impl GameSession {
         // disagreed with. `None` keeps zvm's 8x16 default, which is every profile
         // but the Macintosh.
         if machine.mem.version() == 6 {
-            if let Some((w, h)) = v6_cell {
-                machine.set_v6_cell(zvm::screen::V6Cell::new(w, h));
+            if let Some(cell) = v6_cell {
+                machine.set_v6_cell(cell);
             }
         }
         // v6 (SQ-0479): the game lays out on the 640×400 UNIT screen, so

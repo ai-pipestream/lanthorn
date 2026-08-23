@@ -170,10 +170,7 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     // the session was constructed with, so the renderer divides by the number the
     // engine multiplied by. They disagreeing is every run landing in the wrong
     // column, silently, because both answers look plausible.
-    state.v6_cell = {
-        let (w, h) = state.config.interpreter_profile.v6_font_cell();
-        zvm::screen::V6Cell::new(w, h)
-    };
+    state.v6_cell = state.config.interpreter_profile.v6_font_cell();
     state.period_look = crate::period::resolve(
         state.config.interpreter_profile,
         state.config.period_look,

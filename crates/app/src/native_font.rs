@@ -102,7 +102,8 @@ pub fn resolve(
 /// moves its cell and the shipped face no longer matches, this notices instead of
 /// silently drawing at the wrong pitch.
 fn fits(face: &BitmapFont, profile: InterpreterProfile) -> bool {
-    let (cw, ch) = profile.v6_font_cell();
+    let cell = profile.v6_font_cell();
+    let (cw, ch) = (cell.w, cell.h);
     if u16::from(face.width) != cw || u16::from(face.height) != ch {
         return false;
     }

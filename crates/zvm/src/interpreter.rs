@@ -49,7 +49,7 @@
 //! dressing it as an IBM PC.
 
 use crate::memory::Memory;
-use crate::screen::{Palette, ZColour};
+use crate::screen::{Palette, V6Cell, ZColour};
 
 // ---------------------------------------------------------------------------
 // §11.1.3 interpreter numbers
@@ -645,6 +645,30 @@ pub struct MachineProfile {
     /// [`crate::screen::amiga_global_colour_pair`] carries the full rule; this
     /// flag is the machine half of it, and no other row sets it.
     pub global_colour_pens: bool,
+    /// The Version 6 CHARACTER CELL this machine declares — header `$26`/`$27`,
+    /// `(width, height)` in pixels (SQ-0917, SQ-1013).
+    ///
+    /// **A DECLARED metric, not a drawn advance.** It is what the STORY IS TOLD,
+    /// and a machine that painted proportionally still declared a fixed one: the
+    /// Macintosh's `mac/xzip.lst` sets `colWidth := 7; lineHeight := 15` while
+    /// drawing Geneva 12, and a host that declared anything else would be lying to
+    /// the story. How ink actually lands is the HOST's business — see
+    /// [`crate::screen::V6Cell`] for that boundary.
+    ///
+    /// It lives here because it is machine knowledge, and an embedder that gets
+    /// this machine's interpreter number from zvm should not have to rediscover
+    /// its cell somewhere else.
+    pub v6_cell: V6Cell,
+    /// The Version 6 standard window this machine presents, in pixels, or `None`
+    /// where the machine states none.
+    ///
+    /// **This is the machine's own answer, and it is the LAST link of a chain the
+    /// host resolves** — a story's container and its artwork both outrank it. The
+    /// standard Macintosh's monochrome `Pic.data` states the 480x300 screen it was
+    /// drawn for, so this 320x200 never applies to that press (SQ-0838). Reading
+    /// resource files is the host's business; knowing what an Amiga presented is
+    /// this table's.
+    pub v6_std_window: Option<(u16, u16)>,
     /// This machine's [`default_colours`](Self::default_colours) are not advice
     /// about a terminal — they **are** the Version 6 screen, the ground every
     /// window that names no colour of its own is read on.
@@ -736,6 +760,36 @@ pub struct MachineProfile {
 /// [`machine`] answering `None` is therefore meaningful: it says "this number
 /// names a machine I do not model", which a front-end can report instead of
 /// silently dressing the story as an IBM PC.
+/// The Macintosh's Version 6 character cell — `mac/xzip.lst`'s
+/// `colWidth := 7; lineHeight := 15 {16}` (SQ-0917).
+///
+/// **A declared metric, not a drawn advance.** The machine painted proportional
+/// Geneva 12 and still told the story 7; see [`MachineProfile::v6_cell`].
+pub const MACINTOSH_V6_CELL: V6Cell = V6Cell { w: 7, h: 15 };
+
+/// The Macintosh's Version 6 standard window, `GFXAM_X`/`GFXAM_Y` doubled.
+///
+/// The standard Macintosh's OTHER window — 480x300, `GFXMAC_X`/`GFXMAC_Y`, "1.5 x
+/// Amiga sizes" — belongs to the monochrome archive and arrives with it, ahead of
+/// this (SQ-0838).
+pub const MACINTOSH_STD_WINDOW: (u16, u16) = (320, 200);
+
+/// The Amiga's Version 6 standard window: 320x200 art on a 640x200 **hi-res,
+/// non-interlaced** screen, which a square-pixel display shows as 640x400.
+///
+/// Infocom's own `amiga/yzip1.c` opens one `CUSTOMSCREEN` with `ViewModes = HIRES`
+/// and `AM_XSIZ 640` / `AM_YSIZ 200`; `LACE`/`INTERLACE` appear nowhere in any
+/// Amiga source in that repository and the literal `400` never occurs. A hi-res
+/// Amiga pixel is half as wide as it is tall, so the display doubles the art
+/// horizontally and a modern square-pixel screen doubles it vertically as well —
+/// which is why the host's `art_scale` for this machine is (2, 2) and not (2, 1)
+/// (SQ-1023).
+///
+/// It is also the resolution every Infocom Blorb's `Reso` chunk declares, those
+/// Blorbs being Amiga conversions — so asserting it restores exactly the scaling a
+/// Blorb-sourced copy of the same game already gets.
+pub const AMIGA_STD_WINDOW: (u16, u16) = (320, 200);
+
 pub const MACHINES: &[MachineProfile] = &[
     MachineProfile {
         number: APPLE_IIE_INTERPRETER_NUMBER,
@@ -745,6 +799,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
     MachineProfile {
@@ -755,6 +811,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: true,
+        v6_cell: MACINTOSH_V6_CELL,
+        v6_std_window: Some(MACINTOSH_STD_WINDOW),
         // mac-zork1.jpg: Zork I r88/840726 on a Mac Plus, screen 512x342. A 1-bit
         // screen, so no palette can move these; the status line is set apart by
         // rules rather than by ground, and the caret is 1px by the line height.
@@ -774,6 +832,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: true,
         one_screen_palette: true,
         v6_screen_page: true,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: Some(AMIGA_STD_WINDOW),
         // amiga-spellbreaker.png (r87/860904) and amiga-lurking.png, both v3 and
         // both giving the identical palette in 7-8 exact colours. Note the page
         // is BLUE where default_colours above reports 12/9, a grey — the v3 and
@@ -800,6 +860,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: None,
         // SQ-0933, from `machine-screenshots/st-zork1.png` — Zork I revision 88 /
         // serial 840726, the same release `stories/` carries. A v3 story, so it has
         // no colour concept at all and every pixel is the interpreter's own
@@ -852,6 +914,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: None,
         // SQ-0873/SQ-0928, from `machine-screenshots/dos-hitchhiker.png` — the last
         // period-look capture bar the Atari ST's. Hitchhiker's r47/840914 under a
         // CGA colour display, and **Version 3** is what makes it a period look
@@ -920,6 +984,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: None,
         // c128-trinity.png: Trinity (v4) at the first prompt, two colours exactly.
         // #55FFFF is RGBI light cyan on the nose, so this row is as close to
         // palette-independent as an emulator capture gets.
@@ -941,6 +1007,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: None,
         // c64-zork1-solidgold.png: Zork I release 52 / serial 871125, whose own
         // banner reads "Interpreter 8 Version J" — the machine naming itself, which
         // is as direct a statement of the number as this table has anywhere.
@@ -963,6 +1031,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
     MachineProfile {
@@ -973,6 +1043,8 @@ pub const MACHINES: &[MachineProfile] = &[
         global_colour_pens: false,
         one_screen_palette: false,
         v6_screen_page: false,
+        v6_cell: V6Cell::DEFAULT,
+        v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
 ];

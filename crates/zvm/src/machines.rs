@@ -240,14 +240,14 @@ pub fn table() -> String {
     let mut s = format!("ZMSD §11.1.3 machine profiles — what zvm models, in number order.\n\n{TOLD_INTRO}\n");
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     s.push_str(&format!(
-        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {}\n",
+        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {}\n",
         "#", "machine", "default page / ink ($2C/$2D)", "palette", "global pens", "v6 screen page",
-        "one screen palette"
+        "one screen palette", "v6 cell", "v6 std window"
     ));
-    s.push_str(&format!("  {}\n", "-".repeat(name_w + 94)));
+    s.push_str(&format!("  {}\n", "-".repeat(name_w + 118)));
     for m in MACHINES {
         s.push_str(&format!(
-            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {}\n",
+            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {}\n",
             m.number,
             m.name,
             colours(m),
@@ -267,6 +267,10 @@ pub fn table() -> String {
             yes_no(m.global_colour_pens),
             yes_no(m.v6_screen_page),
             yes_no(m.one_screen_palette),
+            format!("{}x{}", m.v6_cell.w, m.v6_cell.h),
+            // A machine that states none defers to the story's own container, and
+            // to any artwork the host mounted ahead of it (SQ-0838).
+            m.v6_std_window.map_or("the archive's".to_string(), |(w, h)| format!("{w}x{h}")),
         ));
     }
     s.push_str(&format!("\n{LEGEND}"));
@@ -456,6 +460,8 @@ mod tests {
                 global_colour_pens,
                 v6_screen_page,
                 one_screen_palette,
+                v6_cell,
+                v6_std_window,
                 period_look,
             } = *m;
             let rows: Vec<&str> = t.lines().filter(|l| l.contains(name)).collect();
@@ -483,6 +489,23 @@ mod tests {
                 + usize::from(v6_screen_page)
                 + usize::from(one_screen_palette);
             assert_eq!(rows[0].matches("yes").count(), want, "{name}: screen rules\n{all}");
+            // SQ-1013: the two Version 6 geometry columns. The cell always prints
+            // — every machine declares one — and the standard window prints either
+            // its size or the reason it has none, because "blank" and "defers to
+            // the archive" are different answers and a reader cannot tell them
+            // apart from an empty column.
+            assert!(
+                all.contains(&format!("{}x{}", v6_cell.w, v6_cell.h)),
+                "{name}: v6 cell {}x{} not in\n{all}",
+                v6_cell.w,
+                v6_cell.h,
+            );
+            match v6_std_window {
+                Some((w, h)) => {
+                    assert!(all.contains(&format!("{w}x{h}")), "{name}: v6 std window\n{all}")
+                }
+                None => assert!(all.contains("the archive's"), "{name}: a decline says so\n{all}"),
+            }
             // Exhaustive on the VARIANT too, for the same reason the destructure
             // above is exhaustive on the fields: a row that stores its look and one
             // that resolves it store different things, and a new variant must

@@ -268,7 +268,7 @@ fn the_macintosh_face_resolves_for_the_renderer() {
         &path, None, None, None,
     );
     assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "the medium names the Mac");
-    assert_eq!(profile.v6_font_cell(), (7, 15), "which declares 7x15");
+    assert_eq!(profile.v6_font_cell(), zvm::interpreter::MACINTOSH_V6_CELL, "which declares 7x15");
     assert_eq!(
         source,
         app::interpreter::ProfileSource::Medium,

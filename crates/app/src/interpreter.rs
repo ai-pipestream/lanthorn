@@ -697,17 +697,7 @@ impl InterpreterProfile {
     /// character grid the machine used are two different quantities and only the
     /// first of them is a standard window.
     pub fn std_window(self) -> Option<(u16, u16)> {
-        match self {
-            Self::IbmPc
-            | Self::AtariSt
-            | Self::AppleIIe
-            | Self::AppleIIc
-            | Self::AppleIIgs
-            | Self::Commodore128
-            | Self::Commodore64 => None,
-            Self::Amiga => Some(AMIGA_STD_WINDOW),
-            Self::Macintosh => Some(MACINTOSH_STD_WINDOW),
-        }
+        self.machine().and_then(|m| m.v6_std_window)
     }
 
     /// The default background/foreground colour numbers this machine reports in
@@ -877,105 +867,30 @@ impl InterpreterProfile {
         self.machine().map_or(zvm::screen::Palette::Standard, |m| m.palette)
     }
 
-    /// The Version 6 character cell in native pixels, `(width, height)`.
+    /// The Version 6 character cell this machine declares — header `$26`/`$27`.
     ///
-    /// The sixth knob of the bundle, and the one that turned out to need no
-    /// work: both machines used an 8×16 cell for Version 6 (80×25 characters on
-    /// a 640×400 screen), which is already what zvm advertises. It is stated
-    /// here so the bundle is complete rather than partial, and pinned by a test
-    /// against `zvm::screen::V6_FONT_WIDTH`/`V6_FONT_HEIGHT` so the two cannot
-    /// drift apart unnoticed.
+    /// **The table is [`zvm::interpreter`]'s** (SQ-1013), for the same reason the
+    /// palette above is: an embedder that gets this machine's interpreter number
+    /// from the engine should not have to rediscover its cell from the host. See
+    /// [`zvm::interpreter::MachineProfile::v6_cell`] and
+    /// [`zvm::interpreter::MACINTOSH_V6_CELL`], which carry the evidence.
     ///
-    /// **It survived the case that was expected to move it** (SQ-0790). EGA ran
-    /// 640×200 on an 8×8 cell, which reads like a display mode this knob would
-    /// have to express — but 640/8 by 200/8 is 80×25, the *same character grid*
-    /// the 640×400 unit screen already lays out on its 8×16 cell. Halving both
-    /// axes would buy an identical grid with half the vertical precision for
-    /// window and cursor coordinates, at the cost of making
-    /// `V6_FONT_WIDTH`/`V6_FONT_HEIGHT` runtime state throughout `zvm`'s screen
-    /// model, its location heuristics and the app's render path. What genuinely
-    /// differs about an EGA or CGA rendition is that its ART is stored at twice
-    /// the horizontal density, and that belongs to the archive rather than to
-    /// the machine — three video cards, one IBM PC, one cell. See
-    /// [`crate::graphics::PictSource::art_scale`].
+    /// The Macintosh is the only row that is not 8x16: `mac/xzip.lst` sets
+    /// `colWidth := 7; lineHeight := 15 {16}`, so 640x400 gives 91x26 characters
+    /// and 480x300 gives 68x20. It is a DECLARED metric — the machine painted
+    /// proportional Geneva 12 and still told the story 7 — and it is the MACHINE's
+    /// rather than a press's: one code path serves both, and only the window it
+    /// divides changes (SQ-0917).
     ///
-    /// **The Macintosh is the case that genuinely differs, and it is not
-    /// expressed** (SQ-0838, reported rather than quietly rounded). Infocom's
-    /// Mac interpreter set `stdFont := geneva; textSize (12); lineHeight := 15
-    /// {16}; colWidth := 7` — a 7×15 cell, giving 68×20 characters on the
-    /// 480×300 standard-Mac screen where lanthorn's 8×16 gives 60×18. Honouring
-    /// it means making `V6_FONT_WIDTH`/`V6_FONT_HEIGHT` runtime state throughout
-    /// `zvm`'s screen model, its location heuristics and the app's render path,
-    /// which is the same refactor this knob declined for EGA and a far larger
-    /// change than the profile it would be arriving inside. The cost is a
-    /// slightly larger typeface than a real Mac's and up to 4 pixels of vertical
-    /// slack; see [`crate::graphics::PictSource::native_std_window`] for where
-    /// that slack lands.
-    ///
-    /// **The Apple IIgs differs further still, and is reported the same way**
-    /// (SQ-0857). Its Version 6 cell is 3x9 — `MFONT_W EQU 3` and `FONT_H EQU 9`
-    /// in `apple/yzip/rel.15/apple.equ`, handed to the story as `ZFWRD` — giving
-    /// 46x21 characters on the 140x192 screen where lanthorn's 8x16 gives 70x24
-    /// on the 560x384 the archive asks for (SQ-0863). It is the same refactor
-    /// declined twice above, and declining it is still what makes
-    /// [`Self::std_window`] decline: a 140x192 CHARACTER grid is only the
-    /// Apple's screen when read through the Apple's cell, and this knob is where
-    /// that cell would have to live. The 140x192 PICTURE space is a different
-    /// quantity, it needs no cell to be true, and the archive states it — which
-    /// is why the artwork did not have to wait for this.
-    pub fn v6_font_cell(self) -> (u16, u16) {
-        match self {
-            // Infocom's own Macintosh interpreter: `stdFont := geneva; textSize
-            // (12); lineHeight := 15 {16}; colWidth := 7` (`mac/xzip.lst`).
-            //
-            // **A DECLARED metric, not a drawn advance.** The Mac draws
-            // proportionally — `machine-screenshots/mac-zorkzero-hint.png` has the
-            // same `WING` glyph run starting at x=137 in `EAST WING` and x=139 in
-            // `WEST WING`, both at character index 5, which no fixed pitch permits
-            // — and 7 is simply Geneva 12's average advance. `colWidth` is exactly
-            // what header `$27` carries: what the STORY is told, not how the
-            // interpreter painted. Matching it is both the smaller change and the
-            // faithful one.
-            //
-            // Confirmed against the machine four ways, all on 1:1 captures: the
-            // inverse `PROLOGUE` bar is 15 rows (a bar is drawn to the CELL); the
-            // topic list indexes as `y = 118 + 15*i` across fourteen rows; the
-            // colour press's prose tops are 266/281/296/311/326/341; and the
-            // insertion caret is 1px wide and 15 tall in both colour captures.
-            //
-            // It is the MACHINE's cell and not a press's — one code path serves
-            // both, and only the window it divides changes: `totRows := (bottom -
-            // top) DIV lineheight; totCols := ((right - left) - (2 * wMarg)) DIV
-            // colWidth`. So 640x400 gives 91x26 and 480x300 gives 68x20.
-            // **HELD AT THE DEFAULT** pending the rest of the render path (SQ-0917).
-            //
-            // The evidence for 7x15 is settled — `mac/xzip.lst`'s `colWidth := 7;
-            // lineHeight := 15 {16}`, confirmed four ways on 1:1 captures — and
-            // every piece of machinery to carry it exists: `V6Cell` is runtime
-            // state, the engine reads it, and `write_screen_dims_px` keeps the
-            // pixels primary so 480 no longer round-trips to 476.
-            //
-            // What is NOT ready is `render/screen.rs`, which still carries 35
-            // production sites hardcoding 8 and 16 as BARE LITERALS — `(t.y - 1) /
-            // 16`, `chars * 8` — rather than reading the session cell. Threading
-            // the named `FONT_W`/`FONT_H` uses missed every one of them, because a
-            // grep for the constant cannot see a number. Declaring 7x15 while half
-            // the render path still quantizes by 8x16 puts two disagreeing cell
-            // sizes on one screen, which is what the user saw: "some areas have it,
-            // some don't".
-            //
-            // Return this to `(7, 15)` in the SAME commit that finishes those 35.
-            // The tests for it are already written and will start passing then —
-            // see `v6_macintosh_profile`, which pins 68x20 and 91x26 and is
-            // currently the reason this line cannot simply be flipped back.
-            Self::Macintosh => (7, 15),
-            // Every other machine keeps the 8x16 this crate has always advertised.
-            // The Apple IIgs's real 3x9 and EGA's 8x8 are still unexpressed — see
-            // this method's history above; the IIgs in particular needs its cell
-            // and its screen stated in ONE coordinate system before it can move,
-            // and today they are not (SQ-0863).
-            _ => (8, 16),
-        }
+    /// **The Apple IIgs is the row that still does not state its own** (SQ-0857,
+    /// SQ-0863). Its cell is 3x9 — `MFONT_W EQU 3` and `FONT_H EQU 9` in
+    /// `apple/yzip/rel.15/apple.equ`, handed to the story as `ZFWRD` — giving
+    /// 46x21 characters where 8x16 gives 70x24 on the 560x384 its archive asks
+    /// for. Moving it needs its cell and its screen stated in ONE coordinate
+    /// system, and today they are not: 140x192 is a PICTURE space, which needs no
+    /// cell to be true and is why the artwork did not have to wait for this.
+    pub fn v6_font_cell(self) -> zvm::screen::V6Cell {
+        self.machine().map_or(zvm::screen::V6Cell::DEFAULT, |m| m.v6_cell)
     }
 }
 
@@ -1008,29 +923,22 @@ pub use zvm::interpreter::{
     MAC_DEFAULT_BACKGROUND, MAC_DEFAULT_FOREGROUND, ST_DEFAULT_BACKGROUND, ST_DEFAULT_FOREGROUND,
 };
 
-/// The Macintosh Version 6 standard window: the **big colour** Mac's, 320×200
-/// art doubled onto a 640×400 window — the same numbers as the Amiga's, and
-/// from the same place. `mac/xzip.lst` sizes that window as `wy := 2*GFXAM_Y;
-/// wx := 2*GFXAM_X` off `GFXAM_X = 320; GFXAM_Y = 200; { "raw" size of
-/// full-screen Amiga pics }`, which says outright that the Macintosh's colour
-/// artwork *is* the Amiga's picture space.
+/// The Version 6 standard windows, from [`zvm::interpreter`] — the machine table
+/// (SQ-1013).
 ///
-/// The standard Macintosh's other window — 480×300, `GFXMAC_X`/`GFXMAC_Y`,
-/// "1.5 x Amiga sizes" — belongs to the monochrome archive and arrives with it.
-/// See [`InterpreterProfile::std_window`], which quotes the whole decision.
+/// **They moved, and the note that kept them here did not survive its own
+/// reasoning.** It said "a standard window stays in the app… it is a Version 6
+/// picture space stated by an ARCHIVE, resolved against `PictSource`, and zvm has
+/// no business reading resource files (SQ-0872)". The second half is still true
+/// and is why [`InterpreterProfile::std_window`]'s CHAIN stays here — a container's
+/// `Reso` chunk, then a named archive, then the archive's own picture space, then
+/// the machine. But the constants are not that chain: they are its last link, the
+/// answer a MACHINE gives when nothing else has one, and knowing what an Amiga
+/// presented makes zvm read no files at all.
 ///
-/// **A standard window stays in the app**, where the rest of the bundle went to
-/// `zvm`: it is a Version 6 picture space stated by an ARCHIVE, resolved against
-/// `crate::graphics::PictSource`, and zvm has no business reading resource files
-/// (SQ-0872).
-pub const MACINTOSH_STD_WINDOW: (u16, u16) = (320, 200);
-
-/// The Amiga Version 6 standard window: 320×200 art, doubled onto the 640×400
-/// hi-res interlaced screen the games lay themselves out on. This is the same
-/// resolution every Infocom Blorb's `Reso` chunk declares — those Blorbs are
-/// Amiga conversions — which is why asserting it here restores exactly the
-/// scaling a Blorb-sourced copy of the same game already gets.
-pub const AMIGA_STD_WINDOW: (u16, u16) = (320, 200);
+/// So the resolution is the host's and the value is the engine's, which is the
+/// same split every other member of this bundle already had.
+pub use zvm::interpreter::{AMIGA_STD_WINDOW, MACINTOSH_STD_WINDOW};
 
 #[cfg(test)]
 mod tests {
@@ -1255,7 +1163,7 @@ mod tests {
         // tops are 15 apart, and the insertion caret is 1x15.
         assert_eq!(
             InterpreterProfile::Macintosh.v6_font_cell(),
-            (7, 15),
+            zvm::interpreter::MACINTOSH_V6_CELL,
             "the Macintosh declares Geneva 12's metric, not zvm's default",
         );
 
@@ -1271,7 +1179,7 @@ mod tests {
         ] {
             assert_eq!(
                 p.v6_font_cell(),
-                (zvm::screen::V6_FONT_WIDTH, zvm::screen::V6_FONT_HEIGHT),
+                zvm::screen::V6Cell::DEFAULT,
                 "{p:?} v6 cell",
             );
         }

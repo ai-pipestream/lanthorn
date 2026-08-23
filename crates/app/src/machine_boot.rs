@@ -66,9 +66,9 @@ pub struct MachineBoot {
     pub art_scale: Option<(u32, u32)>,
     /// §8.3.3's pair, where the machine or the card states one.
     pub default_colours: Option<(u8, u8)>,
-    /// The Version 6 character cell this machine declares (SQ-0917) — `(7, 15)`
-    /// on a Macintosh, `(8, 16)` everywhere else.
-    pub cell: (u16, u16),
+    /// The Version 6 character cell this machine declares (SQ-0917) — 7x15 on a
+    /// Macintosh, 8x16 everywhere else. The machine table's, since SQ-1013.
+    pub cell: zvm::screen::V6Cell,
 }
 
 impl MachineBoot {
@@ -161,7 +161,7 @@ mod tests {
                 None,
             )
             .cell,
-            (7, 15),
+            zvm::interpreter::MACINTOSH_V6_CELL,
             "a Macintosh boot carries 7x15 without the caller doing anything",
         );
     }
@@ -199,6 +199,6 @@ mod tests {
             (b.interpreter_number, b.screen_px, b.art_scale, b.default_colours),
             (None, None, None, None),
         );
-        assert_eq!(b.cell, (8, 16), "the cell every machine but the Macintosh declares");
+        assert_eq!(b.cell, zvm::screen::V6Cell::DEFAULT, "the cell every machine but the Macintosh declares");
     }
 }

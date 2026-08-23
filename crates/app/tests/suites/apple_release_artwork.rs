@@ -160,7 +160,8 @@ fn the_screen_is_the_archives_picture_space_at_the_machines_scale() {
         APPLE_SCREEN,
         "140x192 at (4, 2) — see `PictSource::art_scale` for where the pair comes from"
     );
-    let (cw, ch) = InterpreterProfile::AppleIIgs.v6_font_cell();
+    let cell = InterpreterProfile::AppleIIgs.v6_font_cell();
+    let (cw, ch) = (cell.w, cell.h);
     assert_eq!(
         (APPLE_SCREEN.0 % cw, APPLE_SCREEN.1 % ch),
         (0, 0),
