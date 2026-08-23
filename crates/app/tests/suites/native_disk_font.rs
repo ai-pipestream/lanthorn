@@ -235,3 +235,47 @@ fn the_macintosh_font_is_fixed_pitch_but_narrower_than_our_cell() {
         l.rows,
     );
 }
+
+/// **The Macintosh face actually reaches the renderer** (SQ-1011).
+///
+/// `native_disk_font`'s other cases prove the PARSER reads `FONT` 524 correctly.
+/// This one proves the app-side resolution does too — which is a different claim,
+/// and the one that was false when this was written: the feature shipped inert and
+/// a before/after render diff came back byte-identical on all four frames.
+///
+/// Each step is asserted separately so a failure says WHICH link broke rather than
+/// just that the chain did.
+#[test]
+fn the_macintosh_face_resolves_for_the_renderer() {
+    let path = stories_dir().join("Zork Zero Disk.image");
+    if !path.is_file() {
+        eprintln!("SKIP: gitignored Macintosh medium absent");
+        return;
+    }
+    // 1. the volume mounts and carries the face
+    let hfs = blorb::hfs::Hfs::mount(std::fs::read(&path).expect("readable")).expect("mounts");
+    let face = blorb::mac_font::from_volume(&hfs).expect("the volume carries FONT 524");
+    assert_eq!((face.width, face.height), (7, 15), "the face is the Macintosh cell");
+    // NOT `!face.proportional` — that flag counts the accented high range and is
+    // `true` for this face. What matters is the printable set (SQ-0916, and the
+    // case above measures it as exactly {7}).
+    let printable: std::collections::BTreeSet<u8> =
+        (b'!'..=b'~').filter_map(|c| face.glyph(c)).map(|g| g.width).collect();
+    assert_eq!(printable, [7].into(), "every printable character advances by the cell");
+
+    // 2. the profile the medium resolves to declares that same cell
+    let (profile, source) = app::interpreter::InterpreterProfile::resolve_with_source(
+        &path, None, None, None,
+    );
+    assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "the medium names the Mac");
+    assert_eq!(profile.v6_font_cell(), (7, 15), "which declares 7x15");
+    assert_eq!(
+        source,
+        app::interpreter::ProfileSource::Medium,
+        "and it came from the MEDIUM — `native_font::resolve` gates on this",
+    );
+
+    // 3. so the resolver hands the renderer a face
+    let resolved = app::native_font::resolve(&path, profile, source);
+    assert!(resolved.is_some(), "native_font::resolve must find it — the renderer takes this or nothing");
+}

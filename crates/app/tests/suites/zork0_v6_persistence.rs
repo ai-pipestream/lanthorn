@@ -65,7 +65,7 @@ fn composite(session: &GameSession) -> image::RgbaImage {
     let colors = app::colors::ColorScheme::default();
     let default_fg = image::Rgba([220, 220, 220, 255]);
     let default_bg = image::Rgba([0, 0, 0, 255]);
-    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
+    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT, None);
     let main = v6::MainText {
         lines: (0..6).map(|i| format!("story line {i} {}", "x".repeat(20))).collect(),
         styles: Vec::new(),
@@ -76,7 +76,7 @@ fn composite(session: &GameSession) -> image::RgbaImage {
     };
     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
         let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 8).max(1) as u16);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg, &[], zvm::screen::V6Cell::DEFAULT);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg, &[], zvm::screen::V6Cell::DEFAULT, None);
     }
     canvas
 }

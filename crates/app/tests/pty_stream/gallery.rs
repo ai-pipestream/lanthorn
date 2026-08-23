@@ -809,7 +809,7 @@ impl Face {
     /// Draw one glyph into a cell.
     pub fn draw(&self, canvas: &mut RgbaImage, ch: char, px: u32, py: u32, cw: u32, chh: u32, fg: Rgba<u8>) {
         match self {
-            Face::Bitmap => app::render::bitfont::blit_glyph(canvas, ch, px, py, cw, chh, fg, None),
+            Face::Bitmap => app::render::bitfont::blit_glyph(canvas, ch, px, py, cw, chh, fg, None, None),
             Face::Outline { font, px: size, unresolved, .. } => {
                 // The half-block and box-drawing glyphs are the picture's
                 // STRUCTURE — rules, borders, and every pixel of a half-block
@@ -825,7 +825,7 @@ impl Face {
                 // whether it HAS the glyph fixes it for every face anyone passes
                 // to `--font`, including the ones nobody has thought of.
                 if is_structural(ch) || !font.has_glyph(ch) {
-                    app::render::bitfont::blit_glyph(canvas, ch, px, py, cw, chh, fg, None);
+                    app::render::bitfont::blit_glyph(canvas, ch, px, py, cw, chh, fg, None, None);
                     // The master is a short hand-authored list, not a font: it
                     // covers font 3, the ZSCII table and the runes, and nothing
                     // says it covers whatever the face just declined. Record what
@@ -1000,7 +1000,7 @@ pub fn label(frame: &RgbaImage, lines: &[String]) -> RgbaImage {
         let fg = if *source == 0 { Rgba([236, 130, 130, 255]) } else { Rgba([150, 152, 158, 255]) };
         let y = frame.height() + PAD + LABEL_LINE * n as u32;
         for (j, ch) in text.chars().enumerate() {
-            app::render::bitfont::blit_glyph(&mut out, ch, PAD + j as u32 * 8, y, 8, LABEL_LINE, fg, None);
+            app::render::bitfont::blit_glyph(&mut out, ch, PAD + j as u32 * 8, y, 8, LABEL_LINE, fg, None, None);
         }
     }
     out

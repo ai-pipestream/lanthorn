@@ -89,7 +89,7 @@ const PLACEHOLDER: char = '\u{10EEEE}';
 /// the stream was resolved under, so art lands where the arithmetic that placed
 /// it says it does.
 pub fn render(res: &Resolved) -> RgbaImage {
-    render_with(res, &|canvas, ch, px, py, cw, chh, fg| blit_glyph(canvas, ch, px, py, cw, chh, fg, None))
+    render_with(res, &|canvas, ch, px, py, cw, chh, fg| blit_glyph(canvas, ch, px, py, cw, chh, fg, None, None))
 }
 
 /// How one glyph gets drawn into its cell: canvas, char, cell origin, cell size,

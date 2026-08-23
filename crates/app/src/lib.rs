@@ -292,6 +292,7 @@ pub mod debug_panel;
 /// still reaches it.
 pub use cli_host::disk_set;
 pub mod engine;
+pub mod native_font;
 pub mod garglk_ini;
 pub mod glk_backend;
 pub mod glulx_debug;

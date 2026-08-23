@@ -223,6 +223,7 @@ fn shoguns_chrome_canvas_keeps_the_status_page_off_the_ring() {
             &colors,
             text,
             zvm::screen::V6Cell::DEFAULT,
+            None,
         );
         // The ring's own order (SQ-0706): art and glyphs, then the painted ground
         // beneath them, then the window pages filling whatever neither claimed.

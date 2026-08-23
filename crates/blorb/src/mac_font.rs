@@ -115,6 +115,32 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
         glyphs,
     })
 }
+/// The body face off a mounted Macintosh volume (SQ-1011).
+///
+/// Mirrors [`crate::amiga_font::from_volume`]: hand it the volume, get the
+/// typeface the release shipped. An Infocom Macintosh release is **all resource
+/// fork** — the application's data fork is zero bytes — so the font is reachable
+/// only through [`crate::hfs::Hfs::read_resource`], which is why this exists
+/// rather than callers walking files themselves.
+///
+/// Picks the `APPL` entry, since that is where Infocom put `FONT` 524; a volume
+/// with no application, no fork, or no bitmap `FONT` answers `None`.
+///
+/// # What it is for
+///
+/// The Macintosh's Version 6 cell is 7x15 (`mac/xzip.lst`'s `colWidth := 7;
+/// lineHeight := 15`), and this face is drawn for exactly that — so it blits 1:1
+/// into that cell where a face drawn for an 8-pixel advance has nowhere to keep
+/// its inter-character gap. Note the METRIC and the FACE are separate facts: the
+/// interpreter declared 7 while painting proportional Geneva, and this resource
+/// is the fixed-pitch face it shipped.
+pub fn from_volume(hfs: &crate::hfs::Hfs) -> Option<BitmapFont> {
+    let app = hfs.files().iter().find(|e| e.file_type == *b"APPL")?;
+    let fork = hfs.read_resource(app)?;
+    let rf = crate::resource_fork::ResourceFork::parse(&fork)?;
+    from_fork(&rf)
+}
+
 
 /// The best font in a resource fork, or `None` when it holds none.
 ///

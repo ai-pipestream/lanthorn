@@ -642,6 +642,7 @@ fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
         &state.colors,
         app::render::v6_layout::TextLayer::All,
         zvm::screen::V6Cell::DEFAULT,
+        None,
     );
     // The banner is found by the text in it, never by a window id.
     let banner = layout

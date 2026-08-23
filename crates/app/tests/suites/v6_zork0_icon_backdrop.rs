@@ -142,6 +142,7 @@ fn zork0_room_icons_rest_on_the_banner_windows_own_white_page() {
         &state.colors,
         app::render::v6_layout::TextLayer::All,
         zvm::screen::V6Cell::DEFAULT,
+        None,
     );
 
     // Precondition (the symptom): inside the banner window, below the frame art,
@@ -287,6 +288,7 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
         &state.colors,
         app::render::v6_layout::TextLayer::All,
         zvm::screen::V6Cell::DEFAULT,
+        None,
     );
     let mut after = before.clone();
     app::render::v6_layout::fill_window_pages(
@@ -360,6 +362,7 @@ fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
         &state.colors,
         app::render::v6_layout::TextLayer::All,
         zvm::screen::V6Cell::DEFAULT,
+        None,
     );
     app::render::v6_layout::fill_window_pages(
         &mut canvas,

@@ -1720,7 +1720,7 @@ fn render_node(
                                 }
                             }
                         }
-                        let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows), state.v6_cell);
+                        let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows), state.v6_cell, state.v6_face.as_ref());
                         // SQ-0896: …and the STORY window's own plate, which the chrome
                         // canvas excludes by construction — `classify_windows` sets a
                         // `win == 0` Graphics aside as `story_gfx` so the ring does not
@@ -3831,7 +3831,7 @@ pub fn build_v6_raster_canvas(
     // Raster has no cells to draw text with, so it needs every run imaged: the
     // empty set is not a default here, it is this path's answer (SQ-0903).
     let mut canvas =
-        v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::All, state.v6_cell);
+        v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::All, state.v6_cell, state.v6_face.as_ref());
     // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
     // canvas does not draw. The story page below spares them like any chrome text.
     // …and the live input line into whichever of them the player is typing into
@@ -3839,7 +3839,7 @@ pub fn build_v6_raster_canvas(
     // `build_main_text` applies to the transcript's own live line.
     let panel_input =
         (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
-    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors, panel_input, state.v6_cell);
+    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors, panel_input, state.v6_cell, state.v6_face.as_ref());
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
     // `fill_window_pages`), so `story_clear_native` below still finds it clear.
@@ -3953,7 +3953,7 @@ pub fn build_v6_raster_canvas(
         // prose box, and no scroll metrics, exactly as when a plate owns the
         // screen. See `story_window_is_a_canvas`: fmvpoker alone.
         if story_window_is_a_canvas(layout, native) {
-            v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors, state.v6_cell);
+            v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors, state.v6_cell, state.v6_face.as_ref());
             return finish_v6_raster_canvas(canvas, page, raster_metrics);
         }
         // Whether any prose belongs on THIS frame, and where (SQ-0707). An
@@ -3983,7 +3983,18 @@ pub fn build_v6_raster_canvas(
         // line the player needs in order to see their draw. The transcript is the
         // host's re-render of window 0's whole history; the label is on the screen
         // now, so the label wins.
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &v6::chrome_text_rects(&layout.chrome, state.v6_cell), state.v6_cell);
+        v6::draw_story_text(
+            &mut canvas,
+            &main,
+            sx,
+            sy,
+            cols,
+            rows,
+            ink,
+            &v6::chrome_text_rects(&layout.chrome, state.v6_cell),
+            state.v6_cell,
+            state.v6_face.as_ref(),
+        );
         // [more] pager indicator (SQ-0455): when a single turn's output
         // overflowed the story box the shared pager (SQ-0404) parks the
         // scroll and shows a `[more]` prompt. The raster path can't reserve
@@ -4010,7 +4021,7 @@ pub fn build_v6_raster_canvas(
             for (i, ch) in label.chars().enumerate() {
                 // The session's v6 cell: X quantizes by its width, Y by its height.
                 crate::render::bitfont::blit_glyph(
-                    &mut canvas, ch, sx + (start_col + i as u32) * u32::from(state.v6_cell.w), sy + last_row * u32::from(state.v6_cell.h), u32::from(state.v6_cell.w), u32::from(state.v6_cell.h), prompt_ink, Some(block),
+                    &mut canvas, ch, sx + (start_col + i as u32) * u32::from(state.v6_cell.w), sy + last_row * u32::from(state.v6_cell.h), u32::from(state.v6_cell.w), u32::from(state.v6_cell.h), prompt_ink, Some(block), state.v6_face.as_ref(),
                 );
             }
         }
@@ -8350,7 +8361,7 @@ mod tests {
         // ── Compose exactly as the raster branch does ────────────────────────
         let native = v6::native_extent(&items, zvm::screen::V6Cell::DEFAULT);
         let layout = v6::classify_windows(&items, zvm::screen::V6Cell::DEFAULT);
-        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
+        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors, v6::TextLayer::All, zvm::screen::V6Cell::DEFAULT, None);
         let chrome_only = canvas.clone(); // pre-fill artwork reference
         let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(page_default);
         let (sx, sy, sw, sh) = v6::story_clear_native(layout.story, &canvas).expect("Zork0 has a story window");
@@ -8359,7 +8370,7 @@ mod tests {
         let cols = (sw / 8).max(1) as u16;
         let rows = (sh / 16).max(1) as u16;
         let (main, _) = build_main_text(&state, cols, rows);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[], zvm::screen::V6Cell::DEFAULT);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[], zvm::screen::V6Cell::DEFAULT, None);
         let pre_flatten = canvas.clone();
         v6::flatten_onto_page(&mut canvas, page);
 
@@ -11897,12 +11908,12 @@ mod tests {
             // Build closure: replicate the raster branch's canvas construction.
             let build = || {
                 let layout = crate::render::v6_layout::classify_windows(&items, zvm::screen::V6Cell::DEFAULT);
-                let mut canvas = crate::render::v6_layout::build_chrome_canvas(&layout.chrome, native, fg, bg, &state.colors, crate::render::v6_layout::TextLayer::All, zvm::screen::V6Cell::DEFAULT);
+                let mut canvas = crate::render::v6_layout::build_chrome_canvas(&layout.chrome, native, fg, bg, &state.colors, crate::render::v6_layout::TextLayer::All, zvm::screen::V6Cell::DEFAULT, None);
                 if let Some((sx, sy, sw, sh)) = crate::render::v6_layout::story_clear_native(layout.story, &canvas) {
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;
                     let (main, _) = build_main_text(&state, cols, rows);
-                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[], zvm::screen::V6Cell::DEFAULT);
+                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[], zvm::screen::V6Cell::DEFAULT, None);
                 }
                 canvas
             };

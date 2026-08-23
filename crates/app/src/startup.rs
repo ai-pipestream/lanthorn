@@ -1143,6 +1143,17 @@ pub(crate) fn boot_story(
     // initial resolve above is global-only (game_dir wasn't set yet). On a per-game
     // parse error the global look already set above stands.
     let _ = app::reload::reload_style(&mut state);
+    // SQ-1011: the typeface the RELEASE shipped, resolved AFTER `reload_style` has
+    // settled `state.v6_cell` — the face is kept only when it IS that cell, so the
+    // cell has to be final first. Resolved here rather than in `reload_style`
+    // because the medium is what carries the font, and only this scope knows the
+    // story path and how the profile was decided (a Macintosh asked for by hand
+    // has no volume to read).
+    state.v6_face = app::native_font::resolve(
+        &story_path,
+        state.config.interpreter_profile,
+        state.config.interpreter_source,
+    );
     if banner_elems.is_empty() {
         state.push_transcript(&banner);
     } else {

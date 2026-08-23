@@ -110,6 +110,7 @@ fn secondary_prose_canvas(session: &GameSession, state: &app::state::AppState) -
     app::render::v6_layout::draw_secondary_prose(
         &mut canvas, &layout.chrome, ink, state.config.honor_game_colours, &state.colors, panel_input,
         zvm::screen::V6Cell::DEFAULT,
+        None,
     );
     canvas
 }

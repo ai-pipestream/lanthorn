@@ -289,8 +289,9 @@ pub fn blit_glyph(
     ch: u32,
     fg: Rgba<u8>,
     bg: Option<Rgba<u8>>,
+    native: Option<&blorb::bitmap_font::BitmapFont>,
 ) {
-    blit_glyph_styled(canvas, glyph, px, py, cw, ch, fg, bg, 0);
+    blit_glyph_styled(canvas, glyph, px, py, cw, ch, fg, bg, 0, native);
 }
 
 /// [`blit_glyph`], with the run's ZMSD §8.7.1 `style` byte applied as a
@@ -307,6 +308,9 @@ pub fn blit_glyph_styled(
     fg: Rgba<u8>,
     bg: Option<Rgba<u8>>,
     style: u8,
+    // The face the RELEASE shipped, when this session has one (SQ-1011). Used
+    // only when it IS the cell — see the `native_face` filter below.
+    native: Option<&blorb::bitmap_font::BitmapFont>,
 ) {
     // The 8x16 face first (SQ-0932): at the 8x16 cell every production call site
     // uses it samples 1:1, where an 8x8 master has to double every row. The 8x8
@@ -337,11 +341,42 @@ pub fn blit_glyph_styled(
     // which comfortably covers a descender sitting in the bottom quarter. Below it
     // the resample starts skipping source rows outright and the 8x8 master — drawn
     // to be legible at its own size — is the better source.
-    let tall = (ch >= 12)
+    // **The release's own face first, when it IS the cell** (SQ-1011).
+    //
+    // `vga16` is drawn for an 8-pixel advance: 76 of its 94 printable glyphs ink
+    // out to column 6, so column 7 is their whole inter-character gap and a
+    // 7-wide cell drops it — letters touch. The Macintosh floppy carries `FONT`
+    // 524 at exactly 7x15, which is the cell SQ-0917 declares, so it samples 1:1
+    // and keeps its own spacing and its own left side bearings.
+    //
+    // The dimensions must match EXACTLY. A face that has to be resampled into the
+    // cell is the defect this replaces wearing different clothes, so a mismatch
+    // declines here and `vga16` answers as before.
+    // Dimensions only. **Fitness was already decided** by `native_font::fits`,
+    // which is the single authority on whether a face may be used — it checks the
+    // advance across printable ASCII, because `BitmapFont::proportional` counts
+    // the accented high range and answers `true` for `FONT` 524 (SQ-0916).
+    //
+    // This kept its own copy of that test, including the `!proportional` clause,
+    // and that duplicate is why the feature shipped inert a second time: the
+    // resolver was corrected and the renderer went on rejecting the same face on
+    // the same wrong condition. What survives here is the cheap structural check
+    // that the face is this cell — a guard against a mismatched pair reaching the
+    // sampler, not a second opinion on fitness.
+    let native_face = native.filter(|f| u32::from(f.width) == cw && u32::from(f.height) == ch);
+    let native_rows: Option<&[u8]> = native_face
+        .and_then(|f| u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)))
+        .map(|g| g.rows.as_slice())
+        .filter(|rows| rows.len() as u32 == ch);
+
+    let tall = (native_rows.is_none() && ch >= 12)
         .then(|| crate::render::vga16::glyph(glyph).map(|b| synthesize_face16(b, style)))
         .flatten();
-    let short =
-        if tall.is_some() { None } else { glyph_bits(glyph).map(|b| synthesize_face(b, style)) };
+    let short = if tall.is_some() || native_rows.is_some() {
+        None
+    } else {
+        glyph_bits(glyph).map(|b| synthesize_face(b, style))
+    };
     let smoothed = (cw == 16 && ch == 16).then(|| short.map(|b| scale2x(&b))).flatten();
     let (cwidth, cheight) = (canvas.width(), canvas.height());
     for dy in 0..ch {
@@ -356,7 +391,11 @@ pub fn blit_glyph_styled(
             if ox >= cwidth {
                 break;
             }
-            let on = if let Some(g) = &tall {
+            let on = if let Some(rows) = native_rows {
+                // 1:1 on both axes — the face IS the cell, which is the whole
+                // point of preferring it. MSB = leftmost, as `vga16` packs too.
+                rows[dy as usize] & (0x80 >> dx) != 0
+            } else if let Some(g) = &tall {
                 let col = dx * 8 / cw; // nearest source col
                 // vga16 packs each row MSB = leftmost column — the OPPOSITE of
                 // font8x8 below. Both orders are live in this function.
@@ -417,7 +456,7 @@ mod tests {
         let fg = Rgba([255, 0, 0, 255]);
         let lowest = |g: char, cw: u32, ch: u32| -> Option<u32> {
             let mut c = RgbaImage::from_pixel(cw, ch, Rgba([0, 0, 0, 255]));
-            blit_glyph(&mut c, g, 0, 0, cw, ch, fg, None);
+            blit_glyph(&mut c, g, 0, 0, cw, ch, fg, None, None);
             (0..ch).rev().find(|&y| (0..cw).any(|x| *c.get_pixel(x, y) == fg))
         };
         for (cw, ch) in [(7u32, 15u32), (8, 16)] {
@@ -437,7 +476,7 @@ mod tests {
     #[test]
     fn space_paints_only_bg() {
         let mut c = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
-        blit_glyph(&mut c, ' ', 0, 0, 8, 8, Rgba([255, 0, 0, 255]), Some(Rgba([9, 9, 9, 255])));
+        blit_glyph(&mut c, ' ', 0, 0, 8, 8, Rgba([255, 0, 0, 255]), Some(Rgba([9, 9, 9, 255])), None);
         // No set bits → every pixel is the bg fill, none is fg.
         assert!(c.pixels().all(|p| *p == Rgba([9, 9, 9, 255])));
     }
@@ -445,7 +484,7 @@ mod tests {
     #[test]
     fn glyph_sets_some_fg_pixels() {
         let mut c = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 0]));
-        blit_glyph(&mut c, 'A', 0, 0, 8, 8, Rgba([255, 0, 0, 255]), None);
+        blit_glyph(&mut c, 'A', 0, 0, 8, 8, Rgba([255, 0, 0, 255]), None, None);
         // 'A' has set bits → at least one fg pixel, and transparent bg elsewhere.
         assert!(c.pixels().any(|p| *p == Rgba([255, 0, 0, 255])), "A has fg pixels");
         assert!(c.pixels().any(|p| p[3] == 0), "unset bits stay transparent (bg=None)");
@@ -454,7 +493,7 @@ mod tests {
     #[test]
     fn transparent_bg_leaves_canvas_on_clear_bits() {
         let mut c = RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255]));
-        blit_glyph(&mut c, '.', 0, 0, 8, 8, Rgba([255, 255, 255, 255]), None);
+        blit_glyph(&mut c, '.', 0, 0, 8, 8, Rgba([255, 255, 255, 255]), None, None);
         // A '.' is mostly clear; those cells keep the original canvas colour.
         assert!(c.pixels().any(|p| *p == Rgba([1, 2, 3, 255])), "clear bits keep canvas");
     }
@@ -466,7 +505,7 @@ mod tests {
         // BLOCK_FONTS, per the coverage audit), so this uses a CJK ideograph
         // instead — genuinely outside every set `glyph_bits` checks.
         let mut c = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 0]));
-        blit_glyph(&mut c, '\u{4E2D}', 0, 0, 8, 8, Rgba([255, 0, 0, 255]), None);
+        blit_glyph(&mut c, '\u{4E2D}', 0, 0, 8, 8, Rgba([255, 0, 0, 255]), None, None);
         assert!(c.pixels().all(|p| p[3] == 0), "unknown glyph paints nothing with bg=None");
     }
 
@@ -474,7 +513,7 @@ mod tests {
     fn scales_up_to_fill_cell() {
         // 8×8 glyph blitted into a 16×16 cell must touch the lower-right quadrant.
         let mut c = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 0]));
-        blit_glyph(&mut c, 'M', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None);
+        blit_glyph(&mut c, 'M', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None, None);
         assert!(
             (8..16).any(|y| (0..16).any(|x| c.get_pixel(x, y)[3] == 255)),
             "scaled glyph reaches the lower half of the cell"
@@ -543,7 +582,7 @@ mod tests {
     fn lit_cell(glyph: char, style: u8) -> std::collections::BTreeSet<(u32, u32)> {
         let fg = Rgba([255, 0, 0, 255]);
         let mut c = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
-        blit_glyph_styled(&mut c, glyph, 0, 0, 8, 16, fg, None, style);
+        blit_glyph_styled(&mut c, glyph, 0, 0, 8, 16, fg, None, style, None);
         c.enumerate_pixels().filter(|(_, _, p)| **p == fg).map(|(x, y, _)| (x, y)).collect()
     }
 
@@ -617,7 +656,7 @@ mod tests {
         for style in [0u8, 2, 4, 6, 1 | 2 | 4 | 8] {
             for glyph in ['W', '\u{2588}', '\u{2500}', 'j'] {
                 let mut c = RgbaImage::from_pixel(24, 48, Rgba([0, 0, 0, 0]));
-                blit_glyph_styled(&mut c, glyph, 8, 16, 8, 16, fg, Some(Rgba([9, 9, 9, 255])), style);
+                blit_glyph_styled(&mut c, glyph, 8, 16, 8, 16, fg, Some(Rgba([9, 9, 9, 255])), style, None);
                 for (x, y, p) in c.enumerate_pixels() {
                     let inside = (8..16).contains(&x) && (16..32).contains(&y);
                     if !inside {
@@ -632,8 +671,8 @@ mod tests {
     fn scale2x_path_is_deterministic() {
         let mut c1 = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 0]));
         let mut c2 = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 0]));
-        blit_glyph(&mut c1, 'M', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None);
-        blit_glyph(&mut c2, 'M', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None);
+        blit_glyph(&mut c1, 'M', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None, None);
+        blit_glyph(&mut c2, 'M', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None, None);
         assert_eq!(c1, c2, "same glyph/size blitted twice must produce identical pixels");
     }
 
@@ -643,7 +682,7 @@ mod tests {
         // font 3, so it stays on the 8×8 master the smoothing belongs to (SQ-0932).
         let bits = glyph_bits('\u{2571}').expect("box diagonal glyph must exist");
         let mut smoothed = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 0]));
-        blit_glyph(&mut smoothed, '\u{2571}', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None);
+        blit_glyph(&mut smoothed, '\u{2571}', 0, 0, 16, 16, Rgba([255, 0, 0, 255]), None, None);
 
         // Naive nearest-neighbour doubling: the pre-smoothing behaviour,
         // each source pixel expands into an exact 2×2 block.
@@ -667,7 +706,7 @@ mod tests {
     fn rendered_rows(glyph: char, style: u8) -> [u8; 16] {
         let fg = Rgba([255, 0, 0, 255]);
         let mut canvas = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
-        blit_glyph_styled(&mut canvas, glyph, 0, 0, 8, 16, fg, None, style);
+        blit_glyph_styled(&mut canvas, glyph, 0, 0, 8, 16, fg, None, style, None);
         let mut rows = [0u8; 16];
         for (y, row) in rows.iter_mut().enumerate() {
             for x in 0..8u32 {
@@ -718,7 +757,7 @@ mod tests {
     fn a_short_cell_keeps_the_eight_row_master() {
         let fg = Rgba([255, 0, 0, 255]);
         let mut canvas = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 0]));
-        blit_glyph(&mut canvas, 'A', 0, 0, 8, 8, fg, None);
+        blit_glyph(&mut canvas, 'A', 0, 0, 8, 8, fg, None, None);
         let eight = glyph_bits('A').expect("font8x8 has 'A'");
         for (y, &src) in eight.iter().enumerate() {
             let mut row = 0u8;
@@ -829,7 +868,7 @@ mod tests {
                 for (col, ch) in line.chars().enumerate() {
                     let px = x_offset + col as u32 * cell;
                     let py = row as u32 * cell;
-                    blit_glyph(&mut canvas, ch, px, py, cell, cell, fg, None);
+                    blit_glyph(&mut canvas, ch, px, py, cell, cell, fg, None, None);
                 }
             }
             x_offset += panel_w[i] + gutter;

@@ -2666,6 +2666,14 @@ pub struct AppState {
     /// [`zvm::screen::V6Cell::DEFAULT`] (8x16) until a profile says otherwise,
     /// which is still every profile today.
     pub v6_cell: zvm::screen::V6Cell,
+    /// The typeface the RELEASE shipped, when this session's medium carries one
+    /// that fits [`Self::v6_cell`] (SQ-1011) — see [`crate::native_font`].
+    ///
+    /// `None` on every machine but the Macintosh, and on a Macintosh reached by
+    /// hand rather than off its own volume. The renderer falls back to
+    /// `render::vga16`, which is right at an 8x16 cell and crowded at 7x15 —
+    /// which is the whole reason this field exists.
+    pub v6_face: Option<blorb::bitmap_font::BitmapFont>,
 
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
@@ -2983,6 +2991,7 @@ impl Default for AppState {
             story_zversion: None,
             period_look: None,
             v6_cell: zvm::screen::V6Cell::DEFAULT,
+            v6_face: None,
             transcript_scroll: 0,
             pager: crate::pager::Pager::default(),
             last_transcript_total_rows: 0,
