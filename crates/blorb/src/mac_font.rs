@@ -123,8 +123,16 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
 /// only through [`crate::hfs::Hfs::read_resource`], which is why this exists
 /// rather than callers walking files themselves.
 ///
-/// Picks the `APPL` entry, since that is where Infocom put `FONT` 524; a volume
-/// with no application, no fork, or no bitmap `FONT` answers `None`.
+/// Searches the `APPL` entries, since that is where Infocom put `FONT` 524; a
+/// volume with no application, no fork, or no bitmap `FONT` answers `None`.
+///
+/// **This asks "what face is on this disk", which on a compilation is the wrong
+/// question** — prefer [`from_volume_beside`], which asks for one story's own.
+/// It used to take the FIRST `APPL` and stop, and on the Masterpieces CD that is
+/// `A MIND FOREVER VOYAGING`, a Version 4 title shipping no `FONT` at all: every
+/// graphical game on the platter resolved to no face and drew its 7x15 cell with
+/// the 8-wide fallback (SQ-1018). Scanning all of them at least answers with a
+/// face that is on the disc, but it is still not necessarily *this game's*.
 ///
 /// # What it is for
 ///
@@ -135,10 +143,53 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
 /// interpreter declared 7 while painting proportional Geneva, and this resource
 /// is the fixed-pitch face it shipped.
 pub fn from_volume(hfs: &crate::hfs::Hfs) -> Option<BitmapFont> {
-    let app = hfs.files().iter().find(|e| e.file_type == *b"APPL")?;
-    let fork = hfs.read_resource(app)?;
-    let rf = crate::resource_fork::ResourceFork::parse(&fork)?;
-    from_fork(&rf)
+    faces_in(hfs, |_| true).max_by_key(|f| f.height)
+}
+
+/// The face shipped **beside** the story at `path` — same folder — or `None`
+/// when that story's own application carries none (SQ-1018).
+///
+/// [`crate::hfs::Hfs::pictures_beside`]'s rule, applied to the typeface, and for
+/// the identical reason: a volume that keeps its games in folders can answer for
+/// one game, and a compilation is exactly where "on this disk" and "beside this
+/// story" stop being the same question. SQ-0876 fixed the artwork half after
+/// every graphical game on the Masterpieces CD was handed Zork Zero's plates;
+/// the font half had the same shape and went unnoticed because its failure is
+/// silent — a missing face falls back to a legible-but-wrong one rather than
+/// drawing the wrong game's pictures.
+///
+/// **A name this volume does not hold falls through to [`from_volume`]**, which
+/// is what keeps a single-game floppy working: there the story and the
+/// application both sit at the root, so "beside" and "on this disk" already
+/// describe the same file set, and nothing about that case moves.
+///
+/// Unlike `pictures_beside`, a folder with no font does NOT stop the search.
+/// Artwork is the game's own or it has none; a typeface is the *machine's*, and
+/// every Macintosh v6 release ships the identical `FONT` 524 — so falling
+/// through to the disc's other applications yields the same 2906-byte resource
+/// rather than another game's plates. The pairing is still tried first, because
+/// it is the honest question and it is what makes the answer right when the
+/// releases ever do differ.
+pub fn from_volume_beside(hfs: &crate::hfs::Hfs, path: &str) -> Option<BitmapFont> {
+    let Some(story) = hfs.files().iter().find(|e| e.path().eq_ignore_ascii_case(path)) else {
+        return from_volume(hfs);
+    };
+    let dirs = story.dirs.clone();
+    faces_in(hfs, |e| e.dirs == dirs).max_by_key(|f| f.height).or_else(|| from_volume(hfs))
+}
+
+/// Every bitmap face reachable through an `APPL` this volume holds that `pick`
+/// accepts, in catalog order.
+fn faces_in<'a>(
+    hfs: &'a crate::hfs::Hfs,
+    pick: impl Fn(&crate::hfs::HfsEntry) -> bool + 'a,
+) -> impl Iterator<Item = BitmapFont> + 'a {
+    hfs.files()
+        .iter()
+        .filter(move |e| e.file_type == *b"APPL" && pick(e))
+        .filter_map(|e| hfs.read_resource(e))
+        .filter_map(|fork| crate::resource_fork::ResourceFork::parse(&fork))
+        .filter_map(|rf| from_fork(&rf))
 }
 
 

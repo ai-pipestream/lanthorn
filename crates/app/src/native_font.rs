@@ -57,8 +57,18 @@ use std::path::Path;
 ///
 /// **The CELL is not conditional on this.** What the story is told must not depend
 /// on which glyphs the host happens to have; only the drawing does.
+/// # And it is paired with ONE story, not with the disc
+///
+/// `entry` is which story on the image the session opened, as
+/// [`crate::config::Config::disk_entry`] spells it. It matters because a
+/// compilation carries many applications and only one of them is the game being
+/// played — see [`blorb::mac_font::from_volume_beside`], and SQ-1018 for the
+/// Masterpieces CD, where the first application on the platter ships no `FONT`
+/// and every graphical game on it therefore drew its 7x15 cell with the 8-wide
+/// fallback.
 pub fn resolve(
     story_path: &Path,
+    entry: Option<&str>,
     profile: InterpreterProfile,
     source: ProfileSource,
 ) -> Option<BitmapFont> {
@@ -67,7 +77,16 @@ pub fn resolve(
     }
     let image = std::fs::read(story_path).ok()?;
     let hfs = blorb::hfs::Hfs::mount(image).ok()?;
-    let face = blorb::mac_font::from_volume(&hfs)?;
+    // `entry` is `None` for every loose file and single-story floppy — and also
+    // for a direct launch of a multi-game image, where `Hfs::story` is the thing
+    // that CHOSE the story, so asking it again names the same one rather than
+    // guessing. That is what makes `lanthorn InfocomMasterpieces.img` pair
+    // correctly without a picker row behind it.
+    let opened = entry.map(str::to_string).or_else(|| hfs.story().map(|(p, _)| p));
+    let face = match opened {
+        Some(p) => blorb::mac_font::from_volume_beside(&hfs, &p),
+        None => blorb::mac_font::from_volume(&hfs),
+    }?;
     fits(&face, profile).then_some(face)
 }
 

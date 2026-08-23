@@ -276,6 +276,71 @@ fn the_macintosh_face_resolves_for_the_renderer() {
     );
 
     // 3. so the resolver hands the renderer a face
-    let resolved = app::native_font::resolve(&path, profile, source);
+    let resolved = app::native_font::resolve(&path, None, profile, source);
     assert!(resolved.is_some(), "native_font::resolve must find it — the renderer takes this or nothing");
+}
+
+/// A compilation volume pairs the face with ONE story, not with the platter
+/// (SQ-1018).
+///
+/// The Masterpieces CD is the case the volume-wide lookup could not answer: 38
+/// applications, and the first one enumerated is *A Mind Forever Voyaging*, a
+/// Version 4 title shipping no `FONT` at all. `mac_font::from_volume` took that
+/// first `APPL` and stopped, so every graphical game on the disc resolved to no
+/// face — and then drew its 7x15 Macintosh cell with the 8-wide fallback, which
+/// is legible enough to look like a rendering opinion rather than a missing
+/// resource. That silence is why this went unnoticed while SQ-0876 caught the
+/// identical defect in the artwork half, where the failure is visible: every
+/// game on this same disc was drawing Zork Zero's plates.
+///
+/// The three v6 titles all carry `FONT` 524 in their own folder, so the fix is
+/// the pairing rather than a fallback.
+#[test]
+fn a_compilation_pairs_the_face_with_the_story_beside_it() {
+    let path = stories_dir().join("InfocomMasterpieces.img");
+    if !path.is_file() {
+        eprintln!("SKIP: gitignored compilation volume absent");
+        return;
+    }
+    let hfs = blorb::hfs::Hfs::mount(std::fs::read(&path).expect("readable")).expect("mounts");
+
+    // NON-VACUITY: this disc must actually BE the trap, or the case below proves
+    // nothing. Many applications, and the first one carries no font.
+    let appls: Vec<_> = hfs.files().iter().filter(|e| e.file_type == *b"APPL").collect();
+    assert!(appls.len() > 1, "a compilation, not a single-game floppy: {} APPL", appls.len());
+    let first = hfs
+        .read_resource(appls[0])
+        .and_then(|f| blorb::resource_fork::ResourceFork::parse(&f))
+        .and_then(|rf| blorb::mac_font::from_fork(&rf));
+    assert!(
+        first.is_none(),
+        "the FIRST application on the platter ships no face — that is the whole defect",
+    );
+
+    // The story this volume opens by its own tiebreak, which is what a launch
+    // with no picker row behind it gets.
+    let (opened, _) = hfs.story().expect("the disc carries a game");
+    assert_eq!(opened, "InfocomMasterpieces/ZORK ZERO/STORY.DATA", "Zork Zero wins the tiebreak");
+
+    // Paired with its own folder, the face is there.
+    let face = blorb::mac_font::from_volume_beside(&hfs, &opened).expect("Zork Zero's own FONT 524");
+    assert_eq!((face.width, face.height), (7, 15), "the Macintosh cell");
+
+    // And it is per-game, not per-disc: Arthur's folder answers for Arthur.
+    let arthur = blorb::mac_font::from_volume_beside(
+        &hfs,
+        "InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA",
+    )
+    .expect("Arthur's own FONT 524");
+    assert_eq!((arthur.width, arthur.height), (7, 15), "the same cell, its own resource");
+
+    // End to end, which is the claim that matters: the renderer gets a face.
+    let (profile, source) =
+        app::interpreter::InterpreterProfile::resolve_with_source(&path, None, None, None);
+    assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "the medium names the Mac");
+    assert_eq!(source, app::interpreter::ProfileSource::Medium, "off the volume");
+    assert!(
+        app::native_font::resolve(&path, None, profile, source).is_some(),
+        "the renderer takes this or nothing — `None` here is the reported defect",
+    );
 }

@@ -1151,6 +1151,7 @@ pub(crate) fn boot_story(
     // has no volume to read).
     state.v6_face = app::native_font::resolve(
         &story_path,
+        state.config.disk_entry.as_deref(),
         state.config.interpreter_profile,
         state.config.interpreter_source,
     );
