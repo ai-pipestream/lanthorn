@@ -143,7 +143,7 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
 /// interpreter declared 7 while painting proportional Geneva, and this resource
 /// is the fixed-pitch face it shipped.
 pub fn from_volume(hfs: &crate::hfs::Hfs) -> Option<BitmapFont> {
-    faces_in(hfs, |_| true).max_by_key(|f| f.height)
+    forks_in(hfs, |_| true).filter_map(|rf| from_fork(&rf)).max_by_key(|f| f.height)
 }
 
 /// The face shipped **beside** the story at `path` — same folder — or `None`
@@ -175,21 +175,56 @@ pub fn from_volume_beside(hfs: &crate::hfs::Hfs, path: &str) -> Option<BitmapFon
         return from_volume(hfs);
     };
     let dirs = story.dirs.clone();
-    faces_in(hfs, |e| e.dirs == dirs).max_by_key(|f| f.height).or_else(|| from_volume(hfs))
+    forks_in(hfs, move |e| e.dirs == dirs)
+        .filter_map(|rf| from_fork(&rf))
+        .max_by_key(|f| f.height)
+        .or_else(|| from_volume(hfs))
 }
 
-/// Every bitmap face reachable through an `APPL` this volume holds that `pick`
+/// Every face in one fork, with the resource id it is stored under.
+///
+/// [`from_fork`] answers with the ONE face worth drawing body text in; this
+/// keeps them all, and their ids, because an id is what distinguishes them to a
+/// reader: it encodes family × 128 + point size, so `524` is family 4 at 12pt
+/// and `1033` is family 8 at 9pt — which `mac/xzip.lst`'s `ZFont` selects as
+/// `ZALT`. A listing that collapsed them would hide that a release ships two.
+pub fn faces_in_fork(fork: &crate::resource_fork::ResourceFork) -> Vec<(i16, BitmapFont)> {
+    fork.of_type(b"FONT")
+        .iter()
+        .chain(fork.of_type(b"NFNT"))
+        .filter_map(|r| parse(&r.data).map(|f| (r.id, f)))
+        .collect()
+}
+
+/// Every face the application beside the story at `path` carries, with ids.
+///
+/// [`from_volume_beside`]'s pairing, reporting rather than choosing — for a
+/// surface that shows a person what a medium holds. Same fallback, so the two
+/// cannot disagree about which application they are reading.
+pub fn faces_beside(hfs: &crate::hfs::Hfs, path: &str) -> Vec<(i16, BitmapFont)> {
+    let all = |h: &crate::hfs::Hfs| -> Vec<(i16, BitmapFont)> {
+        forks_in(h, |_| true).flat_map(|rf| faces_in_fork(&rf)).collect()
+    };
+    let Some(story) = hfs.files().iter().find(|e| e.path().eq_ignore_ascii_case(path)) else {
+        return all(hfs);
+    };
+    let dirs = story.dirs.clone();
+    let beside: Vec<_> =
+        forks_in(hfs, move |e| e.dirs == dirs).flat_map(|rf| faces_in_fork(&rf)).collect();
+    if beside.is_empty() { all(hfs) } else { beside }
+}
+
+/// Every resource fork reachable through an `APPL` this volume holds that `pick`
 /// accepts, in catalog order.
-fn faces_in<'a>(
+fn forks_in<'a>(
     hfs: &'a crate::hfs::Hfs,
     pick: impl Fn(&crate::hfs::HfsEntry) -> bool + 'a,
-) -> impl Iterator<Item = BitmapFont> + 'a {
+) -> impl Iterator<Item = crate::resource_fork::ResourceFork> + 'a {
     hfs.files()
         .iter()
         .filter(move |e| e.file_type == *b"APPL" && pick(e))
         .filter_map(|e| hfs.read_resource(e))
         .filter_map(|fork| crate::resource_fork::ResourceFork::parse(&fork))
-        .filter_map(|rf| from_fork(&rf))
 }
 
 

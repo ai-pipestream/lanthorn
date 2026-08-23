@@ -142,3 +142,16 @@ where
         .filter_map(|(_, bytes)| parse(bytes))
         .max_by_key(|f| f.glyphs.len())
 }
+
+/// Every font a volume carries, each with the file it was found in.
+///
+/// [`from_volume`]'s companion: that one CHOOSES, this one REPORTS, for a
+/// surface showing a person what a medium holds. The name is kept because it is
+/// the only handle a reader has on an Amiga face — nothing is matched on it (see
+/// above), so it is a label rather than a key.
+pub fn faces_in_volume<'a, I>(files: I) -> Vec<(String, BitmapFont)>
+where
+    I: IntoIterator<Item = (&'a str, &'a [u8])>,
+{
+    files.into_iter().filter_map(|(name, bytes)| parse(bytes).map(|f| (name.to_string(), f))).collect()
+}

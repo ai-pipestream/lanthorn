@@ -655,7 +655,8 @@ directions, and breaks ties between equal averages by how many people voted, so
 a 4.6 from two hundred players outranks a 4.6 from three. `i` or
 `Tab` slides in a themeable **info panel** for the highlighted story:
 format/version/release/serial, IFID, author/year/genre, a blurb, feature flags,
-bundled resources, detected artwork, and saves. When the file on disk is a *container* — an Amiga
+bundled resources, detected artwork, the typefaces the story's own medium
+carries, and saves. When the file on disk is a *container* — an Amiga
 floppy, a blorb, a zip — the size line names the game's own size beside the
 file's, because the container's length is not the game's: every `.adf` is 880 KB
 whether it holds Zork I or Shogun. Plain story files show one size, as before.

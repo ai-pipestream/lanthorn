@@ -344,3 +344,42 @@ fn a_compilation_pairs_the_face_with_the_story_beside_it() {
         "the renderer takes this or nothing — `None` here is the reported defect",
     );
 }
+
+/// What the browser's info panel is told about a release's typefaces (SQ-1018).
+///
+/// Arthur's Macintosh pressing carries two — the 7x15 body face and the 7x12
+/// ALT face `mac/xzip.lst` selects as `ZALT` — and only the first is drawn. The
+/// panel showing both, with one marked, is what turns SQ-1017 from an invisible
+/// omission into something a person can see; it is also what would have shown
+/// SQ-1018 as "present, not used" instead of a report about crowded text.
+///
+/// Paired by ENTRY, so this is Arthur's answer and not the platter's: the disc's
+/// own tiebreak opens Zork Zero, which ships no ALT face at all.
+#[test]
+fn the_panel_sees_both_macintosh_faces_and_only_one_in_use() {
+    let path = stories_dir().join("InfocomMasterpieces.img");
+    if !path.is_file() {
+        eprintln!("SKIP: gitignored compilation volume absent");
+        return;
+    }
+    let faces =
+        app::native_font::detected(&path, Some("InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA"));
+    let named = |n: &str| {
+        faces.iter().find(|f| f.name == n).unwrap_or_else(|| panic!("{n} listed: {faces:?}"))
+    };
+
+    let body = named("FONT 524");
+    assert_eq!((body.width, body.height), (7, 15), "the body face is the Macintosh cell");
+    assert!(body.used, "and it is the one the renderer takes");
+
+    let alt = named("FONT 1033");
+    assert_eq!((alt.width, alt.height), (7, 12), "the ALT face has its own cell");
+    assert!(!alt.used, "carried and not drawn — SQ-1017");
+
+    // Zork Zero ships only the body face, which is why its InvisiClues banner
+    // cannot be explained by a second one (SQ-0934).
+    let zz = app::native_font::detected(&path, Some("InfocomMasterpieces/ZORK ZERO/STORY.DATA"));
+    assert_eq!(zz.len(), 1, "Zork Zero carries one face, not two: {zz:?}");
+    assert_eq!(zz[0].name, "FONT 524");
+    assert!(zz[0].used);
+}

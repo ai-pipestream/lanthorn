@@ -2831,6 +2831,36 @@ fn draw_info_panel(
         }
     }
 
+    // Typefaces the MEDIUM carries (SQ-1018), which no Blorb block above can
+    // show: an Infocom Macintosh release keeps its faces in the application's
+    // resource fork, an Amiga one keeps a disk font beside the story. Listed with
+    // the cell each is drawn for, and with which one the v6 raster path actually
+    // takes — because "present but unused" is the exact shape of SQ-1018, where
+    // the Masterpieces CD carried FONT 524 for every graphical game on it and the
+    // renderer reached none of them. That cost a bug report; here it costs a
+    // glance.
+    if let Some(a) = aux {
+        if !a.disk_fonts.is_empty() {
+            lines.push((String::new(), story_info_value));
+            lines.push((
+                format!("Fonts on the medium ({})", a.disk_fonts.len()),
+                story_info_label,
+            ));
+            for f in &a.disk_fonts {
+                let mut row = format!(" {}  {}x{}", f.name, f.width, f.height);
+                // Proportional is worth saying because it is why a face can be
+                // present and still not be the one drawn (SQ-0916).
+                if f.proportional {
+                    row.push_str(" · proportional");
+                }
+                if f.used {
+                    row.push_str(" · in use");
+                }
+                lines.push((row, story_info_value));
+            }
+        }
+    }
+
     // Wrap every logical line to the panel's content width (SQ-0861). One row
     // per line clipped anything wider than the panel — the file line the report
     // named, but equally the IFID, `Saves · <dir>`, `Sidecars:`, and every save,
@@ -4105,6 +4135,7 @@ mod tests {
             art_candidates: vec![],
             art_in_use: None,
             disk_sounds: Vec::new(),
+            disk_fonts: Vec::new(),
         };
         // Wide enough that the resource detail suffix and the save-summary row aren't clipped.
         let area = Rect::new(0, 0, 100, 25);
@@ -4703,6 +4734,7 @@ mod tests {
             art_candidates: vec![],
             art_in_use: None,
             disk_sounds: Vec::new(),
+            disk_fonts: Vec::new(),
         };
         let area = Rect::new(0, 0, 60, 16);
         let mut buf = Buffer::empty(area);
@@ -4748,6 +4780,7 @@ mod tests {
             // What the game's own config.toml names, so the panel can mark it.
             art_in_use: Some("zork0.mg1".into()),
             disk_sounds: Vec::new(),
+            disk_fonts: Vec::new(),
         };
         // Tall enough that the block is on screen without scrolling.
         let area = Rect::new(0, 0, 62, 40);
@@ -4771,6 +4804,81 @@ mod tests {
         // And no other game's art, which is the filter the dialog now shares.
         assert!(!text.contains("arthur."), "another game's archives stay out: {text:?}");
         assert!(!text.contains("journey."), "{text:?}");
+    }
+
+    /// SQ-1018: the panel lists the typefaces the story's own medium carries and
+    /// marks which one the renderer takes.
+    ///
+    /// **Synthetic on purpose.** Every real face lives on gitignored commercial
+    /// media, so a fixture-driven case skips on CI — and this is the surface that
+    /// would have made SQ-1018 visible on sight, so it is worth having a part of
+    /// it CI can still see. `native_disk_font` drives the real disks.
+    ///
+    /// The claim that matters is the SECOND row: a face present and NOT drawn has
+    /// to read differently from one that is, because "carried but unreached" is
+    /// exactly the state the Masterpieces CD was in.
+    #[test]
+    fn info_panel_lists_the_faces_on_the_medium_and_marks_the_one_in_use() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = minimal_story_meta();
+        let aux = app::picker::StoryAux {
+            assoc_blorb: None,
+            saves: vec![],
+            hints_available: false,
+            game_dir: std::path::PathBuf::from("/tmp/arthur"),
+            qzl_saves: vec![],
+            auto_saves: vec![],
+            sidecars: vec![],
+            art_candidates: vec![],
+            art_in_use: None,
+            disk_sounds: Vec::new(),
+            // Arthur's Macintosh pressing, as `native_font::detected` reports it.
+            disk_fonts: vec![
+                app::native_font::DiskFace {
+                    name: "FONT 524".into(),
+                    width: 7,
+                    height: 15,
+                    proportional: true,
+                    used: true,
+                },
+                app::native_font::DiskFace {
+                    name: "FONT 1033".into(),
+                    width: 7,
+                    height: 12,
+                    proportional: false,
+                    used: false,
+                },
+            ],
+        };
+        let area = Rect::new(0, 0, 62, 40);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let p = std::path::Path::new("arthur.z6");
+        super::draw_info_panel(
+            "Arthur", "arthur.z6", &meta, Some(&aux), 0, area, None, &mut cover, p, p, false,
+            None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+        );
+        let text = buffer_to_string(&buf, area);
+        println!("{text}");
+
+        assert!(text.contains("Fonts on the medium (2)"), "the block has a header: {text:?}");
+        let row_of = |name: &str| -> String {
+            text.lines()
+                .find(|l| l.contains(name))
+                .unwrap_or_else(|| panic!("{name} is listed: {text:?}"))
+                .to_string()
+        };
+        let body = row_of("FONT 524");
+        assert!(body.contains("7x15"), "the cell it is drawn for: {body:?}");
+        assert!(body.contains("in use"), "the body face is the one drawn: {body:?}");
+
+        let alt = row_of("FONT 1033");
+        assert!(alt.contains("7x12"), "its own cell: {alt:?}");
+        assert!(
+            !alt.contains("in use"),
+            "a face the renderer does not reach must not read as one it does: {alt:?}",
+        );
     }
 
     /// SQ-0798: Arthur's split EGA set is one row in the panel, exactly as it is
@@ -4802,6 +4910,7 @@ mod tests {
             art_candidates: candidates,
             art_in_use: Some("arthur.eg1".into()),
             disk_sounds: Vec::new(),
+            disk_fonts: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 40);
         let mut buf = Buffer::empty(area);
@@ -4839,6 +4948,7 @@ mod tests {
             art_candidates: vec![],
             art_in_use: Some("FMVPOKER.EG1".into()),
             disk_sounds: Vec::new(),
+            disk_fonts: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 30);
         let mut buf = Buffer::empty(area);

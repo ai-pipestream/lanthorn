@@ -122,3 +122,79 @@ fn fits(face: &BitmapFont, profile: InterpreterProfile) -> bool {
     // depends on — does every character a game prints advance by one cell.
     (b'!'..=b'~').all(|c| face.glyph(c).is_none_or(|g| u16::from(g.width) == cw))
 }
+
+/// One typeface a story's own medium carries, for the browser's info panel
+/// (SQ-1018).
+///
+/// Display-only, exactly like [`crate::picker::StoryAux::art_candidates`] and
+/// `disk_sounds`: it ends at a person's eyes and nothing downstream consumes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskFace {
+    /// How the medium names it — `FONT 524` on a Macintosh, the filename on an
+    /// Amiga volume.
+    pub name: String,
+    /// The cell it is drawn for.
+    pub width: u8,
+    pub height: u8,
+    /// Whether its advance actually varies — see [`BitmapFont::proportional`],
+    /// and note it counts the accented range no game prints.
+    pub proportional: bool,
+    /// Whether [`resolve`] would hand THIS one to the renderer.
+    pub used: bool,
+}
+
+/// Every face on the story's own medium, paired the way the renderer pairs them.
+///
+/// # Why this reports rather than re-deciding
+///
+/// `used` is settled by asking [`resolve`] and comparing the face it returns,
+/// not by re-deriving which one wins. That costs a second mount and is worth it:
+/// SQ-1011 shipped INERT TWICE because a fitness rule existed in two places and
+/// correcting one left the other, and both false branches fell back silently. A
+/// panel that decided for itself would be a third copy of the same question, and
+/// the one a person would trust when it disagreed with the screen.
+///
+/// Had this surface existed, SQ-1018 would have been visible on sight rather
+/// than reported as crowded text: the Masterpieces CD would have shown the face
+/// present and unused.
+pub fn detected(story_path: &Path, entry: Option<&str>) -> Vec<DiskFace> {
+    let (profile, source) = InterpreterProfile::resolve_with_source(story_path, None, None, None);
+    let chosen = resolve(story_path, entry, profile, source);
+    let mark = |name: String, f: &BitmapFont| DiskFace {
+        name,
+        width: f.width,
+        height: f.height,
+        proportional: f.proportional,
+        used: chosen.as_ref() == Some(f),
+    };
+
+    // A Macintosh names its faces, so report the ids: an id is family × 128 +
+    // point size, which is what tells a reader that a release ships a body face
+    // AND an alternate rather than two of the same thing.
+    if let Some(hfs) = std::fs::read(story_path).ok().and_then(|b| blorb::hfs::Hfs::mount(b).ok()) {
+        let opened = entry.map(str::to_string).or_else(|| hfs.story().map(|(p, _)| p));
+        if let Some(p) = opened {
+            let faces: Vec<DiskFace> = blorb::mac_font::faces_beside(&hfs, &p)
+                .iter()
+                .map(|(id, f)| mark(format!("FONT {id}"), f))
+                .collect();
+            if !faces.is_empty() {
+                return faces;
+            }
+        }
+    }
+
+    // Every other medium: an AmigaDOS disk font is a file, so it is named by one.
+    let files: Vec<(String, Vec<u8>)> = crate::assets::files(story_path)
+        .into_iter()
+        .filter(|f| f.is_on_medium())
+        .filter_map(|f| {
+            let name = f.name.clone();
+            f.into_bytes().map(|b| (name, b))
+        })
+        .collect();
+    blorb::amiga_font::faces_in_volume(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
+        .iter()
+        .map(|(name, f)| mark(name.clone(), f))
+        .collect()
+}

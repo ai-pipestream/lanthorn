@@ -322,6 +322,12 @@ pub struct StoryAux {
     ///
     /// Display-only here, exactly like `art_candidates`: it ends at a human's eyes.
     pub disk_sounds: Vec<crate::native_sound::DiskSound>,
+    /// Typefaces the story's own MEDIUM carries (SQ-1018), through the same
+    /// pairing the renderer uses — so the panel cannot claim a face the game will
+    /// not get, and shows one that is present but unused as exactly that.
+    ///
+    /// Display-only here, exactly like `art_candidates` and `disk_sounds`.
+    pub disk_fonts: Vec<crate::native_font::DiskFace>,
 }
 
 /// Resolve the lazy aux for one story. `data_base` is the storage base
@@ -365,6 +371,10 @@ pub fn resolve_aux(
     let mut disk_sounds: Vec<crate::native_sound::DiskSound> =
         crate::native_sound::from_medium(&entry.path).into_values().collect();
     disk_sounds.sort_by_key(|s| s.effect);
+    // Same tier again, and paired with this story's own entry for the same reason
+    // the artwork scan is (SQ-0876/SQ-1018): a compilation carries one
+    // application per game, and only one of them is this row's.
+    let disk_fonts = crate::native_font::detected(&entry.path, entry.meta.disk_entry.as_deref());
     StoryAux {
         assoc_blorb,
         saves,
@@ -376,6 +386,7 @@ pub fn resolve_aux(
         art_candidates,
         art_in_use,
         disk_sounds,
+        disk_fonts,
     }
 }
 
