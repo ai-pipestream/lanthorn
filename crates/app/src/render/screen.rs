@@ -903,12 +903,9 @@ fn render_node(
                         // inert, and never dressed up as a snap that happened.
                         let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
                         state.v6_scale_lock_inapplicable.set(state.config.v6_pixel_lock && !lock_applies);
-                        let (scale_center, lock_fallback) = v6::fitted_scale(
-                            native,
-                            pane_dev,
-                            state.v6_art_scale,
-                            state.config.v6_pixel_lock && lock_applies,
-                        );
+                        let (scale_center, lock_fallback) =
+                            v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_cell)
+                                .fitted_scale(pane_dev, state.config.v6_pixel_lock && lock_applies);
                         state.v6_scale_lock_fallback.set(lock_fallback);
                         // Publish the letterbox factor — the magnification the ART
                         // is drawn at, and since SQ-1002 nothing else. The scale
@@ -2919,7 +2916,7 @@ fn render_node(
                     let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
                     state.v6_scale_lock_inapplicable.set(state.config.v6_pixel_lock && !lock_applies);
                     let lock = (state.config.v6_pixel_lock && lock_applies)
-                        .then(|| v6::locked_scale(native, pane_dev, state.v6_art_scale))
+                        .then(|| v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_cell).locked_scale(pane_dev))
                         .flatten()
                         .map(|sc| sc.s);
                     state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area, lock);

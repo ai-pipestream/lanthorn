@@ -2207,7 +2207,7 @@ fn frame_mags_locked(
     let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
     let pane_dev = pane_dev(&state, pane);
     let free = app::render::v6_layout::uniform_scale(native, pane_dev).s;
-    let locked = app::render::v6_layout::fitted_scale(native, pane_dev, art_scale, true).0.s;
+    let locked = app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).fitted_scale(pane_dev, true).0.s;
     let mags = state.graphics_render.borrow().band_mags.clone();
     (mags, locked, free)
 }
@@ -2326,12 +2326,12 @@ fn a_pane_below_the_smallest_rung_still_renders_freely() {
         };
         let pane_dev = pane_dev(&render_state(), pane);
         assert!(
-            app::render::v6_layout::locked_scale(native, pane_dev, art_scale).is_none(),
+            app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).locked_scale(pane_dev).is_none(),
             "{}: {native:?} into {pane_dev:?} must have no rung, or this case proves nothing",
             sp.title,
         );
         let (scale, fell_back) =
-            app::render::v6_layout::fitted_scale(native, pane_dev, art_scale, true);
+            app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).fitted_scale(pane_dev, true);
         assert!(fell_back, "{}: the fallback is reported", sp.title);
         assert_eq!(
             scale.s,

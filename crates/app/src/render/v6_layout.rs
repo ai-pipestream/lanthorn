@@ -1830,9 +1830,103 @@ pub fn scale_ladder_step(art_scale: (u32, u32)) -> f32 {
 /// and cuts at whole ART-pixel boundaries, so an integral art pixel makes every
 /// tile height integral for free — crisp art and seamless flanks are the same
 /// constraint, not two knobs.
-pub fn locked_scale(native: (u16, u16), pane_dev: (u32, u32), art_scale: (u32, u32)) -> Option<Scale> {
-    let free = uniform_scale(native, pane_dev).s;
-    let g = gcd(art_scale.0.max(1), art_scale.1.max(1)) as f32;
+/// What one Version 6 frame is made of, for anything that has to QUANTIZE it
+/// (SQ-1024).
+///
+/// Three facts that must be considered together and were being passed
+/// positionally: the unit screen, how dense the ARTWORK on it is, and the
+/// character cell the TEXT on it is drawn at. The ladder needs all three, and a
+/// caller that supplied two of them got a plausible answer — which is the same
+/// failure shape as [`crate::machine_boot::MachineBoot`] one layer up, so it gets
+/// the same treatment. A fourth fact will not touch a single call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameGeometry {
+    /// The unit screen in native game pixels.
+    pub native: (u16, u16),
+    /// Unit pixels per ART pixel, per axis — the archive's density (SQ-0790).
+    pub art_scale: (u32, u32),
+    /// The character cell raster TEXT is drawn on — the machine's (SQ-0917).
+    pub cell: zvm::screen::V6Cell,
+}
+
+impl FrameGeometry {
+    pub fn new(
+        native: (u16, u16),
+        art_scale: (u32, u32),
+        cell: zvm::screen::V6Cell,
+    ) -> FrameGeometry {
+        FrameGeometry { native, art_scale, cell }
+    }
+
+    /// Valid magnifications are the multiples of `1 / step()`.
+    ///
+    /// **The ladder serves the ARTWORK and the TEXT, and they are not the same
+    /// constraint.** An art pixel is `art_scale` unit pixels, so art needs
+    /// `art_scale · s` whole and admits steps of `1 / gcd(art_scale)`. Raster text
+    /// is drawn on the character cell, also in unit pixels, so it needs
+    /// `cell.w · s` and `cell.h · s` whole and admits steps of
+    /// `1 / gcd(cell.w, cell.h)`. A rung has to satisfy both.
+    ///
+    /// On an 8x16 cell `gcd(8, 16)` is 8, so this changes nothing — `8 · 1.5 = 12`
+    /// and `16 · 1.5 = 24` are both whole, which is why the half rungs have always
+    /// been fine everywhere else and why nobody noticed. On the Macintosh's
+    /// **7x15** cell `gcd(7, 15)` is **1**, so a half rung gives a 7-wide glyph
+    /// 10.5 device pixels: its strokes alternate one and two, `l` and `i` go
+    /// ragged, and the compass rose in the same frame stays perfectly crisp. That
+    /// contrast inside one image is the signature (SQ-1012).
+    ///
+    /// So this is arithmetic about the cell, not a per-machine exception — a
+    /// machine that declares some other cell gets the right answer without anyone
+    /// adding a case for it.
+    pub fn step(self) -> u32 {
+        let g_art = gcd(self.art_scale.0.max(1), self.art_scale.1.max(1));
+        let g_cell = gcd(u32::from(self.cell.w), u32::from(self.cell.h));
+        gcd(g_art, g_cell).max(1)
+    }
+
+    /// The coarsest rung at or below the free scale, or `None` when the pane
+    /// cannot hold even the smallest.
+    pub fn locked_scale(self, pane_dev: (u32, u32)) -> Option<Scale> {
+        locked_scale_inner(self, pane_dev)
+    }
+
+    /// The scale to draw this frame at: on the ladder when the player asked for it
+    /// and a rung fits, free otherwise. The flag says which, for the diagnostic.
+    ///
+    /// A pane too small for the smallest rung degrades silently on the game screen,
+    /// so the flag is what a caller publishes as a diagnostic (SQ-0936).
+    pub fn fitted_scale(self, pane_dev: (u32, u32), lock: bool) -> (Scale, bool) {
+        if !lock {
+            return (uniform_scale(self.native, pane_dev), false);
+        }
+        match self.locked_scale(pane_dev) {
+            Some(s) => (s, false),
+            None => (uniform_scale(self.native, pane_dev), true),
+        }
+    }
+}
+
+fn locked_scale_inner(geom: FrameGeometry, pane_dev: (u32, u32)) -> Option<Scale> {
+    let free = uniform_scale(geom.native, pane_dev).s;
+    // **The ladder serves the ARTWORK and the TEXT, and they are not the same
+    // constraint** (SQ-1024). An art pixel is `art_scale` unit pixels, so art
+    // needs `art_scale · s` whole and admits steps of `1 / gcd(art_scale)`.
+    // Raster TEXT is drawn on the machine's character cell, which is in UNIT
+    // pixels, so it needs `cell.w · s` and `cell.h · s` whole and admits steps of
+    // `1 / gcd(cell.w, cell.h)`.
+    //
+    // A valid rung satisfies both, so it is a multiple of
+    // `1 / gcd(g_art, g_cell)`.
+    //
+    // On an 8x16 cell `g_cell` is 8 and this changes nothing — 8 · 1.5 = 12 and
+    // 16 · 1.5 = 24 are both whole, which is why the half rungs have always been
+    // fine everywhere else and why nobody noticed. On the Macintosh's **7x15**
+    // cell `gcd(7, 15)` is **1**, so a half rung gives a 7-wide glyph 10.5 device
+    // pixels: its strokes come out alternating one and two, `l` and `i` go ragged,
+    // and the compass rose in the same frame stays perfectly crisp. That contrast
+    // inside one image is the signature, and it is why this is arithmetic about
+    // the CELL rather than a per-machine exception (SQ-1012).
+    let g = geom.step() as f32;
     // Count whole steps in units of the step itself (`free · g`), so the floor is
     // taken on an integer-valued quantity and a 2.9999996 that should be 3 does not
     // drop a whole rung. `1e-4` is far below one step and far above f32's error at
@@ -1841,28 +1935,7 @@ pub fn locked_scale(native: (u16, u16), pane_dev: (u32, u32), art_scale: (u32, u
     if steps < 1.0 {
         return None;
     }
-    Some(centred(native, pane_dev, steps / g))
-}
-
-/// The scale the v6 hybrid ring draws this frame at: on the `art_scale` ladder
-/// when the player asked for it and the pane can hold a rung, free otherwise.
-///
-/// Returns the fallback flag beside the scale so the caller can publish it as a
-/// diagnostic; a pane too small for the smallest rung degrades silently on the
-/// game screen (SQ-0936).
-pub fn fitted_scale(
-    native: (u16, u16),
-    pane_dev: (u32, u32),
-    art_scale: (u32, u32),
-    lock: bool,
-) -> (Scale, bool) {
-    if !lock {
-        return (uniform_scale(native, pane_dev), false);
-    }
-    match locked_scale(native, pane_dev, art_scale) {
-        Some(s) => (s, false),
-        None => (uniform_scale(native, pane_dev), true),
-    }
+    Some(centred(geom.native, pane_dev, steps / g))
 }
 
 /// The story window's clear-interior rect in NATIVE game pixels: its native rect
@@ -3863,12 +3936,59 @@ mod tests {
                 r.press,
                 r.native,
             );
-            let got = locked_scale(r.native, pane, r.art_scale).expect("1024x600 fits a rung").s;
+            let got = FrameGeometry::new(r.native, r.art_scale, zvm::screen::V6Cell::DEFAULT).locked_scale(pane).expect("1024x600 fits a rung").s;
             assert!(
                 (got - want).abs() < 1e-6,
                 "{}: free {free} must lock to {want}, got {got}",
                 r.press,
             );
+        }
+    }
+
+    /// **A rung must put the CELL on whole device pixels too, not only an art
+    /// pixel** (SQ-1024).
+    ///
+    /// Stated as a relation over presses and cells rather than as pinned rungs, so
+    /// it holds for a machine nobody has declared yet. The Macintosh is the case
+    /// that motivated it and it is not special-cased anywhere: `gcd(7, 15) == 1`
+    /// falls out of the same arithmetic that gives `gcd(8, 16) == 8`.
+    #[test]
+    fn a_rung_puts_the_character_cell_on_whole_device_pixels() {
+        let cell = |w, h| zvm::screen::V6Cell::new(w, h);
+        // The step each combination admits, which is the whole claim in one line.
+        let cases = [
+            // press,        art_scale, cell,        step
+            ("most v6",      (2u32, 2u32), cell(8, 16), 2u32),
+            ("Macintosh colour", (2, 2), cell(7, 15), 1),
+            ("Macintosh mono",   (1, 1), cell(7, 15), 1),
+            ("EGA / CGA",         (1, 2), cell(8, 16), 1),
+            ("Apple II",          (4, 2), cell(8, 16), 2),
+        ];
+        for (who, art, c, want) in cases {
+            let geom = FrameGeometry::new((640, 400), art, c);
+            assert_eq!(geom.step(), want, "{who}: rungs are multiples of 1/{want}");
+        }
+
+        // And the property the step exists for: at every rung a pane can hold, one
+        // art pixel AND one cell land on whole device pixels.
+        for (who, art, c, _) in cases {
+            let geom = FrameGeometry::new((640, 400), art, c);
+            for pane in [(640u32, 400u32), (800, 500), (960, 600), (1600, 1200), (900, 337)] {
+                let Some(sc) = geom.locked_scale(pane) else { continue };
+                for (what, n) in [
+                    ("art x", art.0),
+                    ("art y", art.1),
+                    ("cell w", u32::from(c.w)),
+                    ("cell h", u32::from(c.h)),
+                ] {
+                    let dev = n as f32 * sc.s;
+                    assert!(
+                        (dev - dev.round()).abs() < 1e-4,
+                        "{who} at {pane:?}: s={} puts {what} on {dev} device pixels",
+                        sc.s,
+                    );
+                }
+            }
         }
     }
 
@@ -3880,7 +4000,12 @@ mod tests {
     fn a_locked_scale_puts_an_art_pixel_on_whole_device_pixels() {
         for r in LADDER {
             for pane in [(640u32, 400u32), LADDER_PANE, (800, 500), (1600, 1200), (900, 337)] {
-                let Some(sc) = locked_scale(r.native, pane, r.art_scale) else { continue };
+                let Some(sc) =
+                    FrameGeometry::new(r.native, r.art_scale, zvm::screen::V6Cell::DEFAULT)
+                        .locked_scale(pane)
+                else {
+                    continue;
+                };
                 for (axis, n) in [("x", r.art_scale.0), ("y", r.art_scale.1)] {
                     let dev = n as f32 * sc.s;
                     assert!(
@@ -3900,7 +4025,7 @@ mod tests {
     fn a_locked_screen_fits_the_pane_and_stays_centred() {
         let pane = LADDER_PANE;
         for r in LADDER {
-            let sc = locked_scale(r.native, pane, r.art_scale).expect("a rung fits");
+            let sc = FrameGeometry::new(r.native, r.art_scale, zvm::screen::V6Cell::DEFAULT).locked_scale(pane).expect("a rung fits");
             let (w, h) = (r.native.0 as f32 * sc.s, r.native.1 as f32 * sc.s);
             assert!(w <= pane.0 as f32 && h <= pane.1 as f32, "{}: {w}x{h} overflows {pane:?}", r.press);
             assert_eq!(sc.off_x, ((pane.0 as f32 - w) / 2.0) as u32, "{}: centred horizontally", r.press);
@@ -3916,17 +4041,22 @@ mod tests {
     fn a_pane_too_small_for_the_smallest_rung_falls_back_to_free_scaling() {
         let native = (640u16, 400u16);
         let tiny = (240u32, 150u32); // free s = 0.375, below the 0.5 rung
-        assert!(locked_scale(native, tiny, (2, 2)).is_none(), "no rung fits a 240x150 pane");
+        assert!(
+            FrameGeometry::new(native, (2, 2), zvm::screen::V6Cell::DEFAULT).locked_scale(tiny).is_none(),
+            "no rung fits a 240x150 pane",
+        );
 
         let free = uniform_scale(native, tiny);
-        let (got, fell_back) = fitted_scale(native, tiny, (2, 2), true);
+        let (got, fell_back) =
+            FrameGeometry::new(native, (2, 2), zvm::screen::V6Cell::DEFAULT).fitted_scale(tiny, true);
         assert!(fell_back, "the fallback is reported, not silent");
         assert_eq!(got.s, free.s, "and it IS the free scale — degrade, never block");
         assert_eq!((got.off_x, got.off_y), (free.off_x, free.off_y));
 
         // The Mac's whole-step ladder has a coarser floor: anything under 1.0.
-        assert!(locked_scale((480, 300), (470, 600), (1, 1)).is_none(), "0.979 is below the Mac's floor");
-        assert!(fitted_scale((480, 300), (470, 600), (1, 1), true).1, "and reports the fallback");
+        let mac = FrameGeometry::new((480, 300), (1, 1), zvm::screen::V6Cell::DEFAULT);
+        assert!(mac.locked_scale((470, 600)).is_none(), "0.979 is below the Mac's floor");
+        assert!(mac.fitted_scale((470, 600), true).1, "and reports the fallback");
     }
 
     /// With the mode off nothing changes at all — this is opt-in, and the default
@@ -3936,7 +4066,7 @@ mod tests {
         for r in LADDER {
             for pane in [LADDER_PANE, (784, 666), (240, 150)] {
                 let free = uniform_scale(r.native, pane);
-                let (got, fell_back) = fitted_scale(r.native, pane, r.art_scale, false);
+                let (got, fell_back) = FrameGeometry::new(r.native, r.art_scale, zvm::screen::V6Cell::DEFAULT).fitted_scale(pane, false);
                 assert_eq!(got.s, free.s, "{} at {pane:?}", r.press);
                 assert_eq!((got.off_x, got.off_y), (free.off_x, free.off_y));
                 assert!(!fell_back, "a mode that was never asked for cannot fall back");
@@ -3950,7 +4080,10 @@ mod tests {
     #[test]
     fn a_free_scale_already_on_the_ladder_is_left_alone() {
         for (pane, want) in [((1280u32, 800u32), 2.0f32), ((640, 400), 1.0), ((320, 200), 0.5), ((960, 600), 1.5)] {
-            let got = locked_scale((640, 400), pane, (2, 2)).expect("a rung fits").s;
+            let got = FrameGeometry::new((640, 400), (2, 2), zvm::screen::V6Cell::DEFAULT)
+                .locked_scale(pane)
+                .expect("a rung fits")
+                .s;
             assert_eq!(got, want, "{pane:?} is exactly {want} and must not round down a step");
         }
     }

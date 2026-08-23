@@ -421,7 +421,8 @@ fn journey_hybrid_menu_full_black_panel_dividers_continuous() {
         use app::render::v6_layout as v6;
         let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
         let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
-        let (scale, _) = v6::fitted_scale(native, (area.width as u32, area.height as u32 * 2), (2, 2), false);
+        let (scale, _) = v6::FrameGeometry::new(native, (2, 2), zvm::screen::V6Cell::DEFAULT)
+            .fitted_scale((area.width as u32, area.height as u32 * 2), false);
         v6::screen_cols(&scale, native.0, (1, 2), area)
     };
     assert_eq!((lo, hi), (2, 98), "the height-bound fit leaves two columns of letterbox either side");

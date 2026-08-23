@@ -3603,10 +3603,13 @@ mod resample_tests {
     /// the composite gets and a whole rung is left on the table.
     #[test]
     fn the_pixel_lock_ladder_still_governs_when_the_cap_is_gone() {
-        use crate::render::v6_layout::locked_scale;
+        use crate::render::v6_layout::FrameGeometry;
         let canvas = dithered_plate(640, 400);
         let (box_w, box_h) = (2000u32, 1150u32);
-        let s = locked_scale((640, 400), (box_w, box_h), (2, 2)).expect("the pane holds a rung").s;
+        let s = FrameGeometry::new((640, 400), (2, 2), zvm::screen::V6Cell::DEFAULT)
+            .locked_scale((box_w, box_h))
+            .expect("the pane holds a rung")
+            .s;
         assert_eq!(s, 2.5, "the free 2.875x quantizes down to the ladder's 2.5x");
         let (free, _) = super::v6_fit_source(&canvas, box_w, box_h, Some(s), None);
         let (capped, _) =

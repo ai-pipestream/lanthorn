@@ -324,7 +324,7 @@ fn a_locked_half_blocks_frame_is_the_free_one() {
             let nominal = font(&Picker::halfblocks());
             let pane_dev = (u32::from(pw) * u32::from(nominal.0), u32::from(ph) * u32::from(nominal.1));
             let free = v6::uniform_scale(native, pane_dev).s;
-            let old_rung = v6::locked_scale(native, pane_dev, art_scale)
+            let old_rung = app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).locked_scale(pane_dev)
                 .unwrap_or_else(|| panic!("{} {pw}x{ph}: a rung fits this pane", spec.file))
                 .s;
             assert!(
@@ -466,7 +466,7 @@ fn a_locked_kitty_frame_still_snaps_to_the_ladder() {
 
         for (pw, ph) in PANES {
             let pane_dev = (u32::from(pw) * u32::from(KITTY_CELL.0), u32::from(ph) * u32::from(KITTY_CELL.1));
-            let (scale, fell_back) = v6::fitted_scale(native, pane_dev, art_scale, true);
+            let (scale, fell_back) = app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).fitted_scale(pane_dev, true);
             assert!(
                 !fell_back,
                 "{} r{} {pw}x{ph}: the control is about the LOCKED fit; a pane too small for the \

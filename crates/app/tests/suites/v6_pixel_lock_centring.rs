@@ -241,7 +241,7 @@ fn the_locked_letterbox_margins_carry_the_same_ground_on_both_sides() {
 
         for (pw, ph) in PANES {
             let pane_dev = (pw as u32 * CELL.0 as u32, ph as u32 * CELL.1 as u32);
-            let (scale, fell_back) = v6::fitted_scale(native, pane_dev, art_scale, true);
+            let (scale, fell_back) = app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).fitted_scale(pane_dev, true);
             assert!(
                 !fell_back,
                 "{} r{} {pw}x{ph}: this sweep is about the LOCKED fit; a pane too small for the \
@@ -359,7 +359,7 @@ fn the_locked_fit_centres_the_game_screen_to_within_one_cell() {
         for pw in 80u16..=160 {
             for ph in [37u16, 45] {
                 let pane_dev = (pw as u32 * CELL.0 as u32, ph as u32 * CELL.1 as u32);
-                let (scale, fell_back) = v6::fitted_scale(native, pane_dev, art_scale, true);
+                let (scale, fell_back) = app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).fitted_scale(pane_dev, true);
                 if fell_back {
                     continue;
                 }
