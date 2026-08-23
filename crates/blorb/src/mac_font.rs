@@ -130,6 +130,9 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
         width: u8::try_from(rect_w).ok()?,
         height: u8::try_from(rect_h).ok()?,
         baseline: u8::try_from(ascent).unwrap_or(0),
+        // A `FONT` resource has no `tf_BoldSmear` equivalent — the Macintosh's own
+        // bold is synthesised, so there is no stored width to widen by (SQ-1009).
+        bold_smear: 0,
         proportional: BitmapFont::measure_proportional(&glyphs),
         lo: u8::try_from(first).ok()?,
         glyphs,
@@ -260,4 +263,202 @@ pub fn from_fork(fork: &crate::resource_fork::ResourceFork) -> Option<BitmapFont
         .chain(fork.of_type(b"NFNT"))
         .filter_map(|r| parse(&r.data))
         .max_by_key(|f| f.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hfs::Hfs;
+    use crate::resource_fork::tests::{FORK_LEN, VOLUME, fork_bytes};
+
+    /// Every glyph row this module expects, written out by hand.
+    ///
+    /// The fixture's art is five columns wide and its left side bearing is 1
+    /// (`kernMax` -1 plus an offset byte of 2), so column *x* of the image
+    /// lands in bit `0x80 >> (x + 1)` — the five-bit pattern shifted left by
+    /// two. `.###.` is `0b01110 << 2` = `0x38`, `#...#` is `0b10001 << 2` =
+    /// `0x44`, `#####` is `0x7C`, `####.` is `0x78`, `#....` is `0x40`.
+    ///
+    /// **A reader that ignored `kernMax` would produce every one of these
+    /// shifted one column right**, which is why the fixture uses a non-zero
+    /// one: the whole table is the bearing's falsification test.
+    mod art {
+        //   .....  x3
+        //   .###.  #...#  #...#  #...#  #####  #...#  #...#  #...#  #...#
+        //   .....  x3
+        pub const A: [u8; 15] =
+            [0, 0, 0, 0x38, 0x44, 0x44, 0x44, 0x7C, 0x44, 0x44, 0x44, 0x44, 0, 0, 0];
+        //   ####.  #...#  #...#  #...#  ####.  #...#  #...#  #...#  ####.
+        pub const B: [u8; 15] =
+            [0, 0, 0, 0x78, 0x44, 0x44, 0x44, 0x78, 0x44, 0x44, 0x44, 0x78, 0, 0, 0];
+        //   .###.  #...#  #....  #....  #....  #....  #....  #...#  .###.
+        pub const C: [u8; 15] =
+            [0, 0, 0, 0x38, 0x44, 0x40, 0x40, 0x40, 0x40, 0x40, 0x44, 0x38, 0, 0, 0];
+        /// `D` is empty by design — zero image width, advance 3.
+        pub const D: [u8; 15] = [0; 15];
+
+        //   .###.  #...#  #...#  #...#  #...#  #...#  #...#  .###.
+        pub const ZERO: [u8; 12] = [0, 0, 0x38, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x38, 0, 0];
+        //   ..#..  .##..  ..#..  ..#..  ..#..  ..#..  ..#..  .###.
+        pub const ONE: [u8; 12] = [0, 0, 0x10, 0x30, 0x10, 0x10, 0x10, 0x10, 0x10, 0x38, 0, 0];
+    }
+
+    fn volume() -> Hfs {
+        Hfs::mount(VOLUME.to_vec()).expect("the synthetic volume mounts")
+    }
+
+    /// The whole chain SQ-1015 was raised to cover, in one case, on a fixture
+    /// that is present on CI.
+    ///
+    /// `Hfs::mount` → the `APPL` entry → `read_resource` off a file whose DATA
+    /// fork is zero bytes → `ResourceFork::parse` → `mac_font::parse`. Every
+    /// step is asserted, so a break anywhere in it names itself.
+    #[test]
+    fn reads_a_font_off_a_synthetic_macintosh_volume() {
+        let hfs = volume();
+        assert_eq!(hfs.volume_name(), "Lanthorn Test");
+        assert_eq!(hfs.files().len(), 2, "a story and an application, both in a folder");
+
+        let app = hfs
+            .files()
+            .iter()
+            .find(|e| e.file_type == *b"APPL")
+            .expect("the application is in the catalog");
+        assert_eq!(app.path(), "Test Folder/TestApp");
+        assert_eq!(app.size, 0, "an Infocom Macintosh application has NO data fork");
+        assert_eq!(hfs.read(app).as_deref(), Some(&[][..]), "and reads as an empty file");
+        assert_eq!(app.resource_size, FORK_LEN, "everything is in the resource fork");
+
+        let raw = hfs.read_resource(app).expect("the resource fork is reachable");
+        assert_eq!(raw, fork_bytes(), "and is exactly the bytes at allocation block 2");
+
+        let fork = crate::resource_fork::ResourceFork::parse(&raw).expect("a resource fork");
+        let font = fork.get(b"FONT", 524).expect("FONT 524");
+        let face = parse(&font.data).expect("FONT 524 parses");
+        assert_eq!((face.width, face.height, face.baseline), (7, 15, 12));
+    }
+
+    /// A file with no resource fork answers `None` rather than an empty one —
+    /// the distinction `read_resource` exists to make.
+    #[test]
+    fn a_file_with_no_resource_fork_says_so() {
+        let hfs = volume();
+        let story = hfs
+            .files()
+            .iter()
+            .find(|e| e.file_type == *b"INdf")
+            .expect("the story is in the catalog");
+        assert_eq!(story.resource_size, 0);
+        assert_eq!(hfs.read_resource(story), None);
+        assert_eq!(hfs.read(story).map(|b| b.len()), Some(512), "its data fork is there");
+    }
+
+    /// Every field and every glyph of `FONT` 524, against values written out
+    /// from the format description rather than read back off this parser.
+    #[test]
+    fn parses_the_font_resource_glyph_for_glyph() {
+        let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
+        let face = parse(&fork.get(b"FONT", 524).expect("FONT 524").data).expect("parses");
+
+        assert_eq!(face.width, 7, "fRectWidth");
+        assert_eq!(face.height, 15, "fRectHeight");
+        assert_eq!(face.baseline, 12, "ascent");
+        assert_eq!(face.lo, 0x41, "firstChar");
+        assert_eq!(
+            face.glyphs.len(),
+            4,
+            "firstChar..=lastChar — the missing-character glyph and the terminator are NOT codes"
+        );
+
+        for (code, rows) in [(b'A', art::A), (b'B', art::B), (b'C', art::C), (b'D', art::D)] {
+            let g = face.glyph(code).unwrap_or_else(|| panic!("{} is in the font", code as char));
+            assert_eq!(g.rows.as_slice(), &rows[..], "the bitmap for {}", code as char);
+        }
+        assert_eq!(face.glyph(b'A').map(|g| g.width), Some(7));
+        assert_eq!(face.glyph(b'D').map(|g| g.width), Some(3), "a narrow blank, like a space");
+        assert!(face.glyph(b'E').is_none(), "past lastChar");
+        assert!(face.glyph(b'@').is_none(), "before firstChar");
+    }
+
+    /// A blank glyph with an odd advance must not make a fixed-pitch font read
+    /// as proportional — the fixture's `D` is exactly that, and a reader that
+    /// counted it would answer `true` here.
+    #[test]
+    fn a_blank_glyph_does_not_make_a_fixed_font_proportional() {
+        let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
+        let face = parse(&fork.get(b"FONT", 524).expect("FONT 524").data).expect("parses");
+        assert!(face.glyph(b'D').is_some_and(|g| g.rows.iter().all(|&r| r == 0)));
+        assert_ne!(face.glyph(b'D').map(|g| g.width), face.glyph(b'A').map(|g| g.width));
+        assert!(!face.proportional, "the three glyphs that are DRAWN all advance 7");
+    }
+
+    /// The second face, which is shorter — so `from_fork`'s "tallest wins"
+    /// rule has something to choose between, on a volume rather than in the
+    /// abstract.
+    #[test]
+    fn parses_the_second_face_too() {
+        let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
+        let face = parse(&fork.get(b"FONT", 1033).expect("FONT 1033").data).expect("parses");
+        assert_eq!((face.width, face.height, face.baseline, face.lo), (7, 12, 9, 0x30));
+        assert_eq!(face.glyphs.len(), 2);
+        assert_eq!(face.glyph(b'0').map(|g| g.rows.as_slice()), Some(&art::ZERO[..]));
+        assert_eq!(face.glyph(b'1').map(|g| g.rows.as_slice()), Some(&art::ONE[..]));
+        assert_eq!(face.glyph(b'0').map(|g| g.width), Some(6));
+        assert!(!face.proportional);
+    }
+
+    #[test]
+    fn from_fork_and_from_volume_pick_the_taller_face() {
+        let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
+        assert_eq!(from_fork(&fork).map(|f| f.height), Some(15), "15 over 12");
+        assert_eq!(from_volume(&volume()).map(|f| f.height), Some(15));
+    }
+
+    #[test]
+    fn faces_in_fork_reports_both_with_their_ids() {
+        let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
+        let faces = faces_in_fork(&fork);
+        assert_eq!(
+            faces.iter().map(|(id, f)| (*id, f.height)).collect::<Vec<_>>(),
+            vec![(524, 15), (1033, 12)],
+            "in map order, and a listing must not collapse the two"
+        );
+    }
+
+    /// The application and the story share a folder, so "beside this story" and
+    /// "on this disk" reach the same face here — and a name the volume does not
+    /// hold falls through rather than answering nothing.
+    #[test]
+    fn from_volume_beside_pairs_the_application_with_the_story() {
+        let hfs = volume();
+        assert_eq!(from_volume_beside(&hfs, "Test Folder/Story.data").map(|f| f.height), Some(15));
+        assert_eq!(from_volume_beside(&hfs, "TEST FOLDER/STORY.DATA").map(|f| f.height), Some(15));
+        assert_eq!(from_volume_beside(&hfs, "Nowhere/Absent.data").map(|f| f.height), Some(15));
+        assert_eq!(
+            faces_beside(&hfs, "Test Folder/Story.data")
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![524, 1033]
+        );
+    }
+
+    /// A `FONT` id that is a multiple of 128 is the family-NAME record and
+    /// carries no bitmap, so `parse` must refuse it rather than invent a font.
+    #[test]
+    fn refuses_resources_that_are_not_fonts() {
+        assert_eq!(parse(&[]), None, "a family-name record is zero-length");
+        assert_eq!(parse(&[0u8; 26]), None, "an all-zero header has no cell");
+        let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
+        let good = &fork.get(b"FONT", 524).expect("FONT 524").data;
+        // The offset/width table starts at 98 — `owTLoc` 41 words past offset
+        // 16 — so cutting there leaves the header and the strike intact and
+        // takes away the table the glyph widths come from.
+        assert_eq!(parse(&good[..98]), None, "the offset/width table is cut off");
+        assert_eq!(parse(&good[..40]), None, "the strike is cut off");
+        // lastChar before firstChar is the other giveaway of a mis-decode.
+        let mut swapped = good.clone();
+        swapped[2..4].copy_from_slice(&0x0050u16.to_be_bytes());
+        assert_eq!(parse(&swapped), None);
+    }
 }

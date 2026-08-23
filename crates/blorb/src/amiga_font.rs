@@ -98,6 +98,9 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
     let flags = *raw.get(at(TF + 23)?)?;
     let width = be16(at(TF + 24)?)?;
     let baseline = be16(at(TF + 26)?)?;
+    // `tf_BoldSmear`, between the baseline and `tf_Accessors` — how far the face
+    // smears (and how much wider it advances) when a run asks for bold (SQ-1009).
+    let bold_smear = be16(at(TF + 28)?)?;
     let (lo, hi) = (*raw.get(at(TF + 32)?)?, *raw.get(at(TF + 33)?)?);
     let chardata = usize::try_from(be32(at(TF + 34)?)?).ok()?;
     let modulo = usize::from(be16(at(TF + 38)?)?);
@@ -159,6 +162,7 @@ Some(BitmapFont {
         width: u8::try_from(width).ok()?,
         height: u8::try_from(height).ok()?,
         baseline: u8::try_from(baseline).ok()?,
+        bold_smear: u8::try_from(bold_smear).unwrap_or(0),
         proportional: flags & FPF_PROPORTIONAL != 0
             || BitmapFont::measure_proportional(&glyphs),
         lo,

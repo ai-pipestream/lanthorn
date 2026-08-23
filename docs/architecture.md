@@ -576,4 +576,7 @@ timestamps *are* the recording. Reads and keystrokes now keep separate clocks.
 
 - [Interactive-fiction standards lanthorn implements](standards.md) (Z-Machine,
   Glulx, Glk, Quetzal, Blorb, Treaty of Babel).
+- [What CI cannot see](ci-fixture-coverage.md) — which integration suites skip
+  vacuously without `stories/`, which of them an authored fixture can reach,
+  and which are about a particular commercial release and never will be.
 - Design/strategy notes under [`docs/design/`](design/).

@@ -33,6 +33,20 @@ pub struct BitmapFont {
     pub height: u8,
     /// Rows from the top of the cell down to the baseline.
     pub baseline: u8,
+    /// How far a glyph is smeared right to embolden it — AmigaDOS `tf_BoldSmear`
+    /// (SQ-1009).
+    ///
+    /// **The advance grows by the same amount**, which is the half that matters
+    /// and the half a synthesised bold forgets. The Amiga draws a bold glyph as
+    /// itself OR'd with itself shifted right by this many pixels, and moves the pen
+    /// that much further so the extra column has somewhere to live. Emboldening
+    /// without widening eats the inter-character gap instead: at a fixed 8-wide
+    /// cell there is slack to absorb that, and at a real 3-to-8 px proportional
+    /// advance there is none, so bold words run together.
+    ///
+    /// `0` for a format that has no such field, which is every Macintosh `FONT`
+    /// resource — there the synthesised smear is all there is.
+    pub bold_smear: u8,
     /// Whether the advance width actually varies between glyphs.
     ///
     /// **Measured, not taken from a flag**, because the flag and the truth disagree

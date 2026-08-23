@@ -118,3 +118,49 @@ Both are committed as-is rather than regenerated, because the point of them is
 that they are real: an actual snapshot of what a player knew mid-game, and no
 synthetic graph reproduces the particular mess. Loaded by
 `crates/app/tests/matrix_view.rs` and `crates/mapper/tests/advent_maze.rs`.
+
+## Authored fixtures
+
+Everything above is fetched. What follows is **built here**, from a published
+format description, and committed — which is the whole point of it: a fixture we
+authored is redistributable by construction, so it is present on CI, where
+`stories/` is not (SQ-1015).
+
+`macfont.hfs` — a minimal Macintosh volume carrying a bitmap `FONT`. 32,768
+bytes: a 64-block HFS volume with a Master Directory Block, a two-node catalog
+B*-tree, and a `Test Folder` holding two files.
+
+| file | type | data fork | resource fork |
+|---|---|---|---|
+| `Test Folder/Story.data` | `INdf` | 512 bytes, a bare Version 6 header | none |
+| `Test Folder/TestApp` | `APPL` | **zero bytes** | 525 bytes, two `FONT`s |
+
+The zero-byte data fork is the case that matters: that is how an Infocom
+Macintosh release ships, and a reader that can only reach data forks sees an
+empty file rather than a font. The resource fork holds `FONT` 524 (7x15, ascent
+12, `A`–`D`) and `FONT` 1033 (7x12, ascent 9, `0`–`1`) — the two ids and the
+7x15 cell a real release uses, with glyphs this repository drew.
+
+Regenerate with:
+
+```sh
+python3 unit_tests/mk_macfont_hfs.py unit_tests/macfont.hfs
+```
+
+The generator is committed beside it and is the documentation: it cites the
+Inside Macintosh chapters each structure comes from, and it shares no code with
+the Rust readers it exists to test. That independence is deliberate. `blorb`'s
+other HFS tests build volumes with an in-test builder, which is a mirror — a
+writer and a reader developed together agree with each other whether or not
+either agrees with HFS — and the resource-fork path had no coverage at all
+before this. Every expected value in `crates/blorb/src/mac_font.rs`'s tests is
+written out by hand, including all 15 rows of every glyph.
+
+It does **not** replace `crates/app/tests/suites/native_disk_font.rs`, which
+pins the *real* face off a real floppy — 7x15, baseline 12, 200-odd glyphs.
+Synthetic proves the machinery; real media proves the data. Both are needed, and
+the real one still skips on CI.
+
+Loaded by `crates/blorb/src/resource_fork.rs` and `crates/blorb/src/mac_font.rs`
+via `include_bytes!`, so a vanished fixture is a compile error rather than a
+vacuous skip.
