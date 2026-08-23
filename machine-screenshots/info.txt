@@ -252,6 +252,48 @@ TWO OF THEM ARE PIXEL-EXACT. TWO ARE NOT. THE DIFFERENCE IS THE WHOLE POINT.
                          one. Good for layout, z-order and the SQ-1004 island
                          defect; normalise before quoting a metric from it.
 
+THE FOUR SQ-1009 PROPORTIONAL CAPTURES (2026-08-23)
+
+  amiga-arthur-text.png       The opening prose, full-screen text window, at the
+                              first [MORE]. 722x570.
+  amiga-arthur-church.png     Inside the church: a centred illustration in the
+                              decorative border, and the two thin vertical rules
+                              that flank the TEXT window below it. 722x570.
+  amiga-arthur-map.png        The map — a scroll drawn across the whole upper
+                              window, its own two end-caps at the flanks. 722x570.
+                              This is the frame SQ-1010 is about.
+  amiga-arthur-inventory.png  A two-column inventory positioned by pixel, with a
+                              white divider rule and BOLD column headings. 723x570.
+
+ALL FOUR ARE 2x, NOT NATIVE — and unlike amiga-arthur-hint.png the scale is
+recoverable exactly, so they are usable for metrics after halving. Text pitch is
+20 px throughout against the gameplay capture's 10. The frames are 722 wide
+because they include the overscan border; the 320-wide game screen sits inside it.
+
+WHAT THEY SETTLE: THE AMIGA ADVANCE TABLE, TO THE PIXEL
+
+`blorb::amiga_font` read tf_CharLoc's STRIKE width as the pen advance until
+SQ-1009. The real advance is tf_CharKern (before the glyph) plus tf_CharSpace
+(after it), and amiga-arthur-text.png is what proves the corrected reading rather
+than merely agreeing with it. Predicted ink span from Arthur's own char.data
+against measured ink span in the capture, three runs, at 2x:
+
+  run                                                    predicted  measured
+  "WHOSO PULLETH OUT THIS SWORD OF THIS STONE, ..."            628       628
+  "You are shivering in the cold night air of an ..."          634       634
+  "BORN OF ALL ENGLAND."                                       204       204
+
+Exact, three times, on runs of 20 to 71 characters. Nothing but the right advance
+for every glyph produces that. It also closes the 1:1-versus-2:1 argument that ran
+through four notes on SQ-1009 from a second direction: at 2:1 these runs would need
+twice the width and the font has no metrics that could give it.
+
+Read the frames for what they show, too. The text is VISIBLY proportional — 'i' is
+narrow, the capitals in WHOSO PULLETH are wide — which is the thing lanthorn does
+not yet reproduce. And the inventory headings are bold with wider tracking, which
+is tf_BoldSmear: the Amiga smears a glyph one pixel right to embolden it and the
+advance grows by one to match. lanthorn's bold does not widen.
+
 DO NOT MEASURE METRICS FROM THE REMAINING mac-*.jpg FILES. The now-deleted
 `mac-arthur.jpg` was the lesson: lossy, windowed, and its advance-to-line-height
 ratio came out 5.6/14 = 0.40 where the Mac's own colWidth/lineHeight is 7/15 =

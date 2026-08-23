@@ -21,6 +21,27 @@
 //! long bitmap per row, `tf_Modulo` bytes wide, all glyphs side by side;
 //! `tf_CharLoc` is an array of `(bit offset, bit width)` pairs, one per code.
 //!
+//! # The bitmap width is NOT the advance (SQ-1009)
+//!
+//! `tf_CharLoc` says how many bits of the strike belong to a glyph. What the PEN
+//! does is two other arrays: `tf_CharKern` is added BEFORE the glyph is drawn (the
+//! left side bearing) and `tf_CharSpace` after it, so one character advances by
+//! `kern + space` and the ink sits `kern` in from the pen. Reading the strike width
+//! as the advance is wrong for every glyph in a proportional face and catastrophic
+//! for the SPACE, whose strike is **zero bits wide** — draw with it and the words
+//! run together, which is exactly what happened the first time this face was
+//! rasterised.
+//!
+//! Arthur's own table settles a question three notes on SQ-1009 could not: summed
+//! over `THE CHURCHYARD` it gives **80 px**, against the 83-px highlight box
+//! measured on `machine-screenshots/amiga-arthur-hint.png`, and 4.70 px/char on
+//! prose against the 4.5 measured in `machine-screenshots/info.txt`. Both agree at
+//! **1:1** and are off by a factor of two at 2:1 — so those captures are native
+//! 320x200 frames, independently of the palette argument.
+//!
+//! A fixed-pitch face carries neither array (both pointers are zero on Journey's
+//! and Beyond Zork's font-3 sets), and there the advance is `tf_XSize`.
+//!
 //! `dfh_Name` is EMPTY on all of these, which is why they are files beside the game
 //! rather than entries in `FONTS:` — the interpreter loads the segment directly
 //! instead of asking `diskfont.library` for a font by name.
@@ -81,6 +102,10 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
     let chardata = usize::try_from(be32(at(TF + 34)?)?).ok()?;
     let modulo = usize::from(be16(at(TF + 38)?)?);
     let charloc = usize::try_from(be32(at(TF + 40)?)?).ok()?;
+    // Zero means "this font has no such array", which is how a fixed-pitch face is
+    // stored — not an offset of zero.
+    let charspace = usize::try_from(be32(at(TF + 44)?)?).ok().filter(|&p| p != 0);
+    let charkern = usize::try_from(be32(at(TF + 48)?)?).ok().filter(|&p| p != 0);
     // Bounds that only a decoding error could exceed. NOTE the nominal width is
     // NOT capped at 8: Arthur's font is 10 wide nominally while every glyph in
     // it is 8 or narrower, and capping here rejected it outright. The width that
@@ -97,6 +122,25 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
         if gw > 8 {
             return None;
         }
+        // A signed word each, and both default to the fixed-pitch behaviour when
+        // the font omits them: no bearing, and one nominal cell of advance.
+        let word = |p: usize| -> Option<i16> {
+            Some(be16(at(p.checked_add(i.checked_mul(2)?)?)?)? as i16)
+        };
+        let kern = match charkern {
+            Some(p) => word(p)?,
+            None => 0,
+        };
+        let space = match charspace {
+            Some(p) => word(p)?,
+            None => i16::try_from(width).ok()?,
+        };
+        // The bearing is carried in the BITMAP, the way `mac_font` carries the
+        // Macintosh's, so a consumer needs only the advance and the rows. A
+        // negative bearing cannot be represented that way and is dropped rather
+        // than clipping the glyph's left edge; none of the shipped faces has one.
+        let bearing = usize::try_from(kern.max(0)).ok()?;
+        let shift = if bearing + gw <= 8 { bearing } else { 0 };
         let mut rows = Vec::with_capacity(usize::from(height));
         for y in 0..usize::from(height) {
             let base = chardata.checked_add(y.checked_mul(modulo)?)?;
@@ -104,12 +148,12 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
             for x in 0..gw {
                 let bit = off.checked_add(x)?;
                 if *raw.get(at(base.checked_add(bit / 8)?)?)? & (0x80 >> (bit % 8)) != 0 {
-                    bits |= 0x80 >> x;
+                    bits |= 0x80 >> (x + shift);
                 }
             }
             rows.push(bits);
         }
-        glyphs.push(Glyph { width: u8::try_from(gw).ok()?, rows });
+        glyphs.push(Glyph { width: u8::try_from(kern.saturating_add(space).max(0)).ok()?, rows });
     }
 Some(BitmapFont {
         width: u8::try_from(width).ok()?,

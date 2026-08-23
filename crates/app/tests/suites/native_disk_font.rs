@@ -54,18 +54,128 @@ fn arthur_carries_a_proportional_text_font() {
     assert_ne!(a.rows.iter().fold(0, |x, r| x | r), 0, "'A' is drawn");
     assert!(font.glyph(b' ').expect("space").rows.iter().all(|&r| r == 0), "the space is blank");
 
-    // Proportional in fact and not just in flag: the widths really differ.
+    // Proportional in fact and not just in flag: the advances really differ.
     let widths: std::collections::BTreeSet<u8> =
         (32u8..=126).filter_map(|c| font.glyph(c)).map(|g| g.width).collect();
     assert!(widths.len() > 3, "a proportional font has several widths, saw {widths:?}");
-    assert!(widths.iter().all(|&w| w <= 8), "no glyph is wider than a byte: {widths:?}");
     assert!(font.glyph(b'i').unwrap().width < font.glyph(b'm').unwrap().width, "'i' is narrower than 'm'");
+    // The INK fits a byte — that is `Glyph::rows`' limit, and it is a different
+    // fact from the advance, which reaches the nominal 10 on the widest codes.
+    assert!(
+        widths.iter().any(|&w| w > 8),
+        "an advance is not a strike width and is not capped at 8: {widths:?}",
+    );
 
     // Descenders reach the last two rows, which is why an 8-row master would clip.
     for ch in *b"gpqyj" {
         let g = font.glyph(ch).expect("descender");
         assert_ne!(g.rows[9], 0, "{} descends to the last row", char::from(ch));
     }
+}
+
+/// **The advance comes from `tf_CharSpace`/`tf_CharKern`, not from the strike**
+/// (SQ-1009).
+///
+/// The parser read `tf_CharLoc`'s bit width as the pen advance for as long as this
+/// face has been parsed, which is wrong by a pixel or two on every glyph and by
+/// EVERYTHING on the space: a space has no ink, so its strike is zero bits wide and
+/// text drawn at that advance has no gaps between its words at all. The face was
+/// only ever laid out in a fixed cell, so nothing had noticed.
+///
+/// The numbers below are also the independent confirmation that
+/// `machine-screenshots/amiga-arthur*.png` are **1:1 native 320x200** captures and
+/// not halved 640-wide ones, which three notes on SQ-1009 could not settle from the
+/// pixels alone. They agree at 1:1 and are out by a factor of two at 2:1.
+#[test]
+fn the_amiga_advance_is_the_pen_and_not_the_strike() {
+    let Some(font) = font_on("Arthur - The Quest for Excalibur.adf") else { return };
+
+    // A blank glyph that still moves the pen — the whole defect in one assertion.
+    let space = font.glyph(b' ').expect("space");
+    assert!(space.rows.iter().all(|&r| r == 0), "the space has no ink");
+    assert_eq!(space.width, 3, "and still advances three pixels");
+
+    for (ch, advance) in [(b'i', 3), (b'm', 8), (b'W', 8), (b'T', 6), (b'h', 5), (b'e', 5)] {
+        assert_eq!(
+            font.glyph(ch).expect("glyph").width,
+            advance,
+            "{}'s advance",
+            char::from(ch),
+        );
+    }
+
+    // `machine-screenshots/amiga-arthur-hint.png`: the InvisiClues highlight box
+    // around `THE CHURCHYARD` measures 83 px wide, which this run of text fills to
+    // within the box's own padding. At 2:1 the same run would need 160.
+    let run: u32 = b"THE CHURCHYARD".iter().map(|&c| u32::from(font.glyph(c).unwrap().width)).sum();
+    assert_eq!(run, 80, "the pen crosses a 320-wide screen, not a 640-wide one");
+
+    // `machine-screenshots/info.txt` measures Arthur's prose at ~4.5 px/char.
+    let prose = b"The wind moans in the churchyard.";
+    let px: u32 = prose.iter().map(|&c| u32::from(font.glyph(c).unwrap().width)).sum();
+    let per = f64::from(px) / prose.len() as f64;
+    assert!((4.0..5.5).contains(&per), "prose averages ~4.5 px/char, measured {per:.2}");
+}
+
+/// **Three runs off a real Amiga screen, predicted to the pixel** (SQ-1009).
+///
+/// `machine-screenshots/amiga-arthur-text.png` is the opening prose at 2x, and the
+/// ink span of a line of it is a function of every advance in that line — so this
+/// is a per-glyph check wearing the shape of one number, and the strongest evidence
+/// in the repo that the corrected reading is right rather than merely plausible.
+/// The strike-width reading missed all three.
+///
+/// The measured spans are the white-pixel extents of those rows in the capture,
+/// halved: 628, 634 and 204 device pixels at 2x.
+#[test]
+fn the_advance_table_predicts_a_real_amiga_frame_to_the_pixel() {
+    let Some(font) = font_on("Arthur - The Quest for Excalibur.adf") else { return };
+
+    // First inked column of the first glyph to last inked column of the last, which
+    // is what a screen shows — the trailing side bearing of the final glyph leaves
+    // no mark, so the pen total is a pixel wider than the ink on all three.
+    let ink = |s: &str| -> u32 {
+        let (mut pen, mut first, mut last) = (0u32, None, 0u32);
+        for c in s.bytes() {
+            let g = font.glyph(c).expect("glyph");
+            for r in &g.rows {
+                for b in 0..8u32 {
+                    if r & (0x80 >> b) != 0 {
+                        first.get_or_insert(pen + b);
+                        last = last.max(pen + b);
+                    }
+                }
+            }
+            pen += u32::from(g.width);
+        }
+        last - first.expect("some ink") + 1
+    };
+
+    for (run, measured_at_2x) in [
+        ("WHOSO PULLETH OUT THIS SWORD OF THIS STONE, IS RIGHTWISE KING", 628),
+        ("You are shivering in the cold night air of an English churchyard, unsure", 634),
+        ("BORN OF ALL ENGLAND.", 204),
+    ] {
+        assert_eq!(
+            ink(run) * 2,
+            measured_at_2x,
+            "amiga-arthur-text.png measures {measured_at_2x} px of ink for {run:?}",
+        );
+    }
+}
+
+/// The fixed-pitch faces carry NEITHER array, and there the advance is `tf_XSize`.
+///
+/// Journey's and Beyond Zork's font-3 sets store `tf_CharSpace` and `tf_CharKern` as
+/// null pointers. Reading a null as an offset of zero would give every glyph the
+/// first entry of whatever happens to sit at the start of the hunk.
+#[test]
+fn a_fixed_pitch_face_advances_by_its_nominal_cell() {
+    let Some(font) = font_on("Journey - The Quest Begins.adf") else { return };
+    assert_eq!(font.width, 8, "the nominal cell");
+    let widths: std::collections::BTreeSet<u8> =
+        (32u8..=255).filter_map(|c| font.glyph(c)).map(|g| g.width).collect();
+    assert_eq!(widths, [8].into_iter().collect(), "every code advances one cell");
 }
 
 /// **Journey's font is the font-3 set, and it is byte-identical to Beyond Zork's.**
