@@ -84,6 +84,10 @@ const CORPUS: &[(&str, &str)] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // SQ-1020: which story on a compilation, as `HfsEntry::path` spells it. Without
+    // one the volume's tiebreak chooses, and on the Masterpieces CD that is Zork
+    // Zero — so every Macintosh Arthur measurement was of a different game.
+    let mut entry: Option<String> = None;
     let mut story: Option<String> = None;
     let mut all = false;
     let mut pane_cells = (98u16, 37u16);
@@ -106,6 +110,10 @@ fn main() {
             "--all" => all = true,
             "--keys" => {
                 keys_override = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--entry" => {
+                entry = args.get(i + 1).cloned();
                 i += 1;
             }
             "--no-tap" => no_tap = true,
@@ -166,7 +174,7 @@ fn main() {
 
     for (path, keys) in targets {
         println!("═══ {path}");
-        match scout(&path, &keys, pane_cells, cell_px, turns, no_tap, runs, bands, taps, honor_colours, cmd.as_deref()) {
+        match scout(&path, entry.as_deref(), &keys, pane_cells, cell_px, turns, no_tap, runs, bands, taps, honor_colours, cmd.as_deref()) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
@@ -208,6 +216,7 @@ fn parse_pair(s: &str) -> Option<(u16, u16)> {
 #[allow(clippy::too_many_arguments)]
 fn scout(
     path: &str,
+    entry: Option<&str>,
     keys: &str,
     pane_cells: (u16, u16),
     cell_px: (u16, u16),
@@ -224,7 +233,7 @@ fn scout(
     // second answer is the medium THIS story came off, which on a hybrid disc is not
     // the image's own format (SQ-0876) — so it is what the profile resolves from.
     let p = std::path::Path::new(path);
-    let (bytes, disk_image) = match app::hints::load_mounted_story(p) {
+    let (bytes, disk_image) = match app::hints::load_mounted_story_from(p, entry) {
         Ok((loaded, medium)) => (loaded.bytes().to_vec(), medium),
         Err(e) => return Err(format!("{path}: {e:?}")),
     };
@@ -236,7 +245,7 @@ fn scout(
     // 172-native-px flank on the Amiga Arthur where the app renders a 30px pole —
     // and an instrument that silently disagrees with the app on a whole class of
     // media is worse than no instrument at all.
-    let mut picts = app::graphics::PictSource::resolve(p, None);
+    let mut picts = app::graphics::PictSource::resolve(p, entry);
     // No tier-3 archive is named here, so the machine comes from the medium alone.
     let profile = app::interpreter::InterpreterProfile::resolve(p, None, None, disk_image);
     zvm::screen::set_palette(profile.palette());
@@ -272,7 +281,12 @@ fn scout(
         profile.default_colours(),
         None,
         None,
-        None,
+        // SQ-1020: the GAME's Version 6 cell, which `startup.rs` passes and this
+        // harness did not — so every Macintosh frame it ever measured was laid out
+        // on 8x16 where the app uses 7x15. That is the SQ-0901 failure again, in the
+        // instrument built to catch SQ-0901: the numbers stay self-consistent and
+        // describe a screen the player never sees.
+        Some(profile.v6_font_cell()),
     )
     .map_err(|e| format!("boot: {e:?}"))?;
     s.set_pict_source(Some(picts));

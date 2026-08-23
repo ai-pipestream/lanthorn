@@ -983,7 +983,7 @@ fn render_node(
                         // native height — nothing to reclaim, degrade to centred).
                         let scaled_h = (native.1 as f32 * scale_center.s).round() as u32;
                         let slack = pane_dev.1.saturating_sub(scaled_h);
-                        let plan = hybrid_bottom_plan(story, &gfx, &chrome_runs, native, slack);
+                        let plan = hybrid_bottom_plan(story, &gfx, &chrome_runs, native, slack, state.v6_cell);
                         let reclaim = !matches!(plan, BottomPlan::Letterbox);
                         // Resolve the story scale, the story viewport, and an
                         // optional bottom-anchored menu scale.
@@ -1021,7 +1021,7 @@ fn render_node(
                                 // LAST text row of a 640x400 screen, with window 0 ending at
                                 // 384 — and printing *"If only you had a crystal ball...."*
                                 // into it. `menu_strip_below_story` never sees it, because
-                                // its own `native.1 <= story_bottom + 16` guard returns
+                                // its own `native.1 <= story_bottom + cell.h` guard returns
                                 // false before it looks; so the plan is `Frame` (his poles
                                 // flank the story full height), the viewport grew to
                                 // `area.bottom()`, and `content_ring_bands` carved
@@ -1308,19 +1308,18 @@ fn render_node(
                             // the SQ-0548 defect), and a run OVER art is already ring
                             // content that the unraised clip places correctly.
                             let story_top = story.y_px as i32;
+                            // SQ-1020: `over_art` is the oracle's own predicate and
+                            // this used to be a second copy of it — same question,
+                            // written twice, and only one of them was converted when
+                            // the Version 6 cell stopped being 8x16 everywhere. The
+                            // copy passed `run_px(...)` for the width and a bare `16`
+                            // for the height, in the SAME call. One authority now.
                             let text_above = chrome_runs
                                 .iter()
                                 .filter(|t| {
-                                    let py = t.y.max(1) as i32 - 1;
                                     !t.text.trim().is_empty()
-                                        && py + 16 <= story_top
-                                        && !v6::region_has_opaque(
-                                            &gfx,
-                                            t.x.max(1) as u32 - 1,
-                                            py.max(0) as u32,
-                                            state.v6_cell.run_px(&t.text).max(u32::from(state.v6_cell.w)),
-                                            16,
-                                        )
+                                        && state.v6_cell.bottom_px(t.y) as i32 <= story_top
+                                        && !row_oracle.over_art(t)
                                 })
                                 .map(|t| run_cell(t, &scale, cell_px, area).1)
                                 .max();
@@ -3906,7 +3905,7 @@ pub fn build_v6_raster_canvas(
         })
         .flatten()
         .collect();
-    extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, native);
+    extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, native, state.v6_cell);
     grounds(&mut obstruction);
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
@@ -5192,8 +5191,10 @@ fn hybrid_bottom_plan(
     chrome_runs: &[&crate::engine::PxText],
     native: (u16, u16),
     slack: u32,
+    // See `menu_strip_below_story` — the same "one native row" question.
+    cell: zvm::screen::V6Cell,
 ) -> BottomPlan {
-    if menu_strip_below_story(story, gfx, chrome_runs, native) {
+    if menu_strip_below_story(story, gfx, chrome_runs, native, cell) {
         return BottomPlan::Menu;
     }
     if slack == 0 {
@@ -5206,7 +5207,7 @@ fn hybrid_bottom_plan(
     // the flanks to keep the enclosing columns). Zork0 (story bottom 398/400) and
     // Shogun (400/400) both qualify. With no side art there is nothing to stretch, so
     // keep the centred letterbox.
-    if native.1 as u32 <= story_bottom + 16 {
+    if native.1 as u32 <= story_bottom + u32::from(cell.h) {
         let sy0 = story.y_px as u32;
         let sy1 = story_bottom.min(gfx.height());
         let sx0 = story.x_px as u32;
@@ -5257,9 +5258,14 @@ fn menu_strip_below_story(
     gfx: &image::RgbaImage,
     chrome_runs: &[&crate::engine::PxText],
     native: (u16, u16),
+    // SQ-1020: "one native ROW of slack" is a question about the GAME's cell, and
+    // was written `+ 16` here — right on every machine whose cell is 16 and quietly
+    // wrong on the one whose is not. This function had no cell to ask, which is why
+    // it survived SQ-0917's sweep; it takes one now.
+    cell: zvm::screen::V6Cell,
 ) -> bool {
     let story_bottom = story.y_px as u32 + story.h_px as u32;
-    if native.1 as u32 <= story_bottom + 16 {
+    if native.1 as u32 <= story_bottom + u32::from(cell.h) {
         return false;
     }
     let sx0 = story.x_px as u32;
@@ -5456,9 +5462,10 @@ fn extend_raster_flanks(
     story: Option<&crate::engine::PositionedWindow>,
     chrome_runs: &[&crate::engine::PxText],
     native: (u16, u16),
+    cell: zvm::screen::V6Cell,
 ) {
     let Some(story) = story else { return };
-    if menu_strip_below_story(story, gfx, chrome_runs, native) {
+    if menu_strip_below_story(story, gfx, chrome_runs, native, cell) {
         return;
     }
     let native_h = native.1 as u32;
@@ -5900,10 +5907,9 @@ fn flank_border_extension(
             return None;
         }
         let t = runs.iter().copied().find(|t| {
-            let py = t.y.max(1) as u32 - 1;
             let px0 = t.x.max(1) as u32 - 1;
             let w = t.text.chars().count().max(1) as u32 * font_w;
-            (py..py + 16).contains(&mid) && (px0..px0 + w).contains(&dnx0)
+            cell.rows_px(t.y).contains(&mid) && (px0..px0 + w).contains(&dnx0)
         })?;
         let idx = (dnx0 - (t.x.max(1) as u32 - 1)) / font_w;
         let ch = t.text.chars().nth(idx as usize)?;
@@ -5931,7 +5937,7 @@ fn flank_border_extension(
         // over is one whose device span still reaches into the cell — so the crop starts
         // a native pixel or two inside it, and at a large enough scale that is where the
         // stroke lives. Widened, never narrowed: the cell's pixels are the border's.
-        let gnx1 = gnx0 + 8;
+        let gnx1 = gnx0 + u32::from(cell.w);
         let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * s) / cw;
         let x0 = (pane.x as i32 + dev(gnx0).floor() as i32).clamp(band.x as i32, col as i32) as u16;
         let x1 = (pane.x as i32 + dev(gnx1).ceil() as i32).clamp(col as i32 + 1, band.right() as i32) as u16;
@@ -6298,9 +6304,14 @@ impl<'b> ChromeRowOracle<'_, 'b> {
         let story_top = self.story_native.1 as i32;
         let story_bottom = (self.story_native.1 + self.story_native.3) as i32;
         let py = t.y.max(1) as i32 - 1;
+        // SQ-1020: the run's BOTTOM, from the game's own cell. Written `py + 16`
+        // this asked whether a bar clears the story on a machine whose cell is
+        // 16 — and a Macintosh bar sitting directly above the story misses by one
+        // pixel at 15, drops out of the text band, and rasterises.
+        let bottom = self.v6_cell.bottom_px(t.y) as i32;
         py >= story_bottom
-            || py + 16 <= story_top
-            || (self.overlay_bottom > 0 && py + 16 <= self.overlay_bottom)
+            || bottom <= story_top
+            || (self.overlay_bottom > 0 && bottom <= self.overlay_bottom)
     }
 
     fn runs_at(&self, row: u16) -> Vec<&'b crate::engine::PxText> {
@@ -8026,6 +8037,76 @@ fn place_anchored_row(
 
 #[cfg(test)]
 mod tests {
+
+    /// **No native-pixel arithmetic in this file may spell the Version 6 cell as a
+    /// number** (SQ-1020).
+    ///
+    /// This is the second time the same defect shipped from this file, and both
+    /// times a grep could not see it. SQ-0917 gave the Macintosh a 7x15 cell and
+    /// converted every named `FONT_W`/`FONT_H`; thirty-five sites quantized by a
+    /// bare `8` or `16` and were missed, because a constant's NAME is greppable and
+    /// a number is not. Its follow-up then converted the divisions and wrote down
+    /// what it was leaving: "a THRESHOLD compared against a cell dimension is not
+    /// arithmetic and is not fixed by any of this". Six thresholds survived, and
+    /// one of them rasterised the Macintosh score bar.
+    ///
+    /// So this checks the SPELLING, which is the only thing the compiler and the
+    /// gate cannot. A native-pixel name added to a cell-sized constant is what both
+    /// rounds looked like:
+    ///
+    /// ```text
+    /// py + 16 <= story_top          story_bottom + 16          gnx0 + 8
+    /// ```
+    ///
+    /// Every one of those is `cell.h` or `cell.w` — see [`zvm::screen::V6Cell`],
+    /// which now names the extent operations as well as the divisions. If a
+    /// genuinely non-cell use of one of these names arises, rename the variable:
+    /// the point is that a reader can tell the two apart, and today they cannot.
+    #[test]
+    fn no_bare_v6_cell_literals_in_native_pixel_arithmetic() {
+        // The names that carry NATIVE pixels here. Deliberately the ones the two
+        // rounds actually used rather than everything plausible — a discipline case
+        // that cries wolf gets deleted, and then it guards nothing.
+        const NATIVE: &[&str] =
+            &["py", "y_px", "px0", "gnx0", "gnx1", "story_top", "story_bottom", "native_h"];
+        // A cell has been 8x16 and 7x15; both axes of both are worth catching.
+        const CELLISH: &[&str] = &["7", "8", "15", "16"];
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/render/screen.rs");
+        let src = std::fs::read_to_string(&path).expect("this file is readable");
+        let mut bad = Vec::new();
+        for (n, line) in src.lines().enumerate() {
+            // Comments quote the old form on purpose — this case is about code.
+            let code = match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            };
+            for name in NATIVE {
+                for lit in CELLISH {
+                    for op in [" + ", " - "] {
+                        let needle = format!("{name}{op}{lit}");
+                        let Some(at) = code.find(&needle) else { continue };
+                        // `apy + 16` is not `py + 16`, and `py + 160` is not either.
+                        let before_ok = at == 0
+                            || !code.as_bytes()[at - 1].is_ascii_alphanumeric()
+                                && code.as_bytes()[at - 1] != b'_';
+                        let after = at + needle.len();
+                        let after_ok = after >= code.len()
+                            || !code.as_bytes()[after].is_ascii_alphanumeric();
+                        if before_ok && after_ok {
+                            bad.push(format!("  {}:{}  {}", path.display(), n + 1, line.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "native-pixel arithmetic spelling the v6 cell as a literal — use              `cell.w`/`cell.h`, or `V6Cell::rows_px`/`bottom_px` for an extent:\n{}",
+            bad.join("\n"),
+        );
+    }
+
 
     // ── merge_strip_fragments, trailing blanks (SQ-0900) ─────────────────────
 

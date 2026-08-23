@@ -2279,6 +2279,33 @@ impl V6Cell {
     pub fn run_px(self, s: &str) -> u32 {
         s.chars().count() as u32 * u32::from(self.w)
     }
+
+    /// The native pixel rows a run whose 1-based top is `y_px` occupies.
+    ///
+    /// The EXTENT half of this type, and the half SQ-0917's sweep did not have.
+    /// That quest named the three DIVISIONS — [`Self::row_of`], [`Self::col_of`],
+    /// [`Self::run_px`] — and its own follow-up recorded what it was leaving
+    /// behind: "a THRESHOLD compared against a cell dimension is not arithmetic
+    /// and is not fixed by any of this". Those thresholds are written `py + 16`,
+    /// which is a bare number no grep for a constant can see, and they went on
+    /// meaning 16 after one machine stopped being 16.
+    ///
+    /// SQ-1020 is what that cost: a status bar sitting directly above the story
+    /// satisfies `py + h == story_top`, so testing it with a hardcoded 16 fails by
+    /// exactly one pixel on the Macintosh's 15-tall cell — and the bar drops out
+    /// of the text band and rasterises, on one machine, silently.
+    pub fn rows_px(self, y_px: u16) -> core::ops::Range<u32> {
+        let top = u32::from(y_px.max(1) - 1);
+        top..top + u32::from(self.h)
+    }
+
+    /// The native pixel row just PAST a run whose 1-based top is `y_px`.
+    ///
+    /// [`Self::rows_px`]'s end, defined from it so the two cannot drift — which is
+    /// the failure this whole area keeps having.
+    pub fn bottom_px(self, y_px: u16) -> u32 {
+        self.rows_px(y_px).end
+    }
 }
 
 impl Default for V6Cell {
@@ -2687,6 +2714,41 @@ mod tests {
         assert_eq!(mem.read_word(0x24), DEFAULT_SCREEN_ROWS as u16, "height in units");
         assert_eq!(mem.read_byte(0x26), 1, "font width = 1 unit");
         assert_eq!(mem.read_byte(0x27), 1, "font height = 1 unit");
+    }
+
+    /// The extent operations agree with the divisions, at every cell (SQ-1020).
+    ///
+    /// Stated as a RELATION rather than as pinned numbers, so it holds for a cell
+    /// no one has declared yet — which is the property the bare `py + 16` sites
+    /// lacked. A run's last inked row must be the row its top is in whenever the
+    /// run is one cell tall, and its bottom must be where the NEXT row starts.
+    #[test]
+    fn the_extent_of_a_run_agrees_with_the_row_it_is_in() {
+        for h in 1u16..=32 {
+            let cell = V6Cell::new(8, h);
+            for y_px in 1u16..=200 {
+                let rows = cell.rows_px(y_px);
+                assert_eq!(rows.end, cell.bottom_px(y_px), "bottom is the end of the span");
+                assert_eq!(rows.end - rows.start, u32::from(h), "a run is one cell tall");
+                // The row the top is in, and the row the bottom lands in, are
+                // consecutive — the invariant `py + 16 <= story_top` was really
+                // asserting, and the reason a wrong `h` moved a bar by one row.
+                assert_eq!(
+                    u32::from(cell.row_of(y_px)) + 1,
+                    rows.end / u32::from(h),
+                    "cell {h}, y {y_px}: the run ends where the next row begins",
+                );
+            }
+        }
+    }
+
+    /// A 1-based pixel of 0 is clamped, not wrapped (ZMSD §8.8.1 has no row 0).
+    #[test]
+    fn the_extent_of_a_run_at_the_origin_starts_at_zero() {
+        let cell = V6Cell::new(7, 15);
+        assert_eq!(cell.rows_px(0), 0..15, "y=0 is treated as y=1");
+        assert_eq!(cell.rows_px(1), 0..15);
+        assert_eq!(cell.rows_px(16), 15..30);
     }
 
     #[test]
