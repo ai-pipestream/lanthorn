@@ -448,6 +448,25 @@ impl Blorb {
 /// filter by resource type — sounds, images, and data are all shown — but a
 /// blorb that is itself a game (has an `Exec`) is a different story, not this
 /// one's sidecar, so it is excluded from the sibling scan.
+/// The filename extensions a RESOURCE blorb wears (SQ-1067).
+///
+/// One list, consulted by both steps of both [`resolve_resource_blorb`] and
+/// [`sibling_blorb_by_name`]. They used to carry four literal lists between them
+/// and the sets differed in BOTH steps, in opposite directions, so neither
+/// function was a superset of the other — under a doc sentence promising "same
+/// match order and rule". Measured before the fix, with resource-only sidecars:
+/// a Glulx story beside a `.gblorb` resolved its resources while the row never
+/// lit `(blorb)`, and a same-stem `.zblorb` in a prefix tie lit `(blorb)` while
+/// resolution returned nothing. Two opposite lies in the story list.
+///
+/// **`.gblorb` and `.zblorb` are safe in step 1** because the two functions guard
+/// it differently and both guards are right: `resolve` reads the file through
+/// [`read_resource_blorb`], which requires resources AND no executable — so a
+/// `.gblorb` that IS the story is rejected there and picked up by step 0 instead.
+/// `sibling` cannot read the file and does not claim to; filename agreement is
+/// the whole signal it offers, as its own doc says.
+pub(crate) const RESOURCE_BLORB_EXTS: [&str; 4] = ["blb", "blorb", "zblorb", "gblorb"];
+
 fn read_resource_blorb(path: &std::path::Path) -> Option<Blorb> {
     let bytes = std::fs::read(path).ok()?;
     if !Blorb::is_blorb(&bytes) {
@@ -517,7 +536,7 @@ pub fn resolve_resource_blorb(
         }
     }
     // 2. Same-stem sibling.
-    for ext in ["blb", "blorb"] {
+    for ext in RESOURCE_BLORB_EXTS {
         let cand = story_path.with_extension(ext);
         if cand != story_path && cand.exists() {
             if let Some(b) = read_resource_blorb(&cand) {
@@ -542,7 +561,7 @@ pub fn resolve_resource_blorb(
             .and_then(|e| e.to_str())
             .map(|e| {
                 let e = e.to_ascii_lowercase();
-                e == "blb" || e == "blorb" || e == "zblorb" || e == "gblorb"
+                RESOURCE_BLORB_EXTS.contains(&e.as_str())
             })
             .unwrap_or(false);
         if !ext_ok {
@@ -567,18 +586,18 @@ pub fn resolve_resource_blorb(
 
 /// The associated resource-blorb sibling of `story_path`, matched by FILENAME
 /// ONLY (no file read), for the cheap per-row "(blorb)" tag which can't afford
-/// to parse every blorb. Same match order and rule as [`resolve_resource_blorb`]:
-/// an exact same-stem `.blb`/`.blorb`/`.zblorb` sibling first, else the best
-/// unambiguous [`stem_prefix_match`] among the directory's resource blorbs —
+/// to parse every blorb. Same match order and rule as [`resolve_resource_blorb`],
+/// over the same [`RESOURCE_BLORB_EXTS`] (SQ-1067 — this sentence used to name a
+/// third set, matching neither function): an exact same-stem sibling first, else
+/// the best unambiguous [`stem_prefix_match`] among the directory's blorbs —
 /// `None` if there is none or the longest prefix is a tie. Unlike
 /// `resolve_resource_blorb` it does not read the file, so it can't require the
 /// blorb to actually carry resources — filename agreement is the whole signal.
 pub fn sibling_blorb_by_name(
     story_path: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    const EXTS: [&str; 3] = ["blb", "blorb", "zblorb"];
     // 1. Exact same-stem sibling.
-    for ext in EXTS {
+    for ext in RESOURCE_BLORB_EXTS {
         let cand = story_path.with_extension(ext);
         if cand != story_path && cand.exists() {
             return Some(cand);
@@ -598,7 +617,7 @@ pub fn sibling_blorb_by_name(
             .and_then(|e| e.to_str())
             .map(|e| {
                 let e = e.to_ascii_lowercase();
-                EXTS.iter().any(|x| *x == e)
+                RESOURCE_BLORB_EXTS.contains(&e.as_str())
             })
             .unwrap_or(false);
         if !ext_ok {
@@ -1244,6 +1263,71 @@ mod tests {
             resolve_resource_blorb(&story).is_none(),
             "zork0.blb belongs to Zork Zero, not Zork I"
         );
+    }
+
+    /// **The `(blorb)` tag and the resolver agree about every resource extension**
+    /// (SQ-1067).
+    ///
+    /// `sibling_blorb_by_name` promises "same match order and rule as
+    /// `resolve_resource_blorb`". The ORDER always matched; the extension SETS did
+    /// not, and they differed in BOTH steps in opposite directions, so neither
+    /// function was a superset of the other:
+    ///
+    /// | step | `resolve` | `sibling` |
+    /// |---|---|---|
+    /// | 1, exact same-stem | `blb`, `blorb` | `blb`, `blorb`, `zblorb` |
+    /// | 2, directory scan | `blb`, `blorb`, `zblorb`, `gblorb` | `blb`, `blorb`, `zblorb` |
+    ///
+    /// The doc sentence described a third set, matching neither. The result was
+    /// two opposite lies in the story list: a Glulx story beside a resource-only
+    /// `.gblorb` loaded its resources while the row never lit `(blorb)`, and a
+    /// same-stem `.zblorb` caught in a prefix TIE lit `(blorb)` while resolution
+    /// returned nothing.
+    ///
+    /// These are the audit's own four measured rows plus a negative, and every
+    /// existing `sibling_by_name_*` case uses `.blb`/`.blorb` — the two spellings
+    /// where the sets happened to agree — so all 292 were green with the
+    /// divergence in place.
+    ///
+    /// FALSIFY by restoring either literal list: rows 1–3 disagree.
+    #[test]
+    fn the_blorb_tag_and_the_resolver_agree_on_every_resource_extension() {
+        // (story, sidecars, whether a resource sidecar should be found at all)
+        let cases: &[(&str, &[&str], bool)] = &[
+            // A resource-only `.gblorb`: resolve saw it, the tag could not.
+            ("game.ulx", &["game.gblorb"], true),
+            // …and the same by prefix rather than by exact stem.
+            ("gamestory.ulx", &["game.gblorb"], true),
+            // A same-stem `.zblorb` in a prefix tie: the tag saw it, resolve could not.
+            ("game.z5", &["game.zblorb", "game2.zblorb"], true),
+            // The control — the same shape spelled `.blb`, where the two always agreed.
+            ("game.z5", &["game.blb", "game2.blb"], true),
+            // A negative, so agreement is not just "both always find something":
+            // an ambiguous tie with no same-stem sibling is `None` on both sides.
+            ("zork1.z3", &["zork1-a.blorb", "zork1-b.blorb"], false),
+        ];
+        for (i, (story_name, sidecars, expect_found)) in cases.iter().enumerate() {
+            let dir = TempDir::new(&format!("tag-agree-{i}"));
+            let story = dir.join(story_name);
+            std::fs::write(&story, b"not a blorb").unwrap();
+            for name in *sidecars {
+                std::fs::write(dir.join(name), sound_blorb()).unwrap();
+            }
+            let resolved = resolve_resource_blorb(&story).is_some();
+            let tagged = sibling_blorb_by_name(&story).is_some();
+            assert_eq!(
+                resolved, tagged,
+                "row {i} ({story_name} beside {sidecars:?}): the row's `(blorb)` tag says \
+                 {tagged} and the launch says {resolved} — the tag is a claim about a file, \
+                 contradicted by what opening it actually does",
+            );
+            assert_eq!(
+                resolved, *expect_found,
+                "row {i} ({story_name} beside {sidecars:?}): the premise — a resource-only \
+                 sidecar is {} here",
+                if *expect_found { "present and unambiguous" } else { "ambiguous, so neither should claim it" },
+            );
+        }
     }
 
     // ── sibling_blorb_by_name (filename-only, powers the "(blorb)" tag) ──────
