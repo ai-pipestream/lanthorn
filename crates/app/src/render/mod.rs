@@ -55,6 +55,10 @@ use crate::colors::ColorScheme;
 
 /// Layer Z-machine text-style bits (ZMSD §8.7.1: 1=reverse, 2=bold, 4=italic,
 /// 8=fixed-pitch) over a base style. Fixed-pitch is ignored (already monospaced).
+///
+/// The Italic bit becomes `Modifier::ITALIC`, which asks the TERMINAL for its own
+/// italic face — see [`TextInk`] for why that is the whole answer on this path, and
+/// `render::bitfont` for the path where lanthorn holds the face itself.
 pub(crate) fn apply_text_style(base: Style, bits: u8) -> Style {
     let mut s = base;
     if bits & 0x02 != 0 {
@@ -67,6 +71,65 @@ pub(crate) fn apply_text_style(base: Style, bits: u8) -> Style {
         s = s.add_modifier(Modifier::ITALIC);
     }
     s
+}
+
+/// How a run's INK resolves on the CELL paths: whether the game's own colours are
+/// honoured, and the theme every channel it leaves alone is read against.
+///
+/// # Why the pair is a value (SQ-1028)
+///
+/// These two always come from the same place — `state.config.honor_game_colours`
+/// and `state.colors` — and were passed positionally through `screen::v6_run_style`,
+/// the five draw functions that hand them down, and `transcript::draw_str_runs`:
+/// thirty-odd call sites, several of which take the pair as their own parameters
+/// from further out. That is the shape CLAUDE.md's refactoring policy names, where
+/// "a caller who supplies a subset gets a plausible answer rather than an error", and
+/// the cure it prescribes is a type. The next ink fact now edits this one type.
+///
+/// # The next ink fact, and where it will come from
+///
+/// §8.7.1 leaves emphasis open — "An interpreter need not provide Bold or Italic
+/// (even for font 1) and is free to interpret them broadly. (For example, rendering
+/// bold-face by changing the colour, or rendering italic with underlining.)" — and
+/// the rule this project draws it by is: **use a real italic FACE where one is
+/// available, underline where none is, and never synthesise a slope of our own.**
+///
+/// On this path the face is the player's TERMINAL font, and `Modifier::ITALIC` is
+/// exactly the request "draw this with your italic face": lanthorn creates nothing.
+/// So the cell paths ask for italics and this type carries no emphasis fact yet.
+/// Where lanthorn DOES hold the face — `render::bitfont`, blitting a release's own
+/// bitmap typeface for the raster path — no shipped face carries an italic variant,
+/// which is where the rule's second half applies, and it is `native_font::TextFace`
+/// that has to answer it.
+#[derive(Clone, Copy)]
+pub(crate) struct TextInk<'a> {
+    /// `honor_game_colours` — the game's own run colours are consulted only when set.
+    honor: bool,
+    /// The theme every channel the game leaves alone is read against.
+    colors: &'a ColorScheme,
+}
+
+impl<'a> TextInk<'a> {
+    /// The ink the app is drawing with, from the one place that knows both facts.
+    pub(crate) fn of(state: &'a crate::state::AppState) -> TextInk<'a> {
+        TextInk { honor: state.config.honor_game_colours, colors: &state.colors }
+    }
+
+    /// Ink stated outright, for a case with no `AppState` to read it from. Every
+    /// production caller has one, which is the point — [`TextInk::of`] is the only
+    /// place these facts are decided.
+    #[cfg(test)]
+    pub(crate) fn new(honor: bool, colors: &'a ColorScheme) -> TextInk<'a> {
+        TextInk { honor, colors }
+    }
+
+    pub(crate) fn honor(self) -> bool {
+        self.honor
+    }
+
+    pub(crate) fn colors(self) -> &'a ColorScheme {
+        self.colors
+    }
 }
 
 /// Map a Z-machine colour to a ratatui `Color` via the user's theme palette.
@@ -297,5 +360,19 @@ mod text_style_tests {
         // composes: bold+italic
         let bi = apply_text_style(b, 0x06).add_modifier;
         assert!(bi.contains(Modifier::BOLD) && bi.contains(Modifier::ITALIC));
+    }
+
+    /// SQ-1028: the ink a cell path draws with is the app's own two settings, read
+    /// in one place, so a caller cannot supply one of them and get a plausible frame.
+    #[test]
+    fn text_ink_of_state_carries_both_colour_facts() {
+        let mut state = crate::state::AppState::default();
+        state.colors = ColorScheme::terminal_default();
+        for honor in [true, false] {
+            state.config.honor_game_colours = honor;
+            let ink = TextInk::of(&state);
+            assert_eq!(ink.honor(), honor);
+            assert_eq!(ink.colors().palette, state.colors.palette);
+        }
     }
 }

@@ -18,6 +18,8 @@ mod fixture_paths;
 mod v6_shogun_credit_replay;
 #[path = "suites/v6_shogun_declared_columns.rs"]
 mod v6_shogun_declared_columns;
+#[path = "suites/v6_shogun_emphasis_rule.rs"]
+mod v6_shogun_emphasis_rule;
 #[path = "suites/v6_shogun_gameplay.rs"]
 mod v6_shogun_gameplay;
 #[path = "suites/v6_shogun_menu_ground.rs"]

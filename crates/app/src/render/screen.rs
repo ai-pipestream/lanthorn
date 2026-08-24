@@ -14,6 +14,7 @@ use ratatui::layout::Rect;
 
 use crate::colors::ColorScheme;
 use crate::engine::{BorderPref, BufferWindow, Introspect, PositionedWindow, ScreenModel, StatusModel, WinNode};
+use crate::render::TextInk;
 use crate::render::transcript::{draw_str_runs, render_transcript, visible_wrapped_lines_kinded};
 use crate::render::upper_window::{draw_grid, draw_grid_transparent, draw_upper_window};
 use crate::state::{AppState, TranscriptKind};
@@ -1195,8 +1196,7 @@ fn render_node(
                             &layout.chrome,
                             native.0,
                             ratatui::style::Style::default(),
-                            state.config.honor_game_colours,
-                            &state.colors,
+                            TextInk::of(state),
                             state.v6_text.cell(),
                         )
                         .into_keys()
@@ -2193,7 +2193,7 @@ fn render_node(
                                         }
                                     }
                                     ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
-                                        runs, *r, &scale, cell_px, area, native, base, state.config.honor_game_colours, &state.colors, buf,
+                                        runs, *r, &scale, cell_px, area, native, base, TextInk::of(state), buf,
                                         state.v6_text.cell(),
                                     ),
                                 }
@@ -2231,7 +2231,7 @@ fn render_node(
                                     // rasterised copy of this very rule. Stamping the glyph across
                                     // all of them instead would be SQ-0750's doubled rule.
                                     BorderInk::Glyph { ch, style, fg, bg, col, .. } => {
-                                        let st = v6_run_style(base, *fg, *bg, *style, state.config.honor_game_colours, &state.colors);
+                                        let st = v6_run_style(base, *fg, *bg, *style, TextInk::of(state));
                                         let g = ch.to_string();
                                         for y in ext.y..ext.bottom() {
                                             for x in ext.x..ext.right() {
@@ -2246,7 +2246,7 @@ fn render_node(
                                     match strip {
                                         ChromeStrip::Art(_, r) => gr.draw_chrome_band(picker, &canvas, ms, area, *r, buf),
                                         ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
-                                            runs, *r, ms, cell_px, area, native, base, state.config.honor_game_colours, &state.colors, buf,
+                                            runs, *r, ms, cell_px, area, native, base, TextInk::of(state), buf,
                                             state.v6_text.cell(),
                                         ),
                                     }
@@ -2573,7 +2573,7 @@ fn render_node(
                             .filter(|pw| px_rect_to_cells(pw, &scale, cell_px, area, 0).y >= viewport.y)
                             .collect();
                         draw_erase_fills(
-                            &fill_chrome, viewport, buf, base, state.config.honor_game_colours, &state.colors,
+                            &fill_chrome, viewport, buf, base, TextInk::of(state),
                             &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area, 0),
                         );
                         draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
@@ -2767,7 +2767,7 @@ fn render_node(
                                 // Explicit game colours on the run replace the
                                 // theme base per channel; inherited channels
                                 // keep it, reverse toggles (SQ-0488).
-                                let style = v6_run_style(base, t.fg, t.bg, t.style, state.config.honor_game_colours, &state.colors);
+                                let style = v6_run_style(base, t.fg, t.bg, t.style, TextInk::of(state));
                                 let max_w = viewport.right() as usize - col as usize;
                                 if max_w > 0 {
                                     // Untrusted game text (SQ-0639).
@@ -2863,7 +2863,7 @@ fn render_node(
                                 cells: (area.x, area.y, area.width, area.height),
                             });
                         }
-                        draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native.0, state.v6_text.cell());
+                        draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, TextInk::of(state), &layout.chrome, native.0, state.v6_text.cell());
                         return None;
                     }
                 }
@@ -3217,7 +3217,7 @@ fn render_node(
                     // is supposed to be covering. The cell path is 1:1 with native rows
                     // (8x16 cells), so a window's rect maps by division.
                     draw_erase_fills(
-                        &layout.chrome, area, buf, status_style, state.config.honor_game_colours, &state.colors,
+                        &layout.chrome, area, buf, status_style, TextInk::of(state),
                         &|pw: &PositionedWindow| px_rect_to_cells(
                             pw,
                             &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 },
@@ -3233,18 +3233,18 @@ fn render_node(
                     // line anchored to the pane top. Drawn here, with the rest of the
                     // run stamping and after the erase fills, so a bar sits ON its
                     // own window's erased ground rather than under it (SQ-0712).
-                    draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors);
+                    draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, TextInk::of(state));
                     // Painted-screen overlay (SQ-0478): stamp the paint runs INSIDE
                     // the story box as absolutely-positioned terminal text on TOP of
                     // the transcript. A no-op in normal gameplay (chrome grids carry
                     // only the band runs); on a menu screen it draws the items + the
                     // reverse-video selection caret the anchored band drops.
-                    draw_painted_screen(&runs, story_top..story_bot, story_shift, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w, state.v6_text.cell());
+                    draw_painted_screen(&runs, story_top..story_bot, story_shift, area, buf, status_style, TextInk::of(state), &layout.chrome, native_w, state.v6_text.cell());
                     if let Some((first, n)) = bottom_span {
                         // Pack the command band's native rows against the pane
                         // bottom: native `first` lands on the first band row.
                         let shift = area.height as i32 - n as i32 - first as i32;
-                        draw_painted_screen(&runs, story_bot..u16::MAX, shift, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w, state.v6_text.cell());
+                        draw_painted_screen(&runs, story_bot..u16::MAX, shift, area, buf, status_style, TextInk::of(state), &layout.chrome, native_w, state.v6_text.cell());
                     }
                     return m;
                 }
@@ -3267,7 +3267,7 @@ fn render_node(
                             cells: (area.x, area.y, area.width, area.height),
                         });
                     }
-                    draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w, state.v6_text.cell());
+                    draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, TextInk::of(state), &layout.chrome, native_w, state.v6_text.cell());
                     return None;
                 }
             }
@@ -3630,7 +3630,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         if crate::render::inline_image::try_blit_band_row(state, wr, area.x, area.width, row_y, buf) {
             continue;
         }
-        draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, &state.colors, state.config.honor_game_colours);
+        draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, TextInk::of(state));
     }
 }
 
@@ -4347,26 +4347,25 @@ const STATUS_BAND_ROWS: u16 = 4;
 /// overlay). Mirrors the v1-5 / Glulx cell rule (`cell_style`): a run whose
 /// channel carries an EXPLICIT game colour (see [`v6_layout::packed_explicit`])
 /// replaces that channel; a Default or Standard-0/1 sentinel is inheritance, so
-/// the theme keeps the channel. Gated on `honor` exactly like every other
-/// engine's colour path — colours OFF ⇒ the theme `base` is returned untouched.
-/// The reverse bit toggles REVERSED (the terminal performs the fg/bg swap), so
-/// an explicit pair under reverse shows swapped and Shogun's Default/Default,
-/// non-reversed runs collapse to exactly `base`. (SQ-0488)
+/// the theme keeps the channel. Gated on the ink's `honor` exactly like every
+/// other engine's colour path — colours OFF ⇒ the theme `base` is returned
+/// untouched. The reverse bit toggles REVERSED (the terminal performs the fg/bg
+/// swap), so an explicit pair under reverse shows swapped and Shogun's
+/// Default/Default, non-reversed runs collapse to exactly `base`. (SQ-0488)
 fn v6_run_style(
     base: ratatui::style::Style,
     fg: u32,
     bg: u32,
     style_bits: u8,
-    honor: bool,
-    colors: &ColorScheme,
+    ink: TextInk,
 ) -> ratatui::style::Style {
     let mut s = base;
-    if honor {
+    if ink.honor() {
         if crate::render::v6_layout::packed_explicit(fg) {
-            s = s.fg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(fg), colors));
+            s = s.fg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(fg), ink.colors()));
         }
         if crate::render::v6_layout::packed_explicit(bg) {
-            s = s.bg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(bg), colors));
+            s = s.bg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(bg), ink.colors()));
         }
     }
     // ZMSD §8.7.1 style bits, as the model packs them (1 = reverse video,
@@ -4377,6 +4376,14 @@ fn v6_run_style(
     // clear — bold/italic only ever arrive from the run itself, so subtracting
     // them would fight the theme's own base style. Fixed-pitch (8) needs no
     // action in a monospaced terminal.
+    //
+    // Italic is `Modifier::ITALIC` — SGR 3, which asks the player's TERMINAL to draw
+    // the run with its own italic face. §8.7.1 lets an interpreter interpret the bit
+    // broadly ("rendering italic with underlining" is the standard's own example),
+    // and the rule here is to use a real italic FACE where one is available and
+    // underline where none is, never a slope we synthesised. On this path a face is
+    // always available, because it is the terminal's. The path where lanthorn holds
+    // the face itself is `render::bitfont` (SQ-1028).
     if style_bits & 2 != 0 {
         s = s.add_modifier(ratatui::style::Modifier::BOLD);
     }
@@ -4473,8 +4480,7 @@ fn full_width_flood_rows(
     chrome: &[&PositionedWindow],
     native_w: u16,
     base: ratatui::style::Style,
-    honor: bool,
-    colors: &ColorScheme,
+    ink: TextInk,
     cell: zvm::screen::V6Cell,
 ) -> std::collections::HashMap<u16, ratatui::style::Style> {
     use crate::render::v6_layout::packed_explicit;
@@ -4515,7 +4521,7 @@ fn full_width_flood_rows(
         // Reverse only where the game asked for it: a plain strip floods with the
         // theme's own bar style, exactly as the anchored band does.
         let style_bits = u8::from(all_reverse);
-        out.insert(row, v6_run_style(base, fg, bg, style_bits, honor, colors));
+        out.insert(row, v6_run_style(base, fg, bg, style_bits, ink));
     }
     out
 }
@@ -4572,8 +4578,7 @@ fn draw_erase_fills(
     area: Rect,
     buf: &mut Buffer,
     base: ratatui::style::Style,
-    honor: bool,
-    colors: &ColorScheme,
+    ink: TextInk,
     to_cells: &dyn Fn(&PositionedWindow) -> Rect,
 ) {
     let mut fills: Vec<(&PositionedWindow, crate::engine::ErasedFill)> = chrome
@@ -4585,7 +4590,7 @@ fn draw_erase_fills(
         .collect();
     fills.sort_by_key(|(_, f)| f.seq);
     for (pw, f) in fills {
-        let style = v6_run_style(base, 0, f.bg, 0, honor, colors);
+        let style = v6_run_style(base, 0, f.bg, 0, ink);
         let r = to_cells(pw);
         for y in r.y.max(area.y)..r.bottom().min(area.bottom()) {
             for x in r.x.max(area.x)..r.right().min(area.right()) {
@@ -4604,8 +4609,7 @@ fn draw_painted_screen(
     area: Rect,
     buf: &mut Buffer,
     base: ratatui::style::Style,
-    honor: bool,
-    colors: &ColorScheme,
+    ink: TextInk,
     chrome: &[&PositionedWindow],
     native_w: u16,
     cell: zvm::screen::V6Cell,
@@ -4626,7 +4630,7 @@ fn draw_painted_screen(
     // reverse bar rather than reverse across only its own glyphs. A narrow window's
     // reverse row (Shogun's boot-menu selection) is untouched — it stays a
     // text-width highlight block below.
-    let flood = full_width_flood_rows(chrome, native_w, base, honor, colors, cell);
+    let flood = full_width_flood_rows(chrome, native_w, base, ink, cell);
     for (&row, &style) in &flood {
         let Some(y) = place(row) else { continue };
         for x in area.x..area.right() {
@@ -4660,7 +4664,7 @@ fn draw_painted_screen(
         // or a cell once reversed stays reversed after the game repaints it
         // plain (SQ-0490). Explicit game colours on the run replace the theme
         // base per channel; inherited/Default channels keep it (SQ-0488).
-        let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
+        let style = v6_run_style(base, t.fg, t.bg, t.style, ink);
         let max_w = (area.right() - (area.x + col)) as usize;
         // Untrusted game text (SQ-0639): a control char would shift the rest of
         // the run a column left, and these runs are pixel-placed.
@@ -7155,8 +7159,7 @@ fn draw_chrome_text_strip(
     pane: Rect,
     native: (u16, u16),
     base: ratatui::style::Style,
-    honor: bool,
-    colors: &ColorScheme,
+    ink: TextInk,
     buf: &mut Buffer,
     cell: zvm::screen::V6Cell,
 ) {
@@ -7179,7 +7182,7 @@ fn draw_chrome_text_strip(
     let strip_fill = if crate::render::v6_layout::packed_explicit(strip_fg)
         || crate::render::v6_layout::packed_explicit(strip_bg)
     {
-        v6_run_style(base, strip_fg, strip_bg, 0, honor, colors)
+        v6_run_style(base, strip_fg, strip_bg, 0, ink)
     } else {
         base
     };
@@ -7280,7 +7283,7 @@ fn draw_chrome_text_strip(
         }
     }
     if !divider_rows.is_empty() {
-        let rev = v6_run_style(base, 0, 0, 1, honor, colors);
+        let rev = v6_run_style(base, 0, 0, 1, ink);
         for (&c, &(first, last)) in &divider_rows {
             let lo = first.max(rect.y as i32);
             let hi = last.min(rect.bottom() as i32 - 1);
@@ -7313,7 +7316,7 @@ fn draw_chrome_text_strip(
             || crate::render::v6_layout::packed_explicit(row_fg)
             || crate::render::v6_layout::packed_explicit(row_bg)
         {
-            let fill = v6_run_style(base, row_fg, row_bg, all_rev as u8, honor, colors);
+            let fill = v6_run_style(base, row_fg, row_bg, all_rev as u8, ink);
             // Bounded by the game SCREEN, like the strip flood above (SQ-0946).
             for c in rect.x.max(screen_lo)..rect.right().min(screen_hi) {
                 buf.set_stringn(c, *row as u16, " ", 1, fill);
@@ -7453,7 +7456,7 @@ fn draw_chrome_text_strip(
             // was thrown away for the sake of the padding cell in front of it.
             let clip = (rect.x as i32 - col).max(0) as usize;
             let col = col + clip as i32;
-            let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
+            let style = v6_run_style(base, t.fg, t.bg, t.style, ink);
             let max_w = rect.right() as usize - col as usize;
             if max_w == 0 {
                 continue;
@@ -7832,8 +7835,7 @@ fn draw_anchored_status_band(
     area: Rect,
     buf: &mut Buffer,
     style: ratatui::style::Style,
-    honor: bool,
-    colors: &ColorScheme,
+    ink: TextInk,
 ) -> u16 {
     let left_bound = ncols / 3; // left-third boundary (cells)
     let right_bound = ncols * 2 / 3; // right two-thirds boundary (cells)
@@ -7919,7 +7921,7 @@ fn draw_anchored_status_band(
         let row_fg = row_runs.iter().map(|t| t.fg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
         let row_bg = row_runs.iter().map(|t| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
         let row_rev = row_runs.iter().any(|t| t.style & 1 != 0) as u8;
-        let row_style = v6_run_style(style, row_fg, row_bg, row_rev, honor, colors);
+        let row_style = v6_run_style(style, row_fg, row_bg, row_rev, ink);
         if place_anchored_row(buf, area, area.y + (row - first_row), &left_str, &center_str, &right_str, row_style) {
             rows_used = rows_used.max(row - first_row + 1);
         }
@@ -10567,7 +10569,7 @@ mod tests {
             let runs: Vec<&crate::engine::PxText> = vec![&t];
             let mut buf = Buffer::empty(area);
             draw_painted_screen(
-                &runs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), honor, &colors, &[], 640,
+                &runs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), TextInk::new(honor, &colors), &[], 640,
                 zvm::screen::V6Cell::DEFAULT,
             );
             assert_eq!(read(&buf, 0, 5), "AB CD", "honor={honor}: the control char blanks, D stays in column 4");
@@ -11238,7 +11240,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
-        draw_painted_screen(&runs, 0..u16::MAX, 0, area, &mut buf, base, true, &colors, &chrome, native_w, zvm::screen::V6Cell::DEFAULT);
+        draw_painted_screen(&runs, 0..u16::MAX, 0, area, &mut buf, base, TextInk::new(true, &colors), &chrome, native_w, zvm::screen::V6Cell::DEFAULT);
 
         let reversed_count = |y: u16| -> u16 {
             (0..area.width).filter(|&x| buf.cell((x, y)).unwrap().modifier.contains(Modifier::REVERSED)).count() as u16
@@ -11525,7 +11527,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let style = ratatui::style::Style::default();
         let colors = crate::colors::ColorScheme::terminal_default();
-        let rows_used = draw_anchored_status_band(&refs, ncols, 4, area, &mut buf, style, true, &colors);
+        let rows_used = draw_anchored_status_band(&refs, ncols, 4, area, &mut buf, style, TextInk::new(true, &colors));
         let text: String = (0..w).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         (text, rows_used)
     }
@@ -11660,7 +11662,7 @@ mod tests {
             let mut buf = Buffer::empty(area);
             let colors = crate::colors::ColorScheme::terminal_default();
             let drawn = draw_anchored_status_band(
-                &refs, 40, band_rows, area, &mut buf, ratatui::style::Style::default(), true, &colors,
+                &refs, 40, band_rows, area, &mut buf, ratatui::style::Style::default(), TextInk::new(true, &colors),
             );
             assert_eq!(
                 anchored_band_rows(&refs, band_rows, pane_h),
@@ -11680,7 +11682,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         let colors = crate::colors::ColorScheme::terminal_default();
-        let rows_used = draw_anchored_status_band(&refs, 40, 4, area, &mut buf, ratatui::style::Style::default(), true, &colors);
+        let rows_used = draw_anchored_status_band(&refs, 40, 4, area, &mut buf, ratatui::style::Style::default(), TextInk::new(true, &colors));
         assert_eq!(rows_used, 2, "two native rows populated");
         let r0: String = (0..80).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         let r1: String = (0..80).map(|x| buf.cell((x, 1)).unwrap().symbol().to_string()).collect();
@@ -11742,7 +11744,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
         let colors = crate::colors::ColorScheme::terminal_default();
-        draw_painted_screen(&refs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0, zvm::screen::V6Cell::DEFAULT);
+        draw_painted_screen(&refs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), TextInk::new(true, &colors), &[], 0, zvm::screen::V6Cell::DEFAULT);
         // Every cell of the bar (cols 0..5) is REVERSED — including the gap at col 2.
         for x in 0..5u16 {
             assert!(
@@ -11759,7 +11761,7 @@ mod tests {
             .map(|t| crate::engine::PxText { style: 0, ..t.clone() })
             .collect();
         let prefs: Vec<&crate::engine::PxText> = plain.iter().collect();
-        draw_painted_screen(&prefs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0, zvm::screen::V6Cell::DEFAULT);
+        draw_painted_screen(&prefs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), TextInk::new(true, &colors), &[], 0, zvm::screen::V6Cell::DEFAULT);
         assert!(
             !buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
             "the gap cell is repainted plain once the selection moves away (SQ-0490)"
@@ -11776,7 +11778,7 @@ mod tests {
         let colors = crate::colors::ColorScheme::terminal_default();
         let base = colors.theme.get("upper_window").style;
         let fg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(3));
-        let s = v6_run_style(base, fg, 0, 0, true, &colors);
+        let s = v6_run_style(base, fg, 0, 0, TextInk::new(true, &colors));
         assert_eq!(s.fg, Some(crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(3), &colors)));
         assert_eq!(s.bg, base.bg, "unset bg keeps the theme background");
     }
@@ -11787,7 +11789,7 @@ mod tests {
         let colors = crate::colors::ColorScheme::terminal_default();
         let base = colors.theme.get("upper_window").style;
         let bg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x40_2010));
-        let s = v6_run_style(base, 0, bg, 0, true, &colors);
+        let s = v6_run_style(base, 0, bg, 0, TextInk::new(true, &colors));
         assert_eq!(s.bg, Some(ratatui::style::Color::Rgb(0x40, 0x20, 0x10)));
         assert_eq!(s.fg, base.fg, "unset fg keeps the theme foreground");
     }
@@ -11804,7 +11806,7 @@ mod tests {
             crate::state::pack_zcolour(zvm::screen::ZColour::Standard(0)),
             crate::state::pack_zcolour(zvm::screen::ZColour::Standard(1)),
         ] {
-            let s = v6_run_style(base, packed, packed, 0, true, &colors);
+            let s = v6_run_style(base, packed, packed, 0, TextInk::new(true, &colors));
             assert_eq!(s.fg, base.fg, "sentinel {packed:#x} keeps theme fg");
             assert_eq!(s.bg, base.bg, "sentinel {packed:#x} keeps theme bg");
             assert!(!s.add_modifier.contains(ratatui::style::Modifier::REVERSED));
@@ -11815,9 +11817,9 @@ mod tests {
     fn v6_run_style_reverse_bit_toggles_modifier() {
         let colors = crate::colors::ColorScheme::terminal_default();
         let base = colors.theme.get("upper_window").style;
-        let rev = v6_run_style(base, 0, 0, 1, true, &colors);
+        let rev = v6_run_style(base, 0, 0, 1, TextInk::new(true, &colors));
         assert!(rev.add_modifier.contains(ratatui::style::Modifier::REVERSED), "reverse bit adds REVERSED");
-        let plain = v6_run_style(base.add_modifier(ratatui::style::Modifier::REVERSED), 0, 0, 0, true, &colors);
+        let plain = v6_run_style(base.add_modifier(ratatui::style::Modifier::REVERSED), 0, 0, 0, TextInk::new(true, &colors));
         assert!(plain.sub_modifier.contains(ratatui::style::Modifier::REVERSED), "no reverse bit removes REVERSED");
     }
 
@@ -11829,14 +11831,30 @@ mod tests {
         use ratatui::style::Modifier;
         let colors = crate::colors::ColorScheme::terminal_default();
         let base = colors.theme.get("upper_window").style;
-        assert!(v6_run_style(base, 0, 0, 2, true, &colors).add_modifier.contains(Modifier::BOLD));
-        assert!(v6_run_style(base, 0, 0, 4, true, &colors).add_modifier.contains(Modifier::ITALIC));
+        assert!(v6_run_style(base, 0, 0, 2, TextInk::new(true, &colors)).add_modifier.contains(Modifier::BOLD));
+        assert!(v6_run_style(base, 0, 0, 4, TextInk::new(true, &colors)).add_modifier.contains(Modifier::ITALIC));
         // Combined with reverse video, and unaffected by the colour gate.
-        let all = v6_run_style(base, 0, 0, 1 | 2 | 4, false, &colors).add_modifier;
+        let all = v6_run_style(base, 0, 0, 1 | 2 | 4, TextInk::new(false, &colors)).add_modifier;
         assert!(all.contains(Modifier::BOLD) && all.contains(Modifier::ITALIC) && all.contains(Modifier::REVERSED));
         // Fixed-pitch (8) alone still adds nothing in a monospaced terminal.
-        let fixed = v6_run_style(base, 0, 0, 8, true, &colors);
+        let fixed = v6_run_style(base, 0, 0, 8, TextInk::new(true, &colors));
         assert!(!fixed.add_modifier.contains(Modifier::BOLD) && !fixed.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn v6_run_style_asks_the_terminal_for_italics_and_never_both() {
+        // SQ-1028: §8.7.1 lets an interpreter render the Italic bit broadly, and the
+        // rule here is a real italic FACE where one is available, an underline where
+        // none is, and never a slope we synthesised. On a cell path the face is the
+        // player's terminal font, so the bit is SGR 3 and nothing else — in
+        // particular the two renderings are alternatives, never both, since doing
+        // both is neither.
+        use ratatui::style::Modifier;
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let emph = v6_run_style(base, 0, 0, 4, TextInk::new(true, &colors)).add_modifier;
+        assert!(emph.contains(Modifier::ITALIC), "the terminal's own italic face is what §8.7.1's bit asks for here");
+        assert!(!emph.contains(Modifier::UNDERLINED), "…and it is not also underlined — one bit, one rendering");
     }
 
     #[test]
@@ -11847,7 +11865,7 @@ mod tests {
         let base = colors.theme.get("upper_window").style;
         let fg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(3));
         let bg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x123456));
-        let s = v6_run_style(base, fg, bg, 0, false, &colors);
+        let s = v6_run_style(base, fg, bg, 0, TextInk::new(false, &colors));
         assert_eq!(s.fg, base.fg);
         assert_eq!(s.bg, base.bg);
     }
@@ -11864,7 +11882,7 @@ mod tests {
         let refs: Vec<&crate::engine::PxText> = vec![&coloured, &plain];
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
-        draw_painted_screen(&refs, 0..u16::MAX, 0, area, &mut buf, base, true, &colors, &[], 0, zvm::screen::V6Cell::DEFAULT);
+        draw_painted_screen(&refs, 0..u16::MAX, 0, area, &mut buf, base, TextInk::new(true, &colors), &[], 0, zvm::screen::V6Cell::DEFAULT);
         assert_eq!(
             buf.cell((0, 0)).unwrap().fg,
             crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(3), &colors),
@@ -11884,7 +11902,7 @@ mod tests {
         let refs: Vec<&crate::engine::PxText> = vec![&coloured];
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
-        draw_anchored_status_band(&refs, 40, 4, area, &mut buf, base, true, &colors);
+        draw_anchored_status_band(&refs, 40, 4, area, &mut buf, base, TextInk::new(true, &colors));
         assert_eq!(
             buf.cell((0, 0)).unwrap().fg,
             crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(4), &colors),
@@ -11894,7 +11912,7 @@ mod tests {
         let plain = crate::engine::PxText::derived(1, 1, "Shogun".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT);
         let prefs: Vec<&crate::engine::PxText> = vec![&plain];
         let mut buf2 = Buffer::empty(area);
-        draw_anchored_status_band(&prefs, 40, 4, area, &mut buf2, base, true, &colors);
+        draw_anchored_status_band(&prefs, 40, 4, area, &mut buf2, base, TextInk::new(true, &colors));
         assert_eq!(buf2.cell((0, 0)).unwrap().fg, base.fg.unwrap_or(ratatui::style::Color::Reset), "Default band stays theme-styled");
     }
 
