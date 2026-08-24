@@ -228,9 +228,13 @@ pub struct Machine {
     /// is state at all and why 7 on a Macintosh is a DECLARED metric rather than
     /// a drawn advance.
     ///
-    /// [`V6Cell::DEFAULT`] until a host calls [`Machine::set_v6_cell`], which is
+    /// [`V6Cell::DEFAULT`] until a host calls [`Machine::set_v6_text`], which is
     /// the 8x16 every unit test in this crate expects.
-    pub v6_cell: V6Cell,
+    ///
+    /// Since SQ-1009 this carries the machine's PEN as well as its cell — see
+    /// [`crate::screen::V6Metric`] for why the declared metric and the drawn
+    /// advance are one value. [`Machine::v6_cell`] reads the declared half.
+    pub v6_metric: crate::screen::V6Metric,
     /// Output stream routing: streams 1/2/3/4 state.
     pub streams: StreamState,
     /// Snapshot of the original dynamic memory (bytes 0..static_mem_base) taken
@@ -541,7 +545,7 @@ impl Machine {
             out,
             pending_input: None,
             screen,
-            v6_cell: V6Cell::DEFAULT,
+            v6_metric: crate::screen::V6Metric::fixed(V6Cell::DEFAULT),
             streams: StreamState::new(),
             original_dynamic,
             undo_stack: Vec::new(),
@@ -759,7 +763,24 @@ impl Machine {
     /// Window PIXEL sizes are deliberately left alone: they are a screen the host
     /// has not reported yet, and `set_screen_dims` owns them.
     pub fn set_v6_cell(&mut self, cell: crate::screen::V6Cell) {
-        self.v6_cell = cell;
+        self.set_v6_text(crate::screen::V6Metric::fixed(cell));
+    }
+
+    /// The declared Version 6 cell this session runs on — [`V6Metric::cell`].
+    pub fn v6_cell(&self) -> crate::screen::V6Cell {
+        self.v6_metric.cell()
+    }
+
+    /// Declare the cell AND the pen together (SQ-1009).
+    ///
+    /// [`Machine::set_v6_cell`] is this with a fixed pen, which is every machine
+    /// whose release did not ship a proportional face. Arthur's Amiga floppy did,
+    /// and the difference is not decoration: the pen is what the cursor advances
+    /// by, what a line wraps at, and what header `$30` reports when the game
+    /// measures a string through stream 3.
+    pub fn set_v6_text(&mut self, metric: crate::screen::V6Metric) {
+        let cell = metric.cell();
+        self.v6_metric = metric;
         if let Some(v6) = self.screen.v6.as_mut() {
             for w in v6.windows.iter_mut() {
                 w.font_size = (cell.h << 8) | cell.w;
@@ -789,7 +810,7 @@ impl Machine {
         if self.mem.version() != 6 {
             return;
         }
-        let cell = self.v6_cell;
+        let cell = self.v6_cell();
         crate::screen::write_screen_dims_px(&mut self.mem, width_px, height_px, cell);
         if let Some(v6) = self.screen.v6.as_mut() {
             // frotz `restart_screen`: windows 0 and 1 take the new screen WIDTH so a
@@ -805,7 +826,7 @@ impl Machine {
     }
 
     pub fn set_screen_dims(&mut self, rows: u8, cols: u8) {
-        let cell = self.v6_cell;
+        let cell = self.v6_cell();
         crate::screen::write_screen_dims(&mut self.mem, rows, cols, cell);
         if self.mem.version() == 6 {
             if let Some(v6) = self.screen.v6.as_mut() {
@@ -1780,7 +1801,7 @@ impl Machine {
         branch: Option<Branch>,
     ) -> StepResult {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
-        let cell = self.v6_cell;
+        let cell = self.v6_cell();
         match opcode {
             // 0x00 call / call_vs — call with up to 3 args, store result
             0x00 => {
@@ -2042,7 +2063,7 @@ impl Machine {
                             let w = &mut v6.windows[win];
                             let nw = if screen_w > 0 { screen_w } else { w.x_size };
                             if (w.y_coord, w.x_coord, w.y_size, w.x_size) != (y, 1, h, nw)
-                                && w.retire_streamed(1, y, nw, h, cell)
+                                && w.retire_streamed(1, y, nw, h, &self.v6_metric)
                             {
                                 retired = true;
                                 whole &= w.streamed.is_empty();
@@ -2344,7 +2365,7 @@ impl Machine {
                                     w.x_size as i32,
                                 )
                             };
-                            v6.erase_screen_rect(top, left, h, wd, cell);
+                            v6.erase_screen_rect(top, left, h, wd, &self.v6_metric);
                             let w = &mut v6.windows[n as usize];
                             // ZMSD §8.8.5.3: erase "to background colour (even
                             // if the current text style is Reverse Video)" — the
@@ -2628,7 +2649,7 @@ impl Machine {
                         self.streams.push_stream3(table, width_px);
                     }
                     -3 => {
-                        self.streams.pop_stream3(&mut self.mem, self.v6_cell);
+                        self.streams.pop_stream3(&mut self.mem, &self.v6_metric);
                     }
                     4  => { self.streams.stream4 = true; }
                     -4 => { self.streams.stream4 = false; }
@@ -2819,11 +2840,15 @@ impl Machine {
                         let width = if value == 1 { to_edge } else { (value as i32 - 1).min(to_edge) };
                         (y_abs, x_abs, width)
                     };
-                    v6.erase_screen_rect(top, left, cell.h as i32, width, cell);
+                    v6.erase_screen_rect(top, left, cell.h as i32, width, &self.v6_metric);
                     // Cell-grid mirror: blank from the cursor cell rightward.
+                    // The CELL the cursor is in is the grid's own pen, not the
+                    // pixel cursor divided by the cell (SQ-1009): on a machine
+                    // drawing proportionally the two are different columns, and
+                    // dividing here erased from a column right of the text and
+                    // left its head standing.
                     let w = &mut v6.windows[cur.min(7)];
-                    let row = (w.y_cursor.max(1) - 1) / cell.h + 1;
-                    let start = (w.x_cursor.max(1) - 1) / cell.w + 1;
+                    let (row, start) = w.grid_cursor(cell);
                     let cells = (width.max(0) as u16).div_ceil(cell.w);
                     for c in start..(start + cells).min(w.grid.cols + 1) {
                         w.grid.put(row, c, ' ', 0, w.fg, w.bg);
@@ -2886,7 +2911,7 @@ impl Machine {
 
     fn exec_ext(&mut self, opcode: u8, ops: &[u16], store: Option<u8>, branch: Option<Branch>) -> StepResult {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
-        let cell = self.v6_cell;
+        let cell = self.v6_cell();
         match opcode {
             // EXT:0x00 save — 0 operands: full game-state save (suspend).
             // ≥3 operands: v5 auxiliary "save table bytes name [prompt]".
@@ -3236,7 +3261,7 @@ impl Machine {
                         if (w.y_coord, w.x_coord) != (y, x) {
                             // Freeze whatever the window's NEW box leaves behind.
                             let (bw, bh) = (w.x_size, w.y_size);
-                            retired = w.retire_streamed(x, y, bw, bh, cell);
+                            retired = w.retire_streamed(x, y, bw, bh, &self.v6_metric);
                             whole = w.streamed.is_empty();
                         }
                         w.put_prop(0, y); // clamped — see ZWindow::put_prop
@@ -3276,7 +3301,7 @@ impl Machine {
                         // new height and `x` the new width (ZMSD §15).
                         if (w.y_size, w.x_size) != (y, x) {
                             let (bx, by) = (w.x_coord, w.y_coord);
-                            retired = w.retire_streamed(bx, by, x, y, cell);
+                            retired = w.retire_streamed(bx, by, x, y, &self.v6_metric);
                             whole = w.streamed.is_empty();
                         }
                         w.put_prop(2, y); // clamped — see ZWindow::put_prop
@@ -3953,7 +3978,7 @@ impl Machine {
     /// clicking a label did nothing while the blank row below it worked. Nearest
     /// gives line 5, which lands the row inside that band exactly.
     fn v6_take_declared_indent(&mut self, s: &str) -> (usize, usize) {
-        let cell = self.v6_cell;
+        let cell = self.v6_cell();
         let Some((win, col, row)) = self.v6_declared_x.take() else { return (0, 0) };
         let Some(v6) = self.screen.v6.as_ref() else { return (0, 0) };
         if win != v6.current || s.starts_with('\n') {
@@ -3984,8 +4009,10 @@ impl Machine {
     /// No-op below v6.
     fn v6_advance_prose_cursor(&mut self, s: &str, shadow: bool) {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
-        let cell = self.v6_cell;
-        let fw = cell.w;
+        // SQ-1009: and its PEN, because on a machine that drew proportionally the
+        // cursor a story reads back moved by the glyph, not by the cell.
+        let metric = &self.v6_metric;
+        let cell = metric.cell();
         // The style/colours this text is going out in, for the SQ-0697 shadow
         // below — read before the window borrow.
         let (style, fg, bg) = (self.screen.text_style, self.screen.current_fg, self.screen.current_bg);
@@ -3999,8 +4026,9 @@ impl Machine {
                 w.prose_new_line(cell);
                 continue;
             }
+            let adv = metric.advance(ch, style);
             let right_edge = w.x_size.saturating_sub(w.right_margin);
-            if w.x_cursor.saturating_add(fw).saturating_sub(1) > right_edge {
+            if w.x_cursor.saturating_add(adv).saturating_sub(1) > right_edge {
                 w.prose_new_line(cell);
             }
             // Shadow where this glyph landed, so the prose can be frozen in place
@@ -4009,9 +4037,9 @@ impl Machine {
             // which is where the game's own `set_cursor` put it; the host stream
             // carries that column as an indent instead and cannot be read back.
             if shadow {
-                w.record_streamed(ch, style, fg, bg, cell);
+                w.record_streamed(ch, style, fg, bg, metric);
             }
-            w.x_cursor = w.x_cursor.saturating_add(fw);
+            w.x_cursor = w.x_cursor.saturating_add(adv);
         }
     }
 
@@ -4023,7 +4051,7 @@ impl Machine {
     /// "[MORE]" off for good. No-op below v6.
     fn v6_reload_line_counts(&mut self) {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
-        let cell = self.v6_cell;
+        let cell = self.v6_cell();
         if let Some(v6) = self.screen.v6.as_mut() {
             for w in v6.windows.iter_mut() {
                 w.reload_line_count(cell);
@@ -4118,7 +4146,7 @@ impl Machine {
     /// With any other font the output is byte-identical to the input.
     pub fn print_text(&mut self, s: &str) {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
-        let cell = self.v6_cell;
+        let cell = self.v6_cell();
         // ZMSD 7.1.2.5: when stream 3 is selected it is the ONLY output stream —
         // any future stream-2/4 transcript sink MUST be added below this early
         // return, never above it.
@@ -4189,32 +4217,96 @@ impl Machine {
                 // earlier runs it covers (Shogun overprints its status line at
                 // a fixed pixel cursor every turn).
                 let mut finished: Vec<crate::screen::V6Text> = Vec::new();
+                // The machine's PEN, read before `self.screen` is borrowed. On
+                // every machine but Arthur's Amiga press this answers the cell
+                // width for every glyph and everything below is what it was.
+                let metric = &self.v6_metric;
                 if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
                     let fw = cell.w;
                     let fh = cell.h;
                     let cols = w.grid.cols.max(1);
                     let (fg, bg) = (w.fg, w.bg);
                     let bound = screen_h.max(w.grid.rows) * fh; // px bound
-                    // The cursor is in 1-based PIXELS; the cell it maps to is
-                    // `(px-1)/font + 1`. Each printed run is also recorded at
-                    // its exact pixel start (`texts`) for pixel-faithful rasters.
-                    let mut run: Option<crate::screen::V6Text> = None;
+                    // Wrapping is the window's attribute bit 0 (ZMSD §8.8.3.2
+                    // prop 14; frotz update_attributes). With it CLEAR — the
+                    // boot default for windows 1-7 — text does NOT wrap at the
+                    // window's own width: Shogun prints its boot-menu items
+                    // through a 1-px caret window and they must paint rightward
+                    // on the screen, clipped only at the screen edge.
+                    let wrapping = w.attributes & 1 != 0;
                     // ZMSD §8.8.3.1.2.2: "If 'buffered printing' is on, then
                     // text is wrapped after the last word which could fit on a
                     // line. If not, then text is wrapped after the last
                     // character that could fit." Word wrapping therefore needs
                     // BOTH wrapping (attribute 0) and buffered printing
                     // (attribute 3); with buffering off the per-character wrap
-                    // at the end of this loop stands (SQ-0535).
+                    // stands (SQ-0535).
                     let word_wrap = w.wrapping() && w.buffered();
-                    let chars: Vec<char> = s.chars().collect();
-                    let mut i = 0;
-                    while i < chars.len() {
-                        let ch = chars[i];
-                        i += 1;
+                    // The line's right edge, stated once per measure. In pixels
+                    // it is `cols * cell.w` rather than `x_size` so that a window
+                    // the cell does not divide breaks exactly where it always
+                    // has — that is where the character wrap has always been, and
+                    // keeping it there is what makes every fixed-pen machine
+                    // byte-identical through this rewrite.
+                    //
+                    // The two are the same number whenever the cell divides the
+                    // window, which is every window SQ-1009 measured (Arthur's
+                    // 584 on a declared 8). **If a declared width is ever chosen
+                    // that does NOT divide, this has to become the window's own
+                    // `x_size - right_margin`** — the bound
+                    // `v6_advance_prose_cursor` already uses one screen regime
+                    // over. A declared 16 for the Amiga, which its F4 score
+                    // screen argues for, would leave 576 here and wrap the F5
+                    // description one word early.
+                    let (limit_px, limit_cols) = if wrapping {
+                        (u32::from(cols) * u32::from(fw), u32::from(cols))
+                    } else {
+                        (u32::MAX, u32::MAX)
+                    };
+                    let margin_px = u32::from(w.left_margin.saturating_add(1));
+                    let margin_col = cell.col_of(w.left_margin.saturating_add(1)) + 1;
+                    // Font 3 substitutes before anything measures, because the
+                    // glyph the pen advances over has to be the glyph the
+                    // renderer draws — a box-drawing substitution is outside the
+                    // face and falls back to the cell on both sides (ZMSD §16).
+                    let glyph = |ch: char| if font3 { font3_translate(ch) } else { ch };
+                    // Where the grid's pen stands BEFORE the pixel cursor moves —
+                    // `grid_cursor` reads the two against each other (SQ-1009).
+                    let (mut r, mut c) = w.grid_cursor(cell);
+                    // The window's own cell origin, so a run can carry the SCREEN
+                    // cell it was written at (`V6Text::grow`/`gcol`) — the address
+                    // a terminal backend places by, which it cannot derive from a
+                    // proportional run's pixel origin.
+                    let (win_row, win_col) =
+                        (cell.row_of(w.y_coord.max(1)), cell.col_of(w.x_coord.max(1)));
+
+                    // Both measures of the same text, as break INDICES so one pass
+                    // over the string can honour both: the PIXEL wrap is the game's
+                    // truth (it is what `@get_cursor` reports and what the raster
+                    // draws), the COLUMN wrap fills the hybrid backend's own width.
+                    // One routine, two calls — see `screen::wrap_text`.
+                    let px_breaks = crate::screen::wrap_text(
+                        s,
+                        u32::from(w.x_cursor.max(1)),
+                        margin_px,
+                        limit_px,
+                        word_wrap,
+                        &mut |ch| u32::from(metric.advance(glyph(ch), style)),
+                    );
+                    let gr_breaks = crate::screen::wrap_text(
+                        s,
+                        u32::from(c),
+                        u32::from(margin_col),
+                        limit_cols,
+                        word_wrap,
+                        &mut |_| 1,
+                    );
+                    let (mut pi, mut gi) = (0usize, 0usize);
+                    let mut run: Option<crate::screen::V6Text> = None;
+                    for (i, ch) in s.chars().enumerate() {
                         if ch == '\n' {
-                            if let Some(r) = run.take() {
-                                finished.push(r);
+                            if let Some(done) = run.take() {
+                                finished.push(done);
                             }
                             if w.scrolling() {
                                 w.tick_line_count();
@@ -4222,105 +4314,95 @@ impl Machine {
                             // Saturating, because this is an ACCUMULATION and no
                             // clamp on the stored value can bound one: a paint
                             // window never scrolls, so a story that keeps printing
-                            // walks the cursor up a cell per new-line for as long
+                            // walks the cursor down a cell per new-line for as long
                             // as it likes (SQ-1030). Same spelling as
                             // `ZWindow::prose_new_line`, one file away.
                             w.y_cursor = w.y_cursor.saturating_add(fh);
                             w.x_cursor = w.left_margin.saturating_add(1);
+                            r = r.saturating_add(1);
+                            c = margin_col;
                             continue;
                         }
-                        // Word wrap: measure the word about to start and break
-                        // the line ahead of it if it cannot fit. Frotz buffers
-                        // a word together with its leading space and drops that
-                        // space at the break (`screen_word`), so the wrapped
-                        // line does not end in a stray blank. A word longer than
-                        // the whole line is left to the character wrap below.
-                        // (Our buffer only spans one print call, so a word split
-                        // across two calls still breaks mid-word — real v6 games
-                        // print prose through the host path, not here.)
-                        if word_wrap {
-                            let at_space = ch == ' ';
-                            if at_space || i == 1 {
-                                let start = if at_space { i } else { i - 1 };
-                                let word = chars[start..]
-                                    .iter()
-                                    .take_while(|c| **c != ' ' && **c != '\n')
-                                    .count();
-                                let col = ((w.x_cursor.max(1) - 1) / fw + 1) as usize;
-                                let need = word + usize::from(at_space);
-                                if word > 0
-                                    && col > 1
-                                    && word <= cols as usize
-                                    && col + need - 1 > cols as usize
-                                {
-                                    if let Some(r) = run.take() {
-                                        finished.push(r);
-                                    }
-                                    if w.scrolling() {
-                                        w.tick_line_count();
-                                    }
-                                    w.y_cursor = w.y_cursor.saturating_add(fh);
-                                    w.x_cursor = w.left_margin.saturating_add(1);
-                                    if at_space {
-                                        continue; // the break consumes the space
-                                    }
-                                }
+                        let px_here = px_breaks.get(pi).filter(|b| b.at == i).copied();
+                        if px_here.is_some() {
+                            pi += 1;
+                        }
+                        let gr_here = gr_breaks.get(gi).filter(|b| b.at == i).copied();
+                        if gr_here.is_some() {
+                            gi += 1;
+                        }
+                        // A run addresses ONE pixel origin and ONE grid cell, so
+                        // either measure breaking ends it.
+                        if px_here.is_some() || gr_here.is_some() {
+                            if let Some(done) = run.take() {
+                                finished.push(done);
                             }
                         }
-                        let out_ch = if font3 { font3_translate(ch) } else { ch };
-                        // Wrapping is the window's attribute bit 0 (ZMSD
-                        // §8.8.3.2 prop 14; frotz update_attributes). With it
-                        // CLEAR — the boot default for windows 1-7 — text does
-                        // NOT wrap at the window's own width: Shogun prints
-                        // its boot-menu items through a 1-px caret window and
-                        // they must paint rightward on the screen, clipped
-                        // only at the screen edge.
-                        let wrapping = w.attributes & 1 != 0;
-                        let (r, c) = ((w.y_cursor.max(1) - 1) / fh + 1, (w.x_cursor.max(1) - 1) / fw + 1);
-                        if !wrapping {
-                            // u32: both terms are capped (WINDOW_PX_CAP) but
-                            // `x_cursor` ADVANCES past that cap as the story
-                            // prints, and the sum of two u16 pixel coordinates
-                            // does not fit a u16 (SQ-1030).
-                            let abs_x = u32::from(w.x_coord.max(1)) + u32::from(w.x_cursor.max(1)) - 1;
-                            if abs_x + u32::from(fw) - 1 > u32::from(screen_w_px) {
-                                continue; // clipped at the screen edge; cursor pinned
-                            }
-                        }
-                        if r > w.grid.rows && w.y_cursor <= bound {
-                            w.grid.grow_rows(r);
-                        }
-                        w.grid.put(r, c, out_ch, style, fg, bg);
-                        run.get_or_insert_with(|| crate::screen::V6Text {
-                            y: w.y_coord.max(1).saturating_add(w.y_cursor.max(1)).saturating_sub(1),
-                            x: w.x_coord.max(1).saturating_add(w.x_cursor.max(1)).saturating_sub(1),
-                            text: String::new(),
-                            style,
-                            fg,
-                            bg,
-                        })
-                        .text
-                        .push(out_ch);
-                        if wrapping && c >= cols {
-                            if let Some(r) = run.take() {
-                                finished.push(r);
-                            }
+                        if px_here.is_some() {
                             if w.scrolling() {
                                 w.tick_line_count();
                             }
                             w.y_cursor = w.y_cursor.saturating_add(fh);
                             w.x_cursor = w.left_margin.saturating_add(1);
-                        } else {
-                            w.x_cursor = w.x_cursor.saturating_add(fw);
+                        }
+                        if gr_here.is_some() {
+                            r = r.saturating_add(1);
+                            c = margin_col;
+                        }
+                        let out_ch = glyph(ch);
+                        let adv = metric.advance(out_ch, style);
+                        if !wrapping {
+                            // u32: both terms are capped (WINDOW_PX_CAP) but
+                            // `x_cursor` ADVANCES past that cap as the story
+                            // prints, and the sum of two u16 pixel coordinates
+                            // does not fit a u16 (SQ-1030).
+                            let abs_x =
+                                u32::from(w.x_coord.max(1)) + u32::from(w.x_cursor.max(1)) - 1;
+                            if abs_x + u32::from(adv) - 1 > u32::from(screen_w_px) {
+                                continue; // clipped at the screen edge; cursor pinned
+                            }
+                        }
+                        // The blank a word wrap broke on is drawn on neither line,
+                        // and the two measures drop DIFFERENT blanks — so each side
+                        // asks its own.
+                        // Captured BEFORE the grid pen moves: this is the cell
+                        // the run's first glyph is written at, and the tag has to
+                        // name that one rather than the next.
+                        let (cell_row, cell_col) = (r, c);
+                        if !gr_here.is_some_and(|b| b.consumed) {
+                            if r > w.grid.rows
+                                && u32::from(r.saturating_sub(1)) * u32::from(fh)
+                                    < u32::from(bound)
+                            {
+                                w.grid.grow_rows(r);
+                            }
+                            w.grid.put(r, c, out_ch, style, fg, bg);
+                            c = c.saturating_add(1);
+                        }
+                        if !px_here.is_some_and(|b| b.consumed) {
+                            run.get_or_insert_with(|| crate::screen::V6Text {
+                                y: w.y_coord.max(1).saturating_add(w.y_cursor.max(1)).saturating_sub(1),
+                                x: w.x_coord.max(1).saturating_add(w.x_cursor.max(1)).saturating_sub(1),
+                                text: String::new(),
+                                style,
+                                fg,
+                                bg,
+                                grow: win_row.saturating_add(cell_row.saturating_sub(1)),
+                                gcol: win_col.saturating_add(cell_col.saturating_sub(1)),
+                            })
+                            .text
+                            .push(out_ch);
+                            w.x_cursor = w.x_cursor.saturating_add(adv);
                         }
                     }
-                    if let Some(r) = run.take() {
-                        finished.push(r);
+                    if let Some(done) = run.take() {
+                        finished.push(done);
                     }
+                    w.set_grid_cursor(r, c);
                 }
                 if let Some(v6) = self.screen.v6.as_mut() {
                     for r in finished {
-                        v6.paint_run(idx, r, cell);
+                        v6.paint_run(idx, r, &self.v6_metric);
                     }
                 }
                 return;
@@ -8224,7 +8306,7 @@ pub(crate) mod tests {
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
         m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[195], None, None);
-        m.streams.pop_stream3(&mut m.mem, m.v6_cell);
+        m.streams.pop_stream3(&mut m.mem, &m.v6_metric);
 
         assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1, not the UTF-8 byte count");
         assert_eq!(m.mem.read_byte(table_addr + 2), 195);
@@ -8239,7 +8321,7 @@ pub(crate) mod tests {
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
         m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[10], None, None);
-        m.streams.pop_stream3(&mut m.mem, m.v6_cell);
+        m.streams.pop_stream3(&mut m.mem, &m.v6_metric);
 
         assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1");
         assert_eq!(m.mem.read_byte(table_addr + 2), 10, "stream 3 must store verbatim ZSCII 10, not 32");
@@ -8255,7 +8337,7 @@ pub(crate) mod tests {
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
         m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[195], None, None);
-        m.streams.pop_stream3(&mut m.mem, m.v6_cell);
+        m.streams.pop_stream3(&mut m.mem, &m.v6_metric);
 
         assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1");
         assert_eq!(m.mem.read_byte(table_addr + 2), 195);

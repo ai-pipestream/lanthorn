@@ -1434,11 +1434,11 @@ impl TextLayer<'_> {
 /// # Why this exists
 ///
 /// A v6 grid window publishes ONE RUN PER CHARACTER. Arthur's score bar arrives as
-/// 73 of them — `(29, "C"), (37, "h"), (45, "u"), …` — each at a multiple of the
-/// engine's fixed cell, because `zvm`'s cursor advances by the DECLARED width and
-/// records where it stopped. That is correct and must stay correct: the declared
-/// metric is what the story was told, and the engine has no business knowing which
-/// face the host will draw with.
+/// 73 of them — `(29, "C"), (39, "h"), (49, "u"), …` — each where `zvm`'s own
+/// cursor stopped, which since SQ-1009 is the machine's PEN rather than the
+/// declared cell: the engine and the renderer measure through one
+/// [`zvm::screen::V6Metric`], handed over at boot, so the origins already step the
+/// face's advances.
 ///
 /// But it means a proportional pen cannot be applied one run at a time. Each glyph
 /// would be stamped at its engine column and drawn at its own narrower width, and
@@ -1454,6 +1454,10 @@ impl TextLayer<'_> {
 /// safe: nothing moves except the spacing INSIDE a run the engine already
 /// considered contiguous.
 ///
+/// Contiguity is asked in the PEN's units, because that is what the engine
+/// advanced by. Asked in declared cells it would answer no for every glyph on a
+/// proportional machine and the chain would never form.
+///
 /// **Identity when the face is not proportional**, so every other configuration
 /// gets back exactly the list it passed in, in the order it passed it.
 pub(crate) fn pen_chains(runs: &[&PxText], tf: &crate::native_font::TextFace) -> Vec<PxText> {
@@ -1466,7 +1470,6 @@ pub(crate) fn pen_chains(runs: &[&PxText], tf: &crate::native_font::TextFace) ->
     // that decided which of them overdraws the other.
     let mut order: Vec<&PxText> = runs.to_vec();
     order.sort_by_key(|t| (t.y, t.x));
-    let cell_w = u32::from(tf.cell().w);
     let mut out: Vec<PxText> = Vec::with_capacity(order.len());
     for t in order {
         let joins = out.last().is_some_and(|p: &PxText| {
@@ -1474,7 +1477,7 @@ pub(crate) fn pen_chains(runs: &[&PxText], tf: &crate::native_font::TextFace) ->
                 && p.style == t.style
                 && p.fg == t.fg
                 && p.bg == t.bg
-                && u32::from(p.x) + p.text.chars().count() as u32 * cell_w == u32::from(t.x)
+                && u32::from(p.x) + tf.run_px_styled(&p.text, p.style) == u32::from(t.x)
         });
         if joins {
             out.last_mut().expect("just checked").text.push_str(&t.text);
@@ -2521,9 +2524,16 @@ mod tests {
         };
         // A status window rasterising two text rows from its own left edge to the
         // screen's right — Shogun's is 32px, and only the FIRST is a glyph row.
-        let bar = |y: u16| PxText {
-            y, x: ART_END as u16 + 1, text: "X".repeat(74), style: 0,
-            fg: 0x0300_0000, bg: 0x03FF_FFFF,
+        let bar = |y: u16| {
+            crate::engine::PxText::derived(
+                y,
+                ART_END as u16 + 1,
+                "X".repeat(74),
+                0,
+                0x0300_0000,
+                0x03FF_FFFF,
+                zvm::screen::V6Cell::DEFAULT,
+            )
         };
         let status = PositionedWindow {
             x: 0, y: 0, w: 74, h: 2, x_px: ART_END as u16, y_px: 0, w_px: 592, h_px: 32,
@@ -2592,8 +2602,8 @@ mod tests {
                 // where it would be if rows were 16 pixels apart.
                 cells: "Banquet Hall".chars().chain("Moves:     1".chars()).map(cell).collect(),
                 px_texts: vec![
-                    PxText { y: 11, x: 1, text: "Banquet Hall".into(), style: 0, fg: 0x0300_0000, bg: 0 },
-                    PxText { y: 27, x: 1, text: "Moves:     1".into(), style: 0, fg: 0x0300_0000, bg: 0 },
+                    crate::engine::PxText::derived(11, 1, "Banquet Hall".into(), 0, 0x0300_0000, 0, zvm::screen::V6Cell::DEFAULT),
+                    crate::engine::PxText::derived(27, 1, "Moves:     1".into(), 0, 0x0300_0000, 0, zvm::screen::V6Cell::DEFAULT),
                 ],
             }),
         };
@@ -2648,9 +2658,7 @@ mod tests {
     #[test]
     fn a_painting_games_artwork_is_not_at_risk_because_it_lands_after_the_skip() {
         let native = (640u16, 400u16);
-        let bar = PxText {
-            y: 1, x: 1, text: "X".repeat(80), style: 0, fg: 0x0300_0000, bg: 0x03FF_FFFF,
-        };
+        let bar = crate::engine::PxText::derived(1, 1, "X".repeat(80), 0, 0x0300_0000, 0x03FF_FFFF, zvm::screen::V6Cell::DEFAULT);
         let status = PositionedWindow {
             x: 0, y: 0, w: 80, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 16,
             left_margin: 0, right_margin: 0,
@@ -2984,7 +2992,7 @@ mod tests {
         let px_texts = if text.is_empty() {
             Vec::new()
         } else {
-            vec![PxText { x: x + 1, y: y + 1, text: text.into(), style: 0, fg: 0, bg: 0 }]
+            vec![crate::engine::PxText::derived(y + 1, x + 1, text.into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT)]
         };
         PositionedWindow {
             x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w, h_px: h,
@@ -3434,7 +3442,7 @@ mod tests {
                 fill: None,
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
-                px_texts: vec![PxText { y: 1, x: 1, text: text.into(), style, fg, bg }],
+                px_texts: vec![crate::engine::PxText::derived(1, 1, text.into(), style, fg, bg, zvm::screen::V6Cell::DEFAULT)],
             }),
         }
     }
@@ -3662,7 +3670,9 @@ mod tests {
         let default_bg = Rgba([9, 9, 9, 255]);
         let z_black = (1u32 << 24) | 2; // Standard 2 (explicit)
         let z_white = (1u32 << 24) | 9; // Standard 9 (explicit) → spec white
-        let run = |x: u16, style: u8, fg: u32, bg: u32| PxText { y: 1, x, text: "AB".into(), style, fg, bg };
+        let run = |x: u16, style: u8, fg: u32, bg: u32| {
+            crate::engine::PxText::derived(1, x, "AB".into(), style, fg, bg, zvm::screen::V6Cell::DEFAULT)
+        };
         // (a) explicit-bg non-reverse row → floods the resolved white.
         let a = run(1, 0, z_black, z_white);
         let b = run(50, 0, z_black, z_white);
@@ -3708,8 +3718,8 @@ mod tests {
         let z_black = (1u32 << 24) | 2;
         let z_white = (1u32 << 24) | 9;
         let win = band_grid(64, vec![
-            PxText { y: 1, x: 1, text: "AB".into(), style: 0, fg: z_black, bg: z_white },
-            PxText { y: 1, x: 41, text: "CD".into(), style: 0, fg: z_black, bg: z_white },
+            crate::engine::PxText::derived(1, 1, "AB".into(), 0, z_black, z_white, zvm::screen::V6Cell::DEFAULT),
+            crate::engine::PxText::derived(1, 41, "CD".into(), 0, z_black, z_white, zvm::screen::V6Cell::DEFAULT),
         ]);
         let c = build_chrome_canvas(&[&win], (64, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All, &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         // px 24 is a gap between run A (px 0..16) and run C (px 40..): flooded white.
@@ -3741,7 +3751,9 @@ mod tests {
         let ink = 0x0200_7FFF;
         let panel = 0x0200_59A0;
         let blue = Rgba([0, 107, 181, 255]);
-        let px = |x: u16, y: u16, s: &str| PxText { y, x, text: s.into(), style: 0, fg: ink, bg: panel };
+        let px = |x: u16, y: u16, s: &str| {
+            crate::engine::PxText::derived(y, x, s.into(), 0, ink, panel, zvm::screen::V6Cell::DEFAULT)
+        };
         let win = PositionedWindow {
             x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
             left_margin: 0, right_margin: 0,
@@ -3784,7 +3796,7 @@ mod tests {
         let z_red = (1u32 << 24) | 3;
         let art_color = Rgba([180, 140, 90, 255]);
         let art = graphics_window(0, 0, 16, 16, image::RgbaImage::from_pixel(16, 16, art_color));
-        let letter = band_grid(16, vec![PxText { y: 1, x: 1, text: "N".into(), style: 0, fg: z_red, bg: 0 }]);
+        let letter = band_grid(16, vec![crate::engine::PxText::derived(1, 1, "N".into(), 0, z_red, 0, zvm::screen::V6Cell::DEFAULT)]);
         let c = build_chrome_canvas(&[&art, &letter], (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors(), TextLayer::All, &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         // px 12 is the second cell (no ink, no run) — the banner art shows through.
         assert_eq!(*c.get_pixel(12, 8), art_color, "explicit-fg-only run leaves the banner art (no bg flood)");

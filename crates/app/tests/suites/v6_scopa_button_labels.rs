@@ -29,16 +29,14 @@
 //!
 //! The story is gitignored (CLAUDE.md), so these skip cleanly when it is absent.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::GameSession;
 use image::Rgba;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// scopa's baize, which is what must show beside a button: ZMSD §8.3.1 green
 /// through the pixel path.
@@ -56,7 +54,7 @@ const BUTTONS: [(&str, u32); 2] = [("abort", 10), ("confirm", 370)];
 const FONT_H: u32 = 16;
 
 fn boot() -> Option<GameSession> {
-    let path = stories_dir().join("scopa.z6");
+    let path = fixture_path("scopa.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

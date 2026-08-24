@@ -13,11 +13,13 @@
 use app::engine::{Engine, WinNode};
 use app::glulx_session::GlulxSession;
 
+use crate::fixture_paths::fixture_path;
+
 /// Boot the real gitignored story at the user-report geometry: a 138×51 pane at
 /// 8×18 char cells → the toolbar window comes out 138×2 cells with a fully
 /// painted 1104×36 canvas. `None` when the story is absent.
 fn boot_advent() -> Option<GlulxSession> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/advent.blb");
+    let path = fixture_path("advent.blb");
     let raw = std::fs::read(&path).ok()?;
     let blorb = blorb::Blorb::parse(raw.clone()).expect("valid blorb");
     let bytes = match app::hints::extract_story(raw).expect("extract") {

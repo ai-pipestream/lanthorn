@@ -37,18 +37,16 @@
 //! Stories are gitignored (CLAUDE.md), so every case skips cleanly.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn boot(name: &str, honor: bool) -> Option<GameSession> {
-    let path = stories_dir().join(name);
+    let path = fixture_path(name);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

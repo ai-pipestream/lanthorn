@@ -2,10 +2,11 @@ use app::engine::{Engine, KeyInput};
 use app::glulx_session::GlulxSession;
 use app::session::InputKind;
 
+use crate::fixture_paths::fixture_path;
+
 #[test]
 fn wizard_sniffer_reaches_input() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../stories/The_Wizard_Sniffer.gblorb.blorb");
+    let path = fixture_path("The_Wizard_Sniffer.gblorb.blorb");
     let Ok(raw) = std::fs::read(&path) else { eprintln!("SKIP: no WS"); return; };
     let bytes = match app::hints::extract_story(raw).expect("extract") {
         app::hints::LoadedStory::Glulx(b) => b,

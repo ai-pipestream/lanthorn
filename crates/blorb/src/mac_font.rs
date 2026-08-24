@@ -61,8 +61,10 @@ const HEADER: usize = 26;
 
 /// Parse a `FONT` or `NFNT` resource, or `None` when the bytes are not one.
 ///
-/// The glyph rows come back MSB-leftmost and at most 8 columns wide. A font whose
-/// glyphs are wider is refused rather than truncated; every one measured here is 7.
+/// The glyph rows come back MSB-leftmost and up to [`crate::bitmap_font::MAX_ROW_WIDTH`]
+/// columns wide (bearing included). A font whose glyphs are wider still is refused
+/// rather than truncated — see [`crate::bitmap_font::Glyph::row_bytes`] for how a
+/// row past 8px is packed.
 pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
     let be16 = |o: usize| -> Option<u16> { Some(u16::from_be_bytes([*raw.get(o)?, *raw.get(o + 1)?])) };
     let first = usize::from(be16(2)?);
@@ -76,7 +78,10 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
 
     // Bounds that only a decoding error, or a family-name record with no bitmap,
     // could fail. `first` past `last` and a zero-height cell are the giveaways.
-    if last < first || last > 255 || rect_h == 0 || rect_h > 32 || row_words == 0 || rect_w == 0 || rect_w > 8 {
+    // NOTE `rect_w` — the nominal cell — is NOT capped here: Geneva 24 declares 30,
+    // wider than any single glyph in it. The width that has to fit a row is the
+    // per-GLYPH one (bearing + ink), checked below (SQ-1038).
+    if last < first || last > 255 || rect_h == 0 || rect_h > 32 || row_words == 0 || rect_w == 0 {
         return None;
     }
     let strike = row_words.checked_mul(2)?.checked_mul(rect_h)?;
@@ -106,20 +111,28 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
         } else {
             usize::try_from(i32::from(kern_max) + i32::from(obyte)).unwrap_or(0)
         };
-        if img_w.checked_add(bearing)? > 8 {
+        // The row has to hold bearing + ink, not just ink — this is the "refuse
+        // rather than truncate" bound the whole font was rejected on before
+        // SQ-1038; now it is per-glyph, so a font need only decline the glyphs
+        // that actually need it (none of the ones measured do: the widest is
+        // Geneva 24 at 26px, comfortably under the bound).
+        let span = img_w.checked_add(bearing)?;
+        if span > crate::bitmap_font::MAX_ROW_WIDTH {
             return None;
         }
-        let mut rows = Vec::with_capacity(rect_h);
+        let row_bytes = span.div_ceil(8).max(1);
+        let mut rows = Vec::with_capacity(rect_h * row_bytes);
         for y in 0..rect_h {
             let base = HEADER + y * row_words * 2;
-            let mut bits = 0u8;
+            let mut row = vec![0u8; row_bytes];
             for x in 0..img_w {
                 let bit = usize::from(lo) + x;
                 if *raw.get(base + bit / 8)? & (0x80 >> (bit % 8)) != 0 {
-                    bits |= 0x80 >> (x + bearing);
+                    let col = x + bearing;
+                    row[col / 8] |= 0x80 >> (col % 8);
                 }
             }
-            rows.push(bits);
+            rows.extend_from_slice(&row);
         }
         glyphs.push(Glyph { width: advance, rows });
     }
@@ -301,6 +314,37 @@ mod tests {
         pub const ZERO: [u8; 12] = [0, 0, 0x38, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x38, 0, 0];
         //   ..#..  .##..  ..#..  ..#..  ..#..  ..#..  ..#..  .###.
         pub const ONE: [u8; 12] = [0, 0, 0x10, 0x30, 0x10, 0x10, 0x10, 0x10, 0x10, 0x38, 0, 0];
+
+        /// `2` (0x32) — SQ-1038's wide glyph: an 8-column-wide hollow box, image
+        /// columns 0..7, bearing 3, so its ink sits at STRIKE columns 3..10 — past
+        /// column 7, which needs a SECOND row byte. `row_bytes` is 2, so this is
+        /// 12 rows of 2 bytes each, flat.
+        ///
+        /// `########` (all 8 image columns lit) shifted right 3 lands ink at
+        /// columns 3..10: byte 0 (columns 0..7) gets bits 3..7 = `0b0001_1111` =
+        /// `0x1F`, byte 1 (columns 8..15) gets bits 8..10 = `0b1110_0000` = `0xE0`.
+        /// `#......#` (only the two edge columns lit) shifted the same way puts a
+        /// single bit in each byte: column 3 in byte 0 (`0x10`), column 10 in byte
+        /// 1 (`0x20`) — which is the row that proves the bearing shift crossed the
+        /// boundary correctly rather than by accident: a reader that shifted only
+        /// the FIRST byte and left the second alone would still pass the solid top
+        /// and bottom rows (both bytes are "all or nothing" there) but would fail
+        /// every row in between.
+        #[rustfmt::skip]
+        pub const TWO: [u8; 24] = [
+            0x00, 0x00, // pad
+            0x00, 0x00, // pad
+            0x1F, 0xE0, // ########
+            0x10, 0x20, // #......#
+            0x10, 0x20,
+            0x10, 0x20,
+            0x10, 0x20,
+            0x10, 0x20,
+            0x10, 0x20,
+            0x1F, 0xE0, // ########
+            0x00, 0x00, // pad
+            0x00, 0x00, // pad
+        ];
     }
 
     fn volume() -> Hfs {
@@ -400,11 +444,49 @@ mod tests {
         let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
         let face = parse(&fork.get(b"FONT", 1033).expect("FONT 1033").data).expect("parses");
         assert_eq!((face.width, face.height, face.baseline, face.lo), (7, 12, 9, 0x30));
-        assert_eq!(face.glyphs.len(), 2);
+        assert_eq!(face.glyphs.len(), 3, "'0', '1', and SQ-1038's wide '2'");
         assert_eq!(face.glyph(b'0').map(|g| g.rows.as_slice()), Some(&art::ZERO[..]));
         assert_eq!(face.glyph(b'1').map(|g| g.rows.as_slice()), Some(&art::ONE[..]));
         assert_eq!(face.glyph(b'0').map(|g| g.width), Some(6));
         assert!(!face.proportional);
+    }
+
+    /// SQ-1038, falsified directly: `FONT` 1033 carries a glyph whose bearing
+    /// plus ink is 11px — past the OLD 8px bound. Before the fix, the per-glyph
+    /// check inside `parse`'s loop rejected the whole font the moment it reached
+    /// that glyph, so `fork.get(b"FONT", 1033)`'s bytes existed and `parse`
+    /// still answered `None` for the entire resource — not a truncated glyph,
+    /// every glyph gone. Restoring `if img_w.checked_add(bearing)? > 8` here
+    /// reproduces exactly that and makes this test fail with `parse(..)` being
+    /// `None`, which is the falsification this test exists to make possible.
+    #[test]
+    fn a_glyph_wider_than_eight_pixels_no_longer_sinks_the_whole_font() {
+        let fork = crate::resource_fork::ResourceFork::parse(fork_bytes()).expect("a fork");
+        let face = parse(&fork.get(b"FONT", 1033).expect("FONT 1033").data)
+            .expect("a font with one wide glyph still parses (SQ-1038)");
+
+        let two = face.glyph(b'2').expect("0x32 is in range 0x30..=0x32");
+        assert_eq!(two.row_bytes(face.height), 2, "11px of bearing+ink needs a second byte");
+        assert_eq!(two.rows.as_slice(), &art::TWO[..], "the bitmap for '2'");
+        // The advance is unaffected by how wide the ROW representation grew —
+        // still a plain u8, still this glyph's own pen distance (SQ-1009).
+        assert_eq!(two.width, 6);
+
+        // Ink past column 7 is the whole point: read straight through `row_bit`
+        // rather than the packed bytes, so this fails if a future change gets
+        // the multi-byte MSB-leftmost order backwards (the "two bit orders live
+        // in one function" trap SQ-1038's own docs warn about) even if it
+        // happens to keep `art::TWO` passing by accident.
+        for row in 0..usize::from(face.height) {
+            for col in 8usize..11 {
+                let want = matches!(row, 2 | 9) || (3..=8).contains(&row) && col == 10;
+                assert_eq!(
+                    two.bit(2, row, col),
+                    want,
+                    "row {row} col {col}: expected ink={want}",
+                );
+            }
+        }
     }
 
     #[test]

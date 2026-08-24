@@ -63,6 +63,8 @@ const RENDITIONS: &[Rendition] = &[
     Rendition { file: "shogun_s1.dsk", release: 311, serial: "890510" },
 ];
 
+use crate::fixture_paths::fixture_path;
+
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -70,7 +72,7 @@ fn stories_dir() -> PathBuf {
 /// Boot exactly as `startup.rs` does — the profile and the artwork both come from
 /// the medium — after checking the build is the one this file measured.
 fn boot(r: &Rendition) -> Option<GameSession> {
-    let path = stories_dir().join(r.file);
+    let path = fixture_path(r.file);
     let (loaded, _) = app::hints::load_mounted_story(&path).ok().or_else(|| {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         None
@@ -305,7 +307,7 @@ fn hybrid_draws_the_credits_and_menu_as_text() {
 #[test]
 fn a_menu_takeover_with_no_art_still_takes_the_cell_path() {
     let _g = app::v6_palette_at_boot();
-    let path = stories_dir().join("advent.z6");
+    let path = fixture_path("advent.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return;
@@ -409,7 +411,7 @@ fn a_menu_row_paints_one_contiguous_stretch() {
             }
         }
     }
-    if stories_dir().join(RENDITIONS[1].file).exists() {
+    if fixture_path(RENDITIONS[1].file).exists() {
         assert!(ran > 0, "the fixtures are present but no menu row was found — check the premise");
     }
 }

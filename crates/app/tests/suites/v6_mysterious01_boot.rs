@@ -64,6 +64,17 @@ use ratatui::layout::Rect;
 const CARD_H: u32 = 192;
 const CARD_W: u32 = 512;
 
+/// SQ-1015: NOT redirected to the tracked fixtures directory, unlike its
+/// sibling suites. This test's assertions depend on `Mysterious01.blb`'s
+/// actual picture bytes (the two boot title cards), and that blorb's
+/// screenshot-sourced graphics have no established licence separate from the
+/// text `Mysterious Adventures` permission (see `fixture_paths.rs`'s doc
+/// comment) — so only `mysterious01.z6` moved, and `Mysterious01.blb` stays
+/// commercial-only in `stories/`. Resolving the story from the tracked copy
+/// while its Blorb companion stays put would silently boot it with NO
+/// pictures at all (`resolve_resource_blorb` scans the story's own
+/// directory), turning this suite's card-geometry assertions into failures
+/// instead of the clean skip they are today.
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }

@@ -92,19 +92,39 @@ fn scout(path: &std::path::Path, entry: Option<&str>, glyphs: &[char]) {
 
     // Below here is the Macintosh volume itself: the layer the two lookups differ
     // on, and the only place a fork that will not parse is visible at all.
-    let hfs = match blorb::hfs::Hfs::mount(bytes) {
+    let hfs = match blorb::hfs::Hfs::mount(bytes.clone()) {
         Ok(h) => h,
         Err(e) => {
             println!("  (not an HFS volume: {e:?})");
+            // Not a dead end for `--glyph`: an AmigaDOS volume has no resource
+            // forks to dump, but its disk fonts are still worth rendering — the
+            // only surface here that can show whether a wide glyph clipped.
+            if !glyphs.is_empty() {
+                if let Ok(mounted) = blorb::medium::MountedDisk::mount(bytes) {
+                    let files = mounted.contents();
+                    for (name, f) in blorb::amiga_font::faces_in_volume(
+                        files.iter().map(|(n, b)| (n.as_str(), b.as_slice())),
+                    ) {
+                        println!("  {name} -> {}x{} proportional={}", f.width, f.height, f.proportional);
+                        for &c in glyphs {
+                            print_glyph(&f, c);
+                        }
+                    }
+                }
+            }
             return;
         }
     };
     println!("  volume: {:?}", hfs.volume_name());
-    let appls: Vec<_> = hfs.files().iter().filter(|e| e.file_type == *b"APPL").collect();
-    println!("  {} files, {} APPL:", hfs.files().len(), appls.len());
+    // Fonts are not always in an APPL's resource fork: the System 6 font suite
+    // lives in `System Folder/System`, whose file type is `ZSYS` — so every
+    // entry with a resource fork is checked, not only applications.
+    let appls: Vec<_> = hfs.files().iter().filter(|e| e.resource_size > 0).collect();
+    println!("  {} files, {} with a resource fork:", hfs.files().len(), appls.len());
     for e in &appls {
         println!(
-            "    APPL {:?} creator={:?} data={} rsrc={}",
+            "    {} {:?} creator={:?} data={} rsrc={}",
+            String::from_utf8_lossy(&e.file_type),
             e.path(),
             String::from_utf8_lossy(&e.creator),
             e.size,
@@ -190,11 +210,17 @@ fn print_glyph(font: &blorb::bitmap_font::BitmapFont, ch: char) {
         println!("        {ch:?} (0x{code:02X}): not in this font");
         return;
     };
-    println!("        {ch:?} (0x{code:02X}) advance={} :", g.width);
-    for (i, row) in g.rows.iter().enumerate() {
+    // A row can be more than one byte wide since SQ-1038 — bearing + ink past
+    // 8px spills into a second (or third…) byte, MSB-leftmost throughout, so
+    // printing only the first 8 columns would silently clip a wide glyph's
+    // right edge exactly the way the old 8-wide bound did.
+    let row_bytes = g.row_bytes(font.height);
+    let cols = row_bytes * 8;
+    println!("        {ch:?} (0x{code:02X}) advance={} row_bytes={row_bytes} :", g.width);
+    for row in 0..usize::from(font.height) {
         let bits: String =
-            (0..8).map(|b| if row & (0x80 >> b) != 0 { '#' } else { '.' }).collect();
-        let baseline = if i + 1 == usize::from(font.baseline) { " <- baseline" } else { "" };
+            (0..cols).map(|c| if g.bit(row_bytes, row, c) { '#' } else { '.' }).collect();
+        let baseline = if row + 1 == usize::from(font.baseline) { " <- baseline" } else { "" };
         println!("          {bits}{baseline}");
     }
 }

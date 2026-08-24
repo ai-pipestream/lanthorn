@@ -49,9 +49,12 @@
 //! # Bit order
 //!
 //! Rows come back **MSB-leftmost**, exactly as the disk stores them, so a row can be
-//! read against a hex dump without mental arithmetic. A consumer that wants the
-//! opposite convention flips with [`u8::reverse_bits`]; `app`'s renderer does, since
-//! `font8x8` numbers columns from the low bit.
+//! read against a hex dump without mental arithmetic — one byte per row for a glyph
+//! up to 8px wide (bearing included), more for a wider one; see
+//! [`crate::bitmap_font::Glyph::row_bytes`] and [`crate::bitmap_font::row_bit`]
+//! (SQ-1038). `app`'s renderer flips a DIFFERENT, unrelated font (`font8x8`, which
+//! numbers columns from the low bit) with [`u8::reverse_bits`] — that trick only
+//! applies to a single byte, so it is not the right tool for a row of these.
 
 use crate::bitmap_font::{BitmapFont, Glyph};
 
@@ -122,9 +125,6 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
         let entry = charloc.checked_add(i.checked_mul(4)?)?;
         let off = usize::from(be16(at(entry)?)?);
         let gw = usize::from(be16(at(entry + 2)?)?);
-        if gw > 8 {
-            return None;
-        }
         // A signed word each, and both default to the fixed-pitch behaviour when
         // the font omits them: no bearing, and one nominal cell of advance.
         let word = |p: usize| -> Option<i16> {
@@ -143,18 +143,27 @@ pub fn parse(raw: &[u8]) -> Option<BitmapFont> {
         // negative bearing cannot be represented that way and is dropped rather
         // than clipping the glyph's left edge; none of the shipped faces has one.
         let bearing = usize::try_from(kern.max(0)).ok()?;
-        let shift = if bearing + gw <= 8 { bearing } else { 0 };
-        let mut rows = Vec::with_capacity(usize::from(height));
+        // The row has to hold bearing + ink, not just ink (SQ-1038) — this used to
+        // cap at 8 and silently DROP the bearing past it rather than decline, which
+        // flushed a glyph left instead of refusing it; now it refuses, the same
+        // discipline `mac_font` applies.
+        let span = bearing.checked_add(gw)?;
+        if span > crate::bitmap_font::MAX_ROW_WIDTH {
+            return None;
+        }
+        let row_bytes = span.div_ceil(8).max(1);
+        let mut rows = Vec::with_capacity(usize::from(height) * row_bytes);
         for y in 0..usize::from(height) {
             let base = chardata.checked_add(y.checked_mul(modulo)?)?;
-            let mut bits = 0u8;
+            let mut row = vec![0u8; row_bytes];
             for x in 0..gw {
                 let bit = off.checked_add(x)?;
                 if *raw.get(at(base.checked_add(bit / 8)?)?)? & (0x80 >> (bit % 8)) != 0 {
-                    bits |= 0x80 >> (x + shift);
+                    let col = x + bearing;
+                    row[col / 8] |= 0x80 >> (col % 8);
                 }
             }
-            rows.push(bits);
+            rows.extend_from_slice(&row);
         }
         glyphs.push(Glyph { width: u8::try_from(kern.saturating_add(space).max(0)).ok()?, rows });
     }

@@ -1112,7 +1112,7 @@ fn render_node(
                                             .filter(|t| {
                                                 bound.is_some_and(|b| state.v6_text.cell().row_of(t.y) <= b)
                                             })
-                                            .map(|t| run_cell(t, &scale, cell_px, area).1)
+                                            .map(|t| run_cell(t, &scale, cell_px, area, state.v6_text.cell()).1)
                                             .max()
                                     }
                                     _ => None,
@@ -1318,7 +1318,7 @@ fn render_node(
                                         && state.v6_text.cell().bottom_px(t.y) as i32 <= story_top
                                         && !row_oracle.over_art(t)
                                 })
-                                .map(|t| run_cell(t, &scale, cell_px, area).1)
+                                .map(|t| run_cell(t, &scale, cell_px, area, state.v6_text.cell()).1)
                                 .max();
                             let clip_row = match text_above {
                                 Some(r) if r >= 0 => clip_row.max((r as u16).saturating_add(1)),
@@ -2678,11 +2678,19 @@ fn render_node(
                             // the box's first column IS the viewport's first column, by
                             // construction. `px >= vp_native.0` is guaranteed by the filter
                             // that built `in_box`, so the subtraction never goes negative.
+                            //
+                            // SQ-1009: both terms are CELLS. The run's is the one the
+                            // engine wrote it in, never its pixel origin divided by the
+                            // declared width — that division is the column only while
+                            // the pen advances one declared cell per character, and on a
+                            // proportional machine it skips cells and drifts along the
+                            // line. For a fixed pen it is the same subtraction it always
+                            // was.
+                            let vp_col = (vp_native.0 / u32::from(state.v6_text.cell().w)) as i32;
                             let run_col = |t: &crate::engine::PxText| {
-                                let px = t.x.max(1) as i32 - 1;
-                                viewport.x as i32 + (px - vp_native.0 as i32) / i32::from(state.v6_text.cell().w)
+                                viewport.x as i32 + i32::from(t.gcol) - vp_col
                             };
-                            let merged = merge_strip_fragments(row_runs, state.v6_text.cell());
+                            let merged = merge_strip_fragments(row_runs);
                             // SQ-0898: the cells this row's GLYPH runs occupy, so a
                             // BLANK run cannot erase one.
                             //
@@ -3072,7 +3080,7 @@ fn render_node(
                     // window's erase — the bar vanished the moment the split stopped
                     // leaving window 0 on top of window 1 and the bar became band
                     // text instead of story-box paint.
-                    let top_used = anchored_band_rows(&runs, story_top, area.height, state.v6_text.cell());
+                    let top_used = anchored_band_rows(&runs, story_top, area.height);
                     // …and WHERE the transcript starts is the STORY WINDOW'S OWN BOX
                     // (SQ-0697), not "wherever the band happens to end". A game that
                     // parked its story window well down the screen left real empty
@@ -3225,7 +3233,7 @@ fn render_node(
                     // line anchored to the pane top. Drawn here, with the rest of the
                     // run stamping and after the erase fills, so a bar sits ON its
                     // own window's erased ground rather than under it (SQ-0712).
-                    draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors, state.v6_text.cell());
+                    draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors);
                     // Painted-screen overlay (SQ-0478): stamp the paint runs INSIDE
                     // the story box as absolutely-positioned terminal text on TOP of
                     // the transcript. A no-op in normal gameplay (chrome grids carry
@@ -4644,7 +4652,10 @@ fn full_width_flood_rows(
                 if t.text.trim().is_empty() {
                     continue;
                 }
-                let row = cell.row_of(t.y);
+                // The row `draw_painted_screen` will PLACE this run on, so the
+                // flood and the glyphs cannot land on different terminal rows
+                // (SQ-1009): the run's own cell row, not its pixel row divided.
+                let row = t.grow;
                 // Does this run sit within the rows its own window covers?
                 let win_first = cell.row_of_origin0(pw.y_px);
                 let win_last = pw.y_px.saturating_add(pw.h_px).div_ceil(16).max(win_first + 1);
@@ -4796,11 +4807,17 @@ fn draw_painted_screen(
         // menu selection moves, the game repaints the old row's gaps as plain
         // spaces, and skipping those left the stale reversed cells behind
         // (SQ-0490).
-        // The v6 cell (SQ-0479, per-machine since SQ-0917): quantize Y by its
-        // height and X by its width — 8x16 everywhere but the Macintosh's 7x15.
-        let row = cell.row_of(t.y);
+        // The CELL the engine wrote this run's first glyph in (SQ-1009), never
+        // the run's pixel origin divided by the declared cell width. The division
+        // is the column only while the pen advances one declared cell per
+        // character; at Arthur's ~10.4 native pixels against a declared 8 it
+        // climbs 1.3 per glyph, so a derived column skips cells and the drift
+        // compounds along the line — `Churchyard` reads `Ch urc  hy ard`, and a
+        // wider pane makes it worse. For every fixed-pen machine this IS the
+        // division, so nothing else moves.
+        let row = t.grow;
         let Some(y) = place(row) else { continue };
-        let col = cell.col_of(t.x);
+        let col = t.gcol;
         if area.x + col >= area.right() {
             continue;
         }
@@ -5942,7 +5959,7 @@ fn flank_border_extension(
         // SQ-0783: …aligned outward when it is the SCREEN's own edge cell, so the
         // frame reaches the pane instead of leaving the column beside it blank.
         let col = edge_glyph_col(gnx0, native.0 as u32, scale, cell_px, pane, cell)
-            .unwrap_or_else(|| run_cell(t, scale, cell_px, pane).0 + idx as i32);
+            .unwrap_or_else(|| run_cell(t, scale, cell_px, pane, cell).0 + idx as i32);
         let col = u16::try_from(col).ok()?;
         if col < band.x || col >= band.right() {
             return None;
@@ -6143,11 +6160,52 @@ fn strip_native_origin(
     Some((left + slack / 2.0).round() as i32)
 }
 
-fn run_cell(t: &crate::engine::PxText, scale: &crate::render::v6_layout::Scale, cell_px: (u16, u16), pane: Rect) -> (i32, i32) {
+/// Where the ring places a text run, in terminal cells.
+///
+/// # It maps the run's CELL through the scale, never its pixel
+///
+/// A run is positioned once here and then advances ONE TERMINAL COLUMN per
+/// character. Those two rates agree only if the position is itself a whole number
+/// of character cells — and on a proportional machine a run's pixel origin is not
+/// (SQ-1009). Arthur's Amiga press advances ~10.4 native pixels per glyph against
+/// a declared 8, so consecutive word-sized runs are placed ~30% further apart than
+/// their own characters reach: the words stay correct and the GAPS between them
+/// open up, by more the larger the scale. That is the shape the report described —
+/// "more spaces are added between some words" — and why it moved with the pane
+/// while the wrap point, which is engine-side, did not.
+///
+/// So the run's own grid cell is what goes through the scale. For a fixed pen
+/// `gcol * cell.w` IS `t.x - 1` and this is the arithmetic it always was.
+fn run_cell(
+    t: &crate::engine::PxText,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    v6: zvm::screen::V6Cell,
+) -> (i32, i32) {
     let cw = cell_px.0.max(1) as f32;
     let ch = cell_px.1.max(1) as f32;
-    let px = t.x.max(1) as f32 - 1.0;
-    let py = t.y.max(1) as f32 - 1.0;
+    // The COLUMN comes from the engine's grid pen and the SUB-CELL OFFSET from the
+    // run's own pixel — because the two answer different questions and only one of
+    // them drifts (SQ-1009, SQ-1048).
+    //
+    // `gcol * cell.w` alone is the column's left edge, which is not where the game
+    // painted: Arthur opens its status window at x=29 and sets the bar's first glyph
+    // at x=35, two pixels into column 4. Flooring that to 32 walks the whole ribbon
+    // left, and at a pane width of 93 the `C` of `Churchyard` crosses into the
+    // flank's five columns of pole art and is overwritten by it.
+    //
+    // `t.x - 1` alone — what this did before the grid pen existed — is exact on any
+    // machine whose pen IS the cell, and on Arthur's Amiga press climbs about 1.3
+    // columns per glyph.
+    //
+    // So take the column from the grid and the remainder from the pen. On a fixed pen
+    // `gcol == col_of(t.x)` and the two terms collapse back to `t.x - 1` exactly, so
+    // every machine but the proportional one is bit-identical to the old answer.
+    let sub_x = f32::from(t.x.max(1) - 1) - f32::from(v6.col_of(t.x)) * f32::from(v6.w);
+    let sub_y = f32::from(t.y.max(1) - 1) - f32::from(v6.row_of(t.y)) * f32::from(v6.h);
+    let px = f32::from(t.gcol) * f32::from(v6.w) + sub_x;
+    let py = f32::from(t.grow) * f32::from(v6.h) + sub_y;
     let col = pane.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
     let row = pane.y as i32 + ((scale.off_y as f32 + py * scale.s) / ch).round() as i32;
     (col, row)
@@ -6340,7 +6398,7 @@ impl<'b> ChromeRowOracle<'_, 'b> {
         self.runs
             .iter()
             .copied()
-            .filter(|t| self.below_or_above(t) && run_cell(t, self.scale, self.cell_px, self.pane).1 == row as i32)
+            .filter(|t| self.below_or_above(t) && run_cell(t, self.scale, self.cell_px, self.pane, self.v6_cell).1 == row as i32)
             .collect()
     }
 
@@ -6392,7 +6450,7 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     /// same two rates [`draw_chrome_text_strip`] stamps at, so "does this run stand
     /// in those columns" is asked here exactly as the draw answers it.
     fn run_cols(&self, t: &crate::engine::PxText) -> (i32, i32) {
-        let (c, _) = run_cell(t, self.scale, self.cell_px, self.pane);
+        let (c, _) = run_cell(t, self.scale, self.cell_px, self.pane, self.v6_cell);
         (c, c + t.text.chars().count().max(1) as i32)
     }
 
@@ -7153,7 +7211,7 @@ fn stamp_runs_over_art(
     // arm costs a region scan — is asked ONCE per run and not once per character.
     let mut placed: Vec<(&crate::engine::PxText, StampedCells)> = Vec::new();
     for t in runs {
-        let (col0, row) = run_cell(t, scale, cell_px, pane);
+        let (col0, row) = run_cell(t, scale, cell_px, pane, cell);
         let cells: Vec<(u16, u16, char)> = t
             .text
             .chars()
@@ -7326,7 +7384,7 @@ fn draw_chrome_text_strip(
         }
         for (t, _) in row_runs {
             if t.style & 1 != 0 && t.text.trim().is_empty() {
-                let (c, _) = run_cell(t, scale, cell_px, pane);
+                let (c, _) = run_cell(t, scale, cell_px, pane, cell);
                 if c >= rect.x as i32 && c < rect.right() as i32 {
                     divider_cols.push(c as u16);
                 }
@@ -7408,7 +7466,7 @@ fn draw_chrome_text_strip(
             // everywhere else it is this run's own native pixel through the scale.
             let c = match native_origin {
                 Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w)).round() as i32,
-                None => run_cell(t, scale, cell_px, pane).0,
+                None => run_cell(t, scale, cell_px, pane, cell).0,
             };
             // SQ-0783: a LONE frame glyph standing at the game screen's own edge — the
             // `┐` that ends the top rule, the `┘` that ends the bottom one, the `│` that
@@ -7669,9 +7727,9 @@ fn collapse_row_rules(
         }
         if j + 1 - i >= RULE_MIN {
             // A rule. Flush what came before it, then emit it at its scaled width.
-            out.extend(merge_strip_fragments(&pending, cell).into_iter().map(|t| (t, false)));
+            out.extend(merge_strip_fragments(&pending).into_iter().map(|t| (t, false)));
             pending.clear();
-            let (col0, _) = run_cell(t, scale, cell_px, pane);
+            let (col0, _) = run_cell(t, scale, cell_px, pane, cell);
             let cw = cell_px.0.max(1) as f32;
             let end_dev = scale.off_x as f32 + end_px(row_runs[j]) as f32 * scale.s;
             let col1 = pane.x as i32 + (end_dev / cw).round() as i32;
@@ -7686,7 +7744,7 @@ fn collapse_row_rules(
         // before it and stamp each fragment on its own, so the merge cannot drag it
         // off the column the game drew it at.
         if single_glyph(t).is_some_and(box_glyph) {
-            out.extend(merge_strip_fragments(&pending, cell).into_iter().map(|t| (t, false)));
+            out.extend(merge_strip_fragments(&pending).into_iter().map(|t| (t, false)));
             pending.clear();
             out.extend(row_runs[i..=j].iter().filter(|t| !under_label(t)).map(|t| ((*t).clone(), false)));
             i = j + 1;
@@ -7695,7 +7753,7 @@ fn collapse_row_rules(
         pending.push(t);
         i += 1;
     }
-    out.extend(merge_strip_fragments(&pending, cell).into_iter().map(|t| (t, false)));
+    out.extend(merge_strip_fragments(&pending).into_iter().map(|t| (t, false)));
     out
 }
 
@@ -7735,13 +7793,15 @@ fn collapse_row_rules(
 /// Padding still merges with itself, so a row of it is one run rather than fifty; and
 /// a blank run only ever paints the cells no glyph run claimed (SQ-0727), so wherever
 /// it lands it cannot rub a field out.
-fn merge_strip_fragments(row_runs: &[&crate::engine::PxText], cell: zvm::screen::V6Cell) -> Vec<crate::engine::PxText> {
+fn merge_strip_fragments(row_runs: &[&crate::engine::PxText]) -> Vec<crate::engine::PxText> {
     use crate::engine::PxText;
-    /// Blank native pixels that separate two FIELDS rather than two words: more than
-    /// the single 8px cell a game puts between words when it prints them.
-    const FIELD_GAP_PX: u16 = 8;
+    /// Blank CELLS that separate two FIELDS rather than two words: more than the
+    /// single cell a game puts between words when it prints them. Counted in cells
+    /// since SQ-1009 — it was `8 * chars` native pixels, which is neither the
+    /// Macintosh's 7-wide cell nor any proportional pen.
+    const FIELD_GAP_CELLS: u16 = 1;
     let ink = |t: &PxText| !t.text.trim().is_empty();
-    let width = |t: &PxText| 8 * t.text.chars().count() as u16;
+    let width = |t: &PxText| t.text.chars().count() as u16;
     let mut out: Vec<PxText> = Vec::new();
     let mut group: Vec<&PxText> = Vec::new();
     // Blank fragments since the last inked one, held back until the next inked one
@@ -7753,10 +7813,10 @@ fn merge_strip_fragments(row_runs: &[&crate::engine::PxText], cell: zvm::screen:
             blank_px = blank_px.saturating_add(width(t));
             continue;
         }
-        if blank_px > FIELD_GAP_PX {
-            out.extend(merge_row_fragments(&group, 4, cell));
+        if blank_px > FIELD_GAP_CELLS {
+            out.extend(merge_row_fragments(&group, 1));
             group.clear();
-            out.extend(merge_row_fragments(&blanks, 4, cell));
+            out.extend(merge_row_fragments(&blanks, 1));
         } else {
             group.extend(blanks.iter().copied());
         }
@@ -7787,12 +7847,12 @@ fn merge_strip_fragments(row_runs: &[&crate::engine::PxText], cell: zvm::screen:
     // cell wide, because Shogun's selection bar IS made of reverse-video blanks and
     // they are real ink (SQ-0499/SQ-0515). A trailing blank WIDER than one cell is
     // still a field gap and still keeps its own position, exactly as before.
-    if blank_px > FIELD_GAP_PX {
-        out.extend(merge_row_fragments(&group, 4, cell));
-        out.extend(merge_row_fragments(&blanks, 4, cell));
+    if blank_px > FIELD_GAP_CELLS {
+        out.extend(merge_row_fragments(&group, 1));
+        out.extend(merge_row_fragments(&blanks, 1));
     } else {
         group.extend(blanks.iter().copied());
-        out.extend(merge_row_fragments(&group, 4, cell));
+        out.extend(merge_row_fragments(&group, 1));
     }
     out
 }
@@ -7807,19 +7867,26 @@ fn merge_strip_fragments(row_runs: &[&crate::engine::PxText], cell: zvm::screen:
 /// becoming `gap / 8` spaces — so a `tol_px` of 4 bridges only ABUTTING fragments
 /// (adding nothing) while 8 also closes a one-cell word gap with a real space.
 /// Runs separated by a wider gap stay distinct and keep their own positions.
-fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_px: i32, cell: zvm::screen::V6Cell) -> Vec<crate::engine::PxText> {
+fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_cells: i32) -> Vec<crate::engine::PxText> {
     let mut merged: Vec<crate::engine::PxText> = Vec::new();
     for t in row_runs {
         if let Some(last) = merged.last_mut() {
-            let last_end = (last.x.max(1) as i32 - 1) + last.text.chars().count() as i32 * i32::from(cell.w);
-            let start = t.x.max(1) as i32 - 1;
+            // In CELLS, from the grid the engine wrote these runs into (SQ-1009).
+            // Measured in pixels this asked `(t.x - last.x) / cell.w`, which is the
+            // gap between two runs only while the pen advances one declared cell
+            // per character — Arthur's does not, so consecutive GLYPHS of one word
+            // read as separated by a fraction of a cell and the merge fell apart
+            // mid-word: `Churchyard` came back as `Ch urc  hy ard`. A cell gap is
+            // exact on both kinds of machine.
+            let last_end = i32::from(last.gcol) + last.text.chars().count() as i32;
+            let start = i32::from(t.gcol);
             if start >= last_end
-                && start - last_end <= tol_px
+                && start - last_end <= tol_cells
                 && last.style == t.style
                 && last.fg == t.fg
                 && last.bg == t.bg
             {
-                for _ in 0..(start - last_end) / i32::from(cell.w) {
+                for _ in 0..(start - last_end) {
                     last.text.push(' ');
                 }
                 last.text.push_str(&t.text);
@@ -7851,11 +7918,13 @@ fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_px: i32, cell: z
 /// sized and painted after the erase fills, so the two are split: this is the
 /// span from the first inked native row inside the band to the last, clamped to
 /// the pane, which is exactly what the draw returns.
-fn anchored_band_rows(runs: &[&crate::engine::PxText], band_rows: u16, pane_h: u16, cell: zvm::screen::V6Cell) -> u16 {
+fn anchored_band_rows(runs: &[&crate::engine::PxText], band_rows: u16, pane_h: u16) -> u16 {
     let inked = || {
+        // The rows `draw_anchored_status_band` will DRAW on — the runs' own cell
+        // rows (SQ-1009). Measured rows and drawn rows have to be one answer.
         runs.iter()
             .filter(|t| !t.text.trim().is_empty())
-            .map(|t| cell.row_of(t.y))
+            .map(|t| t.grow)
             .filter(|&r| r < band_rows)
     };
     let Some(first) = inked().min() else { return 0 };
@@ -7877,7 +7946,6 @@ fn draw_anchored_status_band(
     style: ratatui::style::Style,
     honor: bool,
     colors: &ColorScheme,
-    cell: zvm::screen::V6Cell,
 ) -> u16 {
     let left_bound = ncols / 3; // left-third boundary (cells)
     let right_bound = ncols * 2 / 3; // right two-thirds boundary (cells)
@@ -7885,7 +7953,7 @@ fn draw_anchored_status_band(
     let Some(first_row) = runs
         .iter()
         .filter(|t| !t.text.trim().is_empty())
-        .map(|t| cell.row_of(t.y))
+        .map(|t| t.grow)
         .filter(|&r| r < band_rows)
         .min()
     else {
@@ -7900,19 +7968,19 @@ fn draw_anchored_status_band(
         let mut row_runs: Vec<&crate::engine::PxText> = runs
             .iter()
             .copied()
-            .filter(|t| !t.text.trim().is_empty() && cell.row_of(t.y) == row)
+            .filter(|t| !t.text.trim().is_empty() && t.grow == row)
             .collect();
         if row_runs.is_empty() {
             continue;
         }
-        row_runs.sort_by_key(|t| t.x);
+        row_runs.sort_by_key(|t| t.gcol);
         // Glue the row's word fragments back together before classifying (SQ-0509,
         // reached here by SQ-0549): Arthur paints its bar one GLYPH per run, which
         // would otherwise put every letter in its own anchor group and join them
-        // with two spaces apiece. The 8px tolerance also restores the single-cell
-        // word gaps inside its date field ("St Anne's Day, Compline"), which a
-        // group join would likewise have doubled.
-        let row_runs = merge_row_fragments(&row_runs, 8, cell);
+        // with two spaces apiece. The one-cell tolerance also restores the
+        // single-cell word gaps inside its date field ("St Anne's Day, Compline"),
+        // which a group join would likewise have doubled.
+        let row_runs = merge_row_fragments(&row_runs, 1);
         // Classify each run into an anchor group by its native position. A run
         // the game CENTRED on its own screen is CENTER wherever it starts (see
         // below); otherwise a run spanning most of the row (a full-width bar)
@@ -7922,7 +7990,7 @@ fn draw_anchored_status_band(
         let (mut left, mut center, mut right): (Vec<&str>, Vec<&str>, Vec<&str>) =
             (Vec::new(), Vec::new(), Vec::new());
         for t in &row_runs {
-            let start = (cell.col_of(t.x)) as u32;
+            let start = u32::from(t.gcol);
             let len = t.text.chars().count() as u32;
             let end = start + len;
             // SQ-0717: the thirds rule reads a run's START, which is the right
@@ -8135,7 +8203,7 @@ mod tests {
     /// One reverse-video character run at native `x`, the shape Shogun's boot menu
     /// emits: `style = 1`, default colours, one 8px cell wide.
     fn rv(x: u16, s: &str) -> crate::engine::PxText {
-        crate::engine::PxText { y: 337, x, text: s.into(), style: 1, fg: 0, bg: 0 }
+        crate::engine::PxText::derived(337, x, s.into(), 1, 0, 0, zvm::screen::V6Cell::DEFAULT)
     }
 
     /// A trailing blank that ABUTS its group joins it, so the group's own advance
@@ -8161,7 +8229,7 @@ mod tests {
             .map(|(i, c)| rv(235 + 8 * i as u16, &c.to_string()))
             .collect();
         let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
-        let merged = merge_strip_fragments(&refs, zvm::screen::V6Cell::DEFAULT);
+        let merged = merge_strip_fragments(&refs);
         assert_eq!(
             merged.iter().map(|t| (t.x, t.text.clone())).collect::<Vec<_>>(),
             vec![(235, "START the game ".to_string())],
@@ -8181,7 +8249,7 @@ mod tests {
     fn a_wide_trailing_blank_is_a_field_gap_and_keeps_its_place() {
         let runs = [rv(235, "SCORE"), rv(275, "    ")];
         let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
-        let merged = merge_strip_fragments(&refs, zvm::screen::V6Cell::DEFAULT);
+        let merged = merge_strip_fragments(&refs);
         assert_eq!(
             merged.iter().map(|t| (t.x, t.text.clone())).collect::<Vec<_>>(),
             vec![(235, "SCORE".to_string()), (275, "    ".to_string())],
@@ -8197,7 +8265,7 @@ mod tests {
         let runs = [rv(235, "the"), rv(259, " "), rv(267, "game")];
         let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
         assert_eq!(
-            merge_strip_fragments(&refs, zvm::screen::V6Cell::DEFAULT).iter().map(|t| (t.x, t.text.clone())).collect::<Vec<_>>(),
+            merge_strip_fragments(&refs).iter().map(|t| (t.x, t.text.clone())).collect::<Vec<_>>(),
             vec![(235, "the game".to_string())],
         );
     }
@@ -10607,7 +10675,7 @@ mod tests {
         };
         for honor in [true, false] {
             // A painted run with a BEL in the middle, at native (row 0, col 0).
-            let t = crate::engine::PxText { y: 1, x: 1, text: "AB\u{7}CD".into(), style: 0, fg: 0, bg: 0 };
+            let t = crate::engine::PxText::derived(1, 1, "AB\u{7}CD".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT);
             let runs: Vec<&crate::engine::PxText> = vec![&t];
             let mut buf = Buffer::empty(area);
             draw_painted_screen(
@@ -10822,9 +10890,7 @@ mod tests {
                 cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,
-                px_texts: vec![crate::engine::PxText {
-                    y: 97, x: 1, text: "Score: 0".into(), style: 1, fg: 0, bg: 0,
-                }],
+                px_texts: vec![crate::engine::PxText::derived(97, 1, "Score: 0".into(), 1, 0, 0, zvm::screen::V6Cell::DEFAULT)],
             }),
         };
         let story = PositionedWindow {
@@ -10931,9 +10997,9 @@ mod tests {
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,
                 px_texts: vec![
-                    crate::engine::PxText { y: 129, x: 101, text: "START the game".into(), style: 0, fg: 0, bg: 0 },
-                    crate::engine::PxText { y: 145, x: 101, text: "RESTORE a saved game".into(), style: 0, fg: 0, bg: 0 },
-                    crate::engine::PxText { y: 161, x: 101, text: "QUIT the game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText::derived(129, 101, "START the game".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
+                    crate::engine::PxText::derived(145, 101, "RESTORE a saved game".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
+                    crate::engine::PxText::derived(161, 101, "QUIT the game".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
                 ],
             }),
         };
@@ -10998,9 +11064,9 @@ mod tests {
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,
                 px_texts: vec![
-                    crate::engine::PxText { y: 129, x: 101, text: "START the game".into(), style: 0, fg: 0, bg: 0 },
-                    crate::engine::PxText { y: 145, x: 101, text: "RESTORE a saved game".into(), style: 0, fg: 0, bg: 0 },
-                    crate::engine::PxText { y: 161, x: 101, text: "QUIT the game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText::derived(129, 101, "START the game".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
+                    crate::engine::PxText::derived(145, 101, "RESTORE a saved game".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
+                    crate::engine::PxText::derived(161, 101, "QUIT the game".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
                 ],
             }),
         };
@@ -11263,14 +11329,14 @@ mod tests {
 
         let full = flood_probe_window(640, vec![
             // Row 0: single reversed run → floods.
-            crate::engine::PxText { y: 1, x: 1, text: "TITLE".into(), style: 1, fg: 0, bg: 0 },
+            crate::engine::PxText::derived(1, 1, "TITLE".into(), 1, 0, 0, zvm::screen::V6Cell::DEFAULT),
             // Row 1: one reversed + one non-reversed run → mixed, does NOT flood.
-            crate::engine::PxText { y: 17, x: 1, text: "LEFT".into(), style: 1, fg: 0, bg: 0 },
-            crate::engine::PxText { y: 17, x: 401, text: "RIGHT".into(), style: 0, fg: 0, bg: 0 },
+            crate::engine::PxText::derived(17, 1, "LEFT".into(), 1, 0, 0, zvm::screen::V6Cell::DEFAULT),
+            crate::engine::PxText::derived(17, 401, "RIGHT".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
         ]);
         let narrow = flood_probe_window(169, vec![
             // Row 2: reversed run in a narrow window → text-width block, no flood.
-            crate::engine::PxText { y: 33, x: 1, text: "SEL".into(), style: 1, fg: 0, bg: 0 },
+            crate::engine::PxText::derived(33, 1, "SEL".into(), 1, 0, 0, zvm::screen::V6Cell::DEFAULT),
         ]);
         let chrome: Vec<&PositionedWindow> = vec![&full, &narrow];
         let runs: Vec<&crate::engine::PxText> = chrome
@@ -11427,7 +11493,7 @@ mod tests {
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,
                 px_texts: vec![
-                    crate::engine::PxText { y: 1, x: 1, text: "SCORE 10".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText::derived(1, 1, "SCORE 10".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT),
                 ],
             }),
         };
@@ -11559,7 +11625,7 @@ mod tests {
 
     /// One px-run at native pixel `(x, y)` (1-based) carrying `text`.
     fn run(x: u16, y: u16, text: &str) -> crate::engine::PxText {
-        crate::engine::PxText { y, x, text: text.into(), style: 0, fg: 0, bg: 0 }
+        crate::engine::PxText::derived(y, x, text.into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT)
     }
 
     /// Render `runs` as an anchored band over a `w`-cell pane at native width
@@ -11571,7 +11637,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let style = ratatui::style::Style::default();
         let colors = crate::colors::ColorScheme::terminal_default();
-        let rows_used = draw_anchored_status_band(&refs, ncols, 4, area, &mut buf, style, true, &colors, zvm::screen::V6Cell::DEFAULT);
+        let rows_used = draw_anchored_status_band(&refs, ncols, 4, area, &mut buf, style, true, &colors);
         let text: String = (0..w).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         (text, rows_used)
     }
@@ -11707,10 +11773,9 @@ mod tests {
             let colors = crate::colors::ColorScheme::terminal_default();
             let drawn = draw_anchored_status_band(
                 &refs, 40, band_rows, area, &mut buf, ratatui::style::Style::default(), true, &colors,
-                zvm::screen::V6Cell::DEFAULT,
             );
             assert_eq!(
-                anchored_band_rows(&refs, band_rows, pane_h, zvm::screen::V6Cell::DEFAULT),
+                anchored_band_rows(&refs, band_rows, pane_h),
                 drawn,
                 "measured rows must equal drawn rows for {:?} (band {band_rows}, pane {pane_h})",
                 runs.iter().map(|t| (t.y, t.x, &t.text)).collect::<Vec<_>>()
@@ -11727,7 +11792,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         let colors = crate::colors::ColorScheme::terminal_default();
-        let rows_used = draw_anchored_status_band(&refs, 40, 4, area, &mut buf, ratatui::style::Style::default(), true, &colors, zvm::screen::V6Cell::DEFAULT);
+        let rows_used = draw_anchored_status_band(&refs, 40, 4, area, &mut buf, ratatui::style::Style::default(), true, &colors);
         assert_eq!(rows_used, 2, "two native rows populated");
         let r0: String = (0..80).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         let r1: String = (0..80).map(|x| buf.cell((x, 1)).unwrap().symbol().to_string()).collect();
@@ -11766,7 +11831,7 @@ mod tests {
 
     /// A reverse-video px-run at native pixel `(x, y)` (1-based) carrying `text`.
     fn rev_run(x: u16, y: u16, text: &str) -> crate::engine::PxText {
-        crate::engine::PxText { y, x, text: text.into(), style: 1, fg: 0, bg: 0 }
+        crate::engine::PxText::derived(y, x, text.into(), 1, 0, 0, zvm::screen::V6Cell::DEFAULT)
     }
 
     #[test]
@@ -11906,11 +11971,8 @@ mod tests {
         // theme base (Shogun's regression pin — its runs are all Default/Default).
         let colors = crate::colors::ColorScheme::terminal_default();
         let base = colors.theme.get("upper_window").style;
-        let coloured = crate::engine::PxText {
-            y: 1, x: 1, text: "N".into(), style: 0,
-            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Standard(3)), bg: 0,
-        };
-        let plain = crate::engine::PxText { y: 1, x: 25, text: "X".into(), style: 0, fg: 0, bg: 0 };
+        let coloured = crate::engine::PxText::derived(1, 1, "N".into(), 0, crate::state::pack_zcolour(zvm::screen::ZColour::Standard(3)), 0, zvm::screen::V6Cell::DEFAULT);
+        let plain = crate::engine::PxText::derived(1, 25, "X".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT);
         let refs: Vec<&crate::engine::PxText> = vec![&coloured, &plain];
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
@@ -11930,24 +11992,21 @@ mod tests {
         // (Zork0's ribbon labels), while Shogun's Default/Default band keeps theme.
         let colors = crate::colors::ColorScheme::terminal_default();
         let base = colors.theme.get("upper_window").style;
-        let coloured = crate::engine::PxText {
-            y: 1, x: 1, text: "West of House".into(), style: 0,
-            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Standard(4)), bg: 0,
-        };
+        let coloured = crate::engine::PxText::derived(1, 1, "West of House".into(), 0, crate::state::pack_zcolour(zvm::screen::ZColour::Standard(4)), 0, zvm::screen::V6Cell::DEFAULT);
         let refs: Vec<&crate::engine::PxText> = vec![&coloured];
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
-        draw_anchored_status_band(&refs, 40, 4, area, &mut buf, base, true, &colors, zvm::screen::V6Cell::DEFAULT);
+        draw_anchored_status_band(&refs, 40, 4, area, &mut buf, base, true, &colors);
         assert_eq!(
             buf.cell((0, 0)).unwrap().fg,
             crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(4), &colors),
             "band row adopts the explicit run colour"
         );
         // Shogun regression: a Default/Default run yields exactly the theme fg.
-        let plain = crate::engine::PxText { y: 1, x: 1, text: "Shogun".into(), style: 0, fg: 0, bg: 0 };
+        let plain = crate::engine::PxText::derived(1, 1, "Shogun".into(), 0, 0, 0, zvm::screen::V6Cell::DEFAULT);
         let prefs: Vec<&crate::engine::PxText> = vec![&plain];
         let mut buf2 = Buffer::empty(area);
-        draw_anchored_status_band(&prefs, 40, 4, area, &mut buf2, base, true, &colors, zvm::screen::V6Cell::DEFAULT);
+        draw_anchored_status_band(&prefs, 40, 4, area, &mut buf2, base, true, &colors);
         assert_eq!(buf2.cell((0, 0)).unwrap().fg, base.fg.unwrap_or(ratatui::style::Color::Reset), "Default band stays theme-styled");
     }
 

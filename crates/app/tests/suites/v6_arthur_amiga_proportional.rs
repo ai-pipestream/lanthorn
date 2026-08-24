@@ -25,14 +25,17 @@
 //!    layer out — against the pixels the RASTER path actually composites — because
 //!    a correct table and a renderer that ignores it look identical from inside the
 //!    font.
-//! 3. **A grid publishes one run per character, and the pen has to see the line.**
-//!    Arthur's score bar arrives as 73 single-character runs at multiples of the
-//!    engine's declared cell, because `zvm`'s cursor advances by the DECLARED width
-//!    and records where it stopped — correctly, and it must keep doing so. Drawing
-//!    each of those at its own narrower width leaves a gap before every letter,
-//!    which is precisely what `amiga-arthur-church.png` does NOT show: there the
-//!    glyph origins of `Church` step 12, 10, 10, 10, 10 device px, which is
-//!    `C h u r c` from the face's own table and nothing else.
+//! 3. **A grid publishes one run per character, and the ENGINE holds the pen.**
+//!    Arthur's score bar arrives as 73 single-character runs, each where `zvm`'s
+//!    own cursor stopped — which is the face's advance, not the declared cell, so
+//!    the glyph origins of `Church` step 12, 10, 10, 10, 10 native px exactly as
+//!    `amiga-arthur-church.png` shows them. The engine measuring with the same
+//!    table the renderer draws with is what also puts the bar's right-hand date
+//!    field where the machine put it (the game right-aligns it from header `$30`)
+//!    and wraps the F5 description where the machine wraps it (`exec.rs` breaks the
+//!    line at the window's real pixel width). The hybrid backend keeps its own
+//!    measure: the character grid still fills the window's 73 DECLARED columns,
+//!    from the same wrap routine called with a different unit.
 //!
 //! # Fixtures
 //!
@@ -205,7 +208,7 @@ fn the_amiga_floppy_declares_the_faces_own_twenty_row_line() {
          because a proportional face has no single advance to declare",
     );
     // And the story RECEIVED it — the boot is what makes the declaration real.
-    assert_eq!(session.machine.v6_cell, zvm::screen::V6Cell::new(8, 20), "the engine holds it too");
+    assert_eq!(session.machine.v6_cell(), zvm::screen::V6Cell::new(8, 20), "the engine holds it too");
     assert_eq!(
         u32::from(machine.cell.h),
         u32::from(face.height) * 2 * CAPTURE_IS_NATIVE_SCALE,
@@ -684,27 +687,38 @@ fn both_of_arthurs_prose_windows_wrap_to_the_same_width() {
     let _ = state;
 }
 
-/// **The score bar's right-hand field is placed by the GAME, from the declared
-/// width — nothing in the render path moves it.**
+/// **The score bar's right-hand field lands where the machine put it, because the
+/// GAME measures its own text and the engine now measures it with the machine's
+/// pen** (SQ-1009).
 ///
-/// Worth its own case because the number looked like a rendering error and is not.
-/// The bar arrives as 73 single-character runs; 72 of them step by the declared
-/// cell and exactly one origin does not, and that discontinuity is where the game
-/// issued its own `set_cursor` for the date. It sits at
-/// `window_left + window_width − 25 × declared_width`, and it tracks the declared
-/// width exactly: 412 at a width of 8, 387 at 9, 362 at 10 — all measured by
-/// driving the story.
+/// # How the game places it
 ///
-/// `machine-screenshots/amiga-arthur-church.png` puts the same field's first ink at
-/// capture x=431, which is native 388 at the established offset of 43 — so the
-/// machine's origin is 382 and ours is 411. **The whole of that 29-pixel gap is the
-/// declared width**, and the same measurement solves to a width of 9.2 native px,
-/// which is not an integer and agrees with the case above: the machine measured.
+/// An Infocom Version 6 game right-aligns by MEASURING: it prints the field to
+/// output stream 3, deselects the stream, and reads back header `$30` — "the total
+/// width of printing, in units" (ZMSD §7.1.2.1) — then `set_cursor`s at
+/// `x_size − $30`. So the field's position is entirely a function of the width the
+/// interpreter reports, and nothing in the render path contributes to it. That was
+/// checked before it was assumed: 72 of the bar's runs step by the engine's own
+/// pen and exactly one origin does not, and that discontinuity is the game's
+/// `set_cursor`.
+///
+/// # What was wrong, and what fixed it
+///
+/// `StreamState::pop_stream3` measured the buffer at the DECLARED cell —
+/// `25 × 8 = 200` units for ` St Anne's Day, Compline ` — so the game placed the
+/// field at window-relative 384 and our proportional glyphs then ran 30 px off the
+/// end of a bar that stops at 612. The machine measured what it was going to DRAW:
+/// 222 units, window-relative 362.
+///
+/// `machine-screenshots/amiga-arthur-church.png` is the falsifier. Its score bar
+/// spans native 29..612 — exactly the `/dump-windows` win1 — and its date field's
+/// ink runs 389..602, ten pixels clear of the bar's right edge. Restore the
+/// `cell.w` measurement and the field returns to 417 and overruns.
 #[test]
-fn the_score_bars_right_field_is_the_games_own_arithmetic() {
+fn the_score_bars_right_field_lands_where_the_machine_put_it() {
     let _g = app::v6_palette_at_boot();
     let Some((session, state)) = in_the_churchyard() else { return };
-    let cell_w = u32::from(state.v6_text.cell().w);
+    assert!(state.v6_text.proportional(), "non-vacuity: the pen under test is the face's");
     let model = Engine::screen(&session);
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
     let (bar, g) = items
@@ -714,36 +728,202 @@ fn the_score_bars_right_field_is_the_games_own_arithmetic() {
             _ => None,
         })
         .expect("the churchyard frame carries a one-row status grid at native y=200");
+    // Non-vacuity on the frame: the bar the capture measures, at the width it has
+    // there — 584 px starting at native 28 (the capture's 29, one-based).
+    assert_eq!(
+        (u32::from(bar.x_px), u32::from(bar.w_px)),
+        (28, PROSE_WINDOW_PX),
+        "amiga-arthur-church.png's bar is 584 px wide and starts at the left flank",
+    );
+    let printed: String = {
+        let mut runs: Vec<_> = g.px_texts.iter().collect();
+        runs.sort_by_key(|t| t.x);
+        runs.iter().map(|t| t.text.as_str()).collect()
+    };
+    assert!(printed.contains("Compline"), "non-vacuity: the bar carries the date, got {printed:?}");
+
+    // Exactly one origin the engine's own pen did not produce — the `set_cursor`.
+    // Asked in the PEN's units, which is what the cursor now advances by.
     let mut runs: Vec<&app::engine::PxText> = g.px_texts.iter().collect();
     runs.sort_by_key(|t| t.x);
-    // The one origin the engine's own pen did not produce.
-    let breaks: Vec<u32> = runs
+    let breaks = runs
         .windows(2)
         .filter(|w| {
-            u32::from(w[0].x) + w[0].text.chars().count() as u32 * cell_w != u32::from(w[1].x)
+            u32::from(w[0].x) + state.v6_text.run_px_styled(&w[0].text, w[0].style)
+                != u32::from(w[1].x)
         })
-        .map(|w| u32::from(w[1].x) - 1)
+        .count();
+    assert!(
+        breaks >= 1,
+        "non-vacuity: the date field is PLACED by the game's own set_cursor, not flowed",
+    );
+
+    let canvas = raster(&session, &state);
+    // The bar is reverse video, so its ground is the block and the glyphs are dark.
+    let ground = *canvas.get_pixel(u32::from(bar.x_px) + 2, 210);
+    // Right of native 200 there is nothing on the bar but the date field. Stop
+    // short of the bar's last column, which carries the frame's own flank.
+    let ink: Vec<u32> = (200..610u32)
+        .filter(|&x| (200..220u32).any(|y| *canvas.get_pixel(x, y) != ground))
         .collect();
-    assert_eq!(breaks.len(), 1, "exactly one field is placed by set_cursor, got {breaks:?}");
-    let field: String = runs
-        .iter()
-        .skip_while(|t| u32::from(t.x) - 1 != breaks[0])
-        .map(|t| t.text.as_str())
-        .collect();
-    // The game names a ONE-BASED pixel (ZMSD §8.8.1), so its own answer is one
-    // more than the zero-based origin the renderer draws at.
-    let expected = u32::from(bar.x_px) + u32::from(bar.w_px)
-        - field.chars().count() as u32 * cell_w;
     assert_eq!(
-        breaks[0] + 1,
-        expected,
-        "the date field sits at window_left + window_width − {} × {cell_w}; the render \
-         path draws it exactly there and contributes nothing to its position",
-        field.chars().count(),
+        (ink.first().copied(), ink.last().copied()),
+        (Some(CHURCH_DATE_INK.0), Some(CHURCH_DATE_INK.1)),
+        "amiga-arthur-church.png puts the date's ink at native {CHURCH_DATE_INK:?},          ten pixels inside a bar that ends at 611",
     );
 }
 
+/// The date field's ink in `machine-screenshots/amiga-arthur-church.png`, in
+/// zero-based native pixels — `St Anne's Day, Compline`, 214 px of it.
+const CHURCH_DATE_INK: (u32, u32) = (389, 602);
+
 // ── 6. an isolated reverse-video run is not a status bar ─────────────────────
+// ── 6b. the ENGINE wraps where the machine wrapped ───────────────────────────
+
+/// The runs a prose window published, re-joined into one string per native row.
+fn f5_rows(node: &WinNode) -> Vec<String> {
+    let WinNode::Grid(g) = node else { return Vec::new() };
+    let mut v: Vec<&app::engine::PxText> = g.px_texts.iter().collect();
+    v.sort_by_key(|t| (t.y, t.x));
+    let mut rows: Vec<(u16, String)> = Vec::new();
+    for t in v {
+        match rows.last_mut() {
+            Some(r) if r.0 == t.y => r.1.push_str(&t.text),
+            _ => rows.push((t.y, t.text.clone())),
+        }
+    }
+    rows.into_iter().map(|(_, s)| s).collect()
+}
+
+/// **The GAME wraps its description where the machine wrapped it** (SQ-1009).
+///
+/// This is the second half of the same defect the score bar is the first half of,
+/// and it has the same one cause: `zvm` measured text by the DECLARED cell while the
+/// pen drew the face's real advances. `exec.rs`'s v6 paint path took the line width
+/// as `w.grid.cols` — the window over the declared width, `584 / 8 = 73` — and broke
+/// there. Seventy-three characters at the real pen is about 759 px in a 584 px
+/// window, so every line was wrapped too late and its tail was cut off.
+///
+/// The line now breaks at the window's own PIXEL width, measured with the same
+/// table the renderer draws with, and the six spans fall out exactly:
+/// [`F5_SPANS`] are `machine-screenshots/amiga-arthur-F5.png`'s own, transcribed
+/// off the capture at rows 39/59/79/99/119/139.
+///
+/// Falsified by restoring the column break: the first line comes back 73 characters
+/// long, 759 px wide, and no span matches.
+#[test]
+fn the_engine_wraps_the_description_where_the_machine_wraps_it() {
+    let _g = app::v6_palette_at_boot();
+    let Some((mut session, state)) = in_the_churchyard() else { return };
+    assert!(state.v6_text.proportional(), "non-vacuity: the pen under test is the face's");
+    let _ = session.submit_char(137); // F5 — the room description
+    let model = Engine::screen(&session);
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
+    let win = items
+        .iter()
+        .find(|it| it.y_px == 0 && u32::from(it.w_px) == PROSE_WINDOW_PX)
+        .expect("F5 opens a full-width description window at the top");
+    let rows = f5_rows(&win.node);
+    assert!(rows.len() >= 6, "non-vacuity: F5 prints six lines of description, got {rows:?}");
+    // The whole description, unbroken — the wrap is the only variable.
+    let joined = rows[..6].join(" ");
+    assert_eq!(joined, DESCRIPTION, "the six lines are the description and nothing else");
+
+    let canvas = raster(&session, &state);
+    let ground = *canvas.get_pixel(600, 190);
+    let line_h = state.v6_text.line_px();
+    let spans: Vec<u32> = (0..6)
+        .map(|n| {
+            let band = n * line_h..(n + 1) * line_h;
+            ink_span(&canvas, band, 0..canvas.width(), ground).expect("an inked line")
+        })
+        .collect();
+    assert_eq!(
+        spans.as_slice(),
+        F5_SPANS.as_slice(),
+        "amiga-arthur-F5.png measures these six line spans; a column wrap gives none of them",
+    );
+    assert_eq!(CAPTURE_IS_NATIVE_SCALE, 1, "a span in the capture is a span in native px");
+}
+
+/// **The hybrid grid keeps filling its own width, in DECLARED columns.**
+///
+/// A v6 window carries two representations of one text and SQ-1009 made them
+/// disagree: the raster draws pixel-positioned runs at the face's advances, and
+/// hybrid draws terminal cells on the story's own grid. The user chose hybrid
+/// filling its own width rather than sharing raster's break points, so the same
+/// wrap routine is called twice with two measures —
+/// [`zvm::screen::wrap_text`] — and only the PIXEL wrap is the game's truth.
+///
+/// So the grid still carries the 73-column lines it always did, while the runs
+/// beside it carry the machine's. Both come out of one print, and the case exists
+/// because "hybrid still works" is exactly what a pixel-only change silently breaks.
+#[test]
+fn the_hybrid_grid_still_wraps_at_the_windows_own_columns() {
+    let _g = app::v6_palette_at_boot();
+    let Some((mut session, state)) = in_the_churchyard() else { return };
+
+    // The score bar first, because it is the case that needs the grid to keep its
+    // OWN pen: Arthur prints it one character per call, so a column DERIVED from
+    // the pixel cursor steps 1.3 per letter and the row grows holes.
+    {
+        let model = Engine::screen(&session);
+        let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
+        let bar = items
+            .iter()
+            .find_map(|it| match &it.node {
+                WinNode::Grid(g) if g.rows == 1 && !g.px_texts.is_empty() && it.y_px == 200 => Some(g),
+                _ => None,
+            })
+            .expect("the churchyard frame carries a one-row status grid at native y=200");
+        let row: String = (1..=bar.cols).map(|c| bar.cell(1, c).ch).collect();
+        assert!(
+            row.contains("Churchyard") && row.contains("St Anne's Day, Compline"),
+            "the bar's grid row carries both fields unbroken, got {row:?}",
+        );
+    }
+
+    let _ = session.submit_char(137); // F5
+    let model = Engine::screen(&session);
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame is Layered") };
+    let win = items
+        .iter()
+        .find(|it| it.y_px == 0 && u32::from(it.w_px) == PROSE_WINDOW_PX)
+        .expect("F5 opens a full-width description window at the top");
+    let WinNode::Grid(g) = &win.node else { panic!("a v6 prose window is a Grid") };
+    let cols = PROSE_WINDOW_PX / u32::from(state.v6_text.cell().w);
+    assert_eq!(u32::from(g.cols), cols, "the grid is the window over the DECLARED width");
+    let grid_rows: Vec<String> = (1..=g.rows)
+        .map(|r| {
+            (1..=g.cols).map(|c| g.cell(r, c).ch).collect::<String>().trim_end().to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert!(grid_rows.len() >= 5, "non-vacuity: the grid carries the description, got {grid_rows:?}");
+    // The same text, broken at 73 columns rather than at 584 pixels — so the grid's
+    // lines are LONGER in characters than the pixel-wrapped runs beside them.
+    // The window also carries the line that follows the description, so this is a
+    // prefix rather than an equality.
+    assert!(
+        grid_rows.join(" ").starts_with(DESCRIPTION),
+        "the grid holds the description, column-wrapped: {grid_rows:?}",
+    );
+    let px_rows = f5_rows(&win.node);
+    assert!(
+        grid_rows[0].chars().count() > px_rows[0].chars().count(),
+        "the column wrap fits more characters on a line than the pen does: {:?} vs {:?}",
+        grid_rows[0],
+        px_rows[0],
+    );
+    for l in &grid_rows[..grid_rows.len() - 1] {
+        assert!(
+            l.chars().count() <= cols as usize,
+            "{l:?} is {} characters in a {cols}-column window",
+            l.chars().count(),
+        );
+    }
+}
+
 // ── 7. the window bounds the pen ─────────────────────────────────────────────
 
 /// **A proportional run stops at its window's right edge.**
@@ -755,6 +935,13 @@ fn the_score_bars_right_field_is_the_games_own_arithmetic() {
 /// proportional face and a run always finished inside the box the game reserved for
 /// it. The pen removed the slack and the omission surfaced — it exposed this rather
 /// than causing it.
+///
+/// The engine now wraps at the pen too, so the game no longer HANDS the renderer a
+/// line that overruns — see
+/// [`the_engine_wraps_the_description_where_the_machine_wraps_it`]. The clamp stays
+/// because a game may still `set_cursor` a run near an edge, and because the
+/// non-vacuity below is what makes reaching the edge possible at all: every full
+/// line of F5's description now fills its window to within 5%.
 ///
 /// (Arthur sets both margins to zero on every window, measured; the bound is the
 /// window's own width. The property is honoured anyway, because a renderer that
@@ -773,26 +960,18 @@ fn a_proportional_run_stops_at_its_windows_right_edge() {
         .find(|it| it.y_px == 0 && u32::from(it.w_px) == PROSE_WINDOW_PX)
         .expect("F5 opens a full-width description window at the top");
     assert_eq!((win.left_margin, win.right_margin), (0, 0), "Arthur declares no margins");
-    // Non-vacuity: the game's own wrap really does overrun the pen's width here.
-    let over = match &win.node {
-        WinNode::Grid(g) => {
-            let mut v: Vec<&app::engine::PxText> = g.px_texts.iter().collect();
-            v.sort_by_key(|t| (t.y, t.x));
-            let mut rows: Vec<String> = Vec::new();
-            let mut last_y = None;
-            for t in v {
-                if Some(t.y) == last_y {
-                    rows.last_mut().expect("a row").push_str(&t.text);
-                } else {
-                    rows.push(t.text.clone());
-                    last_y = Some(t.y);
-                }
-            }
-            rows.iter().any(|r| state.v6_text.run_px(r) > PROSE_WINDOW_PX)
-        }
-        _ => false,
-    };
-    assert!(over, "non-vacuity: F5's lines must be wider than the window once penned");
+    // Non-vacuity: the lines really do reach for the edge. Every full line is
+    // within 5% of the window's width and none exceeds it — which is the property
+    // a column wrap cannot have, and the reason a clamp is worth testing.
+    let rows = f5_rows(&win.node);
+    assert!(rows.len() >= 6, "non-vacuity: F5 prints six lines of description, got {rows:?}");
+    for r in &rows[..5] {
+        let pen = state.v6_text.run_px(r);
+        assert!(
+            pen > PROSE_WINDOW_PX * 95 / 100 && pen <= PROSE_WINDOW_PX,
+            "{r:?} is {pen} px of a {PROSE_WINDOW_PX} px line — a measured wrap fills it",
+        );
+    }
 
     let native = v6::native_extent(items, state.v6_text.cell());
     let layout = v6::classify_windows(items, state.v6_text.cell());
@@ -809,5 +988,87 @@ fn a_proportional_run_stops_at_its_windows_right_edge() {
                  window that bounds it",
             );
         }
+    }
+}
+
+
+
+
+// ── 8. what HYBRID draws ─────────────────────────────────────────────────────
+
+/// Render the frame `session` is standing on through the hybrid path, and read
+/// every terminal row back as a string.
+///
+/// `raster()` above measures the pixel composite; this measures the CELL buffer,
+/// which is the shipped default and the surface the score bar is actually read on.
+fn hybrid_rows(session: &GameSession, state: &mut app::state::AppState) -> Vec<String> {
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    let area = ratatui::layout::Rect::new(0, 0, 100, 30);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let model = Engine::screen(session);
+    let _ = app::render::screen::render_story_pane(&model, false, None, state, area, &mut buf);
+    state.config.v6_render = app::config::V6RenderMode::Raster;
+    (0..area.height)
+        .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect()
+}
+
+/// **Hybrid places a proportional run by its GRID CELL, not by dividing its pixel
+/// origin** (SQ-1009).
+///
+/// `render/screen.rs`'s painted-screen path used to reconstruct a terminal column
+/// as `cell.col_of(t.x)` — the run's native pixel origin over the DECLARED cell
+/// width of 8. At a pen advancing ~10.4 px per character that quotient climbs 1.3
+/// per run, so columns are skipped and the drift compounds along the line:
+/// `Churchyard` came out as `Ch  urc   hy  ard`, and the wider the pane the worse
+/// it read. It is the same defect the engine's own grid had, one layer out.
+///
+/// The engine already maintains a dense character grid beside the pixel runs, so
+/// the column is not something the renderer has to derive: every run now carries
+/// the screen grid cell its first character was written at
+/// ([`zvm::screen::V6Text::grow`]/[`col`](zvm::screen::V6Text::gcol)), and hybrid
+/// places by that.
+///
+/// Asserted on the CELLS the renderer stamped, because
+/// `the_hybrid_grid_still_wraps_at_the_windows_own_columns` asserts on the engine's
+/// grid and passed for a whole round while this was broken on screen.
+#[test]
+fn hybrid_draws_the_score_bar_in_consecutive_cells() {
+    let _g = app::v6_palette_at_boot();
+    let Some((session, mut state)) = in_the_churchyard() else { return };
+    assert!(state.v6_text.proportional(), "non-vacuity: the pen under test is the face's");
+    let rows = hybrid_rows(&session, &mut state);
+    assert!(
+        rows.iter().any(|r| r.contains("Churchyard")),
+        "the room name must read as one word in the cell buffer; got {:?}",
+        rows.iter().filter(|r| r.contains("hurch") || r.contains("urc")).collect::<Vec<_>>(),
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("St Anne's Day, Compline")),
+        "…and so must the date field; got {:?}",
+        rows.iter().filter(|r| r.contains("Anne")).collect::<Vec<_>>(),
+    );
+}
+
+/// The same, for the F5 description — a window that WRAPS, where the pixel line
+/// and the grid line break in different places.
+#[test]
+fn hybrid_draws_the_description_in_consecutive_cells() {
+    let _g = app::v6_palette_at_boot();
+    let Some((mut session, mut state)) = in_the_churchyard() else { return };
+    let _ = session.submit_char(137); // F5
+    let rows = hybrid_rows(&session, &mut state);
+    // Six phrases from across the description, each of which spans several runs.
+    for want in [
+        "You are standing in the bright moonlight",
+        "deserted English churchyard",
+        "jewelled sword protruding from it",
+        "ironwork gate in the wall to your south",
+    ] {
+        assert!(
+            rows.iter().any(|r| r.contains(want)),
+            "{want:?} must read contiguously in the cell buffer; got {rows:?}",
+        );
     }
 }

@@ -820,7 +820,7 @@ pub(crate) fn boot_story(
             {
                 let rows = cfg.virtual_screen_rows.unwrap_or(s.machine.mem.read_byte(0x20) as u16);
                 let cols = cfg.virtual_screen_cols.unwrap_or(s.machine.mem.read_byte(0x21) as u16);
-                let cell = s.machine.v6_cell;
+                let cell = s.machine.v6_cell();
                 zvm::screen::write_screen_dims(
                     &mut s.machine.mem,
                     rows.clamp(1, 255) as u8,

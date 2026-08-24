@@ -145,6 +145,8 @@ fn all_panes() -> impl Iterator<Item = (u16, u16)> {
     PANES.iter().chain(MINIFYING_PANES).copied()
 }
 
+use crate::fixture_paths::fixture_path;
+
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -152,7 +154,7 @@ fn stories_dir() -> PathBuf {
 /// Boot exactly as `startup.rs` does — the profile comes from the MEDIUM, the
 /// artwork from whatever that medium supplies — after checking the build.
 fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
-    let path = stories_dir().join(file);
+    let path = fixture_path(file);
     let (loaded, _) = app::hints::load_mounted_story(&path).ok().or_else(|| {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         None
@@ -202,8 +204,8 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
 /// `(2, 2)` for a 320-wide MCGA or Amiga one (SQ-0790). Exactly what
 /// `startup.rs` does. `None` when either file is absent.
 fn boot_named(story: &str, archive: &str, release: (u16, &str)) -> Option<GameSession> {
-    let path = stories_dir().join(story);
-    let apath = stories_dir().join(archive);
+    let path = fixture_path(story);
+    let apath = fixture_path(archive);
     let raw = std::fs::read(&apath)
         .map_err(|_| eprintln!("SKIP: gitignored archive missing at {}", apath.display()))
         .ok()?;
@@ -471,7 +473,7 @@ fn every_side_flank_is_tiled_and_none_is_stretched() {
             ran += 1;
         }
     }
-    if stories_dir().join(SPECIMENS[0].file).exists() {
+    if fixture_path(SPECIMENS[0].file).exists() {
         assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
     }
 }
@@ -1313,7 +1315,7 @@ fn the_raster_composite_extends_its_side_art_to_the_native_bottom() {
             }
         }
     }
-    if stories_dir().join(SPECIMENS[0].file).exists() {
+    if fixture_path(SPECIMENS[0].file).exists() {
         assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
     }
 }
@@ -1450,7 +1452,7 @@ fn zork_zeros_other_two_scene_borders_declare_no_shaft_and_agree_across_flanks()
             })
             .collect();
         let mut picts = PictSource::from_native(
-            blorb::infocom_pics::InfocomPics::parse(std::fs::read(stories_dir().join(r)).expect("archive"))
+            blorb::infocom_pics::InfocomPics::parse(std::fs::read(fixture_path(r)).expect("archive"))
                 .expect("a native Infocom archive parses"),
         );
         let scale = picts.art_scale().expect("a native archive implies an art scale");
@@ -1500,7 +1502,7 @@ fn zork_zeros_other_two_scene_borders_declare_no_shaft_and_agree_across_flanks()
             ran += 1;
         }
     }
-    if stories_dir().join(RENDITIONS[0]).exists() {
+    if fixture_path(RENDITIONS[0]).exists() {
         assert!(ran > 0, "the archives are present but nothing ran — check the filenames");
     }
 }
@@ -1654,7 +1656,7 @@ fn autocorrelation_cannot_separate_zork_zeros_scene_borders() {
         let fw = story.x_px as u32;
         let flanks = [(0u32, fw), (native.0 as u32 - fw, native.0 as u32)];
         let mut picts = PictSource::from_native(
-            blorb::infocom_pics::InfocomPics::parse(std::fs::read(stories_dir().join(r)).expect("archive"))
+            blorb::infocom_pics::InfocomPics::parse(std::fs::read(fixture_path(r)).expect("archive"))
                 .expect("a native Infocom archive parses"),
         );
         let scale = picts.art_scale().expect("a native archive implies an art scale");
@@ -1690,7 +1692,7 @@ fn autocorrelation_cannot_separate_zork_zeros_scene_borders() {
             }
         }
     }
-    if !stories_dir().join(RENDITIONS[0]).exists() {
+    if !fixture_path(RENDITIONS[0]).exists() {
         return;
     }
     assert!(ran > 0, "the archives are present but nothing ran — check the filenames");
@@ -1833,7 +1835,7 @@ fn the_raster_composite_leaves_a_command_menu_alone() {
             ran += 1;
         }
     }
-    if stories_dir().join(MENU_STRIP[0].file).exists() {
+    if fixture_path(MENU_STRIP[0].file).exists() {
         assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
     }
 }
@@ -1980,7 +1982,7 @@ fn a_divider_extension_replicates_a_rule_and_never_a_picture() {
             }
         }
     }
-    if stories_dir().join(JOURNEY_MEDIA[0].file).exists() {
+    if fixture_path(JOURNEY_MEDIA[0].file).exists() {
         assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
     }
 }
@@ -2132,7 +2134,7 @@ fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
             ran += 1;
         }
     }
-    if stories_dir().join(FLANK_SHAPES[0].file).exists() {
+    if fixture_path(FLANK_SHAPES[0].file).exists() {
         assert!(ran > 0, "the fixtures are present but nothing ran — check the filenames");
     }
 }
@@ -2167,7 +2169,7 @@ fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
 /// An archive with no picture space to declare (a Blorb) answers `None`, which is
 /// the uniform `V6_ART_SCALE` of `(2, 2)` — the same default `AppState` carries.
 fn launch_art_scale(file: &str) -> Option<(u32, u32)> {
-    let path = stories_dir().join(file);
+    let path = fixture_path(file);
     if !path.exists() {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

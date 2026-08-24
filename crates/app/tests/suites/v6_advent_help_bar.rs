@@ -46,7 +46,6 @@
 //! so a mode-specific regression would otherwise hide. The story is gitignored
 //! (CLAUDE.md), so these skip cleanly.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
@@ -54,12 +53,11 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn advent_help(honor: bool) -> Option<(GameSession, app::state::AppState)> {
-    let path = stories_dir().join("advent.z6");
+    let path = fixture_path("advent.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

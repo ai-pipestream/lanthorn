@@ -29,6 +29,8 @@ use app::engine::Engine;
 use app::glk_backend::GlkStylePairs;
 use app::glulx_session::GlulxSession;
 
+use crate::fixture_paths::fixture_path;
+
 const STORY: &str = "Kerkerkruip.gblorb";
 /// glk.h: `style_User2`.
 const STYLE_USER2: usize = 10;
@@ -36,7 +38,7 @@ const STYLE_USER2: usize = 10;
 const FASHION_FUCHSIA: u32 = 0x00F4_00A1;
 
 fn story_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(STORY);
+    let p = fixture_path(STORY);
     if !p.is_file() {
         eprintln!("SKIP: gitignored fixture missing at {}", p.display());
         return None;

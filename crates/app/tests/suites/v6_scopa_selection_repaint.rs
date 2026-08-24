@@ -40,23 +40,21 @@
 //!
 //! The story is gitignored (CLAUDE.md), so these skip cleanly when it is absent.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::GameSession;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// The pane the gate is asked about. Any size works — it is hashed, so it only has
 /// to be the SAME across the two frames being compared.
 const PANE: Rect = Rect { x: 0, y: 0, width: 100, height: 34 };
 
 fn boot() -> Option<GameSession> {
-    let path = stories_dir().join("scopa.z6");
+    let path = fixture_path("scopa.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

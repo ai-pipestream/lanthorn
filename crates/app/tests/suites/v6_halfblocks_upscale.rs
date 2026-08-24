@@ -58,7 +58,6 @@
 //! `GraphicsRender::encode_v6`: `the_halfblocks_composite_is_one_resample_of_the_canvas`
 //! fails on both, with the double-resampled cells against the single-resample reference.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
@@ -75,9 +74,8 @@ use ratatui_image::protocol::halfblocks::Halfblocks;
 use ratatui_image::protocol::Protocol;
 use ratatui_image::Image;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// A title that publishes no primary `Buffer` and so reaches the screen through the
 /// raster composite whichever mode the player is in.
@@ -107,7 +105,7 @@ fn standard_palette() -> app::V6PaletteGuard {
 /// — all three printed, because a measurement whose boot chain is not stated cannot
 /// be checked against anything (SQ-0901).
 fn boot(spec: &Specimen) -> Option<GameSession> {
-    let path = stories_dir().join(spec.file);
+    let path = fixture_path(spec.file);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

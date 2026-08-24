@@ -131,6 +131,35 @@ Macintosh's 7×15 cell it was not — a half-integer rung gave glyphs 10.5 devic
 pixels, so strokes alternated one and two pixels wide while the artwork beside
 them stayed crisp. The ladder now satisfies both constraints at once.
 
+### Arthur's Amiga floppy draws its own proportional face
+
+The Amiga drew Arthur's text with the typeface on its own floppy, advancing
+the pen per glyph; lanthorn drew every Version 6 character at a fixed pitch,
+which is the reason an earlier attempt at this face read worse than the
+substitute it would have replaced (SQ-0916) — the face was fine, the cell was
+wrong for it. A face is now drawn proportionally when the disk actually
+carries one, at the machine's own measured advances (verified to the pixel
+against three prose runs off the release floppy), and the story is told the
+row count the real machine gave it — **20 lines, not 25**, Arthur's own
+`char.data` measured twice independently. Nothing else in the tree carries a
+proportional face — *Journey*, *Beyond Zork* and *Shogun*'s Amiga releases
+ship a fixed 8×8 graphics set instead of a typeface — so every other
+configuration keeps the path it always had.
+
+**This is the raster renderer only**, and hybrid is the default, so it is
+`/set-v6-render raster` (or `v6_render = "raster"`) that shows it. That is not
+an oversight: hybrid draws text as your terminal's own characters, one glyph
+per terminal cell, which is exactly what keeps it crisp and exactly why a
+per-glyph pen has nowhere to put a half-cell advance.
+
+**The engine side of the pen is still catching up, and it shows in two
+places.** zvm's grid windows still measure column position against the old
+fixed cell width while the pen draws the face's real, wider advances, so a
+couple of fields the *game* positions by column land short of where the
+proportional text actually reaches: the status bar's right-hand date field
+overruns the end of its own bar, and Arthur's F5 crystal-ball description
+wraps later than the real machine did. Tracked as SQ-1009.
+
 ### Kitty terminals redraw faster
 
 A v6 graphics window, the chrome ring and the raster composite each keep the same

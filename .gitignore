@@ -56,3 +56,9 @@
 .vscode/
 /WAVE_REPORT.md
 /.superpowers/
+
+# Locally-fetched test fixtures (SQ-1015). Freely redistributable, but 34 MB of
+# third-party game binaries is not something this repo should carry — the plan is a
+# fetch manifest CI runs, not committed blobs. Absent, every suite that names one
+# falls back to `stories/` and skips vacuously, exactly as it did before.
+/crates/app/tests/fixtures/stories/

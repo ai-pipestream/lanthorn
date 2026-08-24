@@ -497,3 +497,42 @@ would give the MONO press a clean 80x25. The colour press's 640x400 gives
 106.7 x 33.3, so the fit is mono-only, and 480 and 300 are divisible enough that
 this is very likely coincidence. It needs independent evidence before it means
 anything.)
+
+
+amiga-shogun-game.png AND amiga-shogun-hint.png (2026-08-23)
+
+  amiga-shogun-game.png  Shogun on an Amiga, gameplay ("The gale tears at
+                         you..."). 720x570, 15 colours.
+  amiga-shogun-hint.png  The same release's hint menu screen. 720x570,
+                         10 colours.
+
+Both are 2x captures of the machine's 320x200 frame, overscan border included
+— every pixel row is duplicated, which is what fixes the scale at exactly 2x
+and lets a measurement be halved back to native rather than guessed.
+
+amiga-shogun-game.png SETTLED SQ-1025 (WITHDRAWN — NO DEFECT)
+
+Text line pitch is 8 rows in the machine's frame — topaz-8. Three prose lines,
+ink span over character count, also in the machine's frame:
+
+  "The gale tears at you,"          22 chars    86.0 px   3.91 px/char
+  "biting deep within, and you"     27 chars   108.0 px   4.00 px/char
+  "know that if you don't make"     27 chars   107.5 px   3.98 px/char
+
+Flat at 4.00 — fixed pitch, and four is half of topaz's eight. That is the
+finding and not a coincidence: Shogun draws its text in the Amiga's hires
+640-wide space, where one pixel is half an art pixel, so topaz's 8 columns
+land on 4 art columns and its 8 rows land on 8 art rows whole. Half the width
+and all of the height cancels to the 8x16 native cell lanthorn already
+declares for the Amiga — the same 8x16 that Arthur's proportional face does
+NOT use (see the SQ-1009 captures above; the text space turned out to be
+per-game, not per-machine). Full reasoning, and the reporter's withdrawal, on
+SQ-1025.
+
+amiga-shogun-hint.png IS UNMEASURED — CAPTURED FOR SQ-1026
+
+This is the release's hint menu, not gameplay, and nothing has been measured
+off it yet: no pitch, no advance, no pixel count. Treat it as good for layout
+and colour only until someone does that work. It exists to give SQ-1026
+("Amiga Shogun's hint menu leaves the story text visible behind it in raster
+mode") a frame to reproduce against.

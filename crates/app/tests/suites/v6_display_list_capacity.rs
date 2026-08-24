@@ -14,14 +14,12 @@
 //!
 //! Skip-if-missing per the other gitignored-story smokes.
 
-use std::path::PathBuf;
 
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind, V6_OPS_CAP};
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Every v6 story in the fixture set, with a rotation of inputs that keeps it drawing.
 /// The verbs are deliberately generic — an unrecognised one still costs a turn and a
@@ -37,7 +35,7 @@ const GAMES: &[(&str, &str)] = &[
 const MOVES: &[&str] = &["look", "n", "s", "e", "w", "wait", "u", "d", "in", "out"];
 
 fn boot(file: &str) -> Option<GameSession> {
-    let p = stories_dir().join(file);
+    let p = fixture_path(file);
     let bytes = std::fs::read(&p).ok()?;
     let mut pic = PictSource::new(blorb::resolve_resource_blorb(&p).map(|(b, _)| b));
     let dims = pic.all_pict_dims();

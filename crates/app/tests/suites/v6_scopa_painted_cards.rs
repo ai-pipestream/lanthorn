@@ -15,20 +15,18 @@
 //!
 //! The story is gitignored (CLAUDE.md), so these skip cleanly when it is absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
 use app::session::GameSession;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot scopa and click into a game — its menu is mouse-driven, and a click
 /// reaches `read_char` as ZSCII 254 (ZMSD §3.8) with the coordinates already set.
 fn scopa_in_play() -> Option<GameSession> {
-    let path = stories_dir().join("scopa.z6");
+    let path = fixture_path("scopa.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

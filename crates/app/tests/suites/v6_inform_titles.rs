@@ -18,14 +18,12 @@
 //! - `sunburst.z6`: keypress-driven boot menu ('s' = start), then a
 //!   read_char-based input loop (the game builds its own command line).
 
-use std::path::PathBuf;
 
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot a v6 story headless; `screen_px` overrides the reported v6 Reso window
 /// — the ART resolution, which the engine doubles to the unit screen (SQ-0479).
@@ -33,7 +31,7 @@ fn stories_dir() -> PathBuf {
 /// falls back to the Blorb Reso (or the 320×200 art → 640×400 screen default).
 /// Returns None (skip) if the story file is absent.
 fn boot(name: &str, screen_px: Option<(u16, u16)>) -> Option<GameSession> {
-    let story_path = stories_dir().join(name);
+    let story_path = fixture_path(name);
     let story_bytes = std::fs::read(&story_path).ok()?;
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();

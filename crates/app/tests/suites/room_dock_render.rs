@@ -16,6 +16,8 @@ use app::layout::compute_pane_layout;
 use app::render::room_dock::{dock_room, draw_room_dock};
 use app::state::{AppState, RoomDockView};
 
+use crate::fixture_paths::fixture_path;
+
 const FRAME: Rect = Rect { x: 0, y: 0, width: 120, height: 40 };
 
 fn advent() -> mapper::mapper::Mapper {
@@ -310,8 +312,7 @@ fn the_info_body_lists_the_current_rooms_objects_from_a_real_engine() {
     use app::engine::Engine;
     use app::session::GameSession;
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../stories/minizork-r34-s871124.z3");
+    let path = fixture_path("minizork-r34-s871124.z3");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return;

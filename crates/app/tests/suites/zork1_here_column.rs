@@ -19,18 +19,16 @@
 //! Commercial stories are gitignored, so every test skips vacuously when its
 //! fixture is absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
 use app::session::GameSession;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn boot(file: &str) -> Option<GameSession> {
-    let path = stories_dir().join(file);
+    let path = fixture_path(file);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

@@ -22,7 +22,6 @@
 //! channels default), so the theme's `upper_window` style has to carry it either
 //! way — and a mode-specific regression here would otherwise hide.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -31,13 +30,12 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot advent.z6 and tap through its intro to the first line prompt.
 fn advent_in_play(honor: bool) -> Option<GameSession> {
-    let story_path = stories_dir().join("advent.z6");
+    let story_path = fixture_path("advent.z6");
     let story_bytes = std::fs::read(&story_path).ok()?;
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
@@ -399,7 +397,7 @@ fn advent_help_panel_is_opaque_theme_only() {
 /// dark bands. A bar has to paint inside its own rect.
 #[test]
 fn the_boot_popup_does_not_blank_the_rows_behind_it() {
-    let story_path = stories_dir().join("advent.z6");
+    let story_path = fixture_path("advent.z6");
     let Ok(bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing");
         return;

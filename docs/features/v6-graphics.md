@@ -3128,8 +3128,26 @@ is itself traffic, so bytes-per-frame taken that way describes the palette's fra
 ```
 
 ## Not yet there
-- **Proportional fonts** — status and chrome text currently use fixed-width
-  metrics; the v6 titles' proportional font tables aren't honored yet.
+- **Proportional fonts, one machine so far.** Arthur's Amiga floppy carries a
+  real proportional typeface, and lanthorn draws it at the face's own per-glyph
+  advances instead of a fixed cell — the only Version 6 release that does,
+  since *Journey*, *Beyond Zork* and *Shogun*'s Amiga releases ship a fixed 8×8
+  graphics set instead of a typeface and keep the old fixed-cell path
+  untouched. The engine measures with the same pen the renderer draws with:
+  the cursor advances by the glyph, a line breaks at the window's real pixel
+  width, and header `$30` — the width a game reads back after measuring a
+  string through output stream 3 — reports what the machine would have drawn.
+  That is what puts Arthur's date field ten pixels inside its own score bar
+  and wraps the F5 crystal-ball description exactly where a real Amiga wraps
+  it, instead of thirty pixels past the bar's end and a word and a half late
+  (SQ-1009). The Macintosh doesn't get
+  a proportional face at all yet — its games carry only Monaco (`FONT` 524), a
+  monospaced stand-in; the real body face, Geneva, lives in the Macintosh
+  System file that shipped with every Mac and no game, so there is nothing on
+  a game disk to draw it from. Reading Geneva (and the Amiga's own system
+  faces, for *Shogun* and *Zork Zero*, which carry no font at all and take the
+  system's topaz) off a user-supplied boot disk is planned but not yet built
+  (SQ-1036, SQ-1037).
 - **Save State across v6** — the host Save State snapshot captures the
   underlying machine as it does for any Z-machine game; carrying the v6-
   specific render state (window geometry, floats, pictures) across a restore

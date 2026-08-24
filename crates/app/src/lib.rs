@@ -339,6 +339,7 @@ pub mod storage;
 pub mod style;
 pub mod machine_boot;
 pub mod story_info;
+pub mod system_fonts;
 pub mod styles;
 pub mod symbols;
 pub mod term_colors;

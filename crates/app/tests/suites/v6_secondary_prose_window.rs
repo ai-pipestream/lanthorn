@@ -15,7 +15,6 @@
 //!
 //! Skip-if-missing per the other gitignored-story smokes.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
@@ -24,12 +23,11 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn boot() -> Option<GameSession> {
-    let story_path = stories_dir().join("advent.z6");
+    let story_path = fixture_path("advent.z6");
     let bytes = std::fs::read(&story_path).ok()?;
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
@@ -76,7 +74,7 @@ fn the_boot_banner_still_reaches_the_transcript() {
         return;
     };
     // `boot` drains the banner on the way to the first prompt, so re-boot raw.
-    let story_path = stories_dir().join("advent.z6");
+    let story_path = fixture_path("advent.z6");
     let bytes = std::fs::read(&story_path).expect("story present");
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();

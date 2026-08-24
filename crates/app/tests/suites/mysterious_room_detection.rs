@@ -26,22 +26,20 @@
 //!
 //! The stories are gitignored, so each test skips vacuously when absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
 use app::session::{apply_turn, DeathWatch, GameSession, InputKind};
 use mapper::mapper::Mapper;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot one Mysterious Adventures port and tap past its "Resume play on a game ?"
 /// prompt into play. Returns the session parked at the first line prompt, in the
 /// opening room.
 fn boot_into_play(file: &str) -> Option<GameSession> {
-    let path = stories_dir().join(file);
+    let path = fixture_path(file);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;
@@ -75,7 +73,7 @@ fn here(m: &Mapper) -> Option<(u16, String)> {
 /// (the files are commercial), so CI and fresh worktrees legitimately have none.
 /// The `ran > 0` guard in the sweep must not fire there.
 fn any_mysterious_present() -> bool {
-    (1..=11).any(|n| stories_dir().join(format!("mysterious{n:02}.z6")).exists())
+    (1..=11).any(|n| fixture_path(&format!("mysterious{n:02}.z6")).exists())
 }
 
 /// The reported bug, end to end: walk mysterious01 and watch the map fill in.

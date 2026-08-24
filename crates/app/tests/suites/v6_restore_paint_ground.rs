@@ -41,12 +41,11 @@ use app::graphics::PictSource;
 use app::session::GameSession;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn story_path() -> PathBuf {
-    stories_dir().join("scopa.z6")
+    fixture_path("scopa.z6")
 }
 
 fn picts() -> PictSource {
@@ -385,7 +384,7 @@ fn an_archive_without_a_ground_resets_the_one_on_screen() {
 #[test]
 fn shogun_restores_its_backdrop_onto_a_boot_that_never_painted_one() {
     let _g = standard_palette();
-    let path = stories_dir().join("shogun-r322-s890706.z6");
+    let path = fixture_path("shogun-r322-s890706.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return;

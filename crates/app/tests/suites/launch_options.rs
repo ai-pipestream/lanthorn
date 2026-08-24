@@ -37,9 +37,8 @@ use app::launch_options::{
 };
 use app::styles::{per_game_config_path, read_per_game_interpreter_number, read_per_game_pictures};
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("lanthorn-launchopt-it-{}-{tag}", std::process::id()));
@@ -53,7 +52,7 @@ fn tmp(tag: &str) -> PathBuf {
 /// filename. The dialog's list is what makes that a choice instead of a guess.
 #[test]
 fn every_rendition_of_zork_zero_is_offered_with_enough_to_choose_by() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return; // gitignored fixture
     }
@@ -150,7 +149,7 @@ fn each_game_in_the_library_detects_its_own_archives_and_no_others() {
     ];
 
     for (story, wanted, unwanted) in cases {
-        let path = stories_dir().join(story);
+        let path = fixture_path(story);
         if !path.is_file() {
             continue; // gitignored fixture
         }
@@ -158,7 +157,7 @@ fn each_game_in_the_library_detects_its_own_archives_and_no_others() {
         let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
         for w in *wanted {
             // Only assert on archives this library actually has.
-            if stories_dir().join(w).is_file() {
+            if fixture_path(w).is_file() {
                 assert!(
                     found.iter().any(|c| c.filename.eq_ignore_ascii_case(w)),
                     "{story} must detect {w}; got {names:?}"
@@ -190,8 +189,8 @@ fn a_split_ega_archive_is_offered_as_one_entry_carrying_both_files() {
         ("arthur-r74-s890714.z6", "arthur.eg1", "arthur.eg2", 171usize, "arthur.mg1"),
         ("journey-r83-s890706.z6", "journey.eg1", "journey.eg2", 135, "journey.mg1"),
     ] {
-        let path = stories_dir().join(story_file);
-        if !path.is_file() || !stories_dir().join(tail).is_file() {
+        let path = fixture_path(story_file);
+        if !path.is_file() || !fixture_path(tail).is_file() {
             continue; // gitignored fixtures
         }
         let found = discover_art_candidates(&path, None);
@@ -233,7 +232,7 @@ fn a_split_ega_archive_is_offered_as_one_entry_carrying_both_files() {
 /// flagged, rather than an empty dialog.
 #[test]
 fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
-    let eg2 = stories_dir().join("arthur.eg2");
+    let eg2 = fixture_path("arthur.eg2");
     if !eg2.is_file() {
         return; // gitignored fixture
     }
@@ -250,7 +249,7 @@ fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
     assert_eq!(c.pictures, 101, "and it advertises only what it actually holds");
 
     // Put part 1 back and the row disappears into it.
-    std::fs::copy(stories_dir().join("arthur.eg1"), dir.join("arthur.eg1")).unwrap();
+    std::fs::copy(fixture_path("arthur.eg1"), dir.join("arthur.eg1")).unwrap();
     let found = discover_art_candidates(&dir.join("arthur.z6"), None);
     assert!(!found.iter().any(|c| c.filename.eq_ignore_ascii_case("arthur.eg2")));
     assert_eq!(
@@ -264,7 +263,7 @@ fn a_lone_continuation_is_still_offered_and_says_which_part_it_is() {
 /// Blorb — the two files most likely to be sitting right beside it.
 #[test]
 fn the_detected_list_is_sorted_and_holds_only_native_archives() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return;
     }
@@ -283,7 +282,7 @@ fn the_detected_list_is_sorted_and_holds_only_native_archives() {
 /// resolution that follows is the one already tested by `picture_override.rs`.
 #[test]
 fn a_chosen_rendition_becomes_the_same_override_the_config_key_would_have() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return;
     }
@@ -316,9 +315,9 @@ fn a_chosen_rendition_becomes_the_same_override_the_config_key_would_have() {
 /// specific, more recent instruction to win — and the help text says so.
 #[test]
 fn a_launch_time_name_outranks_the_games_own_config_key() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
-    let pic = stories_dir().join("zork0.pic");
-    let mg1 = stories_dir().join("zork0.mg1");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
+    let pic = fixture_path("zork0.pic");
+    let mg1 = fixture_path("zork0.mg1");
     if !z0.is_file() || !pic.is_file() || !mg1.is_file() {
         return;
     }
@@ -405,7 +404,7 @@ fn writing_one_launch_key_never_deletes_the_other() {
 /// dialog exists to prevent.
 #[test]
 fn the_art_choice_moves_the_machine_and_the_dialog_can_name_the_source() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return;
     }
@@ -439,8 +438,8 @@ fn the_art_choice_moves_the_machine_and_the_dialog_can_name_the_source() {
 /// cosmetic change — `crates/zvm/src/cpu/exec.rs` branches on that byte.
 #[test]
 fn the_cli_door_reaches_the_machine_the_same_way_boot_does() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
-    if !z0.is_file() || !stories_dir().join("zork0.pic").is_file() {
+    let z0 = fixture_path("zork0-r393-s890714.z6");
+    if !z0.is_file() || !fixture_path("zork0.pic").is_file() {
         return;
     }
     let empty = tmp("cli-chain");
@@ -509,7 +508,7 @@ fn a_non_z_story_has_no_interpreter_number_to_report() {
 /// on that archive, and overrides nothing — the baseline is what it inherits.
 #[test]
 fn the_dialog_opens_on_what_the_story_already_inherits() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return;
     }
@@ -537,7 +536,7 @@ fn the_dialog_opens_on_what_the_story_already_inherits() {
 fn the_dialog_renders_its_list_its_derived_number_and_its_checkbox() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return;
     }
@@ -618,7 +617,7 @@ fn the_dialog_renders_its_list_its_derived_number_and_its_checkbox() {
 /// reported symptom, exactly.
 #[test]
 fn both_macintosh_archives_are_offered_from_inside_the_disk_image() {
-    let image = stories_dir().join("Zork Zero Disk.image");
+    let image = fixture_path("Zork Zero Disk.image");
     if !image.is_file() {
         eprintln!("SKIP: gitignored Macintosh medium missing");
         return;
@@ -667,7 +666,7 @@ fn both_macintosh_archives_are_offered_from_inside_the_disk_image() {
 /// two ways of saying one thing rather than one working and one missing.
 #[test]
 fn an_amiga_floppy_offers_its_own_archive_through_the_same_seam() {
-    let adf = stories_dir().join("Zork Zero - The Revenge of Megaboz.adf");
+    let adf = fixture_path("Zork Zero - The Revenge of Megaboz.adf");
     if !adf.is_file() {
         eprintln!("SKIP: gitignored Amiga medium missing");
         return;
@@ -692,7 +691,7 @@ fn an_amiga_floppy_offers_its_own_archive_through_the_same_seam() {
 /// what it actually is.
 #[test]
 fn picking_the_monochrome_row_loads_the_monochrome_art() {
-    let image = stories_dir().join("Zork Zero Disk.image");
+    let image = fixture_path("Zork Zero Disk.image");
     if !image.is_file() {
         eprintln!("SKIP: gitignored Macintosh medium missing");
         return;
@@ -708,7 +707,7 @@ fn picking_the_monochrome_row_loads_the_monochrome_art() {
     );
     // The name really is absent from the story's directory: this is the case a
     // host-filesystem-only override would report as `Missing`.
-    assert!(!stories_dir().join("Pic.data").exists(), "the archive is on the volume, not beside it");
+    assert!(!fixture_path("Pic.data").exists(), "the archive is on the volume, not beside it");
 
     for (filename, want_mono, want_space) in
         [("Pic.data", true, (480u16, 300u16)), ("CPic.data", false, (320, 200))]
@@ -769,7 +768,7 @@ fn picking_the_monochrome_row_loads_the_monochrome_art() {
 /// boot applies another is worse than either alone.
 #[test]
 fn choosing_a_macintosh_archive_leaves_the_machine_a_macintosh() {
-    let image = stories_dir().join("Zork Zero Disk.image");
+    let image = fixture_path("Zork Zero Disk.image");
     if !image.is_file() {
         eprintln!("SKIP: gitignored Macintosh medium missing");
         return;
@@ -830,7 +829,7 @@ fn adding_the_medium_arm_moved_nothing_beside_the_story() {
         // the SQ-0798 rule, unchanged by any of this.
         ("arthur-r74-s890714.z6", &["arthur.cg1", "arthur.eg1", "arthur.mg1", "arthur.pic"]),
     ] {
-        let path = stories_dir().join(story);
+        let path = fixture_path(story);
         if !path.is_file() {
             continue; // gitignored fixtures
         }
@@ -852,7 +851,7 @@ fn adding_the_medium_arm_moved_nothing_beside_the_story() {
 fn the_dialog_shows_the_disks_own_archives_and_says_where_they_live() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    let image = stories_dir().join("Zork Zero Disk.image");
+    let image = fixture_path("Zork Zero Disk.image");
     if !image.is_file() {
         eprintln!("SKIP: gitignored Macintosh medium missing");
         return;
@@ -932,7 +931,7 @@ fn a_single_image_release_says_from_game_disk_and_names_its_default() {
         ("Zork Zero Disk.image", "CPic.data", "Amiga"),
         ("Zork Zero - The Revenge of Megaboz.adf", "Pic.data", "Amiga"),
     ] {
-        let image = stories_dir().join(name);
+        let image = fixture_path(name);
         if !image.is_file() {
             eprintln!("SKIP: gitignored medium missing: {name}");
             continue;
@@ -996,7 +995,7 @@ fn a_single_image_release_says_from_game_disk_and_names_its_default() {
 /// to name it: it is otherwise the one thing the dialog can boot and cannot show.
 #[test]
 fn a_loose_story_names_its_blorb_and_mentions_no_disk() {
-    let z0 = stories_dir().join("zork0-r393-s890714.z6");
+    let z0 = fixture_path("zork0-r393-s890714.z6");
     if !z0.is_file() {
         return; // gitignored fixture
     }
@@ -1036,7 +1035,7 @@ fn a_loose_story_names_its_blorb_and_mentions_no_disk() {
 fn a_narrow_dialog_keeps_the_name_and_the_rendition_of_every_row() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    let image = stories_dir().join("Zork Zero Disk.image");
+    let image = fixture_path("Zork Zero Disk.image");
     if !image.is_file() {
         eprintln!("SKIP: gitignored Macintosh medium missing");
         return;

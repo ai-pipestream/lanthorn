@@ -236,6 +236,24 @@ re-rendering of it — sometimes at audibly different pitches. `/play-sound` say
 which source answered, and names a Blorb that is present but outranked rather
 than leaving you wondering.
 
+**And now the typeface, on the Amiga.** *Arthur*'s Amiga floppy carries a real
+proportional font rather than a fixed grid, and lanthorn now draws it at the
+game's own per-glyph advances instead of an even-width approximation — the same
+look the machine had, straight off the floppy with nothing to install. It needs
+the **raster** renderer, which paints the whole frame as an image: hybrid is the
+default and draws text as your terminal's own characters, one glyph per cell,
+which is what makes it crisp and is also why a proportional face cannot fit in
+it. `/set-v6-render raster` switches live, or `v6_render = "raster"` in
+`config.toml` makes it the default.
+
+*Journey*, *Beyond Zork* and *Shogun*'s Amiga releases carry a fixed 8×8
+character set instead of a typeface and draw exactly as before. **The
+Macintosh does not get this yet, and it's worth saying plainly why:**
+Infocom's Mac games ship only Monaco (`FONT` 524), a monospaced stand-in — the
+real body face, Geneva, lives in the Macintosh System file that shipped with
+every Mac and no game, so there is nothing on a game disk for lanthorn to draw
+it from. Macintosh Version 6 text still sets in Monaco's fixed 7×15 cell.
+
 → [interpreter](docs/features/interpreter.md) · [v6 graphics](docs/features/v6-graphics.md)
 
 ---

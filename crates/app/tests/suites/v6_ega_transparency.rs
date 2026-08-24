@@ -36,6 +36,8 @@ use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
+use crate::fixture_paths::fixture_path;
+
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
@@ -44,10 +46,10 @@ fn stories_dir() -> PathBuf {
 /// named archive up: the native source, its art scale, and the Infocom standard
 /// window a native archive has no chunk to declare.
 fn fmvpoker_ega_dealt() -> Option<GameSession> {
-    let story = stories_dir().join("fmvpoker.z6");
+    let story = fixture_path("fmvpoker.z6");
     let (Ok(bytes), Ok(art)) = (
         std::fs::read(&story),
-        std::fs::read(stories_dir().join("FMVPOKER.EG1")),
+        std::fs::read(fixture_path("FMVPOKER.EG1")),
     ) else {
         eprintln!("SKIP: gitignored fmvpoker.z6 / FMVPOKER.EG1 missing under {}", stories_dir().display());
         return None;
@@ -120,7 +122,7 @@ fn a_non_zero_transparent_index_reaches_the_canvas() {
     let _g = standard_palette();
     let Some(s) = fmvpoker_ega_dealt() else { return };
     let pics = blorb::infocom_pics::InfocomPics::parse(
-        std::fs::read(stories_dir().join("FMVPOKER.EG1")).unwrap(),
+        std::fs::read(fixture_path("FMVPOKER.EG1")).unwrap(),
     )
     .unwrap();
 
@@ -156,7 +158,7 @@ fn the_rank_plates_are_opaque_in_the_artwork() {
     let _g = standard_palette();
     let Some(_s) = fmvpoker_ega_dealt() else { return };
     let pics = blorb::infocom_pics::InfocomPics::parse(
-        std::fs::read(stories_dir().join("FMVPOKER.EG1")).unwrap(),
+        std::fs::read(fixture_path("FMVPOKER.EG1")).unwrap(),
     )
     .unwrap();
 

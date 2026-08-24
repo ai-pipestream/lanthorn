@@ -328,6 +328,13 @@ pub struct StoryAux {
     ///
     /// Display-only here, exactly like `art_candidates` and `disk_sounds`.
     pub disk_fonts: Vec<crate::native_font::DiskFace>,
+    /// Typefaces the user's OWN disk images under `~/.lanthorn/` carry (SQ-1038)
+    /// — a Workbench or System disk kept beside the stories rather than any one
+    /// game's release. Same value for every story (it does not depend on
+    /// `entry`), resolved here anyway so the panel reads it the same way it
+    /// reads `disk_fonts`. Display-only, and unlike `disk_fonts` there is no
+    /// "in use": see [`crate::system_fonts`].
+    pub system_fonts: Vec<crate::system_fonts::SystemFace>,
 }
 
 /// Resolve the lazy aux for one story. `data_base` is the storage base
@@ -375,6 +382,27 @@ pub fn resolve_aux(
     // the artwork scan is (SQ-0876/SQ-1018): a compilation carries one
     // application per game, and only one of them is this row's.
     let disk_fonts = crate::native_font::detected(&entry.path, entry.meta.disk_entry.as_deref());
+    // Same tier again. Not paired with `entry` at all — the user's own disks
+    // under `~/.lanthorn/` are not any one game's release — but resolved here
+    // rather than on every frame, for the same reason the three scans above are.
+    //
+    // **Only for a Version 6 story, and only for its OWN machine.** Below v6 no
+    // text is drawn from a disk face at all — it goes through the terminal — so a
+    // system disk is irrelevant whatever machine it names. And a Macintosh System
+    // disk has nothing to say about an Amiga release: showing Geneva under a
+    // Journey floppy would be a row that can never apply, which is exactly the
+    // "present but never used" confusion this panel exists to prevent (SQ-1018).
+    let system_fonts = if entry.meta.engine == Engine::ZCode
+        && entry.meta.version.as_deref() == Some("6")
+    {
+        // The MEDIUM names the machine, the same door `native_font::detected`
+        // takes — not the path, and not a guess (SQ-0876).
+        let (profile, _) =
+            crate::interpreter::InterpreterProfile::resolve_with_source(&entry.path, None, None, None);
+        crate::system_fonts::detected_for(profile)
+    } else {
+        Vec::new()
+    };
     StoryAux {
         assoc_blorb,
         saves,
@@ -387,6 +415,7 @@ pub fn resolve_aux(
         art_in_use,
         disk_sounds,
         disk_fonts,
+        system_fonts,
     }
 }
 

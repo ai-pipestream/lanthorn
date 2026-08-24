@@ -14,6 +14,8 @@
 use app::engine::Engine;
 use app::scott_session::ScottSession;
 
+use crate::fixture_paths::fixture_path;
+
 fn tiny_cave() -> Vec<u8> {
     include_bytes!("../../../scott/tests/tiny_cave.dat").to_vec()
 }
@@ -60,7 +62,7 @@ fn scott_dump_describes_a_scott_screen() {
 /// would be invisible otherwise, since a wrong dump still returns lines.
 #[test]
 fn glulx_dump_describes_the_window_tree() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/advent.blb");
+    let path = fixture_path("advent.blb");
     let Ok(raw) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return;

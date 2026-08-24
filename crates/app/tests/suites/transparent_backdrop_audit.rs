@@ -30,9 +30,7 @@
 
 use app::engine::{Engine, GraphicsWindow, WinNode};
 
-fn stories(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(name)
-}
+use crate::fixture_paths::fixture_path as stories;
 
 fn graphics_windows(node: &WinNode, out: &mut Vec<GraphicsWindow>) {
     match node {

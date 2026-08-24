@@ -27,7 +27,6 @@
 //!
 //! The story is gitignored (CLAUDE.md), so these skip cleanly when it is absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -36,15 +35,14 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot scopa to its title table, optionally dealing a hand. `Engine::set_mouse`
 /// takes the coordinates Y FIRST; a click reaches `read_char` as ZSCII 254
 /// (ZMSD §3.8) with the coordinates already set.
 fn scopa(deal: bool, trace: bool) -> Option<GameSession> {
-    let path = stories_dir().join("scopa.z6");
+    let path = fixture_path("scopa.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;
@@ -216,7 +214,9 @@ fn the_score_screen_does_not_bridge_the_gap_between_two_runs() {
     let panel = 0x0200_59A0;
     let blue = image::Rgba([0, 107, 181, 255]);
     let baize = image::Rgba([0, 132, 0, 255]);
-    let px = |x: u16, y: u16, s: &str| PxText { y, x, text: s.into(), style: 0, fg: ink, bg: panel };
+    let px = |x: u16, y: u16, s: &str| {
+        PxText::derived(y, x, s.into(), 0, ink, panel, zvm::screen::V6Cell::DEFAULT)
+    };
     let board = PositionedWindow {
         x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
         left_margin: 0, right_margin: 0,

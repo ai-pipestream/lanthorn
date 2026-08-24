@@ -13,16 +13,17 @@
 //! the game's own SAVE/RESTORE verb plumbing end to end. The tests skip vacuously
 //! when the gitignored fixture is absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
 use app::session::PendingIo;
 
+use crate::fixture_paths::fixture_path;
+
 /// The Glulx executable inside `advent.blb` (gitignored; the test skips loudly
 /// when it is absent).
 fn advent_image() -> Option<Vec<u8>> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/advent.blb");
+    let p = fixture_path("advent.blb");
     let bytes = match std::fs::read(&p) {
         Ok(b) => b,
         Err(_) => {

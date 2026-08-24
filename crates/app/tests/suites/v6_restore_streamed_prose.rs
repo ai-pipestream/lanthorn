@@ -34,7 +34,6 @@
 //!
 //! The stories are gitignored (CLAUDE.md), so every test skips cleanly without them.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, PxText, WinNode};
 use app::graphics::PictSource;
@@ -42,15 +41,14 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot `story` with `honor_game_colours` set and the session believing it is on
 /// `host_screen` — varied by the different-terminal test, and irrelevant to a v6
 /// story's own 640x400 native screen, which is part of what is being pinned.
 fn boot(story: &str, honor: bool, host_screen: Option<(u16, u16)>) -> Option<GameSession> {
-    let path = stories_dir().join(story);
+    let path = fixture_path(story);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

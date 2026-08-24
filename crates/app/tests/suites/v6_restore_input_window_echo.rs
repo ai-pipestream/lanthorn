@@ -41,12 +41,11 @@ use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn story_path() -> PathBuf {
-    stories_dir().join("fmvpoker.z6")
+    fixture_path("fmvpoker.z6")
 }
 
 fn picts() -> PictSource {

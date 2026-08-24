@@ -23,9 +23,8 @@ use app::state::AppState;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn temp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("lanthorn-uwb-{}-{}", tag, std::process::id()));
@@ -54,7 +53,7 @@ fn state_with_style(tag: &str, style_toml: &str) -> (AppState, PathBuf) {
 /// Anchorhead, driven past its two startup quote boxes to an ordinary turn whose
 /// upper window is the one-row status line.
 fn anchor_in_play() -> Option<GameSession> {
-    let path = stories_dir().join("anchor.z8");
+    let path = fixture_path("anchor.z8");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

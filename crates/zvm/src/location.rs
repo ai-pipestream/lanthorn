@@ -273,14 +273,6 @@ fn is_v6_stat_field(s: &str) -> bool {
     !n.chars().any(|c| c.is_alphabetic())
 }
 
-/// Global 8-px cell column holding the glyph painted at 1-based screen pixel `x`.
-/// Nearest cell, not floor: games paint on their own sub-cell offsets (Zork Zero
-/// starts its status text at x=71, Shogun at x=49), so a floor would smear runs
-/// that are really side by side into overlapping columns.
-fn v6_cell_of(x: u16, cell: V6Cell) -> usize {
-    ((x.max(1) - 1 + cell.w / 2) / cell.w) as usize
-}
-
 /// One field of a rasterized status row: its text, the screen pixel `x` of its
 /// first glyph, and the left edge of the window that painted it.
 struct V6Segment {
@@ -303,16 +295,29 @@ struct V6Segment {
 fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)], cell: V6Cell) -> Vec<V6Segment> {
     let mut line: Vec<char> = Vec::new();
     let mut owner: Vec<u16> = Vec::new();
+    // The screen pixel each column's glyph was painted at, kept only so a field can
+    // report where it starts; the LINE itself is addressed in columns.
+    let mut pen: Vec<u16> = Vec::new();
     for (t, win_x) in runs {
-        let start = v6_cell_of(t.x, cell);
+        // The column the engine's own grid cursor held (SQ-1048), not `t.x / cell.w`.
+        // Dividing the pixel is only the column while the pen advances one declared
+        // cell per glyph: on Arthur's Amiga press it climbs ~1.3 columns per glyph,
+        // so the derivation leaves gaps mid-word, the 2+-space field rule cuts there,
+        // and "Churchyard" arrives as "C hur chy ard" — a name no object answers to.
+        let start = usize::from(t.gcol);
         for (i, ch) in t.text.chars().enumerate() {
             let c = start + i;
             if c >= line.len() {
                 line.resize(c + 1, ' ');
                 owner.resize(c + 1, *win_x);
+                pen.resize(c + 1, 0);
             }
             line[c] = deframe(ch);
             owner[c] = *win_x;
+            // Exact for i=0, and for the rest wherever the pen is fixed. A
+            // proportional machine emits one run per glyph (that is how the drift
+            // above is visible at all), so i>0 does not arise there.
+            pen[c] = t.x.saturating_add((i as u16).saturating_mul(cell.w));
         }
     }
 
@@ -339,7 +344,7 @@ fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)], cell: V6Cell) -> Vec<
         }
         out.push(V6Segment {
             text: line[start..=last].iter().collect(),
-            x: (start as u16).saturating_mul(cell.w) + 1,
+            x: pen[start],
             win_x: owner[start],
         });
         i = last + 1;
@@ -381,7 +386,7 @@ fn is_v6_status_strip(
 /// story window owns y=1, so nothing is above it and a menu screen yields no room.
 fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
     // SQ-0917: the session's cell, which every pixel-to-column step below divides by.
-    let cell = machine.v6_cell;
+    let cell = machine.v6_cell();
     let Some(v6) = machine.screen.v6.as_ref() else {
         return Vec::new();
     };
@@ -1497,6 +1502,27 @@ mod tests {
         v.windows[1].y_coord = 1;
         v.windows[1].x_coord = 1;
         for &(y, x, text) in runs {
+            v.windows[1].texts.push(V6Text::derived(
+                y,
+                x,
+                text.into(),
+                0,
+                ZColour::Default,
+                ZColour::Default,
+                crate::screen::V6Cell::DEFAULT,
+            ));
+        }
+        v
+    }
+
+    /// As [`v6_band`], but every run also carries the COLUMN the engine's grid pen
+    /// was standing on — which on a proportional machine is NOT `x / cell.w`.
+    fn v6_band_penned(runs: &[(u16, u16, u16, &str)]) -> V6Windows {
+        let mut v = V6Windows::default();
+        v.windows[0].y_coord = 79;
+        v.windows[1].y_coord = 1;
+        v.windows[1].x_coord = 1;
+        for &(y, x, gcol, text) in runs {
             v.windows[1].texts.push(V6Text {
                 y,
                 x,
@@ -1504,9 +1530,59 @@ mod tests {
                 style: 0,
                 fg: ZColour::Default,
                 bg: ZColour::Default,
+                grow: 0,
+                gcol,
             });
         }
         v
+    }
+
+    /// SQ-1048 — the band is laid out on the pen's columns, not on `x / cell.w`.
+    ///
+    /// Transcribed from `stories/Arthur - The Quest for Excalibur.adf` (release 54 /
+    /// serial 890606, the Amiga press), fifteen blank turns and a `look`: the
+    /// churchyard bar, emitted one run per glyph as Arthur always emits it. The pen
+    /// advances by the disk face's own widths — 12, 10, 10, 10, 10, 10, 12, 10, 10 —
+    /// so the pixel quotient climbs about 1.3 columns per glyph and lands the name on
+    /// 4, 6, 7, 8, 10, 11, 12, 14, 15, 16. The gaps that opens are what the ordinary
+    /// "two or more spaces end a field" rule then cuts on, and `Churchyard` reaches
+    /// the object tree as `C hur chy ard` — a name nothing in the story answers to,
+    /// which cost Arthur room detection outright while the F3 and F5 overlays went on
+    /// offering `red piece of glass` and `You are standing…` in its place.
+    ///
+    /// The date is here so the fix cannot be "merge everything": those columns really
+    /// are far enough out to be a second field, and must stay one.
+    #[test]
+    fn v6_candidates_lay_the_band_on_the_engines_pen_not_the_pixel_quotient() {
+        let v = v6_band_penned(&[
+            (1, 35, 4, "C"),
+            (1, 47, 5, "h"),
+            (1, 57, 6, "u"),
+            (1, 67, 7, "r"),
+            (1, 77, 8, "c"),
+            (1, 87, 9, "h"),
+            (1, 97, 10, "y"),
+            (1, 109, 11, "a"),
+            (1, 119, 12, "r"),
+            (1, 129, 13, "d"),
+            (1, 390, 48, "S"),
+            (1, 402, 49, "t"),
+            (1, 416, 51, "A"),
+            (1, 428, 52, "n"),
+            (1, 438, 53, "n"),
+            (1, 448, 54, "e"),
+            (1, 458, 55, "'"),
+            (1, 464, 56, "s"),
+            (1, 480, 58, "D"),
+            (1, 492, 59, "a"),
+            (1, 502, 60, "y"),
+        ]);
+        let mut m = make_machine(build_v5_forests());
+        m.screen.v6 = Some(v);
+        assert_eq!(
+            v6_status_room_candidates(&m),
+            vec!["Churchyard".to_string(), "St Anne's Day".to_string()],
+        );
     }
 
     #[test]

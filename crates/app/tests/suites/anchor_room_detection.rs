@@ -21,21 +21,19 @@
 //!
 //! The story is gitignored, so this skips vacuously when absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::session::{apply_turn, DeathWatch, GameSession, InputKind};
 use mapper::mapper::Mapper;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot `anchor.z8` and tap through the three `read_char` intro screens (title
 /// splash + epigraph, prologue, `* THE FIRST DAY *`) into play. Returns the
 /// session parked at the first line prompt, in "Outside the Real Estate Office".
 fn boot_anchor_into_play() -> Option<GameSession> {
-    let path = stories_dir().join("anchor.z8");
+    let path = fixture_path("anchor.z8");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

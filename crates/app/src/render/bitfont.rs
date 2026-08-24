@@ -371,11 +371,11 @@ pub fn blit_glyph_styled(
     // block, 2x2 on Arthur's Amiga floppy), which is what makes `face.height *
     // art_scale.1` the declared cell height in the first place.
     if let Some(t) = tf.filter(|t| t.proportional()) {
-        if let Some(g) = u8::try_from(u32::from(glyph))
-            .ok()
-            .and_then(|c| t.face().and_then(|f| f.glyph(c)))
-        {
-            blit_metric_glyph(canvas, g, px, py, ch, t.scale(), fg, bg, style, t.bold_smear(style));
+        if let Some((f, g)) = t.face().and_then(|f| {
+            u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)).map(|g| (f, g))
+        }) {
+            let row_bytes = g.row_bytes(f.height);
+            blit_metric_glyph(canvas, g, row_bytes, px, py, ch, t.scale(), fg, bg, style, t.bold_smear(style));
             return;
         }
         // A code the typeface does not carry falls through to the masters below,
@@ -384,6 +384,13 @@ pub fn blit_glyph_styled(
     let native_face = tf
         .and_then(|t| t.face())
         .filter(|f| u32::from(f.width) == cw && u32::from(f.height) == ch);
+    // `rows.len() as u32 == ch` (== `f.height`) is what makes this single-byte-per-
+    // row read below safe: it holds only when this GLYPH's own row is exactly one
+    // byte (`Glyph::row_bytes(f.height) == 1`), which every real face reaching this
+    // path satisfies — `f.width == cw` above already restricts it to a font whose
+    // nominal cell fits the (always ≤8px) v6 grid, and a glyph is never wider than
+    // its font's nominal cell. A glyph that DID need more than one byte here would
+    // fail this filter and fall through to the masters below, not misread (SQ-1038).
     let native_rows: Option<&[u8]> = native_face
         .and_then(|f| u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)))
         .map(|g| g.rows.as_slice())
@@ -446,10 +453,14 @@ pub fn blit_glyph_styled(
 /// and the ten-row face fills the twenty-row line exactly.
 ///
 /// Rows are MSB-leftmost, as [`crate::render::vga16`] packs them and as
-/// [`blorb::bitmap_font`] documents, so the style shears go `>>`.
+/// [`blorb::bitmap_font`] documents, so the style shears go `>>`. `row_bytes` is
+/// [`blorb::bitmap_font::Glyph::row_bytes`]'s result for `g` — 1 for a glyph up to
+/// 8px wide (bearing included), more for a wider one (SQ-1038) — computed once by
+/// the caller, which already has the font `g` came from and so its `height`.
 fn blit_metric_glyph(
     canvas: &mut RgbaImage,
     g: &blorb::bitmap_font::Glyph,
+    row_bytes: usize,
     px: u32,
     py: u32,
     ch: u32,
@@ -460,12 +471,13 @@ fn blit_metric_glyph(
     smear: u8,
 ) {
     let (sx, sy) = (scale.0.max(1), scale.1.max(1));
-    let rows = synthesize_rows(&g.rows, style, smear);
+    let rows = synthesize_rows(&g.rows, row_bytes, style, smear);
     // The pen's own advance, which is where the NEXT glyph starts — so a painted
     // background covers exactly the run and never a neighbour's column. Bold adds
     // the face's own `tf_BoldSmear` to it, exactly as the machine does: the smear
     // needs a column to live in or it eats the inter-character gap (SQ-1009).
     let adv = (u32::from(g.width) + u32::from(smear)) * sx;
+    let row_cols = row_bytes * 8;
     let (cwidth, cheight) = (canvas.width(), canvas.height());
     for dy in 0..ch {
         let oy = py + dy;
@@ -478,8 +490,8 @@ fn blit_metric_glyph(
             if ox >= cwidth {
                 break;
             }
-            let col = dx / sx;
-            let on = col < 8 && rows.get(src_row).is_some_and(|r| r & (0x80 >> col) != 0);
+            let col = (dx / sx) as usize;
+            let on = col < row_cols && blorb::bitmap_font::row_bit(&rows, row_bytes, src_row, col);
             if on {
                 canvas.put_pixel(ox, oy, fg);
             } else if let Some(b) = bg {
@@ -489,25 +501,65 @@ fn blit_metric_glyph(
     }
 }
 
-/// [`synthesize_face16`]'s two transforms for a face of any height.
+/// [`synthesize_face16`]'s two transforms for a face of any height and, since
+/// SQ-1038, any row width — `row_bytes` is [`blorb::bitmap_font::Glyph::row_bytes`],
+/// 1 for a glyph up to 8px wide (bearing included), more for a wider one.
 ///
-/// Same reasoning, same direction (MSB-leftmost, so right is `>>`), sheared at the
-/// midpoint of whatever height the face has rather than at a fixed row — and
-/// emboldened by the FACE's `tf_BoldSmear` rather than by a fixed one pixel.
-fn synthesize_rows(rows: &[u8], style: u8, smear: u8) -> Vec<u8> {
+/// Same reasoning, same direction (MSB-leftmost, so right is a shift toward higher
+/// columns), sheared at the midpoint of whatever height the face has rather than at
+/// a fixed row — and emboldened by the FACE's `tf_BoldSmear` rather than by a fixed
+/// one pixel. A row wider than one byte shifts as ONE unit across the whole row
+/// (ink can cross a byte boundary), never each byte independently — shifting bytes
+/// independently would wrap a bit that crossed a boundary back to the SAME byte's
+/// column 0 instead of carrying it into the next byte, which is a corrupted glyph
+/// wearing a font's clothes exactly the way this module's header warns about.
+fn synthesize_rows(rows: &[u8], row_bytes: usize, style: u8, smear: u8) -> Vec<u8> {
     let mut out = rows.to_vec();
-    let half = out.len() / 2;
+    if row_bytes == 0 {
+        return out;
+    }
+    let height = out.len() / row_bytes;
+    let half = height / 2;
     if style & STYLE_ITALIC != 0 {
-        for r in out.iter_mut().take(half) {
-            *r >>= 1;
+        for r in 0..half {
+            let shifted = shift_row_right(&out[r * row_bytes..(r + 1) * row_bytes], 1);
+            out[r * row_bytes..(r + 1) * row_bytes].copy_from_slice(&shifted);
         }
     }
     if style & STYLE_BOLD != 0 {
         // The face's OWN smear, not a fixed one pixel — and the caller has already
         // widened the advance by the same amount.
         let n = u32::from(smear.max(1));
-        for r in out.iter_mut() {
-            *r |= r.checked_shr(n).unwrap_or(0);
+        for r in 0..height {
+            let slice = r * row_bytes..(r + 1) * row_bytes;
+            let shifted = shift_row_right(&out[slice.clone()], n);
+            for (o, s) in out[slice].iter_mut().zip(shifted.iter()) {
+                *o |= s;
+            }
+        }
+    }
+    out
+}
+
+/// Shift one MSB-leftmost row right by `n` bits, AS A WHOLE ROW: ink at column `c`
+/// moves to column `c + n`, carrying across a byte boundary when `row.len() > 1`,
+/// and a bit shifted past the last byte is dropped rather than wrapping — the same
+/// clipping guarantee [`synthesize_face`]'s single-byte `<<`/`>>` gives for free,
+/// generalised because a multi-byte row cannot get it for free (SQ-1038).
+fn shift_row_right(row: &[u8], n: u32) -> Vec<u8> {
+    let total_bits = row.len() * 8;
+    let mut out = vec![0u8; row.len()];
+    if row.is_empty() {
+        return out;
+    }
+    let n = n as usize;
+    for col in 0..total_bits {
+        let new_col = col + n;
+        if new_col >= total_bits {
+            continue;
+        }
+        if row[col / 8] & (0x80 >> (col % 8)) != 0 {
+            out[new_col / 8] |= 0x80 >> (new_col % 8);
         }
     }
     out

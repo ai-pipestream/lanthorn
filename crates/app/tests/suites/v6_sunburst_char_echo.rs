@@ -42,19 +42,17 @@
 //! `stories/` is gitignored (CLAUDE.md), so every test here skips vacuously when
 //! the story is absent.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind, TurnResult};
 use app::state::{AppState, TranscriptKind};
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn open(name: &str) -> Option<GameSession> {
-    let path = stories_dir().join(name);
+    let path = fixture_path(name);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

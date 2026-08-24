@@ -8,6 +8,12 @@
 
 #![allow(dead_code, unused_imports)]
 
+// Shared fixture-path resolution, declared ONCE per group binary: the suites
+// below are modules of this one crate, so a `#[path]` module in each of them is
+// the same file loaded several times over (clippy::duplicate_mod).
+#[path = "suites/fixture_paths.rs"]
+mod fixture_paths;
+
 #[path = "suites/adf_disk_image.rs"]
 mod adf_disk_image;
 #[path = "suites/apple_disk_set_release.rs"]

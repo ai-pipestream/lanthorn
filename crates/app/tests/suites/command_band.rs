@@ -13,7 +13,6 @@
 //! Real commercial stories are gitignored, so every test that needs one skips
 //! vacuously when it is absent (the `any_v6_story_present` pattern).
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -26,9 +25,8 @@ use app::state::{AppState, CommandBandState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn open_band(state: &mut AppState) {
     let band = CommandBandState::new(default_verbs(), default_quick());
@@ -45,7 +43,7 @@ fn dump(buf: &Buffer) -> String {
 /// Boot a plain (non-v6) Z-machine story from `stories/`, or `None` when the
 /// gitignored fixture is absent.
 fn boot_zmachine(file: &str) -> Option<GameSession> {
-    let path = stories_dir().join(file);
+    let path = fixture_path(file);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;
@@ -282,7 +280,7 @@ fn the_story_prompt_line_is_still_drawn_while_the_band_is_open() {
 #[test]
 fn v6_keeps_the_pixel_path_while_the_band_is_open() {
     for honor in [true, false] {
-        let story_path = stories_dir().join("zork0-r393-s890714.z6");
+        let story_path = fixture_path("zork0-r393-s890714.z6");
         let Ok(story_bytes) = std::fs::read(&story_path) else {
             eprintln!("SKIP: gitignored story missing at {}", story_path.display());
             return;

@@ -38,9 +38,8 @@ use ratatui::style::Color;
 const TERM_FG: (u8, u8, u8) = (0x58, 0x6e, 0x75);
 const TERM_BG: (u8, u8, u8) = (0xfd, 0xf6, 0xe3);
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn answered_probe() -> TermDefaultColors {
     TermDefaultColors {
@@ -76,7 +75,7 @@ fn state_with_probe(tag: &str, probe: TermDefaultColors, honor: bool) -> (AppSta
 /// Anchorhead, driven past its two startup quote boxes to an ordinary turn whose
 /// upper window is the one-row status line.
 fn anchor_in_play() -> Option<GameSession> {
-    let path = stories_dir().join("anchor.z8");
+    let path = fixture_path("anchor.z8");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

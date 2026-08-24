@@ -23,6 +23,8 @@ use app::engine::Engine;
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
+use crate::fixture_paths::fixture_path;
+
 fn story_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/zork0-r393-s890714.z6")
 }
@@ -161,7 +163,7 @@ fn story_ink_survives_a_save_state_resume() {
 fn story_ink_survives_a_resume_without_a_v6_window_table() {
     use zvm::screen::ZColour;
 
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/photopia.z5");
+    let path = fixture_path("photopia.z5");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return;

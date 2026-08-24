@@ -336,14 +336,17 @@ caught all of the above.
 
 ## 7. Missing seams, and the one `gvm` already built
 
-**`FontMetrics`.** `zvm` names this gap itself, at `screen.rs:~2210`: a
-proportional renderer "needs per-glyph advances, which is a `FontMetrics`-shaped
-thing supplied by the host". No such trait exists. `V6Cell` answers the *declared*
-metric — what the story is told in `$26`/`$27` — and there is no interface at all
-for the *drawn* one. Under the standard-implementation goal this stops being
-speculative: a GUI painting proportional text is precisely the second consumer
-the goal anticipates, and `V6Cell`'s doc has already done half the design by
-naming the boundary. Worth filing; not worth building inside this review.
+**`FontMetrics` — closed by `V6Metric` (SQ-1009).** `zvm` named this gap itself,
+on `V6Cell`: a proportional renderer "needs per-glyph advances, which is a
+`FontMetrics`-shaped thing supplied by the host". That thing now exists as
+`screen::V6Metric` — the declared cell and a per-ZSCII-byte advance table in one
+value, installed with `Machine::set_v6_text` and defaulting to a fixed pen, so a
+host that has no face to offer behaves exactly as before. It is the seam the
+standard-implementation goal anticipated: the engine advances its cursor, wraps
+its lines and answers header `$30` through the same table the host draws with, and
+a GUI painting proportional text supplies one table rather than reimplementing the
+layout. The zero-dependency rule is intact — the host builds the table from
+whatever font it has, and `zvm` only reads it.
 
 **Resources are a pre-filled `Vec`, not an interface.** `picture_dims:
 Vec<(u16, u16, u16)>` (`exec.rs:277`) forces a host to enumerate every picture in

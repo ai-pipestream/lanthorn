@@ -2859,6 +2859,45 @@ fn draw_info_panel(
                 lines.push((row, story_info_value));
             }
         }
+
+        // Typefaces the USER'S OWN disks under `~/.lanthorn/` carry (SQ-1038) —
+        // a Workbench or System disk kept beside the stories rather than any one
+        // game's release. Same shape as the block above, minus "in use": nothing
+        // renders with one of these yet (SQ-1037), so every row here is simply
+        // present. Only ever populated for a Version 6 story on this disk's own
+        // machine — `picker::aux_for` decides that, not this.
+        //
+        // **Grouped by disk, disk named once.** A system disk carries a whole
+        // drawer — eighteen faces off a System 6.0.8 startup disk, fourteen off a
+        // Workbench floppy — and repeating a sixty-character filename on every one
+        // of them buries the faces in their own provenance. The disk still has to
+        // be named, because Workbench 1.2 and 1.3 ship IDENTICAL font drawers and
+        // would otherwise read as one list silently standing for two; naming it
+        // once as a heading says it without drowning the rows under it.
+        if !a.system_fonts.is_empty() {
+            lines.push((String::new(), story_info_value));
+            lines.push((format!("System fonts ({})", a.system_fonts.len()), story_info_label));
+            // Grouped in FIRST-APPEARANCE order rather than sorted, so the list
+            // reads in the order the directory scan found the disks and does not
+            // reshuffle when a face is added to one of them.
+            let mut seen: Vec<&str> = Vec::new();
+            for f in &a.system_fonts {
+                if !seen.contains(&f.disk.as_str()) {
+                    seen.push(f.disk.as_str());
+                }
+            }
+            for disk in seen {
+                let n = a.system_fonts.iter().filter(|f| f.disk == disk).count();
+                lines.push((format!(" {disk} ({n})"), story_info_value));
+                for f in a.system_fonts.iter().filter(|f| f.disk == disk) {
+                    let mut row = format!("   {}  {}x{}", f.name, f.width, f.height);
+                    if f.proportional {
+                        row.push_str(" · proportional");
+                    }
+                    lines.push((row, story_info_value));
+                }
+            }
+        }
     }
 
     // Wrap every logical line to the panel's content width (SQ-0861). One row
@@ -4136,6 +4175,7 @@ mod tests {
             art_in_use: None,
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
+            system_fonts: Vec::new(),
         };
         // Wide enough that the resource detail suffix and the save-summary row aren't clipped.
         let area = Rect::new(0, 0, 100, 25);
@@ -4735,6 +4775,7 @@ mod tests {
             art_in_use: None,
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
+            system_fonts: Vec::new(),
         };
         let area = Rect::new(0, 0, 60, 16);
         let mut buf = Buffer::empty(area);
@@ -4781,6 +4822,7 @@ mod tests {
             art_in_use: Some("zork0.mg1".into()),
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
+            system_fonts: Vec::new(),
         };
         // Tall enough that the block is on screen without scrolling.
         let area = Rect::new(0, 0, 62, 40);
@@ -4850,6 +4892,7 @@ mod tests {
                     used: false,
                 },
             ],
+            system_fonts: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 40);
         let mut buf = Buffer::empty(area);
@@ -4879,6 +4922,111 @@ mod tests {
             !alt.contains("in use"),
             "a face the renderer does not reach must not read as one it does: {alt:?}",
         );
+    }
+
+    /// SQ-1038: the panel also lists typefaces off the user's OWN disks under
+    /// `~/.lanthorn/`, named with the disk each came from and never marked "in
+    /// use" — nothing renders with one of these yet (SQ-1037).
+    ///
+    /// Two rows share a name on purpose, matching the user's own Workbench 1.2
+    /// and 1.3 disks (identical font drawers): both must still be listed rather
+    /// than collapsing into one.
+    #[test]
+    fn info_panel_lists_system_fonts_named_with_their_disk_and_never_marks_them_in_use() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = minimal_story_meta();
+        let aux = app::picker::StoryAux {
+            assoc_blorb: None,
+            saves: vec![],
+            hints_available: false,
+            game_dir: std::path::PathBuf::from("/tmp/arthur"),
+            qzl_saves: vec![],
+            auto_saves: vec![],
+            sidecars: vec![],
+            art_candidates: vec![],
+            art_in_use: None,
+            disk_sounds: Vec::new(),
+            disk_fonts: Vec::new(),
+            system_fonts: vec![
+                app::system_fonts::SystemFace {
+                    disk: "MacOS_6.0.8_System_Startup.img".into(),
+                    name: "FONT 396".into(),
+                    width: 24,
+                    height: 24,
+                    proportional: true,
+                    machine: app::interpreter::InterpreterProfile::Macintosh,
+                },
+                app::system_fonts::SystemFace {
+                    disk: "Workbench v1.2.adf".into(),
+                    name: "fonts/garnet/16".into(),
+                    width: 16,
+                    height: 16,
+                    proportional: true,
+                    machine: app::interpreter::InterpreterProfile::Amiga,
+                },
+                app::system_fonts::SystemFace {
+                    disk: "Workbench v1.3.adf".into(),
+                    name: "fonts/garnet/16".into(),
+                    width: 16,
+                    height: 16,
+                    proportional: true,
+                    machine: app::interpreter::InterpreterProfile::Amiga,
+                },
+            ],
+        };
+        // Wider than the other panel fixtures: a disk filename is long enough
+        // ("MacOS_6.0.8_System_Startup.img") that the default 62 wraps the row
+        // and splits it from its own "proportional" tag onto a continuation
+        // line the per-row lookup below would miss.
+        let area = Rect::new(0, 0, 90, 40);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let p = std::path::Path::new("arthur.z6");
+        super::draw_info_panel(
+            "Arthur", "arthur.z6", &meta, Some(&aux), 0, area, None, &mut cover, p, p, false,
+            None, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+        );
+        let text = buffer_to_string(&buf, area);
+        println!("{text}");
+
+        assert!(text.contains("System fonts (3)"), "the block has a header: {text:?}");
+        let rows_of = |name: &str| -> Vec<String> {
+            text.lines().filter(|l| l.contains(name)).map(str::to_string).collect()
+        };
+
+        // **Each disk is named ONCE, as a heading.** That is the whole point of
+        // grouping: a system disk carries a whole drawer — eighteen faces off a
+        // System 6.0.8 startup disk — and repeating a sixty-character filename on
+        // every row buries the faces in their own provenance. Asserted as a COUNT,
+        // because "appears at least once" would pass equally well for the
+        // per-row repetition this replaced.
+        for disk in ["MacOS_6.0.8_System_Startup.img", "Workbench v1.2.adf", "Workbench v1.3.adf"] {
+            let named = rows_of(disk);
+            assert_eq!(named.len(), 1, "{disk} is named exactly once: {named:?}");
+        }
+
+        // A face row carries its own metrics and NOT its disk — it sits under the
+        // heading that already said so.
+        let mac = rows_of("FONT 396");
+        assert_eq!(mac.len(), 1, "one Macintosh face: {mac:?}");
+        assert!(mac[0].contains("24x24") && mac[0].contains("proportional"), "{mac:?}");
+        assert!(
+            !mac[0].contains("MacOS_6.0.8"),
+            "the face row does not repeat its disk: {mac:?}",
+        );
+        assert!(!mac[0].contains("in use"), "a system face is never marked in use: {mac:?}");
+
+        // The duplicate: the SAME face name on two disks still reads as two,
+        // because each sits under its own heading. Workbench 1.2 and 1.3 ship
+        // identical font drawers, so collapsing them would be one list silently
+        // standing for two.
+        let garnet = rows_of("fonts/garnet/16");
+        assert_eq!(garnet.len(), 2, "both Workbench disks list it: {garnet:?}");
+
+        // And the headings carry a per-disk count, so a reader can see the split
+        // without counting rows.
+        assert!(text.contains("(1)"), "each disk heading states how many it carries: {text:?}");
     }
 
     /// SQ-0798: Arthur's split EGA set is one row in the panel, exactly as it is
@@ -4911,6 +5059,7 @@ mod tests {
             art_in_use: Some("arthur.eg1".into()),
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
+            system_fonts: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 40);
         let mut buf = Buffer::empty(area);
@@ -4949,6 +5098,7 @@ mod tests {
             art_in_use: Some("FMVPOKER.EG1".into()),
             disk_sounds: Vec::new(),
             disk_fonts: Vec::new(),
+            system_fonts: Vec::new(),
         };
         let area = Rect::new(0, 0, 62, 30);
         let mut buf = Buffer::empty(area);

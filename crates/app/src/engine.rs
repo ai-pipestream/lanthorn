@@ -182,6 +182,38 @@ pub struct PxText {
     /// Packed ZColour (`state::pack_zcolour`); 0 = default.
     pub fg: u32,
     pub bg: u32,
+    /// The screen character CELL this run's first glyph was written at, 0-based —
+    /// `zvm::screen::V6Text::grow`/`gcol`, carried through unchanged.
+    ///
+    /// A cell backend places by this and never by `(x - 1) / cell_width`. The
+    /// division is the column only while the pen advances exactly one declared
+    /// cell per character; on Arthur's Amiga press it advances ~10.4 native pixels
+    /// against a declared 8, so the quotient climbs 1.3 per glyph and a derived
+    /// column skips cells — `Churchyard` reads `Ch urc  hy ard`, worse the wider
+    /// the pane (SQ-1009). The engine keeps a dense grid beside the pixel runs;
+    /// this is that grid's answer, and for every fixed-pen machine it is exactly
+    /// what the division gave.
+    pub grow: u16,
+    pub gcol: u16,
+}
+
+impl PxText {
+    /// A run whose grid cell is the DERIVATION `((y-1)/h, (x-1)/w)`.
+    ///
+    /// Exactly what a fixed-pen machine emits — the pen and the declared cell
+    /// agree there — so it is what a fixture placing paint by hand means, and what
+    /// a caller synthesising a run from pixels alone can honestly say.
+    pub fn derived(
+        y: u16,
+        x: u16,
+        text: String,
+        style: u8,
+        fg: u32,
+        bg: u32,
+        cell: zvm::screen::V6Cell,
+    ) -> PxText {
+        PxText { y, x, text, style, fg, bg, grow: cell.row_of(y), gcol: cell.col_of(x) }
+    }
 }
 
 impl GridWindow {

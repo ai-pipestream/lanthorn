@@ -1138,9 +1138,14 @@ Amiga floppy or anywhere else.
   the cell follows the *face*: Arthur's Amiga floppy ships a 10-row `char.data`,
   and its art doubles onto the 640×400 unit screen, so the story is told a
   **20-row line** and lays out the 20 text rows a real Amiga showed instead of
-  25. Only the HEIGHT moves — a proportional face has no single advance to
-  declare, so the width stays the machine's and the *drawing* is what goes
-  proportional. Setting
+  25. Only the DECLARED height moves — a proportional face has no single advance
+  to declare, so header `$27` stays the machine's 8 and the story's own column
+  grid with it. What goes proportional is every *measurement*: the cursor
+  advances by the glyph the face draws, a line breaks at the window's real pixel
+  width, and the width a game reads back out of header `$30` after measuring a
+  string through output stream 3 is the width that string will occupy. Games
+  right-align from that number, so declaring one thing and drawing another put
+  Arthur's date field thirty pixels past the end of its own score bar. Setting
   `interpreter_number` yourself names the machine outright and outranks both, so
   `interpreter_number = 4` gets you the Amiga's palette, its standard window and
   its §8.3 screen rules rather than just the byte — a number that changed what

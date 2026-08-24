@@ -23,12 +23,11 @@ use std::path::{Path, PathBuf};
 
 use app::session::{format_pane_title, resolve_title};
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn story(name: &str) -> Option<PathBuf> {
-    let p = stories_dir().join(name);
+    let p = fixture_path(name);
     if p.is_file() {
         Some(p)
     } else {

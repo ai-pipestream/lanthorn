@@ -123,7 +123,7 @@ pub(crate) mod tests {
     /// allocation block 2 — so this reaches the fork WITHOUT going through
     /// `crate::hfs`, and the two can be checked against each other.
     pub(crate) const FORK_AT: usize = (4 + 2) * 512;
-    pub(crate) const FORK_LEN: usize = 525;
+    pub(crate) const FORK_LEN: usize = 553;
 
     pub(crate) fn fork_bytes() -> &'static [u8] {
         &VOLUME[FORK_AT..FORK_AT + FORK_LEN]
@@ -140,11 +140,13 @@ pub(crate) mod tests {
         assert_eq!(VOLUME.len(), 32_768, "the synthetic volume is 64 logical blocks");
         assert_eq!(&VOLUME[1024..1026], b"BD", "an HFS Master Directory Block at block 2");
         let fork = fork_bytes();
-        // The 16-byte resource header: data at 256, map at 440, 184 bytes of
-        // data, 85 bytes of map.
-        assert_eq!(&fork[0..16], &[0, 0, 1, 0, 0, 0, 1, 0xB8, 0, 0, 0, 0xB8, 0, 0, 0, 0x55]);
-        // The map repeats it, which is what makes 440 the map offset.
-        assert_eq!(&fork[440..456], &fork[0..16], "the map opens with a copy of the header");
+        // The 16-byte resource header: data at 256, map at 468, 212 bytes of
+        // data (FONT 524 is 110 bytes, FONT 1033 is 94 — SQ-1038's wide glyph
+        // grew it from 66), 85 bytes of map (fixed: the map's own size does not
+        // depend on how big a resource's DATA is).
+        assert_eq!(&fork[0..16], &[0, 0, 1, 0, 0, 0, 1, 0xD4, 0, 0, 0, 0xD4, 0, 0, 0, 0x55]);
+        // The map repeats it, which is what makes 468 the map offset.
+        assert_eq!(&fork[468..484], &fork[0..16], "the map opens with a copy of the header");
         // And the first resource's four-byte length, at the data area's start.
         assert_eq!(&fork[256..260], &[0, 0, 0, 110], "FONT 524 is 110 bytes");
     }
@@ -162,18 +164,18 @@ pub(crate) mod tests {
         assert_eq!(fonts[0].data.len(), 110);
         assert_eq!(fonts[1].id, 1033);
         assert_eq!(fonts[1].name.as_deref(), Some("Lanthorn 9"));
-        assert_eq!(fonts[1].data.len(), 66);
+        assert_eq!(fonts[1].data.len(), 94, "66 before SQ-1038's wide glyph 0x32");
 
         // The three-byte data offset is what places the second resource: 114
         // bytes past the first, which is its own four-byte length plus 110.
-        assert_eq!(fonts[1].data, fork_bytes()[256 + 114 + 4..256 + 114 + 4 + 66]);
+        assert_eq!(fonts[1].data, fork_bytes()[256 + 114 + 4..256 + 114 + 4 + 94]);
     }
 
     #[test]
     fn finds_a_resource_by_type_and_id() {
         let fork = ResourceFork::parse(fork_bytes()).expect("a resource fork");
         assert_eq!(fork.get(b"FONT", 524).map(|r| r.data.len()), Some(110));
-        assert_eq!(fork.get(b"FONT", 1033).map(|r| r.data.len()), Some(66));
+        assert_eq!(fork.get(b"FONT", 1033).map(|r| r.data.len()), Some(94));
         assert!(fork.get(b"FONT", 525).is_none(), "no such id");
         assert!(fork.get(b"NFNT", 524).is_none(), "no such type");
         assert!(fork.of_type(b"snd ").is_empty());
@@ -186,14 +188,14 @@ pub(crate) mod tests {
         assert_eq!(ResourceFork::parse(b""), None);
         assert_eq!(ResourceFork::parse(&[0u8; 15]), None, "shorter than the header");
         // A header pointing at a map that is not there.
-        let short = &fork_bytes()[..440 + 29];
+        let short = &fork_bytes()[..468 + 29];
         assert_eq!(ResourceFork::parse(short), None, "the map does not fit");
         // A resource whose three-byte data offset leaves the fork is refused
         // outright — the four-byte length it points at is not there to read.
         // The second reference list entry sits 50 bytes into the map and its
         // offset is the three bytes after the attribute byte.
         let mut broken = fork_bytes().to_vec();
-        broken[440 + 50 + 5..440 + 50 + 8].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+        broken[468 + 50 + 5..468 + 50 + 8].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
         assert_eq!(ResourceFork::parse(&broken), None, "a data offset off the end");
     }
 
@@ -209,7 +211,7 @@ pub(crate) mod tests {
         assert_eq!(fonts.len(), 2);
         assert_eq!(fonts[0].name.as_deref(), Some("Lanthorn 12"), "the first name is whole");
         assert_eq!(fonts[1].name, None, "the second ran off the end");
-        assert_eq!(fonts[1].data.len(), 66, "and its bytes are untouched");
+        assert_eq!(fonts[1].data.len(), 94, "and its bytes are untouched");
     }
 
     /// An empty fork is a legitimate thing to be handed, and yields no types.

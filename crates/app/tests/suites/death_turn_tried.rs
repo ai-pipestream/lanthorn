@@ -23,6 +23,8 @@ use app::session::{
     TurnResult,
 };
 
+use crate::fixture_paths::fixture_path;
+
 fn turn(num: u16, name: &str, transcript: &str) -> TurnResult {
     TurnResult {
         transcript: transcript.into(),
@@ -339,7 +341,7 @@ fn adventure_at_the_pit() -> Option<(app::glulx_session::GlulxSession, Mapper, D
     use app::engine::Engine;
     use app::glulx_session::GlulxSession;
 
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/advent.blb");
+    let path = fixture_path("advent.blb");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

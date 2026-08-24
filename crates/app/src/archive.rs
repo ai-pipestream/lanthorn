@@ -481,7 +481,23 @@ impl ZColourDto {
 struct GridCellDto { ch: char, style: u8, fg: ZColourDto, bg: ZColourDto }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct V6TextDto { y: u16, x: u16, text: String, style: u8, fg: ZColourDto, bg: ZColourDto }
+struct V6TextDto {
+    y: u16,
+    x: u16,
+    text: String,
+    style: u8,
+    fg: ZColourDto,
+    bg: ZColourDto,
+    /// The screen character CELL the run's first glyph was written at (SQ-1009).
+    ///
+    /// Archived rather than re-derived because on a machine that drew
+    /// proportionally it CANNOT be re-derived: `(x - 1) / cell.w` is the column
+    /// only while the pen advances one declared cell per character, and Arthur's
+    /// Amiga press does not. This is the recipe, not the result — a cell backend
+    /// places every restored run by it.
+    grow: u16,
+    gcol: u16,
+}
 
 /// serde mirror of one `zvm::screen::ZWindow`. `props` holds the 16 ZMSD window
 /// properties (indices 0–15, §8.8.3.2) in field order; the grid, colours and
@@ -534,6 +550,8 @@ fn v6_texts_to_dto(runs: &[zvm::screen::V6Text]) -> Vec<V6TextDto> {
             style: t.style,
             fg: ZColourDto::from_z(t.fg),
             bg: ZColourDto::from_z(t.bg),
+            grow: t.grow,
+            gcol: t.gcol,
         })
         .collect()
 }
@@ -547,6 +565,8 @@ fn v6_texts_from_dto(runs: &[V6TextDto]) -> Vec<zvm::screen::V6Text> {
             style: t.style,
             fg: t.fg.to_z(),
             bg: t.bg.to_z(),
+            grow: t.grow,
+            gcol: t.gcol,
         })
         .collect()
 }
@@ -2344,12 +2364,12 @@ mod tests {
         w1.put_prop(2, 8);
         w1.grid.resize(1, 4);
         w1.grid.put(1, 2, 'Z', 0x01, ZColour::Standard(3), ZColour::Standard(9));
-        w1.texts.push(V6Text { y: 6, x: 139, text: "SCORE".into(), style: 2, fg: ZColour::True24(0xABCDEF), bg: ZColour::Default });
+        w1.texts.push(V6Text::derived(6, 139, "SCORE".into(), 2, ZColour::True24(0xABCDEF), ZColour::Default, zvm::screen::V6Cell::DEFAULT));
         // …and the OTHER two pixel-run layers of the same window (SQ-0820): prose
         // the window has streamed, and prose a move left frozen behind it. Both are
         // live screen state nothing repaints after a restore.
-        w1.streamed.push(V6Text { y: 247, x: 76, text: "Current Bet:".into(), style: 0, fg: ZColour::Standard(4), bg: ZColour::True(0x0421) });
-        w1.retired.push(V6Text { y: 49, x: 297, text: "SHOGUN".into(), style: 4, fg: ZColour::Default, bg: ZColour::Standard(9) });
+        w1.streamed.push(V6Text::derived(247, 76, "Current Bet:".into(), 0, ZColour::Standard(4), ZColour::True(0x0421), zvm::screen::V6Cell::DEFAULT));
+        w1.retired.push(V6Text::derived(49, 297, "SHOGUN".into(), 4, ZColour::Default, ZColour::Standard(9), zvm::screen::V6Cell::DEFAULT));
 
         let src = ScreenState { v6: Some(v6), ..Default::default() };
         let dto = ScreenDto::from_screen(&src);
@@ -2367,15 +2387,15 @@ mod tests {
         let c: Cell = rv.windows[1].grid.cell(1, 2);
         assert_eq!((c.ch, c.style, c.fg, c.bg), ('Z', 0x01, ZColour::Standard(3), ZColour::Standard(9)));
         assert_eq!(rv.windows[1].texts.len(), 1);
-        assert_eq!(rv.windows[1].texts[0], V6Text { y: 6, x: 139, text: "SCORE".into(), style: 2, fg: ZColour::True24(0xABCDEF), bg: ZColour::Default });
+        assert_eq!(rv.windows[1].texts[0], V6Text::derived(6, 139, "SCORE".into(), 2, ZColour::True24(0xABCDEF), ZColour::Default, zvm::screen::V6Cell::DEFAULT));
         assert_eq!(
             rv.windows[1].streamed,
-            vec![V6Text { y: 247, x: 76, text: "Current Bet:".into(), style: 0, fg: ZColour::Standard(4), bg: ZColour::True(0x0421) }],
+            vec![V6Text::derived(247, 76, "Current Bet:".into(), 0, ZColour::Standard(4), ZColour::True(0x0421), zvm::screen::V6Cell::DEFAULT)],
             "SQ-0820: a prose window's streamed runs are live screen state, so they ride in the archive beside `texts`"
         );
         assert_eq!(
             rv.windows[1].retired,
-            vec![V6Text { y: 49, x: 297, text: "SHOGUN".into(), style: 4, fg: ZColour::Default, bg: ZColour::Standard(9) }],
+            vec![V6Text::derived(49, 297, "SHOGUN".into(), 4, ZColour::Default, ZColour::Standard(9), zvm::screen::V6Cell::DEFAULT)],
             "SQ-0820: and so does the prose a move or resize froze in place"
         );
     }

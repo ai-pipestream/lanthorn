@@ -79,7 +79,6 @@
 //! table is a Zork Zero picture drawn deliberately. Both `honor_game_colours` modes
 //! are pinned. Stories are gitignored (CLAUDE.md), so these skip cleanly.
 
-use std::path::PathBuf;
 
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
@@ -87,12 +86,11 @@ use app::session::{GameSession, InputKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 fn boot(name: &str, honor: bool) -> Option<(GameSession, app::state::AppState)> {
-    let path = stories_dir().join(name);
+    let path = fixture_path(name);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

@@ -25,15 +25,13 @@
 //!
 //! The story is gitignored (CLAUDE.md), so these skip cleanly when it is absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
 use app::session::GameSession;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// The three sample cards on the opening menu, as the game lays them out:
 /// `locateims` centres them 70 px apart at `x` = 250/320/390 and `y` = 350, each
@@ -47,7 +45,7 @@ const CARD_H: u32 = 84;
 
 /// Boot scopa to its opening menu with its Blorb resolved.
 fn scopa_at_the_menu() -> Option<GameSession> {
-    let path = stories_dir().join("scopa.z6");
+    let path = fixture_path("scopa.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

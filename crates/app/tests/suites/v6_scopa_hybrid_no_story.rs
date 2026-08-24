@@ -31,7 +31,6 @@
 //!
 //! The story is gitignored (CLAUDE.md), so these skip cleanly when it is absent.
 
-use std::path::PathBuf;
 
 use app::engine::Engine;
 use app::graphics::PictSource;
@@ -40,16 +39,15 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// Boot scopa and deal a hand — `Engine::set_mouse` takes the coordinates Y
 /// FIRST, and the ace of hearts the title screen invites you to click sits at
 /// roughly x 222..272, y 305..395. A click reaches `read_char` as ZSCII 254
 /// (ZMSD §3.8) with the coordinates already set.
 fn scopa_dealt() -> Option<GameSession> {
-    let path = stories_dir().join("scopa.z6");
+    let path = fixture_path("scopa.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;

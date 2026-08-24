@@ -253,10 +253,20 @@ pub fn declared_cell(
 /// measures to the pixel on three separate runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextFace {
-    cell: zvm::screen::V6Cell,
     face: Option<BitmapFont>,
     fit: Option<FaceFit>,
     scale: (u32, u32),
+    /// The declared cell and the pen as [`zvm`] holds them — see
+    /// [`zvm::screen::V6Metric`].
+    ///
+    /// **The engine is handed THIS value, not a copy of the rule that built it**
+    /// (SQ-1009). Both halves of the split measure the same text: the renderer
+    /// asks [`Self::advance_styled`] where the next glyph goes, and zvm asks the
+    /// same table where the cursor lands, where a line wraps and how wide a run
+    /// came out for header `$30`. Two implementations of one advance would drift
+    /// — SQ-1026 and SQ-1035 are a matched pair of exactly that — so there is
+    /// one, and everything below delegates to it.
+    metric: zvm::screen::V6Metric,
 }
 
 impl TextFace {
@@ -271,17 +281,39 @@ impl TextFace {
     ) -> TextFace {
         let scale = art_scale.unwrap_or((1, 1));
         let fit = face.as_ref().and_then(|f| fit(f, profile));
-        TextFace { cell: declared_cell(profile, face.as_ref(), scale), face, fit, scale }
+        let cell = declared_cell(profile, face.as_ref(), scale);
+        let metric = match (face.as_ref(), fit) {
+            (Some(f), Some(FaceFit::Metric)) => {
+                // Every byte carries a usable number, so `V6Metric` never has to
+                // guess: a glyph the face does not cover falls back to the cell,
+                // which is what the renderer draws it at.
+                let mut advances = Box::new([cell.w; 256]);
+                for (b, a) in advances.iter_mut().enumerate() {
+                    if let Some(g) = f.glyph(b as u8) {
+                        *a = (u32::from(g.width) * scale.0).min(u32::from(u16::MAX)) as u16;
+                    }
+                }
+                let bold = (u32::from(f.bold_smear) * scale.0).min(u32::from(u16::MAX)) as u16;
+                zvm::screen::V6Metric::proportional(cell, advances, bold)
+            }
+            _ => zvm::screen::V6Metric::fixed(cell),
+        };
+        TextFace { face, fit, scale, metric }
     }
 
     /// A cell with no release face behind it — a bare story, or a host default.
     pub fn cell_only(cell: zvm::screen::V6Cell) -> TextFace {
-        TextFace { cell, face: None, fit: None, scale: (1, 1) }
+        TextFace { face: None, fit: None, scale: (1, 1), metric: zvm::screen::V6Metric::fixed(cell) }
     }
 
     /// What the STORY was told: [`zvm::screen::V6Cell`], declared metrics.
     pub fn cell(&self) -> zvm::screen::V6Cell {
-        self.cell
+        self.metric.cell()
+    }
+
+    /// The cell and the pen as the ENGINE takes them — `Machine::set_v6_text`.
+    pub fn metric(&self) -> &zvm::screen::V6Metric {
+        &self.metric
     }
 
     /// The face the renderer may draw with, if the release shipped a usable one.
@@ -325,15 +357,7 @@ impl TextFace {
     /// inter-character gap and bold words ran together. Arthur's `char.data`
     /// states a smear of **1** (SQ-1009).
     pub fn advance_styled(&self, ch: char, style: u8) -> u32 {
-        let cell_w = u32::from(self.cell.w);
-        if !self.proportional() {
-            return cell_w;
-        }
-        let Some(face) = self.face.as_ref() else { return cell_w };
-        let g = u8::try_from(u32::from(ch)).ok().and_then(|c| face.glyph(c));
-        g.map_or(cell_w, |g| {
-            (u32::from(g.width) + u32::from(self.bold_smear(style))) * self.scale.0
-        })
+        u32::from(self.metric.advance(ch, style))
     }
 
     /// How far a run in `style` smears, in FACE pixels — 0 unless it is bold.
@@ -355,15 +379,12 @@ impl TextFace {
 
     /// [`Self::run_px`] for a run carrying a §8.7.1 style byte.
     pub fn run_px_styled(&self, s: &str, style: u8) -> u32 {
-        if !self.proportional() {
-            return self.cell.run_px(s);
-        }
-        s.chars().map(|c| self.advance_styled(c, style)).sum()
+        self.metric.run_px(s, style)
     }
 
     /// Native pixels from one text baseline to the next — the cell's height.
     pub fn line_px(&self) -> u32 {
-        u32::from(self.cell.h)
+        u32::from(self.cell().h)
     }
 }
 

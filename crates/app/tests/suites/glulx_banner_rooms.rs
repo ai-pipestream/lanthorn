@@ -12,14 +12,14 @@
 //! `superbrief` prints a room heading, a blank line and nothing but its object list, so
 //! "detached from the prose below it" alone would throw real rooms away.
 
-use std::path::PathBuf;
-
 use app::engine::{Engine, KeyInput};
 use app::glulx_session::GlulxSession;
 use app::session::InputKind;
 
+use crate::fixture_paths::fixture_path;
+
 fn glulx_image(name: &str) -> Option<Vec<u8>> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(name);
+    let p = fixture_path(name);
     let Ok(bytes) = std::fs::read(&p) else {
         eprintln!("SKIP: gitignored story missing at {}", p.display());
         return None;

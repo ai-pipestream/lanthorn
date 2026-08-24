@@ -44,9 +44,8 @@ use app::interpreter::InterpreterProfile;
 use app::session::GameSession;
 use blorb::infocom_pics::Flavour;
 
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
+use crate::fixture_paths::fixture_path;
+
 
 /// A throwaway `game_dir` holding the sidecar `config.toml`, seeded with the
 /// bare lines given. `None` writes no sidecar at all.
@@ -62,7 +61,7 @@ fn game_dir_with(tag: &str, body: Option<&str>) -> PathBuf {
 
 /// A story fixture, or `None` (→ skip) when the gitignored file is absent.
 fn story(name: &str) -> Option<PathBuf> {
-    let p = stories_dir().join(name);
+    let p = fixture_path(name);
     if p.is_file() {
         Some(p)
     } else {
@@ -153,7 +152,7 @@ fn a_relative_name_resolves_beside_the_story() {
     let PictureOverride::Loaded { ref path, ref pics, .. } = over else {
         panic!("expected Loaded, got {over:?}")
     };
-    assert_eq!(path, &stories_dir().join("zork0.eg1"));
+    assert_eq!(path, &fixture_path("zork0.eg1"));
     assert_eq!(pics.flavour(), Flavour::Pc);
     assert_eq!(over.warning(), None, "a key that worked says nothing");
     let _ = std::fs::remove_dir_all(&dir);
@@ -272,7 +271,7 @@ fn the_named_archives_flavour_comes_from_its_content() {
             continue;
         }
         let dir = game_dir_with(&format!("flavour-{name}"), Some(&format!("pictures = {name:?}\n")));
-        let story_path = stories_dir().join("anything.z6");
+        let story_path = fixture_path("anything.z6");
         let over = PictureOverride::resolve(&story_path, &dir);
         assert_eq!(over.flavour(), Some(want_flavour), "{name}");
         // …and the flavour is what selects the machine, with no interpreter
@@ -302,8 +301,8 @@ fn naming_a_pc_archive_leaves_the_v6_corpus_on_ibm_pc() {
         return;
     }
     let dir = game_dir_with("blast", Some("pictures = \"zork0.eg1\"\n"));
-    let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-    let profile = InterpreterProfile::resolve(&stories_dir().join("anything.z6"), None, over.flavour(), None);
+    let over = PictureOverride::resolve(&fixture_path("anything.z6"), &dir);
+    let profile = InterpreterProfile::resolve(&fixture_path("anything.z6"), None, over.flavour(), None);
     assert_eq!(profile, InterpreterProfile::IbmPc);
     assert_eq!(profile.interpreter_number(), None, "zvm's 6-for-v6 rule stays in force");
     let _ = std::fs::remove_dir_all(&dir);
@@ -340,9 +339,9 @@ fn every_rendition_supplies_the_same_standard_window() {
             continue;
         }
         let dir = game_dir_with(&format!("stdwin-{name}"), Some(&format!("pictures = {name:?}\n")));
-        let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
+        let over = PictureOverride::resolve(&fixture_path("anything.z6"), &dir);
         let space = over.std_window().unwrap_or_else(|| panic!("{name} declares a picture space"));
-        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over, None);
+        let picts = PictSource::resolve_with_override(&fixture_path("anything.z6"), over, None);
         let (sx, sy) = picts.art_scale().unwrap_or_else(|| panic!("{name} declares a density"));
         assert_eq!(
             (u32::from(space.0) * sx, u32::from(space.1) * sy),
@@ -383,8 +382,8 @@ fn a_640_wide_rendition_arrives_at_half_width_pixels() {
             continue;
         }
         let dir = game_dir_with(&format!("scale-{name}"), Some(&format!("pictures = {name:?}\n")));
-        let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-        let picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over, None);
+        let over = PictureOverride::resolve(&fixture_path("anything.z6"), &dir);
+        let picts = PictSource::resolve_with_override(&fixture_path("anything.z6"), over, None);
         assert_eq!(picts.art_scale(), Some(want), "{name}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -441,8 +440,8 @@ fn the_ega_and_mcga_renditions_of_one_game_land_in_the_same_places() {
     let unit_dims = |name: &str| -> Option<std::collections::BTreeMap<u16, (u32, u32)>> {
         story(name)?;
         let dir = game_dir_with(&format!("agree-{name}"), Some(&format!("pictures = {name:?}\n")));
-        let over = PictureOverride::resolve(&stories_dir().join("anything.z6"), &dir);
-        let mut picts = PictSource::resolve_with_override(&stories_dir().join("anything.z6"), over, None);
+        let over = PictureOverride::resolve(&fixture_path("anything.z6"), &dir);
+        let mut picts = PictSource::resolve_with_override(&fixture_path("anything.z6"), over, None);
         let (sx, sy) = picts.art_scale().expect("a native archive declares its picture space");
         let table = picts
             .all_pict_dims()

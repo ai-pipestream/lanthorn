@@ -355,6 +355,46 @@ pub struct ZWindow {
     /// Live per-burst state, not history: transient, not archived, and
     /// meaningless outside the window between a clear and the read that follows.
     pub stream_origin: Option<(u16, u16)>,
+    /// Where the character GRID's pen sits, and the pixel cursor it belongs to
+    /// (SQ-1009). See [`GridPen`].
+    pub grid_pen: Option<GridPen>,
+}
+
+/// The character-grid pen, remembered against the pixel cursor it was reached
+/// from (SQ-1009).
+///
+/// # Why the grid needs its own pen at all
+///
+/// A v6 window carries two representations of the same text — [`ZWindow::grid`]
+/// for the hybrid backend's terminal cells, [`ZWindow::texts`] for the raster's
+/// pixel-positioned runs — and until SQ-1009 the column was simply DERIVED,
+/// `(x_cursor - 1) / cell.w + 1`. That is exact while the pen advances by one
+/// declared cell per character and false the moment it does not: at Arthur's
+/// ~10.4 native pixels against a declared 8, the derived column steps 1.3 per
+/// character and the grid grows holes.
+///
+/// So the column advances by ONE per character while the pixel cursor advances
+/// by the face's advance, and this records the pair they were last in step at.
+///
+/// # Why it is remembered against the cursor rather than simply stored
+///
+/// Every other route to the cursor — `set_cursor`, `put_prop` 4/5, a resize
+/// re-homing it, `erase_window` — moves the pixel cursor and knows nothing about
+/// a grid pen. Stored plainly, the column would go stale at each of them, and a
+/// stale column is exactly the silent, self-consistent defect this codebase keeps
+/// meeting. Recording the pixel cursor alongside makes going stale detectable:
+/// [`ZWindow::grid_cursor`] falls back to the derivation whenever the pixel
+/// cursor has moved by any other hand, so no site outside the print loop has to
+/// know this exists.
+///
+/// Not archived, for the same reason: it is a memo about a derivation, and a
+/// restore re-derives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridPen {
+    pub y_cursor: u16,
+    pub x_cursor: u16,
+    pub row: u16,
+    pub col: u16,
 }
 
 /// One pixel-positioned text run in a v6 grid window: `(y, x)` are the 1-based
@@ -373,12 +413,52 @@ pub struct V6Text {
     pub style: u8,
     pub fg: ZColour,
     pub bg: ZColour,
+    /// The SCREEN character cell this run's first glyph was written at — 0-based
+    /// row and column in the same space [`V6Cell::row_of`] and [`V6Cell::col_of`]
+    /// answer in (SQ-1009).
+    ///
+    /// # Why a run carries its cell as well as its pixel
+    ///
+    /// Because on a proportional machine the two are no longer the same fact, and
+    /// a cell backend cannot recover one from the other. `(x - 1) / cell.w` is the
+    /// column only while the pen advances by exactly one declared cell per
+    /// character; at Arthur's ~10.4 native pixels against a declared 8 that
+    /// quotient climbs 1.3 per glyph, so a renderer deriving columns skips them
+    /// and the drift compounds along the line — `Churchyard` reads `Ch urc  hy ard`,
+    /// and the wider the pane the worse it gets.
+    ///
+    /// The engine already maintains the dense grid ([`ZWindow::grid`], see
+    /// [`GridPen`]), so the answer exists and only needed carrying. A run never
+    /// spans more than one grid row: the print loop breaks a run at EITHER
+    /// measure's line break, so this cell plus the run's own characters address
+    /// every glyph in it.
+    ///
+    /// For a fixed pen these are exactly `row_of(y)` and `col_of(x)`, so every
+    /// machine but Arthur's Amiga press is unchanged.
+    pub grow: u16,
+    pub gcol: u16,
 }
 
 impl V6Text {
-    /// Pixel width of this run, on the cell the session declared (SQ-0917).
-    fn px_w(&self, cell: V6Cell) -> u32 {
-        self.text.chars().count() as u32 * cell.w as u32
+    /// A painted run whose grid cell is the DERIVATION `(row_of(y), col_of(x))`.
+    ///
+    /// Correct for every fixed-pen machine — the pen and the cell agree there —
+    /// and the honest answer wherever no grid stands behind the run at all: the
+    /// prose shadow, and test fixtures that place paint by hand. The print path
+    /// does NOT use it: on a proportional machine the grid pen is a separate fact
+    /// and it carries that instead.
+    pub fn derived(y: u16, x: u16, text: String, style: u8, fg: ZColour, bg: ZColour, cell: V6Cell) -> V6Text {
+        V6Text { y, x, text, style, fg, bg, grow: cell.row_of(y), gcol: cell.col_of(x) }
+    }
+
+    /// Pixel width of this run as the machine DREW it (SQ-0917, SQ-1009).
+    ///
+    /// The run's own style byte is part of the measurement: a bold run on a
+    /// machine that emboldens by smearing is genuinely wider than the same
+    /// letters in roman, and this width is what decides whether a later paint
+    /// covers it.
+    fn px_w(&self, metric: &V6Metric) -> u32 {
+        metric.run_px(&self.text, self.style)
     }
 }
 
@@ -546,6 +626,26 @@ impl ZWindow {
         }
     }
 
+    /// The grid `(row, col)` the next printed character belongs in — see
+    /// [`GridPen`].
+    ///
+    /// Answers the remembered pen when the pixel cursor is still the one that pen
+    /// was left at, and otherwise re-derives from the cursor, which is what every
+    /// caller did before SQ-1009.
+    pub fn grid_cursor(&self, cell: V6Cell) -> (u16, u16) {
+        match self.grid_pen {
+            Some(p) if (p.y_cursor, p.x_cursor) == (self.y_cursor, self.x_cursor) => (p.row, p.col),
+            _ => (cell.row_of(self.y_cursor) + 1, cell.col_of(self.x_cursor) + 1),
+        }
+    }
+
+    /// Remember the grid pen against the pixel cursor as it stands NOW — so call
+    /// this after the print has finished moving both.
+    pub fn set_grid_cursor(&mut self, row: u16, col: u16) {
+        self.grid_pen =
+            Some(GridPen { y_cursor: self.y_cursor, x_cursor: self.x_cursor, row, col });
+    }
+
     /// The screen-absolute `(y, x)` the window's cursor is at right now, in the
     /// same space [`ZWindow::stream_origin`] records — so the two compare directly.
     pub fn pen(&self) -> (u16, u16) {
@@ -565,7 +665,7 @@ impl ZWindow {
     /// (SQ-0697) — see [`ZWindow::streamed`]. Extends the run in progress when the
     /// glyph continues it in the same style at the next cell; starts a new one
     /// otherwise (a new line, a `set_cursor` jump, a style or colour change).
-    pub fn record_streamed(&mut self, ch: char, style: u8, fg: ZColour, bg: ZColour, cell: V6Cell) {
+    pub fn record_streamed(&mut self, ch: char, style: u8, fg: ZColour, bg: ZColour, metric: &V6Metric) {
         // Window coords and cursors are both 1-based, so the absolute position is
         // origin + cursor - 1 (ZMSD §8.8.1/§8.8.3.2).
         let x = self.x_coord.saturating_add(self.x_cursor).saturating_sub(1);
@@ -573,7 +673,7 @@ impl ZWindow {
         // Where this burst of prose STARTED (SQ-0804) — see `stream_origin`.
         self.stream_origin.get_or_insert((y, x));
         if let Some(last) = self.streamed.last_mut() {
-            let end = last.x as u32 + last.px_w(cell);
+            let end = last.x as u32 + last.px_w(metric);
             if last.y == y
                 && end == x as u32
                 && last.style == style
@@ -591,7 +691,9 @@ impl ZWindow {
         if self.streamed.len() >= STREAMED_MAX_RUNS {
             self.streamed.drain(..self.streamed.len() - STREAMED_MAX_RUNS / 2);
         }
-        self.streamed.push(V6Text { y, x, text: ch.to_string(), style, fg, bg });
+        // Streamed PROSE has no grid behind it — the host wraps it — so the cell
+        // is the derivation, which is what every consumer used before SQ-1009.
+        self.streamed.push(V6Text::derived(y, x, ch.to_string(), style, fg, bg, metric.cell()));
     }
 
     /// Hand the shadowed prose over to real paint (SQ-0697): the window's box is
@@ -610,10 +712,11 @@ impl ZWindow {
     ///
     /// Returns `true` when anything was frozen, which is the host's cue to restart
     /// its transcript at the window's new origin.
-    pub fn retire_streamed(&mut self, x: u16, y: u16, w: u16, h: u16, cell: V6Cell) -> bool {
+    pub fn retire_streamed(&mut self, x: u16, y: u16, w: u16, h: u16, metric: &V6Metric) -> bool {
         if self.streamed.is_empty() {
             return false;
         }
+        let cell = metric.cell();
         let (left, top) = (x.max(1) as i32, y.max(1) as i32);
         let (right, bottom) = (left + w as i32, top + h as i32);
         let mut kept = Vec::with_capacity(self.streamed.len());
@@ -623,7 +726,7 @@ impl ZWindow {
             let ry = run.y.max(1) as i32;
             let covered = rx >= left
                 && ry >= top
-                && rx + run.px_w(cell) as i32 <= right
+                && rx + run.px_w(metric) as i32 <= right
                 && ry + cell.h as i32 <= bottom;
             if covered {
                 kept.push(run);
@@ -740,9 +843,27 @@ pub struct V6Windows {
     pub current: u8, // 0–7
 }
 
+/// Where each glyph of `run` starts, as offsets from the run's own origin, with
+/// the run's total width appended — so glyph `i` covers `edges[i]..edges[i+1]`.
+///
+/// One list rather than `i * cell.w` at each site, because on a proportional pen
+/// the glyphs are not the same width and the arithmetic is no longer a
+/// multiplication (SQ-1009). For a fixed pen every step is `cell.w` and this is
+/// exactly what the multiplication gave.
+fn glyph_edges(run: &V6Text, metric: &V6Metric) -> Vec<i32> {
+    let mut edges = Vec::with_capacity(run.text.chars().count() + 1);
+    let mut acc = 0i32;
+    for c in run.text.chars() {
+        edges.push(acc);
+        acc += i32::from(metric.advance(c, run.style));
+    }
+    edges.push(acc);
+    edges
+}
+
 /// Trim `run` against the screen rect `(top, left)..(top+h, left+w)` in pixels:
 /// drop it entirely, keep it, or split it into up-to-two remnants. A glyph is
-/// erased when its 8×8 cell intersects the rect at all (paint replaces whole
+/// erased when its cell intersects the rect at all (paint replaces whole
 /// glyphs; sub-glyph residue can't be represented as text).
 fn trim_run_against_rect(
     run: V6Text,
@@ -750,47 +871,58 @@ fn trim_run_against_rect(
     left: i32,
     h: i32,
     w: i32,
-    cell: V6Cell,
+    metric: &V6Metric,
 ) -> Vec<V6Text> {
+    let cell = metric.cell();
     let ry = run.y as i32;
     // Vertical band overlap?
     if ry + cell.h as i32 <= top || ry >= top + h {
         return vec![run];
     }
-    let fw = cell.w as i32;
     let rx = run.x as i32;
-    let n = run.text.chars().count() as i32;
-    if rx + n * fw <= left || rx >= left + w {
+    let edges = glyph_edges(&run, metric);
+    let n = edges.len() - 1;
+    if rx + edges[n] <= left || rx >= left + w {
         return vec![run];
     }
-    // Glyph i covers [rx + i*fw, rx + (i+1)*fw); erased iff it intersects
+    // Glyph i covers [rx + edges[i], rx + edges[i+1]); erased iff it intersects
     // [left, left+w). Chars form one contiguous erased span, leaving at most a
     // left and a right remnant.
-    let first_erased = ((left - rx).div_euclid(fw)).max(0); // first glyph whose cell intersects
-    let last_erased = (((left + w - 1) - rx).div_euclid(fw)).min(n - 1);
-    if first_erased > last_erased {
-        return vec![run];
+    let mut span: Option<(usize, usize)> = None;
+    for i in 0..n {
+        if rx + edges[i + 1] > left && rx + edges[i] < left + w {
+            span = Some(span.map_or((i, i), |(f, _)| (f, i)));
+        }
     }
+    let Some((first_erased, last_erased)) = span else {
+        return vec![run];
+    };
     let chars: Vec<char> = run.text.chars().collect();
     let mut out = Vec::new();
     if first_erased > 0 {
         out.push(V6Text {
             y: run.y,
             x: run.x,
-            text: chars[..first_erased as usize].iter().collect(),
+            text: chars[..first_erased].iter().collect(),
             style: run.style,
             fg: run.fg,
             bg: run.bg,
+            grow: run.grow,
+            gcol: run.gcol,
         });
     }
-    if (last_erased as usize) + 1 < chars.len() {
+    if last_erased + 1 < chars.len() {
         out.push(V6Text {
             y: run.y,
-            x: (rx + (last_erased + 1) * fw) as u16,
-            text: chars[last_erased as usize + 1..].iter().collect(),
+            x: (rx + edges[last_erased + 1]) as u16,
+            text: chars[last_erased + 1..].iter().collect(),
             style: run.style,
             fg: run.fg,
             bg: run.bg,
+            // A run never spans a grid row, so the surviving tail is that many
+            // columns further along the same one.
+            grow: run.grow,
+            gcol: run.gcol.saturating_add(last_erased as u16 + 1),
         });
     }
     out
@@ -810,7 +942,8 @@ impl V6Windows {
     /// labels. (Non-space ink on transparent bg is approximated as covering
     /// its cell: latest-wins per cell, since a text-run model can't
     /// overstrike.)
-    pub fn paint_run(&mut self, win: usize, run: V6Text, cell: V6Cell) {
+    pub fn paint_run(&mut self, win: usize, run: V6Text, metric: &V6Metric) {
+        let cell = metric.cell();
         if run.text.is_empty() {
             return;
         }
@@ -826,20 +959,23 @@ impl V6Windows {
         // gaps (Shogun pads its status fields with spaces) and erasing under
         // them would eat a neighbouring label painted in the same row.
         let clearing = run.text.chars().all(|c| c == ' ');
-        let fw = cell.w as i32;
-        let mut seg_start: Option<i32> = None; // char index of current erasing segment
+        // Segment bounds come from the PEN, not from `i * cell.w`: the glyphs of
+        // a proportional run are not the same width, so the pixels an erasing
+        // segment covers are the pen's cumulative offsets (SQ-1009).
+        let edges = glyph_edges(&run, metric);
+        let mut seg_start: Option<usize> = None; // char index of current erasing segment
         let chars: Vec<char> = run.text.chars().collect();
         for i in 0..=chars.len() {
             let erases = i < chars.len() && (bg_opaque || clearing || chars[i] != ' ');
             match (erases, seg_start) {
-                (true, None) => seg_start = Some(i as i32),
+                (true, None) => seg_start = Some(i),
                 (false, Some(s)) => {
                     self.erase_screen_rect(
                         run.y as i32,
-                        run.x as i32 + s * fw,
+                        run.x as i32 + edges[s],
                         cell.h as i32,
-                        (i as i32 - s) * fw,
-                        cell,
+                        edges[i] - edges[s],
+                        metric,
                     );
                     seg_start = None;
                 }
@@ -856,10 +992,11 @@ impl V6Windows {
     /// (which erases the target window's CURRENT screen rect — Shogun erases
     /// its 1-px caret window without disturbing the menu items painted around
     /// it earlier).
-    pub fn erase_screen_rect(&mut self, top: i32, left: i32, h: i32, w: i32, cell: V6Cell) {
+    pub fn erase_screen_rect(&mut self, top: i32, left: i32, h: i32, w: i32, metric: &V6Metric) {
         if h <= 0 || w <= 0 {
             return;
         }
+        let cell = metric.cell();
         for win in self.windows.iter_mut() {
             // Every layer that records where glyphs are SITTING: what the window
             // is showing now, the prose it left frozen behind when it moved
@@ -875,13 +1012,13 @@ impl V6Windows {
                     let tx = t.x as i32;
                     ty + (cell.h as i32) > top
                         && ty < top + h
-                        && tx + (t.px_w(cell) as i32) > left
+                        && tx + (t.px_w(metric) as i32) > left
                         && tx < left + w
                 }) {
                     let old = std::mem::take(layer);
                     *layer = old
                         .into_iter()
-                        .flat_map(|t| trim_run_against_rect(t, top, left, h, w, cell))
+                        .flat_map(|t| trim_run_against_rect(t, top, left, h, w, metric))
                         .collect();
                 }
             }
@@ -1390,11 +1527,11 @@ impl StreamState {
     /// The wrap itself happens here, at close, on the whole accumulated buffer
     /// (splitting on ASCII spaces) rather than incrementally per printed word
     /// the way Frotz's `memory_word` does it.
-    pub fn pop_stream3(&mut self, mem: &mut Memory, cell: V6Cell) {
+    pub fn pop_stream3(&mut self, mem: &mut Memory, metric: &V6Metric) {
         if let Some(frame) = self.stream3_stack.pop() {
             let total_width = match frame.width_px {
                 Some(w) => {
-                    let (bytes, total_width) = wrap_stream3_text(&frame.buf, w, cell);
+                    let (bytes, total_width) = wrap_stream3_text(&frame.buf, w, metric);
                     // One (count word, bytes) record per line, then a zero word.
                     // `wrap_stream3_text` marks the breaks with ZSCII 13 (§7.1.2.2.1),
                     // which is how the lines are recovered — the separator itself is
@@ -1417,7 +1554,7 @@ impl StreamState {
                     for (i, &b) in frame.buf.iter().enumerate() {
                         mem.write_byte(frame.table_addr + 2 + i as u32, b);
                     }
-                    frame.buf.len() as u32 * cell.w as u32
+                    metric.run_px(&zscii_run(&frame.buf), 0)
                 }
             };
             // ZMSD §7.1.2.1: in v6, deselecting stream 3 stores "the total
@@ -1442,8 +1579,18 @@ impl StreamState {
     }
 }
 
-/// Word-wrap a stream-3 buffer to `width_px` pixels (fixed-width v6 font,
-/// `cell.w` per glyph), replacing the space at each wrap point with a
+/// The characters a slice of stream-3 ZSCII bytes stands for, for MEASUREMENT
+/// only.
+///
+/// Stream 3 stores one byte per output character (ZMSD §7.1.2.5) and the pen is
+/// keyed by the same byte, so this is the identity mapping written down rather
+/// than a text codec — nothing decoded here is ever printed.
+fn zscii_run(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+/// Word-wrap a stream-3 buffer to `width_px` pixels at the machine's own PEN,
+/// replacing the space at each wrap point with a
 /// ZSCII 13 newline (ZMSD §7.1.2.2.1: "Newlines are written to output stream
 /// 3 as ZSCII 13") — mirrors Frotz's `memory_word`/`memory_close`
 /// (`redirect.c`): a word that would overflow the current line drops its
@@ -1452,8 +1599,17 @@ impl StreamState {
 /// counted as printable width, and line-width accounting restarts after them.
 /// Returns the rewritten bytes and the total width (sum of every completed
 /// line's pixel width, hard-broken or wrapped) for header $30.
-fn wrap_stream3_text(buf: &[u8], width_px: u16, cell: V6Cell) -> (Vec<u8>, u32) {
-    let fw = cell.w as u32;
+///
+/// **The pen, not the declared cell** (SQ-1009). Header $30 is how an Infocom v6
+/// game MEASURES a string it is about to right-align, and the machine measured
+/// what it was going to draw. Arthur's Amiga press right-aligns its date field at
+/// `x_size - $30`: told the declared 8 per character it puts the field 25 px left
+/// of where the machine did and the proportional glyphs then run off the end of
+/// the bar. Measured roman, because a stream-3 buffer accumulates across style
+/// changes and carries none of them.
+fn wrap_stream3_text(buf: &[u8], width_px: u16, metric: &V6Metric) -> (Vec<u8>, u32) {
+    let px = |w: &[u8]| metric.run_px(&zscii_run(w), 0);
+    let space = metric.run_px(" ", 0);
     let mut out = Vec::with_capacity(buf.len());
     let mut total: u32 = 0;
     for segment in buf.split(|&b| b == 13) {
@@ -1462,15 +1618,15 @@ fn wrap_stream3_text(buf: &[u8], width_px: u16, cell: V6Cell) -> (Vec<u8>, u32) 
         for word in segment.split(|&b| b == b' ') {
             if first {
                 first = false;
-                line_width = word.len() as u32 * fw;
+                line_width = px(word);
                 out.extend_from_slice(word);
                 continue;
             }
-            let candidate = line_width + fw + word.len() as u32 * fw;
+            let candidate = line_width + space + px(word);
             if line_width > 0 && candidate > width_px as u32 {
                 total += line_width;
                 out.push(13);
-                line_width = word.len() as u32 * fw;
+                line_width = px(word);
                 out.extend_from_slice(word);
             } else {
                 out.push(b' ');
@@ -2223,12 +2379,14 @@ pub const V6_FONT_HEIGHT: u16 = 16;
 ///
 /// Where the ink actually goes is a different question, and one this type must not
 /// be asked. A proportional renderer — the Macintosh's own, or a future GUI —
-/// needs per-glyph advances, which is a `FontMetrics`-shaped thing supplied by the
-/// host. Both can be true at once, and were, on real hardware.
+/// needs per-glyph advances, which the host supplies through
+/// [`V6Metric::proportional`] (SQ-1009). Both are true at once, and were, on real
+/// hardware: the pen is what the cursor advances by and what a printed run
+/// measures, the cell is still what the story was told.
 ///
 /// So: interpreting a coordinate the story produced is [`Self::row_of`],
-/// [`Self::col_of`], [`Self::run_px`]. Deciding where to put a pixel is not this
-/// type's business.
+/// [`Self::col_of`], [`Self::run_px`]. Deciding where to put a pixel is
+/// [`V6Metric::advance`]'s business, not this type's.
 ///
 /// # Not a global
 ///
@@ -2330,6 +2488,223 @@ impl Default for V6Cell {
     fn default() -> Self {
         V6Cell::DEFAULT
     }
+}
+
+/// ZMSD §8.7.1 style bit 1 — bold. Named here because the pen has to know:
+/// the Amiga emboldens by smearing a glyph right and advancing by the same
+/// amount, so a bold run is genuinely WIDER than the same letters in roman.
+const STYLE_BOLD: u8 = 2;
+
+/// What the story is TOLD about its cell, together with the pen the machine
+/// actually drew with (SQ-1009).
+///
+/// # Why these are one value
+///
+/// They are the same subject measured two ways, and every place that quantizes
+/// text needs both: [`V6Cell`] is the DECLARED metric — header `$26`/`$27`, the
+/// grid a window divides into, what `@get_wind_prop 13` reports — while the pen
+/// is what the interpreter's own cursor arithmetic advanced by. On every machine
+/// but one they are the same number and this type is a cell in a wrapper. On
+/// Arthur's Amiga floppy they are not: the release ships a proportional
+/// `char.data` whose glyphs advance 2..=8 face pixels (4..=16 native, the art
+/// scale doubling them) against a declared width of 8.
+///
+/// CLAUDE.md's refactoring policy is the reason they travel together rather than
+/// as `(cell, pen)` at each of the dozen call sites: a caller who supplies one
+/// and not the other gets a plausible answer rather than an error, which is the
+/// exact shape of SQ-0901/SQ-1020/SQ-1021/SQ-1022.
+///
+/// # Declared still wins where the STORY is doing the arithmetic
+///
+/// [`Self::cell`] is not deprecated by [`Self::advance`]. A window's character
+/// grid, the row a pixel falls in, `more_interval` — all of those are the
+/// story's own units and must stay on the declared cell, because the story laid
+/// its windows out from it. The pen governs only where the NEXT glyph goes and
+/// how wide a printed run came out, which is what the machine measured and what
+/// header `$30` reports back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V6Metric {
+    cell: V6Cell,
+    /// Native pixels of advance per ZSCII byte, or `None` for a fixed pen —
+    /// which is every machine whose release did not ship a proportional face,
+    /// and every configuration that existed before SQ-1009.
+    advances: Option<Box<[u16; 256]>>,
+    /// Native pixels a **bold** glyph adds to its own advance, so the smeared
+    /// column has somewhere to live. Zero for a fixed pen.
+    bold_extra: u16,
+}
+
+impl V6Metric {
+    /// A machine that advances by its declared cell — every one but Arthur's
+    /// Amiga press, and every path that existed before SQ-1009.
+    pub fn fixed(cell: V6Cell) -> V6Metric {
+        V6Metric { cell, advances: None, bold_extra: 0 }
+    }
+
+    /// A machine drawing a proportional face: `advances[b]` is the native pixel
+    /// advance of ZSCII byte `b`, and `bold_extra` what bold adds to each.
+    ///
+    /// The host builds the table, because the face lives on the release's own
+    /// medium and `zvm` takes no dependencies. Every byte must carry a usable
+    /// number — a glyph the face does not cover is the caller's to fill with the
+    /// cell width, so that this type never has to guess.
+    pub fn proportional(cell: V6Cell, advances: Box<[u16; 256]>, bold_extra: u16) -> V6Metric {
+        V6Metric { cell, advances: Some(advances), bold_extra }
+    }
+
+    /// The DECLARED cell — what the story was told.
+    pub fn cell(&self) -> V6Cell {
+        self.cell
+    }
+
+    /// Whether the pen varies per glyph.
+    pub fn is_proportional(&self) -> bool {
+        self.advances.is_some()
+    }
+
+    /// Native pixels the pen moves for one character printed in §8.7.1 `style`.
+    ///
+    /// A fixed pen answers the cell width for everything, which is what every
+    /// machine but one does and what this crate did before SQ-1009.
+    pub fn advance(&self, ch: char, style: u8) -> u16 {
+        let Some(advances) = self.advances.as_ref() else { return self.cell.w };
+        let Ok(b) = u8::try_from(u32::from(ch)) else { return self.cell.w };
+        let extra = if style & STYLE_BOLD != 0 { self.bold_extra } else { 0 };
+        advances[usize::from(b)].saturating_add(extra).max(1)
+    }
+
+    /// Native pixels a whole run occupies at this pen — the width that WRAPS,
+    /// and the width header `$30` reports when a game measures through stream 3.
+    pub fn run_px(&self, s: &str, style: u8) -> u32 {
+        if self.advances.is_none() {
+            return self.cell.run_px(s);
+        }
+        s.chars().map(|c| u32::from(self.advance(c, style))).sum()
+    }
+}
+
+impl Default for V6Metric {
+    fn default() -> Self {
+        V6Metric::fixed(V6Cell::DEFAULT)
+    }
+}
+
+/// One line break [`wrap_text`] introduced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrapBreak {
+    /// Index, in CHARACTERS of the printed string, of the first character on the
+    /// new line.
+    pub at: usize,
+    /// Whether the break CONSUMED the space at `at`. Frotz buffers a word with
+    /// its leading blank and drops that blank at the break (`screen_word`), so a
+    /// wrapped line never begins with the space that caused it — and that
+    /// character is drawn on neither line.
+    pub consumed: bool,
+}
+
+/// Where `s` breaks under ONE measure, whatever that measure is — as character
+/// indices, so two measures of the same string can be walked together.
+///
+/// # Why this is parameterised rather than written twice
+///
+/// A Version 6 window carries two representations of the same text and SQ-1009
+/// made them disagree. [`ZWindow::grid`] is the character grid the hybrid backend
+/// draws with terminal cells, measured in DECLARED columns; [`ZWindow::texts`] are
+/// the pixel-positioned runs the raster backend draws, measured in the face's real
+/// advances. At ~10.4 native pixels against a declared 8 they break in different
+/// places, and both break points are correct for their own surface.
+///
+/// So this is called twice per print — once with `advance` answering the pen and
+/// `limit` the window's pixel width, once with `advance` answering 1 and `limit`
+/// the column count — and the print loop walks both answers over one pass of the
+/// string. Two call sites of one function cannot drift; two functions will, and
+/// that drift is what made SQ-1026 and SQ-1035 a matched pair.
+///
+/// # Why INDICES and not laid-out lines
+///
+/// Because the caller has to correlate them. A soft break drops a space, and the
+/// two measures drop DIFFERENT spaces, so the two line-sets are not the same
+/// character sequence and cannot be matched up after the fact. Indices into the
+/// printed string are the one currency both answers share — which is what lets a
+/// printed run carry the grid CELL it was written at as well as the pixel it was
+/// drawn at, and those two facts have to agree character for character or hybrid
+/// draws holes.
+///
+/// * `at` — the 1-based unit position of the first character.
+/// * `margin` — the 1-based unit position a fresh line begins at
+///   (`left_margin + 1` in pixels; its column in the grid).
+/// * `limit` — the last usable unit on a line, inclusive. [`u32::MAX`] for a
+///   window with wrapping off, which never breaks.
+/// * `word_wrap` — ZMSD §8.8.3.1.2.2, wrapping AND buffered printing.
+///
+/// Hard newlines are NOT reported: they are in the string, both measures honour
+/// them identically, and the caller sees them itself. They are still obeyed here,
+/// because a new line resets the position every later break depends on.
+///
+/// The word-wrap probe fires at a space, and once at the very first character:
+/// the buffer spans one print call, exactly as it did before this was extracted.
+pub fn wrap_text(
+    s: &str,
+    at: u32,
+    margin: u32,
+    limit: u32,
+    word_wrap: bool,
+    advance: &mut dyn FnMut(char) -> u32,
+) -> Vec<WrapBreak> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut breaks = Vec::new();
+    let mut x = at;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        i += 1;
+        if ch == '\n' {
+            x = margin;
+            continue;
+        }
+        // Measure the word about to start and break ahead of it if it cannot fit.
+        // Frotz buffers a word together with its leading space and drops that
+        // space at the break (`screen_word`), so a wrapped line does not begin
+        // with a stray blank. A word longer than a whole line is left to the
+        // character wrap below.
+        if word_wrap {
+            let at_space = ch == ' ';
+            if at_space || i == 1 {
+                let start = if at_space { i } else { i - 1 };
+                let word: u32 = chars[start..]
+                    .iter()
+                    .take_while(|c| **c != ' ' && **c != '\n')
+                    .map(|c| advance(*c))
+                    .sum();
+                let need = word + if at_space { advance(' ') } else { 0 };
+                if word > 0
+                    && x > margin
+                    && word <= limit
+                    && x.saturating_add(need).saturating_sub(1) > limit
+                {
+                    // `i - 1` is this character's own index. At a space the break
+                    // consumes it and the new line starts on the word behind it;
+                    // at the call's first character nothing is consumed.
+                    breaks.push(WrapBreak { at: i - 1, consumed: at_space });
+                    x = margin;
+                    if at_space {
+                        continue; // the break consumes the space
+                    }
+                }
+            }
+        }
+        x = x.saturating_add(advance(ch));
+        // The character wrap is a POST-check and deliberately so: a glyph that
+        // ends exactly ON the limit is drawn on this line, and the break happens
+        // after it. Checked ahead of the glyph instead, a run that exactly fills
+        // its line would leave the cursor at the end of that line rather than at
+        // the start of the next — which a story reads back through `@get_cursor`.
+        if x > limit {
+            breaks.push(WrapBreak { at: i, consumed: false });
+            x = margin;
+        }
+    }
+    breaks
 }
 
 /// Upper bound on any character-grid dimension a story operand can request
@@ -2635,19 +3010,19 @@ mod tests {
         assert_eq!(w.stream_origin, None, "a window that has printed nothing has no origin");
         assert_eq!(w.pen(), (9, 7), "the pen is origin + cursor - 1, screen-absolute (§8.8.1)");
 
-        w.record_streamed('a', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
+        w.record_streamed('a', 0, ZColour::Default, ZColour::Default, &V6Metric::default());
         assert_eq!(w.stream_origin, Some((9, 7)), "the first glyph lands at the pen");
 
         // A second glyph, wherever it goes, must not move the origin.
         w.x_cursor += V6_FONT_WIDTH;
-        w.record_streamed('b', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
+        w.record_streamed('b', 0, ZColour::Default, ZColour::Default, &V6Metric::default());
         w.y_cursor += V6_FONT_HEIGHT;
-        w.record_streamed('c', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
+        w.record_streamed('c', 0, ZColour::Default, ZColour::Default, &V6Metric::default());
         assert_eq!(w.stream_origin, Some((9, 7)), "…and only the first");
 
         w.clear_stream_origin();
         assert_eq!(w.stream_origin, None, "cleared, ready for the next burst");
-        w.record_streamed('d', 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT);
+        w.record_streamed('d', 0, ZColour::Default, ZColour::Default, &V6Metric::default());
         assert_eq!(w.stream_origin, Some(w.pen()), "the next burst records its own start");
     }
 
@@ -3288,8 +3663,8 @@ mod tests {
     #[test]
     fn zwindow_scroll_pixels_shifts_text_runs_and_drops_out_of_range() {
         let mut w = ZWindow { y_size: 24, ..Default::default() };
-        w.texts.push(V6Text { y: 9, x: 1, text: "far".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
-        w.texts.push(V6Text { y: 1, x: 1, text: "near".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
+        w.texts.push(V6Text::derived(9, 1, "far".into(), 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT));
+        w.texts.push(V6Text::derived(1, 1, "near".into(), 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT));
         // Scroll forward by 32px (two 16px lines):
         //   y=9  -> new_y=-23, bottom=-23+16-1=-8 < 1 -> fully above, dropped.
         //   y=1  -> new_y=-31, bottom=-31+16-1=-16 < 1 -> fully above, dropped.
@@ -3300,7 +3675,7 @@ mod tests {
     #[test]
     fn zwindow_scroll_pixels_keeps_run_still_partially_visible() {
         let mut w = ZWindow { y_size: 24, ..Default::default() };
-        w.texts.push(V6Text { y: 9, x: 1, text: "keep".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
+        w.texts.push(V6Text::derived(9, 1, "keep".into(), 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT));
         // Scroll forward by 8px: y=9 -> 1, bottom=1+16-1=16 >= 1, still kept.
         w.scroll_pixels(8, V6Cell::DEFAULT);
         assert_eq!(w.texts.len(), 1, "run still overlapping the window is kept");
@@ -3310,7 +3685,7 @@ mod tests {
     #[test]
     fn zwindow_scroll_pixels_negative_scrolls_down() {
         let mut w = ZWindow { y_size: 24, ..Default::default() };
-        w.texts.push(V6Text { y: 5, x: 1, text: "a".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
+        w.texts.push(V6Text::derived(5, 1, "a".into(), 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT));
         w.scroll_pixels(-3, V6Cell::DEFAULT);
         assert_eq!(w.texts[0].y, 8, "negative pixels shift y downward (y - (-3) = y+3)");
     }
@@ -3341,7 +3716,7 @@ mod tests {
         assert!(ss.stream3_active());
 
         ss.write_stream3_bytes(b"Hello");
-        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
+        ss.pop_stream3(&mut mem, &V6Metric::default());
 
         assert!(!ss.stream3_active());
 
@@ -3366,7 +3741,7 @@ mod tests {
 
         ss.push_stream3(table_addr, None);
         ss.write_stream3_bytes(&[195]);
-        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
+        ss.pop_stream3(&mut mem, &V6Metric::default());
 
         assert_eq!(mem.read_word(table_addr), 1, "length word should be 1");
         assert_eq!(mem.read_byte(table_addr + 2), 195);
@@ -3415,9 +3790,9 @@ mod tests {
         ss.write_stream3_bytes(b"ab");
         ss.push_stream3(table2, None);
         ss.write_stream3_bytes(b"cd");
-        ss.pop_stream3(&mut mem, V6Cell::DEFAULT); // finalise table2
+        ss.pop_stream3(&mut mem, &V6Metric::default()); // finalise table2
         ss.write_stream3_bytes(b"ef");
-        ss.pop_stream3(&mut mem, V6Cell::DEFAULT); // finalise table1
+        ss.pop_stream3(&mut mem, &V6Metric::default()); // finalise table1
 
         // table2: "cd" (2 bytes)
         assert_eq!(mem.read_word(table2), 2);
@@ -3476,7 +3851,7 @@ mod tests {
 
         ss.push_stream3(table_addr, Some(40));
         ss.write_stream3_bytes(b"AAAA BBBB");
-        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
+        ss.pop_stream3(&mut mem, &V6Metric::default());
 
         assert_eq!(read_formatted(&mem, table_addr), ["AAAA", "BBBB"], "one record per line");
         // Total width = 4 chars + 4 chars (the dropped space isn't printable width).
@@ -3495,7 +3870,7 @@ mod tests {
 
         ss.push_stream3(table_addr, Some(200));
         ss.write_stream3_bytes(b"Score:");
-        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
+        ss.pop_stream3(&mut mem, &V6Metric::default());
 
         assert_eq!(read_formatted(&mem, table_addr), ["Score:"]);
         assert_eq!(mem.read_word(table_addr), 6, "the one line's own character count");
@@ -3516,7 +3891,7 @@ mod tests {
 
         ss.push_stream3(table_addr, None);
         ss.write_stream3_bytes(b"AAAA BBBB");
-        ss.pop_stream3(&mut mem, V6Cell::DEFAULT);
+        ss.pop_stream3(&mut mem, &V6Metric::default());
 
         assert_eq!(mem.read_word(table_addr), 9, "word 0 is the whole character count");
         let bytes: Vec<u8> = (0..9).map(|i| mem.read_byte(table_addr + 2 + i)).collect();
@@ -3640,38 +4015,10 @@ mod tests {
             fg: ZColour::Standard(9),
             bg: ZColour::Standard(2),
         };
-        w1.texts.push(V6Text {
-            y: 1,
-            x: 1,
-            text: "banner".into(),
-            style: 0,
-            fg: ZColour::Standard(9),
-            bg: ZColour::Standard(2),
-        });
-        w1.streamed.push(V6Text {
-            y: 9,
-            x: 1,
-            text: "prose".into(),
-            style: 0,
-            fg: ZColour::Standard(9),
-            bg: ZColour::Standard(2),
-        });
-        w1.retired.push(V6Text {
-            y: 17,
-            x: 1,
-            text: "frozen".into(),
-            style: 0,
-            fg: ZColour::Standard(9),
-            bg: ZColour::Standard(2),
-        });
-        v6.windows[2].texts.push(V6Text {
-            y: 1,
-            x: 1,
-            text: "over the art".into(),
-            style: 0,
-            fg: ZColour::Standard(9),
-            bg: ZColour::Default,
-        });
+        w1.texts.push(V6Text::derived(1, 1, "banner".into(), 0, ZColour::Standard(9), ZColour::Standard(2), V6Cell::DEFAULT));
+        w1.streamed.push(V6Text::derived(9, 1, "prose".into(), 0, ZColour::Standard(9), ZColour::Standard(2), V6Cell::DEFAULT));
+        w1.retired.push(V6Text::derived(17, 1, "frozen".into(), 0, ZColour::Standard(9), ZColour::Standard(2), V6Cell::DEFAULT));
+        v6.windows[2].texts.push(V6Text::derived(1, 1, "over the art".into(), 0, ZColour::Standard(9), ZColour::Default, V6Cell::DEFAULT));
         s
     }
 

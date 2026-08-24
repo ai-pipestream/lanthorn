@@ -89,6 +89,8 @@ def put(buf, at, data):
 # hex dump, and so the expected bytes in the Rust test can be checked by eye.
 
 BLANK5 = "....."
+# Eight columns wide, for the SQ-1038 wide-glyph fixture below.
+BLANK8 = "........"
 
 FONT_524_GLYPHS = {
     # 'A' — advance 7, image 5 wide.
@@ -156,6 +158,22 @@ FONT_1033_GLYPHS = {
         "..#..",
         ".###.",
     ] + [BLANK5] * 2,
+    # '2' (0x32) — SQ-1038: an 8-column-wide image with a left side bearing of 3,
+    # so its ink spans strike columns 3..10 — PAST column 7, which is exactly the
+    # case `mac_font::parse` refused outright before SQ-1038 (the whole FONT
+    # resource came back `None`, not just this glyph truncated). A hollow box is
+    # easy to verify by eye and forces ink into the SECOND row byte on every row,
+    # not just the two end rows.
+    0x32: [BLANK8] * 2 + [
+        "########",
+        "#......#",
+        "#......#",
+        "#......#",
+        "#......#",
+        "#......#",
+        "#......#",
+        "########",
+    ] + [BLANK8] * 2,
 }
 
 # The missing-character glyph: a hollow box, which is what the Macintosh drew
@@ -274,7 +292,7 @@ FONT_524 = build_font(
 # the bearing is 1 again.
 FONT_1033 = build_font(
     first=0x30,
-    last=0x31,
+    last=0x32,
     glyphs=FONT_1033_GLYPHS,
     missing=missing_box(12, 8, 2),
     rect_w=7,
@@ -284,8 +302,12 @@ FONT_1033 = build_font(
     leading=0,
     wid_max=6,
     kern_max=0,
-    advances={0x30: 6, 0x31: 6, "missing": 6},
-    bearings={0x30: 1, 0x31: 1, "missing": 1},
+    # 0x32's bearing is 3 (kernMax 0 + offset byte 3) and its image is 8 wide,
+    # so bearing + ink = 11 — past the old 8px bound (SQ-1038). Advance stays 6,
+    # same as its neighbours, so this fixture isolates ONE variable (row width)
+    # rather than also making the font read as proportional.
+    advances={0x30: 6, 0x31: 6, 0x32: 6, "missing": 6},
+    bearings={0x30: 1, 0x31: 1, 0x32: 3, "missing": 1},
 )
 
 
@@ -629,7 +651,7 @@ def main():
         f.write(image)
     print(f"{out}: {len(image)} bytes")
     print(f"  FONT  524: {len(FONT_524)} bytes, 7x15, ascent 12, 'A'-'D'")
-    print(f"  FONT 1033: {len(FONT_1033)} bytes, 7x12, ascent 9, '0'-'1'")
+    print(f"  FONT 1033: {len(FONT_1033)} bytes, 7x12, ascent 9, '0'-'2' ('2' is SQ-1038's wide glyph)")
     print(f"  resource fork: {len(RESOURCE_FORK)} bytes")
 
 
