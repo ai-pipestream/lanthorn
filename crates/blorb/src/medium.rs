@@ -550,7 +550,16 @@ const FORMATS: &[Format] = &[
         //
         // A spelling is still claimed when a medium wears it — and `.iso` is
         // what this medium wears everywhere it is distributed.
-        extensions: &["image", "bin", "iso", "dc42"],
+        //
+        // `toast` is the fifth, by the same rule a fifth time (SQ-1055). Roxio
+        // Toast writes a bare HFS volume under that name — `stories/Shogun.toast`
+        // carries the Macintosh press of *Shogun*, release 292 / serial 890314, and
+        // its Master Directory Block sits at offset 1024 with no wrapper of any
+        // kind in front of it. It mounted here the day it arrived; only the
+        // DIRECTORY SCAN skipped it, on its name, before its bytes were looked at —
+        // which is SQ-0849's defect verbatim and, again, presents as a disc
+        // silently missing from the story list while opening it by name works.
+        extensions: &["image", "bin", "iso", "dc42", "toast"],
         looks_like: <Hfs as Volume>::looks_like,
         mount: mount_boxed::<Hfs>,
         pages_across_images: false,
@@ -2037,7 +2046,9 @@ mod tests {
         // a DiskCopy wrapper round one. Three of them mounted then and all four
         // do since SQ-0889 taught the ProDOS reader that placement. A spelling
         // is claimed when a medium wears it.
-        for want in ["adf", "image", "ima", "img", "st", "2mg", "dsk", "po"] {
+        // `toast` joined them in SQ-1055, on the Macintosh row and by the same
+        // rule: `Shogun.toast` is a bare HFS volume and the corpus now wears it.
+        for want in ["adf", "image", "ima", "img", "st", "2mg", "dsk", "po", "toast"] {
             assert!(image_extensions().any(|e| e == want), "no row claims {want:?}");
         }
         // …and a spelling still does NOT get a name before a medium wears it:
