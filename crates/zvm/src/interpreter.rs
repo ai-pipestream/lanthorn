@@ -594,6 +594,56 @@ const APPLE_PERIOD_LOOK: PeriodLook = PeriodLook {
     cursor_colour: (0xFF, 0xFF, 0xFF),
 };
 
+
+/// The coordinate space a machine's own TYPEFACE bitmaps are authored in — which
+/// is not always the space its ARTWORK is authored in (SQ-1039).
+///
+/// # Why this is a separate fact from `art_scale`
+///
+/// `art_scale` is the ARCHIVE's: how many native pixels one picture pixel becomes
+/// (SQ-0790). The Version 6 cell is the MACHINE's: what the story is told
+/// (SQ-0917, SQ-1013). On most presses those two never meet, because the face IS
+/// the cell and neither is scaled. A machine that ships a real proportional
+/// typeface makes them meet, and then one native pixel means two different things
+/// in one frame — see `CLAUDE.md`'s art-versus-text density table.
+///
+/// Only a [`crate::screen::V6Metric`]-bearing face is affected, so this is
+/// unobservable on any row whose releases carry no typeface. Those rows state
+/// [`Self::Native`] because that is the answer that changes nothing, NOT because
+/// anything measured them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6FaceSpace {
+    /// The face is drawn in the ARCHIVE's picture space, so one face pixel is one
+    /// art pixel and scales with the artwork.
+    ///
+    /// **The Amiga**, and measured rather than assumed: Arthur's `char.data`
+    /// advance table averages 5.21 face px per character while
+    /// `machine-screenshots/amiga-arthur-text.png` measures 4.70 ART px per
+    /// character — which agree at 1:1 and are out by a factor of two at 2:1. Its
+    /// ten face rows are a ten-row text pitch in the machine's own 320x200 frame
+    /// and twenty in the 2x captures, so on a press that doubles onto the 640x400
+    /// unit screen the declared line really is 20.
+    Art,
+    /// The face is drawn in NATIVE device pixels, whatever the artwork does around
+    /// it.
+    ///
+    /// **The Macintosh**, where the split is not academic: the colour press draws
+    /// `CPic.data` at 320x200 with `art_scale` (2, 2) while painting text at one
+    /// native pixel per face pixel. Scaling a face by the art scale there declares
+    /// Geneva 12 — fifteen rows — as thirty, and the monochrome press hides it
+    /// because `Pic.data` is 480x300 at (1, 1) and 15 x 1 is still 15.
+    Native,
+}
+
+impl V6FaceSpace {
+    /// Native pixels per FACE pixel, given the archive's art scale.
+    pub fn text_scale(self, art_scale: (u32, u32)) -> (u32, u32) {
+        match self {
+            V6FaceSpace::Art => art_scale,
+            V6FaceSpace::Native => (1, 1),
+        }
+    }
+}
 /// A row is the machine's *bundle*: the byte it writes into `$1E`, the page and
 /// ink it reports in `$2C`/`$2D`, the palette its colour numbers resolve through,
 /// and the §8.3 screen rules the standard gives it by name. Any member a row
@@ -659,6 +709,14 @@ pub struct MachineProfile {
     /// this machine's interpreter number from zvm should not have to rediscover
     /// its cell somewhere else.
     pub v6_cell: V6Cell,
+    /// The space this machine's own typefaces are authored in — see
+    /// [`V6FaceSpace`], which is where the reasoning and the measurements are.
+    ///
+    /// It sits beside [`Self::v6_cell`] because it is the same kind of claim: an
+    /// embedder that gets this machine's interpreter number and cell from zvm
+    /// should not have to rediscover, somewhere else, whether a face it admits
+    /// scales with the artwork.
+    pub v6_face_space: V6FaceSpace,
     /// The Version 6 standard window this machine presents, in pixels, or `None`
     /// where the machine states none.
     ///
@@ -800,6 +858,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
@@ -812,6 +871,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: true,
         v6_cell: MACINTOSH_V6_CELL,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: Some(MACINTOSH_STD_WINDOW),
         // mac-zork1.jpg: Zork I r88/840726 on a Mac Plus, screen 512x342. A 1-bit
         // screen, so no palette can move these; the status line is set apart by
@@ -833,6 +893,9 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: true,
         v6_screen_page: true,
         v6_cell: V6Cell::DEFAULT,
+        // The one row that is not Native, and the one row with a typeface to
+        // measure — see `V6FaceSpace::Art`.
+        v6_face_space: V6FaceSpace::Art,
         v6_std_window: Some(AMIGA_STD_WINDOW),
         // amiga-spellbreaker.png (r87/860904) and amiga-lurking.png, both v3 and
         // both giving the identical palette in 7-8 exact colours. Note the page
@@ -861,6 +924,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: None,
         // SQ-0933, from `machine-screenshots/st-zork1.png` — Zork I revision 88 /
         // serial 840726, the same release `stories/` carries. A v3 story, so it has
@@ -915,6 +979,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: None,
         // SQ-0873/SQ-0928, from `machine-screenshots/dos-hitchhiker.png` — the last
         // period-look capture bar the Atari ST's. Hitchhiker's r47/840914 under a
@@ -985,6 +1050,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: None,
         // c128-trinity.png: Trinity (v4) at the first prompt, two colours exactly.
         // #55FFFF is RGBI light cyan on the nose, so this row is as close to
@@ -1008,6 +1074,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: None,
         // c64-zork1-solidgold.png: Zork I release 52 / serial 871125, whose own
         // banner reads "Interpreter 8 Version J" — the machine naming itself, which
@@ -1032,6 +1099,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
@@ -1044,6 +1112,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
+        v6_face_space: V6FaceSpace::Native,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },

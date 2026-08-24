@@ -294,6 +294,56 @@ pub fn blit_glyph(
     blit_glyph_styled(canvas, glyph, px, py, cw, ch, fg, bg, 0, tf);
 }
 
+/// Whether a glyph must TILE EDGE TO EDGE with its neighbours, so its rightmost
+/// source column has to survive into the cell's rightmost column (SQ-1027).
+///
+/// Box drawing (U+2500..) and block elements (U+2580..) — a game's chrome, and the
+/// only glyphs whose correctness depends on meeting the cell next door. A LETTER is
+/// the opposite case: `crate::render::vga16` inks 76 of its 94 printable glyphs out
+/// to column 6 and keeps column 7 as the inter-character gap, so dropping that
+/// column is exactly right for text and exactly wrong for a rule.
+///
+/// Same range as `render::screen::is_box_glyph`, which delegates here rather than
+/// restating it — one predicate, since a second copy of a set like this drifts.
+pub(crate) fn must_tile(c: char) -> bool {
+    ('\u{2500}'..='\u{259F}').contains(&c)
+}
+
+/// The source column of an 8-pixel master that destination column `dx` samples, in
+/// a cell `cw` wide.
+///
+/// # Why a tiling glyph needs a different map
+///
+/// `dx * 8 / cw` is the identity at `cw == 8`, which is every machine but one. At
+/// the Macintosh's `cw == 7` (SQ-0917) `dx` runs 0..=6 and the quotient takes
+/// 0,1,2,3,4,5,6 — **source column 7 is never sampled** and the master's rightmost
+/// column is dropped.
+///
+/// For text that is the right column to lose. For a glyph that has to meet the cell
+/// beside it, it is not, and measuring which glyphs actually suffer is worth
+/// recording because the arithmetic alone predicts far more damage than occurs: the
+/// corners `└ ┌ ┐ ┘ ├ ┤ ┬ ┴ ┼` all SURVIVE, because their arms are ink across
+/// columns 3..7 and dropping column 7 still leaves ink at column 6. Rendering the
+/// whole U+2500..U+25FF range at both widths finds exactly three casualties —
+/// `▕` (U+2595, right one-eighth block), whose only ink IS column 7, so it vanishes
+/// outright; and `┄`/`┅`, whose dashes leave column 6 blank, so they lose contact
+/// with the cell to their right.
+///
+/// So a tiling glyph maps its ENDPOINTS instead: `dx * 7 / (cw - 1)` sends
+/// destination 0 to source 0 and destination `cw - 1` to source 7, dropping an
+/// INTERIOR column. At `cw == 8` that is the identity too, so no machine but the
+/// Macintosh moves, and at `cw > 8` it spreads the master over the wider cell the
+/// same way. An all-ink arm stays contiguous either way; a stem mid-cell stays one
+/// pixel wide.
+fn source_col(dx: u32, cw: u32, tiling: bool) -> u32 {
+    let col = if tiling && (2..8).contains(&cw) {
+        dx.saturating_mul(7) / (cw - 1)
+    } else {
+        dx.saturating_mul(8) / cw.max(1)
+    };
+    col.min(7)
+}
+
 /// [`blit_glyph`], with the run's ZMSD §8.7.1 `style` byte applied as a
 /// synthesized face (bit 2 bold, bit 4 italic — see [`synthesize_face`], which
 /// also documents why reverse/fixed-pitch are ignored here). `style == 0` is
@@ -367,9 +417,11 @@ pub fn blit_glyph_styled(
     // (SQ-1009). It has no single advance to match `cw` against — that is what
     // makes it proportional — so the `Cell` test below can never admit one and the
     // filter would silently discard Arthur's whole typeface. Its bitmap is scaled
-    // by the ART scale instead (each face pixel becomes a `scale.0` x `scale.1`
+    // by the TEXT scale instead (each face pixel becomes a `scale.0` x `scale.1`
     // block, 2x2 on Arthur's Amiga floppy), which is what makes `face.height *
-    // art_scale.1` the declared cell height in the first place.
+    // text_scale.1` the declared cell height in the first place. `TextFace` holds
+    // that scale, and it is NOT always the art scale — see
+    // `zvm::interpreter::V6FaceSpace` (SQ-1039).
     if let Some(t) = tf.filter(|t| t.proportional()) {
         if let Some((f, g)) = t.face().and_then(|f| {
             u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)).map(|g| (f, g))
@@ -405,6 +457,10 @@ pub fn blit_glyph_styled(
         glyph_bits(glyph).map(|b| synthesize_face(b, style))
     };
     let smoothed = (cw == 16 && ch == 16).then(|| short.map(|b| scale2x(&b))).flatten();
+    // Whether this glyph has to meet the cell beside it — see `source_col`, which
+    // samples a tiling glyph's rightmost column and a letter's inter-character gap
+    // from two different places (SQ-1027).
+    let tiling = must_tile(glyph);
     let (cwidth, cheight) = (canvas.width(), canvas.height());
     for dy in 0..ch {
         let oy = py + dy;
@@ -423,14 +479,14 @@ pub fn blit_glyph_styled(
                 // point of preferring it. MSB = leftmost, as `vga16` packs too.
                 rows[dy as usize] & (0x80 >> dx) != 0
             } else if let Some(g) = &tall {
-                let col = dx * 8 / cw; // nearest source col
+                let col = source_col(dx, cw, tiling);
                 // vga16 packs each row MSB = leftmost column — the OPPOSITE of
                 // font8x8 below. Both orders are live in this function.
                 g[tall_row] & (0x80 >> col) != 0
             } else if let Some(grid) = &smoothed {
                 grid[dy as usize][dx as usize]
             } else {
-                let col = dx * 8 / cw; // nearest source col
+                let col = source_col(dx, cw, tiling);
                 // font8x8 packs each row LSB = leftmost column.
                 short.is_some_and(|g| g[row] & (1 << col) != 0)
             };
@@ -448,9 +504,13 @@ pub fn blit_glyph_styled(
 /// Split out because every assumption the cell blit above makes is wrong here: the
 /// glyph's width is its own advance rather than `cw`, its rows are the face's
 /// rather than a fixed 8 or 16, and the only resampling wanted is a whole-number
-/// block per face pixel — `scale` is the ART scale, so on a press whose 320-wide
-/// rendition doubles onto the unit screen each face pixel is a 2x2 native block
-/// and the ten-row face fills the twenty-row line exactly.
+/// block per face pixel — `scale` is the TEXT scale
+/// ([`crate::native_font::TextFace::scale`]), so on an AMIGA press whose 320-wide
+/// rendition doubles onto the unit screen each face pixel is a 2x2 native block and
+/// the ten-row face fills the twenty-row line exactly. On a MACINTOSH it is `(1, 1)`
+/// however dense the artwork is, because that machine paints text at one native
+/// pixel per face pixel — `zvm::interpreter::V6FaceSpace` carries the split
+/// (SQ-1039).
 ///
 /// Rows are MSB-leftmost, as [`crate::render::vga16`] packs them and as
 /// [`blorb::bitmap_font`] documents, so the style shears go `>>`. `row_bytes` is
@@ -1029,6 +1089,111 @@ mod tests {
         }
         canvas.save(&out_path).expect("write bitfont sample PNG");
     }
+    /// Ink columns of `glyph` rendered into a `cw`-wide cell, bit `1 << x` per
+    /// column — the shape a tiling glyph's correctness is judged on.
+    fn cell_rows(glyph: char, cw: u32) -> Vec<u16> {
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut canvas = RgbaImage::from_pixel(cw, 16, Rgba([0, 0, 0, 0]));
+        blit_glyph_styled(&mut canvas, glyph, 0, 0, cw, 16, fg, None, 0, None);
+        (0..16u32)
+            .map(|y| {
+                let mut r = 0u16;
+                for x in 0..cw {
+                    if *canvas.get_pixel(x, y) == fg {
+                        r |= 1 << x;
+                    }
+                }
+                r
+            })
+            .collect()
+    }
+
+    /// **A glyph that must tile keeps its rightmost column in a 7-wide cell**
+    /// (SQ-1027).
+    ///
+    /// `dx * 8 / cw` never reaches source column 7 when `cw` is 7, so the master's
+    /// rightmost column was dropped on the Macintosh (SQ-0917 is where that cell
+    /// came from). The quest predicted this would break every corner; rendering the
+    /// whole U+2500..U+25FF range at both widths says otherwise, and the real
+    /// casualties are pinned below rather than the predicted ones — the corners are
+    /// ink across columns 3..7, so losing column 7 still leaves ink at column 6 and
+    /// the arm reaches the cell edge anyway.
+    ///
+    /// Falsified by restoring `dx * 8 / cw` for tiling glyphs: `▕` comes back blank
+    /// and the two dashed rules come back a pixel short.
+    #[test]
+    fn a_tiling_glyph_keeps_its_right_edge_in_a_narrow_cell() {
+        // `▕` U+2595 RIGHT ONE EIGHTH BLOCK — its ONLY ink is source column 7, so
+        // this is the glyph that vanished outright.
+        let narrow = cell_rows('\u{2595}', 7);
+        assert!(
+            narrow.iter().any(|&r| r != 0),
+            "`▕` must survive a 7-wide cell; it is nothing but its rightmost column",
+        );
+        assert!(
+            narrow.iter().all(|&r| r == 0 || r == 1 << 6),
+            "`▕` is the RIGHTMOST column and nothing else, got {narrow:?}",
+        );
+        // `┄`/`┅` — dashed, so column 6 is a gap and only column 7 touches the edge.
+        for ch in ['\u{2504}', '\u{2505}'] {
+            assert!(
+                cell_rows(ch, 7).iter().any(|&r| r & (1 << 6) != 0),
+                "{ch:?} must reach the right edge of a 7-wide cell to meet the cell beside it",
+            );
+        }
+    }
+
+    /// The glyphs the narrow cell was never breaking must not start breaking now —
+    /// the fix drops an INTERIOR source column instead of the last one, and these
+    /// are the shapes that could notice (SQ-1027).
+    #[test]
+    fn narrowing_a_cell_keeps_arms_contiguous_and_stems_hairline() {
+        // A corner's arm runs from the stem to the edge and must stay unbroken.
+        for ch in ['\u{2514}', '\u{250C}', '\u{2500}', '\u{2588}'] {
+            for (y, &r) in cell_rows(ch, 7).iter().enumerate() {
+                if r == 0 {
+                    continue;
+                }
+                let lo = r.trailing_zeros();
+                let hi = 15 - r.leading_zeros();
+                let span = (lo..=hi).fold(0u16, |a, b| a | 1 << b);
+                assert_eq!(r, span, "{ch:?} row {y} has a hole: {r:#09b}");
+            }
+        }
+        // `│`'s stem sits mid-cell and must stay one pixel — the case SQ-0932 chose
+        // the 16-row subset's boundary on.
+        for cw in [7u32, 8] {
+            let rows = cell_rows('\u{2502}', cw);
+            let ink = rows.iter().copied().find(|&r| r != 0).expect("the rule has ink");
+            assert_eq!(ink.count_ones(), 1, "`│` at cw={cw} must stay a hairline: {ink:#010b}");
+        }
+    }
+
+    /// **Every machine but the Macintosh is untouched**, because both column maps
+    /// are the identity at an 8-wide cell (SQ-1027).
+    #[test]
+    fn an_eight_wide_cell_is_the_identity_for_tiling_and_text_alike() {
+        for c in 0x2500u32..=0x25FFu32 {
+            let ch = char::from_u32(c).expect("a valid scalar");
+            assert_eq!(
+                (0..8).map(|dx| source_col(dx, 8, must_tile(ch))).collect::<Vec<_>>(),
+                (0..8).collect::<Vec<_>>(),
+                "{ch:?}: an 8-wide cell samples its master 1:1",
+            );
+        }
+        // And a LETTER keeps the old map at 7 wide: vga16 inks out to column 6 and
+        // column 7 is the inter-character gap, so dropping column 7 is correct there.
+        assert_eq!(
+            (0..7).map(|dx| source_col(dx, 7, false)).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5, 6],
+        );
+        assert_eq!(
+            (0..7).map(|dx| source_col(dx, 7, true)).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5, 7],
+            "a tiling glyph maps its endpoints and drops an interior column instead",
+        );
+    }
+
 }
 
 

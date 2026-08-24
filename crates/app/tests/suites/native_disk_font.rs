@@ -493,3 +493,121 @@ fn the_panel_sees_both_macintosh_faces_and_only_one_in_use() {
     assert_eq!(zz[0].name, "FONT 524");
     assert!(zz[0].used);
 }
+
+// ── the TEXT scale is not the ART scale (SQ-1039) ────────────────────────────
+
+/// A synthetic proportional face `height` rows tall, with a real advance per glyph.
+///
+/// Synthetic on purpose: no medium in `stories/` carries a `Metric` face for the
+/// Macintosh — Geneva lives in the System file that shipped with the machine and
+/// with no game (SQ-1036) — so the press that exposes SQ-1039 cannot be reached
+/// through a fixture at all. The metrics are Geneva 12's as
+/// `unit_tests/macfont.hfs` reports them: fifteen rows, advances spanning 3 to 11.
+fn proportional_face(height: u8) -> blorb::bitmap_font::BitmapFont {
+    let glyph = |w: u8| blorb::bitmap_font::Glyph {
+        width: w,
+        // Solid ink, so `measure_proportional` counts the glyph — it excludes blank
+        // ones, since an undefined character carries a zero advance in both formats.
+        rows: vec![0xFF; usize::from(height)],
+    };
+    let widths: Vec<u8> = (b'\x20'..=b'\x7e').map(|c| 3 + (c % 9)).collect();
+    blorb::bitmap_font::BitmapFont {
+        width: 11,
+        height,
+        baseline: height - 3,
+        bold_smear: 0,
+        proportional: true,
+        lo: b' ',
+        glyphs: widths.into_iter().map(glyph).collect(),
+    }
+}
+
+/// **A `Metric` face's declared line takes the TEXT scale, and the Macintosh's is
+/// 1:1 however dense its artwork is** (SQ-1039).
+///
+/// `art_scale` is the ARCHIVE's — how many native pixels one PICTURE pixel becomes
+/// — and the Version 6 cell is the MACHINE's. Scaling a typeface by the art scale
+/// conflates them, and on one press that is wrong rather than merely imprecise:
+///
+/// | press | picture space | `art_scale` | one art px | one text px |
+/// |---|---|---|---|---|
+/// | Macintosh colour | `CPic.data` 320x200 | (2, 2) → 640x400 | **2 native** | 1 native |
+/// | Macintosh B/W | `Pic.data` 480x300 | (1, 1) | 1 native | 1 native |
+/// | Amiga | 320x200 | (2, 2) → 640x400 | 2 native | 1 native |
+///
+/// The Amiga's face is authored in the picture space, so doubling the art doubles
+/// the face with it and `height * 2` is right — measured, not assumed: Arthur's
+/// advance table averages 5.21 face px per character while
+/// `machine-screenshots/amiga-arthur-text.png` measures 4.70 ART px, which agree at
+/// 1:1 and are out by a factor of two at 2:1. The Macintosh paints text at one
+/// native pixel per face pixel while doubling `CPic.data` around it, so Geneva 12's
+/// fifteen rows were being declared as thirty.
+///
+/// **The monochrome press cannot falsify this**, which is why the colour row is here:
+/// `Pic.data` is (1, 1) and 15 x 1 is 15 under either rule.
+#[test]
+fn a_metric_faces_declared_line_takes_the_text_scale_not_the_archives() {
+    use app::interpreter::InterpreterProfile as P;
+    use app::native_font::{declared_cell, fit, FaceFit};
+
+    let face = proportional_face(15);
+    // Non-vacuity: the whole quest is about `Metric` faces, and a face that fell to
+    // `Cell` — or was declined — would pass every assertion below for free.
+    assert_eq!(fit(&face, P::Macintosh), Some(FaceFit::Metric), "admitted on the Macintosh");
+    assert_eq!(fit(&face, P::Amiga), Some(FaceFit::Metric), "admitted on the Amiga");
+
+    assert_eq!(
+        declared_cell(P::Macintosh, Some(&face), (2, 2)).h,
+        15,
+        "the Macintosh COLOUR press declares the face's own fifteen rows, not thirty",
+    );
+    assert_eq!(
+        declared_cell(P::Macintosh, Some(&face), (1, 1)).h,
+        15,
+        "the monochrome press agrees, as it does under either rule",
+    );
+    assert_eq!(
+        declared_cell(P::Amiga, Some(&face), (2, 2)).h,
+        30,
+        "the Amiga's face IS in the picture space, so a doubled press doubles it",
+    );
+    // The WIDTH never follows the face on either machine: a proportional face has no
+    // single advance, and this repo does not guess a declared metric.
+    assert_eq!(declared_cell(P::Macintosh, Some(&face), (2, 2)).w, 7);
+    assert_eq!(declared_cell(P::Amiga, Some(&face), (2, 2)).w, 8);
+}
+
+/// **The PEN takes the same scale the cell does** (SQ-1039).
+///
+/// `TextFace` holds one scale and all three consumers read it — the declared cell,
+/// the advance table `zvm` measures and wraps with, and `render::bitfont`'s
+/// per-glyph blit. So a machine whose text is native-pixel must advance and draw at
+/// 1:1 while its artwork stays doubled, and asserting the stored scale is asserting
+/// all three at their source.
+#[test]
+fn the_pen_and_the_blit_take_the_text_scale_too() {
+    use app::interpreter::InterpreterProfile as P;
+    use app::native_font::TextFace;
+
+    let face = proportional_face(15);
+    let mac = TextFace::new(P::Macintosh, Some(face.clone()), Some((2, 2)));
+    let amiga = TextFace::new(P::Amiga, Some(face), Some((2, 2)));
+
+    assert_eq!(mac.scale(), (1, 1), "the Macintosh draws one native pixel per face pixel");
+    assert_eq!(amiga.scale(), (2, 2), "the Amiga doubles its face with its artwork");
+    assert!(mac.proportional() && amiga.proportional(), "non-vacuity: both pens are the face's");
+
+    // The advance is the glyph's own width on the Macintosh, and twice it on the
+    // Amiga — the same ratio the cell moved by, which is the point.
+    for ch in ['i', 'm', 'W', ' '] {
+        assert_eq!(
+            amiga.advance(ch),
+            2 * mac.advance(ch),
+            "{ch:?}: the Amiga's pen is the Macintosh's doubled",
+        );
+        assert!(mac.advance(ch) > 0, "{ch:?}: non-vacuity, the face covers it");
+    }
+    assert_eq!(amiga.run_px("moonlight"), 2 * mac.run_px("moonlight"));
+    assert_eq!(mac.line_px(), 15, "and the line is the face's own fifteen rows");
+    assert_eq!(amiga.line_px(), 30);
+}

@@ -199,11 +199,19 @@ pub fn fit(face: &BitmapFont, profile: InterpreterProfile) -> Option<FaceFit> {
 ///
 /// The height is MEASURED. Arthur's `char.data` is 10 rows, `machine-screenshots/
 /// amiga-arthur.png` reads a text pitch of exactly 10 in the machine's own 320x200
-/// frame, and the four 2x captures read 20 — the same fact twice, and the reason
-/// `art_scale` multiplies it: a v6 coordinate is a NATIVE pixel, and on a press
-/// whose art doubles onto the unit screen one machine row is two native rows. For
+/// frame, and the four 2x captures read 20 — the same fact twice, and the reason a
+/// scale multiplies it: a v6 coordinate is a NATIVE pixel, and on an Amiga press
+/// whose art doubles onto the unit screen one FACE row is two native rows. For
 /// Arthur that is a 20-row line against the 16 we declared, which is the 20 text
 /// rows the machine shows against our 25.
+///
+/// **The scale is the TEXT scale and not the art scale** (SQ-1039). They coincide
+/// on the Amiga, which draws its face in the picture space, and they do not on the
+/// Macintosh, whose colour press doubles `CPic.data` onto the unit screen while
+/// painting text at one native pixel per face pixel — so Geneva 12's fifteen rows
+/// would be declared as thirty. `InterpreterProfile::text_scale` resolves it from
+/// `zvm::interpreter::V6FaceSpace`; the monochrome press hides the difference,
+/// because `Pic.data` is 480x300 at (1, 1) and 15 x 1 is still 15.
 ///
 /// The width is NOT measured, and there is nothing here to measure. A proportional
 /// face has no single advance — that is what makes it proportional — so any number
@@ -215,7 +223,9 @@ pub fn fit(face: &BitmapFont, profile: InterpreterProfile) -> Option<FaceFit> {
 /// [`zvm::screen::V6Cell`] exists to name.
 ///
 /// `art_scale` is [`crate::machine_boot::MachineBoot::art_scale`]; `None` there
-/// means an undoubled rendition and should arrive here as `(1, 1)`.
+/// means an undoubled rendition and should arrive here as `(1, 1)`. It is converted
+/// to a text scale inside, so callers keep passing the ARCHIVE's number and only one
+/// place knows the machine's rule.
 pub fn declared_cell(
     profile: InterpreterProfile,
     face: Option<&BitmapFont>,
@@ -224,7 +234,14 @@ pub fn declared_cell(
     let cell = profile.v6_font_cell();
     match face.and_then(|f| fit(f, profile).map(|k| (f, k))) {
         Some((f, FaceFit::Metric)) => {
-            zvm::screen::V6Cell::new(cell.w, u16::from(f.height).saturating_mul(art_scale.1 as u16))
+            // The TEXT scale, not the art scale (SQ-1039). They are the same number
+            // on the Amiga — the only press with a typeface today, and one that
+            // draws it in the picture space — and they are not on the Macintosh,
+            // whose colour press doubles `CPic.data` while painting text at one
+            // native pixel per face pixel. `art_scale.1` there would declare Geneva
+            // 12's fifteen rows as thirty.
+            let text = profile.text_scale(art_scale);
+            zvm::screen::V6Cell::new(cell.w, u16::from(f.height).saturating_mul(text.1 as u16))
         }
         _ => cell,
     }
@@ -279,7 +296,11 @@ impl TextFace {
         face: Option<BitmapFont>,
         art_scale: Option<(u32, u32)>,
     ) -> TextFace {
-        let scale = art_scale.unwrap_or((1, 1));
+        // The TEXT scale (SQ-1039). Stored rather than the art scale because all
+        // three consumers of `scale` are text: the declared cell, the advance table
+        // below, and `render::bitfont`'s per-glyph blit. The artwork's own density
+        // travels separately, in `AppState::v6_art_scale`.
+        let scale = profile.text_scale(art_scale.unwrap_or((1, 1)));
         let fit = face.as_ref().and_then(|f| fit(f, profile));
         let cell = declared_cell(profile, face.as_ref(), scale);
         let metric = match (face.as_ref(), fit) {

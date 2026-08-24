@@ -892,6 +892,26 @@ impl InterpreterProfile {
     pub fn v6_font_cell(self) -> zvm::screen::V6Cell {
         self.machine().map_or(zvm::screen::V6Cell::DEFAULT, |m| m.v6_cell)
     }
+
+    /// Native pixels per FACE pixel, given the archive's art scale — the TEXT
+    /// scale, which is not always the art scale (SQ-1039).
+    ///
+    /// `art_scale` is the ARCHIVE's (SQ-0790) and says how dense the PICTURES are.
+    /// A typeface is a separate question, and the two machines that ship one answer
+    /// it differently: the Amiga draws its face in the picture space, so a doubled
+    /// press doubles the face with it, and the Macintosh draws text at one native
+    /// pixel per face pixel while its colour press doubles `CPic.data` around it.
+    /// Scaling a face by the art scale there would declare Geneva 12's fifteen rows
+    /// as thirty.
+    ///
+    /// Only a `FaceFit::Metric` face is affected — a `Cell` face IS the cell and is
+    /// blitted 1:1 — so on every press that admits no typeface this is `(1, 1)`
+    /// either way. The table is [`zvm::interpreter`]'s, beside the cell, for the
+    /// same reason the cell is: see [`zvm::interpreter::V6FaceSpace`].
+    pub fn text_scale(self, art_scale: (u32, u32)) -> (u32, u32) {
+        self.machine()
+            .map_or((1, 1), |m| m.v6_face_space.text_scale(art_scale))
+    }
 }
 
 /// The §11.1.3 interpreter numbers, from [`zvm::interpreter`] — the machine

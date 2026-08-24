@@ -240,14 +240,14 @@ pub fn table() -> String {
     let mut s = format!("ZMSD §11.1.3 machine profiles — what zvm models, in number order.\n\n{TOLD_INTRO}\n");
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     s.push_str(&format!(
-        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {}\n",
+        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {}\n",
         "#", "machine", "default page / ink ($2C/$2D)", "palette", "global pens", "v6 screen page",
-        "one screen palette", "v6 cell", "v6 std window"
+        "one screen palette", "v6 cell", "face space", "v6 std window"
     ));
-    s.push_str(&format!("  {}\n", "-".repeat(name_w + 118)));
+    s.push_str(&format!("  {}\n", "-".repeat(name_w + 130)));
     for m in MACHINES {
         s.push_str(&format!(
-            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {}\n",
+            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {}\n",
             m.number,
             m.name,
             colours(m),
@@ -268,6 +268,12 @@ pub fn table() -> String {
             yes_no(m.v6_screen_page),
             yes_no(m.one_screen_palette),
             format!("{}x{}", m.v6_cell.w, m.v6_cell.h),
+            // Which space this machine's own TYPEFACES are authored in, which is not
+            // always the space its ARTWORK is (SQ-1039). Only the Amiga says `art`.
+            match m.v6_face_space {
+                crate::interpreter::V6FaceSpace::Art => "art",
+                crate::interpreter::V6FaceSpace::Native => "native px",
+            },
             // A machine that states none defers to the story's own container, and
             // to any artwork the host mounted ahead of it (SQ-0838).
             m.v6_std_window.map_or("the archive's".to_string(), |(w, h)| format!("{w}x{h}")),
@@ -461,6 +467,7 @@ mod tests {
                 v6_screen_page,
                 one_screen_palette,
                 v6_cell,
+                v6_face_space,
                 v6_std_window,
                 period_look,
             } = *m;
@@ -483,6 +490,13 @@ mod tests {
                 Palette::IbmXzip | Palette::IbmYzip | Palette::IbmCga => "EGA",
             };
             assert!(all.contains(palette_name), "{name}: palette");
+            assert!(
+                all.contains(match v6_face_space {
+                    crate::interpreter::V6FaceSpace::Art => "art",
+                    crate::interpreter::V6FaceSpace::Native => "native px",
+                }),
+                "{name}: v6_face_space not in\n{all}",
+            );
             // The three booleans share one spelling, so count rather than search:
             // the machine table row holds exactly these three yes/no columns.
             let want = usize::from(global_colour_pens)

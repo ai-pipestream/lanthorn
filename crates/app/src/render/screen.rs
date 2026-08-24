@@ -6215,7 +6215,10 @@ fn run_cell(
 /// (U+2580..). What a game builds chrome geometry out of, and nothing any game's
 /// prose contains. (SQ-0742's predicate, shared with SQ-0783.)
 fn is_box_glyph(c: char) -> bool {
-    ('\u{2500}'..='\u{259F}').contains(&c)
+    // One predicate, in `bitfont` — where the sampler that has to keep these glyphs
+    // meeting their neighbours also asks the question (SQ-1027). Two copies of a set
+    // like this drift.
+    crate::render::bitfont::must_tile(c)
 }
 
 /// SQ-0783: which column a LONE frame glyph belongs in when it stands at the game
