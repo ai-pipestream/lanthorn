@@ -15,6 +15,7 @@ use ratatui::style::Color;
 
 use crate::engine::{Introspect, StatusField, StatusModel};
 use crate::state::{AppState, Focus, ParaFmt, StyleRun, TranscriptFilter, TranscriptKind};
+use crate::render::wrap_cache::{CellWrapCache, WrapKey, WrapPlan};
 use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
 
@@ -687,7 +688,48 @@ pub(crate) fn wrap_lines_kinded_indexed(
     // non-prose line flushes it first (so the whole picture always renders, even
     // when the text beside it is shorter than the image — or absent). (SQ-0454)
     let mut float: Option<FloatState> = None;
+    wrap_lines_kinded_extend(
+        &mut out, &mut starts, &mut float, transcript, kinds, styles, runs, para, images, char_px, images_enabled,
+        left_float, width,
+    );
+    // Finish any float whose picture outran (or had no) text beside it.
+    flush_float(&mut out, &mut float);
+    (out, starts)
+}
 
+/// [`wrap_lines_kinded_indexed`]'s body, resumable: wrap `transcript` into an
+/// existing `out`/`starts` carrying an existing `float`, and DO NOT flush.
+///
+/// This is what makes the wrap cache incremental (SQ-1034). Two things are true
+/// of this loop and neither is obvious:
+///
+/// * the wrap carries state ACROSS lines — an open margin float narrows the rows
+///   after it — so an appended line cannot be wrapped in isolation. `float` is
+///   that carry, in and out;
+/// * the trailing [`flush_float`] is NOT final. A float whose picture outran its
+///   text emits its remaining strips as empty rows at the end; the next prose
+///   line to arrive rides beside the picture and claims those strips instead. So
+///   the cache records how many rows preceded the flush and truncates back to
+///   there before extending.
+///
+/// `starts` indices are absolute rows in `out` and stay valid across an append,
+/// because every one of them precedes the flush.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn wrap_lines_kinded_extend(
+    out: &mut Vec<WrappedRow>,
+    starts: &mut Vec<usize>,
+    float: &mut Option<FloatState>,
+    transcript: &[String],
+    kinds: &[TranscriptKind],
+    styles: &[Style],
+    runs: &[Vec<StyleRun>],
+    para: &[ParaFmt],
+    images: &[Option<crate::inline_image::InlineImage>],
+    char_px: (u16, u16),
+    images_enabled: bool,
+    left_float: bool,
+    width: u16,
+) {
     for (i, line) in transcript.iter().enumerate() {
         starts.push(out.len());
         // An image unit either starts a left-margin float or expands into an
@@ -698,10 +740,10 @@ pub(crate) fn wrap_lines_kinded_indexed(
                 continue;
             }
             // A new picture ends any active float (finishing it as strip rows).
-            flush_float(&mut out, &mut float);
+            flush_float(out, float);
             if left_float {
                 if let Some(fl) = FloatState::start(img, char_px, width) {
-                    float = Some(fl);
+                    *float = Some(fl);
                     continue; // the float emits no rows of its own; text rides beside it
                 }
             }
@@ -732,7 +774,7 @@ pub(crate) fn wrap_lines_kinded_indexed(
         // A float only wraps the game's own prose. Any other line kind flushes
         // the picture first, then renders normally at full width.
         if !is_prose {
-            flush_float(&mut out, &mut float);
+            flush_float(out, float);
         }
 
         match kind {
@@ -792,7 +834,7 @@ pub(crate) fn wrap_lines_kinded_indexed(
                 let fl = float.as_mut().unwrap();
                 fl.next_strip += placed;
                 if fl.remaining() == 0 {
-                    float = None;
+                    *float = None;
                 }
             }
             TranscriptKind::Story | TranscriptKind::Input => {
@@ -813,9 +855,6 @@ pub(crate) fn wrap_lines_kinded_indexed(
             }
         }
     }
-    // Finish any float whose picture outran (or had no) text beside it.
-    flush_float(&mut out, &mut float);
-    (out, starts)
 }
 
 /// The minimum prose column (cells) worth floating a picture beside; a narrower
@@ -832,7 +871,13 @@ const FLOAT_MIN_TEXT_COLS: u16 = 8;
 ///   keeps text flush left, `x_off` blits the picture at the right edge.
 ///
 /// Either way the wrap width on covered rows is `width - reserve`. (SQ-0454/0489)
-struct FloatState {
+///
+/// `Clone` because it is the wrap's CARRY: the incremental cache stores the float
+/// still open after the last line it consumed and hands a copy back on the next
+/// append (SQ-1034). Without it an appended prose line would wrap at full width
+/// beside a picture it cannot see.
+#[derive(Clone)]
+pub(crate) struct FloatState {
     image: crate::inline_image::InlineImage,
     cols: u16,
     rows: u16,
@@ -918,7 +963,7 @@ fn float_text_indent(img: &crate::inline_image::InlineImage, cell_w: u16, cols: 
 /// Emit a float's not-yet-placed strips as empty rows so its whole picture
 /// renders even when the text beside it is shorter than the image (or absent),
 /// then clear the float. (SQ-0454)
-fn flush_float(out: &mut Vec<WrappedRow>, float: &mut Option<FloatState>) {
+pub(crate) fn flush_float(out: &mut Vec<WrappedRow>, float: &mut Option<FloatState>) {
     if let Some(fl) = float.take() {
         for r in fl.next_strip..fl.rows {
             out.push(WrappedRow {
@@ -2095,34 +2140,28 @@ fn render_middle(
     // smooth scroll is in flight, else the logical target. Clamped below.
     let effective_scroll = state.effective_transcript_scroll();
 
-    // Wrapped-transcript cache (SQ-0305): re-wrapping the whole filtered history
-    // and cloning every visible line/run/image is the dominant per-frame cost, so
-    // do it only when an input the wrapped rows actually depend on changed. An
-    // idle redraw or a scroll (transcript, width, filter, styles all unchanged)
-    // reuses the cached rows and just re-windows them to the viewport below.
-    let cache_stale = {
-        let cache = state.transcript_wrap.borrow();
-        match cache.as_ref() {
-            None => true,
-            // Field-by-field so the hot (cache-hit) path never clones the colour
-            // scheme / room name — only a rebuild pays for that (see the key built
-            // below; keep the two field lists in sync).
-            Some(c) => {
-                c.key.gen != state.transcript_gen
-                    || c.key.len != state.transcript.len()
-                    || c.key.filter != state.transcript_filter
-                    || c.key.width != body_area.width
-                    || c.key.images_enabled != images_enabled
-                    || c.key.char_px != char_px
-                    || c.key.clear_anchor != state.clear_anchor
-                    || c.key.room_name.as_deref() != state.current_room_name.as_deref()
-                    || c.key.machine_pair != state.v6_page_pair.get()
-                    || c.key.colors != state.colors
-            }
-        }
+    // Wrapped-transcript cache (SQ-0305; incremental since SQ-1034): re-wrapping
+    // the whole filtered history and cloning every visible line/run/image is the
+    // dominant per-frame cost. What this frame owes is
+    // `wrap_cache::WrapKey::plan`'s to say — the ONE owner of that decision, and
+    // the same one the raster path asks. An idle redraw or a scroll reuses the
+    // rows; a turn that only printed extends them; a resize, a filter, a theme or
+    // a moved screen-clear anchor rebuilds them.
+    //
+    // The key is built ONCE here and compared without cloning, so the hot path
+    // never pays for the colour scheme or the room name.
+    let plan = match state.transcript_wrap.borrow().as_ref() {
+        Some(c) => c.key.plan(state, body_area.width),
+        None => WrapPlan::Rebuild,
     };
-    if cache_stale {
-        let visible_indices = state.visible_transcript_indices();
+    if plan != WrapPlan::Reuse {
+        // The source lines this frame has to wrap: all of them on a rebuild, only
+        // the ones that just arrived on an append.
+        let wrap_from = match plan {
+            WrapPlan::Append { from } => from,
+            _ => 0,
+        };
+        let visible_indices = state.visible_transcript_indices_from(wrap_from);
         let filtered_lines: Vec<String> = visible_indices.iter().map(|&i| state.transcript[i].clone()).collect();
         let filtered_kinds: Vec<TranscriptKind> = visible_indices.iter().map(|&i| state.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story)).collect();
         // Resolve each logical line's text style ONCE, before wrapping. Story lines
@@ -2301,7 +2340,36 @@ fn render_middle(
             .flatten()
             .map(|img| std::sync::Arc::as_ptr(&img.pixels) as usize)
             .collect();
-        let (rows, line_starts) = wrap_lines_kinded_indexed(
+        let mut slot = state.transcript_wrap.borrow_mut();
+        if matches!(plan, WrapPlan::Rebuild) {
+            *slot = Some(CellWrapCache {
+                key: WrapKey::of(state, body_area.width),
+                rows: Vec::new(),
+                starts: Vec::new(),
+                stable_rows: 0,
+                carry: None,
+                // Map the screen-clear boundary (a full-transcript index) to a
+                // position in the filtered line list, so top-anchoring works under
+                // any transcript filter. Only a rebuild can compute this: an
+                // append sees only the suffix. It does not need to — the anchor is
+                // in the key, and every appended line sits at or past it, so the
+                // count cannot change without a rebuild.
+                clear_anchor_filtered: state
+                    .clear_anchor
+                    .map(|a| visible_indices.iter().filter(|&&i| i < a).count()),
+                anchor_row: None,
+                live_bands: std::collections::HashSet::new(),
+            });
+        }
+        let cache = slot.as_mut().expect("rebuilt above, or appending onto a live cache");
+        // Drop the trailing float flush before extending: those strip rows are not
+        // final, and the prose that just arrived claims them (SQ-1034).
+        cache.rows.truncate(cache.stable_rows);
+        let mut carry = cache.carry.clone();
+        wrap_lines_kinded_extend(
+            &mut cache.rows,
+            &mut cache.starts,
+            &mut carry,
             &filtered_lines,
             &filtered_kinds,
             &filtered_styles,
@@ -2313,31 +2381,18 @@ fn render_middle(
             true, // main transcript: left-margin images float, text wraps beside (SQ-0454)
             body_area.width,
         );
-        // Map the screen-clear boundary (a full-transcript index) to a position in
-        // the filtered line list, so top-anchoring works under any transcript filter.
-        let clear_anchor_filtered = state
-            .clear_anchor
-            .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
+        cache.stable_rows = cache.rows.len();
+        cache.carry = carry.clone();
+        // Finish any float whose picture outran (or had no) text beside it.
+        flush_float(&mut cache.rows, &mut carry);
+        cache.live_bands.extend(live_bands);
         // The anchor is where that line STARTS in the wrap just built (SQ-0640) — a
-        // separate wrap of the prefix would count a margin float's strips twice over.
-        let anchor_row = anchor_row_at(&line_starts, rows.len(), clear_anchor_filtered);
-        *state.transcript_wrap.borrow_mut() = Some(crate::state::TranscriptWrapCache {
-            key: crate::state::TranscriptWrapKey {
-                gen: state.transcript_gen,
-                len: state.transcript.len(),
-                filter: state.transcript_filter,
-                width: body_area.width,
-                images_enabled,
-                char_px,
-                clear_anchor: state.clear_anchor,
-                room_name: state.current_room_name.clone(),
-                machine_pair: state.v6_page_pair.get(),
-                colors: state.colors.clone(),
-            },
-            rows,
-            anchor_row,
-            live_bands,
-        });
+        // separate wrap of the prefix would count a margin float's strips twice
+        // over. Recomputed on every append and not merely on a rebuild: an anchor
+        // sitting exactly at the end is an EMPTY post-clear screen, and the next
+        // line printed is what gives it a real row.
+        cache.anchor_row = anchor_row_at(&cache.starts, cache.rows.len(), cache.clear_anchor_filtered);
+        cache.key = WrapKey::of(state, body_area.width);
     }
     let cache = state.transcript_wrap.borrow();
     let entry = cache.as_ref().expect("wrap cache populated above");
@@ -6065,13 +6120,16 @@ mod tests {
         assert_eq!(buf.cell((5, 0)).unwrap().symbol(), "Z");
     }
 
-    // ── Transcript wrap cache (SQ-0305) ───────────────────────────────────────
+    // ── Transcript wrap cache (SQ-0305, SQ-1034) ──────────────────────────────
     //
     // The cache holds the fully wrapped rows so an unchanged transcript is not
     // re-wrapped. These tests POISON the cached rows with a sentinel after a
-    // render, then render again: a cache HIT leaves the sentinel in place (no
-    // rebuild), while an invalidation rebuilds it from the real transcript
-    // (sentinel gone). This directly observes hit vs. rebuild without a counter.
+    // render, then render again, which observes the three outcomes directly and
+    // without a counter: a REUSE leaves the sentinel alone, an APPEND leaves it
+    // alone and adds rows after it, and a REBUILD wipes it.
+    //
+    // The sentinel row is what a re-wrap can never produce, so "is it still
+    // there?" is exactly "did this frame re-wrap line zero?".
 
     fn wrap_render(state: &AppState, area: Rect) {
         let machine = minimal_machine();
@@ -6092,6 +6150,23 @@ mod tests {
             band: None,
             float: None,
         });
+        // Keep the product self-consistent: `stable_rows` is where an append
+        // truncates back to, so a poisoned row that sat past it would be silently
+        // dropped and the probe would report a rebuild that never happened.
+        e.stable_rows = e.rows.len();
+        e.starts = vec![0];
+    }
+
+    fn cached_row_texts(state: &AppState) -> Vec<String> {
+        state
+            .transcript_wrap
+            .borrow()
+            .as_ref()
+            .expect("cache present")
+            .rows
+            .iter()
+            .map(|r| r.text.clone())
+            .collect()
     }
 
     fn cached_first_text(state: &AppState) -> String {
@@ -6119,15 +6194,316 @@ mod tests {
     }
 
     #[test]
-    fn wrap_cache_invalidates_on_append() {
+    fn wrap_cache_extends_on_append_without_rewrapping_what_it_already_wrapped() {
         let mut state = AppState::default();
         state.push_transcript_kind("hello world", TranscriptKind::Story);
         let area = Rect::new(0, 0, 20, 8);
         wrap_render(&state, area);
         poison_wrap_cache(&state);
-        state.push_transcript_kind("more", TranscriptKind::Story); // bumps gen + len
+        state.push_transcript_kind("more", TranscriptKind::Story); // grows, nothing moves
         wrap_render(&state, area);
-        assert_eq!(cached_first_text(&state), "hello world", "append must rebuild from real content");
+        // The sentinel survives: this frame wrapped ONE new line rather than the
+        // whole history, which is the whole of SQ-1034. Before it, the same frame
+        // re-wrapped from line zero and 20,000 turns of scrollback cost 17.9 ms.
+        assert_eq!(
+            cached_row_texts(&state),
+            vec!["SENTINEL".to_string(), "more".to_string()],
+            "an append must EXTEND the wrapped rows, not rebuild them"
+        );
+    }
+
+    // ── Append == rebuild (SQ-1034) ───────────────────────────────────────────
+    //
+    // The property the incremental wrap rests on, and the only one that matters:
+    // a product reached by N appends must be EXACTLY the product one rebuild
+    // would have produced. Everything else here is a performance claim; this is
+    // the correctness claim, and it is asserted directly rather than sampled —
+    // two states are driven to the same transcript by different routes and their
+    // whole wrapped products are compared field by field.
+
+    /// Every wrapped row, projected to something comparable. `WrappedRow` is not
+    /// `PartialEq` (it carries an `InlineImage`), so the image is compared by the
+    /// Arc it points at plus its band geometry — which is what the blitter reads.
+    fn wrap_product(state: &AppState) -> Vec<String> {
+        fn band(b: &Option<ImageBand>) -> String {
+            match b {
+                None => "-".to_string(),
+                Some(b) => format!(
+                    "{:p}/{}x{}@{}+{}",
+                    std::sync::Arc::as_ptr(&b.image.pixels),
+                    b.cols,
+                    b.rows,
+                    b.row,
+                    b.x_off
+                ),
+            }
+        }
+        state
+            .transcript_wrap
+            .borrow()
+            .as_ref()
+            .expect("cache present")
+            .rows
+            .iter()
+            .map(|r| {
+                format!(
+                    "{:?}|{:?}|{:?}|{:?}|{}|{}",
+                    r.text,
+                    r.kind,
+                    r.style,
+                    r.runs,
+                    band(&r.band),
+                    band(&r.float)
+                )
+            })
+            .collect()
+    }
+
+    /// The wrap product's bookkeeping, which the draw path reads and a stale
+    /// value in which would misplace a whole screen.
+    fn wrap_bookkeeping(state: &AppState) -> (Option<usize>, Option<usize>, Vec<usize>, usize) {
+        let c = state.transcript_wrap.borrow();
+        let c = c.as_ref().expect("cache present");
+        (c.anchor_row, c.clear_anchor_filtered, c.starts.clone(), c.live_bands.len())
+    }
+
+    /// Drive `state` through the same script every append test uses: prose that
+    /// wraps, a multi-line push (hard newlines), a Meta line with its own gutter
+    /// wrap, styled runs, and a left-margin float whose picture outruns the text
+    /// beside it — which is the case that makes the trailing flush non-final.
+    ///
+    /// `render_after_each` is what separates the two routes: true drives a frame
+    /// between every step (so the cache appends, over and over), false pushes the
+    /// lot and renders once (so the cache rebuilds).
+    /// A state the script can exercise every branch of the wrap in: a picker, so
+    /// inline images are emitted at all (without one the float path is dead code
+    /// and the comparison is vacuous), and a resolved theme.
+    fn script_state() -> AppState {
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state
+    }
+
+    /// ONE picture, shared by both routes through the script.
+    ///
+    /// Shared rather than built twice so the products can be compared by the Arc
+    /// the rows point at — which is not pedantry: `live_bands` is a set of exactly
+    /// those pointers, and it is what bounds the inline-image protocol cache. Two
+    /// separately-allocated copies of the same pixels would compare unequal here
+    /// while being indistinguishable on screen, so the comparison would have had
+    /// to drop the identity and stop checking the thing that matters.
+    fn script_image() -> crate::inline_image::InlineImage {
+        static IMG: std::sync::OnceLock<crate::inline_image::InlineImage> = std::sync::OnceLock::new();
+        IMG.get_or_init(|| left_img(24, 64, Some(32))).clone()
+    }
+
+    fn drive_script(state: &mut AppState, area: Rect, render_after_each: bool) {
+        let step = |state: &AppState| {
+            if render_after_each {
+                wrap_render(state, area);
+            }
+        };
+        state.push_transcript_kind("You are standing in an open field west of a white house.", TranscriptKind::Story);
+        step(state);
+        state.push_transcript_kind("one\ntwo\nthree", TranscriptKind::Story);
+        step(state);
+        state.push_transcript_kind("> look", TranscriptKind::Input);
+        step(state);
+        state.push_transcript_kind("a meta line long enough to wrap past the gutter it reserves", TranscriptKind::Meta);
+        step(state);
+        // A picture four rows tall with only two short lines beside it: two rows
+        // ride the text and two are flushed as strips — then more prose arrives
+        // and takes them over. That retake is what `stable_rows` exists for.
+        state.push_transcript_image(script_image());
+        step(state);
+        state.push_transcript_kind("beside one", TranscriptKind::Story);
+        step(state);
+        state.push_transcript_kind("beside two", TranscriptKind::Story);
+        step(state);
+        state.push_transcript_kind(&"word ".repeat(30), TranscriptKind::Story);
+        step(state);
+        state.push_transcript_kind("tail", TranscriptKind::Story);
+        step(state);
+    }
+
+    #[test]
+    fn appending_lands_on_exactly_what_a_rebuild_would_have_produced() {
+        let area = Rect::new(0, 0, 34, 12);
+
+        let mut incremental = script_state();
+        drive_script(&mut incremental, area, true);
+        wrap_render(&incremental, area);
+
+        let mut rebuilt = script_state();
+        drive_script(&mut rebuilt, area, false);
+        wrap_render(&rebuilt, area);
+
+        // Non-vacuity by SHAPE, not by count: the comparison is worthless unless
+        // the script actually reached the branches that carry state across lines.
+        let rows = wrap_product(&rebuilt);
+        assert!(rows.len() > 15, "the script must produce a real wrap, got {} rows", rows.len());
+        assert!(
+            rows.iter().filter(|r| r.ends_with("+0") && r.contains("/3x4@")).count() == 4,
+            "all four strips of the float must be placed beside prose: {rows:#?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("|Meta|")), "the hanging-indent wrap must be exercised");
+        assert_eq!(
+            wrap_product(&incremental),
+            wrap_product(&rebuilt),
+            "nine appends must produce the same rows as one rebuild"
+        );
+        assert_eq!(
+            wrap_bookkeeping(&incremental),
+            wrap_bookkeeping(&rebuilt),
+            "and the same anchor, line index and live-band set"
+        );
+    }
+
+    #[test]
+    fn appending_across_a_resize_lands_on_exactly_what_a_rebuild_would_have_produced() {
+        // A resize is the common LAYOUT move, and the one the raster path never
+        // makes — which is exactly why it has to be pinned on the path that does.
+        let narrow = Rect::new(0, 0, 28, 12);
+        let wide = Rect::new(0, 0, 52, 12);
+
+        let mut incremental = script_state();
+        drive_script(&mut incremental, narrow, true);
+        // Resize partway, then keep appending at the new width.
+        wrap_render(&incremental, wide);
+        incremental.push_transcript_kind(&"after the resize ".repeat(6), TranscriptKind::Story);
+        wrap_render(&incremental, wide);
+        incremental.push_transcript_kind("last", TranscriptKind::Story);
+        wrap_render(&incremental, wide);
+
+        let mut rebuilt = script_state();
+        drive_script(&mut rebuilt, wide, false);
+        rebuilt.push_transcript_kind(&"after the resize ".repeat(6), TranscriptKind::Story);
+        rebuilt.push_transcript_kind("last", TranscriptKind::Story);
+        wrap_render(&rebuilt, wide);
+
+        assert_eq!(
+            wrap_product(&incremental),
+            wrap_product(&rebuilt),
+            "a resize mid-stream must leave the same rows a fresh wrap at that width gives"
+        );
+        assert_eq!(wrap_bookkeeping(&incremental), wrap_bookkeeping(&rebuilt));
+    }
+
+    #[test]
+    fn appending_after_a_screen_clear_lands_on_exactly_what_a_rebuild_would_have_produced() {
+        // `clear_anchor` is in the key, so moving it rebuilds — but the ANCHOR ROW
+        // it resolves to moves as lines are appended without it moving at all: an
+        // anchor at the very end is an empty post-clear screen until something is
+        // printed into it (SQ-0748). That is recomputed per append, and this is
+        // what says so.
+        let area = Rect::new(0, 0, 34, 12);
+
+        let mut incremental = script_state();
+        drive_script(&mut incremental, area, true);
+        incremental.mark_screen_clear();
+        wrap_render(&incremental, area);
+        assert_eq!(
+            wrap_bookkeeping(&incremental).0,
+            Some(wrap_product(&incremental).len()),
+            "non-vacuity: a clear with nothing printed since anchors past the last row"
+        );
+        incremental.push_transcript_kind("after the clear", TranscriptKind::Story);
+        wrap_render(&incremental, area);
+
+        let mut rebuilt = script_state();
+        drive_script(&mut rebuilt, area, false);
+        rebuilt.mark_screen_clear();
+        rebuilt.push_transcript_kind("after the clear", TranscriptKind::Story);
+        wrap_render(&rebuilt, area);
+
+        assert_eq!(wrap_product(&incremental), wrap_product(&rebuilt));
+        assert_eq!(
+            wrap_bookkeeping(&incremental),
+            wrap_bookkeeping(&rebuilt),
+            "the anchor row must follow the line that was printed into the cleared screen"
+        );
+        assert!(
+            wrap_bookkeeping(&incremental).0.is_some_and(|a| a < wrap_product(&incremental).len()),
+            "non-vacuity: printing into the cleared screen must give the anchor a real row"
+        );
+    }
+
+    #[test]
+    fn a_restore_into_a_different_size_and_backend_rebuilds_rather_than_appending() {
+        // The cell path's half of `render::wrap_cache`'s restore case — see its
+        // `restore_transcript` for the four production sites this mirrors, and
+        // CLAUDE.md for why a restore is asserted one move LATER: on the frame it
+        // lands, a cache that quietly appended onto the pre-restore scrollback
+        // still shows the archive's own rows correctly.
+        let before = Rect::new(0, 0, 52, 12);
+        let after = Rect::new(0, 0, 30, 12);
+        let archived: &[&str] = &[
+            "West of House",
+            "You are standing in an open field west of a white house, with a boarded front door.",
+            "There is a small mailbox here.",
+        ];
+        let moved = "You open the mailbox, revealing a small leaflet.";
+
+        let restore = |state: &mut AppState| {
+            state.transcript = archived.iter().map(|s| s.to_string()).collect();
+            state.clear_anchor = None;
+            state.transcript_kinds = vec![TranscriptKind::Story; archived.len()];
+            state.transcript_runs = vec![Vec::new(); archived.len()];
+            state.transcript_para = vec![ParaFmt::default(); archived.len()];
+            state.reset_transcript_sidecars();
+        };
+
+        let mut live = script_state();
+        drive_script(&mut live, before, true);
+        restore(&mut live);
+        // A different pane and a different graphics backend.
+        live.game_picker = Some(crate::render::graphics::kitty_picker(8, 16));
+        wrap_render(&live, after);
+        // PERTURB, then assert.
+        live.push_transcript_kind(moved, TranscriptKind::Story);
+        wrap_render(&live, after);
+
+        let mut fresh = script_state();
+        fresh.game_picker = Some(crate::render::graphics::kitty_picker(8, 16));
+        restore(&mut fresh);
+        fresh.push_transcript_kind(moved, TranscriptKind::Story);
+        wrap_render(&fresh, after);
+
+        let want = wrap_product(&fresh);
+        assert!(
+            want.iter().any(|r| r.contains("leaflet")),
+            "non-vacuity: the move after the restore must be on screen: {want:#?}"
+        );
+        assert!(
+            !want.iter().any(|r| r.contains("beside one")),
+            "non-vacuity: the pre-restore scrollback must be GONE: {want:#?}"
+        );
+        assert_eq!(
+            wrap_product(&live),
+            want,
+            "a restore then a move must leave the archive's rows, not the old ones"
+        );
+        assert_eq!(wrap_bookkeeping(&live), wrap_bookkeeping(&fresh));
+    }
+
+    #[test]
+    fn wrap_cache_rebuilds_when_an_already_wrapped_line_is_edited() {
+        let mut state = AppState::default();
+        state.push_transcript_kind("hello world", TranscriptKind::Story);
+        let area = Rect::new(0, 0, 20, 8);
+        wrap_render(&state, area);
+        poison_wrap_cache(&state);
+        // The inline-prompt echo: the LAST line grows in place. Nothing was
+        // appended, so a length co-key cannot see it — `TranscriptEdit::Rewrote`
+        // and the tail fingerprint both can.
+        state.append_to_last_transcript_line("!");
+        wrap_render(&state, area);
+        assert_eq!(
+            cached_first_text(&state),
+            "hello world!",
+            "an in-place edit of a wrapped line must rebuild"
+        );
     }
 
     #[test]

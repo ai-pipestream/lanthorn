@@ -192,6 +192,44 @@ model — v6 is a fourth leaf kind, not a parallel pipeline. See [Graphical
 v6](features/v6-graphics.md) for what that composite looks like from the
 player's side.
 
+## One transcript wrap, for both ways of drawing it
+
+Both render paths wrap the whole scrollback and then show forty rows of it, and
+they used to disagree about when that was necessary — in opposite directions.
+The cell path (which hybrid's story text also uses) had a whole-product cache
+keyed on a generation counter that moves on *every* transcript mutation, so each
+turn threw the wrap away and rebuilt it from line zero; its idle frame sat flat
+while its post-turn frame grew to 35 ms at 20,000 turns. The raster path had no
+cache at all, behind a whole-canvas gate that hashes the live input line — so one
+keystroke re-wrapped the lot.
+
+`render/wrap_cache.rs` is now the single owner of the question. `WrapKey` gathers
+every fact that can move a wrap boundary — width, filter, the picker's cell, the
+screen-clear anchor, the machine and window pages, the period look, and the pen's
+own advance table — in one constructor, so a caller cannot supply a subset and get
+a plausible wrong answer. `WrapKey::plan` answers **reuse**, **append**, or
+**rebuild**, and both paths obey the same answer: content only ever grows at the
+end, so a turn extends the wrapped rows, while a resize or a theme change drops
+them. There are two cache structs because the two products are different types —
+`WrappedRow`s carrying kinds, styles, runs and image bands against the raster's
+glyph rows and emphasis bits — but only one copy of the rule, because two copies
+of a measurement rule is precisely what drifted.
+
+Raster is the degenerate case rather than a second design: its columns come from
+the native v6 screen rect, i.e. the game's own coordinate space, so they do not
+move with the pane and it takes the append branch essentially always. The cell
+path wraps to the terminal's columns and takes the rebuild branch on a resize.
+
+Two details are worth knowing before touching it. The wrap carries state across
+lines — an open margin float narrows the rows beside it — so an append resumes
+from the float the last line left open, and the trailing flush of a picture that
+outran its text is *not* final: the next prose line to arrive claims those strips,
+so an append truncates back past the flush before extending. And the append/rebuild
+choice is stated by each mutator (`TranscriptEdit::Appended` / `Rewrote`) rather
+than inferred, with the last consumed line's fingerprint in the key as the guard
+that catches a mutator which picked wrong. `cargo run --release -p app --example
+scroll_bench` measures all of it.
+
 ## Input: a suspend/resume handshake
 
 Input is engine-neutral too. A VM's `step()` returns a request —

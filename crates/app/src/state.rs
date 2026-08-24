@@ -822,7 +822,7 @@ pub fn apply_transcript_elems(state: &mut AppState, elems: &[crate::session::Tra
 }
 
 /// A run of characters in a transcript line carrying Z-machine text-style bits and colour.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct StyleRun {
     pub start: usize, // char offset within the line, inclusive
     pub end: usize,   // char offset, exclusive
@@ -843,7 +843,7 @@ pub struct StyleRun {
 /// the Z-machine and any buffer that set no layout hints render exactly as before.
 /// The renderer turns these into LEADING-SPACE padding in the wrap (so
 /// selection/copy/search coordinates stay consistent with what is drawn).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ParaFmt {
     /// Left indent applied to every wrapped row of the paragraph, in cells.
     #[serde(default)]
@@ -1109,6 +1109,27 @@ pub fn format_play_sound_report(r: &PlaySoundReport) -> Vec<String> {
         None => lines.push("playback: backend returned None".to_string()),
     }
     lines
+}
+
+// ── Transcript edits ──────────────────────────────────────────────────────────
+
+/// What a transcript mutation did to the lines that were ALREADY there.
+///
+/// The wrap cache (SQ-1034) can extend its wrapped rows only while every line it
+/// has already wrapped still says what it said. That is a property of the EDIT,
+/// not of the resulting buffer — a same-length rewrite and a pure append are
+/// indistinguishable afterwards — so every mutator states it at the call site
+/// (`AppState::touch_transcript`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptEdit {
+    /// Lines were added at the END and nothing before the old end moved. The
+    /// wrapped rows for `[..old_len]` are still exactly right, so the cache wraps
+    /// the new lines and appends them.
+    Appended,
+    /// An existing line was edited, inserted before, merged, removed, truncated
+    /// away, or the whole buffer was replaced. Everything wrapped so far is
+    /// suspect; the cache rebuilds.
+    Rewrote,
 }
 
 // ── Transcript filter ─────────────────────────────────────────────────────────
@@ -1983,71 +2004,6 @@ pub type LoadedTranscript = Option<(
     Vec<Option<crate::inline_image::InlineImage>>,
 )>;
 
-/// Cache key for the wrapped-transcript product: every input the wrap output
-/// depends on. A change in any field forces a re-wrap; an unchanged key lets an
-/// idle redraw / scroll reuse the cached rows without re-wrapping. Only the
-/// inputs `wrap_lines_kinded` actually consumes are keyed — search query,
-/// command_bar mode and viewport height do NOT change the wrapped rows (they act
-/// at draw / windowing time), so they are deliberately excluded. (SQ-0305)
-#[derive(Debug, Clone)]
-pub(crate) struct TranscriptWrapKey {
-    /// Content generation (see `AppState::transcript_gen`) — catches a same-length
-    /// content replacement (rewind / restore) that a length check alone misses.
-    pub gen: u64,
-    /// Transcript length — a cheap co-key catching append / clear even if a gen
-    /// bump were ever missed.
-    pub len: usize,
-    /// Active filter (which kinds are visible → which lines are wrapped).
-    pub filter: TranscriptFilter,
-    /// Wrap width (body columns).
-    pub width: u16,
-    /// Whether inline-image bands are emitted (a game picker is present).
-    pub images_enabled: bool,
-    /// Picker cell pixel size (drives image-band fit).
-    pub char_px: (u16, u16),
-    /// Screen-clear anchor (full-transcript index); drives top-anchoring.
-    pub clear_anchor: Option<usize>,
-    /// Current room name — location-header style matching in `resolve_story_style`.
-    pub room_name: Option<String>,
-    /// Resolved colour scheme (theme / `/reload`); Story styles resolve from it.
-    pub colors: crate::colors::ColorScheme,
-    /// The MACHINE's own screen pair for this frame (`AppState::v6_page_pair`),
-    /// which under ZMSD §8.3's Amiga interpreter is the base every Story line's
-    /// style resolves from and which withdraws the built-in bracketed-system rule
-    /// (SQ-0822). `None` on every other frame. In the key because it can move
-    /// without the transcript changing — a `/set-game-colours` toggle, or the game
-    /// moving the pens — and the styles are cached alongside the wrapped rows.
-    pub machine_pair: Option<(u32, u32)>,
-}
-
-/// The cached wrapped-transcript product for one [`TranscriptWrapKey`]. Holds the
-/// fully wrapped rows (so the per-frame filter+clone+wrap waterfall runs only on
-/// change, not every frame) plus the two derived products the draw path needs.
-/// (SQ-0305)
-pub(crate) struct TranscriptWrapCache {
-    /// The key these products were built for.
-    pub key: TranscriptWrapKey,
-    /// Fully wrapped rows for the whole filtered transcript (oldest-first).
-    pub rows: Vec<crate::render::transcript::WrappedRow>,
-    /// Wrapped-row count before the filtered screen-clear anchor, when it maps
-    /// into range (drives top-anchoring); `None` otherwise.
-    pub anchor_row: Option<usize>,
-    /// Arc-ptr set of every inline image present in the filtered transcript, for
-    /// bounding the inline-image protocol cache (`InlineImageRender::retain_live`).
-    pub live_bands: std::collections::HashSet<usize>,
-}
-
-// `WrappedRow` carries images and is not `Debug`; summarise instead of recursing.
-impl std::fmt::Debug for TranscriptWrapCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TranscriptWrapCache")
-            .field("rows", &self.rows.len())
-            .field("anchor_row", &self.anchor_row)
-            .field("live_bands", &self.live_bands.len())
-            .finish()
-    }
-}
-
 /// The cached map render model for the live graph, keyed by graph generation and
 /// viewed layer. `render_layer` re-runs chain detection + edge routing every call,
 /// so re-doing it on an animation / transcript / mouse-move redraw of an otherwise
@@ -2247,11 +2203,25 @@ pub struct AppState {
     /// from an unchanged buffer, which a length check alone cannot. Read by the
     /// transcript wrap cache. (SQ-0305)
     pub transcript_gen: u64,
-    /// Cache of the fully wrapped transcript rows, keyed by [`TranscriptWrapKey`],
+    /// Monotonic count of transcript mutations that were NOT pure appends —
+    /// every [`TranscriptEdit::Rewrote`] (in-place edit, insert-above-prompt,
+    /// merge, truncate, wholesale replacement). `transcript_gen` moves on every
+    /// mutation and so can only say "something changed"; this says "something
+    /// that was already WRAPPED changed", which is the difference between the
+    /// wrap cache appending and rebuilding. (SQ-1034)
+    pub transcript_edits: u64,
+    /// Cache of the fully wrapped transcript rows, keyed by
+    /// [`crate::render::wrap_cache::WrapKey`],
     /// so an unchanged transcript (idle redraw / scroll) is not re-wrapped and the
     /// per-line filter+clone waterfall is skipped. Published/consumed by render.
     /// (SQ-0305)
-    pub(crate) transcript_wrap: std::cell::RefCell<Option<TranscriptWrapCache>>,
+    pub(crate) transcript_wrap: std::cell::RefCell<Option<crate::render::wrap_cache::CellWrapCache>>,
+    /// The RASTER path's twin of `transcript_wrap` (SQ-1034): the v6 pixel
+    /// composite's wrapped story rows, under the same key type and the same
+    /// append-or-rebuild rule. Two caches because the two products are different
+    /// types — glyph rows against `WrappedRow`s — but ONE owner of the question
+    /// "has the wrap moved?", because two copies of that rule are what drifted.
+    pub(crate) raster_wrap: std::cell::RefCell<Option<crate::render::wrap_cache::RasterWrapCache>>,
     /// Cache of the live map's routed render model, keyed by graph generation +
     /// viewed layer, so an animation / transcript / mouse-move redraw of an
     /// unchanged map reuses the routed model instead of re-running `render_layer`.
@@ -2997,7 +2967,9 @@ impl Default for AppState {
             last_transcript_total_rows: 0,
             clear_anchor: None,
             transcript_gen: 0,
+            transcript_edits: 0,
             transcript_wrap: std::cell::RefCell::new(None),
+            raster_wrap: std::cell::RefCell::new(None),
             map_render: std::cell::RefCell::new(None),
             render_job: std::cell::RefCell::new(None),
             render_steps: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -4147,7 +4119,19 @@ impl AppState {
     /// return only indices whose kind matches. Defensively tolerates any length
     /// mismatch between `transcript` and `transcript_kinds` by defaulting to `Story`.
     pub fn visible_transcript_indices(&self) -> Vec<usize> {
-        (0..self.transcript.len())
+        self.visible_transcript_indices_from(0)
+    }
+
+    /// [`visible_transcript_indices`](Self::visible_transcript_indices) over the
+    /// source lines from `from` onwards.
+    ///
+    /// The filter is decided per line from that line's own kind, so the visible
+    /// indices of a suffix are exactly the tail of the whole transcript's — which
+    /// is what lets the wrap cache wrap only the lines that just arrived
+    /// (SQ-1034). Anything that made the filter depend on a line's NEIGHBOURS
+    /// would break that silently, so it lives here rather than being open-coded.
+    pub fn visible_transcript_indices_from(&self, from: usize) -> Vec<usize> {
+        (from.min(self.transcript.len())..self.transcript.len())
             .filter(|&i| {
                 let kind = self.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
                 match self.transcript_filter {
@@ -4186,7 +4170,7 @@ impl AppState {
         self.transcript_runs.truncate(len);
         self.transcript_para.truncate(len);
         self.transcript_images.truncate(len);
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Rewrote);
     }
 
     pub fn push_transcript(&mut self, text: &str) {
@@ -4205,11 +4189,23 @@ impl AppState {
             .then(|| self.transcript.len().saturating_sub(1))
     }
 
-    /// Bump the transcript-content generation, invalidating the wrap cache. Call
-    /// from every method that mutates the transcript vecs (content, kinds, runs,
-    /// styles, or images). (SQ-0305)
-    fn bump_transcript_gen(&mut self) {
+    /// Record a mutation of the transcript vecs (content, kinds, runs, styles,
+    /// para, or images). Call from every method that touches them. (SQ-0305)
+    ///
+    /// The argument is not decoration: it is the difference between the wrap
+    /// cache extending its rows and throwing them away (SQ-1034). It is an
+    /// argument rather than something inferred here BECAUSE it cannot be inferred
+    /// here — "did anything before the old end move?" is not visible from a
+    /// `&mut self` after the fact — and because a new mutator that has to pick one
+    /// is a mutator whose author had to think about it. A wrong pick is still
+    /// caught: the cache also fingerprints the last line it consumed
+    /// ([`crate::render::wrap_cache::WrapContent`]), and every in-place mutator
+    /// here touches that line.
+    fn touch_transcript(&mut self, edit: TranscriptEdit) {
         self.transcript_gen = self.transcript_gen.wrapping_add(1);
+        if matches!(edit, TranscriptEdit::Rewrote) {
+            self.transcript_edits = self.transcript_edits.wrapping_add(1);
+        }
     }
 
     /// Bump the graph generation, invalidating the map render memo. Call after ANY
@@ -4223,7 +4219,7 @@ impl AppState {
 
     /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
     pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Appended);
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
         self.transcript_para.resize(self.transcript.len(), ParaFmt::default()); // self-heal alignment
@@ -4243,12 +4239,14 @@ impl AppState {
     /// but in inline-prompt mode it inserts the line(s) ABOVE a trailing game `>`
     /// prompt so the prompt the caret sits at is never buried (SQ-0270).
     pub fn push_transcript_internal(&mut self, text: &str, kind: TranscriptKind) {
-        self.bump_transcript_gen();
+        let base = self.insert_above_prompt_at();
+        // Inline-prompt mode INSERTS above the trailing prompt, which moves a line
+        // the wrap cache has already wrapped; every other frame appends (SQ-1034).
+        self.touch_transcript(if base.is_some() { TranscriptEdit::Rewrote } else { TranscriptEdit::Appended });
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
         self.transcript_images.resize(self.transcript.len(), None);
-        let base = self.insert_above_prompt_at();
         for (k, line) in text.split('\n').enumerate() {
             match base {
                 Some(b) => {
@@ -4289,7 +4287,7 @@ impl AppState {
             self.push_transcript_kind(text, TranscriptKind::Input);
             return;
         }
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Rewrote);
         let start = self.transcript.last().unwrap().chars().count();
         self.transcript.last_mut().unwrap().push_str(text);
         let end = start + text.chars().count();
@@ -4319,7 +4317,7 @@ impl AppState {
         if idx == 0 || idx >= self.transcript.len() {
             return;
         }
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Rewrote);
         let base = self.transcript[idx - 1].chars().count();
         let moved = std::mem::take(&mut self.transcript[idx]);
         self.transcript[idx - 1].push_str(&moved);
@@ -4384,7 +4382,7 @@ impl AppState {
         if len == 0 {
             return;
         }
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Rewrote);
         // Resolve per char: (bits, fg, bg, link, glk_style). Unstyled chars take the fill.
         let mut per: Vec<(u8, u32, u32, u32, u8)> = vec![(0, fg, bg, 0, 0); len];
         for r in self.transcript_runs.get(idx).cloned().unwrap_or_default() {
@@ -4423,7 +4421,7 @@ impl AppState {
 
     /// Append lines with the given kind and an explicit per-line render style.
     pub fn push_transcript_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Appended);
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
         self.transcript_para.resize(self.transcript.len(), ParaFmt::default()); // self-heal alignment
@@ -4441,12 +4439,13 @@ impl AppState {
     /// Like [`push_transcript_styled`], but inserts app-internal styled output
     /// above a trailing game prompt in inline-prompt mode (SQ-0270).
     pub fn push_transcript_internal_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
-        self.bump_transcript_gen();
+        let base = self.insert_above_prompt_at();
+        // See `push_transcript_internal`: an insert above the prompt rewrites.
+        self.touch_transcript(if base.is_some() { TranscriptEdit::Rewrote } else { TranscriptEdit::Appended });
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
         self.transcript_images.resize(self.transcript.len(), None);
-        let base = self.insert_above_prompt_at();
         for (k, line) in text.split('\n').enumerate() {
             match base {
                 Some(b) => {
@@ -4494,7 +4493,7 @@ impl AppState {
         if text.is_empty() {
             return;
         }
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Appended);
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
@@ -4667,7 +4666,7 @@ impl AppState {
     /// Append a logical image unit: an empty placeholder line tagged `Story`
     /// carrying an inline image, keeping the parallel Vecs length-synced.
     pub fn push_transcript_image(&mut self, img: crate::inline_image::InlineImage) {
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Appended);
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
@@ -4690,7 +4689,7 @@ impl AppState {
     /// `Some(..)` at retained head indices (e.g. an inline image a Glulx game drew
     /// before the load, now indexing a different, shorter transcript).
     pub fn reset_transcript_sidecars(&mut self) {
-        self.bump_transcript_gen();
+        self.touch_transcript(TranscriptEdit::Rewrote);
         self.transcript_styles = vec![None; self.transcript.len()];
         self.transcript_images = vec![None; self.transcript.len()];
     }
