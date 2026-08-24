@@ -600,3 +600,146 @@ fn arthur_screen_swaps_do_not_move_the_frame() {
         assert_eq!(shown, 0, "{label}: the frame is anchored to the pane TOP, not centred (img_y={shown})");
     }
 }
+
+// ── the MACINTOSH press, in RASTER (SQ-1052) ─────────────────────────────────
+
+/// Arthur off `InfocomMasterpieces.img`, the Macintosh compilation volume — the
+/// press whose face is PROPORTIONAL, which is what makes it the one that can
+/// falsify SQ-1052.
+///
+/// Booted the way `startup.rs` boots (SQ-0901): the profile from the medium, the
+/// face cascade off that same medium, and every per-machine fact through one
+/// [`app::machine_boot::MachineBoot`] — so the 7x15 cell, the (2, 2) art scale and
+/// the release's own `FONT 524` all reach the story and the renderer together.
+/// Skip vacuously when the gitignored volume is absent.
+///
+/// **Turn count: 12** blank lines / returns from cold, which answers the restore
+/// question and lands in the Churchyard with the bar painted (SQ-0883 — say how
+/// you got to a frame, because a frame is a fixture).
+fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::native_font::TextFace)> {
+    const ENTRY: &str = "InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA";
+    let path = stories_dir().join("InfocomMasterpieces.img");
+    if !path.is_file() {
+        eprintln!("SKIP: gitignored compilation volume missing at {}", path.display());
+        return None;
+    }
+    let (profile, source) =
+        app::interpreter::InterpreterProfile::resolve_with_source(&path, None, None, None);
+    app::v6_set_palette(profile.palette());
+    let bytes = match app::hints::load_mounted_story_from(&path, Some(ENTRY)).ok()?.0 {
+        app::hints::LoadedStory::ZCode(b) => b,
+        other => panic!("Arthur is Z-code on this volume, got {other:?}"),
+    };
+    let mut picts = PictSource::resolve_with_override(&path, app::graphics::PictureOverride::Unset, Some(ENTRY));
+    let picture_dims = picts.all_pict_dims();
+    let honoured = honor && !picts.declines_game_colours(profile.default_colours());
+    let disks = app::system_fonts::UserDisks::new("");
+    let faces = app::native_font::resolve(&app::native_font::FaceRequest {
+        story_path: &path,
+        entry: Some(ENTRY),
+        profile,
+        source,
+        art_scale: picts.art_scale(),
+        disks: Some(&disks),
+    });
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
+        profile.interpreter_number(),
+        honoured.then(|| profile.default_colours()).flatten(),
+        faces,
+    );
+    assert_eq!(boot.cell, zvm::interpreter::MACINTOSH_V6_CELL, "the Macintosh's 7x15 cell");
+    let face = boot.text_face();
+    assert!(face.proportional(), "the volume's own FONT is the proportional face SQ-1052 needs");
+    let mut session = app::session::GameSession::new_for_machine(
+        bytes, honoured, false, false, picture_dims, None, None, &boot,
+    )
+    .expect("Arthur boots off the Macintosh volume");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    for _ in 0..12 {
+        let r = match session.pending_input() {
+            InputKind::Line => session.submit(""),
+            InputKind::Char => session.submit_char(13),
+            InputKind::Event => session.submit(""),
+        };
+        if r.transcript.to_lowercase().contains("y or n") {
+            let _ = session.submit_char(b'n');
+        }
+    }
+    Some((session, face))
+}
+
+/// (SQ-1052) RASTER, Macintosh: the score bar is one unbroken reversed ribbon
+/// across its own window — not the location alone with the rest of the row blank.
+///
+/// The defect was a granularity one. A v6 grid publishes ONE RUN PER CHARACTER and
+/// SQ-1009 joins those runs into lines for the pen; `region_has_opaque` — "is ANY
+/// pixel under this run opaque?" — then stopped being asked about a character cell
+/// and started being asked about an 88-character chain, which found the frame art
+/// and took SQ-0487's no-block arm for the whole bar.
+///
+/// FALSIFY by putting the probe back on the run (`region_has_opaque(&art, px0, py,
+/// cell.run_px(&t.text).max(font_w), font_h)`, hoisted out of the glyph loop): the
+/// ribbon collapses to 13% of its window — ` Churchyard` and a two-pixel sliver —
+/// which is the reported screen.
+///
+/// Both `honor_game_colours` modes, per the standing rule: the ribbon is the
+/// resolved page INK either way, and only one of them was ever exercised.
+#[test]
+fn mac_arthur_raster_score_bar_is_one_ribbon_not_the_location_alone() {
+    for honor in [true, false] {
+        let _g = app::v6_palette_at_boot();
+        let Some((session, face)) = mac_arthur_at_status(honor) else { return };
+        let model = session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+
+        // Non-vacuity: this frame really is the score bar — one grid window whose
+        // runs are ALL reverse-video, carrying both the location and the date.
+        let bar = items
+            .iter()
+            .find(|pw| matches!(&pw.node, WinNode::Grid(g) if g.px_texts.len() > 10))
+            .expect("the score bar window is on this frame");
+        let WinNode::Grid(g) = &bar.node else { unreachable!() };
+        let line: String = {
+            let mut v: Vec<_> = g.px_texts.iter().collect();
+            v.sort_by_key(|t| (t.y, t.x));
+            v.iter().map(|t| t.text.as_str()).collect()
+        };
+        assert!(line.contains("Churchyard"), "honor={honor}: the location is on the bar: {line:?}");
+        assert!(line.contains("Compline"), "honor={honor}: and the date: {line:?}");
+        assert!(
+            g.px_texts.iter().all(|t| t.style & 1 != 0),
+            "honor={honor}: every run is reversed — this is the pure-reverse bar the fill is about"
+        );
+
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = app::config::V6RenderMode::Raster;
+        state.config.honor_game_colours = honor;
+        state.v6_text = face;
+        let cell = state.v6_text.cell();
+        let native = app::render::v6_layout::native_extent(items, cell);
+        let layout = app::render::v6_layout::classify_windows(items, cell);
+        let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+        // The bar's own top scan line, across the bar's own window. The ribbon is
+        // whatever colour the location's block is — asked of the pixels rather than
+        // pinned, so the case says "one bar" and not "this theme".
+        let py = u32::from(g.px_texts.iter().map(|t| t.y.max(1)).min().expect("runs")) - 1;
+        let x0 = u32::from(bar.x_px);
+        let x1 = x0 + u32::from(bar.w_px);
+        let ribbon = *canvas.get_pixel(x0, py);
+        let solid = (x0..x1).filter(|&x| *canvas.get_pixel(x, py) == ribbon).count();
+        let width = (x1 - x0) as usize;
+        assert!(
+            solid * 100 >= width * 95,
+            "honor={honor}: the bar is one ribbon across its window — {solid}/{width} px are \
+             {ribbon:?} at native row {py} (pre-SQ-1052 this was 13%: the location and a sliver)"
+        );
+    }
+}

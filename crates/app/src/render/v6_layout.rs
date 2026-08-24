@@ -1630,18 +1630,6 @@ pub fn build_chrome_canvas(
                 for t in &px_texts {
                     let px0 = t.x.max(1) as u32 - 1;
                     let py = t.y.max(1) as u32 - 1;
-                    // The run's DECLARED span — the cells the game reserved for it,
-                    // which is what the over-art question has always been about and
-                    // is the one span a proportional pen must not shorten (SQ-1009):
-                    // shorten it and a run drawn with a narrower pen probes a
-                    // different rectangle than the game laid out, widen it past the
-                    // window and it starts sampling the frame art beside the bar.
-                    let span_w = cell.run_px(&t.text).max(font_w);
-                    // `art` is pass 1 frozen, so the over-art question sees the real
-                    // artwork (or transparency) and never another run's own block.
-                    let (fg, bg) = chrome_run_ink(t, default_fg, default_bg, colors, || {
-                        region_has_opaque(&art, px0, py, span_w, font_h)
-                    });
                     // Run coords are SCREEN-absolute 1-based pixels stamped at
                     // paint time (v6 paint semantics) — no window-origin
                     // offset: the window may have moved/shrunk since (Shogun
@@ -1657,15 +1645,55 @@ pub fn build_chrome_canvas(
                     // a machine that positioned every label by pixel — Arthur's
                     // status line, its inventory columns, its map captions — comes
                     // out right without the engine's cursor moving at all.
+                    //
+                    // **The over-art question is the GLYPH's, not the run's**
+                    // (SQ-1052). `region_has_opaque` answers "is ANY pixel here
+                    // opaque?", which is a fair question about one character cell
+                    // and a meaningless one about a long run: a single stray pixel
+                    // anywhere beneath it condemns the whole thing. That was
+                    // harmless while a v6 grid published ONE RUN PER CHARACTER —
+                    // every probe was one cell wide — and stopped being harmless
+                    // the moment `pen_chains` began joining those runs into lines.
+                    //
+                    // Macintosh Arthur is the report. Its score bar arrives as 123
+                    // inherited-reverse runs which join into three: ` Churchyard`,
+                    // eighty-eight padding spaces, and `St Anne's Day, Compline `.
+                    // The padding chain's declared span is 616 px — the bar, the
+                    // poles at both ends and 80 px past the screen — so it found
+                    // frame art, took SQ-0487's "draw dark ink on the artwork, no
+                    // block" arm, and eighty-eight cells of what should have been a
+                    // white ribbon came out as page. The date chain overshot into
+                    // the right-hand pole and went the same way. Only the location,
+                    // whose chain is short enough to clear the art, survived — the
+                    // reported "only the location, reversed, and the rest blank".
+                    //
+                    // Asked per glyph it is the same question the unjoined runs
+                    // asked, at the same coordinates: the chain walks the engine's
+                    // own pen, which is where those runs were. So this restores the
+                    // pre-SQ-1009 answer for a proportional face and leaves every
+                    // fixed one — where nothing joins — byte-identical, except that
+                    // a run half over artwork now resolves per cell instead of
+                    // letting its first opaque pixel speak for all of it.
+                    //
+                    // `art` is pass 1 frozen, so the question sees the real artwork
+                    // (or transparency) and never another run's own block.
                     let mut pen = px0;
                     for ch in t.text.chars() {
+                        let adv = tf.advance_styled(ch, t.style);
                         if let Some(right) = bound {
-                            if pen + tf.advance_styled(ch, t.style) > right {
+                            if pen + adv > right {
                                 break;
                             }
                         }
+                        // The cell this glyph reserves: its own advance, never
+                        // narrower than the declared cell, so a proportional face
+                        // probes at least the rectangle the game laid out.
+                        let span_w = adv.max(font_w);
+                        let (fg, bg) = chrome_run_ink(t, default_fg, default_bg, colors, || {
+                            region_has_opaque(&art, pen, py, span_w, font_h)
+                        });
                         crate::render::bitfont::blit_glyph_styled(&mut canvas, ch, pen, py, font_w, font_h, fg, bg, t.style, Some(tf));
-                        pen += tf.advance_styled(ch, t.style);
+                        pen += adv;
                     }
                 }
                 continue;
