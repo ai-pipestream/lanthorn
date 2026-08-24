@@ -6211,6 +6211,45 @@ fn run_cell(
     (col, row)
 }
 
+/// Whether a row of painted runs is a reverse-video BAR — a band the game drew edge
+/// to edge — as opposed to furniture built out of reversed spaces (SQ-1035).
+///
+/// # Why "all reversed" was not enough
+///
+/// A reverse-video SPACE is a solid block, and that is how these games draw a rule:
+/// Arthur's F3 inventory paints its two column dividers as a single reversed space
+/// per row, and Journey's IbmPc frame paints its side border the same way
+/// (`journey_amiga_flank_border_is_a_stroke_not_a_filled_block` pins that the border
+/// must stay a solid block, so the RUN is never in question). A row holding nothing
+/// but those is entirely reversed and is not a bar, so flooding the cells around it
+/// turned seven rows of Arthur's inventory white —
+/// `machine-screenshots/amiga-arthur-inventory.png` shows a bare page with two thin
+/// rules down it.
+///
+/// A bar has TEXT in it. Arthur's own status row, one window below, is all-reversed
+/// AND carries `Churchyard`, and the same capture shows that row filled edge to edge
+/// with dark letters on white — so the test is the presence of a non-blank run, and
+/// both rows of that one frame come out right under it.
+///
+/// An earlier attempt gated on the runs reaching both window edges instead. That
+/// reads the geometry rather than the content, and it broke Journey's border on the
+/// IbmPc press; the rule that satisfies Arthur's inventory, Arthur's bar and
+/// Journey's border together is what the runs CONTAIN.
+pub(crate) fn row_is_reverse_bar<'a>(
+    runs: impl IntoIterator<Item = &'a crate::engine::PxText>,
+) -> bool {
+    let mut any = false;
+    let mut text = false;
+    for t in runs {
+        if t.style & 1 == 0 {
+            return false;
+        }
+        any = true;
+        text |= !t.text.trim().is_empty();
+    }
+    any && text
+}
+
 /// A glyph from the frame-drawing blocks: box drawing (U+2500..) and block elements
 /// (U+2580..). What a game builds chrome geometry out of, and nothing any game's
 /// prose contains. (SQ-0742's predicate, shared with SQ-0783.)
@@ -7373,34 +7412,45 @@ fn draw_chrome_text_strip(
     let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
     let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
 
-    // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run in
-    // a MIXED row (normal verb text among reversed dividers — Journey's menu body) is
-    // a vertical column divider; extend every such column across the FULL strip height
-    // so the scale-introduced gap rows (bridged in as blank Text rows) don't break the
-    // lines. Collected from mixed rows only, so a pure-reverse bar row (a header /
-    // status bar, already filled edge to edge below) contributes none.
-    let mut divider_cols: Vec<u16> = Vec::new();
-    for row_runs in by_row.values() {
-        let mixed = row_runs.iter().any(|(t, _)| t.style & 1 == 0);
-        if !mixed {
+    // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run is
+    // a vertical column divider — a reverse-video space is a solid block, which is how
+    // these games draw a rule — and the scale bridges some rows in as blank Text rows,
+    // so a column has to be drawn continuously or the line breaks up.
+    //
+    // **Continuously between the rows the GAME painted it on, not down the whole
+    // strip** (SQ-1035). The strip's rect reaches past the window that owns the rule:
+    // on Arthur's F3 inventory the two dividers belong to window 2, which ends at the
+    // score bar, and running them to `rect.bottom()` drew them straight through the bar
+    // and on down the story window — four rows of rule under a bar that
+    // `machine-screenshots/amiga-arthur-inventory.png` shows the rules stopping at.
+    // Spanning first-painted to last-painted keeps SQ-0508(b)'s bridging (the gap rows
+    // are INTERIOR to that span) and stops where the game stopped.
+    //
+    // Collected from every row except a BAR row, whose edge-to-edge fill below would
+    // subsume a rule anyway.
+    let mut divider_rows: BTreeMap<u16, (i32, i32)> = BTreeMap::new();
+    for (row, row_runs) in &by_row {
+        if row_is_reverse_bar(row_runs.iter().map(|(t, _)| t)) {
             continue;
         }
         for (t, _) in row_runs {
             if t.style & 1 != 0 && t.text.trim().is_empty() {
                 let (c, _) = run_cell(t, scale, cell_px, pane, cell);
                 if c >= rect.x as i32 && c < rect.right() as i32 {
-                    divider_cols.push(c as u16);
+                    let span = divider_rows.entry(c as u16).or_insert((*row, *row));
+                    span.0 = span.0.min(*row);
+                    span.1 = span.1.max(*row);
                 }
             }
         }
     }
-    divider_cols.sort_unstable();
-    divider_cols.dedup();
-    if !divider_cols.is_empty() {
+    if !divider_rows.is_empty() {
         let rev = v6_run_style(base, 0, 0, 1, honor, colors);
-        for y in rect.y..rect.bottom() {
-            for &c in &divider_cols {
-                buf.set_stringn(c, y, " ", 1, rev);
+        for (&c, &(first, last)) in &divider_rows {
+            let lo = first.max(rect.y as i32);
+            let hi = last.min(rect.bottom() as i32 - 1);
+            for y in lo..=hi {
+                buf.set_stringn(c, y as u16, " ", 1, rev);
             }
         }
     }
@@ -7421,7 +7471,7 @@ fn draw_chrome_text_strip(
         // reversed dividers) is NOT flood-reversed; its reversed divider runs re-stamp
         // over an un-reversed flood below. Colourless non-reverse rows keep the strip
         // `base` flood untouched (byte-identical), so Journey's menu body is unchanged.
-        let all_rev = !row_runs.is_empty() && row_runs.iter().all(|(t, _)| t.style & 1 != 0);
+        let all_rev = row_is_reverse_bar(row_runs.iter().map(|(t, _)| t));
         let row_fg = row_runs.iter().map(|(t, _)| t.fg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
         let row_bg = row_runs.iter().map(|(t, _)| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
         if all_rev

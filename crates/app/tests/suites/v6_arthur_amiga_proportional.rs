@@ -1122,3 +1122,90 @@ fn hybrid_draws_the_description_in_consecutive_cells() {
         );
     }
 }
+
+// ── 8. reversed spaces are FURNITURE, not a bar ──────────────────────────────
+
+/// **A row of reversed SPACES is a rule, not a band — and a rule stops where the
+/// window that owns it stops** (SQ-1035).
+///
+/// A reverse-video space is a solid block, which is how these games draw a line.
+/// Arthur's F3 inventory paints two column dividers as one reversed space per row,
+/// and its status bar one window below is ALSO entirely reversed — but that row
+/// carries `Churchyard`. `machine-screenshots/amiga-arthur-inventory.png` shows what
+/// the machine makes of the difference: a bare page with two thin rules down it, and
+/// a status bar filled edge to edge with dark letters on white. The rules stop at the
+/// bar and do not continue into the story window below it.
+///
+/// lanthorn got both halves wrong in hybrid. Treating "every run reversed" as a band
+/// flooded seven rows of the page white, and drawing the divider columns down the
+/// whole chrome strip — rather than between the rows the game painted them on — ran
+/// them through the bar and four rows past it.
+///
+/// The engine's own runs for this frame, which is what the assertions below are
+/// measured against: window 2 (584x200 at 29,1) paints `x=213` and `x=413` as a
+/// reversed `" "` on every row from y=21 to y=181, and window 1 (584x20 at 29,201)
+/// paints the bar. Sixteen turns and a `look`, then F3.
+#[test]
+fn reversed_spaces_rule_the_inventory_page_instead_of_flooding_it() {
+    let _g = app::v6_palette_at_boot();
+    let Some((mut session, mut state)) = in_the_churchyard() else { return };
+    let _ = session.submit_char(135); // F3 — the inventory screen
+
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    let area = ratatui::layout::Rect::new(0, 0, 90, 34);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let model = Engine::screen(&session);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let reversed = |y: u16| -> Vec<u16> {
+        (0..area.width)
+            .filter(|&x| buf[(x, y)].modifier.contains(ratatui::style::Modifier::REVERSED))
+            .collect()
+    };
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_string()
+    };
+
+    // Non-vacuity: the frame under test really is the inventory over a status bar.
+    let bar = (0..area.height)
+        .find(|&y| row_text(y).contains("Churchyard"))
+        .expect("the F3 frame carries the status bar");
+    assert!(
+        (0..bar).any(|y| row_text(y).contains("red piece of glass")),
+        "non-vacuity: the inventory listing is above the bar",
+    );
+
+    // The BAR is a band: reversed edge to edge.
+    assert_eq!(
+        reversed(bar).len(),
+        area.width as usize,
+        "the status row carries text and floods the full width, as the capture shows",
+    );
+
+    // Every row ABOVE it is bare page with exactly the two rules on it — never a
+    // flooded row, which is what the user reported.
+    let rules = reversed(bar.saturating_sub(1));
+    assert_eq!(rules.len(), 2, "the page carries two column rules, got {rules:?}");
+    for y in 1..bar {
+        assert_eq!(
+            reversed(y),
+            rules,
+            "row {y} of the inventory page must be two rules, not a flooded band",
+        );
+    }
+
+    // …and the RULE COLUMNS are gone below the bar: they belong to window 2, which
+    // ends there. Asserted on those columns rather than on "nothing is reversed",
+    // because the input caret one row from the bottom is legitimately a reversed cell.
+    for y in bar + 1..area.height {
+        let still = reversed(y);
+        for c in &rules {
+            assert!(
+                !still.contains(c),
+                "column {c} is a rule from window 2, but is still drawn on row {y}, \
+                 below the bar the window ends at",
+            );
+        }
+    }
+}
